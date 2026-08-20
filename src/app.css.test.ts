@@ -159,8 +159,15 @@ describe("app.css theme-token layering (CPE-1534)", () => {
 // and out of scope for CPE-1534 (a pure app.css refactor) — this is a growth guard, not a
 // zero-tolerance rule.
 const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
-const BASELINE_FILES_WITH_HEX = 90;
-const BASELINE_TOTAL_HEX_OCCURRENCES = 466;
+// CPE-1810 ratcheted these down: migrating AgentTimeline/ConsentSheet/ExplorerPane/
+// ImageCompareView/SidecarManager off the undefined `--warn` token's `var(--warn, <hex>)` fallback
+// idiom (onto the now-real `--warn`/`--warn-fill` semantic tokens) deleted one hard-coded hex
+// literal per fallback call site — 24 in total across those 5 files — and dropped
+// ImageCompareView.svelte out of the "has hex" set entirely (its only hex literals were --warn
+// fallbacks). Was 90/466 (actual pre-CPE-1810 count was 88/466 — the files count already had
+// 2 free of slack before this ticket).
+const BASELINE_FILES_WITH_HEX = 87;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 442;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

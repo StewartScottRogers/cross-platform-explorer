@@ -228,7 +228,7 @@
     font-size: 12px;
   }
   .compat.bad {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
   }
   .status {
     flex: 0 0 auto;
@@ -246,8 +246,8 @@
     border-color: #3a9d4a;
   }
   .status.warn {
-    color: var(--warn, #d08b2b);
-    border-color: var(--warn, #d08b2b);
+    color: var(--warn);
+    border-color: var(--warn);
   }
   .status.bad {
     color: #fff;
@@ -266,8 +266,8 @@
     padding-left: 8px;
   }
   .repair-msg.fail {
-    color: var(--warn, #d08b2b);
-    border-left-color: var(--warn, #d08b2b);
+    color: var(--warn);
+    border-left-color: var(--warn);
   }
   .spacer {
     flex: 1;
@@ -330,7 +330,7 @@
     padding: 0 2px;
   }
   .revoke:hover {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
   }
   .row-actions {
     display: flex;
@@ -348,7 +348,7 @@
     color: #3a9d4a;
   }
   .health .err {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -386,7 +386,7 @@
     color: var(--text-dim, #a0a0a0);
   }
   .log-error {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
   }
   .log-warn {
     color: #c9a227;

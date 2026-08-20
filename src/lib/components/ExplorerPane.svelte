@@ -649,7 +649,7 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text);
-    background: color-mix(in srgb, var(--warn, #b5872b) 14%, var(--surface));
+    background: color-mix(in srgb, var(--warn) 14%, var(--surface));
     border-bottom: 1px solid var(--border);
     overflow: hidden;
     white-space: nowrap;

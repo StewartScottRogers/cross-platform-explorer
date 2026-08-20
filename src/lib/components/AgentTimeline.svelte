@@ -1542,7 +1542,7 @@
     margin: 0 8px 6px;
     padding: 4px 8px;
     border-radius: 5px;
-    background: color-mix(in srgb, var(--warn, #b5872b) 20%, transparent);
+    background: color-mix(in srgb, var(--warn) 20%, transparent);
     color: var(--text, inherit);
     font-size: 10.5px;
     line-height: 1.4;
@@ -1650,16 +1650,16 @@
     font-variant-numeric: tabular-nums;
   }
   .cp-count.drift {
-    color: var(--warn, #b8860b);
-    border-color: var(--warn, #b8860b);
+    color: var(--warn);
+    border-color: var(--warn);
   }
   /* Prominent drift warning when reverting would clobber work changed since the checkpoint. */
   .cp-drift-warn {
     margin: 4px 0;
     padding: 6px 8px;
-    border: 1px solid var(--warn, #b8860b);
+    border: 1px solid var(--warn);
     border-radius: 5px;
-    background: color-mix(in srgb, var(--warn, #b8860b) 16%, transparent);
+    background: color-mix(in srgb, var(--warn) 16%, transparent);
     color: var(--text, inherit);
     font-size: 11px;
     line-height: 1.4;
@@ -1734,9 +1734,9 @@
   .cp-confirm-drift {
     margin: 0 0 8px;
     padding: 6px 8px;
-    border: 1px solid var(--warn, #b8860b);
+    border: 1px solid var(--warn);
     border-radius: 5px;
-    background: color-mix(in srgb, var(--warn, #b8860b) 16%, transparent);
+    background: color-mix(in srgb, var(--warn) 16%, transparent);
     color: var(--text, inherit);
     font-size: 11.5px;
     line-height: 1.4;
@@ -1807,7 +1807,7 @@
     margin: 0 10px 4px;
     padding: 3px 7px;
     border-radius: 5px;
-    background: color-mix(in srgb, var(--warn, #b5872b) 18%, transparent);
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
     color: var(--text, inherit);
     font-size: 10px;
     line-height: 1.4;
@@ -1954,7 +1954,7 @@
     margin: 4px 8px 0;
     padding: 3px 7px;
     border-radius: 5px;
-    background: color-mix(in srgb, var(--warn, #b5872b) 18%, transparent);
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
     color: var(--text, inherit);
     font-size: 10px;
     line-height: 1.4;
@@ -1984,7 +1984,7 @@
     border: 1px solid var(--border, #3a3a3a);
   }
   .rd-kind-divergence {
-    background: color-mix(in srgb, var(--warn, #b5872b) 22%, transparent);
+    background: color-mix(in srgb, var(--warn) 22%, transparent);
   }
   .rd-kind-collision {
     background: color-mix(in srgb, var(--accent, #2f6fed) 22%, transparent);
@@ -2101,7 +2101,8 @@
   }
   /* CPE-1641: caveat shown when the aggregates above include an unclean (crashed/reaped) row's
      best-effort duration — theme-only tokens (`--border-strong`/`--surface-alt`, both real, always-
-     defined semantic vars, unlike this file's older `var(--warn, <hex>)` fallback idiom), never a
+     defined semantic vars, same as this file's `--warn` uses elsewhere now that CPE-1810 gave it a
+     real definition instead of an undefined-token `var(--warn, <hex>)` fallback), never a
      hard-coded hex and never the danger/red token — this is expected, handled data, not a failure. */
   .hd-unclean-note {
     margin: 6px 0 0;

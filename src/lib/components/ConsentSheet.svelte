@@ -122,7 +122,7 @@
     background: var(--bg, #171717);
   }
   .caps li.sensitive {
-    border-color: var(--warn, #b5872b);
+    border-color: var(--warn);
   }
   label {
     display: flex;
@@ -160,7 +160,7 @@
     letter-spacing: 0.04em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: var(--warn, #b5872b);
+    background: var(--warn-fill);
     color: #fff;
   }
   .badge.granted {
