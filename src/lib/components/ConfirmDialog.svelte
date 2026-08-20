@@ -5,14 +5,17 @@
 
   // CPE-1790: `title`/`message` arrive as free-text strings a caller has already composed around an
   // escaped filesystem name (`App.svelte`'s callers wrap the name with displaySafeName before building
-  // the sentence) — this dialog has no way to know which substring, if any, is filesystem-derived. Escaping
-  // the WHOLE string on arrival is
-  // safe regardless: `displaySafeName` only replaces the twelve bidi/format control characters (never an
-  // ordinary letter), so it's a no-op on plain prose and idempotent on a caller's own already-escaped
-  // substring (its replacement text — `[RLO]`, `[LRM]`, … — is plain ASCII, containing none of the
-  // characters it looks for, so a second pass finds nothing left to replace; see `src/lib/filename.ts`'s
-  // own doc comment). That makes this LEAF the single point of truth instead of a caller-remembered
-  // convention: every render below is provably safe to `bidiEscape.guard.test.ts`
+  // the sentence) — this dialog has no way to know which substring, if any, is filesystem-derived.
+  // `confirmLabel` is escaped too: every caller today passes a static verb ("Delete"/"Extract"/…), but
+  // that is only true BY CONVENTION — an ordinary caller-supplied prop, not a value static by
+  // construction the way a `$t(...)` call is — and this ticket exists specifically to stop leaving a
+  // free-text render slot protected by convention instead of by the leaf. Escaping the WHOLE string on
+  // arrival is safe regardless of which slot: `displaySafeName` only replaces the twelve bidi/format
+  // control characters (never an ordinary letter), so it's a no-op on plain prose and idempotent on a
+  // caller's own already-escaped substring (its replacement text — `[RLO]`, `[LRM]`, … — is plain ASCII,
+  // containing none of the characters it looks for, so a second pass finds nothing left to replace; see
+  // `src/lib/filename.ts`'s own doc comment). That makes this LEAF the single point of truth instead of a
+  // caller-remembered convention: every render below is provably safe to `bidiEscape.guard.test.ts`
   // (`src/lib/bidiRenderScan.ts`) whether or not the caller wrapped its own name first.
   export let title = "Are you sure?";
   export let message = "";
@@ -36,7 +39,7 @@
     <div class="actions">
       <button class="btn" on:click={() => dispatch("cancel")}>Cancel</button>
       <button class="btn primary" class:danger on:click={() => dispatch("confirm")}>
-        {confirmLabel}
+        {displaySafeName(confirmLabel)}
       </button>
     </div>
   </div>

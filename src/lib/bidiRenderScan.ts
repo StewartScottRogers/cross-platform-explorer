@@ -624,11 +624,21 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *     `ConfirmDialog`/`PasswordPromptDialog`. A component that already calls the escape helper is, by
  *     construction, handling filesystem-derived text and must be pinned in `REGISTRY` so a regression
  *     that later deletes the call (reverting to a raw `{message}`) reds the exact-equality check instead
- *     of silently going unwatched again. Confirmed non-disruptive: every `.svelte` file under
- *     `src/lib/components/` that already calls either helper was independently already a `REGISTRY` key
- *     before this bullet existed (verified by sweeping the codebase at CPE-1790 time), so this addition
- *     only ever newly flags a file the moment it starts (or stops, at the git-blame level) doing exactly
- *     the thing REGISTRY exists to pin.
+ *     of silently going unwatched again. Confirmed non-disruptive (independently re-derived by review
+ *     round 2, PR #949): of all 135 `.svelte` files under `src/lib/components/`, 51 call
+ *     `displaySafeName`/`displaySafePath` and every one of them already carried a `REGISTRY` key before
+ *     this bullet existed, so the membership test cannot go red from this addition alone. Three files
+ *     newly match `CANDIDATE_PATTERN` specifically because of this bullet (no earlier bullet already
+ *     caught them): `ConfirmDialog.svelte`/`PasswordPromptDialog.svelte` (this ticket's own fix) and
+ *     `TabBar.svelte` (pre-existing — its `displaySafeName(tab.title)` calls predate this ticket, but
+ *     `tab.title` never matched any name/path-shaped-identifier bullet above). `TabBar.svelte` needed no
+ *     new registration; it was already a `REGISTRY` key from the original CPE-1712 sweep (B4, above),
+ *     independent of whether it mechanically matched the criterion at the time. **Stated boundary, not
+ *     closed by this bullet:** the ratchet holds only while the `REGISTRY` key survives — deleting the
+ *     escape call AND its `REGISTRY` entry in the same change is silent, since candidacy drops back to
+ *     `false` and the membership test stops asking for that file at all. That takes a deliberate two-part
+ *     deletion visible in any diff (not a one-line regression), so it is materially harder to hit than
+ *     the single-line regression this bullet exists to catch, but it is not zero.
  *  The first CPE-1768 pass shipped only the first bullet's five spellings plus `export let name`/`path` —
  *  literally a five-property regex, the same "regex zoo" shape the header above (lines 4-10) says this
  *  module's CORE engine already replaced, just relocated from expressions to filenames. Review confirmed
@@ -660,9 +670,20 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  component-prop-pass-through boundary this module's header already states rather than hides. CPE-1790's
  *  sweep of `export let (label|caption|text|detail|body|notice|heading|desc|description|content|summary)`
  *  across every component found one further structural sibling, `MacroParamPrompt.svelte` (same
- *  `title`/`message` shape as `PasswordPromptDialog`, reused for the macro-parameter prompt) — currently
- *  fed only static copy by its one caller, so left unregistered rather than defensively escaped, but
- *  worth the same treatment the moment a caller composes it around a real name.
+ *  `title`/`message` shape as `PasswordPromptDialog`, reused for the macro-parameter prompt) —
+ *  **review round 2 (PR #949) corrected an earlier draft of this paragraph that called it "currently fed
+ *  only static copy": it is not.** `App.svelte`'s one caller composes `title="Macro parameters —
+ *  {macroParamPromptFor.macro.name}"`, and a macro can be imported from a pasted definition
+ *  (`MacrosDialog.svelte`'s import flow), so `macro.name` is externally-supplied — the same
+ *  accepted-but-disclosed raw render `MacroRunConfirm.svelte`'s own `REGISTRY` entry already carries for
+ *  the run confirmation itself. `title`/`message` are now escaped on arrival (this bullet's trigger) and
+ *  the file is registered; its `label` prop (the per-parameter field caption, taken from the macro's own
+ *  `{ask:label}` token — also externally-supplied) is deliberately left unescaped and disclosed instead,
+ *  since it doubles as the literal `for=`/`id=` value pairing a `<label>` with its `<input>` — escaping
+ *  only the display text would desynchronize that pairing, a real fix but a different one, out of this
+ *  ticket's scope. A durable comment that states a caller is static without checking is worse than no
+ *  comment at all — it is the reason to check, not just assert, before writing "currently fed only
+ *  static copy" about any other file.
  *
  *  Deliberately broad and heuristic, not a parser — the exact inversion of the "regex zoo" this module's
  *  core engine (`isSafeExpr`/`findUnsafeRenderLines`) replaced. That's fine here because a false positive

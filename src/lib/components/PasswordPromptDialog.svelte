@@ -7,11 +7,13 @@
   import { createEventDispatcher, onMount, tick } from "svelte";
   import { displaySafeName } from "../filename";
 
-  // CPE-1790: `title`/`message`/`error` arrive as free-text strings a caller has already composed
-  // around an escaped filesystem name (App.svelte's vault-unlock caller wraps it with displaySafeName
-  // before building the sentence) — this dialog has no way to know which substring, if any, is
-  // filesystem-derived, so every render below escapes the WHOLE
-  // string on arrival instead of trusting the caller. That's safe unconditionally: `displaySafeName`
+  // CPE-1790: `title`/`message`/`error`/`confirmLabel` arrive as free-text strings a caller has already
+  // composed around an escaped filesystem name (App.svelte's vault-unlock caller wraps it with
+  // displaySafeName before building the sentence) — this dialog has no way to know which substring, if
+  // any, is filesystem-derived. `confirmLabel` is escaped too even though every caller today passes a
+  // static verb ("Unlock"/"Compress"/"Extract") — that is only true BY CONVENTION, not by construction,
+  // and this ticket exists specifically to stop a free-text render slot being protected by convention
+  // instead of by the leaf. Escaping the WHOLE string on arrival is safe unconditionally: `displaySafeName`
   // only replaces the twelve bidi/format control characters (never an ordinary letter), so it's a no-op
   // on plain prose and idempotent on a caller's own already-escaped substring (its replacement text is
   // plain ASCII, containing none of the characters it looks for — see `src/lib/filename.ts`). See
@@ -75,7 +77,7 @@
 
     <div class="actions">
       <button class="btn" data-testid="cancel-btn" on:click={() => dispatch("cancel")}>Cancel</button>
-      <button class="btn primary" data-testid="ok-btn" on:click={submit} disabled={submitting}>{confirmLabel}</button>
+      <button class="btn primary" data-testid="ok-btn" on:click={submit} disabled={submitting}>{displaySafeName(confirmLabel)}</button>
     </div>
   </div>
 </div>

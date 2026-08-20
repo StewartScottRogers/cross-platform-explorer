@@ -9,7 +9,21 @@
    * caller and does the actual substitution + dry-run + execute.
    */
   import { createEventDispatcher, onMount, tick } from "svelte";
+  import { displaySafeName } from "../filename";
 
+  // CPE-1790: `title` is NOT static-by-caller the way this file's own doc comment used to claim — its
+  // one caller (App.svelte's run-macro flow) composes it as `Macro parameters — {macro.name}`, and a
+  // macro can be imported from a pasted definition (see MacrosDialog.svelte's import flow), so
+  // `macro.name` is externally-supplied text, not user-typed-only. Escaping on arrival here (the "leaf
+  // escapes what it renders" model, matching ConfirmDialog/PasswordPromptDialog) closes that instead of
+  // leaving it as a disclosed-but-unescaped gap the way MacroRunConfirm.svelte's "81:macro.name" already
+  // is for the run confirmation itself. `message` is escaped too even though its one caller never
+  // overrides the static default — true only BY CONVENTION, the same reasoning that put `confirmLabel`
+  // under the same wrap in ConfirmDialog/PasswordPromptDialog. `label` (the per-parameter field caption,
+  // taken from the macro's own `{ask:label}` token — also externally-supplied) is deliberately left
+  // unescaped: it doubles as the literal `for=`/`id=` value used to associate the `<label>` with its
+  // `<input>`, so escaping only the display text would desynchronize that pairing — out of this
+  // ticket's scope; see the REGISTRY comment in bidiEscape.guard.test.ts.
   export let title = "Macro parameters";
   export let message = "This macro asks for a few values before it runs:";
   /** The distinct `{ask:label}` labels to prompt for, in the order they first appear in the macro. */
@@ -48,9 +62,9 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={() => dispatch("cancel")}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label={title} on:click|stopPropagation>
-    <h2>{title}</h2>
-    {#if message}<p>{message}</p>{/if}
+  <div class="dialog" role="dialog" aria-modal="true" aria-label={displaySafeName(title)} on:click|stopPropagation>
+    <h2>{displaySafeName(title)}</h2>
+    {#if message}<p>{displaySafeName(message)}</p>{/if}
 
     <div class="fields" bind:this={fieldsEl}>
       {#if labels.length === 0}
