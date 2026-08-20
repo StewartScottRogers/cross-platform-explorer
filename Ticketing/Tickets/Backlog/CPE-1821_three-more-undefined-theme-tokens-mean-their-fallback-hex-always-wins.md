@@ -63,3 +63,20 @@ widening its diff. Follow CPE-1810's precedent for the split-role question: a to
 foreground and as a solid fill under white text needs two values (`--danger`/`--danger-fill`,
 `--warn`/`--warn-fill`), because one value cannot satisfy both contrast roles. Check whether `--accent-2`
 is used that way before assuming a single value is enough.
+
+## Added 2026-08-20 (Visual Critic, during CPE-1810 review) — three more, same class
+
+Found by looking at rendered screenshots rather than by grepping, which is why CPE-1810's
+`var(--token, <fallback>)` grep could not see them:
+
+1. **`--log-warn` has no `hc-dark` override.** It therefore inherits the light-theme `#8a5a00` and
+   renders at **3.28:1 on `#0d0d0d`** — the least legible chip on the panel, in the theme whose entire
+   premise is legibility. CPE-1810 added `--pal-hc-dark-amber-300: #ffcc66`, which is the correct value
+   for it. One line.
+2. **`.tl-badge.created` (`#3a9d4a`) and `.tl-badge.renamed` (`#3a72b5`)** in `AgentTimeline.svelte` are
+   the same un-themed solid-fill-with-white-text shape CPE-1810 fixed for amber, in green and blue.
+   `#3a9d4a` is duplicated in `SidecarManager`'s `.status.ok`. They need `--ok`/`--info` tokens with the
+   `--x` / `--x-fill` split, following the `--danger`/`--warn` precedent.
+3. The methodology note is the durable finding: a token audit that greps for `var(--token, #hex)` is
+   structurally blind to a bare hex that never referenced the token at all. Audit by **rendered colour
+   value**, not by call shape.
