@@ -3034,6 +3034,19 @@ fn cross_volume_move_into_picked_slot(src: &Path, target: PathBuf) -> Result<Pat
     //
     // Scoped to MOVE deliberately: `do_copy_into` dereferences a link and should — copying a shortcut to
     // another volume and getting the contents is what a copy means, and `src/docs/03-explorer.md` says so.
+    //
+    // **This guard covers THIS path only, and `run_transfer` is not on it — CPE-1831.** The
+    // progress-panel transfer engine has its own `RenameFailed` arm which falls into `copy_tree_streamed`
+    // → `stream_copy_file`, whose `File::open` follows the link, so a cross-volume move of a shortcut
+    // there still copies the target's contents out and deletes the shortcut. Measured C: → Z: through
+    // production on PR #968 round 3: `transferred=1 failed=0`, `landed_is_link=false`,
+    // `landed_bytes=Some("PRIVATE KEY")`, `src_link_left=false`.
+    //
+    // That path is **pre-existing and unchanged by CPE-1765** — it behaved identically before this
+    // ticket. It is deliberately NOT fixed here: a second refusal branch in a different engine is a new
+    // mechanism at the end of a review chain whose whole lesson is that new mechanisms are where the
+    // holes came from. `src/docs/03-explorer.md` states the split rather than promising a refusal the
+    // transfer panel does not make.
     if std::fs::symlink_metadata(src).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(format!(
             "\"{}\" is a shortcut (a symbolic link or junction), and the destination is on a different \
@@ -18649,6 +18662,51 @@ overlay / overlay rw,relatime 0 0
         );
         let e = r.expect_err("a cross-volume move of a shortcut must refuse, not dereference");
         assert!(e.contains("shortcut"), "the refusal must explain what it refused: {e}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The other direction: the cross-volume path must still WORK** (PR #968 review round 3, finding 2).
+    ///
+    /// The refusal leg above is the only thing that pinned `cross_volume_move_into_picked_slot`, so the
+    /// Reviewer mutated its predicate to `if true` — refuse *every* cross-volume move — and all 207 tests
+    /// stayed green. Copy-then-delete is the path behind every move to another drive, a USB stick or a
+    /// network share, and it was unpinned in the "still works" direction: the classic hazard of extracting
+    /// a function to test one branch of it.
+    ///
+    /// Both legs assert the bytes landed AND the source is gone, because a move that copies without
+    /// deleting, or deletes without copying, are different bugs that a bare `is_ok()` would miss.
+    #[test]
+    fn cpe_1765_a_cross_volume_move_still_moves_ordinary_files_and_folders() {
+        let d = scratch("cpe1765_xvol_ok");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        // A plain file.
+        let file_src = d.join("real.txt");
+        fs::write(&file_src, b"REAL BYTES").unwrap();
+        let file_dst = dest.join("real.txt");
+        let r = cross_volume_move_into_picked_slot(&file_src, file_dst.clone());
+        assert_eq!(
+            fs::read_to_string(&file_dst).ok().as_deref(),
+            Some("REAL BYTES"),
+            "an ordinary cross-volume file move must still land the bytes (result {r:?})"
+        );
+        assert!(!file_src.exists(), "and must remove the source (result {r:?})");
+        r.expect("an ordinary cross-volume file move must succeed");
+
+        // A folder, which takes the tree arm and the `remove_dir_all` arm.
+        let dir_src = d.join("tree");
+        fs::create_dir_all(dir_src.join("sub")).unwrap();
+        fs::write(dir_src.join("sub/leaf.txt"), b"LEAF").unwrap();
+        let dir_dst = dest.join("tree");
+        let r = cross_volume_move_into_picked_slot(&dir_src, dir_dst.clone());
+        assert_eq!(
+            fs::read_to_string(dir_dst.join("sub/leaf.txt")).ok().as_deref(),
+            Some("LEAF"),
+            "an ordinary cross-volume folder move must still land the whole tree (result {r:?})"
+        );
+        assert!(!dir_src.exists(), "and must remove the source folder (result {r:?})");
+        r.expect("an ordinary cross-volume folder move must succeed");
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -249,11 +249,14 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
 - **Moving a shortcut moves the shortcut — on the same drive.** Dragging a symbolic link, junction or
   shortcut to another folder on the **same drive** moves *the shortcut itself*: it does not copy out the
   contents of whatever it points at, and does not leave the original behind.
-  **Moving one to a different drive is refused**, with a message naming it. A move across drives has to be
-  done as a copy-then-delete, and copying a shortcut follows it — so the move would have written out
-  everything the shortcut points at (which could be a whole home directory) and then deleted the shortcut.
-  Rather than do that silently, the app declines and leaves both the shortcut and its target alone. Copy
-  it instead if you want the contents on the other drive, or recreate the shortcut there by hand.
+  **Moving one to a different drive is a different matter, and is best avoided.** A move across drives
+  has to be done as a copy-then-delete, and copying a shortcut follows it — so such a move can write out
+  everything the shortcut points at (which could be a whole home directory) and then delete the shortcut.
+  Moves made through the **Move** command refuse this outright, with a message naming the shortcut and
+  leaving both it and its target alone. Moves that run through the **transfer panel** do not yet, and
+  still copy the contents out. Until the two agree, don't move a shortcut across drives: copy what it
+  points at deliberately if you want the contents on the other drive, or recreate the shortcut there by
+  hand.
   **Copying** a shortcut still copies what it points at, on any drive, as it always has.
 
 ## Add metadata columns

@@ -763,14 +763,22 @@ pub fn claim_dir_slot(target: &Path) -> Result<(), String> {
 /// signature defect rather than a nicety. Windows is unaffected by all of this — it has no mode, and the
 /// only bit `set_permissions` carries there is read-only.
 pub fn copy_file_into_claimed_slot(src: &Path, dst: &Path) -> Result<u64, String> {
-    // STAT FIRST — before any open, and before the destination name is claimed. See the doc above: on
-    // Unix, opening a FIFO blocks forever and opening a directory succeeds. `metadata` follows links,
-    // matching `fs::copy`'s subject.
-    // Pre-open guard ONLY, and deliberately not bound to a name (PR #968 audit round 2, R2-F3): its one
-    // job is to keep the `open` below from ever touching a FIFO or a device. NOTHING downstream may read
-    // it — a path stat can be swapped between here and the open, and a stale copy of it decided both the
-    // birth mode and the final mode in the previous round. Not binding it to a name is what makes that
-    // structural rather than a rule the next editor has to remember.
+    // Pre-open guard ONLY, and deliberately not bound to a name (PR #968 audit round 2, R2-F3).
+    //
+    // It **narrows** the window in which the `open` below can touch a FIFO or a device; it **cannot
+    // close it**, because the path can be swapped between this stat and that open (PR #968 audit round
+    // 3, follow-up 2). An attacker with write access to the SOURCE directory can put a FIFO here
+    // afterwards and the `open` blocks indefinitely — a hung copy, Unix only. Note the handle check
+    // below is no defence against that particular shape, because it never runs: the call it would
+    // validate is the one that never returns.
+    //
+    // Saying so precisely matters more than usual here. Three rounds of this PR had a comment asserting
+    // the opposite of what the code did — F1's `symlink_metadata` claim, R2-F1's "absolute" guarantee,
+    // R2-F2's "same 100 ns tick" — and each time the comment is what stopped a reviewer looking.
+    //
+    // NOTHING downstream may read this stat: a stale copy of it decided both the birth mode and the
+    // final mode in the previous round. Not binding it to a name is what makes that structural rather
+    // than a rule the next editor has to remember.
     if !std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?.is_file() {
         return Err(not_a_regular_file(src));
     }
@@ -1114,7 +1122,9 @@ impl Drop for SlotClaim {
 /// time the unlink runs. Closing both needs `CreateFileW` + `GetFileInformationByHandle` (there is
 /// in-repo precedent in `batch_media`) and a handle-relative unlink; that is a new mechanism, and this
 /// ticket's own history is that every round's new hole arrived in the layer added to close the last
-/// one. It is a follow-up ticket, deliberately not attempted here.
+/// one. Deliberately not attempted here — it is **CPE-1830**. The number is written down because this
+/// ticket's other lesson is that an unticketed residual is the same failure as an undocumented one,
+/// with better prose.
 ///
 /// A `false` from here is always safe: it means the placeholder is left behind, never that something
 /// else is removed. That asymmetry is what makes the honest bound above tolerable — the failure
