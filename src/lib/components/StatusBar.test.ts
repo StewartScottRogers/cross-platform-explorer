@@ -74,6 +74,27 @@ describe("StatusBar filtered-hidden note (CPE-1708)", () => {
   });
 });
 
+// CPE-1798: `notice` is fed backend error strings from 35 `showNotice(String(e), true)` call sites in
+// App.svelte, and a Rust error routinely embeds the offending filesystem path — so a bidi/format-control
+// character sitting in that path must not reach either render position raw. Reproduced with a real RLO
+// override (U+202E), the same character `src/lib/filename.ts`'s own doc comment uses as its example.
+describe("StatusBar notice bidi escape (CPE-1798)", () => {
+  it("escapes a bidi override embedded in the notice's path, in both the visible text and the title tooltip", () => {
+    const spoofedPath = "C:\\Users\\demo\\\u202Egnp.txt.exe";
+    render(StatusBar, { itemCount: 1, totalCount: 1, notice: `Delete failed: ${spoofedPath}`, noticeIsError: true });
+    const note = screen.getByText(`Delete failed: C:\\Users\\demo\\[RLO]gnp.txt.exe`);
+    expect(note).toBeTruthy();
+    expect(note.textContent).not.toContain("\u202E");
+    expect(note.getAttribute("title")).toBe(`Delete failed: C:\\Users\\demo\\[RLO]gnp.txt.exe`);
+    expect(note.getAttribute("title")).not.toContain("\u202E");
+  });
+
+  it("leaves an ordinary notice untouched (idempotent no-op on plain prose)", () => {
+    render(StatusBar, { itemCount: 1, totalCount: 1, notice: "Copied 3 files", noticeIsError: false });
+    expect(screen.getByText("Copied 3 files")).toBeTruthy();
+  });
+});
+
 describe("StatusBar git sync (CPE-462)", () => {
   it("shows branch + ahead/behind and offers Pull/Push, dispatching them", async () => {
     const { component } = render(StatusBar, {

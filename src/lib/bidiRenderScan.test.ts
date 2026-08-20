@@ -623,14 +623,23 @@ describe("CPE-1768: isCandidateComponent — the membership-rule trigger", () =>
 
   // The literal review probe, reproduced without leaving a permanent unregistered fixture in the tree
   // (same convention this file's other demonstrations use — see the PreviewPane.svelte:1015 substitution
-  // test in bidiEscape.guard.test.ts): read StatusBar.svelte's REAL current source (confirmed out of scope
-  // today — no name/path shape in it), then inject the review's exact probe shape and show the mutated
-  // content becomes a candidate. That's the mechanism that makes CI red the moment such a render lands,
-  // whether in StatusBar.svelte or anywhere else — proven end-to-end here, enforced for real by
-  // bidiEscape.guard.test.ts's membership test walking the actual directory.
-  it("the StatusBar.svelte review probe: injecting a raw {entry.name} makes it a candidate", () => {
-    const src = readFileSync(join(process.cwd(), "src", "lib", "components", "StatusBar.svelte"), "utf8");
-    expect(isCandidateComponent(src), "StatusBar.svelte gained a name/path-shaped reference — update this test/the module header's out-of-scope example").toBe(false);
+  // test in bidiEscape.guard.test.ts): read Toolbar.svelte's REAL current source (confirmed out of scope
+  // today — no name/path shape in it, and every real call site passes a static `$t(...)` label, see
+  // bidiRenderScan.ts's own "Out of scope" doc example), then inject the review's exact probe shape and
+  // show the mutated content becomes a candidate. That's the mechanism that makes CI red the moment such
+  // a render lands, whether in Toolbar.svelte or anywhere else — proven end-to-end here, enforced for
+  // real by bidiEscape.guard.test.ts's membership test walking the actual directory.
+  //
+  // CPE-1798: this probe originally ran against StatusBar.svelte, which this ticket's own review found
+  // was NOT actually static (its `notice` prop is fed 35 live backend-error strings) — the exact
+  // "shape-cleared but not runtime-cleared" mistake this file's module doc now warns about. StatusBar now
+  // escapes on arrival and carries a real REGISTRY entry (see bidiEscape.guard.test.ts), so it's no
+  // longer a valid "out of scope" fixture; Toolbar.svelte replaces it here, re-verified against its own
+  // real callers (all four pass `$t(...)`, never anything filesystem- or agent-derived) as part of this
+  // same ticket's sibling audit (AgentMenu/HelpButton/JsonTree/Submenu/Toolbar).
+  it("the Toolbar.svelte review probe: injecting a raw {entry.name} makes it a candidate", () => {
+    const src = readFileSync(join(process.cwd(), "src", "lib", "components", "Toolbar.svelte"), "utf8");
+    expect(isCandidateComponent(src), "Toolbar.svelte gained a name/path-shaped reference — update this test/the module header's out-of-scope example").toBe(false);
     const mutated = src + `\n<span>{entry.name}</span>\n`;
     expect(isCandidateComponent(mutated)).toBe(true);
   });

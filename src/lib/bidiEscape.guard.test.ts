@@ -211,6 +211,27 @@ const REGISTRY: Record<string, string[]> = {
   // `label` string unchanged (none of them are DOM render positions this engine scans), so wrapping only
   // the text node touches that pairing in no way at all. Fully provably safe: `[]`.
   "MacroParamPrompt.svelte": [],
+
+  // --- CPE-1798: StatusBar's `notice` prop is fed 35 live backend-error strings (App.svelte's
+  // showNotice(String(e), true) call sites, plus one hand-built "Sync failed: " + e.message) that
+  // routinely embed the offending filesystem path — the same "generic prop, no name/path SHAPE, but not
+  // actually static" gap CPE-1790 closed for ConfirmDialog/PasswordPromptDialog/MacroParamPrompt.
+  // `notice` is now escaped on arrival at both render positions (text + title), which is also what makes
+  // this file a CANDIDATE_PATTERN match through the `displaySafeName(`-call trigger. Every OTHER offender
+  // below (item/selection counts, git branch/ahead/behind, the disk-free label) is unrelated pre-existing
+  // UI text this engine can't prove safe (numbers, i18n-free plain labels) — none of it is a filesystem
+  // name/path, and `notice`/`filteredHiddenText`/`filteredHiddenTitle` (already escaped at the source
+  // that builds them, see CPE-1708) do not appear here, proving the fix.
+  "StatusBar.svelte": ["76:itemCount","76:totalCount","78:itemCount","78:itemCount === 1 ? \"\" : \"s\"","84:selectedCount","84:selectedSize > 0 ? ` — ${formatSize(selectedSize)}` : \"\"","97:filteredHiddenTitle","98:filteredHiddenText","107:git.upstream ? `Tracking ${git.upstream}` : \"No upstream branch\"","108:git.branch || \"detached\"","109:git.behind","110:git.ahead","124:diskLabel"],
+
+  // --- CPE-1798 sibling audit: AgentMenu's `sessionLabel` prop is built by its one real caller
+  // (Sidebar.svelte:436, `${s.agentName || s.agentId || "Agent"}${model ? " · " + model : ""}`) from an
+  // agent's own self-reported identity string, not static UI copy — the same shape-cleared-but-not-
+  // runtime-cleared gap the ticket found for StatusBar. Escaped on arrival at both render positions
+  // ("Open "/"Close " rows); `sessionNum(sessionId)` (a numeric chip label, unrelated to this ticket) and
+  // `label` (verified static — every real caller passes either the literal default or `$t(...)`, see
+  // Toolbar.svelte's equivalent, unlike `sessionLabel`) are left as accepted-but-unprovable entries below.
+  "AgentMenu.svelte": ["58:sessionNum(sessionId)","63:sessionNum(sessionId)","69:label"],
 };
 
 /** The subset of REGISTRY whose non-empty array is an ACTUAL disclosed "still renders a raw filesystem
@@ -461,6 +482,48 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
     const recordedSorted = [...REGISTRY["ConfirmDialog.svelte"]].sort(compareOffenders);
 
     expect(found, "the un-escaped message render must be flagged").toContain("38:message");
+    expect(JSON.stringify(found), "the mutated file's offender set must no longer equal what's recorded — this is what makes the real REGISTRY-equality test above red").not.toBe(
+      JSON.stringify(recordedSorted),
+    );
+  });
+
+  // CPE-1798: the same "a call site that forgets the wrap must fail CI" AC as CPE-1790's proof above,
+  // applied to StatusBar's `notice` — mutate the real, current source to drop BOTH displaySafeName wraps
+  // (reverting to the exact pre-fix `{notice}`/`title={notice}` shape the ticket found) and prove the
+  // guard reds. See StatusBar.test.ts's companion test for the end-to-end proof that a real bidi override
+  // renders the `[RLO]` escape marker, not the raw override character, at both positions today.
+  it("CPE-1798 regression proof: reverting StatusBar's notice render to raw {notice}/title={notice} reds the guard", () => {
+    const src = readFileSync(join(COMPONENTS, "StatusBar.svelte"), "utf8");
+    const ORIGINAL = '<span class="notice" class:error={noticeIsError} title={displaySafeName(notice)}>{displaySafeName(notice)}</span>';
+    const SPOOFED = '<span class="notice" class:error={noticeIsError} title={notice}>{notice}</span>';
+    expect(src, "StatusBar.svelte no longer contains the exact text this demonstration substitutes — update the fixture").toContain(ORIGINAL);
+
+    const mutated = src.replace(ORIGINAL, SPOOFED);
+    const found = findUnsafeRenderLines(mutated, "StatusBar.svelte (mutated: displaySafeName wraps dropped)");
+    const recordedSorted = [...REGISTRY["StatusBar.svelte"]].sort(compareOffenders);
+
+    // Both the text-content render and the title= render sit on the same line with the same expression
+    // (`notice`), so findUnsafeRenderLines' offender Set records ONE line:expr entry covering both —
+    // still proof both are flagged, since a Set entry can only exist if at least one render position
+    // resolved unsafe, and this file's markup has no OTHER bare `{notice}`/`title={notice}` anywhere.
+    expect(found.some((e) => e.endsWith(":notice")), "the un-escaped notice render (text + title, same line) must be flagged").toBe(true);
+    expect(JSON.stringify(found), "the mutated file's offender set must no longer equal what's recorded — this is what makes the real REGISTRY-equality test above red").not.toBe(
+      JSON.stringify(recordedSorted),
+    );
+  });
+
+  // CPE-1798 sibling fix: same proof for AgentMenu's `sessionLabel`.
+  it("CPE-1798 regression proof: reverting AgentMenu's sessionLabel render to raw {sessionLabel} reds the guard", () => {
+    const src = readFileSync(join(COMPONENTS, "AgentMenu.svelte"), "utf8");
+    const ORIGINAL = "Open {displaySafeName(sessionLabel)}";
+    const SPOOFED = "Open {sessionLabel}";
+    expect(src, "AgentMenu.svelte no longer contains the exact text this demonstration substitutes — update the fixture").toContain(ORIGINAL);
+
+    const mutated = src.replace(ORIGINAL, SPOOFED);
+    const found = findUnsafeRenderLines(mutated, "AgentMenu.svelte (mutated: displaySafeName wrap dropped)");
+    const recordedSorted = [...REGISTRY["AgentMenu.svelte"]].sort(compareOffenders);
+
+    expect(found.some((e) => e.includes("sessionLabel")), "the un-escaped sessionLabel render must be flagged").toBe(true);
     expect(JSON.stringify(found), "the mutated file's offender set must no longer equal what's recorded — this is what makes the real REGISTRY-equality test above red").not.toBe(
       JSON.stringify(recordedSorted),
     );
