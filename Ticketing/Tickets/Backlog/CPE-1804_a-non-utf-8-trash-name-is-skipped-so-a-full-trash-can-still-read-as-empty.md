@@ -52,5 +52,17 @@ watch it fail, restore. Half a test here is a test that certifies the bug.
 Filed by the Foreman from the independent review of PR #957, 2026-08-20. The reviewer flagged it as out of
 CPE-1803's scope rather than letting it pass unmentioned.
 
+**Independently confirmed by that PR's UAT**, which reached the same finding by a different route and added
+two details worth having before starting:
+
+- The skip covers `id`, `name` **and** `original_parent` — any one of the three failing UTF-8 drops the
+  whole entry.
+- The current behaviour is already **pinned by the repo's own test at `src-tauri/src/lib.rs:14769`**, so
+  like CPE-1801 this is a deliberate change to a guarded behaviour, not an unguarded fix. Update the pin;
+  do not delete it.
+- The UAT's framing of the harm: *"on Linux, filenames are arbitrary bytes, so a trash holding only such
+  files still renders 'Trash is empty', and a mixed trash silently under-counts."* The under-count is the
+  half that is easy to miss — it does not need an all-undecodable trash to mislead.
+
 Related: **CPE-1803** (the panic route, fixed), **CPE-1791** (the backend degradation), **CPE-1704** (the
 counting contract).
