@@ -123,3 +123,55 @@ Reverted the sabotage immediately after confirming red; `git grep` confirms no t
 - No frontend files touched — `npm run check`/`vitest` not run (out of scope per the gate rules).
 
 Branch `cpe-1818-pty-leak-async-teardown`, PR opened against `main`.
+
+**2026-08-20, round 2** — PR #967 Reviewer returned CHANGES REQUESTED with one empirically-reproduced
+blocker: the 2s deadline still flaked, 1/10, under *heavier* combined contention than round 1 used
+(parallel `cargo build --all-targets -j16` **and** a second competing `cargo test` loop — the sidecar's
+own `pty::` group — simultaneously on the same 32-core box), panicking cleanly at 6.59s wall. Not a hang;
+the polling loop worked exactly as designed, just at a deadline too short for that load level. A
+build-only control run (no second test loop) came back 10/10, confirming it takes the *combined* load to
+surface — consistent with `windows-latest` runners being weaker/more oversubscribed than this dev box.
+
+Fix: widened the deadline from 2s to 10s in both files (`src-tauri/src/pty.rs` and
+`sidecar/ai-console/src/pty.rs`, both call sites in each), matching this file's own existing 10s
+convention for output-drain polling rather than inventing a third number. Costs nothing on the happy
+path — every idle run still finishes in well under a second, since the loop returns the instant
+`pid_is_alive` goes false. Rewrote `assert_pid_reaped_within`'s doc comment in both files to state the
+real reasoning (a generous ceiling for a scheduling gap, not a tuned estimate; a genuine leak still reds
+because a leaked process never disappears no matter how long you wait) and to record the round-1
+measurement that justified 10s over a smaller number.
+
+Also documented, per the Foreman's instruction, an accepted residual the Reviewer identified and
+explicitly chose not to block on: `pid_is_alive` matches purely on numeric PID (`tasklist`/`ps`
+containment) with no process-name or start-time cross-check, so it can't distinguish "our child still
+alive" from "an unrelated process reused the same PID after ours exited." The pre-fix single-shot check
+had a near-zero exposure window to that race; polling widens it to the full deadline, and widening the
+deadline to 10s widens it further. Accepted because Windows doesn't rapidly recycle recently-freed PIDs
+and this helper is test-only; closing it properly would mean cross-checking process start time or image
+name (`GetProcessTimes`/`CreateToolhelp32Snapshot`, or `tasklist`'s image-name column), which is out of
+scope here. Written into `assert_pid_reaped_within`'s doc comment in both files so it's a recorded,
+accepted risk rather than a silent one.
+
+**Note on test-catchability (per the Foreman's request to record it)**: the Reviewer also tried a mutation
+closer to a real leak than the `pid_is_alive` stub — neutering `PtySession::kill()` and `impl Drop` to
+no-ops — and `close_all_kills_every_session_and_leaves_no_process_behind` stayed **green**. Reason: Rust
+runs field destructors after a custom `Drop::drop()` body returns, so even with the `Drop` body neutered,
+`master`'s own destructor still runs and closes the ConPTY, which alone kills the child on Windows
+(already documented in this file per CPE-1707). So a total kill/drop-suppression bug is structurally hard
+to introduce in this codebase — good news for robustness, but it means the `pid_is_alive`-stub red-proof
+(this ticket's method) is the practical ceiling for demonstrating this specific test shape can still fail;
+a "neuter kill+Drop" mutation is not a meaningful red-proof here and shouldn't be expected to redden this
+test.
+
+**Re-verified gates after the widen** (both crates, both `src-tauri` feature modes):
+- `cargo clippy --all-targets -- -D warnings` — clean: `src-tauri` default features, `src-tauri
+  --features sidecar-platform`, and `sidecar/ai-console`.
+- `cargo test` — `src-tauri`: 200 passed (default), 255 passed (sidecar-platform), 0 failed either way.
+  `sidecar/ai-console`: 382 passed, 0 failed, 2 ignored (pre-existing, unrelated).
+- **Reproduced the Reviewer's heavier condition**: parallel `cargo build --all-targets -j16` of
+  `crates/server` (fresh, from a `cargo clean`) running concurrently with a second competing `cargo test
+  --lib pty::` loop in `sidecar/ai-console`, both confirmed still actively running throughout via their
+  background output. Against that, the `src-tauri` `pty::tests::` group ran **20/20 pass** (wall times per
+  run ranged 3.5s-12.6s including cargo's own recompile/lock-wait overhead under contention; none hit the
+  10s per-assertion deadline).
+- No frontend touched — `npm run check`/`vitest` not applicable.
