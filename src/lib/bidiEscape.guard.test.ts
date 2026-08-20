@@ -179,6 +179,38 @@ const REGISTRY: Record<string, string[]> = {
   "RepairLinkDialog.svelte": ["106:$t(\"link.repairTitle\")","107:$t(\"link.repairTitle\")","108:$t(\"link.repairIntro\")","111:$t(\"link.repairLoading\")","115:$t(\"link.repairSuggestionLabel\")","119:$t(\"link.repairNoSuggestion\")","124:translate($locale, \"link.repairConfirm\", { target: displaySafePath(chosenTarget ?? \"\") })","128:$t(\"common.cancel\")","131:$t(\"link.repairConfirmYes\")","135:error","138:$t(\"common.close\")","141:$t(\"link.repairBrowse\")","148:$t(\"link.repairAccept\")"],
   "Spotlight.svelte": ["186:$t(\"spotlight.title\")","197:$t(\"spotlight.ariaSearch\")","201:query.trim() ? $t(\"spotlight.noMatches\") : $t(\"spotlight.typeHint\")","205:$t(GROUP_LABEL[section.kind])"],
   "WorkbenchView.svelte": ["92:branch || \"detached\"","96:stats.added","96:stats.files","96:stats.files === 1 ? \"\" : \"s\"","96:stats.removed","130:error","132:branch || \"the working tree\"","140:isCollapsed ? \"Expand\" : \"Collapse\"","141:isCollapsed ? \"▸\" : \"▾\"","143:fs.added","143:fs.removed","144:copiedFile === key ? \"✓ Copied\" : \"Copy\"","149:h.header","151:l.kind === \"add\" ? \"+\" : l.kind === \"del\" ? \"−\" : \" \"","151:l.newLine ?? \"\"","151:l.oldLine ?? \"\"","151:l.text","151:s.text"],
+
+  // --- CPE-1790: the confirm/password-prompt dialogs, previously invisible to isCandidateComponent
+  // because their own props (`title`/`message`/`error`/`confirmLabel`) don't match any name/path SHAPE
+  // — see the ticket and bidiRenderScan.ts's CANDIDATE_PATTERN doc for why generic-prop leaves needed
+  // their own membership trigger (a call to displaySafeName/displaySafePath), not just a wider
+  // vocabulary list. Both dialogs now escape EVERY free-text prop (`title`/`message`/`error`/
+  // `confirmLabel`) on arrival — CPE-1760's "leaf escapes what it renders" model — so every App.svelte
+  // call site is covered whether or not it remembers to wrap its own name first. `confirmLabel` is
+  // included even though every caller today passes a static verb ("OK"/"Delete"/"Extract"/"Compress"/
+  // "Unlock"/"Delete permanently"/"Close all"): that was true only BY CONVENTION — an ordinary
+  // caller-supplied prop, not static BY CONSTRUCTION the way a `$t(...)` call is — and this ticket
+  // exists specifically to stop a free-text render slot being protected by convention instead of by the
+  // leaf (review round 2, PR #949). Both files are fully provably safe: `[]`.
+  "ConfirmDialog.svelte": [],
+  "PasswordPromptDialog.svelte": [],
+
+  // --- CPE-1790 (review round 2/3): MacroParamPrompt.svelte shares ConfirmDialog/PasswordPromptDialog's
+  // exact `title`/`message` shape, and its one caller (App.svelte's run-macro flow, `title="Macro
+  // parameters — {macroParamPromptFor.macro.name}"`) is NOT static — a macro can be imported from a
+  // pasted definition (MacrosDialog.svelte's import flow), so `macro.name` is externally-supplied text,
+  // the same accepted-but-disclosed raw render MacroRunConfirm.svelte's REGISTRY entry already carries
+  // for the run confirmation itself (`"81:macro.name"`, below). `title`/`message` are escaped on
+  // arrival, the same leaf-escapes model as the other two dialogs, which is also what makes this file a
+  // `CANDIDATE_PATTERN` match through the CPE-1790 `displaySafeName(`-call trigger rather than through
+  // an incidental `.name` mention. `label` (the per-parameter field caption, taken from the macro's own
+  // `{ask:label}` token — also externally-supplied, same as `macro.name`) is escaped too, in its one
+  // render position (the `<label>` text node) — review round 3 rejected an earlier draft that left it
+  // raw on the reasoning that it doubled as the `for=`/`id=` pairing value: that reasoning didn't hold,
+  // since `for=`/`id=`/`data-testid=` and the `values[label]` object key all still reference the RAW
+  // `label` string unchanged (none of them are DOM render positions this engine scans), so wrapping only
+  // the text node touches that pairing in no way at all. Fully provably safe: `[]`.
+  "MacroParamPrompt.svelte": [],
 };
 
 /** The subset of REGISTRY whose non-empty array is an ACTUAL disclosed "still renders a raw filesystem
@@ -378,6 +410,60 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
       const src = readFileSync(join(COMPONENTS, f), "utf8");
       expect(isCandidateComponent(src), `${f} must be detected as a candidate — this is the exact shape CPE-1768's review found missing`).toBe(true);
     }
+  });
+
+  // CPE-1790: `ConfirmDialog`/`PasswordPromptDialog` take generic `title`/`message`(/`error`) props —
+  // none of them match ANY name/path SHAPE in CANDIDATE_PATTERN, so `isCandidateComponent` used to return
+  // `false` for both and `findUnsafeRenderLines` was never run on either file at all, despite
+  // `src/docs/03-explorer.md` claiming delete/extract/unlock/run-command confirmations were covered.
+  // Reproduced literally (not asserted in prose) against the exact shape both files had BEFORE this
+  // ticket: a raw `{message}` body-text render and no call to either escape helper anywhere in the file.
+  it("CPE-1790 red proof: the pre-fix generic-prop dialog shape is invisible to isCandidateComponent (the bug this ticket closes)", () => {
+    const preFixConfirmDialogSrc = `<script>\n  export let title = "Are you sure?";\n  export let message = "";\n  export let confirmLabel = "OK";\n</script>\n\n<h2>{title}</h2>\n<p>{message}</p>\n<button>{confirmLabel}</button>\n`;
+    // The exact spoof this shape lets through: a caller composing \`message\` straight from
+    // \`item.name\` with no escape (the mistake CPE-1790's own ticket says "nothing currently stops").
+    expect(findUnsafeRenderLines(preFixConfirmDialogSrc), "the render IS unsafe by the engine's own rules").toEqual(
+      ["7:title", "8:message", "9:confirmLabel"].sort(compareOffenders),
+    );
+    expect(
+      isCandidateComponent(preFixConfirmDialogSrc),
+      "this is the bug: a real, unescaped filesystem-name render sits in this file, but nothing marks it as a REGISTRY candidate, so the membership test (CPE-1768, above) never asks for it to be registered and findUnsafeRenderLines is never run against it by the guard suite at all",
+    ).toBe(false);
+  });
+
+  // The fix: once the leaf calls displaySafeName/displaySafePath on arrival (CPE-1760's model), the same
+  // shape becomes a candidate through the NEW CANDIDATE_PATTERN bullet (a call to the escape helper
+  // itself, not a name/path-shaped identifier) — proving the membership rule, not just REGISTRY's
+  // hand-added keys above, now catches this exact class of component. MacroParamPrompt.svelte (review
+  // round 2, PR #949) is the same shape: its `title` render was never static-by-caller the way an
+  // earlier draft of bidiRenderScan.ts's own doc comment claimed (App.svelte composes it around
+  // `macro.name`, and a macro can be imported from a pasted definition), so it needed the identical fix.
+  it("CPE-1790: ConfirmDialog/PasswordPromptDialog/MacroParamPrompt are detected as candidates now that they escape on arrival", () => {
+    for (const f of ["ConfirmDialog.svelte", "PasswordPromptDialog.svelte", "MacroParamPrompt.svelte"]) {
+      const src = readFileSync(join(COMPONENTS, f), "utf8");
+      expect(isCandidateComponent(src), `${f} must be detected as a candidate — it now calls displaySafeName on arrival`).toBe(true);
+    }
+  });
+
+  // CPE-1790's own "a call site that forgets the wrap must fail CI" AC, relocated to where the duty now
+  // lives: the LEAF's render, not the caller's message-composition. Mutate ConfirmDialog.svelte's real,
+  // current source to drop the displaySafeName wrap from its message render (reverting to the exact
+  // pre-fix shape) and prove the guard reds — same substitution-demonstration technique as the
+  // PreviewPane.svelte:1015 test above.
+  it("CPE-1790 regression proof: reverting ConfirmDialog's message render to raw {message} reds the guard", () => {
+    const src = readFileSync(join(COMPONENTS, "ConfirmDialog.svelte"), "utf8");
+    const ORIGINAL = "<p>{displaySafeName(message)}</p>";
+    const SPOOFED = "<p>{message}</p>";
+    expect(src, "ConfirmDialog.svelte no longer contains the exact text this demonstration substitutes — update the fixture").toContain(ORIGINAL);
+
+    const mutated = src.replace(ORIGINAL, SPOOFED);
+    const found = findUnsafeRenderLines(mutated, "ConfirmDialog.svelte (mutated: displaySafeName wrap dropped)");
+    const recordedSorted = [...REGISTRY["ConfirmDialog.svelte"]].sort(compareOffenders);
+
+    expect(found, "the un-escaped message render must be flagged").toContain("38:message");
+    expect(JSON.stringify(found), "the mutated file's offender set must no longer equal what's recorded — this is what makes the real REGISTRY-equality test above red").not.toBe(
+      JSON.stringify(recordedSorted),
+    );
   });
 
   // The AC's demonstration ("adding a new component… shows CI red without any manual registration step"),

@@ -603,10 +603,10 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
   return [...offenders].sort(compareOffenders);
 }
 
-/** CPE-1768 (widened this round — reviewer B1): the membership CRITERION — a `.svelte` file must carry a
- *  `REGISTRY` entry in `bidiEscape.guard.test.ts` (even `[]`, once `findUnsafeRenderLines` proves it draws
- *  nothing unsafe) if its source references a value shaped like a filesystem entry's identity, in ANY of
- *  the concrete shapes this codebase actually uses for one:
+/** CPE-1768 (widened this round — reviewer B1; widened again CPE-1790): the membership CRITERION — a
+ *  `.svelte` file must carry a `REGISTRY` entry in `bidiEscape.guard.test.ts` (even `[]`, once
+ *  `findUnsafeRenderLines` proves it draws nothing unsafe) if its source references a value shaped like a
+ *  filesystem entry's identity, in ANY of the concrete shapes this codebase actually uses for one:
  *   - a `.name`/`.path`/`.fullPath`/`.oldName`/`.cwd`/`.root`/`.folder`/`.dir`/`.target`/`.fileName`/
  *     `.filePath`/`.linkPath` property access (`entry.name`, `e.path`, `f.fullPath`, `rc.oldName`,
  *     `s.cwd`, `rule.root`, `job.source`, `sig.target`, …),
@@ -614,8 +614,31 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *     fileName`, or a plain `let folder = outDir` deriving one from a differently-named prop — the exact
  *     "intermediate variable" shape this module's own header (line 7) already names as a render pattern),
  *   - a call to one of this codebase's own path-splitting helpers: `baseName(`/`basename(`/`parentDir(`,
- *   - an `{#each … as { name }}`/`{ path }` (or plain JS `const { name } = …`) destructuring pattern, or
- *   - `["name"]`/`['path']` bracket property access.
+ *   - an `{#each … as { name }}`/`{ path }` (or plain JS `const { name } = …`) destructuring pattern,
+ *   - `["name"]`/`['path']` bracket property access, or
+ *   - CPE-1790: a call to the escape helpers themselves, `displaySafeName(`/`displaySafePath(`. Every
+ *     other trigger above recognizes a component by the SHAPE of the value it receives; this one instead
+ *     recognizes a component by the shape of what it DOES with an opaque value it received under a
+ *     generic prop name (`title`/`message`/`error` — none of which match any bullet above) — the "leaf
+ *     escapes what it renders" model CPE-1760 confirmed for `MediaPlayer` and CPE-1790 applied to
+ *     `ConfirmDialog`/`PasswordPromptDialog`. A component that already calls the escape helper is, by
+ *     construction, handling filesystem-derived text and must be pinned in `REGISTRY` so a regression
+ *     that later deletes the call (reverting to a raw `{message}`) reds the exact-equality check instead
+ *     of silently going unwatched again. Confirmed non-disruptive (independently re-derived by review
+ *     round 2, PR #949): of all 135 `.svelte` files under `src/lib/components/`, 51 call
+ *     `displaySafeName`/`displaySafePath` and every one of them already carried a `REGISTRY` key before
+ *     this bullet existed, so the membership test cannot go red from this addition alone. Three files
+ *     newly match `CANDIDATE_PATTERN` specifically because of this bullet (no earlier bullet already
+ *     caught them): `ConfirmDialog.svelte`/`PasswordPromptDialog.svelte` (this ticket's own fix) and
+ *     `TabBar.svelte` (pre-existing — its `displaySafeName(tab.title)` calls predate this ticket, but
+ *     `tab.title` never matched any name/path-shaped-identifier bullet above). `TabBar.svelte` needed no
+ *     new registration; it was already a `REGISTRY` key from the original CPE-1712 sweep (B4, above),
+ *     independent of whether it mechanically matched the criterion at the time. **Stated boundary, not
+ *     closed by this bullet:** the ratchet holds only while the `REGISTRY` key survives — deleting the
+ *     escape call AND its `REGISTRY` entry in the same change is silent, since candidacy drops back to
+ *     `false` and the membership test stops asking for that file at all. That takes a deliberate two-part
+ *     deletion visible in any diff (not a one-line regression), so it is materially harder to hit than
+ *     the single-line regression this bullet exists to catch, but it is not zero.
  *  The first CPE-1768 pass shipped only the first bullet's five spellings plus `export let name`/`path` —
  *  literally a five-property regex, the same "regex zoo" shape the header above (lines 4-10) says this
  *  module's CORE engine already replaced, just relocated from expressions to filenames. Review confirmed
@@ -626,15 +649,47 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  **In scope** (example): `<div title={entry.path}>{entry.name}</div>` — the ordinary shape of a
  *  directory-listing row, a dialog operating on selected files, or a component fed a name/path prop by
  *  its parent (`<TagEditor name={entry.name} />`); equally, `export let root: string;` — any prop whose
- *  OWN NAME reads as a filesystem location, regardless of what expression eventually renders it.
+ *  OWN NAME reads as a filesystem location, regardless of what expression eventually renders it; equally,
+ *  `<p>{displaySafeName(message)}</p>` — a component whose OWN prop name is generic but which itself
+ *  calls the escape helper on arrival.
  *  **Out of scope** (example): `StatusBar.svelte` as it stands today — item counts, a disk-free label, git
  *  branch/ahead/behind, a plain `notice` string. Nothing in it is a filesystem entry's name or path (or a
- *  variable NAMED like one), so it doesn't match this pattern and carries no `REGISTRY` entry. The moment
- *  it (or any file) starts rendering one of these shapes, `isCandidateComponent` flags it and the
- *  membership test in `bidiEscape.guard.test.ts` reds until it's registered — registration becomes the
- *  thing you cannot forget, not the thing you must remember. See that test's own mutation-probe
- *  demonstration (CPE-1768 AC: the review's original `StatusBar.svelte` injected-render probe, reproduced
- *  without leaving a permanent unregistered fixture in the tree).
+ *  variable NAMED like one), and it doesn't call either escape helper, so it doesn't match this pattern
+ *  and carries no `REGISTRY` entry. The moment it (or any file) starts rendering one of these shapes,
+ *  `isCandidateComponent` flags it and the membership test in `bidiEscape.guard.test.ts` reds until it's
+ *  registered — registration becomes the thing you cannot forget, not the thing you must remember. See
+ *  that test's own mutation-probe demonstration (CPE-1768 AC: the review's original `StatusBar.svelte`
+ *  injected-render probe, reproduced without leaving a permanent unregistered fixture in the tree).
+ *
+ *  **Still not exhaustive (CPE-1790's own honest boundary):** a component with a generic prop name that
+ *  neither matches a name/path SHAPE nor yet calls `displaySafeName`/`displaySafePath` — the exact bug
+ *  this ticket fixed for `ConfirmDialog`/`PasswordPromptDialog` before they called the helper — is still
+ *  invisible to this criterion until either it starts calling the helper (this bullet) or a future caller
+ *  happens to pass it something matching a name/path SHAPE (the bullets above). There is no general
+ *  textual signal for "this opaque prop will someday carry a filesystem name": that is exactly the
+ *  component-prop-pass-through boundary this module's header already states rather than hides. CPE-1790's
+ *  sweep of `export let (label|caption|text|detail|body|notice|heading|desc|description|content|summary)`
+ *  across every component found one further structural sibling, `MacroParamPrompt.svelte` (same
+ *  `title`/`message` shape as `PasswordPromptDialog`, reused for the macro-parameter prompt) —
+ *  **review round 2 (PR #949) corrected an earlier draft of this paragraph that called it "currently fed
+ *  only static copy": it is not.** `App.svelte`'s one caller composes `title="Macro parameters —
+ *  {macroParamPromptFor.macro.name}"`, and a macro can be imported from a pasted definition
+ *  (`MacrosDialog.svelte`'s import flow), so `macro.name` is externally-supplied — the same
+ *  accepted-but-disclosed raw render `MacroRunConfirm.svelte`'s own `REGISTRY` entry already carries for
+ *  the run confirmation itself. `title`/`message` are escaped on arrival (this bullet's trigger) and the
+ *  file is registered fully clean (`[]`). Its `label` prop (the per-parameter field caption, taken from
+ *  the macro's own `{ask:label}` token — also externally-supplied, same provenance as `macro.name`) is
+ *  escaped too, in its one render position (the `<label>` text node) — **review round 3 (PR #949)
+ *  rejected an earlier draft of this paragraph that left `label` raw**, reasoning it doubled as the
+ *  literal `for=`/`id=` value pairing a `<label>` with its `<input>` and that escaping only the display
+ *  text would desynchronize that pairing. That reasoning did not hold: `for=`/`id=`/`data-testid=` and
+ *  the `values[label]` object key all still reference the RAW `label` string unchanged — none of them
+ *  are DOM render positions this module's own engine scans (`title=`/`aria-label=`/`alt=`/body text
+ *  only; see `isRenderPosition` above), so a bidi override sitting in an un-rendered attribute value has
+ *  no spoofing effect to begin with, and wrapping only the text node touches the `for`/`id` pairing in
+ *  no way at all. A durable comment that states a caller is static without checking is worse than no
+ *  comment at all — the same is true of a plausible-sounding technical reason for leaving a disclosed gap
+ *  unfixed: check whether the constraint is real before writing it down, for this file or any other.
  *
  *  Deliberately broad and heuristic, not a parser — the exact inversion of the "regex zoo" this module's
  *  core engine (`isSafeExpr`/`findUnsafeRenderLines`) replaced. That's fine here because a false positive
@@ -648,7 +703,7 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  KNOWN to use for a filesystem location today; a genuinely novel prop name (`export let whereItLives`)
  *  is still invisible to it, same honest boundary every heuristic in this file states rather than hides. */
 export const CANDIDATE_PATTERN =
-  /\.(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|(?:export\s+)?let\s+(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|\b(?:baseName|basename|parentDir)\s*\(|\{\s*(?:name|path)\s*\}|\[\s*["'](?:name|path)["']\s*\]/;
+  /\.(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|(?:export\s+)?let\s+(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|\b(?:baseName|basename|parentDir|displaySafeName|displaySafePath)\s*\(|\{\s*(?:name|path)\s*\}|\[\s*["'](?:name|path)["']\s*\]/;
 
 /** True if `src` (a whole `.svelte` file's text — script and markup both, unlike `findUnsafeRenderLines`
  *  which only ever looks at markup) matches `CANDIDATE_PATTERN` and therefore must carry a `REGISTRY`

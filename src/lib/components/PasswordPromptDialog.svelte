@@ -5,7 +5,19 @@
    * CPE-1182 consumes it for encrypted-archive extract/create (wiring lives there, not here).
    */
   import { createEventDispatcher, onMount, tick } from "svelte";
+  import { displaySafeName } from "../filename";
 
+  // CPE-1790: `title`/`message`/`error`/`confirmLabel` arrive as free-text strings a caller has already
+  // composed around an escaped filesystem name (App.svelte's vault-unlock caller wraps it with
+  // displaySafeName before building the sentence) — this dialog has no way to know which substring, if
+  // any, is filesystem-derived. `confirmLabel` is escaped too even though every caller today passes a
+  // static verb ("Unlock"/"Compress"/"Extract") — that is only true BY CONVENTION, not by construction,
+  // and this ticket exists specifically to stop a free-text render slot being protected by convention
+  // instead of by the leaf. Escaping the WHOLE string on arrival is safe unconditionally: `displaySafeName`
+  // only replaces the twelve bidi/format control characters (never an ordinary letter), so it's a no-op
+  // on plain prose and idempotent on a caller's own already-escaped substring (its replacement text is
+  // plain ASCII, containing none of the characters it looks for — see `src/lib/filename.ts`). See
+  // `ConfirmDialog.svelte`'s matching comment for the full argument.
   export let title = "Password required";
   export let message = "";
   export let confirmLabel = "OK";
@@ -46,9 +58,9 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={() => dispatch("cancel")}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label={title} on:click|stopPropagation>
-    <h2>{title}</h2>
-    {#if message}<p>{message}</p>{/if}
+  <div class="dialog" role="dialog" aria-modal="true" aria-label={displaySafeName(title)} on:click|stopPropagation>
+    <h2>{displaySafeName(title)}</h2>
+    {#if message}<p>{displaySafeName(message)}</p>{/if}
 
     <input
       class="field"
@@ -61,11 +73,11 @@
       autocomplete="current-password"
     />
 
-    {#if error}<div class="err" data-testid="password-error">{error}</div>{/if}
+    {#if error}<div class="err" data-testid="password-error">{displaySafeName(error)}</div>{/if}
 
     <div class="actions">
       <button class="btn" data-testid="cancel-btn" on:click={() => dispatch("cancel")}>Cancel</button>
-      <button class="btn primary" data-testid="ok-btn" on:click={submit} disabled={submitting}>{confirmLabel}</button>
+      <button class="btn primary" data-testid="ok-btn" on:click={submit} disabled={submitting}>{displaySafeName(confirmLabel)}</button>
     </div>
   </div>
 </div>
