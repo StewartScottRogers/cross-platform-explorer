@@ -3,7 +3,7 @@ id: CPE-1792
 title: the freshness check's stale path dies on an apostrophe before it can report anything
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
