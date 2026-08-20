@@ -467,15 +467,27 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //   functions from the comment warning about it.
 // - The link-creation fallback swallowed every `io::ErrorKind` into a refusal asserting the cause was
 //   the Windows symlink privilege, so a full disk produced a green extraction advising Developer Mode.
-//   [`link_creation_is_categorical`] now draws the line, on the **raw OS code** rather than
-//   `ErrorKind` — Rust decodes `ERROR_PRIVILEGE_NOT_HELD` and `ERROR_ACCESS_DENIED` to the same kind,
-//   so a classifier written against the kind cannot tell "this machine has no links" from "you may not
-//   write here". That mutation is one of this ticket's red-proofs and it reproduces the false message
-//   exactly.
+//   [`link_creation_is_categorical`] now draws the line on the **raw OS code**.
+//
+// **And round 3 found the reason given for that second fix was itself unmeasured.** Round 2 wrote that
+// raw codes were needed because Rust decodes `ERROR_PRIVILEGE_NOT_HELD` (1314) and
+// `ERROR_ACCESS_DENIED` (5) to the same `PermissionDenied`. Measured on the pinned toolchain, 1314
+// decodes to `Uncategorized` and 5 to `PermissionDenied` — they never collided. The conclusion survived
+// on a *stronger* reason (`Uncategorized` has no stable name, so a kind-based match cannot express the
+// case at all), and the red-proof had gone red for a different reason than its author believed. **That
+// is this ticket's own "abort is atomic" mistake, committed by the person who had just demolished it**,
+// two commits later, and it is written up on [`ERROR_PRIVILEGE_NOT_HELD`] rather than quietly corrected:
+// a mutation going red confirms the code decides something; it never confirms the story about why.
+//
+// Round 3 also found the *promise* half broken: the in-app help told users a link-less filesystem would
+// skip the entry, while the only code path that delivered it was an arm no shipping platform reaches.
+// Windows 1/50 and POSIX `EPERM` now deliver it — see [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`], and
+// note that on POSIX `EPERM`-vs-`EACCES` **is** a real same-kind collision, which is where round 2's
+// story would have been true if it had been told about the right platform.
 //
 // The one judgement call left is that a machine which *categorically* has no links refuses rather than
 // fails: it is a standing property of the machine, and every ordinary entry in the archive still
-// extracts — see [`link_creation_is_categorical`] for the two causes that qualify and the ones that
+// extracts — see [`link_creation_is_categorical`] for the causes that qualify and the ones that
 // deliberately do not.
 //
 // ## The three extractors that are NOT our write loop — measured one at a time, because they differ
@@ -942,55 +954,151 @@ fn create_entry_symlink(_out: &Path, _target: &Path) -> std::io::Result<()> {
 /// Windows `ERROR_PRIVILEGE_NOT_HELD` — `symlink_file`/`symlink_dir` without
 /// `SeCreateSymbolicLinkPrivilege` (administrator, or Developer Mode).
 ///
-/// Matched on the **raw OS code, not on `ErrorKind`**, and that is load-bearing: Rust's Windows
-/// `decode_error_kind` maps 1314 to `PermissionDenied`, the same kind it gives `ERROR_ACCESS_DENIED`
-/// (5) — a genuine "you may not write here" that must abort. The kind cannot tell the two apart; the
-/// code can.
+/// # Why the raw code, and NOT the reason review round 2 gave
+///
+/// That round justified raw-code matching by claiming Rust decodes 1314 and `ERROR_ACCESS_DENIED` (5)
+/// to the *same* `PermissionDenied`, so only the code could separate them. **That was false, and it was
+/// measured false on the pinned toolchain** (`rustc 1.97.0`, msvc):
+///
+/// ```text
+/// [K] raw     1 -> Uncategorized      [K] raw   120 -> Unsupported
+/// [K] raw     5 -> PermissionDenied   [K] raw   183 -> AlreadyExists
+/// [K] raw    50 -> Uncategorized      [K] raw  1314 -> Uncategorized
+/// ```
+///
+/// The real reason is **stronger**: 1314 decodes to `ErrorKind::Uncategorized`, which is **unstable and
+/// unnameable** — `ErrorKind` is `#[non_exhaustive]` and that variant has no stable path — so a
+/// kind-based match cannot express this case *at all*, not merely less precisely. Raw-code matching is
+/// the only construction that compiles, never mind the only one that is correct.
+///
+/// **Worth recording how the false version survived its own red-proof.** The mutation (match on
+/// `ErrorKind::PermissionDenied`) did go red — but for a different reason than the model predicted:
+/// under it the *1314* assertion fails because 1314 is not `PermissionDenied`, not because 5 collides
+/// with it. A test going red confirms the code changed behaviour; it does not confirm the story about
+/// *why*. That is the same shape as the "abort leaves nothing partial" premise this very ticket
+/// demolished — inherited, plausible, and never measured — reproduced by its own author two commits
+/// later.
 #[cfg(windows)]
 const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 
-/// **The refusal/failure line for link creation** (CPE-1759, review round 2).
+/// The Windows codes that mean **this volume has no symbolic links**, whoever you are.
 ///
-/// `true` only for *categorical* refusals — this machine or filesystem does not do symbolic links at
-/// all, for anyone, until something about the machine changes:
+/// `ERROR_NOT_SUPPORTED` (50) and `ERROR_INVALID_FUNCTION` (1) are what a FAT/exFAT volume or a network
+/// redirector answers; `ERROR_CALL_NOT_IMPLEMENTED` (120) is the one that already decodes to
+/// `ErrorKind::Unsupported` and is listed anyway so the set reads as one thing rather than two.
 ///
-/// - **`ErrorKind::Unsupported`** — the filesystem has no links (a FAT/exFAT volume, some network
-///   mounts). Rust maps POSIX `ENOSYS`/`EOPNOTSUPP` here, and it is what this module's own
-///   `not(any(unix, windows))` arm of [`create_entry_symlink`] returns.
-/// - **Windows [`ERROR_PRIVILEGE_NOT_HELD`]** — the missing symlink privilege.
+/// **Measured for their `ErrorKind`, not for their occurrence.** 50 and 1 decode to `Uncategorized` (see
+/// [`ERROR_PRIVILEGE_NOT_HELD`]), which is why they need naming here at all. That these are the codes
+/// Windows *emits* for a link-less volume comes from the platform documentation, not from a runner: no
+/// CI leg can mount a FAT volume. Being wrong about one costs a refusal that arrives as an abort — the
+/// pre-CPE-1759 behaviour, and the safe direction — never the reverse.
+#[cfg(windows)]
+const WINDOWS_NO_LINK_SUPPORT: &[i32] = &[1, 50, 120];
+
+/// POSIX `EPERM`, which `symlink(2)` documents as *"the filesystem containing linkpath does not support
+/// the creation of symbolic links"* — the FAT-stick case, on the other family.
 ///
-/// Everything else is a **failure** and aborts, with the same treatment `File::create` and `io::copy`
-/// get in the same loop: `PermissionDenied` on the directory, `NotFound`, a full disk, `EIO`. The first
-/// version of this code had no such test — it mapped *every* error to a refusal whose text asserted the
-/// cause was the Windows privilege, so a full disk produced a green extraction advising the user to
-/// enable Developer Mode.
+/// **`EACCES` (13) is the write-permission failure and is deliberately absent**: that one must abort.
+/// The two are indistinguishable by `ErrorKind` (both `PermissionDenied`), which is the *genuine*
+/// same-kind collision review round 2 mistakenly attributed to the Windows pair.
+///
+/// **This is only sound because the classifier sees exactly one syscall's errno.**
+/// [`create_entry_symlink`]'s unix arm is a bare `std::os::unix::fs::symlink`, and
+/// [`materialise_entry_symlink`] never routes a `remove_file` error here — which matters concretely:
+/// `remove_file` returns `EPERM` on a sticky-bit directory such as `/tmp`, and classifying *that* as
+/// "this filesystem has no links" would file a failure as a refusal, the exact defect review round 2
+/// existed to remove.
+///
+/// `EPERM` is 1 on Linux, macOS and every BSD (the original UNIX errno ordering); it is spelled out
+/// rather than taken from `libc` because this crate has no such dependency and is not gaining one.
+#[cfg(unix)]
+const EPERM: i32 = 1;
+
+/// **The refusal/failure line for link creation** (CPE-1759, review rounds 2 and 3).
+///
+/// `true` only for *categorical* refusals — this machine or volume does not do symbolic links at all,
+/// for anyone, until something about the machine changes. Everything else is a **failure** and aborts,
+/// with the same treatment `File::create` and `io::copy` get in the same loop: `EACCES` on the
+/// directory, `NotFound`, a full disk, `EIO`.
+///
+/// **Round 3 fixed a promise the code was not keeping.** Round 2 matched `ErrorKind::Unsupported` plus
+/// Windows 1314 and told users, in the in-app help, that a link-less filesystem would skip the entry.
+/// Measured, `Unsupported` is reachable from Windows 120 and from the
+/// `not(any(unix, windows))` arm of [`create_entry_symlink`] that no CI leg compiles — while the codes a
+/// real FAT volume produces (Windows 1/50, POSIX `EPERM`) all aborted. The help promised a skip the code
+/// did not deliver. It is delivered now, on [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`].
+///
+/// That mattered beyond the broken promise: before CPE-1759 the streamed loop wrote a symlink entry's
+/// target out as *text*, so extracting a source tarball onto a FAT stick never failed. Materialising
+/// real links without this arm would have turned that into a dead extraction — a regression introduced
+/// by a fix, on a platform combination nothing here can test.
 fn link_creation_is_categorical(e: &std::io::Error) -> bool {
     if e.kind() == std::io::ErrorKind::Unsupported {
         return true;
     }
     #[cfg(windows)]
-    if e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) {
+    if e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+        || e.raw_os_error().is_some_and(|c| WINDOWS_NO_LINK_SUPPORT.contains(&c))
+    {
+        return true;
+    }
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(EPERM) {
         return true;
     }
     false
 }
 
+/// True when the refusal is the **Windows privilege**, as opposed to a volume with no links at all.
+/// The two need different things from the user, so they are worded differently by
+/// [`link_creation_refusal`]; on every other platform this is `false` and only the volume wording ships.
+fn link_creation_needs_privilege(e: &std::io::Error) -> bool {
+    // A cfg'd `let`, not two cfg'd blocks: a bare `#[cfg] { .. }` in statement position is a *statement*,
+    // not the function's tail expression, so that shape silently returns `()` and fails to compile — and
+    // the `return` spelling that does work trips clippy's `needless_return`.
+    #[cfg(windows)]
+    let privilege = e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD);
+    #[cfg(not(windows))]
+    let privilege = {
+        let _ = e;
+        false
+    };
+    privilege
+}
+
 /// The wording for a link entry this machine categorically will not create (CPE-1759) — in one place so
 /// it cannot drift, and **it no longer guesses the cause**. The first version said "On Windows that
 /// normally means…" for every error it was handed, including ones that had nothing to do with
-/// privileges; now the two causes [`link_creation_is_categorical`] admits are named separately, because
-/// they need different things from the user.
+/// privileges; the two causes [`link_creation_is_categorical`] admits are now named separately.
 fn link_creation_refusal(target: &Path, e: &std::io::Error) -> String {
-    let remedy = if e.kind() == std::io::ErrorKind::Unsupported {
-        "this folder is on a filesystem that has no links"
-    } else {
+    let remedy = if link_creation_needs_privilege(e) {
         "creating a link needs administrator rights or Developer Mode on Windows"
+    } else {
+        "this folder is on a drive whose filesystem has no links"
     };
     format!(
         "this entry is a link to \"{}\", and it could not be created here — {remedy} ({e}). Skipped; \
          the rest of the archive still extracts",
         target.display()
     )
+}
+
+/// **What a link-creation error means, as a pure function**: `Ok(None)` unreachable here, `Ok(Some(m))`
+/// a **refusal** (skip this entry), `Err(m)` a **failure** (abort the run).
+///
+/// Split out of [`materialise_entry_symlink`] in review round 3, for the reason `entry_slot_action` and
+/// `fsutil`'s classifiers are split out — and the review measured the cost of not having it: mutating
+/// the `Ok(Some(..))` arm to `Err(..)`, which converts every categorical refusal into an aborted
+/// extraction, turned **no test red**. Neither arm can be staged on any runner (a machine with the
+/// symlink privilege cannot produce 1314; no CI leg can mount a link-less volume), so with the decision
+/// inline the routing that carries this ticket's whole point went unverified.
+fn link_creation_outcome(target: &Path, out: &Path, e: &std::io::Error) -> Result<Option<String>, String> {
+    if link_creation_is_categorical(e) {
+        return Ok(Some(link_creation_refusal(target, e)));
+    }
+    // Names the path, unlike the bare `e.to_string()` its neighbours use: an OS string alone ("Access is
+    // denied.") tells the user nothing about *which* of an archive's entries died on it.
+    Err(format!("could not create the link \"{}\": {e}", out.display()))
 }
 
 /// Create the link a symlink entry asks for, classifying what happens into this module's two outcomes:
@@ -1013,26 +1121,29 @@ fn link_creation_refusal(target: &Path, e: &std::io::Error) -> String {
 /// message was untrue, and the test certified both.
 ///
 /// A `remove_file` that fails — because the occupant is a **directory**, most obviously — is a failure
-/// and aborts, exactly as `File::create` would on the same path.
+/// and aborts, exactly as `File::create` would on the same path. **Its error is returned directly and
+/// never handed to [`link_creation_outcome`]**, which is not tidiness: `remove_file` answers `EPERM` on
+/// a sticky-bit directory such as `/tmp`, and [`EPERM`] is one of the codes that classifier reads as
+/// "this filesystem has no links". Routing it there would file a failure as a refusal — the defect this
+/// whole review chain is about — on POSIX only, where nothing here runs.
 fn materialise_entry_symlink(out: &Path, target: &Path) -> Result<Option<String>, String> {
     let err = match create_entry_symlink(out, target) {
         Ok(()) => return Ok(None),
         Err(e) => e,
     };
-    let err = if err.kind() == std::io::ErrorKind::AlreadyExists {
-        match fs::remove_file(out).and_then(|()| create_entry_symlink(out, target)) {
-            Ok(()) => return Ok(None),
-            Err(retried) => retried,
-        }
-    } else {
-        err
-    };
-    if link_creation_is_categorical(&err) {
-        return Ok(Some(link_creation_refusal(target, &err)));
+    if err.kind() != std::io::ErrorKind::AlreadyExists {
+        return link_creation_outcome(target, out, &err);
     }
-    // Names the path, unlike the bare `e.to_string()` its neighbours use: an OS string alone ("Access is
-    // denied.") tells the user nothing about *which* of an archive's entries died on it.
-    Err(format!("could not create the link \"{}\": {err}", out.display()))
+    if let Err(removing) = fs::remove_file(out) {
+        return Err(format!(
+            "could not replace \"{}\" with the archive's link: {removing}",
+            out.display()
+        ));
+    }
+    match create_entry_symlink(out, target) {
+        Ok(()) => Ok(None),
+        Err(retried) => link_creation_outcome(target, out, &retried),
+    }
 }
 
 /// Row 17: create an extraction's destination folder, and **say something true when that fails**
@@ -5766,23 +5877,59 @@ mod tests {
         }
     }
 
-    /// **CPE-1759 review round 2: the refusal/failure line for link creation, both sides, as a pure
-    /// classifier.**
+    /// **The `ErrorKind` decoding this module's link classifier rests on, measured rather than assumed.**
+    ///
+    /// Review round 2 asserted, in three places and a commit message, that Rust decodes
+    /// `ERROR_PRIVILEGE_NOT_HELD` (1314) and `ERROR_ACCESS_DENIED` (5) to the same `PermissionDenied`,
+    /// and that separating them was why the classifier reads raw codes. It does not, and this is the
+    /// leg that keeps the correction true instead of leaving it as a second unmeasured story:
+    ///
+    /// ```text
+    /// [K] raw     1 -> Uncategorized      [K] raw   120 -> Unsupported
+    /// [K] raw     5 -> PermissionDenied   [K] raw    50 -> Uncategorized
+    /// [K] raw  1314 -> Uncategorized
+    /// ```
+    ///
+    /// The real reason is stronger and this asserts it directly: 1314, 1 and 50 decode to a kind with
+    /// **no stable name** (`Uncategorized`, on a `#[non_exhaustive]` enum), so a kind-based classifier
+    /// cannot express them at all. If a future toolchain gives any of them a nameable kind, this goes
+    /// red and `link_creation_is_categorical`'s reasoning can be revisited — which is the only way a
+    /// claim about someone else's mapping stays honest.
+    #[cfg(windows)]
+    #[test]
+    fn cpe1759_the_windows_link_codes_have_no_nameable_error_kind() {
+        use std::io::{Error, ErrorKind};
+        for code in [ERROR_PRIVILEGE_NOT_HELD, 1, 50] {
+            let kind = Error::from_raw_os_error(code).kind();
+            assert_ne!(
+                kind,
+                ErrorKind::PermissionDenied,
+                "raw {code} decoding to PermissionDenied would make the round-2 story true after all, \
+                 and would mean 5 and {code} really are indistinguishable by kind"
+            );
+            assert_ne!(
+                kind, ErrorKind::Unsupported,
+                "and if raw {code} ever decodes to Unsupported, the raw-code arm for it is redundant"
+            );
+        }
+        assert_eq!(
+            Error::from_raw_os_error(5).kind(),
+            ErrorKind::PermissionDenied,
+            "ERROR_ACCESS_DENIED is the one that IS nameable — and it must stay a failure"
+        );
+    }
+
+    /// **CPE-1759: the refusal/failure line for link creation, both sides, as a pure classifier.**
     ///
     /// The first version of this ticket had no such line — it mapped **every** `io::Error` from
     /// `create_entry_symlink` to a refusal whose text asserted the cause was the missing Windows symlink
     /// privilege, so a full disk or a read-only directory produced a green extraction advising the user
     /// to turn on Developer Mode, while `File::create` twelve lines away aborted on the same errors.
     ///
-    /// This is a pure test for the reason `entry_slot_action`'s is: the two arms that matter cannot be
-    /// staged on demand anywhere. `ERROR_PRIVILEGE_NOT_HELD` needs an unprivileged Windows account and
-    /// `Unsupported` needs a filesystem without links, so with the classification inline the arms that
-    /// were wrong would again be the arms nothing reaches.
-    ///
-    /// **The `PermissionDenied` leg is the one that would have caught the original defect**, and on
-    /// Windows it is not a formality: Rust's `decode_error_kind` maps `ERROR_PRIVILEGE_NOT_HELD` (1314)
-    /// and `ERROR_ACCESS_DENIED` (5) to the *same* `ErrorKind`, so a classifier written against the kind
-    /// cannot tell "this machine does not do links" from "you may not write here". Only the raw code can.
+    /// This is a pure test for the reason `entry_slot_action`'s is: **none** of the arms that matter can
+    /// be staged on any runner. 1314 needs an unprivileged Windows account; the no-link-support codes
+    /// need a FAT volume mounted; `Unsupported` on POSIX needs a filesystem that answers `ENOSYS`. With
+    /// the classification inline, the arms that were wrong would again be the arms nothing reaches.
     #[test]
     fn cpe1759_link_creation_separates_a_categorical_refusal_from_a_failure() {
         use std::io::{Error, ErrorKind};
@@ -5792,19 +5939,41 @@ mod tests {
             "a filesystem with no links at all is a refusal — the entry is impossible, not the write"
         );
         #[cfg(windows)]
-        assert!(
-            link_creation_is_categorical(&Error::from_raw_os_error(ERROR_PRIVILEGE_NOT_HELD)),
-            "ERROR_PRIVILEGE_NOT_HELD is the Windows symlink privilege, a property of the machine"
-        );
-        #[cfg(windows)]
-        assert!(
-            !link_creation_is_categorical(&Error::from_raw_os_error(5)),
-            "...but ERROR_ACCESS_DENIED is an ordinary permission failure and must ABORT — and it \
-             decodes to the SAME ErrorKind as 1314, which is exactly why this classifier reads the raw \
-             code. A version matching on `PermissionDenied` passes the leg above and fails here"
-        );
+        {
+            assert!(
+                link_creation_is_categorical(&Error::from_raw_os_error(ERROR_PRIVILEGE_NOT_HELD)),
+                "ERROR_PRIVILEGE_NOT_HELD is the Windows symlink privilege, a property of the machine"
+            );
+            for code in WINDOWS_NO_LINK_SUPPORT {
+                assert!(
+                    link_creation_is_categorical(&Error::from_raw_os_error(*code)),
+                    "raw {code} is a volume that cannot hold links — the case the in-app help promises \
+                     a skip for, and the case round 2 shipped as an abort because it only matched \
+                     `ErrorKind::Unsupported`, which none of these decode to"
+                );
+            }
+            assert!(
+                !link_creation_is_categorical(&Error::from_raw_os_error(5)),
+                "...but ERROR_ACCESS_DENIED is an ordinary permission failure and must ABORT. It is the \
+                 one Windows code here with a nameable kind, so a classifier rewritten to match \
+                 `PermissionDenied` fails HERE and on the 1314 leg above — both, and for different \
+                 reasons"
+            );
+        }
+        #[cfg(unix)]
+        {
+            assert!(
+                link_creation_is_categorical(&Error::from_raw_os_error(EPERM)),
+                "EPERM is what `symlink(2)` documents for a filesystem that cannot hold links"
+            );
+            assert!(
+                !link_creation_is_categorical(&Error::from_raw_os_error(13)),
+                "...and EACCES is the write-permission failure, which must ABORT. THESE two are the \
+                 genuine same-`ErrorKind` collision (both PermissionDenied) that round 2 wrongly \
+                 attributed to the Windows pair — so on POSIX the raw code really is the only separator"
+            );
+        }
         for (label, e) in [
-            ("permission", Error::from(ErrorKind::PermissionDenied)),
             ("disk full", Error::other("No space left on device")),
             ("not found", Error::from(ErrorKind::NotFound)),
             ("already exists", Error::from(ErrorKind::AlreadyExists)),
@@ -5815,14 +5984,51 @@ mod tests {
                  loop — reporting it as a skip returns Ok with an entry silently missing"
             );
         }
+    }
 
-        // And the wording names the right remedy for each, because the first version named one remedy
-        // for everything it was handed.
-        let unsupported =
-            link_creation_refusal(Path::new("t"), &Error::new(ErrorKind::Unsupported, "nope"));
+    /// **CPE-1759 review round 3: the routing a deleted fixture used to cover.**
+    ///
+    /// Round 2 removed a test that pinned the wrong behaviour — correctly — but nothing replaced the
+    /// leg it *incidentally* covered, and the re-review measured the hole: mutating
+    /// `link_creation_outcome`'s `Ok(Some(..))` arm to `Err(..)`, which turns every categorical refusal
+    /// into an aborted extraction and undoes this ticket's entire point for link entries, **turned no
+    /// test red**. Deleting a test that asserts the wrong thing still deletes whatever else it happened
+    /// to hold up.
+    ///
+    /// Pure, because that is the only way to reach these arms at all (see the classifier test above),
+    /// and asserting the *shape* — `Ok(Some)` vs `Err` — because that shape is the refusal/failure
+    /// decision the loop then acts on.
+    #[test]
+    fn cpe1759_a_categorical_refusal_is_delivered_as_a_skip_not_an_abort() {
+        use std::io::{Error, ErrorKind};
+        let (target, out) = (Path::new("some/target"), Path::new("dest/good_link"));
+
+        let refused = link_creation_outcome(target, out, &Error::new(ErrorKind::Unsupported, "nope"))
+            .expect("a categorical refusal must be Ok(Some(..)) — a SKIP. As Err it aborts the archive");
+        let refused = refused.expect("...and it must carry a reason, not be an Ok(None) silent success");
         assert!(
-            unsupported.contains("filesystem that has no links") && !unsupported.contains("Developer Mode"),
-            "an unsupported filesystem must not be reported as a Windows privilege problem: {unsupported}"
+            refused.contains("some/target") && refused.contains("no links"),
+            "and the reason must name the target and the cause: {refused}"
+        );
+
+        #[cfg(windows)]
+        {
+            let privilege =
+                link_creation_outcome(target, out, &Error::from_raw_os_error(ERROR_PRIVILEGE_NOT_HELD))
+                    .expect("the Windows privilege case is a SKIP")
+                    .expect("with a reason");
+            assert!(
+                privilege.contains("Developer Mode") && !privilege.contains("no links"),
+                "and it must name the privilege remedy, not the wrong one: {privilege}"
+            );
+        }
+
+        let failed = link_creation_outcome(target, out, &Error::other("No space left on device"))
+            .expect_err("a failure must be Err(..) — as Ok(Some(..)) the run returns success with the \
+                         entry missing, which is the shape this whole ticket family is about");
+        assert!(
+            failed.contains("dest") && failed.contains("could not create the link"),
+            "and the failure must name the path it died on: {failed}"
         );
     }
 
@@ -5881,11 +6087,28 @@ mod tests {
                     "a link entry that cannot displace a DIRECTORY is the write failing, not a guard \
                      refusing — it aborts, like `File::create` on the same path would",
                 );
+                // **Which of our two failure messages this is, is platform-dependent, and that was
+                // measured rather than assumed** (the first version of this assertion guessed, and went
+                // red on Windows). `symlink_file` over an existing *directory* answers
+                // `Access is denied. (os error 5)` on Windows — NOT `AlreadyExists` — so the retry
+                // branch is never entered and the message is the creation one. POSIX `symlink(2)`
+                // answers `EEXIST`, so the retry runs and `remove_file` fails on the directory,
+                // producing the replacement message. **Only the Linux and macOS matrix legs exercise
+                // that second path.** Both are ours and neither is reachable from an unrelated failure,
+                // so accepting either keeps the assertion distinctive without asserting a platform
+                // constant this cannot check.
                 assert!(
-                    err.contains("good_link") && err.contains("could not create the link"),
-                    "and the failure must name the entry and what was being attempted, not be a bare OS \
-                     string — an `is_err()` check here would stay green through the guard firing for \
-                     some entirely different reason. Got: {err}"
+                    err.contains("good_link")
+                        && (err.contains("could not create the link") || err.contains("could not replace")),
+                    "the failure must name the entry and be one of this module's own two link-write \
+                     failures — an `is_err()` check would stay green through the guard firing for some \
+                     entirely different reason. Got: {err}"
+                );
+                assert!(
+                    !err.contains("Skipped"),
+                    "and it must NOT be phrased as a refusal: a directory in the way is the write \
+                     failing, and `link_creation_refusal`'s wording here would mean the classifier had \
+                     swallowed it. Got: {err}"
                 );
                 let _ = fs::remove_dir_all(&d);
                 continue;
@@ -5935,14 +6158,25 @@ mod tests {
             let slot = dest.join("a.txt");
             fs::write(&slot, b"PRE-EXISTING").unwrap();
 
-            struct Restore<'a>(&'a Path, &'a Path);
+            // **`parent` is `dest`, not the scratch root, and the distinction is load-bearing on the
+            // platforms this cannot run on.** `deny_stat_of` denies `slot.parent()` — `dest` — and
+            // `undo_deny_stat_of`'s unix leg restores *only* the directory it is handed
+            // (`fsutil.rs:2606-2611`; the Windows leg happens to also walk `target.parent()`, which is
+            // what hid this). Handing it the scratch root left `dest` at `0o000` on Linux and macOS, so
+            // the `remove_dir_all` below could not descend into it and the tree leaked — twice per run,
+            // accumulating undeletable directories on CI runners. The root is removed separately.
+            struct Restore<'a> {
+                target: &'a Path,
+                parent: &'a Path,
+                root: &'a Path,
+            }
             impl Drop for Restore<'_> {
                 fn drop(&mut self) {
-                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
-                    let _ = fs::remove_dir_all(self.1);
+                    crate::fsutil::undo_deny_stat_of(self.target, self.parent);
+                    let _ = fs::remove_dir_all(self.root);
                 }
             }
-            let _r = Restore(&slot, &d);
+            let _r = Restore { target: &slot, parent: &dest, root: &d };
 
             if !crate::fsutil::deny_stat_of(&slot) {
                 crate::skip_notice!(

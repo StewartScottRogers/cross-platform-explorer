@@ -166,12 +166,12 @@ Three independent protections apply automatically — you don't opt into any of 
   and it now holds for every format. "Refused" means this app decided not to write that entry — an
   unusable name, a shortcut already sitting at the name, a destination that would land outside your
   folder, a shortcut pointing out of it, or a shortcut this system cannot make at all (on Windows
-  without administrator rights or Developer Mode, or on a drive whose filesystem has no shortcuts).
-  "Failed" means the write itself did not work — a full disk, a permission error on the folder, a TAR
-  hard link whose target is not in the archive. Refusals cost you one entry and are listed in the
-  operations panel; failures stop the run and say so. The difference is whether trying the next entry
-  could plausibly work: a machine that has no shortcuts still extracts every ordinary file, while a full
-  disk does not.
+  without administrator rights or Developer Mode, or on a drive — a FAT-formatted USB stick, say — whose
+  filesystem has no shortcuts at all). "Failed" means the write itself did not work — a full disk, a
+  permission error on the folder, a TAR hard link whose target is not in the archive. Refusals cost you
+  one entry and are listed in the operations panel; failures stop the run and say so. The difference is
+  whether trying the next entry could plausibly work: a drive that has no shortcuts still extracts every
+  ordinary file on it, while a full disk does not.
 - **Zip-bomb / expansion-ratio scoring**, via **Check archive safety…** — for the ordinary case, reads a
   ZIP's central directory (no extraction) and compares every entry's compressed size against its
   uncompressed size. It reports the overall compression ratio, total compressed → uncompressed size, how
@@ -289,8 +289,9 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
   the archive said. It is now created as a real shortcut (subject to the "points outside the folder you
   chose" refusal above), and it replaces an ordinary file already sitting at that name, exactly as an
   ordinary entry would. On **Windows**, creating shortcuts needs administrator rights or Developer Mode;
-  without either — or on a drive whose filesystem has no shortcuts at all — that one entry is skipped and
-  listed in the operations panel, and the rest of the archive still extracts. Anything *else* that stops
+  without either — or when the destination is on a drive whose filesystem cannot hold shortcuts at all,
+  such as a FAT-formatted USB stick, on **any** system — that one entry is skipped and listed in the
+  operations panel, and the rest of the archive still extracts. Anything *else* that stops
   the shortcut being created (a permission error on the folder, a directory sitting at the name) is a
   failure, not a refusal, and stops the extraction with a message naming the entry.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
