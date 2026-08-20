@@ -235,8 +235,17 @@ jobs:
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
-          FFMPEG_BUILD_TAG: "autobuild-2026-08-15-13-02"
-          FFMPEG_BUILD_VER: "n8.1.2-44-g7c533d0f86"
+          # CPE-1789: pinned to a BtbN MONTH-END anchor, not a rolling daily. BtbN keeps ~14 rolling
+          # dailies on a ~14-day pruning window but retains one anchor per month (*-07-31-*, *-06-30-*,
+          # …) indefinitely (back to 2024-09). A daily pin rots on a ~2-week clock; a month-end anchor
+          # doesn't rot at all. For a shipped release, reproducibility and a build that still exists in
+          # six months beat two weeks of extra freshness — so when this next needs bumping, prefer the
+          # newest available month-end anchor over the newest daily. Verify the chosen tag's actual
+          # asset list (both the BUILD_VER commit hash AND the release-line suffix on the filename, e.g.
+          # `-lgpl-8.1`, can differ between same-dated releases) and HEAD every fetch URL below before
+          # merging — see CPE-1789's Work Log for the verification this pin was set from.
+          FFMPEG_BUILD_TAG: "autobuild-2026-07-31-14-10"
+          FFMPEG_BUILD_VER: "n8.1.2-34-g9b6c8969e0"
           FFMPEG_SRC_TAG: "n8.1.2"
         run: |
           set -euo pipefail
