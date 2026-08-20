@@ -122,15 +122,66 @@ job and tallies pass/fail via direct (capture-proof) stderr writes.
 
 - **Variant A** (commit `611f0a71`, throwaway): mutex neutralised (each `lock_real_trash()` call
   locks its own private, unshared `Mutex` instead of the shared `TRASH_ENV_LOCK` static), redirect
-  kept. CI run in progress — the Foreman is driving/watching it directly (worker-side CI polling
-  was identified as a token-burning anti-pattern across the sprint and stopped). Result: **pending**.
-- **Variant B** (redirect neutralised, mutex kept): not yet pushed — queued behind variant A's
-  result.
-- **Fix restored, diagnostic test removed:** final green confirmation queued behind both of the
-  above.
+  kept. Run `32327426732`, `Backend (ubuntu-latest)`, commit `f6341a43` (the code from `611f0a71`
+  carried forward under a new commit sha after an unrelated ticket-only push restarted CI on this
+  ref — see below). **Result: REPRODUCED DECISIVELY — 33/50 nested runs failed (66%).**
 
-This section will be updated with the actual pass/fail counts once the Foreman reports the CI
-results back; the PR body's Evidence section is being kept in sync with this one.
+  ```
+  CPE-1785 STRESS RESULT: 33/50 nested runs failed
+  test result: FAILED. 187 passed; 2 failed
+  ```
+
+  And the failure carries the exact mechanism, not just a bare panic — the blocker-2 assertion
+  fired and named it:
+
+  ```
+  thread 'tests::macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash'
+  panicked at src/lib.rs:14279:13:
+    the probe's trashinfo file (/home/runner/.local/share/Trash/info/cpe-trash-roundtrip-probe.tmp.trashinfo)
+    is not inside the redirected scratch trash (/tmp/cpe-1785-trash-xdg-5935-3)
+    — XDG_DATA_HOME redirection silently did not take effect, so this test just touched the
+    REAL shared OS trash (CPE-1785, PR #940 review, blocker 2)
+  ```
+
+  Two distinct failure shapes were observed across the 33: one run's redirect landed on the
+  runner's own real trash (`/home/runner/.local/share/Trash`) instead of any scratch directory at
+  all; another landed in a *different concurrently-running test's* private scratch directory
+  (`.../cpe-1785-trash-xdg-6670-4` while its own was `...-6670-3`). Both are exactly what
+  `std::env::set_var` being process-global predicts without the mutex: two concurrent tests race
+  to set `XDG_DATA_HOME` between one test's `set_var` and its own later read, so the loser silently
+  operates on the wrong directory — either the real shared trash, or another test's directory —
+  which is the same list-then-read race the ticket started from, now reproduced on demand instead
+  of waited for.
+
+  **For context on why fault injection was necessary:** this exact race resisted 46 *unforced*
+  attempts earlier the same day — this worker's 12 natural `gh run rerun` attempts against pre-fix
+  `main` (0/11 valid reproduced), plus an independent UAT's 6 fresh Linux pre-fix reruns and 40
+  Windows iterations, all clean. One fault-injected CI run found what a day of unforced repetition
+  could not.
+
+- **Variant B** (commit `35e608f1`, throwaway): redirect neutralised (the scratch directory is
+  still created but `XDG_DATA_HOME` is deliberately left unset), mutex kept (restored to the real
+  shared `TRASH_ENV_LOCK` via `git checkout b2717976 -- src-tauri/src/lib.rs` before applying B).
+  Answers the remaining question: with tests serialised but still sharing the one real OS trash,
+  does the original `freedesktop.rs:140` panic return? CI run `32329693244` — result pending.
+- **Fix restored, diagnostic test removed:** final green confirmation, and confirming the branch
+  contains only the real fix (no throwaway commits' code, `cpe_1785_diagnostic_stress_loop_temporary`
+  gone), queued behind variant B's result.
+
+**Interim conclusions already supported by variant A alone:**
+1. The mutex is load-bearing, now with a number: 66% failure without it (33/50) vs. 0 failures
+   across every other run this ticket has produced with it (3 Linux CI runs, 40 Windows
+   iterations, this worker's own 10/10 local Windows run).
+2. The redirect alone is not sufficient — variant A is exactly "redirect present, mutex absent",
+   and it failed 66% of the time. The doc comment's claim that the mutex is not redundant with the
+   redirect is now backed by measurement, not just reasoning.
+3. Blocker 2's assertion earned its keep on its first outing: without it, all 33 failing runs
+   would have *passed* while silently touching the wrong trash directory — exactly the "silently
+   degraded, every test still green" failure mode the review predicted for a missing invariant
+   check.
+
+This section will be updated with variant B's pass/fail counts once that run completes; the PR
+body's Evidence section is being kept in sync with this one.
 
 ### Gates
 
