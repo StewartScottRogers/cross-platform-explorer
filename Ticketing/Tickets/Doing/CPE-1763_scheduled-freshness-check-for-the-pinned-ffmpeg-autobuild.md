@@ -3,7 +3,7 @@ id: CPE-1763
 title: A scheduled freshness check for the pinned ffmpeg autobuild, so the pin is bumped before a release needs it
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-17
@@ -64,3 +64,44 @@ implements), CPE-1258 (introduced the native-deps staging step).
 
 Filed by the Foreman during the batched sprint of 2026-08-17, on the reviewer-confirmed recommendation in
 CPE-1762's Work Log.
+
+## Work Log
+
+2026-08-19 — Built `.github/workflows/ffmpeg-pin-freshness.yml` (PR #938, branch
+`CPE-1763-ffmpeg-pin-freshness-check`): weekly (Mondays 07:00 UTC) + `workflow_dispatch`. Extracts
+`FFMPEG_BUILD_TAG`/`FFMPEG_BUILD_VER`/`PDFIUM_TAG` from `release-sidecar.yml`'s "Stage native deps"
+step via `grep -oP` at run time (no second copy); the extraction itself fails loudly
+(`::error::`) if that `env:` block ever moves/reformats, instead of silently checking stale values.
+
+2026-08-19 — HEAD-checks (curl, `--max-time 30 --retry 3 --retry-connrefused`, `timeout-minutes: 5`
+at the step level — the CPE-1787 lesson about `ci.yml`'s unbounded ffmpeg install applied here from
+the start) the exact URLs `release-sidecar.yml` downloads: ffmpeg win64 zip, ffmpeg linux64 tar.xz,
+and one representative pdfium asset (win64 tgz — every platform archive in a pdfium-binaries release
+comes from the same tag, so one check covers all of them).
+
+2026-08-19 — Confirmed live via `gh api repos/bblanchon/pdfium-binaries/releases --paginate` that
+pdfium-binaries does **not** prune: 418 releases returned, oldest `chromium/3218` (years old), current
+pin `chromium/7961` (2026-07-14) still present. Checked it anyway per the ticket ("costs one more
+request") as a cheap safety net, not because it is expected to legitimately fire. Contrast: `gh api
+repos/BtbN/FFmpeg-Builds/releases` returned only ~38 live releases, confirming BtbN's daily-prune
+behavior and grounding the weekly cadence (~5 weeks of runway on a freshly-set pin).
+
+2026-08-19 — Notification mechanism decided: a GitHub issue (`gh issue create`, default
+`GITHUB_TOKEN`, `issues: write`, no extra secrets), not a red badge. Reasoning: nobody watches the
+Actions tab for a job that only checks dates — that is exactly the failure mode this ticket exists to
+close. An issue is visible in the repo's Issues tab/notifications; it is deduped against an open
+`dep-pin-stale`-labeled issue so a still-broken pin does not refile weekly. Deliberately does NOT try
+to allocate a `CPE-NNN` ID and push a ticket file to `main` itself — that risks colliding with
+tickets filed concurrently by a human or another agent; a human/Foreman converts the issue to a
+ticket on triage instead, same as any other externally-raised finding.
+
+2026-08-19 — Added a `workflow_dispatch` input, `override_ffmpeg_build_tag`, so both branches can be
+demonstrated live without ever touching the real pin in `release-sidecar.yml`: an empty override runs
+the real check; a non-empty one (e.g. the ticket's known-dead `autobuild-2026-08-01-13-21`) substitutes
+it for the extracted tag.
+
+2026-08-19 — PR #938 opened. CI (the full 3-OS matrix runs on `pull_request` even for a
+workflow-only change, since PR #935's `paths-ignore` is deliberately `push`-only) is running; will
+merge once green, then run both the fresh-pin and stale-pin `workflow_dispatch` demonstrations live
+on `main` (GitHub only allows dispatching a `workflow_dispatch` workflow that already exists on the
+default branch) and record run links + outputs here.
