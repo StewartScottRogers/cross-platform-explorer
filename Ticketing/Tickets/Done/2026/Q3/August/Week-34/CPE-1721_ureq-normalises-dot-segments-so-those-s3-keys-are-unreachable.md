@@ -2,14 +2,14 @@
 id: CPE-1721
 title: "ureq normalises dot segments out of a URL, so an S3 key containing `.`/`..` is unreachable"
 type: Bug
-status: Backlog
+status: Done
 priority: Low
 component: Backend
 tags: [ready]
 epic: CPE-1503
 estimate: M
 created: 2026-08-13
-closed:
+closed: 2026-08-20
 ---
 
 ## What
@@ -95,3 +95,16 @@ documented — a folder must not list children that the same provider will refus
 Filed 2026-08-13 by the CPE-1684 worker, from its own measurement. The ticket it came from
 (`Ticketing/Tickets/Doing/CPE-1684_*.md`) carries the full write-up under "Test this first"; that
 section was a hypothesis and this ticket is its resolution.
+
+## Work Log
+
+- 2026-08-20 — merged as **#955** (`caaba863`), batch 30 of the batched sprint.
+  A single `rooted_key_bytes` boundary now owns path->key translation, so an S3 key is treated as
+  the opaque byte string it is rather than a filesystem path. `stat` no longer mis-derives the
+  display name for a trailing-slash key.
+- The ureq-2 normalisation half was **measured, not assumed** — a raw-socket probe observed what
+  actually goes on the wire across two major versions, and proved no encoding of `.` survives both
+  `url` and S3. That measurement is recorded in the module doc and escalated as **CPE-1800**
+  (migrate to ureq 3, or accept the limitation) rather than decided inside a sprint slot.
+- A slashes-only key found in passing was deliberately **not** fixed in-flight; the current
+  behaviour was pinned at `0` so it cannot change accidentally, and filed as **CPE-1801**.
