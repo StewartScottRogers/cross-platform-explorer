@@ -2930,15 +2930,21 @@ struct TransferReport {
 
 impl TransferReport {
     /// Translate an archive engine's [`cpe_server::archive::ArchiveReport`] into the shape the
-    /// operations panel already understands (CPE-1184). `skipped` stays 0 — archive ops don't have a
-    /// per-item conflict policy like copy/move; an unsafe/zip-slip entry is recorded in `errors`
-    /// instead (mirroring the one-shot extractors' silent-skip).
+    /// operations panel already understands (CPE-1184).
+    ///
+    /// **`skipped` used to be hard-coded to 0, and that was CPE-1775's bug, not a simplification.** The
+    /// comment here said archive ops "don't have a per-item conflict policy like copy/move" — true, and
+    /// beside the point: they have per-entry *guards*, and a guard's refusal is a skip by any reading.
+    /// Zeroing it meant the frontend, which surfaces `errors` only when `failed > 0`, showed a plain
+    /// "N items extracted" success toast for an archive whose hostile entry had just been refused, with
+    /// N quietly lower than the archive's contents. The engine now counts refusals
+    /// (`ArchiveReport::skipped`) and this carries the count through unchanged.
     fn from_archive(id: u64, op: TransferOp, r: cpe_server::archive::ArchiveReport) -> Self {
         TransferReport {
             id,
             op,
             transferred: r.done,
-            skipped: 0,
+            skipped: r.skipped,
             failed: r.failed,
             cancelled: r.cancelled,
             errors: r.errors,

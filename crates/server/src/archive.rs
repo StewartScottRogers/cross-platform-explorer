@@ -243,13 +243,42 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // | 18| the four per-entry `create_dir_all(&out)` / `(parent)` inside rows 15–16's loops | `create_dir_all` | **archive-controlled** dir name under user dir | **per-component containment** (skip) |
 // | 19| `extract_7z_safe`'s callback                | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** (skip) + `entry_name_is_safe` |
 // | 20| `extract_7z_stream`'s callback              | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** (skip, recorded) + `entry_name_is_safe` |
+// | 21| `tar_unpack`                                | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + **link-target containment** (skip, silent) |
+// | 22| `extract_tar_stream`                        | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + **link-target containment** (skip, recorded) |
+// | 23| `extract_archive`'s zip fallback (`ZipArchive::extract`) | `File::create`/`symlink` **inside `zip`** | **archive-controlled** name under user dir | **link-target containment** pre-pass (abort) |
 //
-// **The row count reconciles to the source.** `archive.rs` has 10 `create_dir_all` calls: 2 in row 1 (the
+// **Rows 21–23 are CPE-1773 + CPE-1774, and the table itself is why they were missing.** The version of
+// this table CPE-1733 wrote listed `entry_name_is_safe` as the guard for rows 15/16 and 19/20 and named
+// **no tar row at all** — so CPE-1758, whose scope came from this table, closed the ADS/reserved-name
+// hole at four sinks and left it wide open for a whole archive family, on the path the right-click
+// → Extract button actually uses. A sink omitted from the inventory is a sink nobody is scheduled to
+// guard, which is the same lesson as the unpinned-prose one below, one level up. They own no
+// `File::create` in this file for rows 19–20's reason: the write is `tar`'s `Entry::unpack_in` and
+// `zip`'s `ZipArchive::extract`, and the guard is a check *before* handing the entry over.
+//
+// **Rows 21–23 are also the first rows guarding a destination that is not a path at all.** A zip or tar
+// entry can declare itself a **symlink**, and its stored bytes are the link's *target*. Every guard
+// above asks about the entry's name; this attack's name is ordinary (`evil_link`) and the payload is the
+// target, so nothing above it fires. See [`link_target_action`] for the measurement, the policy, and why
+// `confined_to` — not a string check — is what answers it.
+//
+// **7z is NOT in this group, and that is measured rather than assumed.** `sevenz-rust` 0.6.1's source
+// contains the string "symlink" **zero times** (`grep -ri symlink sevenz-rust-0.6.1/src` → no hits), so
+// `default_entry_extract_fn` has no link-materialising branch to guard: a 7z entry that names itself a
+// link is written as an ordinary file whose contents are the target text. CPE-1746 already covers a link
+// **already sitting in `dest`** on that path, which is the other half.
+//
+// **The row count reconciles to the source.** `archive.rs` has 11 `create_dir_all` calls: 2 in row 1 (the
 // shared root, and re-creating this session's own root if another instance's sweeper removed it —
 // CPE-1786), 4 in row 17 (the extraction `dest` roots), 4 in row 18 (per-entry, inside the two ZIP
-// loops), plus row 1's two exclusive `fs::create_dir`s (the session root, then the per-extraction
+// loops), **1 in row 21** (`tar_unpack`'s, which is `tar::Archive::_unpack`'s own `dst` creation,
+// reproduced along with the rest of that loop — CPE-1773; it is a row-17-shaped call, on the same
+// user-named `dest`, and shares row 17's wording guard via `extraction_dest_error`), plus row 1's two
+// exclusive `fs::create_dir`s (the session root, then the per-extraction
 // directory inside it). Rows 2–16 are the 13 `File::create` calls, the 1
-// `fs::write` and the 1 `create_new`. Row 18 was missing from the first version of this table, which
+// `fs::write` and the 1 `create_new`. Rows 21–23 add no `File::create` of their own (the writes are
+// `tar`'s and `zip`'s), so the `File::create` count is unchanged by CPE-1773/1774.
+// Row 18 was missing from the first version of this table, which
 // billed itself as the inventory — the count line exists so the next reader can check that claim in one
 // subtraction instead of trusting it (PR #906 review).
 //
@@ -371,9 +400,11 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // **REFUSE, not rename** — see [`entry_name_is_safe`]'s own doc for the full argument. In short:
 // `local_safe_segment`'s rename is right for a transfer sink that owns the destination name outright; an
 // extraction entry that fails the check is **skipped, same as a traversal escape always was**, and the
-// skip is not silent: the streamed extractors (rows 16/20) push `"{name}: unsafe entry name, skipped"`
-// into `ArchiveReport::errors`, which the frontend renders as an error count in the operations panel
-// (`TransferPanel.svelte`). `extract_plan::plan_extract` also records it in `skipped_unsafe`, though that
+// skip is not silent: the streamed extractors (rows 16/20/22) push `"{name}: unsafe entry name, skipped"`
+// into `ArchiveReport::errors` **and increment `ArchiveReport::skipped`** (CPE-1775 — the count is what
+// the toast reads, and until it existed the frontend read `errors` only when `failed > 0`, so every
+// refusal produced a plain success notice with a quietly lower count; see [`ArchiveReport`]).
+// `extract_plan::plan_extract` also records it in `skipped_unsafe`, though that
 // field currently has no UI consumer — nothing calls `plan_extract` outside its own module yet. Pinned by
 // `entry_name_is_safe_now_agrees_with_transfers_is_safe_name` below, so the gap closing is a recorded,
 // CI-enforced fact rather than a sentence.
@@ -409,7 +440,10 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // **The two paths that already refused are recorded, not adopted.** `tar` and the zip crate's one-shot
 // `extract` both abort the whole run rather than skipping the entry — safe, and the opposite of the
 // skip-and-keep-going contract rows 15–20 have. That divergence is the same one the link case has, and it
-// is left where it was for the reasons under "the three extractors" below.
+// is left where it was for the reasons under "the three extractors" below. (CPE-1773 narrowed this by one
+// case: an entry `tar` refuses for our *name* rules is now skipped by rows 21–22 before `unpack_in` sees
+// it, so a `nul` entry no longer takes the rest of the archive down with it. What `unpack_in` itself
+// aborts on — a *containment* failure it detects internally — still aborts, and that half is CPE-1759's.)
 //
 // ## The three extractors that are NOT our write loop — measured one at a time, because they differ
 //
@@ -426,6 +460,17 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // reimplemented extractor. Rows 19–20 below are that condition; the generalisation from "the write is in
 // another crate" to "nothing can be done about it" is the same one-step-too-far move rows 1–5 were
 // corrected for, and it was costing the shipping path real bytes for as long as it stood.
+//
+// **CPE-1773/1774 finished the thought for the other two, and the "true of `tar` and `zip`" clause above
+// is now only half true.** Neither crate offers a per-entry hook, so the guard cannot go *inside* their
+// extraction — but neither has to. `tar`'s per-entry unit, `Entry::unpack_in`, is public and is what
+// `Archive::unpack` calls in a loop, so rows 21–22 own the loop and ask before handing each entry over
+// (`tar_unpack` reproduces `_unpack`'s directory-deferral pass verbatim so nothing else moves; see its
+// doc). `zip`'s `ZipArchive::extract` genuinely has no unit to borrow, so row 23 is a **pre-pass** over
+// the central directory instead — enough for the link-target question, which can be answered from the
+// entry list alone. "Reimplementing the extractor" was the right cost estimate for one of the two and
+// too high for the other, and the difference is worth naming: what mattered was not whether the write is
+// in another crate but whether that crate exposes the entry before it writes.
 //
 // **An earlier version of this comment said a pre-existing link in the destination "is therefore still
 // followed on the tar, 7z and one-shot-zip paths". That is false for two of the three, and the UAT for
@@ -661,6 +706,155 @@ fn entry_dir_action(dest: &Path, out: &Path) -> EntrySlotAction {
     } else {
         EntrySlotAction::Skip(escaped_dest_message(dest, out))
     }
+}
+
+/// The refusal wording for a **link entry whose target leaves the extraction folder** (CPE-1774) — the
+/// message half of [`link_target_action`], in one place so the two sinks that produce it cannot drift.
+///
+/// It names the target, because that is the whole payload of this attack and the user has no other way
+/// to see it: the entry's *name* is perfectly ordinary (`evil_link`), and after a successful extraction
+/// the link looks like an ordinary file in the pane.
+fn escaping_link_target_message(dest: &Path, target: &Path) -> String {
+    format!(
+        "this entry is a link pointing at \"{}\", which is outside the extraction folder \"{}\" — \
+         extracting it would put a shortcut in your folder that silently reads and writes a file you \
+         never chose. Skipped; the rest of the archive still extracts",
+        target.display(),
+        dest.display()
+    )
+}
+
+/// **The link-TARGET decision** (CPE-1774) — the guard none of rows 1–20 had, because every one of them
+/// asks about a *destination path* and this attack's payload is the link's *content*.
+///
+/// A `.zip` and a `.tar` can both carry an entry flagged as a symlink whose stored bytes are the link's
+/// target. `entry_name_is_safe` passes it — the name is an ordinary one — and then the crate-native
+/// extractor materialises a **real OS symlink** with that raw target and no check of any kind.
+/// Reproduced on this branch before the fix, one zip and one tar, entry named `evil_link`:
+///
+/// ```text
+/// [M2 abs zip ONE-SHOT ] symlink_metadata(is_symlink) = Ok(true)
+///                        read_link  = Ok("…\\cpe_measure_m2\\outside_secret.txt")
+///                        read_to_string(THROUGH the link) = Ok("SECRET")
+/// [M3 abs tar ONE-SHOT ] same three lines
+/// [M3 abs tar STREAMED ] same three lines   <- the SHIPPING path (start_archive_extract)
+/// ```
+///
+/// # The policy, and why this one
+///
+/// The ticket offered three: refuse every link entry, refuse only escaping ones, or write the target as
+/// ordinary text. **Refuse only the escaping ones.** Refusing all of them would break archives that
+/// legitimately carry internal links (source tarballs routinely do, and the `inside` leg of the same
+/// measurement shows one working today); writing the target as text is what the *streamed zip* loops
+/// already do by accident and it silently turns a link into a file with confusing contents. Refusing
+/// only the escape keeps a valid archive valid and costs the attacker the whole attack.
+///
+/// # Resolution — against the destination, never the literal string
+///
+/// The target is resolved against the **link's own parent directory** (a relative target is interpreted
+/// from where the link sits, which is what the OS does), then handed to [`crate::fsutil::confined_to`],
+/// the same filesystem-resolving guard rows 15–20 use. That is what makes `x/../..`, an absolute target,
+/// and a link-to-a-link chain all answer correctly rather than only literal `..`:
+///
+/// - **`x/../..`** — `confined_to` canonicalises, so the `..`s collapse and the verdict is about where
+///   the path actually lands, not how it is spelled.
+/// - **absolute** — `Path::join` on an absolute (or, on Windows, a rooted) target replaces the base, so
+///   the candidate *is* the absolute path and `starts_with(dest)` answers it.
+/// - **a chain** — `confined_to` follows a link it meets on the way, including a dangling one, so
+///   `evil -> inner` where `inner` is a pre-existing link out of `dest` is refused at `evil`.
+/// - **not-yet-created targets** — a link to a file later in the same archive resolves to nothing yet;
+///   `confined_to` walks up to the nearest existing ancestor, which is `dest`, and allows it. That is
+///   why an ordinary internal link still extracts.
+///
+/// **Backslashes are normalised to `/` on every platform**, matching [`entry_name_is_safe`]. On Windows
+/// that is a no-op (both are separators already). On POSIX it is deliberately *over-broad*: a target
+/// literally named `..\secret` is a legal single filename there and would be harmless, and this refuses
+/// it. The trade is one-directional — a POSIX user loses a pathological filename, and a Windows-authored
+/// archive cannot smuggle a traversal past a POSIX check by spelling it with the other separator.
+///
+/// **That over-broadness is a real, accepted false refusal, recorded rather than hand-waved**: extracting
+/// a POSIX archive whose symlink target is literally `..\secret` — legal and harmless there — now skips
+/// that entry and says so. It is a false *refusal*, never a false permit, and the user sees it (CPE-1775),
+/// which is the only reason it is an acceptable price. **Note the asymmetry with the entry NAME**, which
+/// this function must never normalise: over-broad on the target fails safe, over-broad on the name fails
+/// open, and the review that caught the name half is written up above.
+///
+/// **The `is_symlink()` note for Windows:** this guard runs on the *archive entry's* declared type, not
+/// on anything already on disk, so the junction-vs-symlink difference that
+/// `symlink_metadata().is_symlink()` papers over elsewhere in this codebase does not arise here. What
+/// each extractor then creates is the crate's business — the zip crate picks `symlink_dir`/`symlink_file`
+/// on Windows, `tar` calls `symlink`; neither creates a junction. `confined_to` is what covers a junction
+/// **already sitting in `dest`**, and it covers it because it canonicalises rather than inspecting a
+/// file type.
+/// # `out` MUST be the path the extractor will actually create the link at
+///
+/// This function derives the target's containment base from `out.parent()`, so `out` decides **how deep
+/// the guard believes the link sits**, and every level of disagreement with reality is worth one extra
+/// `..` of real escape. The first version of this code passed
+/// `dest.join(name.replace('\\', "/"))` at both call sites, and the reviewer measured the hole that
+/// opened on POSIX:
+///
+/// ```text
+/// tar_entry_refusal("a\\b\\evil" -> "../../x")   = None                    <- ALLOWED
+/// tar_entry_refusal("evil"       -> "../../x")   = Some("...outside...")   <- refused
+/// ```
+///
+/// Same target, same real location, opposite verdicts — because on Unix `Path::new("a\\b\\evil")` is
+/// **one** `Component::Normal`. `tar-0.4.46`'s `unpack_in` builds `file_dst` from
+/// `self.path()?.components()` and `zip-2.4.2`'s `simplified_components` does the same, so both write the
+/// link at `<dest>/a\b\evil` — directly in `dest` — while the pre-normalised `out` told this function it
+/// was two directories down. An attacker adds fake components for arbitrary depth. End to end through
+/// `start_archive_extract`: real `a/` and `a/b/` directory entries (so `confined_to` resolves rather than
+/// failing closed), then a symlink named `a\b\evil` targeting `../../etc/passwd`.
+///
+/// Note the asymmetry, because it decides which side the fix belongs on: normalising `\` to `/` in the
+/// **target** below is *over*-broad and therefore fails safe; normalising it in the **name** is
+/// *under*-broad and was the hole. So the callers now build `out` exactly as their own extractor does —
+/// `dest.join(name)` for tar (which is what the sibling `extract_zip_archive_stream` loop already did),
+/// [`zip_entry_out`] for the zip pre-pass — and this function no longer touches the name at all.
+fn link_target_action(dest: &Path, out: &Path, target: &Path) -> EntrySlotAction {
+    let normalized = target.to_string_lossy().replace('\\', "/");
+    let base = out.parent().unwrap_or(dest);
+    let candidate = base.join(&normalized);
+    if crate::fsutil::confined_to(&candidate, dest) {
+        EntrySlotAction::Write
+    } else {
+        EntrySlotAction::Skip(escaping_link_target_message(dest, target))
+    }
+}
+
+/// Where `zip-2.4.2`'s `ZipArchive::extract` will actually put entry `name` under `dest` — a mirror of
+/// its private `crate::path::simplified_components`, so [`refuse_escaping_zip_symlinks`] measures a link
+/// entry's target from the directory the crate will really create the link in (see
+/// [`link_target_action`] for what going wrong here costs).
+///
+/// `None` means the crate's own `safe_prepare_path` would reject this name outright (a drive prefix, a
+/// root, or a `..` that pops above the entry's own components) — the caller refuses rather than guessing.
+///
+/// **The `..` case counts depth instead of calling `PathBuf::pop`.** `simplified_components` pops a
+/// `Vec` of the *entry's* components and fails when that vec is empty; popping a `PathBuf` already
+/// rooted at `dest` would instead walk silently **out of `dest`** and hand a plausible-looking path back.
+/// That is the same class of off-by-one-directory bug this whole function exists to close, so the
+/// counter fails closed where `pop()` would fail open.
+fn zip_entry_out(dest: &Path, name: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = dest.to_path_buf();
+    let mut depth = 0usize;
+    for c in Path::new(name).components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => return None,
+            Component::ParentDir => {
+                depth = depth.checked_sub(1)?;
+                out.pop();
+            }
+            Component::Normal(s) => {
+                depth += 1;
+                out.push(s);
+            }
+            Component::CurDir => {}
+        }
+    }
+    Some(out)
 }
 
 /// Row 17: create an extraction's destination folder, and **say something true when that fails**
@@ -1755,10 +1949,120 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
     Ok(dest.to_string())
 }
 
-/// Unpack a tar stream into `dest`.
+/// The one refusal message for an entry name this module will not write, so the tar sinks and the zip
+/// sinks say the *same words* about the same shape (CPE-1773 — "the user does not think in sinks").
+const UNSAFE_NAME_SKIP: &str = "unsafe entry name, skipped";
+
+/// **The whole per-entry decision for the two TAR sinks** (CPE-1773 + CPE-1774), pure so it can be
+/// tested without a tar in hand.
+///
+/// `tar`'s `Entry::unpack_in` owns the write, so unlike rows 15/16 there is no `File::create` to
+/// intercept — the questions have to be asked *before* handing the entry over, and a refused entry is
+/// skipped, which is exactly the zip loops' contract.
+///
+/// Three questions, and the first two were being asked nowhere on this path:
+///
+/// 1. **Is the name one we will write?** [`entry_name_is_safe`]. `unpack_in` guards traversal and
+///    nothing else, so measured on `main` a `.tar`/`.tar.gz`/`.tgz` entry named `file:stream` reached
+///    NTFS as an **alternate data stream** of a neighbouring file — no visible file, `errors: []`,
+///    `done: 1`. `..evil`, `con`, `x.` and `x ` were written literally, and `nul` aborted the whole
+///    extraction with a hard `Err`, taking every other entry with it. All six now answer as they do in
+///    zip.
+/// 2. **If it is a link, does its target stay inside `dest`?** [`link_target_action`]. `unpack_in`
+///    canonicalisation-validates a **hard link**'s target (`tar-0.4.46/src/entry.rs`,
+///    `validate_inside_dst`) and does **not** validate a **symlink**'s: it calls `symlink(&src, dst)`
+///    with the raw bytes. Measured, not inferred — both tar paths created a real link reading a file
+///    outside the extraction folder (see [`link_target_action`]).
+/// 3. Anything else is written.
+///
+/// **An unreadable entry path fails closed.** The callers pass what `entry.path()` gave them, and its
+/// failure case is the empty string; `entry_name_is_safe("")` is `false`, so such an entry is skipped
+/// and recorded rather than handed to `unpack_in` under a name we could not read.
+///
+/// **`dest.join(name)` — with no `\`-to-`/` normalisation.** That normalisation was a live escape on
+/// POSIX; the measurement and the reasoning are on [`link_target_action`]. This is also exactly what the
+/// sibling ZIP loop ([`extract_zip_archive_stream`]) already does for its own `out`.
+fn tar_entry_refusal(dest: &Path, name: &str, link_target: Option<&Path>) -> Option<String> {
+    if !entry_name_is_safe(name) {
+        return Some(UNSAFE_NAME_SKIP.to_string());
+    }
+    let target = link_target?;
+    if target.as_os_str().is_empty() {
+        return Some(EMPTY_LINK_SKIP.to_string());
+    }
+    match link_target_action(dest, &dest.join(name), target) {
+        EntrySlotAction::Write => None,
+        EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => Some(m),
+    }
+}
+
+/// The refusal for a link entry that declares no readable target (CPE-1774 review nit 4).
+///
+/// **This is a fix, not a wording change.** The first version returned an empty target here and let it
+/// through on the reasoning that `unpack_in` "gets to fail on its own terms" — which it does, with
+/// *"symlink destination is empty"*, and [`extract_tar_stream`] propagates that with `?`. So one crafted
+/// entry still took the whole streamed run down, which is the exact failure mode CPE-1773 removed for
+/// `nul` two paragraphs earlier. It is not silent (the user sees `failed: 1`), but "not silent" is a
+/// lower bar than this path already meets everywhere else. An empty link target is never legitimate —
+/// `symlink("", …)` fails on every supported platform — so refusing it costs no valid archive anything.
+const EMPTY_LINK_SKIP: &str =
+    "this entry is a link with no target — there is nothing it could point at, so it cannot be created. \
+     Skipped; the rest of the archive still extracts";
+
+/// The link target an entry would materialise, or `None` for an ordinary file/directory entry.
+///
+/// **Symlinks only, deliberately.** A tar hard-link entry carries a target too, but `unpack_in` already
+/// canonicalisation-validates that one against `dst` before creating it (`validate_inside_dst`), so a
+/// second guard here would be two guards for one question — the same reasoning the section comment above
+/// applies to traversal. The symlink branch has no such check, which is why it is the one this returns.
+///
+/// A symlink entry whose link name cannot be read yields an **empty** target, which
+/// [`tar_entry_refusal`] refuses outright — see [`EMPTY_LINK_SKIP`].
+fn tar_link_target<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> Option<PathBuf> {
+    if !entry.header().entry_type().is_symlink() {
+        return None;
+    }
+    Some(entry.link_name().ok().flatten().map(|p| p.into_owned()).unwrap_or_default())
+}
+
+/// Unpack a tar stream into `dest`, applying [`tar_entry_refusal`] to every entry (CPE-1773/1774).
+///
+/// **This is `tar::Archive::unpack`'s own loop, reproduced so the guard has somewhere to stand**, not a
+/// new extraction strategy: `unpack` takes a destination and offers no per-entry hook, so there is no way
+/// to refuse an entry without owning the iteration. Everything `tar-0.4.46`'s `_unpack` does is kept —
+/// creating `dst` when it has no `symlink_metadata`, canonicalising it (which is what gives Windows the
+/// `\\?\` extended-length prefix and therefore paths over 260 characters), deferring **directory**
+/// entries to a second pass sorted by descending path bytes so a restrictive directory mode cannot be
+/// applied before its children are written. Dropping that second pass would have been a silent
+/// permissions regression on POSIX, which is why it is here rather than "simplified away".
+///
+/// The skip is **silent** on this one-shot path, for row 15's reason: this signature predates
+/// [`ArchiveReport`] and has nowhere to record a per-entry note. Its streamed sibling
+/// ([`extract_tar_stream`]) records both the count and the reason.
 fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
     let mut archive = tar::Archive::new(reader);
-    archive.unpack(dest).map_err(|e| e.to_string())
+    if fs::symlink_metadata(dest).is_err() {
+        fs::create_dir_all(dest).map_err(|e| extraction_dest_error(dest, &e))?;
+    }
+    let root = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+    let mut directories = Vec::new();
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        if tar_entry_refusal(&root, &name, tar_link_target(&entry).as_deref()).is_some() {
+            continue;
+        }
+        if entry.header().entry_type().is_dir() {
+            directories.push(entry);
+        } else {
+            entry.unpack_in(&root).map_err(|e| e.to_string())?;
+        }
+    }
+    directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
+    for mut dir in directories {
+        dir.unpack_in(&root).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// True if an archive entry name is a plain relative path that cannot escape the extraction root — the
@@ -1979,9 +2283,75 @@ pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
         // zip family: the crate's extractor guards against traversal via ZipFile::enclosed_name.
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        refuse_escaping_zip_symlinks(&mut archive, dest_path)?;
         archive.extract(dest_path).map_err(|e| e.to_string())?;
     }
     Ok(dest.to_string())
+}
+
+/// **The one-shot ZIP path's link-target guard** (CPE-1774) — a pre-pass, because `ZipArchive::extract`
+/// takes a destination and offers no per-entry hook at all.
+///
+/// This is the sink the Security Auditor demonstrated on. `zip-2.4.2`'s `extract_internal`
+/// (`src/read.rs:903`) reads a symlink entry's stored bytes as the target and calls `make_symlink`
+/// (`:451`), which goes straight to `std::os::unix::fs::symlink` / `symlink_file`/`symlink_dir` with **no
+/// traversal or canonicalisation check on the target whatsoever**. Its neighbouring `safe_prepare_path`
+/// guard is about the entry's *name* and about links already sitting in `dest`; nothing there looks at
+/// where a link the archive asks for would point. Measured on this branch before the fix, entry
+/// `evil_link` with target `../outside_secret.txt`:
+/// `is_symlink = Ok(true)`, `read_link = Ok("..\\outside_secret.txt")`,
+/// `read_to_string = Ok("SECRET")`.
+///
+/// # Why a pre-pass, and why it aborts rather than skipping
+///
+/// **Abort is this path's existing contract, not a new one.** `ZipArchive::extract` is all-or-nothing
+/// today — the section comment above records it aborting the whole run when an entry lands on a link,
+/// and CPE-1759 owns whether that should change. Refusing here in the same shape adds a guard without
+/// deciding CPE-1759's question, which is exactly what that ticket asked for. Skipping instead would
+/// mean routing this branch through `extract_zip_archive_stream`, and the section comment above records
+/// why that is not the no-op refactor it looks like (the crate's `extract` also restores unix permission
+/// bits and materialises *legitimate* links, neither of which our own loop does).
+///
+/// **A legitimate internal link still extracts**: only an entry whose target fails
+/// [`link_target_action`] is refused, and the whole archive is then left untouched rather than
+/// half-written.
+fn refuse_escaping_zip_symlinks(archive: &mut zip::ZipArchive<fs::File>, dest: &Path) -> Result<(), String> {
+    use std::io::Read;
+    // Which entries are links, decided WITHOUT building a decompressor per entry. `by_index_raw` answers
+    // `is_symlink()` from the header alone; `by_index` would set up a decoder for every ordinary file in
+    // the archive just to be told it is not a link, and would turn an unsupported-compression or
+    // encrypted entry into a hard error *earlier* than `extract` itself would have produced one — a
+    // pre-pass must not change which failures a caller sees, only add refusals of its own.
+    let mut links = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive.by_index_raw(i).map_err(|e| e.to_string())?;
+        if entry.is_symlink() {
+            links.push(i);
+        }
+    }
+    for i in links {
+        // The target is the entry's *content*, so this one does need decompressing.
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        let mut target = Vec::new();
+        entry.read_to_end(&mut target).map_err(|e| e.to_string())?;
+        let target = PathBuf::from(String::from_utf8_lossy(&target).into_owned());
+        // `zip_entry_out`, not `dest.join(name)`: the containment base has to be the directory the crate
+        // will really create the link in. See `link_target_action` for the escape that opened when this
+        // pre-normalised the name instead. `None` means the crate's own `safe_prepare_path` would reject
+        // the name outright, so there is no path to judge the target against — refuse rather than guess.
+        // It also removes a latent FALSE abort: `dest.join("a/../evil")`'s parent is `dest/a/..`, which
+        // `confined_to` refuses outright when `dest/a` does not exist, killing a legitimate one-shot run.
+        let Some(out) = zip_entry_out(dest, &name) else {
+            return Err(format!("{name}: this entry's path is not one that can be extracted safely"));
+        };
+        if let EntrySlotAction::Skip(reason) | EntrySlotAction::Abort(reason) =
+            link_target_action(dest, &out, &target)
+        {
+            return Err(format!("{name}: {reason}"));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2013,16 +2383,40 @@ pub struct ArchiveProgress {
     pub current: String,
 }
 
-/// The final outcome of a compress/extract run. `done` counts entries actually written (an entry
-/// skipped for failing the zip-slip guard is neither done nor failed — it's recorded in `errors`,
-/// mirroring the silent-skip the one-shot extractors already do); `failed` stays 0 unless the whole run
-/// aborted with an error (compress/extract are otherwise all-or-nothing, same as the one-shot functions).
+/// The final outcome of a compress/extract run. `done` counts entries actually written; `failed` stays
+/// 0 unless the whole run aborted with an error (compress/extract are otherwise all-or-nothing, same as
+/// the one-shot functions).
+///
+/// **`skipped` is CPE-1775's addition, and it is the count the UI was missing.** An entry refused by a
+/// guard — an unsafe name, a link sitting at the destination, a destination that escapes the extraction
+/// folder, a link entry whose target escapes it — is neither `done` nor `failed`. Before this field, the
+/// only trace was a line in `errors`, which the frontend read **only when `failed > 0`**: a refused entry
+/// produced a plain "N items extracted" success toast with N quietly one lower than the archive's
+/// contents. `failed` could not be reused for it (nothing failed, and a genuine failure must stay
+/// distinguishable), so the honest shape is a third count, carried through `TransferReport` to the
+/// `transfer://done` event.
+///
+/// **Invariant: every push to `errors` from a per-entry skip also increments `skipped`.** They are two
+/// halves of one record — the count is what the headline notice reads, the string is the reason behind
+/// it — and `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` fails if any skip
+/// site grows one without the other.
 #[derive(Clone, Debug, Default)]
 pub struct ArchiveReport {
     pub done: u64,
     pub failed: u64,
+    /// Entries a guard refused. Neither written nor failed — see the type doc.
+    pub skipped: u64,
     pub cancelled: bool,
     pub errors: Vec<String>,
+}
+
+impl ArchiveReport {
+    /// Record one refused entry: the count the headline notice reads **and** the reason behind it, in
+    /// one call so a future skip site cannot grow one without the other (CPE-1775).
+    fn skip(&mut self, name: &str, reason: &str) {
+        self.skipped += 1;
+        self.errors.push(format!("{name}: {reason}"));
+    }
 }
 
 /// One item queued for an archive write — either a directory placeholder or a file with known size,
@@ -2116,7 +2510,7 @@ pub fn compress_to_zip_streamed(
     prog.current.clear();
     emit(&prog);
     writer.finish().map_err(|e| e.to_string())?;
-    Ok(ArchiveReport { done: prog.done_items, failed: 0, cancelled, errors: Vec::new() })
+    Ok(ArchiveReport { done: prog.done_items, failed: 0, skipped: 0, cancelled, errors: Vec::new() })
 }
 
 /// Pack `paths` into a new gzip-compressed tarball at `dest` — the streamed sibling of
@@ -2161,7 +2555,7 @@ pub fn compress_to_targz_streamed(
     prog.current.clear();
     emit(&prog);
     builder.into_inner().map_err(|e| e.to_string())?.finish().map_err(|e| e.to_string())?;
-    Ok(ArchiveReport { done: prog.done_items, failed: 0, cancelled, errors: Vec::new() })
+    Ok(ArchiveReport { done: prog.done_items, failed: 0, skipped: 0, cancelled, errors: Vec::new() })
 }
 
 /// Pack `paths` into `dest`, choosing the format by extension (`.zip` / `.tar.gz` / `.tgz`) — the
@@ -2232,7 +2626,7 @@ pub fn compress_to_zip_encrypted_streamed(
     prog.current.clear();
     emit(&prog);
     writer.finish().map_err(|e| e.to_string())?;
-    Ok(ArchiveReport { done: prog.done_items, failed: 0, cancelled, errors: Vec::new() })
+    Ok(ArchiveReport { done: prog.done_items, failed: 0, skipped: 0, cancelled, errors: Vec::new() })
 }
 
 /// Quick, cheap check of whether `path` (a zip) needs `password` to read — or needs *some* password
@@ -2302,7 +2696,7 @@ fn extract_zip_archive_stream(
         let name = entry.name().to_string();
         prog.current = name.clone();
         if !entry_name_is_safe(&name) {
-            report.errors.push(format!("{name}: unsafe entry name, skipped"));
+            report.skip(&name, UNSAFE_NAME_SKIP);
             prog.done_items += 1;
             emit(&prog);
             continue;
@@ -2313,7 +2707,7 @@ fn extract_zip_archive_stream(
             match entry_dir_action(dest, &out) {
                 EntrySlotAction::Write => {}
                 EntrySlotAction::Skip(e) => {
-                    report.errors.push(format!("{name}: {e}"));
+                    report.skip(&name, &e);
                     prog.done_items += 1;
                     emit(&prog);
                     continue;
@@ -2330,7 +2724,7 @@ fn extract_zip_archive_stream(
             match entry_sink_action(dest, &out) {
                 EntrySlotAction::Write => {}
                 EntrySlotAction::Skip(e) => {
-                    report.errors.push(format!("{name}: {e}"));
+                    report.skip(&name, &e);
                     prog.done_items += 1;
                     emit(&prog);
                     continue;
@@ -2418,6 +2812,21 @@ fn extract_tar_stream<R: std::io::Read>(
         let size = entry.header().size().unwrap_or(0);
         let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
         prog.current = name.clone();
+        // CPE-1773/1774: the guard `unpack_in` does not have. Asked BEFORE the entry is handed over,
+        // because `unpack_in` owns the write and there is no `File::create` here to intercept — see
+        // [`tar_entry_refusal`] for the three questions and the measurements behind each.
+        if let Some(reason) = tar_entry_refusal(dest, &name, tar_link_target(&entry).as_deref()) {
+            report.skip(&name, &reason);
+            // Counted as a done *item* so the progress bar still reaches its total — but only for a
+            // non-directory entry, because [`tar_totals`] counts only those into `total_items` (unlike
+            // the ZIP loop, whose total is `archive.len()`). Incrementing here for a refused directory
+            // would push `done_items` past `total_items` and show a bar over 100%.
+            if !is_dir {
+                prog.done_items += 1;
+            }
+            emit(&prog);
+            continue;
+        }
         let unpacked = entry.unpack_in(dest).map_err(|e| e.to_string())?;
         if unpacked {
             if !is_dir {
@@ -2426,7 +2835,9 @@ fn extract_tar_stream<R: std::io::Read>(
                 prog.done_items += 1;
             }
         } else {
-            report.errors.push(format!("{name}: unsafe entry name, skipped"));
+            // `unpack_in`'s own traversal refusal (`../evil`), which never reached our guard because
+            // `entry_name_is_safe` rejects those first — kept as the belt it always was.
+            report.skip(&name, UNSAFE_NAME_SKIP);
         }
         emit(&prog);
     }
@@ -2475,7 +2886,7 @@ fn extract_7z_stream(
             let size = entry.size();
             prog.current = name.clone();
             if !entry_name_is_safe(&name) {
-                report.errors.push(format!("{name}: unsafe entry name, skipped"));
+                report.skip(&name, UNSAFE_NAME_SKIP);
                 emit(&prog);
                 return Ok(true);
             }
@@ -2485,7 +2896,7 @@ fn extract_7z_stream(
             match sevenz_entry_slot_action(entry, entry_dest, dest) {
                 EntrySlotAction::Write => {}
                 EntrySlotAction::Skip(e) => {
-                    report.errors.push(format!("{name}: {e}"));
+                    report.skip(&name, &e);
                     prog.done_items += 1;
                     emit(&prog);
                     return Ok(true);
@@ -2557,7 +2968,7 @@ pub fn extract_archive_streamed(
         prog.done_items = 1;
         prog.current.clear();
         emit(&prog);
-        Ok(ArchiveReport { done: 1, failed: 0, cancelled: false, errors: Vec::new() })
+        Ok(ArchiveReport { done: 1, failed: 0, skipped: 0, cancelled: false, errors: Vec::new() })
     } else if lower.ends_with(".7z") {
         extract_7z_stream(path, dest_path, cancel, &mut emit)
     } else {
@@ -5511,6 +5922,752 @@ mod tests {
             !err.contains("is a link"),
             "row 7: an ordinary file must not be reported as a link — that is the mirror of the defect the \
              link guard exists for. Got: {err}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------
+    // CPE-1773 / CPE-1774 / CPE-1775 — the tar name guard, link targets, and the visible refusal
+    // -----------------------------------------------------------------------
+
+    /// A tar holding one regular-file entry with an arbitrary raw `name`.
+    ///
+    /// Hand-built through `tar::Header` rather than `Builder::append_path`, for
+    /// `craft_zip_with_entry_name`'s reason: the archive *writer* is not where the hazard lives, and
+    /// several of these names (`nul`, `con`, `x.`) cannot exist as real files on Windows to be packed
+    /// from. The extractor is what is under test.
+    fn craft_tar_with_entry_name(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, name, data).unwrap();
+        // An innocent bystander, so every leg can tell "skipped one entry" from "abandoned the archive".
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_size(8);
+        h2.set_mode(0o644);
+        h2.set_cksum();
+        b.append_data(&mut h2, "ok.txt", &b"ORDINARY"[..]).unwrap();
+        b.into_inner().unwrap()
+    }
+
+    /// A tar holding a **symlink** entry `name` -> `target`, plus the same bystander.
+    fn craft_tar_with_symlink(name: &str, target: &str) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_link_name(target).unwrap();
+        h.set_cksum();
+        b.append_data(&mut h, name, std::io::empty()).unwrap();
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_size(8);
+        h2.set_mode(0o644);
+        h2.set_cksum();
+        b.append_data(&mut h2, "ok.txt", &b"ORDINARY"[..]).unwrap();
+        b.into_inner().unwrap()
+    }
+
+    /// A zip holding a **symlink** entry `name` -> `target`, plus the same bystander.
+    fn craft_zip_with_symlink(name: &str, target: &str) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let link: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().unix_permissions(0o120_777);
+        w.add_symlink(name, target, link).unwrap();
+        let plain: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        w.start_file("ok.txt", plain).unwrap();
+        w.write_all(b"ORDINARY").unwrap();
+        w.finish().unwrap().into_inner()
+    }
+
+    /// The six names CPE-1758 taught `entry_name_is_safe` to refuse, plus the payload that makes the
+    /// first one visible. `x.` and `x ` and the device names are Windows-only shapes — `entry_name_is_safe`
+    /// is the identity on other platforms for those — so the expectation is computed from the guard
+    /// itself rather than hard-coded per name, which is what lets one table serve both platforms AND
+    /// makes the tar-vs-zip agreement assertion below meaningful rather than circular (the two formats
+    /// are compared to **each other**, not to the guard).
+    const CPE_1773_NAMES: &[&str] = &["file:stream", "ok/file:stream", "..evil", "con", "nul", "x.", "x "];
+
+    /// Does the extraction folder actually **list** a file for entry `name`?
+    ///
+    /// `Path::exists`/`fs::read` are the wrong question for this family and each is wrong differently:
+    /// on Windows `fs::read("<dir>/nul")` opens the NUL **device** and returns `Ok(vec![])` whether or
+    /// not anything was written, and `fs::read("<dir>/file:stream")` opens an alternate data stream that
+    /// no directory listing shows. What the user meets is the listing, so that is what this asks — with
+    /// the stream case checked separately at the call site, since a listing can never reveal one.
+    fn dest_lists(dest: &Path, name: &str) -> bool {
+        let out = dest.join(name);
+        let (Some(parent), Some(leaf)) = (out.parent(), out.file_name()) else { return false };
+        let Ok(rd) = fs::read_dir(parent) else { return false };
+        rd.flatten().any(|e| e.file_name() == leaf)
+    }
+
+    /// **CPE-1773's core: tar and zip must answer identically, and the harm is asserted before the
+    /// `Result` is unwrapped.**
+    ///
+    /// Measured on `main` through the real streamed path, i.e. what right-click → Extract did:
+    ///
+    /// ```text
+    /// [M1 tar      STREAMED] Ok(done:1, errors:[])   ADS bytes = Some("ADS PAYLOAD 24 bytes ok!!")
+    /// [M1 tar.gz   STREAMED] Ok(done:1, errors:[])   ADS bytes = Some("ADS PAYLOAD 24 bytes ok!!")
+    /// [M1 "..evil"/"con"/"x."/"x "] Ok(done:1, errors:[])  — written literally
+    /// [M1 "nul"]                    Err("failed to unpack `…\\nul`")  — took the whole archive down
+    /// ```
+    ///
+    /// This family **fails by succeeding**, so every filesystem assertion runs before `expect`.
+    #[test]
+    fn cpe1773_tar_refuses_the_same_entry_names_as_zip_on_every_tar_flavour() {
+        let d = scratch("cpe1773_tar_names");
+        let payload = b"ADS PAYLOAD 24 bytes ok!!";
+
+        for (i, name) in CPE_1773_NAMES.iter().enumerate() {
+            let expected_refused = !entry_name_is_safe(name);
+
+            // --- the zip answer, which is the reference behaviour the tar sinks must match ---
+            let zip_path = d.join(format!("z{i}.zip"));
+            fs::write(&zip_path, craft_zip_with_entry_name(name, payload)).unwrap();
+            let zip_dest = d.join(format!("zd{i}"));
+            let zip_report = extract_archive_streamed(
+                &zip_path.to_string_lossy(),
+                &zip_dest.to_string_lossy(),
+                &AtomicBool::new(false),
+                |_| {},
+            );
+
+            // --- the three tar flavours ---
+            let tar_bytes = craft_tar_with_entry_name(name, payload);
+            let flavours: [(&str, Vec<u8>); 3] = [
+                ("tar", tar_bytes.clone()),
+                ("tar.gz", gzip_bytes(&tar_bytes)),
+                ("tgz", gzip_bytes(&tar_bytes)),
+            ];
+            for (ext, bytes) in flavours {
+                let ap = d.join(format!("t{i}.{ext}"));
+                fs::write(&ap, &bytes).unwrap();
+                let dest = d.join(format!("td{i}_{}", ext.replace('.', "_")));
+                fs::create_dir_all(&dest).unwrap();
+                // The neighbour whose alternate data stream is where a `file:stream` entry's bytes land
+                // on NTFS. Its own length must not move: an ADS write leaves the base file byte-identical.
+                let neighbour = dest.join("file");
+                fs::write(&neighbour, b"NEIGHBOUR").unwrap();
+
+                let report = extract_archive_streamed(
+                    &ap.to_string_lossy(),
+                    &dest.to_string_lossy(),
+                    &AtomicBool::new(false),
+                    |_| {},
+                );
+
+                // ---- harm first, Result second ----
+                assert_eq!(
+                    fs::read(&neighbour).unwrap(),
+                    b"NEIGHBOUR".to_vec(),
+                    "{ext}/{name:?}: the neighbouring file's own bytes must be untouched"
+                );
+                if expected_refused {
+                    assert!(
+                        !dest_lists(&dest, name),
+                        "{ext}/{name:?}: the refused entry must not appear in the extraction folder"
+                    );
+                    if name.contains(':') {
+                        // The ADS-specific half. `read_dir` cannot see an alternate data stream at all
+                        // — that is exactly why the original bug was invisible — so the only way to ask
+                        // whether the payload landed is to open the stream by name.
+                        assert!(
+                            fs::read(dest.join(name)).is_err(),
+                            "{ext}/{name:?}: on NTFS this name reads back as a hidden STREAM of the \
+                             neighbouring file. A successful read here IS the bug: the user sees no \
+                             file and the archive's bytes are on their disk anyway"
+                        );
+                    }
+                }
+
+                let report = report.expect(
+                    "a refused entry must not abort the extraction — on main `nul` did exactly that, \
+                     taking every other entry down with it (CPE-1773)",
+                );
+                assert_eq!(
+                    fs::read(dest.join("ok.txt")).unwrap(),
+                    b"ORDINARY".to_vec(),
+                    "{ext}/{name:?}: the rest of the archive must still extract"
+                );
+
+                if expected_refused {
+                    assert_eq!(
+                        report.skipped, 1,
+                        "{ext}/{name:?}: the refusal must be COUNTED (CPE-1775) — a count of 0 is the \
+                         success toast that hides it; got {report:?}"
+                    );
+                    assert!(
+                        report.errors.iter().any(|e| e.ends_with(": unsafe entry name, skipped")),
+                        "{ext}/{name:?}: and RECORDED with the same words zip uses; got {:?}",
+                        report.errors
+                    );
+                    assert_eq!(report.done, 1, "{ext}/{name:?}: only the bystander was written");
+                } else {
+                    assert_eq!(
+                        report.skipped, 0,
+                        "{ext}/{name:?}: a name this platform accepts must extract with NO new noise \
+                         (CPE-1775's no-regression leg); got {report:?}"
+                    );
+                }
+
+                // ---- and the two formats must agree, which is the assertion that stops them drifting ----
+                //
+                // Compared on the *verdict and its wording*, not on `done`: the zip reference archive
+                // carries only the one entry (`craft_zip_with_entry_name` is a hand-built single-entry
+                // zip, because the zip WRITER refuses several of these names) while the tar carries the
+                // bystander too, so their `done` counts are not the same quantity. Both halves of what
+                // the user actually meets — refused or not, and what the report says about it — are.
+                let zr = zip_report.as_ref().expect("the zip reference run must succeed");
+                assert_eq!(
+                    (report.skipped, report.errors.clone()),
+                    (zr.skipped, zr.errors.clone()),
+                    "{ext}/{name:?}: TAR and ZIP must reach the same verdict for the same entry name, \
+                     and SAY the same thing about it. The user does not think in sinks, and a \
+                     divergence here is how CPE-1773 happened: zip refused this shape from CPE-1758 \
+                     onward while tar wrote it into an alternate data stream. tar={report:?} zip={zr:?}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The other half of CPE-1773: the guard must not eat ordinary archives. `%` is here because
+    /// CPE-1758's review caught an over-broad check that refused every `%`-containing name on Windows.
+    #[test]
+    fn cpe1773_tar_still_extracts_legitimate_entry_names() {
+        let d = scratch("cpe1773_tar_ok");
+        let names = [
+            "a file with spaces.txt",
+            "\u{4e2d}\u{6587}\u{540d}\u{79f0}.txt",
+            "emoji \u{1f600}.txt",
+            "archive.tar.gz.backup.txt",
+            "deep/deeper/deepest/leaf.txt",
+            "50% off.txt",
+            "city=A%2FB.txt",
+        ];
+        let mut b = tar::Builder::new(Vec::new());
+        for n in names {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(4);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, n, &b"GOOD"[..]).unwrap();
+        }
+        let ap = d.join("good.tar");
+        fs::write(&ap, b.into_inner().unwrap()).unwrap();
+        let dest = d.join("out");
+
+        let report = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("a tar of ordinary names must extract");
+
+        for n in names {
+            assert_eq!(
+                fs::read(dest.join(n)).unwrap_or_default(),
+                b"GOOD".to_vec(),
+                "{n:?} is an ordinary name and must still extract; report was {report:?}"
+            );
+        }
+        assert_eq!(
+            (report.skipped, report.errors.len()),
+            (0, 0),
+            "no ordinary name may be refused, and an unremarkable extraction must produce NO skip \
+             notice at all (CPE-1775: 'an extraction with nothing skipped is unchanged'); got {report:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The four escaping link-target shapes CPE-1774 lists, as `(label, target)` built against `outside`
+    /// — a victim file that sits beside, not inside, the extraction folder.
+    fn cpe1774_escaping_targets(outside: &Path) -> Vec<(&'static str, String)> {
+        vec![
+            ("plain-parent", format!("..{}victim.txt", std::path::MAIN_SEPARATOR)),
+            ("absolute", outside.join("victim.txt").to_string_lossy().to_string()),
+            ("dot-chain", "x/../../victim.txt".to_string()),
+            ("mixed-separators", "..//..\\victim.txt".to_string()),
+        ]
+    }
+
+    /// **CPE-1774, the zip half.** The Security Auditor's reproduction, re-run: a zip entry named
+    /// `evil_link` (a name our guard accepts, and correctly — it is perfectly ordinary) whose stored
+    /// content is a path that leaves the extraction folder. Measured on `main`:
+    ///
+    /// ```text
+    /// [M2 zip ONE-SHOT] symlink_metadata(is_symlink) = Ok(true)
+    ///                   read_link                    = Ok("..\\outside_secret.txt")
+    ///                   read_to_string(THROUGH it)   = Ok("SECRET")
+    /// ```
+    ///
+    /// A real OS link, in the user's folder, reading a file they never chose.
+    #[test]
+    fn cpe1774_a_zip_symlink_entry_whose_target_escapes_creates_no_link() {
+        let d = scratch("cpe1774_zip");
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
+
+        for (label, target) in cpe1774_escaping_targets(&outside) {
+            let ap = d.join(format!("z_{label}.zip"));
+            fs::write(&ap, craft_zip_with_symlink("evil_link", &target)).unwrap();
+            let dest = outside.join(format!("dest_{label}"));
+
+            let outcome = extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy());
+
+            // ---- the harm, before the Result ----
+            let leaf = dest.join("evil_link");
+            assert!(
+                !fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "{label}: no LINK may exist at the entry's name. On main this was Ok(true) with \
+                 read_link = {:?}",
+                fs::read_link(&leaf)
+            );
+            assert!(
+                fs::read_to_string(&leaf).unwrap_or_default() != "SECRET",
+                "{label}: and reading the 'extracted file' must not return the victim's contents — that \
+                 is the measurement the auditor took, and it is the one that matters even if the link's \
+                 file type ever changes"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.join("victim.txt")).unwrap(),
+                "SECRET",
+                "{label}: the victim itself must be untouched"
+            );
+
+            let err = outcome.expect_err(
+                "the one-shot zip path is all-or-nothing today (see the section comment); an escaping \
+                 link entry must refuse it, not extract half of it",
+            );
+            assert!(
+                err.contains("evil_link") && err.contains("outside the extraction folder"),
+                "{label}: the refusal must name the ENTRY and say the target left the folder — an \
+                 `is_err()` check here would stay green through a straight revert, because the crate \
+                 already errors on some malformed archives. Got: {err}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1774, the tar half — the one the ticket could only reason about from crate source, and the
+    /// one that turned out to be live in the shipping UI.** `Entry::unpack_in` canonicalisation-validates
+    /// a HARD link's target (`validate_inside_dst`) and calls `symlink(&src, dst)` with the raw bytes for
+    /// a SYMLINK. Measured on `main`, both tar paths, `evil_link` -> an absolute target:
+    ///
+    /// ```text
+    /// [M3 tar ONE-SHOT] is_symlink = Ok(true)  read_to_string(THROUGH it) = Ok("SECRET")
+    /// [M3 tar STREAMED] is_symlink = Ok(true)  read_to_string(THROUGH it) = Ok("SECRET")
+    /// ```
+    ///
+    /// The streamed line is `start_archive_extract`'s own path, so unlike the zip case this one had a
+    /// live caller.
+    #[test]
+    fn cpe1774_a_tar_symlink_entry_whose_target_escapes_creates_no_link_on_either_path() {
+        let d = scratch("cpe1774_tar");
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
+
+        for (label, target) in cpe1774_escaping_targets(&outside) {
+            let ap = d.join(format!("t_{label}.tar"));
+            fs::write(&ap, craft_tar_with_symlink("evil_link", &target)).unwrap();
+
+            for streamed in [false, true] {
+                let dest = outside.join(format!("dest_{label}_{streamed}"));
+                let outcome: Result<Option<ArchiveReport>, String> = if streamed {
+                    extract_archive_streamed(
+                        &ap.to_string_lossy(),
+                        &dest.to_string_lossy(),
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
+                    .map(Some)
+                } else {
+                    extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|_| None)
+                };
+
+                // ---- the harm, before the Result ----
+                let leaf = dest.join("evil_link");
+                assert!(
+                    !fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                    "{label} streamed={streamed}: no LINK may exist at the entry's name; read_link was {:?}",
+                    fs::read_link(&leaf)
+                );
+                assert!(
+                    fs::read_to_string(&leaf).unwrap_or_default() != "SECRET",
+                    "{label} streamed={streamed}: reading the 'extracted file' must not return the \
+                     victim's contents"
+                );
+                assert_eq!(
+                    fs::read_to_string(outside.join("victim.txt")).unwrap(),
+                    "SECRET",
+                    "{label} streamed={streamed}: the victim itself must be untouched"
+                );
+
+                let report = outcome.expect(
+                    "a refused link entry is a SKIP on the tar paths (their contract is 'extract what is \
+                     safe, keep going'), never an abort",
+                );
+                assert_eq!(
+                    fs::read(dest.join("ok.txt")).unwrap(),
+                    b"ORDINARY".to_vec(),
+                    "{label} streamed={streamed}: the rest of the archive must still extract"
+                );
+                if let Some(report) = report {
+                    assert_eq!(
+                        report.skipped, 1,
+                        "{label}: the streamed path must COUNT the refusal (CPE-1775); got {report:?}"
+                    );
+                    assert!(
+                        report.errors.iter().any(|e| {
+                            e.starts_with("evil_link: ") && e.contains("outside the extraction folder")
+                        }),
+                        "{label}: and record WHICH entry and WHY — the entry name is ordinary, so the \
+                         target is the only thing that tells the user what happened; got {:?}",
+                        report.errors
+                    );
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The other half of CPE-1774, and the leg that stops the two tests above from passing vacuously
+    /// on a runner that cannot create symlinks at all.**
+    ///
+    /// A legitimate relative link pointing *inside* the extraction root must still be materialised. If
+    /// this runner cannot make one, `require_staged` decides whether that is a legitimate skip or a red
+    /// build (CPE-1717) — which is exactly the question "did the escape tests above verify anything?"
+    #[test]
+    fn cpe1774_a_legitimate_link_pointing_inside_the_extraction_root_still_extracts() {
+        let d = scratch("cpe1774_ok");
+        let probe_victim = d.join("probe_victim.txt");
+        fs::write(&probe_victim, b"x").unwrap();
+        let supported = stage_live_link(&probe_victim, &d.join("probe_link"));
+        if !crate::fsutil::require_staged(
+            "cpe1774_a_legitimate_link_pointing_inside_the_extraction_root_still_extracts",
+            cfg!(any(windows, unix)),
+            supported,
+        ) {
+            return;
+        }
+
+        for (label, bytes) in [
+            ("zip", craft_zip_with_symlink("good_link", "ok.txt")),
+            ("tar", craft_tar_with_symlink("good_link", "ok.txt")),
+        ] {
+            let ap = d.join(format!("good.{label}"));
+            fs::write(&ap, &bytes).unwrap();
+            let dest = d.join(format!("out_{label}"));
+            extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy())
+                .unwrap_or_else(|e| panic!("{label}: a valid archive with an INTERNAL link must extract, \
+                                            not be refused by CPE-1774's guard: {e}"));
+            let leaf = dest.join("good_link");
+            assert!(
+                fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "{label}: a link whose target stays inside the extraction folder must still be created — \
+                 refusing every link entry was one of the three policies CPE-1774 offered and it is NOT \
+                 the one taken, because source tarballs legitimately carry internal links"
+            );
+            assert_eq!(
+                fs::read_to_string(&leaf).unwrap(),
+                "ORDINARY",
+                "{label}: and it must resolve to the archive's own file"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1775's invariant, across every streamed skip path at once.**
+    ///
+    /// `ArchiveReport::skipped` is what the headline notice reads and `errors` is the reason behind it.
+    /// Before this ticket only the second existed, and the frontend read it **only when `failed > 0`** —
+    /// so a refused entry produced a plain "1 item extracted" toast with the count quietly one lower.
+    /// This asserts the two halves stay in step whichever guard fired, which is what makes
+    /// `ArchiveReport::skip` the only way to record a skip.
+    #[test]
+    fn cpe1775_skipped_counts_every_recorded_skip_on_every_streamed_path() {
+        let d = scratch("cpe1775_counts");
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
+        let escaping = format!("..{}victim.txt", std::path::MAIN_SEPARATOR);
+
+        // One archive per guard, so a report that counts the wrong number names which guard drifted.
+        let cases: Vec<(&str, String, Vec<u8>)> = vec![
+            ("zip unsafe name", "z1.zip".into(), craft_zip_with_entry_name("file:stream", b"X")),
+            ("zip traversal", "z2.zip".into(), craft_zip_with_entry_name("../escape.txt", b"X")),
+            ("tar unsafe name", "t1.tar".into(), craft_tar_with_entry_name("file:stream", b"X")),
+            ("tar escaping link", "t2.tar".into(), craft_tar_with_symlink("evil_link", &escaping)),
+        ];
+
+        for (label, file, bytes) in cases {
+            let ap = d.join(&file);
+            fs::write(&ap, &bytes).unwrap();
+            let dest = outside.join(format!("d_{}", file.replace('.', "_")));
+            let report = extract_archive_streamed(
+                &ap.to_string_lossy(),
+                &dest.to_string_lossy(),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap_or_else(|e| panic!("{label}: a skip must never abort the run: {e}"));
+
+            assert_eq!(
+                report.skipped as usize,
+                report.errors.len(),
+                "{label}: every recorded reason must be counted and every count must have a reason — \
+                 they are two halves of one record and a site that grows one without the other is \
+                 exactly the CPE-1775 defect, re-made. Got {report:?}"
+            );
+            assert_eq!(
+                report.skipped, 1,
+                "{label}: this archive contains exactly one refusable entry. A 0 here means the guard \
+                 stopped firing; a 2 means something ordinary is being refused. Got {report:?}"
+            );
+            assert_eq!(
+                report.failed, 0,
+                "{label}: a SKIP is not a FAILURE. Reusing `failed` was the shape CPE-1775 rejected, \
+                 because it would misreport a genuine failure and vice versa. Got {report:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------
+    // CPE-1774 round 2 — the escape the Windows-only matrix could not express
+    // -----------------------------------------------------------------------
+
+    /// **The containment base must be the directory the extractor really writes into.**
+    ///
+    /// `link_target_action` derives it from `out.parent()`, so `out` decides how deep the guard believes
+    /// the link sits, and every level of disagreement buys the attacker one more `..`. The first version
+    /// passed `dest.join(name.replace('\\', "/"))`, which on Unix invents depth that neither extractor
+    /// creates: `Path::new("a\\b\\evil")` is ONE `Component::Normal` there, so the link lands directly in
+    /// `dest` while the guard measured from `dest/a/b`.
+    ///
+    /// **Stated plainly: on Windows this test passes with or without the fix**, because `\` and `/` are
+    /// both separators there, so `name.replace('\\', "/")` is a no-op and the buggy base and the correct
+    /// one are the same path. It is not `#[cfg(unix)]` anyway, for two reasons that are worth the run:
+    /// it pins the correct verdicts on both platforms, and its first assertion — that the verdict
+    /// **changes** with `out`'s depth — is the mechanism itself, and that one *is* measurable here.
+    /// The regression proof for the defect is the `#[cfg(unix)]` end-to-end test below.
+    #[test]
+    fn cpe1774_the_link_target_base_matches_what_the_extractor_creates() {
+        let d = scratch("cpe1774_base");
+        let dest = d.join("out");
+        fs::create_dir_all(dest.join("a").join("b")).unwrap();
+        fs::write(d.join("victim.txt"), b"SECRET").unwrap();
+
+        // ---- the mechanism, demonstrated rather than asserted ----
+        // One target, two `out` values differing only in depth, opposite verdicts. This is *why* `out`
+        // is load-bearing: get its depth wrong by n and the attacker gets n extra levels of escape for
+        // free. Measurable on every platform, because it varies `out` directly instead of relying on a
+        // platform's separator rules to vary it.
+        let one_up = Path::new("../victim.txt");
+        assert!(
+            matches!(link_target_action(&dest, &dest.join("evil"), one_up), EntrySlotAction::Skip(_)),
+            "from a link directly in `dest`, `../victim.txt` leaves the extraction folder"
+        );
+        assert_eq!(
+            link_target_action(&dest, &dest.join("a").join("b").join("evil"), one_up),
+            EntrySlotAction::Write,
+            "...and from two directories down, the very same target does not. So an `out` one level too \
+             deep silently converts a refusal into a write — which is exactly what the pre-normalised \
+             name did on POSIX"
+        );
+
+        // How deep the extractor REALLY puts this name, derived by the same component walk `unpack_in`
+        // and `simplified_components` do rather than by asserting a per-platform constant: 1 on Unix
+        // (`a\b\evil` is a single `Component::Normal`), 3 on Windows (`\` is a separator there). The
+        // whole defect was the guard using a number of its own instead of this one.
+        const NAME: &str = "a\\b\\evil";
+        let depth = Path::new(NAME).components().count();
+        assert_eq!(depth, if cfg!(windows) { 3 } else { 1 }, "sanity: the platform split this test rests on");
+
+        // `depth` levels of `..` from the link's real directory lands exactly one level above `dest`.
+        let escapes = format!("{}victim.txt", "../".repeat(depth));
+        // One fewer stays inside it.
+        let stays = format!("{}inside.txt", "../".repeat(depth - 1));
+
+        let refused = tar_entry_refusal(&dest, NAME, Some(Path::new(&escapes)));
+        assert!(
+            refused.is_some(),
+            "a target that escapes from where the extractor ACTUALLY creates the link must be refused. \
+             Measured on Linux before the fix: this returned None, because the guard resolved from an \
+             invented `dest/a/b` while `unpack_in` wrote the link straight into `dest` — every `..` was \
+             worth one level more of real escape than the guard accounted for. target={escapes:?}"
+        );
+        assert!(
+            refused.as_deref().unwrap_or_default().contains("outside the extraction folder"),
+            "and refused as a link-target escape, not for some unrelated reason: {refused:?}"
+        );
+        assert_eq!(
+            tar_entry_refusal(&dest, NAME, Some(Path::new(&stays))),
+            None,
+            "...while one level less — still inside the extraction folder from that same real directory \
+             — must still be allowed, or this guard has become blanket-refuse-everything and the \
+             assertion above proves nothing. target={stays:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `zip_entry_out` mirrors `zip-2.4.2`'s private `simplified_components`, which is what decides where
+    /// `ZipArchive::extract` actually puts an entry.
+    #[test]
+    fn cpe1774_zip_entry_out_mirrors_the_crates_own_path_simplification() {
+        let dest = Path::new("/tmp/dest");
+        assert_eq!(zip_entry_out(dest, "a/b/x"), Some(dest.join("a").join("b").join("x")));
+        assert_eq!(zip_entry_out(dest, "./a/./x"), Some(dest.join("a").join("x")));
+        // A `..` that stays within the entry's own components pops, exactly as the crate's `Vec` does —
+        // and this is the case that used to make the pre-pass ABORT a legitimate archive, because
+        // `dest.join("a/../evil").parent()` is `dest/a/..`, which `confined_to` refuses when `dest/a`
+        // does not exist yet.
+        assert_eq!(zip_entry_out(dest, "a/../evil"), Some(dest.join("evil")));
+        // A `..` that would pop above them is what the crate rejects — and the counter must fail closed
+        // rather than letting `PathBuf::pop` walk out of `dest` and hand back a plausible-looking path.
+        assert_eq!(zip_entry_out(dest, "../evil"), None);
+        assert_eq!(zip_entry_out(dest, "a/../../evil"), None);
+        assert_eq!(zip_entry_out(dest, "/abs/evil"), None);
+        #[cfg(windows)]
+        assert_eq!(zip_entry_out(dest, "C:\\abs\\evil"), None);
+    }
+
+    /// **The end-to-end escape, through the real streamed path.** `#[cfg(unix)]` because Windows cannot
+    /// express it: `\` is a separator there, so both spellings produce the same three components and the
+    /// fake-depth trick has no purchase. That is exactly why the Windows-only measurement behind the
+    /// first round of this ticket stayed green over a live hole — and why
+    /// `cpe1774_a_tar_symlink_entry_whose_target_escapes_creates_no_link_on_either_path` cannot catch it
+    /// either: that test varies the TARGET's spelling but always uses the single-component entry name
+    /// `evil_link`.
+    #[cfg(unix)]
+    #[test]
+    fn cpe1774_a_backslash_name_cannot_buy_fake_depth_for_its_link_target() {
+        let d = scratch("cpe1774_fakedepth");
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
+        let dest = outside.join("dest");
+
+        // Real directory entries, so `dest/a/b` genuinely exists and `confined_to` RESOLVES rather than
+        // failing closed for a reason unrelated to the defect.
+        let archive = {
+            let mut b = tar::Builder::new(Vec::new());
+            for dir in ["a/", "a/b/"] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(0);
+                h.set_mode(0o755);
+                h.set_entry_type(tar::EntryType::Directory);
+                h.set_cksum();
+                b.append_data(&mut h, dir, std::io::empty()).unwrap();
+            }
+            // One component on Unix, named `a\b\evil`, landing DIRECTLY in `dest`.
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_mode(0o777);
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_link_name("../../victim.txt").unwrap();
+            h.set_cksum();
+            b.append_data(&mut h, "a\\b\\evil", std::io::empty()).unwrap();
+            let mut h2 = tar::Header::new_gnu();
+            h2.set_size(8);
+            h2.set_mode(0o644);
+            h2.set_cksum();
+            b.append_data(&mut h2, "ok.txt", &b"ORDINARY"[..]).unwrap();
+            b.into_inner().unwrap()
+        };
+        let ap = d.join("fakedepth.tar");
+        fs::write(&ap, archive).unwrap();
+
+        let outcome = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        );
+
+        // ---- harm first ----
+        let leaf = dest.join("a\\b\\evil");
+        assert!(
+            !fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "no link may be created at the one-component name `a\\b\\evil`; read_link was {:?}",
+            fs::read_link(&leaf)
+        );
+        assert!(
+            fs::read_to_string(&leaf).unwrap_or_default() != "SECRET",
+            "and reading it must not return the victim two levels above the extraction folder"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("victim.txt")).unwrap(),
+            "SECRET",
+            "the victim itself must be untouched"
+        );
+
+        let report = outcome.expect("a refused entry must not abort the streamed tar run");
+        assert_eq!(
+            report.skipped, 1,
+            "the refusal must be counted, not merely happen (CPE-1775); got {report:?}"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("outside the extraction folder")),
+            "and recorded as a link-target escape; got {:?}",
+            report.errors
+        );
+        assert_eq!(
+            fs::read(dest.join("ok.txt")).unwrap(),
+            b"ORDINARY".to_vec(),
+            "the rest of the archive must still extract"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Review nit 4: a link entry with no readable target used to be waved through, and `unpack_in` then
+    /// failed with *"symlink destination is empty"*, which `extract_tar_stream` propagates with `?` —
+    /// one crafted entry killing the whole streamed run, the exact failure mode CPE-1773 removed for
+    /// `nul`. It is now a counted skip like every other refusal on this path.
+    #[test]
+    fn cpe1774_a_link_entry_with_no_target_is_skipped_not_fatal() {
+        let d = scratch("cpe1774_emptylink");
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_cksum(); // no link name set at all
+        b.append_data(&mut h, "dangling", std::io::empty()).unwrap();
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_size(8);
+        h2.set_mode(0o644);
+        h2.set_cksum();
+        b.append_data(&mut h2, "ok.txt", &b"ORDINARY"[..]).unwrap();
+        let ap = d.join("empty.tar");
+        fs::write(&ap, b.into_inner().unwrap()).unwrap();
+        let dest = d.join("out");
+
+        let report = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("a link entry with no target must not take the whole run down");
+
+        assert_eq!(
+            fs::read(dest.join("ok.txt")).unwrap(),
+            b"ORDINARY".to_vec(),
+            "the rest of the archive must still extract"
+        );
+        assert_eq!(report.skipped, 1, "the refusal must be counted; got {report:?}");
+        assert!(
+            report.errors.iter().any(|e| e.contains("no target")),
+            "and say what was wrong with it in the user's terms; got {:?}",
+            report.errors
         );
         let _ = fs::remove_dir_all(&d);
     }

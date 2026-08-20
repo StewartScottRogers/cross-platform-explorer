@@ -113,26 +113,49 @@ Three independent protections apply automatically — you don't opt into any of 
   *"trying to unpack outside of destination path"* and unpacks nothing at all. (An earlier version of this
   page said a folder shortcut "is still followed" during extraction. That was never true of TAR, and is no
   longer true of anything.)
+- **A refused entry is never silent.** Whenever any guard below turns an entry away, the finishing notice
+  says so — *"3 items extracted. 2 entries were skipped — they couldn't be written safely. Open the
+  operations panel to see which."* — instead of a plain success message with a quietly lower count. The
+  operations panel then carries a **"· N skipped — why?"** button; one click lists each refused entry with
+  the reason in full. A skip and a genuine failure are reported differently, and an extraction with
+  nothing skipped looks exactly as it always did — no new noise on the normal path.
+  (Earlier versions of this page described these skips as *silent*. They were, and that was the bug: an
+  archive could contain a hostile entry, have it correctly refused, and still report plain success.)
 - **Zip-slip (path traversal) protection.** An archive entry whose name would escape the destination
-  folder — an absolute path, or one containing `..` — is **silently skipped** during extraction rather than
-  written outside where you asked, for every supported format (zip, tar, 7z, the one-entry-at-a-time RAR
-  path). This is a structural guard baked into the extractor itself, not something you check separately.
-- **Entry *names*, not just where they point, are checked too — for ZIP, 7-Zip, and the one-entry-at-a-time
-  RAR/single-leaf path, but not yet for TAR.** Separately from the traversal guard above, an entry whose
+  folder — an absolute path, or one containing `..` — is **skipped and reported** during extraction rather
+  than written outside where you asked, for every supported format (zip, tar, 7z, the one-entry-at-a-time
+  RAR path). This is a structural guard baked into the extractor itself, not something you check separately.
+- **Entry *names*, not just where they point, are checked too — now for TAR as well.** Separately from the
+  traversal guard above, an entry whose
   own leaf name isn't one the local filesystem can safely hold is also skipped rather than written when
-  extracting a **ZIP** (both the streamed and password-protected paths) or **7-Zip** archive, or when
+  extracting a **ZIP** (both the streamed and password-protected paths), a **TAR** (`.tar`, `.tar.gz`,
+  `.tgz`) or a **7-Zip** archive, or when
   opening a single entry directly: a name containing a colon (`file:stream`) — which on Windows/NTFS would
   otherwise divert the bytes into a hidden alternate data stream on a neighbouring file, leaving no visible
   file at all — a name that starts with `..` without being a traversal component (`..evil`), and, on
   Windows only, a reserved device name (`con`, `nul`, `com1`, …) or a name ending in a run of `.`/space.
-  **TAR extraction does not run this check yet** — the same shapes still reach TAR's writer unguarded; this
-  is a known, tracked gap, not an oversight. These are the same per-segment rules the Network program's
+  **TAR used to be exempt from this check and no longer is** — every TAR flavour now answers exactly as ZIP
+  does for the same entry name, which also means a `nul` entry no longer aborts the whole extraction and
+  takes the rest of the archive with it. These are the same per-segment rules the Network program's
   downloads already apply; extraction skips the entry rather than renaming it, so the entry is missing
-  rather than silently landing somewhere else — check
-  the operations panel if a count looks lower than expected.
-  Related, open work: the TAR gap noted above and a demonstrated ZIP symlink-target escape are tracked
-  separately, and the operations-panel count itself doesn't currently distinguish "extracted with a skip"
-  from a fully clean run — you have to open the entry to see it.
+  rather than silently landing somewhere else — and the notice tells you it happened.
+- **A link entry that points outside the folder you chose is refused.** A ZIP or TAR archive can carry an
+  entry that is not a file at all but a **shortcut**, with its target stored inside the archive. Nothing
+  about such an entry's *name* looks unusual, so the name checks above do not see it — an entry called
+  `notes.txt` can be a shortcut to your SSH keys, and opening the "extracted file" would read the real
+  one. Every extraction now resolves a link entry's target against the destination folder and refuses any
+  that lands outside it, whether it is spelled with `..`, as an absolute path, with mixed separators, or
+  by pointing through another shortcut. Shortcuts that stay **inside** the extraction folder still work
+  normally — source tarballs legitimately contain them, so they are not blanket-refused. A link entry
+  that declares no target at all is skipped rather than aborting the extraction.
+  **One accepted false refusal, on Linux and macOS only:** a shortcut whose target is a file *literally
+  named* `..\secret` — legal and harmless there, since a backslash is an ordinary character on those
+  systems — is refused as though it were a Windows-style traversal. That entry is skipped and reported
+  rather than extracted. It is deliberate: the check treats a backslash as a separator everywhere so a
+  Windows-authored archive cannot slip a traversal past a Linux or macOS extraction by spelling it the
+  other way, and being too strict here costs a pathological filename while being too lax costs your files.
+  Related, open work: the remaining differences between the one-shot and streamed extraction paths are
+  tracked separately.
 - **Zip-bomb / expansion-ratio scoring**, via **Check archive safety…** — for the ordinary case, reads a
   ZIP's central directory (no extraction) and compares every entry's compressed size against its
   uncompressed size. It reports the overall compression ratio, total compressed → uncompressed size, how
@@ -237,9 +260,13 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
   destination first, so the same check runs and the entry is skipped. **TAR** gives no such hook: its
   entries go straight to the decoder, which replaces the link with a regular file (see the format bullet
   under *Safety limits*). Extract into a **new, empty folder** (the plain **Extract** action already does
-  exactly that) if you don't trust the archive. This is only about a link at an entry's **own name** — the
-  separate "can't land outside the folder you picked" guarantee above holds for every format, TAR
-  included.
+  exactly that) if you don't trust the archive. This is only about a shortcut **you already had** sitting
+  at an entry's name — the separate "can't land outside the folder you picked" guarantee above holds for
+  every format, TAR included.
+  **Do not confuse this with the link-entry guard above**, which is the opposite direction and covers
+  every format: that one is about a shortcut *the archive asks this app to create*, and an archive-supplied
+  shortcut pointing outside the extraction folder is refused for ZIP and TAR alike. This bullet is about a
+  shortcut that was in your destination folder before the extraction started.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
   decompression verification, and the verification time/byte caps are all fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —
