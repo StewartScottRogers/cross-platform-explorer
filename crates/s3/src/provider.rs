@@ -464,6 +464,42 @@ fn is_url_dot_segment(segment: &str) -> bool {
 /// URL and the signature cannot disagree" guarantee ends at the crate boundary; this is where it ends, said
 /// out loud. Actually reaching such a key needs an HTTP client that does not normalise URLs, which is
 /// **CPE-1721**, filed from this measurement.
+///
+/// # CPE-1721's decision, and the measurement it rests on
+///
+/// CPE-1721 offered three options and asked for a decision rather than a fix. **Option 2 was measured
+/// first, as that ticket instructed, and it works**: the same raw-socket recorder, driven against both
+/// majors from one probe, reports
+///
+/// ```text
+/// ASKED /test-bucket/a/../b//c%252Fd.txt   ureq2 /test-bucket/b//c%252Fd.txt        REWROTE
+///                                          ureq3 /test-bucket/a/../b//c%252Fd.txt   OK
+/// ASKED /test-bucket/a/./b.txt             ureq2 /test-bucket/a/b.txt               REWROTE
+///                                          ureq3 /test-bucket/a/./b.txt             OK
+/// ASKED /test-bucket/a/%2e%2e/b.txt        ureq2 /test-bucket/b.txt                 REWROTE
+///                                          ureq3 /test-bucket/a/%2e%2e/b.txt        OK
+/// ```
+///
+/// `ureq` 3 routes the request target through `http::Uri` (via `ureq-proto`) instead of the `url` crate —
+/// `url` is an *optional* dependency there — and `http::Uri` is a syntax-only parser that performs no
+/// dot-segment removal. So the dot-segment gap is a property of `ureq` 2 specifically, not of HTTP.
+///
+/// **The same probe also closes the "just encode the dots" escape hatch**, which is the obvious cheap fix
+/// and does not work: WHATWG URL parsing defines a double-dot segment as `..` *or* a case-insensitive
+/// `.%2e` / `%2e.` / `%2e%2e`, so `%2e%2e` is resolved away too (measured above), and the only spelling
+/// that survives — `%252e%252e` — percent-decodes at S3 to the key `%2e%2e`, a *different* object. There
+/// is no encoding of `.` that `url` passes through and S3 decodes back to `.`.
+///
+/// **The swap is not made here.** It is a `ureq` major migration — a rewrite of this crate's whole request
+/// layer (agent construction, the per-request vs per-read deadline split CPE-1706/1727 tuned, the gzip and
+/// `Response` surfaces, the error mapping) — and it pulls a new dependency family (`ureq-proto`, `http`,
+/// `rustls` 0.23) into a crate whose `Cargo.toml` records "adds NO new dependency family at all" as a
+/// decision, while the sibling `cpe-webdav` still pins `ureq` 2. That is its own ticket with its own
+/// dependency-budget question, not a rider on a path-grammar fix. What CPE-1721 asked for and what is
+/// delivered here is the decision recorded against the measurement: **option 2 is viable and is the fix;
+/// until it lands the refusal stands**, and — see [`S3Provider::list_with_filtered_count`] — `list` now
+/// refuses such a prefix too, so the crate no longer offers a browsable folder whose every child it will
+/// then decline to open.
 fn guard_path_survives_the_client(encoded_path: &str) -> Result<(), String> {
     if let Some(segment) = encoded_path.split('/').find(|s| is_url_dot_segment(s)) {
         return Err(format!(
@@ -514,12 +550,21 @@ fn xml_nesting_too_deep(xml: &str, max_depth: usize) -> bool {
 ///
 /// The bucket root (`""` or `"/"`) maps to the empty prefix (list the whole bucket); it has no marker
 /// object and is never filtered as one.
+///
+/// # Derived from [`provider_path_to_object_key`], not re-implemented (CPE-1722)
+///
+/// This used to carry its own `path.trim_matches('/')`, identical to the one in the object-key helper.
+/// Two copies of a path grammar is how the two drift apart, and CPE-1722's acceptance criterion is that
+/// the grammar is decided **once, for the whole crate**, with `list`/`mkdir`/`stat`/`delete` all
+/// agreeing. So there is now exactly one parser: this is `object_key + "/"`, and the bucket root — the
+/// one path with no object key — is the one case that yields the empty prefix. The two therefore cannot
+/// disagree about where a path's key starts, because only one of them decides it.
 pub fn provider_path_to_key_prefix(path: &str) -> String {
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!("{trimmed}/")
+    match provider_path_to_object_key(path) {
+        Ok(key) => format!("{key}/"),
+        // The only `Err` is the bucket root, which is exactly the empty-prefix case (list the whole
+        // bucket, no marker object).
+        Err(_) => String::new(),
     }
 }
 
@@ -531,21 +576,48 @@ pub fn provider_path_to_key_prefix(path: &str) -> String {
 /// else — the same refusal, for the same reason, that [`S3Config::object_target`] already applies to an
 /// empty key ("S3 has no zero-length key").
 ///
-/// # KNOWN GAP (CPE-1722): `trim_matches('/')` collapses the ends, and CPE-1689 does not cover that
+/// # The path grammar, decided once for the whole crate (CPE-1722)
 ///
-/// Say this plainly, because the CPE-1689 reference below otherwise implies a guarantee this function
-/// does not provide. [`S3Config::object_target`] genuinely preserves a leading slash — `"/a.txt"` builds
-/// `/bucket//a.txt` — so `a.txt`, `/a.txt` and `//a.txt` really are three distinct objects *at that
-/// layer*. **This function sits above it and trims both ends first**, so a provider path of `//a.txt`
-/// reaches `object_target` as the key `a.txt`. Measured to the wire by the CPE-1684 round-2 UAT:
-/// `"//a.txt"` → `/test-bucket/a.txt`. `write("//report.pdf", …)` therefore overwrites `report.pdf`.
+/// **A provider path is `"/"` + the S3 key + an optional `"/"` marking that the key is being addressed
+/// as a directory/prefix.** Exactly one leading slash is removed and at most one trailing slash; every
+/// other byte, at either end or in the middle, is part of the key and survives untouched.
 ///
-/// Not fixed here, deliberately, and CPE-1722 carries the full reasoning: the sibling
-/// [`provider_path_to_key_prefix`] (merged, CPE-1683) has the identical trim and feeds `list`/`mkdir`, so
-/// changing one alone would leave two path grammars inside one provider; and trailing-slash
-/// insignificance is a cross-backend `FileSystemProvider` contract that `stat`/`delete` rely on when they
-/// build a probe prefix as `format!("{key}/")`. Reachable only by a hand-typed path — `is_safe_s3_leaf`
-/// refuses any leaf containing `/`, so no listing can surface one.
+/// That makes every S3 key spellable, which is the whole point — a key is an opaque byte string, so
+/// `a.txt`, `/a.txt` and `//a.txt` are three different objects and a bucket written by a tool that joined
+/// paths carelessly genuinely holds all three:
+///
+/// | provider path  | object key | prefix (marker) key |
+/// |----------------|------------|---------------------|
+/// | `/a.txt`       | `a.txt`    | `a.txt/`            |
+/// | `/a.txt/`      | `a.txt`    | `a.txt/`            |
+/// | `//a.txt`      | `/a.txt`   | `/a.txt/`           |
+/// | `/a//b.txt`    | `a//b.txt` | `a//b.txt/`         |
+/// | `/a.txt//`     | `a.txt/`   | `a.txt//`           |
+/// | `///`          | `/`        | `//`                |
+/// | `/` or `//`    | *(none — the bucket root)* | *(empty)* |
+///
+/// # What this replaced, and why the old shape was a data-loss bug
+///
+/// Until CPE-1722 this was `path.trim_matches('/')`, which strips **every** leading and trailing slash.
+/// [`S3Config::object_target`] one layer below has always been byte-exact (CPE-1689: `"/a.txt"` builds
+/// `/bucket//a.txt`), so the guarantee was correct at the layer that documented it and thrown away at the
+/// layer callers actually use. Measured to the wire by the CPE-1684 round-2 UAT: provider path `"//a.txt"`
+/// reached the socket as `/test-bucket/a.txt`. `write("//report.pdf", …)` therefore **overwrote**
+/// `report.pdf` — the silently-wrong-object failure CPE-1689 exists to prevent, arriving one layer up
+/// from where that ticket looked.
+///
+/// # Why a *trailing* slash is still not part of the object key
+///
+/// This is the one deliberate asymmetry, and it is a cross-backend contract rather than a concession.
+/// Every other [`FileSystemProvider`] (local, SFTP, WebDAV, FTP) treats `/a` and `/a/` as the same path,
+/// and `stat`/`delete` build their prefix probe as `format!("{key}/")`. A trailing slash therefore means
+/// "address this as a directory", which on S3 is exactly what a key ending in `/` *is* — the zero-byte
+/// marker convention this module's own `mkdir` writes.
+///
+/// Nothing is lost by it, because the rule is total: a key that genuinely ends in `/` is spelled with the
+/// slash doubled (`/a.txt//` → key `a.txt/`), which is just the general rule `"/" + key + "/"` applied to
+/// a key whose last byte happens to be a slash. So `stat`/`delete` keep the grammar every other backend
+/// speaks, and no S3 key becomes unreachable.
 ///
 /// # No `is_safe_s3_leaf` pass here, and this is a deliberate decision, not an omission
 ///
@@ -568,14 +640,19 @@ pub fn provider_path_to_key_prefix(path: &str) -> String {
 /// outside the unreserved set into the path (so a `\n` in a key travels as `%0A`, never as a request-line
 /// break), and [`guard_header_sendable`] covers the header side.
 fn provider_path_to_object_key(path: &str) -> Result<String, String> {
-    let key = path.trim_matches('/').to_string();
+    // Exactly ONE leading slash (the `/`-rooting every provider path carries), never all of them: the
+    // second slash of `//a.txt` is the first byte of the key `/a.txt`, not more rooting.
+    let rooted = path.strip_prefix('/').unwrap_or(path);
+    // At most ONE trailing slash, which is the "address this as a directory" marker described above —
+    // again never all of them, so `/a.txt//` keeps the key `a.txt/`.
+    let key = rooted.strip_suffix('/').unwrap_or(rooted);
     if key.is_empty() {
         return Err(format!(
             "s3: {path:?} addresses the bucket itself, which is not an object — S3 has no zero-length \
              key, so there is nothing here to stat, read, write or delete"
         ));
     }
-    Ok(key)
+    Ok(key.to_string())
 }
 
 /// Turn a non-2xx response into an error, choosing the rule by whether the response actually carried a
@@ -1878,6 +1955,29 @@ impl S3Provider {
     /// is non-zero instead of the listing reading as an ordinary, indistinguishable-from-real empty folder.
     pub fn list_with_filtered_count(&self, path: &str) -> Result<(Vec<ProviderEntry>, usize), String> {
         let key_prefix = provider_path_to_key_prefix(path);
+        // CPE-1721 (folded in from CPE-1723 item 2): close the query-string/path asymmetry.
+        //
+        // `list` puts the prefix in the QUERY STRING, which `ureq`/`url` does not normalise, so
+        // `list("/a/../b")` used to succeed and hand back a folder that opened and browsed normally.
+        // `stat`/`read`/`write` put the key in the PATH, which *is* normalised, so every single file
+        // inside that folder was then refused by `guard_path_survives_the_client`. A browsable folder in
+        // which nothing is openable is a worse answer than a refusal that names the cause, so the same
+        // guard is applied here, to the object target a child of this prefix would be fetched under.
+        //
+        // Checked against the real object target rather than by re-scanning the raw key, so it is the
+        // one guard making the decision in both places: `encode_path` escapes a literal `%` on the way
+        // in, so a raw key segment of `%2e` becomes `%252e` and is correctly NOT a dot segment, while a
+        // bare `.`/`..` stays one. A hand-rolled second check here would have to re-derive that and
+        // would eventually re-derive it wrong.
+        if !key_prefix.is_empty() {
+            guard_path_survives_the_client(&self.config.object_target(&key_prefix)?.encoded_path)
+                .map_err(|e| {
+                    format!(
+                        "s3: list {path:?}: this prefix would list children that this crate then could \
+                         not open. {e}"
+                    )
+                })?;
+        }
         let target = self.config.bucket_target()?;
 
         let mut out = Vec::new();
