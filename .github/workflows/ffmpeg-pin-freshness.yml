@@ -135,13 +135,20 @@ jobs:
           # separate asset sets; "Determine current live tags to recommend" below uses this suffix to
           # pick the SAME release line release-sidecar.yml already pins, instead of grabbing whichever
           # asset sorts first -- the bug this ticket exists to fix.
-          ffmpeg_suffix=$(grep -oP 'linux64-lgpl-\K[0-9.]+(?=\.tar\.xz)' "$RELEASE_SIDECAR_YML" | head -1)
-          if [ -z "$ffmpeg_suffix" ]; then
-            echo "::error::could not extract the ffmpeg linux64 lgpl suffix (e.g. '8.1') from" \
-                 "${RELEASE_SIDECAR_YML}'s fetch line -- it moved or was reformatted. Fix the" \
-                 "extraction in ffmpeg-pin-freshness.yml before trusting this workflow again." >&2
+          # Uniqueness-checked the same way match_for() below checks fetch-URL matches: `| head -1`
+          # alone would silently pick whichever line sorts first if this pattern ever matched twice
+          # (even a stray comment) -- the exact "first match wins" failure shape this ticket exists
+          # to close, one step earlier than where the recommendation itself is built.
+          ffmpeg_suffix_matches=$(grep -oP 'linux64-lgpl-\K[0-9.]+(?=\.tar\.xz)' "$RELEASE_SIDECAR_YML" || true)
+          ffmpeg_suffix_count=$(printf '%s\n' "$ffmpeg_suffix_matches" | grep -c . || true)
+          if [ "$ffmpeg_suffix_count" != "1" ]; then
+            echo "::error::expected exactly one ffmpeg linux64 lgpl suffix (e.g. '8.1') in" \
+                 "${RELEASE_SIDECAR_YML}, found ${ffmpeg_suffix_count} -- its fetch line moved," \
+                 "was reformatted, or gained a second reference. Fix the extraction in" \
+                 "ffmpeg-pin-freshness.yml before trusting this workflow again." >&2
             exit 1
           fi
+          ffmpeg_suffix="$ffmpeg_suffix_matches"
 
           # Test hook (CPE-1763): a manual dispatch can override the extracted ffmpeg tag to dry-run
           # the stale-pin path (e.g. against the known-pruned autobuild-2026-08-01-13-21) without
@@ -349,6 +356,18 @@ jobs:
       # into them differ). A recommendation that itself 404s is worse than no recommendation: a human
       # trusts it, repins, and breaks the very release build this workflow exists to protect. Refuse
       # to publish an unvalidated one.
+      #
+      # Review finding: an earlier version of this step treated ANY non-200 (a confirmed 404, a
+      # transient 403/429/5xx, or curl's connect-level "000") as equally "unverified" -- exactly the
+      # "inconclusive != a confirmed problem" conflation "HEAD-check pinned assets" above already
+      # guards against for the CURRENT pin, just moved one level downstream to the recommendation.
+      # Mirrors that step's 200/404/inconclusive classification instead: a confirmed 404 withholds
+      # the recommendation with a "this candidate is wrong" message; an inconclusive result fails
+      # this step loudly (mirroring the sibling exactly) but "File an issue" below still runs
+      # (`if: always()`) because the CURRENT pin's staleness is a separately-confirmed fact that a
+      # rate limit while checking the *candidate* must never suppress -- it instead publishes a
+      # clearly-labeled "could not confirm, re-run before trusting" note, never a confident-and-wrong
+      # or a confident-and-silent one.
       - name: Validate the recommendation before publishing it
         id: validate
         if: steps.check.outputs.stale == 'true'
@@ -362,12 +381,14 @@ jobs:
           set -uo pipefail
           export FFMPEG_BUILD_TAG FFMPEG_BUILD_VER
           verified="true"
-          note=""
+          inconclusive="false"
+          not_found_note=""
+          inconclusive_note=""
 
           if [[ "$FFMPEG_BUILD_TAG" == "<could not determine"* || -z "$FFMPEG_BUILD_TAG" \
              || "$FFMPEG_BUILD_VER" == "<could not determine"* || -z "$FFMPEG_BUILD_VER" ]]; then
             verified="false"
-            note="the live ffmpeg tag/version could not be determined upstream -- see the run log above\n"
+            not_found_note="the live ffmpeg tag/version could not be determined upstream -- see the run log above\n"
           else
             win64_url=$(printf '%s' "$FFMPEG_WIN64_URL_TMPL" | envsubst)
             linux64_url=$(printf '%s' "$FFMPEG_LINUX64_URL_TMPL" | envsubst)
@@ -377,26 +398,55 @@ jobs:
               code=$(curl -sSL --max-time 30 --retry 3 --retry-delay 2 --retry-connrefused \
                 -o /dev/null -w '%{http_code}' --head "$url")
               echo "  recommended ffmpeg ${label}: HTTP ${code} (${url})"
-              if [ "$code" != "200" ]; then
-                verified="false"
-                note="${note}recommended ffmpeg ${label} asset returned HTTP ${code}: ${url}\n"
-              fi
+              # Same three-way split as "HEAD-check pinned assets" above: 200 fine, 404 a CONFIRMED
+              # problem with this candidate, anything else inconclusive (never treated as a
+              # confirmed problem, never silently swallowed either).
+              case "$code" in
+                200) ;;
+                404)
+                  verified="false"
+                  not_found_note="${not_found_note}recommended ffmpeg ${label} asset confirmed missing: HTTP 404 - ${url}\n"
+                  ;;
+                *)
+                  verified="false"
+                  inconclusive="true"
+                  inconclusive_note="${inconclusive_note}recommended ffmpeg ${label} check was inconclusive: HTTP ${code} - ${url}\n"
+                  ;;
+              esac
             done
           fi
 
           echo "verified=${verified}" >> "$GITHUB_OUTPUT"
+          echo "inconclusive=${inconclusive}" >> "$GITHUB_OUTPUT"
           {
-            echo "note<<RECNOTE_EOF"
-            echo -e "$note"
-            echo "RECNOTE_EOF"
+            echo "not_found_note<<RECNOTFOUND_EOF"
+            echo -e "$not_found_note"
+            echo "RECNOTFOUND_EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "inconclusive_note<<RECINCONCLUSIVE_EOF"
+            echo -e "$inconclusive_note"
+            echo "RECINCONCLUSIVE_EOF"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$verified" != "true" ]; then
-            echo "::warning::could not validate the ffmpeg recommendation before publishing it -- the issue will say so instead of naming an unverified tag/version"
+          if [ "$inconclusive" = "true" ]; then
+            echo "::error::could not conclusively verify the recommended ffmpeg asset(s) (non-200, non-404 status -- looks like a transient network/CDN/rate-limit issue, NOT evidence the recommendation is wrong):"
+            echo -e "$inconclusive_note"
+            echo "::error::not treating this as a confirmed-bad recommendation. The filed issue will say so and ask for a re-run -- see 'File an issue' below, which still runs despite this step failing."
+            exit 1
+          elif [ "$verified" != "true" ]; then
+            echo "::warning::the recommended ffmpeg tag/version failed its own pre-publish HEAD-check (confirmed 404, or could not be determined) -- withholding it from the issue"
           fi
 
+      # `if: always()` is load-bearing: "Validate the recommendation" above intentionally exits 1 on
+      # an inconclusive HEAD-check (mirroring "HEAD-check pinned assets"'s fail-loud convention), but
+      # the CURRENT pin's staleness was already confirmed (not inconclusive) by that earlier step --
+      # a rate limit while checking the *candidate* replacement must never suppress the notification
+      # about the pin that is ALREADY confirmed broken. Without always() here, GitHub Actions would
+      # skip this step whenever validate fails, silently dropping the primary "file an issue" signal
+      # -- the exact swallowed-notification failure mode CPE-1763's design note above warns against.
       - name: File an issue (deduped) so a human sees it
-        if: steps.check.outputs.stale == 'true'
+        if: always() && steps.check.outputs.stale == 'true'
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -405,7 +455,10 @@ jobs:
           FFMPEG_LIVE_VER: ${{ steps.live.outputs.ffmpeg_live_ver }}
           PDFIUM_LIVE_TAG: ${{ steps.live.outputs.pdfium_live_tag }}
           REC_VERIFIED: ${{ steps.validate.outputs.verified }}
-          REC_NOTE: ${{ steps.validate.outputs.note }}
+          REC_INCONCLUSIVE: ${{ steps.validate.outputs.inconclusive }}
+          REC_NOT_FOUND_NOTE: ${{ steps.validate.outputs.not_found_note }}
+          REC_INCONCLUSIVE_NOTE: ${{ steps.validate.outputs.inconclusive_note }}
+          FFMPEG_SUFFIX: ${{ steps.pins.outputs.ffmpeg_suffix }}
         run: |
           set -uo pipefail
           label="dep-pin-stale"
@@ -425,10 +478,18 @@ jobs:
             if [ "$REC_VERIFIED" = "true" ]; then
               printf '\n%s\n' "Upstream's current live tag to bump to (HEAD-checked 200 on the SAME release line release-sidecar.yml already pins before this issue was filed; a stable month-end anchor, not a rolling daily -- see the workflow's cadence comment):"
               printf '%s\n' "- ffmpeg (BtbN/FFmpeg-Builds): tag \`${FFMPEG_LIVE_TAG}\`, version \`${FFMPEG_LIVE_VER}\`"
+            elif [ "$REC_INCONCLUSIVE" = "true" ]; then
+              # Distinct from the confirmed-404 branch below on purpose (review finding): this is NOT
+              # evidence the candidate is wrong, only that checking it did not conclusively succeed --
+              # conflating the two would be exactly the "confident and wrong" failure mode CPE-1795
+              # exists to close, moved one level downstream from the pin to the recommendation.
+              printf '\n%s\n' "**Could not confirm the ffmpeg recommendation** -- this is NOT a confirmed-bad candidate, just an inconclusive check (a transient network/CDN/rate-limit issue), so treat it as unconfirmed rather than wrong:"
+              printf '%s\n' "$REC_INCONCLUSIVE_NOTE" | sed '/^$/d; s/^/- /'
+              printf '%s\n' "Unconfirmed candidate: tag \`${FFMPEG_LIVE_TAG}\`, version \`${FFMPEG_LIVE_VER}\` -- it may well be correct. Re-run this workflow via workflow_dispatch to get a validated recommendation before trusting it."
             else
-              printf '\n%s\n' "**Could not produce a validated ffmpeg recommendation** -- the automatically-derived tag/version failed its own pre-publish HEAD-check, so it is withheld rather than risk repeating CPE-1795 (a wrong recommendation once broke the very release this check protects):"
-              printf '%s\n' "$REC_NOTE" | sed '/^$/d; s/^/- /'
-              printf '%s\n' "Check https://github.com/BtbN/FFmpeg-Builds/releases manually and pick a stable month-end anchor tag (not a rolling daily -- see the workflow's cadence comment) on the SAME release line release-sidecar.yml already pins."
+              printf '\n%s\n' "**Could not produce a validated ffmpeg recommendation** -- the automatically-derived tag/version was confirmed unusable (see below), so it is withheld rather than risk repeating CPE-1795 (a wrong recommendation once broke the very release this check protects):"
+              printf '%s\n' "$REC_NOT_FOUND_NOTE" | sed '/^$/d; s/^/- /'
+              printf '%s\n' "Check https://github.com/BtbN/FFmpeg-Builds/releases manually and pick a stable month-end anchor tag (not a rolling daily -- see the workflow's cadence comment) on the SAME release line release-sidecar.yml already pins (currently suffixed -lgpl-${FFMPEG_SUFFIX}). If that release line no longer exists upstream at all, moving to a different line is a deliberate human call, not this check's -- update BOTH release-sidecar.yml's suffix and this recommendation logic to match whichever line is chosen."
             fi
             printf '%s\n\n' "- pdfium (bblanchon/pdfium-binaries): \`${PDFIUM_LIVE_TAG}\`"
             printf '%s\n' "Update \`FFMPEG_BUILD_TAG\` / \`FFMPEG_BUILD_VER\` / \`PDFIUM_TAG\` in the \"Stage native deps\" step of \`.github/workflows/release-sidecar.yml\` (see CPE-1762, and CPE-1789 for the currently-known-due re-pin). Then re-run this workflow via workflow_dispatch to confirm the new pin is reachable before it blocks a release."
