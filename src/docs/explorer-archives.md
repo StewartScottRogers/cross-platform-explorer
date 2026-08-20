@@ -87,10 +87,11 @@ Three independent protections apply automatically — you don't opt into any of 
   doesn't replace the link: it writes *through* it, into whatever the link points at, and reports success
   about a file you never named. So if the archive you're about to create — or the file a single-file `.gz`
   would unpack to — lands on a name that already holds a symlink, the operation stops before writing
-  anything and tells you it found a link, rather than quietly overwriting the link's target. During a **ZIP
-  or 7-Zip** extraction the same check applies per entry: an entry that would land on an existing link in
-  the destination folder is **skipped** and the rest of the archive still extracts. Overwriting an ordinary
-  existing file is unaffected — that stays allowed, because it's a thing you can reasonably mean.
+  anything and tells you it found a link, rather than quietly overwriting the link's target. During an
+  extraction the same check applies per entry, in **every** format — ZIP, TAR (`.tar`, `.tar.gz`, `.tgz`)
+  and 7-Zip alike: an entry that would land on an existing link in the destination folder is **skipped**
+  and the rest of the archive still extracts. Overwriting an ordinary existing file is unaffected — that
+  stays allowed, because it's a thing you can reasonably mean.
 - **Nothing an extraction writes can end up outside the folder you picked — including via a folder
   shortcut.** This is a second, separate check from the one above, and it covers the case a name-only
   check cannot see: if the destination already contains a **folder** shortcut (a symlink, or on Windows a
@@ -102,17 +103,22 @@ Three independent protections apply automatically — you don't opt into any of 
   folder entries get the same treatment, so an extraction can't create directories out there either.
   Extracting into a **new, empty folder** (what the plain **Extract** action always does) has no shortcuts
   to run into in the first place.
-- **What happens to a link already sitting in the destination differs by format**, and it's worth knowing
-  which you're using. Extracting a **ZIP** or a **7-Zip** archive through the normal Extract / Extract to…
-  flow skips just that entry, as above, and leaves both the link and the file it points at alone. A **TAR**
-  (`.tar`, `.tar.gz`, `.tgz`) behaves differently at the library level: it **replaces the link with a
-  regular file** — the file the link pointed at is left alone, but the link itself is gone. If a
-  destination folder contains shortcuts you care about, extract into a new empty folder instead.
-  For the *folder*-shortcut case in the bullet above the formats differ again, though every one of them is
-  safe: ZIP and 7-Zip skip the entry and carry on, while **TAR refuses the whole extraction** with
-  *"trying to unpack outside of destination path"* and unpacks nothing at all. (An earlier version of this
-  page said a folder shortcut "is still followed" during extraction. That was never true of TAR, and is no
-  longer true of anything.)
+- **Every format now answers a refused entry the same way: skip that entry, extract the rest.** This used
+  to differ by format and by which action you used, which meant this page could only ever describe one of
+  the behaviours honestly:
+  - A **TAR** (`.tar`, `.tar.gz`, `.tgz`) used to **replace a link in the destination with a regular
+    file** — the file the link pointed at was left alone, but your shortcut was gone, and the extraction
+    reported plain success. It now skips that entry and leaves the shortcut exactly as it was, like ZIP
+    and 7-Zip always did.
+  - A **ZIP** extracted through the older one-shot route used to **abandon the whole archive** on the
+    first refused entry, so entries before it were left on disk, entries after it were not, and the error
+    named neither. It now skips the entry and carries on, matching the route the Extract buttons use.
+  - The *folder*-shortcut case in the bullet above used to differ too: ZIP and 7-Zip skipped the entry
+    while **TAR refused the whole extraction** with *"trying to unpack outside of destination path"*.
+    TAR now skips that entry as well.
+
+  (An earlier version of this page said a folder shortcut "is still followed" during extraction. That was
+  never true of TAR, and is no longer true of anything.)
 - **A refused entry is never silent.** Whenever any guard below turns an entry away, the finishing notice
   says so — *"3 items extracted. 2 entries were skipped — they couldn't be written safely. Open the
   operations panel to see which."* — instead of a plain success message with a quietly lower count. The
@@ -147,15 +153,22 @@ Three independent protections apply automatically — you don't opt into any of 
   that lands outside it, whether it is spelled with `..`, as an absolute path, with mixed separators, or
   by pointing through another shortcut. Shortcuts that stay **inside** the extraction folder still work
   normally — source tarballs legitimately contain them, so they are not blanket-refused. A link entry
-  that declares no target at all is skipped rather than aborting the extraction.
+  that declares no target at all is skipped rather than aborting the extraction. TAR archives can also
+  carry a **hard link**, which is the same idea in a different shape; one pointing outside the folder you
+  chose used to end the whole extraction, and is now skipped like any other refused entry.
   **One accepted false refusal, on Linux and macOS only:** a shortcut whose target is a file *literally
   named* `..\secret` — legal and harmless there, since a backslash is an ordinary character on those
   systems — is refused as though it were a Windows-style traversal. That entry is skipped and reported
   rather than extracted. It is deliberate: the check treats a backslash as a separator everywhere so a
   Windows-authored archive cannot slip a traversal past a Linux or macOS extraction by spelling it the
   other way, and being too strict here costs a pathological filename while being too lax costs your files.
-  Related, open work: the remaining differences between the one-shot and streamed extraction paths are
-  tracked separately.
+- **A refused entry is skipped; a genuine failure still stops the extraction.** That is the whole rule,
+  and it now holds for every format. "Refused" means this app decided not to write that entry — an
+  unusable name, a shortcut already sitting at the name, a destination that would land outside your
+  folder, a shortcut pointing out of it, or (on Windows without administrator rights or Developer Mode) a
+  shortcut this system will not create. "Failed" means the write itself did not work — a full disk, a
+  permission error, a TAR hard link whose target is not in the archive. Refusals cost you one entry and
+  are listed in the operations panel; failures stop the run and say so.
 - **Zip-bomb / expansion-ratio scoring**, via **Check archive safety…** — for the ordinary case, reads a
   ZIP's central directory (no extraction) and compares every entry's compressed size against its
   uncompressed size. It reports the overall compression ratio, total compressed → uncompressed size, how
@@ -253,20 +266,27 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
   readable and one of those trips the danger threshold, the **DANGER** banner still leads, with a note
   that other entries couldn't be assessed. An all-encrypted zip, and an archive whose suspicious entries
   all exhausted the verification budget, both report as unassessed rather than safe or dangerous.
-- **The symlink refusal covers ZIP and 7-Zip extraction, but not TAR.** Stated plainly rather than
-  implied: the per-entry link check described under *Safety limits* is applied wherever this app gets to
-  decide before the write — archive creation, single-file `.gz` unpacking, and ZIP **and 7-Zip**
-  extraction. 7-Zip entries are written by the decoder library, but it hands this app each entry's
-  destination first, so the same check runs and the entry is skipped. **TAR** gives no such hook: its
-  entries go straight to the decoder, which replaces the link with a regular file (see the format bullet
-  under *Safety limits*). Extract into a **new, empty folder** (the plain **Extract** action already does
-  exactly that) if you don't trust the archive. This is only about a shortcut **you already had** sitting
-  at an entry's name — the separate "can't land outside the folder you picked" guarantee above holds for
-  every format, TAR included.
+- **The symlink refusal now covers TAR too.** This bullet used to say it covered ZIP and 7-Zip but *not*
+  TAR, because a TAR entry went straight to the decoder library, which replaced the link with a regular
+  file before this app could object. That gap is closed: the per-entry link check described under *Safety
+  limits* is applied wherever this app gets to decide before the write, which is now everywhere —
+  archive creation, single-file `.gz` unpacking, and ZIP, 7-Zip **and TAR** extraction. For 7-Zip and TAR
+  the entry is written by the decoder library, but both hand this app the entry before they write it, so
+  the check runs and the entry is skipped. Extracting into a **new, empty folder** (the plain **Extract**
+  action always does exactly that) still avoids the situation entirely. This is only about a shortcut
+  **you already had** sitting at an entry's name — the separate "can't land outside the folder you
+  picked" guarantee above holds for every format too.
   **Do not confuse this with the link-entry guard above**, which is the opposite direction and covers
   every format: that one is about a shortcut *the archive asks this app to create*, and an archive-supplied
   shortcut pointing outside the extraction folder is refused for ZIP and TAR alike. This bullet is about a
   shortcut that was in your destination folder before the extraction started.
+- **A shortcut *inside* an archive is now created as a real shortcut, not as a text file.** A ZIP can
+  carry an entry that is a shortcut rather than a file. Extracting one through the Extract buttons used
+  to leave you an ordinary file whose contents were the shortcut's target path — harmless, but not what
+  the archive said. It is now created as a real shortcut (subject to the "points outside the folder you
+  chose" refusal above). On **Windows**, creating shortcuts needs administrator rights or Developer Mode;
+  without either, that one entry is skipped and listed in the operations panel, and the rest of the
+  archive still extracts.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
   decompression verification, and the verification time/byte caps are all fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —

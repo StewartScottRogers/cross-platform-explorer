@@ -238,23 +238,24 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // | 13| `extract_archive` (`.gz` branch)           | `File::create`   | **user-named dir** + stem of the archive name| link |
 // | 14| `extract_archive_streamed` (`.gz` branch)  | `File::create`   | **user-named dir** + stem of the archive name| link |
 // | 15| `extract_zip_encrypted`                    | `File::create`   | **archive-controlled** name under user dir   | leaf link + **per-component containment** (skip) + `entry_name_is_safe` |
-// | 16| `extract_zip_archive_stream`               | `File::create`   | **archive-controlled** name under user dir   | leaf link + **per-component containment** (skip, recorded) + `entry_name_is_safe` |
+// | 16| `extract_zip_archive_stream`               | `File::create`/`symlink` | **archive-controlled** name under user dir   | leaf link + **per-component containment** + **link-target containment** (skip, recorded) + `entry_name_is_safe` |
 // | 17| the four extraction `dest` roots           | `create_dir_all` | **user-named dir**                           | none (a live link is followed on purpose) — wording only, see below |
 // | 18| the four per-entry `create_dir_all(&out)` / `(parent)` inside rows 15–16's loops | `create_dir_all` | **archive-controlled** dir name under user dir | **per-component containment** (skip) |
 // | 19| `extract_7z_safe`'s callback                | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** (skip) + `entry_name_is_safe` |
 // | 20| `extract_7z_stream`'s callback              | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** (skip, recorded) + `entry_name_is_safe` |
-// | 21| `tar_unpack`                                | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + **link-target containment** (skip, silent) |
-// | 22| `extract_tar_stream`                        | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + **link-target containment** (skip, recorded) |
-// | 23| `extract_archive`'s zip fallback (`ZipArchive::extract`) | `File::create`/`symlink` **inside `zip`** | **archive-controlled** name under user dir | **link-target containment** pre-pass (abort) |
+// | 21| `tar_unpack`                                | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + leaf link + **per-component containment** + **link-target containment** (both link kinds) (skip, silent) |
+// | 22| `extract_tar_stream`                        | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + leaf link + **per-component containment** + **link-target containment** (both link kinds) (skip, recorded) |
+// | 23| `extract_archive`'s zip branch              | *row 16's loop* | **archive-controlled** name under user dir | row 16's, exactly — this row no longer has an extractor of its own (CPE-1759) |
 //
 // **Rows 21–23 are CPE-1773 + CPE-1774, and the table itself is why they were missing.** The version of
 // this table CPE-1733 wrote listed `entry_name_is_safe` as the guard for rows 15/16 and 19/20 and named
 // **no tar row at all** — so CPE-1758, whose scope came from this table, closed the ADS/reserved-name
 // hole at four sinks and left it wide open for a whole archive family, on the path the right-click
 // → Extract button actually uses. A sink omitted from the inventory is a sink nobody is scheduled to
-// guard, which is the same lesson as the unpinned-prose one below, one level up. They own no
-// `File::create` in this file for rows 19–20's reason: the write is `tar`'s `Entry::unpack_in` and
-// `zip`'s `ZipArchive::extract`, and the guard is a check *before* handing the entry over.
+// guard, which is the same lesson as the unpinned-prose one below, one level up. Rows 21–22 own no
+// `File::create` in this file for rows 19–20's reason: the write is `tar`'s `Entry::unpack_in`, and the
+// guard is a check *before* handing the entry over. **Row 23 no longer owns an extractor at all**
+// (CPE-1759): its write is row 16's, because that is now the loop it calls.
 //
 // **Rows 21–23 are also the first rows guarding a destination that is not a path at all.** A zip or tar
 // entry can declare itself a **symlink**, and its stored bytes are the link's *target*. Every guard
@@ -276,8 +277,9 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // user-named `dest`, and shares row 17's wording guard via `extraction_dest_error`), plus row 1's two
 // exclusive `fs::create_dir`s (the session root, then the per-extraction
 // directory inside it). Rows 2–16 are the 13 `File::create` calls, the 1
-// `fs::write` and the 1 `create_new`. Rows 21–23 add no `File::create` of their own (the writes are
-// `tar`'s and `zip`'s), so the `File::create` count is unchanged by CPE-1773/1774.
+// `fs::write` and the 1 `create_new`. Rows 21–23 add no `File::create` of their own (row 21–22's write
+// is `tar`'s; row 23's is row 16's), so the `File::create` count is unchanged by CPE-1773/1774/1759 —
+// re-counted after CPE-1759 rather than assumed: 11, 13, 2, as above.
 // Row 18 was missing from the first version of this table, which
 // billed itself as the inventory — the count line exists so the next reader can check that claim in one
 // subtraction instead of trusting it (PR #906 review).
@@ -437,13 +439,24 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // outside `dest` on the way to being refused. Pinned by
 // `rows_15_to_20_refuse_an_entry_addressed_through_a_symlinked_intermediate_directory`.
 //
-// **The two paths that already refused are recorded, not adopted.** `tar` and the zip crate's one-shot
-// `extract` both abort the whole run rather than skipping the entry — safe, and the opposite of the
-// skip-and-keep-going contract rows 15–20 have. That divergence is the same one the link case has, and it
-// is left where it was for the reasons under "the three extractors" below. (CPE-1773 narrowed this by one
-// case: an entry `tar` refuses for our *name* rules is now skipped by rows 21–22 before `unpack_in` sees
-// it, so a `nul` entry no longer takes the rest of the archive down with it. What `unpack_in` itself
-// aborts on — a *containment* failure it detects internally — still aborts, and that half is CPE-1759's.)
+// **The two paths that already refused have now been adopted, not merely recorded — CPE-1759.** `tar`
+// and the zip crate's one-shot `extract` both aborted the whole run rather than skipping the entry:
+// safe-sounding, and the opposite of the skip-and-keep-going contract rows 15–20 have. For tar,
+// [`entry_sink_action`]/[`entry_dir_action`] answer the containment question *before* `unpack_in`
+// reaches its own internal `validate_inside_dst`, and [`hard_link_target_action`] answers the hard-link
+// one before `unpack_in`'s, converting both aborts into counted skips without changing either verdict
+// (`unpack_in`'s checks stay as the belt behind them). For zip, row 23 stopped being an extractor at all
+// and became a call into row 16's loop.
+//
+// **The line this table now draws, stated so it can be checked rather than assumed: a REFUSAL skips; a
+// FAILURE aborts.** A refusal is a per-entry decision this module makes and can repeat — an unsafe name,
+// a link at the slot, an escaping destination, an escaping link target, a link this platform will not
+// create. A failure is the write itself not working: `File::create`, `io::copy`, `fs::hard_link`, an
+// unreadable slot ([`EntrySlotAction::Abort`]). Failures abort at every row, including the ones this
+// ticket touched — measured and pinned rather than left implied: a tar hard link whose target is simply
+// missing still takes the run down (`cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails`).
+// The one judgement call is the missing-symlink-privilege case, which is filed as a *refusal* because it
+// is a standing property of the machine rather than an incident — see [`link_creation_refusal`].
 //
 // ## The three extractors that are NOT our write loop — measured one at a time, because they differ
 //
@@ -466,11 +479,19 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // extraction — but neither has to. `tar`'s per-entry unit, `Entry::unpack_in`, is public and is what
 // `Archive::unpack` calls in a loop, so rows 21–22 own the loop and ask before handing each entry over
 // (`tar_unpack` reproduces `_unpack`'s directory-deferral pass verbatim so nothing else moves; see its
-// doc). `zip`'s `ZipArchive::extract` genuinely has no unit to borrow, so row 23 is a **pre-pass** over
-// the central directory instead — enough for the link-target question, which can be answered from the
-// entry list alone. "Reimplementing the extractor" was the right cost estimate for one of the two and
-// too high for the other, and the difference is worth naming: what mattered was not whether the write is
-// in another crate but whether that crate exposes the entry before it writes.
+// doc). `zip`'s `ZipArchive::extract` genuinely has no unit to borrow, so CPE-1774 made row 23 a
+// **pre-pass** over the central directory instead — enough for the link-target question, which can be
+// answered from the entry list alone, but able only to abort.
+//
+// **CPE-1759 removed that last asymmetry by removing the extractor.** Row 23 no longer calls
+// `ZipArchive::extract` at all: it calls row 16's loop, which this module already owns entry by entry.
+// The pre-pass is gone, and with it the "answerable from the entry list alone" constraint that shaped
+// it. What kept that from being an option for CPE-1774 was the two capabilities the crate's extractor
+// had and our loop did not — unix permission bits and real symlink entries — and CPE-1759 implemented
+// both here rather than trading them away (see [`create_entry_symlink`]). So the honest generalisation
+// is one step further on again: what mattered was not whether the write is in another crate, nor even
+// whether that crate exposes the entry before it writes, but whether we were willing to own everything
+// that crate's extractor did for us.
 //
 // **An earlier version of this comment said a pre-existing link in the destination "is therefore still
 // followed on the tar, 7z and one-shot-zip paths". That is false for two of the three, and the UAT for
@@ -490,33 +511,48 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //
 // So, one behaviour each:
 //
-// - **tar does not follow — it *destroys*.** It unlinks the symlink and writes a regular file in its
-//   place. The victim's bytes are safe; the user's link is gone, silently, with the call reporting
-//   success. That is a genuine hazard of a **different shape** to the one this ticket guards, and it was
-//   recorded nowhere until the UAT measured it. Tracked in **CPE-1759**.
+// - **tar did not follow — it *destroyed*. FIXED by CPE-1759 (rows 21–22).** "Destroyed" is precise, and
+//   which of its two possible meanings applied decided the fix: `tar-0.4.46/src/entry.rs:644-662` opens
+//   the destination with `create_new(true)` and, on the `AlreadyExists` a symlink at that name produces,
+//   calls `fs::remove_file(dst)` and retries. `remove_file` does not follow a symlink on any supported
+//   platform, so it **unlinked the user's link and wrote a regular file in its place**; it never wrote
+//   *through* it (the crate's own comment there — "Ensure we write a new file rather than overwriting
+//   in-place which is attackable" — is why the victim's bytes were always safe). What the user lost was
+//   the link, silently, with the call returning `Ok`. Both tar sinks now ask [`entry_sink_action`] before
+//   handing the entry to `unpack_in`, so the same input gives rows 15–20's answer: the entry is skipped
+//   (recorded on the streamed path), and the link and its target are untouched.
 //
-//   **CPE-1744 looked at closing it and did not.** The streamed path has a per-entry hook (`unpack_in`)
-//   and would take the guard in five lines, but the one-shot path is `Archive::unpack`, which has none —
-//   so guarding only the live path would *manufacture* a fresh one-shot/streamed divergence to fix the
-//   one below, and guarding both means reimplementing `unpack` (including the directory-mtime pass it
-//   does after the entry loop) or sweeping `dest` before handing off. Which of those is right is a
-//   design decision the ticket itself flagged as needing confirmation, and it is not the same decision as
-//   the containment guard, so it moved out whole rather than being half-shipped.
-// - **one-shot zip does not follow either — it aborts the whole extraction**, and nothing is extracted,
-//   not even the entries that were fine. Safe, but it also means the one-shot and streamed ZIP paths
-//   behave **oppositely** on the same input (streamed skips the entry and extracts the rest: `done: 1`,
-//   `b.txt extracted = true`). Two shipped paths, one documented behaviour. Tracked in **CPE-1759**.
+//   **CPE-1744 looked at closing it and did not**, on the grounds that the one-shot path was
+//   `Archive::unpack`, which has no per-entry hook, so a half-fix would manufacture a fresh divergence.
+//   That obstacle was removed by CPE-1773, which owns the one-shot loop as [`tar_unpack`] for its own
+//   reasons; the guard then went in at the one place both sinks already share ([`tar_entry_refusal`]),
+//   which is why this closed as five lines rather than as the `unpack` reimplementation CPE-1744 priced.
+// - **one-shot zip did not follow either — it aborted the whole extraction. FIXED by CPE-1759 (row 23),
+//   in the skip direction.** That branch handed its entry loop to `zip::ZipArchive::extract`; it now runs
+//   [`extract_zip_archive_stream`], the same loop the streamed path uses. The decision, and the three
+//   reasons behind it, are on [`extract_archive`]. The one worth repeating here, because it corrects a
+//   claim this comment used to make:
 //
-//   **CPE-1744 decided to record this rather than close it, and the reason is a measurement it added.**
-//   Aligning the two means routing `extract_archive`'s zip branch through `extract_zip_archive_stream`,
-//   because the alignment cannot go the other way (the crate's `extract` has no progress or cancel hook).
-//   But `zip::ZipArchive::extract` is **not** a plain loop over our loop's work: it restores unix
-//   permission bits and materialises a stored symlink entry as a real symlink, neither of which this
-//   module's loop does. So "align them" is not a no-op refactor — it silently downgrades the *more*
-//   capable path, on a general file explorer, to fix a divergence that currently fails **safe** (nothing
-//   is written outside; the user gets a clear error and can retry into an empty folder). Recording the
-//   extra reason is the change CPE-1744 made here; the alignment itself, and whichever of the two
-//   behaviours wins, is CPE-1759.
+//   **"nothing is written outside; the user gets a clear error and can retry into an empty folder" was
+//   false**, and it survived two tickets because every measurement behind it used an archive poisoned at
+//   entry 0. `zip-2.4.2`'s `extract_internal` (`src/read.rs:897`) is a plain `for` loop with `?`, so the
+//   refusal fires mid-loop. Re-measured with the poison second of three:
+//
+//   ```text
+//   [M1] outcome                          = Err("invalid Zip archive: Invalid symlink target path")
+//   [M1] a.txt (BEFORE the poison) exists = true
+//   [M1] c.txt (AFTER  the poison) exists = false
+//   ```
+//
+//   A half-extraction *and* an error naming neither half. Abort was never the atomic option, so the
+//   choice was between "partial, with an error" and "complete-but-one, with a refusal".
+//
+//   **And the downgrade CPE-1744 priced the merge at is gone rather than accepted.** Its objection was
+//   real — the crate's `extract` restores unix permission bits and materialises symlink entries, and our
+//   loop did neither, measured here as `[M4] good_link is symlink = Ok(false) content = Ok("ok.txt")`,
+//   a *legitimate* internal link arriving as a file containing its own target's name, on the shipping
+//   streamed path. Both capabilities now live in [`extract_zip_archive_stream`], so the merge moved them
+//   **up** to the streamed path instead of down from the one-shot one.
 // - **7z followed, and it was the live one — FIXED by CPE-1746 (rows 19–20).** `extract_archive_streamed`
 //   routes `.7z` to `extract_7z_stream`, which is what `start_archive_extract` calls, so the figures above
 //   (`Ok`, `errors: []`, victim reading `"ARCHIVED A"`) were what the shipping UI did. Both 7z callbacks
@@ -531,13 +567,15 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //                                      victim = "VICTIM ORIGINAL"   slot is link = true
 //   ```
 //
-// **All four behaviours above are pinned by tests**, one per extractor:
-// `tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it` (both tar paths),
-// `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` and — since CPE-1746 —
-// `rows_19_and_20_sevenz_refuse_a_link_at_an_entry_name_and_still_extract_the_rest`, which is the
-// re-pointed `sevenz_extraction_still_writes_through_a_link_until_cpe_1746`. It was written to go red the
-// moment this guard landed, and it did; it now asserts the refusal on both 7z paths and both link kinds
-// instead of the hazard.
+// **All four behaviours above are pinned by tests**, one per extractor —
+// `rows_21_and_22_tar_refuse_a_link_at_an_entry_name_and_still_extract_the_rest`,
+// `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically` and
+// `rows_19_and_20_sevenz_refuse_a_link_at_an_entry_name_and_still_extract_the_rest` — and **all three
+// are re-pointed characterization tests that pinned the hazard first**. Each was written to go red the
+// moment its guard landed, each did, and each now asserts the refusal instead of the defect. That is the
+// whole argument for pinning behaviour you consider wrong, run three times: the sentence these
+// paragraphs replaced was prose, unpinned, and wrong in two of the three cases it described, and it
+// survived four commits into the user-facing docs.
 //
 // An earlier round of this comment declined to pin them, on the grounds that pinning behaviour we
 // consider wrong makes it harder to change. That argument does not survive what happened here: the
@@ -823,38 +861,77 @@ fn link_target_action(dest: &Path, out: &Path, target: &Path) -> EntrySlotAction
     }
 }
 
-/// Where `zip-2.4.2`'s `ZipArchive::extract` will actually put entry `name` under `dest` — a mirror of
-/// its private `crate::path::simplified_components`, so [`refuse_escaping_zip_symlinks`] measures a link
-/// entry's target from the directory the crate will really create the link in (see
-/// [`link_target_action`] for what going wrong here costs).
+/// Materialise the OS symlink a ZIP symlink entry asks for (CPE-1759).
 ///
-/// `None` means the crate's own `safe_prepare_path` would reject this name outright (a drive prefix, a
-/// root, or a `..` that pops above the entry's own components) — the caller refuses rather than guessing.
+/// This is the capability [`extract_zip_archive_stream`] was missing, and the reason CPE-1744 recorded
+/// that routing the one-shot path through that loop would "silently downgrade the more capable path".
+/// Measured on this branch before the fix, a zip carrying a **legitimate internal** link entry
+/// `good_link -> ok.txt`, extracted through the streamed loop:
 ///
-/// **The `..` case counts depth instead of calling `PathBuf::pop`.** `simplified_components` pops a
-/// `Vec` of the *entry's* components and fails when that vec is empty; popping a `PathBuf` already
-/// rooted at `dest` would instead walk silently **out of `dest`** and hand a plausible-looking path back.
-/// That is the same class of off-by-one-directory bug this whole function exists to close, so the
-/// counter fails closed where `pop()` would fail open.
-fn zip_entry_out(dest: &Path, name: &str) -> Option<PathBuf> {
-    use std::path::Component;
-    let mut out = dest.to_path_buf();
-    let mut depth = 0usize;
-    for c in Path::new(name).components() {
-        match c {
-            Component::Prefix(_) | Component::RootDir => return None,
-            Component::ParentDir => {
-                depth = depth.checked_sub(1)?;
-                out.pop();
-            }
-            Component::Normal(s) => {
-                depth += 1;
-                out.push(s);
-            }
-            Component::CurDir => {}
-        }
+/// ```text
+/// [M4] good_link is symlink = Ok(false)   content = Ok("ok.txt")
+/// ```
+///
+/// A file whose bytes are the target's *name* — not a link, and not the archive's content either. So the
+/// downgrade was real, and it was already shipping: this loop is what `start_archive_extract` uses. It is
+/// fixed here rather than worked around, which is also what lets [`extract_archive`]'s zip branch adopt
+/// the same loop without losing anything.
+///
+/// **Deliberately mirrors `zip-2.4.2`'s `read::make_symlink` on the two platforms that have links**, with
+/// one correction: for the `symlink_dir`/`symlink_file` choice Windows needs, the crate probes
+/// `fs::metadata(target)` on the **raw, still-relative** target, which resolves against the *process's*
+/// working directory rather than the link's own. This resolves it against `out.parent()`, which is where
+/// the OS will resolve it from. Getting it wrong is not a safety question (containment is
+/// [`link_target_action`]'s, already answered before this is called) — it picks the wrong link *flavour*,
+/// which on Windows means a directory link that does not behave like one.
+///
+/// **A platform that refuses to create the link is a SKIP, never an abort** — see the call site. The
+/// common case is not exotic: `symlink_file` on Windows needs `SeCreateSymbolicLinkPrivilege`
+/// (administrator, or Developer Mode), so an ordinary user extracting a zip authored on macOS/Linux meets
+/// it. The `not(any(unix, windows))` arm returns `Unsupported` rather than copying the crate's
+/// write-the-target-as-a-file fallback, because that fallback is precisely the defect measured above; no
+/// CI leg compiles it (the matrix is Linux/macOS/Windows).
+#[cfg(unix)]
+fn create_entry_symlink(out: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, out)
+}
+
+#[cfg(windows)]
+fn create_entry_symlink(out: &Path, target: &Path) -> std::io::Result<()> {
+    let probe = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        out.parent().unwrap_or(Path::new(".")).join(target)
+    };
+    if fs::metadata(&probe).map(|m| m.is_dir()).unwrap_or(false) {
+        std::os::windows::fs::symlink_dir(target, out)
+    } else {
+        std::os::windows::fs::symlink_file(target, out)
     }
-    Some(out)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_entry_symlink(_out: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this platform has no symbolic links",
+    ))
+}
+
+/// The refusal for a link entry this platform would not let us create (CPE-1759) — in one place so the
+/// wording cannot drift, and phrased so the user can act on it.
+///
+/// It is a **skip**, not an abort, and not a silent write-something-else: on Windows the overwhelmingly
+/// common cause is the missing symlink privilege, which is a property of the *machine*, not of the
+/// archive, so taking the whole extraction down over it would deny an ordinary user every other entry
+/// in a source zip that happens to carry one link.
+fn link_creation_refusal(target: &Path, e: &std::io::Error) -> String {
+    format!(
+        "this entry is a link to \"{}\", and this system would not create it ({e}). On Windows that \
+         normally means symbolic links need administrator rights or Developer Mode. Skipped; the rest \
+         of the archive still extracts",
+        target.display()
+    )
 }
 
 /// Row 17: create an extraction's destination folder, and **say something true when that fails**
@@ -1968,12 +2045,33 @@ const UNSAFE_NAME_SKIP: &str = "unsafe entry name, skipped";
 ///    `done: 1`. `..evil`, `con`, `x.` and `x ` were written literally, and `nul` aborted the whole
 ///    extraction with a hard `Err`, taking every other entry with it. All six now answer as they do in
 ///    zip.
-/// 2. **If it is a link, does its target stay inside `dest`?** [`link_target_action`]. `unpack_in`
-///    canonicalisation-validates a **hard link**'s target (`tar-0.4.46/src/entry.rs`,
-///    `validate_inside_dst`) and does **not** validate a **symlink**'s: it calls `symlink(&src, dst)`
-///    with the raw bytes. Measured, not inferred — both tar paths created a real link reading a file
-///    outside the extraction folder (see [`link_target_action`]).
-/// 3. Anything else is written.
+/// 2. **Is something already sitting at that name, and is it a link?** [`entry_sink_action`] for a file
+///    entry, [`entry_dir_action`] for a directory one — the same pair rows 15/16/19/20 ask. **This is
+///    CPE-1759's half**, and it is the one question tar answers *destructively* rather than by following
+///    or refusing; see [`tar_unpack`] and the tar bullet in the section comment for what
+///    `tar-0.4.46/src/entry.rs:644-662` does and why the victim's bytes survive while the user's link
+///    does not.
+/// 3. **If it is a link, does its target stay inside `dest`?** [`link_target_action`] for a symlink,
+///    [`hard_link_target_action`] for a hard link — two functions because the crate resolves the two
+///    targets against different bases. `unpack_in` calls `symlink(&src, dst)` with the raw bytes and
+///    validates nothing (measured, not inferred: both tar paths created a real link reading a file
+///    outside the extraction folder — see [`link_target_action`]); it *does*
+///    canonicalisation-validate a hard link's, but by **aborting the whole run**, which is the half
+///    CPE-1759 converted to a skip.
+/// 4. Anything else is written.
+///
+/// **Question 2 before question 3, and both after question 1** — the same order the ZIP loop uses, and
+/// load-bearing for the same reason [`entry_sink_action`]'s own two halves are ordered: a link already in
+/// the user's folder and a link the archive is asking us to create are different hazards with different
+/// remedies, and each must stay reported as itself so a mutation of either guard turns a *distinct* test
+/// red.
+///
+/// **Question 2's containment half overlaps a check `unpack_in` also makes, and that is the point.**
+/// `validate_inside_dst` already refuses an entry addressed through a symlinked intermediate directory —
+/// but it refuses it as an `io::Error`, which both tar sinks propagate with `?`, taking the whole archive
+/// down. Asking [`entry_sink_action`] first converts that abort into a counted skip without changing the
+/// verdict, which is the same alignment CPE-1759 makes for zip. `unpack_in`'s check stays as the belt
+/// behind it.
 ///
 /// **An unreadable entry path fails closed.** The callers pass what `entry.path()` gave them, and its
 /// failure case is the empty string; `entry_name_is_safe("")` is `false`, so such an entry is skipped
@@ -1982,18 +2080,99 @@ const UNSAFE_NAME_SKIP: &str = "unsafe entry name, skipped";
 /// **`dest.join(name)` — with no `\`-to-`/` normalisation.** That normalisation was a live escape on
 /// POSIX; the measurement and the reasoning are on [`link_target_action`]. This is also exactly what the
 /// sibling ZIP loop ([`extract_zip_archive_stream`]) already does for its own `out`.
-fn tar_entry_refusal(dest: &Path, name: &str, link_target: Option<&Path>) -> Option<String> {
+fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> Option<String> {
     if !entry_name_is_safe(name) {
         return Some(UNSAFE_NAME_SKIP.to_string());
     }
-    let target = link_target?;
+    let out = dest.join(name);
+    let slot = match kind {
+        TarEntryKind::Directory => entry_dir_action(dest, &out),
+        _ => entry_sink_action(dest, &out),
+    };
+    match slot {
+        EntrySlotAction::Write => {}
+        // Both arms skip here, unlike rows 15/16 where `Abort` means "an I/O failure we must not report
+        // as success". These two sinks have the same reason to skip an unreadable slot that they have to
+        // skip a readable link: `unpack_in` owns the write, so handing it a slot we could not classify is
+        // the one thing we must not do, and the alternative — aborting — is precisely the behaviour this
+        // ticket is removing from the zip branch. It is recorded either way on the streamed path.
+        EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => return Some(m),
+    }
+    let (target, decision) = match kind {
+        TarEntryKind::Symlink(t) => (t, link_target_action(dest, &out, t)),
+        // The base is `dest`, not the link's own parent, because that is what the crate resolves a hard
+        // link's target against: `unpack_in` passes the canonical destination root as `target_base` and
+        // computes `p.join(src)` (`tar-0.4.46/src/entry.rs:529-547`). A guard measuring from the wrong
+        // base is worth one `..` of real escape per level of disagreement — see [`link_target_action`]
+        // for the round of this that shipped a live hole.
+        TarEntryKind::HardLink(t) => (t, hard_link_target_action(dest, t)),
+        TarEntryKind::Directory | TarEntryKind::Other => return None,
+    };
     if target.as_os_str().is_empty() {
         return Some(EMPTY_LINK_SKIP.to_string());
     }
-    match link_target_action(dest, &dest.join(name), target) {
+    match decision {
         EntrySlotAction::Write => None,
         EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => Some(m),
     }
+}
+
+/// The containment decision for a **hard link** entry's target (CPE-1759).
+///
+/// CPE-1774 deliberately left hard links to `unpack_in`'s own `validate_inside_dst`, on the sound
+/// grounds that a second guard for one question is a liability. That reasoning was about *safety*, and
+/// it still holds — nothing escapes either way. It said nothing about *how* the refusal arrives, which is
+/// this ticket's question, and the answer was measured on both tar paths:
+///
+/// ```text
+/// [HL escaping streamed=false] outcome=Err("failed to unpack `…\dst\hard`")  ok.txt=false
+/// [HL escaping streamed=true ] outcome=Err("failed to unpack `…\dst\hard`")  ok.txt=false
+/// [HL absolute streamed=false] outcome=Err("failed to unpack `…\dst\hard`")  ok.txt=false
+/// [HL absolute streamed=true ] outcome=Err("failed to unpack `…\dst\hard`")  ok.txt=false
+/// ```
+///
+/// One hostile hard-link entry took the whole archive down, `ok.txt` included, with a message naming a
+/// path and no reason. Asking here first turns that into a counted skip with the same wording every other
+/// escaping link entry gets, and leaves `validate_inside_dst` in place as the belt behind it.
+///
+/// **`\`-to-`/` normalisation, over-broad on POSIX, for [`link_target_action`]'s reason** — a target
+/// literally named `..\secret` is a legal filename there and is refused. One-directional: a false
+/// refusal the user is told about, never a false permit.
+///
+/// **What this does NOT convert**, because it is a failure rather than a refusal: a hard link whose
+/// target simply is not there (measured — `[HL nonexistent-inside]` aborts both paths, and it is the
+/// same `Err` shape). `fs::hard_link` owns that write and there is no way to predict its outcome without
+/// attempting it, so it stays an abort, exactly like a `File::create` or `io::copy` failure at rows
+/// 15/16/19/20. The line this module draws is *refusals skip, failures abort* — not *nothing aborts*.
+fn hard_link_target_action(dest: &Path, target: &Path) -> EntrySlotAction {
+    let normalized = target.to_string_lossy().replace('\\', "/");
+    if crate::fsutil::confined_to(&dest.join(&normalized), dest) {
+        EntrySlotAction::Write
+    } else {
+        EntrySlotAction::Skip(escaping_link_target_message(dest, target))
+    }
+}
+
+/// What a tar entry is, as far as [`tar_entry_refusal`] needs to care: the three shapes that get three
+/// different questions asked of them.
+///
+/// Split out by CPE-1759, which needed the **directory/not-directory** distinction the previous
+/// `Option<&Path>` parameter could not carry: a link at a *directory* entry's name is `create_dir_all`
+/// redirection and only costs the user something when it redirects out of `dest` ([`entry_dir_action`]),
+/// while a link at a *file* entry's name is destroyed outright ([`entry_sink_action`]). Every other tar
+/// entry type — hard link, fifo, device node, and the unrecognised typeflags a POSIX implementation must
+/// treat as regular files — is `Other`, and gets the file treatment, because `unpack_in`'s
+/// unlink-and-replace runs for all of them.
+#[derive(Clone, Copy)]
+enum TarEntryKind<'a> {
+    Directory,
+    /// The declared link target — possibly empty, which [`tar_entry_refusal`] refuses; see
+    /// [`EMPTY_LINK_SKIP`].
+    Symlink(&'a Path),
+    /// Same, for a hard link. Separate from [`TarEntryKind::Symlink`] because the crate resolves the two
+    /// targets against **different bases** — see [`hard_link_target_action`].
+    HardLink(&'a Path),
+    Other,
 }
 
 /// The refusal for a link entry that declares no readable target (CPE-1774 review nit 4).
@@ -2011,18 +2190,35 @@ const EMPTY_LINK_SKIP: &str =
 
 /// The link target an entry would materialise, or `None` for an ordinary file/directory entry.
 ///
-/// **Symlinks only, deliberately.** A tar hard-link entry carries a target too, but `unpack_in` already
-/// canonicalisation-validates that one against `dst` before creating it (`validate_inside_dst`), so a
-/// second guard here would be two guards for one question — the same reasoning the section comment above
-/// applies to traversal. The symlink branch has no such check, which is why it is the one this returns.
+/// **Both link kinds, as of CPE-1759.** CPE-1774 returned symlinks only, because `unpack_in` already
+/// canonicalisation-validates a hard link's target (`validate_inside_dst`) and a second guard for one
+/// question is a liability. That reasoning was about *safety* and it still holds; what it did not cover
+/// is that `unpack_in` refuses by **aborting the run**, which is the divergence CPE-1759 exists to close.
+/// See [`hard_link_target_action`] for the measurement and for the base the two kinds differ on.
 ///
-/// A symlink entry whose link name cannot be read yields an **empty** target, which
-/// [`tar_entry_refusal`] refuses outright — see [`EMPTY_LINK_SKIP`].
+/// A link entry whose link name cannot be read yields an **empty** target, which [`tar_entry_refusal`]
+/// refuses outright — see [`EMPTY_LINK_SKIP`].
+///
+/// Returns an owned target rather than a [`TarEntryKind`] because the borrow has to outlive the `entry`
+/// borrow the callers still hold while unpacking; they build the `TarEntryKind` from it.
 fn tar_link_target<R: std::io::Read>(entry: &tar::Entry<'_, R>) -> Option<PathBuf> {
-    if !entry.header().entry_type().is_symlink() {
+    let kind = entry.header().entry_type();
+    if !kind.is_symlink() && !kind.is_hard_link() {
         return None;
     }
     Some(entry.link_name().ok().flatten().map(|p| p.into_owned()).unwrap_or_default())
+}
+
+/// [`TarEntryKind`] from the pieces both tar sinks already have to hand.
+fn tar_entry_kind<'a>(entry_type: tar::EntryType, link_target: Option<&'a Path>) -> TarEntryKind<'a> {
+    if entry_type.is_dir() {
+        return TarEntryKind::Directory;
+    }
+    match link_target {
+        Some(t) if entry_type.is_symlink() => TarEntryKind::Symlink(t),
+        Some(t) if entry_type.is_hard_link() => TarEntryKind::HardLink(t),
+        _ => TarEntryKind::Other,
+    }
 }
 
 /// Unpack a tar stream into `dest`, applying [`tar_entry_refusal`] to every entry (CPE-1773/1774).
@@ -2049,10 +2245,13 @@ fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-        if tar_entry_refusal(&root, &name, tar_link_target(&entry).as_deref()).is_some() {
+        let link = tar_link_target(&entry);
+        let entry_type = entry.header().entry_type();
+        let is_dir = entry_type.is_dir();
+        if tar_entry_refusal(&root, &name, tar_entry_kind(entry_type, link.as_deref())).is_some() {
             continue;
         }
-        if entry.header().entry_type().is_dir() {
+        if is_dir {
             directories.push(entry);
         } else {
             entry.unpack_in(&root).map_err(|e| e.to_string())?;
@@ -2248,8 +2447,56 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 /// Extract an archive into `dest`, which is created if missing (CPE-252). Dispatched by extension. Every
-/// format is guarded against zip-slip: zip via `enclosed_name`, tar via the crate's checked `unpack`, 7z
-/// via [`extract_7z_safe`].
+/// format is guarded against zip-slip via [`entry_name_is_safe`], applied by the loop each branch owns.
+///
+/// # CPE-1759 — abort vs skip, decided
+///
+/// Four of this function's five branches **skip** a refused entry and extract the rest. The zip branch
+/// **aborted** the whole run, because it handed the entry loop to `zip::ZipArchive::extract`. Same
+/// function, same call, opposite answers depending on which extension the user right-clicked. The
+/// decision is **skip**, and the zip branch now runs [`extract_zip_archive_stream`] — the loop its
+/// streamed sibling already used.
+///
+/// **Why skip, given abort is the safer-sounding one.** Three reasons, in the order they settled it:
+///
+/// 1. **Skip is this module's contract, and abort was one branch out of twenty-three.** Rows 15, 19 and
+///    21 of the table above are the other three one-shot sinks, and all three skip. Aligning the other
+///    way meant converting three shipping behaviours to abort to fix one divergence.
+/// 2. **Abort's only advantage turned out not to exist.** CPE-1744 recorded it as failing safe — "the
+///    user gets a clear error and can retry into an empty folder" — and the review of CPE-1773/1774
+///    confirmed an empty destination. Both observations came from a test archive whose *first* entry is
+///    the poisoned one. `zip-2.4.2`'s `extract_internal` (`src/read.rs:897`) is a plain `for` loop with
+///    `?` on `safe_prepare_path`, so the refusal fires **mid-loop**. Re-measured on this branch with the
+///    poisoned entry second of three:
+///
+///    ```text
+///    [M1] outcome                        = Err("invalid Zip archive: Invalid symlink target path")
+///    [M1] a.txt (BEFORE the poison) exists = true
+///    [M1] c.txt (AFTER  the poison) exists = false
+///    ```
+///
+///    A half-extraction *and* an error naming neither what landed nor what did not. The folder is empty
+///    only when the archive happens to be poisoned at entry 0. So the choice was never
+///    "atomic vs partial"; it was "partial with an error" vs "complete-but-one with a refusal".
+/// 3. **One hostile entry cannot be allowed to deny the other 499.** That was always skip's argument and
+///    CPE-1775 supplied its precondition on the streamed path by making refusals *counted*
+///    (`ArchiveReport::skipped`), not merely logged.
+///
+/// **What this does NOT fix, stated plainly rather than implied away.** This function returns
+/// `Result<String, String>`; it has nowhere to put a per-entry note, so its skips are **silent** — the
+/// same limitation rows 15, 19 and 21 already carry and the table above already records. Skip does not
+/// make the one-shot path *informative*; it makes it *consistent*, which is what the ticket asked for.
+/// The silence is a property of the signature, and `extract_archive` is a registered Tauri command with
+/// no Svelte caller (every user-facing extraction goes through [`extract_archive_streamed`], which does
+/// report), so changing the signature is a bindings change owed to whoever wires it up, not to this fix.
+/// After this change, whoever does wire it up gets **exactly** the streamed path's behaviour, which was
+/// the trap worth closing.
+///
+/// **And it is not the downgrade CPE-1744 measured it as.** That ticket declined the merge because
+/// `ZipArchive::extract` restores unix permission bits and materialises symlink entries while our loop
+/// did neither — true, and re-measured here (`[M4] good_link is symlink = Ok(false) content =
+/// Ok("ok.txt")`). Both now live in [`extract_zip_archive_stream`] (see [`create_entry_symlink`]), so
+/// the capability moved *up* to the streamed path rather than down from the one-shot one.
 pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
     // Row 17 of the CPE-1733 table — a folder the user pointed at, so a live link there is still followed
     // on purpose; CPE-1744 reworded only the dangling case (`extraction_dest_error`).
@@ -2280,78 +2527,14 @@ pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
     } else if lower.ends_with(".7z") {
         extract_7z_safe(Path::new(path), dest_path)?;
     } else {
-        // zip family: the crate's extractor guards against traversal via ZipFile::enclosed_name.
+        // zip family — **CPE-1759**: the same loop the streamed path uses, with a cancel flag that is
+        // never set and a progress sink that discards. See this function's doc for why skip won.
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-        refuse_escaping_zip_symlinks(&mut archive, dest_path)?;
-        archive.extract(dest_path).map_err(|e| e.to_string())?;
+        let never = AtomicBool::new(false);
+        extract_zip_archive_stream(&mut archive, dest_path, None, &never, &mut |_| {})?;
     }
     Ok(dest.to_string())
-}
-
-/// **The one-shot ZIP path's link-target guard** (CPE-1774) — a pre-pass, because `ZipArchive::extract`
-/// takes a destination and offers no per-entry hook at all.
-///
-/// This is the sink the Security Auditor demonstrated on. `zip-2.4.2`'s `extract_internal`
-/// (`src/read.rs:903`) reads a symlink entry's stored bytes as the target and calls `make_symlink`
-/// (`:451`), which goes straight to `std::os::unix::fs::symlink` / `symlink_file`/`symlink_dir` with **no
-/// traversal or canonicalisation check on the target whatsoever**. Its neighbouring `safe_prepare_path`
-/// guard is about the entry's *name* and about links already sitting in `dest`; nothing there looks at
-/// where a link the archive asks for would point. Measured on this branch before the fix, entry
-/// `evil_link` with target `../outside_secret.txt`:
-/// `is_symlink = Ok(true)`, `read_link = Ok("..\\outside_secret.txt")`,
-/// `read_to_string = Ok("SECRET")`.
-///
-/// # Why a pre-pass, and why it aborts rather than skipping
-///
-/// **Abort is this path's existing contract, not a new one.** `ZipArchive::extract` is all-or-nothing
-/// today — the section comment above records it aborting the whole run when an entry lands on a link,
-/// and CPE-1759 owns whether that should change. Refusing here in the same shape adds a guard without
-/// deciding CPE-1759's question, which is exactly what that ticket asked for. Skipping instead would
-/// mean routing this branch through `extract_zip_archive_stream`, and the section comment above records
-/// why that is not the no-op refactor it looks like (the crate's `extract` also restores unix permission
-/// bits and materialises *legitimate* links, neither of which our own loop does).
-///
-/// **A legitimate internal link still extracts**: only an entry whose target fails
-/// [`link_target_action`] is refused, and the whole archive is then left untouched rather than
-/// half-written.
-fn refuse_escaping_zip_symlinks(archive: &mut zip::ZipArchive<fs::File>, dest: &Path) -> Result<(), String> {
-    use std::io::Read;
-    // Which entries are links, decided WITHOUT building a decompressor per entry. `by_index_raw` answers
-    // `is_symlink()` from the header alone; `by_index` would set up a decoder for every ordinary file in
-    // the archive just to be told it is not a link, and would turn an unsupported-compression or
-    // encrypted entry into a hard error *earlier* than `extract` itself would have produced one — a
-    // pre-pass must not change which failures a caller sees, only add refusals of its own.
-    let mut links = Vec::new();
-    for i in 0..archive.len() {
-        let entry = archive.by_index_raw(i).map_err(|e| e.to_string())?;
-        if entry.is_symlink() {
-            links.push(i);
-        }
-    }
-    for i in links {
-        // The target is the entry's *content*, so this one does need decompressing.
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = entry.name().to_string();
-        let mut target = Vec::new();
-        entry.read_to_end(&mut target).map_err(|e| e.to_string())?;
-        let target = PathBuf::from(String::from_utf8_lossy(&target).into_owned());
-        // `zip_entry_out`, not `dest.join(name)`: the containment base has to be the directory the crate
-        // will really create the link in. See `link_target_action` for the escape that opened when this
-        // pre-normalised the name instead. `None` means the crate's own `safe_prepare_path` would reject
-        // the name outright, so there is no path to judge the target against — refuse rather than guess.
-        // It also removes a latent FALSE abort: `dest.join("a/../evil")`'s parent is `dest/a/..`, which
-        // `confined_to` refuses outright when `dest/a` does not exist, killing a legitimate one-shot run.
-        let Some(out) = zip_entry_out(dest, &name) else {
-            return Err(format!("{name}: this entry's path is not one that can be extracted safely"));
-        };
-        if let EntrySlotAction::Skip(reason) | EntrySlotAction::Abort(reason) =
-            link_target_action(dest, &out, &target)
-        {
-            return Err(format!("{name}: {reason}"));
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2667,9 +2850,26 @@ fn extract_zip_stream(
     extract_zip_archive_stream(&mut archive, dest, None, cancel, emit)
 }
 
-/// Shared zip-extraction loop for both the plain and password-protected streamed extractors: iterate
-/// entries, skip a zip-slip name, otherwise write it out, checking `cancel` and emitting progress
-/// between entries.
+/// Shared zip-extraction loop for **every** zip extraction in this module — the plain and
+/// password-protected streamed extractors, and (since CPE-1759) [`extract_archive`]'s one-shot zip
+/// branch. Iterate entries, skip a zip-slip name, otherwise write it out, checking `cancel` and emitting
+/// progress between entries.
+///
+/// # CPE-1759: this is now the only zip extractor, and why
+///
+/// `extract_archive` used to hand its zip branch to `zip::ZipArchive::extract`, which is all-or-nothing:
+/// one refused entry ended the run. Its streamed sibling skipped the entry and kept going. Two shipped
+/// paths, opposite answers to one input. CPE-1759 chose **skip**, and the decision is written up on
+/// [`extract_archive`]; the two capabilities CPE-1744 measured as blocking the merge — unix permission
+/// bits and real symlink entries — are implemented here rather than lost, so adopting this loop costs
+/// the one-shot path nothing and *gains* the streamed path both.
+///
+/// **Order of questions per entry**, unchanged for the first three and the same order every other sink in
+/// this module asks them in: the name ([`entry_name_is_safe`]), the slot
+/// ([`entry_sink_action`]/[`entry_dir_action`]), then — new here — the link *target*
+/// ([`link_target_action`]) for an entry that declares itself a link. Slot before target matters for the
+/// same reason it does at rows 15/16: a link already sitting at the name is a different hazard from a
+/// link the archive is asking us to create, and each stays reported as itself.
 fn extract_zip_archive_stream(
     archive: &mut zip::ZipArchive<fs::File>,
     dest: &Path,
@@ -2677,12 +2877,20 @@ fn extract_zip_archive_stream(
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
+    use std::io::Read;
     // Row 17 of the CPE-1733 table — a folder the user pointed at; still followed when it is a live link,
     // and CPE-1744 fixed only what a *dangling* one says (`extraction_dest_error`).
     fs::create_dir_all(dest).map_err(|e| extraction_dest_error(dest, &e))?;
     let total_items = archive.len() as u64;
     let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items, done_items: 0, current: String::new() };
     let mut report = ArchiveReport::default();
+    // The unix mode bits `zip::ZipArchive::extract` restores in a second pass, reproduced for the reason
+    // its directory-deferral twin is reproduced in `tar_unpack`: dropping it to unify the two paths would
+    // have been a silent permissions regression traded for a consistency fix. Deferred and applied
+    // parent-last for the crate's own reason — set a directory unwritable before its children are written
+    // and the children cannot be written.
+    #[cfg(unix)]
+    let mut modes: Vec<(PathBuf, u32)> = Vec::new();
     emit(&prog);
     for i in 0..archive.len() {
         if cancel.load(Ordering::Relaxed) {
@@ -2735,13 +2943,63 @@ fn extract_zip_archive_stream(
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
+            // Row 23 (CPE-1774), moved off the pre-pass and into the loop by CPE-1759: a zip entry can
+            // declare itself a symlink, and its stored bytes are the link's TARGET. Nothing above asks
+            // about that — `evil_link` is a perfectly ordinary entry name. This used to be answered by
+            // `refuse_escaping_zip_symlinks`, a pre-pass that could only abort; asked here it is a
+            // counted skip like every other refusal on this path, and it covers `extract_zip_encrypted`'s
+            // streamed twin too, which the pre-pass never ran for.
+            if entry.is_symlink() {
+                let mut target = Vec::new();
+                entry.read_to_end(&mut target).map_err(|e| e.to_string())?;
+                let target = PathBuf::from(String::from_utf8_lossy(&target).into_owned());
+                let refusal = if target.as_os_str().is_empty() {
+                    // `symlink("", …)` fails on every supported platform, so refusing costs no valid
+                    // archive anything — the same call `tar_entry_refusal` makes, see `EMPTY_LINK_SKIP`.
+                    Some(EMPTY_LINK_SKIP.to_string())
+                } else {
+                    match link_target_action(dest, &out, &target) {
+                        EntrySlotAction::Write => None,
+                        EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => Some(m),
+                    }
+                };
+                let refusal = match refusal {
+                    Some(m) => Some(m),
+                    // A machine that will not create links refuses the ENTRY, not the archive — see
+                    // `link_creation_refusal`.
+                    None => create_entry_symlink(&out, &target)
+                        .err()
+                        .map(|e| link_creation_refusal(&target, &e)),
+                };
+                match refusal {
+                    Some(m) => report.skip(&name, &m),
+                    None => report.done += 1,
+                }
+                prog.done_items += 1;
+                emit(&prog);
+                continue;
+            }
             let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
             prog.done_bytes += entry.size();
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                modes.push((out.clone(), mode));
+            }
             report.done += 1; // only files count toward "done" — a dir is a placeholder, not content
         }
         prog.done_items += 1;
         emit(&prog);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Children before parents, so a mode that makes a directory unwritable is applied last — the
+        // crate sorts by `Reverse(path)` for exactly this and a plain descending sort is the same order.
+        modes.sort_by(|a, b| b.0.cmp(&a.0));
+        for (path, mode) in modes {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+        }
     }
     prog.current.clear();
     emit(&prog);
@@ -2815,7 +3073,9 @@ fn extract_tar_stream<R: std::io::Read>(
         // CPE-1773/1774: the guard `unpack_in` does not have. Asked BEFORE the entry is handed over,
         // because `unpack_in` owns the write and there is no `File::create` here to intercept — see
         // [`tar_entry_refusal`] for the three questions and the measurements behind each.
-        if let Some(reason) = tar_entry_refusal(dest, &name, tar_link_target(&entry).as_deref()) {
+        let link = tar_link_target(&entry);
+        let entry_type = entry.header().entry_type();
+        if let Some(reason) = tar_entry_refusal(dest, &name, tar_entry_kind(entry_type, link.as_deref())) {
             report.skip(&name, &reason);
             // Counted as a done *item* so the progress bar still reaches its total — but only for a
             // non-directory entry, because [`tar_totals`] counts only those into `total_items` (unlike
@@ -5154,42 +5414,54 @@ mod tests {
         }
     }
 
-    /// **TAR does not follow a link at an entry's name — it DESTROYS it** (UAT finding 1).
+    /// **Rows 21–22: TAR no longer DESTROYS a link at an entry's name** (CPE-1759).
     ///
-    /// This module used to assert, in four places including the user-facing docs, that a pre-existing link
-    /// in the destination "is therefore still followed on the tar, 7z and one-shot-zip paths". That was an
-    /// inference from "we do not guard it", it was never measured, and it is false for two of the three.
-    /// The correction is written up in the section comment; this is the leg that keeps it true. A prose
-    /// correction is exactly as unpinned as the prose it corrected.
+    /// This is the re-pointed `tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it`,
+    /// which pinned the hazard precisely so the fix would announce itself — and it did, on the
+    /// "the slot must be a regular file" assertion, on both legs.
     ///
-    /// **This is a characterization test, not an endorsement.** `tar`'s `Archive::unpack` creates the file
-    /// inside the `tar` crate, so this module has no create site here to guard; the behaviour recorded is
-    /// the crate's: it unlinks the symlink and writes a regular file in its place, silently, returning
-    /// `Ok`. The victim's bytes survive — the *user's link* is what is gone. Tracked as **CPE-1759**; when
-    /// that lands this test is what tells you the behaviour moved, and its message says so.
+    /// **What the old behaviour was, mechanically**, because "destroys" is vague and the two things it
+    /// could mean call for different fixes: `tar-0.4.46/src/entry.rs:644-662` opens the destination with
+    /// `create_new(true)`, and on `AlreadyExists` — which a symlink at that name produces — calls
+    /// `fs::remove_file(dst)` and retries. `remove_file` does not follow a symlink on any supported
+    /// platform, so it **unlinks the user's link and writes a regular file in its place**. It never wrote
+    /// *through* the link; the crate's own comment ("Ensure we write a new file rather than overwriting
+    /// in-place which is attackable") says so. The victim's bytes were always safe. What was lost was the
+    /// link — silently, with the call returning `Ok`, which is why nothing in the app could report it.
     ///
-    /// **Re-aimed by CPE-1744, which did NOT fix this** — the pointer moved so it does not name a closed
-    /// ticket. That ticket closed the *containment* gap (a symlinked intermediate directory), which tar
-    /// already refused on both paths (`"trying to unpack outside of destination path"`), so nothing here
-    /// changed and this test is expected to stay GREEN. Its reasoning for leaving the leaf-link case is on
-    /// the tar bullet in the section comment: the streamed path has a per-entry hook and the one-shot path
-    /// does not, so a half-fix would manufacture the very divergence
-    /// `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` records.
+    /// Rows 15/16/19/20 answer the same input by refusing the entry and leaving the link alone. Rows
+    /// 21–22 now do too, via `entry_sink_action` inside `tar_entry_refusal`.
+    ///
+    /// **Assertion order is deliberate**: the victim and the link are checked before the `Result` is
+    /// unwrapped, because the defect this replaces returned `Ok`.
     #[test]
-    fn tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it() {
-        type Run = fn(&Path, &Path) -> Result<(), String>;
-        let legs: &[(&str, Run)] = &[
-            ("one-shot extract_archive", |tgz: &Path, dest: &Path| {
-                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|_| ())
-            }),
-            ("extract_archive_streamed", |tgz: &Path, dest: &Path| {
-                let cancel = AtomicBool::new(false);
-                extract_archive_streamed(&tgz.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {}).map(|_| ())
-            }),
+    fn rows_21_and_22_tar_refuse_a_link_at_an_entry_name_and_still_extract_the_rest() {
+        // (label, runs it, does it have somewhere to record the skip?)
+        type Run = fn(&Path, &Path) -> Result<Vec<String>, String>;
+        let legs: &[(&str, Run, bool)] = &[
+            (
+                "row 21 one-shot extract_archive",
+                |tgz: &Path, dest: &Path| {
+                    extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new())
+                },
+                false, // predates `ArchiveReport`; the skip is silent, and the table says so
+            ),
+            (
+                "row 22 extract_archive_streamed",
+                |tgz: &Path, dest: &Path| {
+                    let cancel = AtomicBool::new(false);
+                    extract_archive_streamed(&tgz.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {})
+                        .map(|r| {
+                            assert_eq!(r.skipped, 1, "the refusal must be COUNTED, not merely logged (CPE-1775); got {r:?}");
+                            r.errors
+                        })
+                },
+                true,
+            ),
         ];
 
-        for (label, run) in legs {
-            let d = scratch("cpe1733_tar_link");
+        for (label, run, records) in legs {
+            let d = scratch("cpe1759_tar_link");
             let tgz = d.join("in.tar.gz");
             compress_to_targz(&two_source_files(&d), &tgz.to_string_lossy()).unwrap();
             let victim = d.join("victim-the-user-never-named.bin");
@@ -5199,8 +5471,8 @@ mod tests {
             let link = dest.join("a.txt");
             if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
                 crate::skip_notice!(
-                    "[CPE-1733] SKIPPED the tar leg ({label}): could not stage a live link at {}. The \
-                     recorded tar behaviour was NOT checked on this run.",
+                    "[CPE-1759] SKIPPED the tar leg ({label}): could not stage a live link at {}. The \
+                     tar leaf-link guard was NOT checked on this run.",
                     link.display()
                 );
                 let _ = fs::remove_dir_all(&d);
@@ -5209,105 +5481,280 @@ mod tests {
 
             let outcome = run(&tgz, &dest);
 
+            // ---- the harm, before the Result ----
             assert_eq!(
                 fs::read(&victim).unwrap(),
                 b"VICTIM ORIGINAL".to_vec(),
-                "tar ({label}): the entry's bytes went THROUGH the link. That is the behaviour this \
-                 module WRONGLY claimed before the CPE-1733 UAT measured it — if tar really has started \
-                 following links, the section comment above and src/docs/explorer-archives.md are now \
-                 wrong too (outcome was {outcome:?})"
+                "tar ({label}): the entry's bytes went THROUGH the link and truncated a file outside the \
+                 destination that nobody named (outcome was {outcome:?})"
             );
-            let slot = fs::symlink_metadata(&link).expect("tar leaves something at the entry's name");
             assert!(
-                !slot.file_type().is_symlink() && slot.is_file(),
-                "tar ({label}): the recorded behaviour is that the link is REPLACED by a regular file. \
-                 If the slot is a link again, tar now refuses or follows instead — either way this is the \
-                 CPE-1759 change and the three places describing tar need updating with it \
-                 (outcome was {outcome:?})"
+                fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "tar ({label}): the LINK ITSELF must survive. Before CPE-1759 this slot was a regular \
+                 file holding the entry's bytes — `tar` unlinked the user's link and replaced it, \
+                 silently, returning Ok. A guard that deleted the link and then skipped would pass the \
+                 victim assertion above, so this is the one that names the defect (outcome was {outcome:?})"
             );
             assert_eq!(
                 fs::read(&link).unwrap(),
-                b"ARCHIVED A".to_vec(),
-                "tar ({label}): and the regular file holds the ENTRY's bytes — the link is destroyed, not \
-                 merely detached"
+                b"VICTIM ORIGINAL".to_vec(),
+                "tar ({label}): and it must still point where the user pointed it — a link replaced by a \
+                 link would be just as much of a loss"
             );
-            outcome.unwrap_or_else(|e| panic!("tar ({label}): and it reports success while doing it: {e}"));
+
+            let errors = outcome.unwrap_or_else(|e| {
+                panic!("tar ({label}): one refused entry must not abort the run: {e}")
+            });
+            if *records {
+                assert!(
+                    errors.iter().any(|e| e.contains("a.txt") && e.contains("is a link")),
+                    "tar ({label}): the skip must be RECORDED, and recorded as OUR link refusal rather \
+                     than as whatever the OS or the tar crate happened to say — got {errors:?}"
+                );
+            }
             assert_eq!(
                 fs::read(dest.join("b.txt")).unwrap(),
                 b"ARCHIVED B".to_vec(),
-                "tar ({label}): the rest of the archive still extracts"
+                "tar ({label}): a refusal must cost ONE entry — the rest of the archive still extracts"
             );
             let _ = fs::remove_dir_all(&d);
         }
     }
 
-    /// **One-shot ZIP aborts the WHOLE extraction on a link in the destination — the streamed path skips
-    /// one entry** (UAT findings 1 and 2). Two shipped paths, opposite answers to the same input.
+    /// `src/a.txt` + `src/b.txt` + `src/c.txt`, in that archive order. **`b.txt` is the poisoned one, and
+    /// its position in the middle is the whole design** — see
+    /// `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically`.
+    fn three_source_files(d: &Path) -> Vec<String> {
+        let src = d.join("src");
+        fs::create_dir_all(&src).unwrap();
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(src.join(n), format!("ARCHIVED {n}").as_bytes()).unwrap();
+        }
+        ["a.txt", "b.txt", "c.txt"].iter().map(|n| src.join(n).to_string_lossy().to_string()).collect()
+    }
+
+    /// **CPE-1759: the one-shot and streamed ZIP paths now answer a link at an entry's name the same
+    /// way** — the re-pointed `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link`.
     ///
-    /// Safe, but not harmless: nothing lands at all, including the entries that were fine, and until the
-    /// UAT measured it `src/docs/explorer-archives.md` described only the streamed behaviour. Pinned here
-    /// because the divergence is the finding — a fix that aligned the two paths without touching the docs
-    /// would otherwise be invisible. Tracked as **CPE-1759**.
+    /// That test pinned the divergence: `extract_archive` handed its zip branch to
+    /// `zip::ZipArchive::extract`, which aborted the whole run, while `extract_archive_streamed` skipped
+    /// the entry and extracted the rest. Two shipped paths, opposite answers to one input.
     ///
-    /// `b.txt` is the whole point: it is what separates "skipped that entry" from "abandoned the run".
+    /// # Why the poisoned entry is `b.txt` and not `a.txt`
     ///
-    /// **Re-aimed by CPE-1744, which decided NOT to close this** — the pointer moved so it does not name a
-    /// closed ticket, and the decision is written up on the one-shot-zip bullet in the section comment.
-    /// The short version: alignment can only run one way (the crate's `extract` has no progress/cancel
-    /// hook, so the streamed loop would have to take over the one-shot path), and `zip::ZipArchive::extract`
-    /// also restores unix permission bits and materialises symlink entries, neither of which this module's
-    /// loop does — so "align them" downgrades the more capable path to fix a divergence that fails safe.
-    /// This test is expected to stay GREEN.
+    /// The old test staged the link at the archive's **first** entry, and that is why abort looked
+    /// atomic: CPE-1744 recorded it as "the user gets a clear error and can retry into an empty folder",
+    /// and the CPE-1773/1774 review confirmed the destination was empty. Both observations were true of
+    /// that archive and false in general. `zip-2.4.2`'s `extract_internal` (`src/read.rs:897`) is a plain
+    /// `for` loop with `?` on `safe_prepare_path`, so the refusal fires **mid-loop**. Measured on this
+    /// branch before the fix, three entries with the poison second:
+    ///
+    /// ```text
+    /// [M1] outcome                          = Err("invalid Zip archive: Invalid symlink target path")
+    /// [M1] a.txt (BEFORE the poison) exists = true
+    /// [M1] c.txt (AFTER  the poison) exists = false
+    /// ```
+    ///
+    /// A half-extraction *and* an error, with nothing saying which half. So the ordering is not cosmetic:
+    /// with the link at entry 0, a revert to abort still leaves an empty folder and a straightforward
+    /// `!exists` assertion could not tell "aborted" from "skipped and wrote nothing". Asserting that the
+    /// entry **after** the refusal also landed is what makes a revert red.
     #[test]
-    fn one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link() {
-        let d = scratch("cpe1733_zip_oneshot_link");
-        let zip = d.join("in.zip");
-        compress_to_zip(&two_source_files(&d), &zip.to_string_lossy()).unwrap();
-        let victim = d.join("victim-the-user-never-named.bin");
-        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+    fn one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically() {
+        // (label, runs it, does it have somewhere to record the skip?)
+        type Run = fn(&Path, &Path) -> Result<Vec<String>, String>;
+        let legs: &[(&str, Run, bool)] = &[
+            (
+                "one-shot extract_archive",
+                |zip: &Path, dest: &Path| {
+                    extract_archive(&zip.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new())
+                },
+                false,
+            ),
+            (
+                "extract_archive_streamed",
+                |zip: &Path, dest: &Path| {
+                    let cancel = AtomicBool::new(false);
+                    extract_archive_streamed(&zip.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {})
+                        .map(|r| {
+                            assert_eq!(r.skipped, 1, "one refusal, counted once (CPE-1775); got {r:?}");
+                            assert_eq!(r.done, 2, "and the other two entries written; got {r:?}");
+                            r.errors
+                        })
+                },
+                true,
+            ),
+        ];
+
+        for (label, run, records) in legs {
+            let d = scratch("cpe1759_zip_align");
+            let zip = d.join("in.zip");
+            compress_to_zip(&three_source_files(&d), &zip.to_string_lossy()).unwrap();
+            let victim = d.join("victim-the-user-never-named.bin");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+            let dest = d.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            let link = dest.join("b.txt");
+            if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
+                crate::skip_notice!(
+                    "[CPE-1759] SKIPPED the ZIP alignment leg ({label}): could not stage a live link at \
+                     {}. The one-shot/streamed alignment was NOT checked on this run.",
+                    link.display()
+                );
+                let _ = fs::remove_dir_all(&d);
+                return;
+            }
+
+            let outcome = run(&zip, &dest);
+
+            // ---- the harm, before the Result ----
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "zip ({label}): the entry's bytes went THROUGH the link (outcome was {outcome:?})"
+            );
+            assert!(
+                fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "zip ({label}): the link must survive untouched (outcome was {outcome:?})"
+            );
+
+            // ---- the alignment itself ----
+            let errors = outcome.unwrap_or_else(|e| {
+                panic!(
+                    "zip ({label}): one refused entry must not abort the run. This is the CPE-1759 \
+                     decision going backwards; before it, the one-shot leg returned exactly this: {e}"
+                )
+            });
+            assert_eq!(
+                fs::read(dest.join("a.txt")).unwrap(),
+                b"ARCHIVED a.txt".to_vec(),
+                "zip ({label}): the entry BEFORE the refusal must be on disk"
+            );
+            assert_eq!(
+                fs::read(dest.join("c.txt")).unwrap(),
+                b"ARCHIVED c.txt".to_vec(),
+                "zip ({label}): and so must the entry AFTER it. This is the assertion an abort fails: the \
+                 crate's loop refuses mid-iteration, so `a.txt` lands, `c.txt` does not, and the caller \
+                 gets an error that names neither"
+            );
+            if *records {
+                assert!(
+                    errors.iter().any(|e| e.contains("b.txt") && e.contains("is a link")),
+                    "zip ({label}): the skip must be recorded as OUR link refusal, not as whatever the \
+                     zip crate happened to say — an `is_err()`-shaped check here would stay green through \
+                     a disk-full or permission failure that proves nothing about links. Got {errors:?}"
+                );
+            }
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    /// **CPE-1759: a link entry the OS refuses to create is a counted skip, not an abort.**
+    ///
+    /// The branch this covers is not exotic. `extract_zip_archive_stream` now materialises a real symlink
+    /// for a symlink entry, and `std::os::windows::fs::symlink_file` needs
+    /// `SeCreateSymbolicLinkPrivilege` — administrator, or Developer Mode — so an ordinary Windows user
+    /// extracting a zip authored on macOS or Linux meets exactly this failure. Taking the whole archive
+    /// down over a property of the *machine* would be the abort behaviour this ticket removed, arriving
+    /// by a different door.
+    ///
+    /// **Staged portably by occupying the slot with a plain file** rather than by dropping privileges,
+    /// which no test can do here: `symlink`/`symlink_file` then fails `AlreadyExists` on every supported
+    /// platform, which is a real `create_entry_symlink` error reaching the real fallback. A plain file is
+    /// also a slot `entry_sink_action` deliberately allows through (it is not a link), so the refusal
+    /// under test is the one being staged and not the leaf-link guard firing early — asserted below.
+    #[test]
+    fn cpe1759_a_link_entry_this_system_will_not_create_is_a_counted_skip() {
+        let d = scratch("cpe1759_linkfail");
+        let ap = d.join("link.zip");
+        fs::write(&ap, craft_zip_with_symlink("good_link", "ok.txt")).unwrap();
         let dest = d.join("out");
         fs::create_dir_all(&dest).unwrap();
-        let link = dest.join("a.txt");
-        if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
-            crate::skip_notice!(
-                "[CPE-1733] SKIPPED the one-shot ZIP leg: could not stage a live link at {}. The \
-                 one-shot/streamed divergence was NOT checked on this run.",
-                link.display()
-            );
-            let _ = fs::remove_dir_all(&d);
-            return;
-        }
+        // Occupy the slot with an ordinary file, so creating the link cannot succeed.
+        fs::write(dest.join("good_link"), b"IN THE WAY").unwrap();
 
-        let outcome = extract_archive(&zip.to_string_lossy(), &dest.to_string_lossy());
+        let report = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("a link this system will not create must not abort the whole extraction");
 
         assert_eq!(
-            fs::read(&victim).unwrap(),
-            b"VICTIM ORIGINAL".to_vec(),
-            "one-shot zip: the entry's bytes went THROUGH the link (outcome was {outcome:?})"
+            fs::read(dest.join("good_link")).unwrap(),
+            b"IN THE WAY".to_vec(),
+            "the file already at the name must be left exactly as it was — neither replaced by a link \
+             nor overwritten with the link's target text"
         );
+        assert_eq!(
+            fs::read(dest.join("ok.txt")).unwrap(),
+            b"ORDINARY".to_vec(),
+            "and the rest of the archive still extracts — `ok.txt` sits after the link entry"
+        );
+        assert_eq!(report.skipped, 1, "the refusal must be counted (CPE-1775); got {report:?}");
         assert!(
-            !dest.join("b.txt").exists(),
-            "one-shot zip: the recorded behaviour is that NOTHING is extracted — b.txt appearing means the \
-             one-shot path now skips per-entry like the streamed one. That is the CPE-1759 alignment: \
-             update this test and the format bullet in src/docs/explorer-archives.md together \
-             (outcome was {outcome:?})"
-        );
-        let err = outcome.expect_err(
-            "one-shot zip: the recorded behaviour is a whole-run failure. An Ok here means the run \
-             succeeded while an entry aimed at a link — check what happened to the link before assuming \
-             this is an improvement",
-        );
-        assert!(
-            err.to_lowercase().contains("symlink"),
-            "one-shot zip: the abort must be the zip crate's symlink refusal, not any old I/O error — an \
-             `is_err()`-only assertion here would stay green through a disk-full or permission failure \
-             that proves nothing about links. Got: {err}"
-        );
-        assert!(
-            fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
-            "one-shot zip: and the link itself is untouched (unlike tar, which replaces it)"
+            report.errors.iter().any(|e| e.starts_with("good_link: ") && e.contains("would not create it")),
+            "and recorded as a LINK-CREATION refusal naming the entry — not as the leaf-link guard \
+             (\"is a link\"), which would mean this test staged the wrong condition, and not as a bare \
+             I/O string. Got {:?}",
+            report.errors
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1759: the unix mode bits `zip::ZipArchive::extract` restored, restored by our loop too.**
+    ///
+    /// This is the second of the two capabilities CPE-1744 measured as blocking the one-shot/streamed
+    /// merge (`create_entry_symlink` covers the first). Routing `extract_archive`'s zip branch through
+    /// the shared loop without this would have silently dropped the executable bit off every binary in
+    /// every zip — a downgrade traded for a consistency fix, which is exactly what CPE-1744 declined to
+    /// accept.
+    ///
+    /// `#[cfg(unix)]` because the bits do not exist on Windows, which means **only the Linux and macOS
+    /// legs of the CI matrix can confirm it**; a green local Windows run says nothing about this one.
+    #[cfg(unix)]
+    #[test]
+    fn cpe1759_zip_extraction_restores_unix_permission_bits_on_both_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        for leg in ["one-shot", "streamed"] {
+            let d = scratch("cpe1759_modes");
+            let ap = d.join("modes.zip");
+            {
+                let mut w = zip::ZipWriter::new(fs::File::create(&ap).unwrap());
+                let exec: zip::write::FileOptions<()> =
+                    zip::write::FileOptions::default().unix_permissions(0o755);
+                w.start_file("run.sh", exec).unwrap();
+                w.write_all(b"#!/bin/sh\n").unwrap();
+                let plain: zip::write::FileOptions<()> =
+                    zip::write::FileOptions::default().unix_permissions(0o600);
+                w.start_file("secret.txt", plain).unwrap();
+                w.write_all(b"shh").unwrap();
+                w.finish().unwrap();
+            }
+            let dest = d.join("out");
+            if leg == "one-shot" {
+                extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).unwrap();
+            } else {
+                extract_archive_streamed(
+                    &ap.to_string_lossy(),
+                    &dest.to_string_lossy(),
+                    &AtomicBool::new(false),
+                    |_| {},
+                )
+                .unwrap();
+            }
+            for (name, mode) in [("run.sh", 0o755u32), ("secret.txt", 0o600u32)] {
+                let got = fs::metadata(dest.join(name)).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    got, mode,
+                    "{leg}: {name} must come out {mode:o}, not {got:o}. Asserting the exact mode rather \
+                     than just the executable bit is what catches a pass that restores SOME mode: 0o600 \
+                     is the leg that fails if the umask, not the archive, decided the answer"
+                );
+            }
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -6207,8 +6654,29 @@ mod tests {
     /// ```
     ///
     /// A real OS link, in the user's folder, reading a file they never chose.
+    ///
+    /// **CPE-1759 moved this guard off the one-shot pre-pass and into the shared loop**, so the refusal
+    /// is now a counted **skip** on both zip paths instead of an abort on one — hence the streamed leg
+    /// (which the pre-pass never ran for at all, since it only sat in `extract_archive`) and the flipped
+    /// outcome expectation. The three harm assertions are unchanged: they are what this test is for.
     #[test]
     fn cpe1774_a_zip_symlink_entry_whose_target_escapes_creates_no_link() {
+        type Run = fn(&Path, &Path) -> Result<Option<ArchiveReport>, String>;
+        let legs: &[(&str, Run)] = &[
+            ("one-shot", |ap: &Path, dest: &Path| {
+                extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|_| None)
+            }),
+            ("streamed", |ap: &Path, dest: &Path| {
+                extract_archive_streamed(
+                    &ap.to_string_lossy(),
+                    &dest.to_string_lossy(),
+                    &AtomicBool::new(false),
+                    |_| {},
+                )
+                .map(Some)
+            }),
+        ];
+
         let d = scratch("cpe1774_zip");
         let outside = d.join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -6217,40 +6685,59 @@ mod tests {
         for (label, target) in cpe1774_escaping_targets(&outside) {
             let ap = d.join(format!("z_{label}.zip"));
             fs::write(&ap, craft_zip_with_symlink("evil_link", &target)).unwrap();
-            let dest = outside.join(format!("dest_{label}"));
 
-            let outcome = extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy());
+            for (leg, run) in legs {
+                let dest = outside.join(format!("dest_{label}_{leg}"));
 
-            // ---- the harm, before the Result ----
-            let leaf = dest.join("evil_link");
-            assert!(
-                !fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
-                "{label}: no LINK may exist at the entry's name. On main this was Ok(true) with \
-                 read_link = {:?}",
-                fs::read_link(&leaf)
-            );
-            assert!(
-                fs::read_to_string(&leaf).unwrap_or_default() != "SECRET",
-                "{label}: and reading the 'extracted file' must not return the victim's contents — that \
-                 is the measurement the auditor took, and it is the one that matters even if the link's \
-                 file type ever changes"
-            );
-            assert_eq!(
-                fs::read_to_string(outside.join("victim.txt")).unwrap(),
-                "SECRET",
-                "{label}: the victim itself must be untouched"
-            );
+                let outcome = run(&ap, &dest);
 
-            let err = outcome.expect_err(
-                "the one-shot zip path is all-or-nothing today (see the section comment); an escaping \
-                 link entry must refuse it, not extract half of it",
-            );
-            assert!(
-                err.contains("evil_link") && err.contains("outside the extraction folder"),
-                "{label}: the refusal must name the ENTRY and say the target left the folder — an \
-                 `is_err()` check here would stay green through a straight revert, because the crate \
-                 already errors on some malformed archives. Got: {err}"
-            );
+                // ---- the harm, before the Result ----
+                let leaf = dest.join("evil_link");
+                assert!(
+                    !fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                    "{label} {leg}: no LINK may exist at the entry's name. On main this was Ok(true) with \
+                     read_link = {:?}",
+                    fs::read_link(&leaf)
+                );
+                assert!(
+                    fs::read_to_string(&leaf).unwrap_or_default() != "SECRET",
+                    "{label} {leg}: and reading the 'extracted file' must not return the victim's \
+                     contents — that is the measurement the auditor took, and it is the one that matters \
+                     even if the link's file type ever changes"
+                );
+                assert_eq!(
+                    fs::read_to_string(outside.join("victim.txt")).unwrap(),
+                    "SECRET",
+                    "{label} {leg}: the victim itself must be untouched"
+                );
+
+                let report = outcome.unwrap_or_else(|e| {
+                    panic!(
+                        "{label} {leg}: a refused link entry is a SKIP on both zip paths as of CPE-1759, \
+                         never an abort: {e}"
+                    )
+                });
+                assert_eq!(
+                    fs::read(dest.join("ok.txt")).unwrap(),
+                    b"ORDINARY".to_vec(),
+                    "{label} {leg}: and the rest of the archive still extracts — `ok.txt` sits AFTER the \
+                     poisoned entry in this archive, so its absence is what an abort looks like"
+                );
+                if let Some(report) = report {
+                    assert_eq!(
+                        report.skipped, 1,
+                        "{label}: the streamed path must COUNT the refusal (CPE-1775); got {report:?}"
+                    );
+                    assert!(
+                        report.errors.iter().any(|e| {
+                            e.starts_with("evil_link: ") && e.contains("outside the extraction folder")
+                        }),
+                        "{label}: and record WHICH entry and WHY — an `is_err()`/`is_ok()` check would \
+                         stay green through a straight revert of the guard; got {:?}",
+                        report.errors
+                    );
+                }
+            }
         }
         let _ = fs::remove_dir_all(&d);
     }
@@ -6496,7 +6983,7 @@ mod tests {
         // One fewer stays inside it.
         let stays = format!("{}inside.txt", "../".repeat(depth - 1));
 
-        let refused = tar_entry_refusal(&dest, NAME, Some(Path::new(&escapes)));
+        let refused = tar_entry_refusal(&dest, NAME, TarEntryKind::Symlink(Path::new(&escapes)));
         assert!(
             refused.is_some(),
             "a target that escapes from where the extractor ACTUALLY creates the link must be refused. \
@@ -6509,34 +6996,13 @@ mod tests {
             "and refused as a link-target escape, not for some unrelated reason: {refused:?}"
         );
         assert_eq!(
-            tar_entry_refusal(&dest, NAME, Some(Path::new(&stays))),
+            tar_entry_refusal(&dest, NAME, TarEntryKind::Symlink(Path::new(&stays))),
             None,
             "...while one level less — still inside the extraction folder from that same real directory \
              — must still be allowed, or this guard has become blanket-refuse-everything and the \
              assertion above proves nothing. target={stays:?}"
         );
         let _ = fs::remove_dir_all(&d);
-    }
-
-    /// `zip_entry_out` mirrors `zip-2.4.2`'s private `simplified_components`, which is what decides where
-    /// `ZipArchive::extract` actually puts an entry.
-    #[test]
-    fn cpe1774_zip_entry_out_mirrors_the_crates_own_path_simplification() {
-        let dest = Path::new("/tmp/dest");
-        assert_eq!(zip_entry_out(dest, "a/b/x"), Some(dest.join("a").join("b").join("x")));
-        assert_eq!(zip_entry_out(dest, "./a/./x"), Some(dest.join("a").join("x")));
-        // A `..` that stays within the entry's own components pops, exactly as the crate's `Vec` does —
-        // and this is the case that used to make the pre-pass ABORT a legitimate archive, because
-        // `dest.join("a/../evil").parent()` is `dest/a/..`, which `confined_to` refuses when `dest/a`
-        // does not exist yet.
-        assert_eq!(zip_entry_out(dest, "a/../evil"), Some(dest.join("evil")));
-        // A `..` that would pop above them is what the crate rejects — and the counter must fail closed
-        // rather than letting `PathBuf::pop` walk out of `dest` and hand back a plausible-looking path.
-        assert_eq!(zip_entry_out(dest, "../evil"), None);
-        assert_eq!(zip_entry_out(dest, "a/../../evil"), None);
-        assert_eq!(zip_entry_out(dest, "/abs/evil"), None);
-        #[cfg(windows)]
-        assert_eq!(zip_entry_out(dest, "C:\\abs\\evil"), None);
     }
 
     /// **The end-to-end escape, through the real streamed path.** `#[cfg(unix)]` because Windows cannot
@@ -6669,6 +7135,141 @@ mod tests {
             "and say what was wrong with it in the user's terms; got {:?}",
             report.errors
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A tar carrying one **hard-link** entry `hard -> target`, plus the usual `ok.txt` bystander.
+    fn craft_tar_with_hard_link(target: &str) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Link);
+        h.set_link_name(target).unwrap();
+        h.set_cksum();
+        b.append_data(&mut h, "hard", std::io::empty()).unwrap();
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_size(8);
+        h2.set_mode(0o644);
+        h2.set_cksum();
+        b.append_data(&mut h2, "ok.txt", &b"ORDINARY"[..]).unwrap();
+        b.into_inner().unwrap()
+    }
+
+    /// **CPE-1759: an escaping HARD-link entry is a counted skip, not a dead run — and the line between
+    /// a refusal and a failure, pinned on both sides.**
+    ///
+    /// CPE-1774 left hard links to `unpack_in`'s own `validate_inside_dst`, correctly for *safety*
+    /// (nothing escapes either way) and silently on the question of *how the refusal arrives*. Measured
+    /// on both tar paths before this ticket:
+    ///
+    /// ```text
+    /// [HL escaping streamed=false] outcome=Err("failed to unpack `…\dst\hard`")  ok.txt=false
+    /// [HL escaping streamed=true ] outcome=Err("failed to unpack `…\dst\hard`")  ok.txt=false
+    /// ```
+    ///
+    /// One hostile entry, whole archive gone, `ok.txt` included, and a message naming a path and no
+    /// reason — the exact shape CPE-1759 removed from the zip branch, hiding in the tar one.
+    ///
+    /// **The third leg pins the residual rather than leaving it to prose.** A hard link whose target is
+    /// simply not there still aborts, because that is `fs::hard_link` *failing*, not a guard *refusing* —
+    /// unpredictable without attempting it, and the same treatment a `File::create` or `io::copy` failure
+    /// gets at rows 15/16/19/20. If someone later converts that to a skip, this leg says so out loud
+    /// instead of letting "refusals skip, failures abort" quietly stop being the rule.
+    #[test]
+    fn cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails() {
+        let d = scratch("cpe1759_hardlink");
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
+
+        // (label, target, is this a REFUSAL — skip — or a FAILURE — abort?)
+        //
+        // The absolute leg uses a SHORT absolute path rather than the scratch directory's own: a GNU tar
+        // header's link-name field is 100 bytes, and `set_link_name` on the real temp path failed with
+        // *"provided value is too long"* — but only when the suite ran in full, because the scratch
+        // counter suffix pushed it over. A test whose fixture depends on how many tests ran before it is
+        // not a test, so the length is taken out of the equation instead of being got away with.
+        let abs_outside = if cfg!(windows) { "C:\\cpe_victim.txt" } else { "/cpe_victim.txt" };
+        let cases: Vec<(&str, String, bool)> = vec![
+            ("relative-parent", format!("..{}victim.txt", std::path::MAIN_SEPARATOR), true),
+            ("absolute", abs_outside.to_string(), true),
+            ("missing-target-inside", "not_in_this_archive.txt".to_string(), false),
+        ];
+
+        for (label, target, refusal) in cases {
+            let ap = d.join(format!("h_{label}.tar"));
+            fs::write(&ap, craft_tar_with_hard_link(&target)).unwrap();
+
+            for streamed in [false, true] {
+                let dest = outside.join(format!("dst_{label}_{streamed}"));
+                let outcome: Result<Option<ArchiveReport>, String> = if streamed {
+                    extract_archive_streamed(
+                        &ap.to_string_lossy(),
+                        &dest.to_string_lossy(),
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
+                    .map(Some)
+                } else {
+                    extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|_| None)
+                };
+
+                // ---- the harm, before the Result, on every leg ----
+                assert_eq!(
+                    fs::read_to_string(outside.join("victim.txt")).unwrap(),
+                    "SECRET",
+                    "{label} streamed={streamed}: the victim must be untouched"
+                );
+                assert!(
+                    !dest.join("hard").exists(),
+                    "{label} streamed={streamed}: no link may be created at the entry's name"
+                );
+
+                if !refusal {
+                    let err = outcome.expect_err(
+                        "a hard link whose target does not exist is `fs::hard_link` FAILING, not a guard \
+                         refusing — it stays an abort, like every other I/O failure in these loops. An \
+                         Ok here means that line moved and the section comment's \"refusals skip, \
+                         failures abort\" needs rewriting with it",
+                    );
+                    assert!(
+                        err.contains("hard"),
+                        "{label} streamed={streamed}: and the failure must name the entry it failed on, \
+                         not merely be some error — got {err}"
+                    );
+                    continue;
+                }
+
+                let report = outcome.unwrap_or_else(|e| {
+                    panic!(
+                        "{label} streamed={streamed}: an escaping hard link is a REFUSAL and must skip. \
+                         Before CPE-1759 both legs returned exactly this: {e}"
+                    )
+                });
+                assert_eq!(
+                    fs::read(dest.join("ok.txt")).unwrap(),
+                    b"ORDINARY".to_vec(),
+                    "{label} streamed={streamed}: and the rest of the archive still extracts — `ok.txt` \
+                     sits after the poisoned entry, so its absence is what the old abort looked like"
+                );
+                if let Some(report) = report {
+                    assert_eq!(
+                        report.skipped, 1,
+                        "{label}: the refusal must be counted (CPE-1775); got {report:?}"
+                    );
+                    assert!(
+                        report.errors.iter().any(|e| {
+                            e.starts_with("hard: ") && e.contains("outside the extraction folder")
+                        }),
+                        "{label}: and recorded as a link-target escape naming the entry — an `is_ok()` \
+                         check would stay green through a guard that skipped for any reason at all; got \
+                         {:?}",
+                        report.errors
+                    );
+                }
+            }
+        }
         let _ = fs::remove_dir_all(&d);
     }
 }
