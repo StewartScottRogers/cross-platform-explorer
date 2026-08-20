@@ -246,7 +246,12 @@ jobs:
       #
       # `CPE_STAGING_STRICT` is deliberately unset — see the `crates` job's copy of this step for the
       # measurement that says why pinning it blinds the guard to the arm it needs to cover.
-      - name: skip-visibility guard (CPE-1717)
+      #
+      # CPE-1806 added the trash-roundtrip sub-blocks below, after PR #961's review found the routing
+      # this ticket added (7 `trash_roundtrip_available()` call sites in `lib.rs`, all through
+      # `cpe_server::fsutil::require_staged`) could be deleted from ANY of the 7 sites with this step
+      # never noticing — the exact silent-vacuity shape CPE-1806 itself exists to close, one level up.
+      - name: skip-visibility guard (CPE-1717 / CPE-1806)
         working-directory: src-tauri
         shell: bash
         env:
@@ -254,18 +259,77 @@ jobs:
         run: |
           set -u
           log="${RUNNER_TEMP:-/tmp}/cpe1717-sabotage.log"   # outside the checkout: no stray file can dirty a later git-diff guard
+          fail=0
+
           filter=cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name
           if cargo test "$filter" > "$log" 2>&1; then
             echo "::error::CPE-1717 regression: '$filter' PASSED with staging sabotaged — a leg that staged nothing is reporting green. Check that cpe_server::fsutil::require_staged is still on this path."
-            exit 1
-          fi
-          if ! grep -q 'CPE-1717' "$log"; then
+            fail=1
+          elif ! grep -q 'CPE-1717' "$log"; then
             echo "::error::CPE-1717: '$filter' failed, but not with the require_staged panic, so this step no longer proves anything about skip visibility. Full log:"
             cat "$log"
-            exit 1
+            fail=1
+          else
+            echo "OK: '$filter' went red, and for the right reason:"
+            grep -m1 -A6 'CPE-1717' "$log"
           fi
-          echo "OK: '$filter' went red, and for the right reason:"
-          grep -m1 -A6 'CPE-1717' "$log"
+
+          # ── CPE-1806: the trash-roundtrip mechanism (`trash_roundtrip_available()` /
+          # `cpe_server::fsutil::require_staged("trash_roundtrip", ..)`, 7 call sites in `lib.rs`),
+          # asymmetric across all THREE legs of this same job's matrix rather than just two.
+          # `supported_here = true` for the two Linux-only malformed-`.trashinfo` panic-boundary tests
+          # (CPE-1791/CPE-1803); `supported_here = cfg!(target_os = "linux")` for the five
+          # `cfg(any(target_os = "windows", target_os = "linux"))` round-trip tests — matching the
+          # measured verdict now recorded on `trash_roundtrip_available`'s own doc comment (grepped whole
+          # raw job logs of two real runs: zero `CPE-1268` notices on Linux, five on Windows, same runs).
+          # macOS has no `trash::os_limited` API at all, so none of the seven tests even compile there —
+          # a filter for any of their names would match ZERO tests on macOS, and `cargo test <filter>`
+          # with zero matches exits 0, which would silently read as evidence of nothing rather than "not
+          # applicable" (the same zero-match trap the fourth `link_status` block below guards against).
+          # So: Linux must go RED under sabotage, Windows must stay a quiet passing skip, and macOS is
+          # explicitly skipped rather than trusted to a false green.
+          echo "--- sabotaged run of the Linux-only panic-boundary test (CPE-1791/CPE-1803): trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file"
+          if [ "$RUNNER_OS" != "Linux" ]; then
+            echo "OK: skipped on $RUNNER_OS — this test is #[cfg(target_os = \"linux\")], so it doesn't compile here at all; a filtered run would prove nothing."
+          elif cargo test trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file > "$log" 2>&1; then
+            echo "::error::CPE-1806 regression: 'trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on, and the only execution CPE-1803's degraded-flag assertions ever get. A leg that staged nothing reported green; check require_staged is still on this path."
+            fail=1
+          elif grep -q 'CPE-1717' "$log"; then
+            echo "OK: went red, and for the right reason:"
+            grep -m1 -A6 'CPE-1717' "$log"
+          else
+            echo "::error::CPE-1806: red, but not with the require_staged panic — so this step is no longer evidence about skip visibility. Full log:"
+            cat "$log"
+            fail=1
+          fi
+
+          echo "--- sabotaged run of the shared trash-roundtrip sites: list_trash_then_restore_trash_items_round_trips_a_probe_file"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "OK: skipped on macOS — none of the trash-roundtrip tests compile there (no cfg match), so a filtered run would prove nothing but a zero-match exit 0."
+          elif cargo test list_trash_then_restore_trash_items_round_trips_a_probe_file > "$log" 2>&1; then
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "OK: on Windows this mechanism may legitimately not stage (a headless CI session can lack a working Recycle Bin), so it stayed a passing skip — no false red:"
+              grep -m1 'CPE-1268' "$log" || true
+            else
+              echo "::error::CPE-1806: on $RUNNER_OS the trash round-trip IS supposed to work, so a sabotaged run must be red. It passed, which means supported_here is wrong for this site or require_staged is no longer on the path."
+              fail=1
+            fi
+          else
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "::error::CPE-1806: a FALSE RED on Windows — the round-trip may legitimately fail to stage there, so this leg must skip quietly, not fail. Check its supported_here is cfg!(target_os = \"linux\"). Full log:"
+              cat "$log"
+              fail=1
+            elif grep -q 'CPE-1717' "$log"; then
+              echo "OK: on $RUNNER_OS it went red, and for the right reason:"
+              grep -m1 -A6 'CPE-1717' "$log"
+            else
+              echo "::error::CPE-1806: red, but not with the require_staged panic. Full log:"
+              cat "$log"
+              fail=1
+            fi
+          fi
+
+          exit $fail
 
       # The default build above is the delete-test: the explorer compiles with ZERO
       # sidecar code. This proves the opt-in integration also compiles (CPE-272).
