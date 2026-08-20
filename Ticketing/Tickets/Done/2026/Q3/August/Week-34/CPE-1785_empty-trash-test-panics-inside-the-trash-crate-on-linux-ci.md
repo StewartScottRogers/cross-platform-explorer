@@ -3,7 +3,7 @@ id: CPE-1785
 title: empty_trash_purges_only_the_selected_probe_item panics inside the trash crate on Linux CI
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
