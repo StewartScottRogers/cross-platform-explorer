@@ -662,12 +662,23 @@ fn rooted_key_bytes(path: &str) -> &str {
 /// own `mkdir` writes.
 ///
 /// Do **not** restate this as "every other provider trims a trailing slash" or "the siblings build a
-/// `format!("{key}/")` probe". Both are false, and an earlier version of this comment said them: the
-/// `trim_end_matches` calls in `cpe-ftp`, `cpe-sftp` and `cpe-webdav` are all inside `stat`, deriving a
-/// **display name only**, while `list`/`mkdir`/`delete`/`rename` send the path verbatim on every
-/// backend. `crates/vfs/src/connect.rs`'s `join_remote` carries a comment written specifically to
-/// retract that same overclaim — including the live WebDAV `delete` bug it was hiding. The convention is
-/// real; the uniform-trimming story about it is not.
+/// `format!("{key}/")` probe". Both are false, and two successive versions of this comment said them —
+/// so here are the actual call sites, checked one at a time rather than described by shape:
+///
+/// - `cpe-ftp` (`crates/ftp/src/lib.rs:301`) and `cpe-webdav` (`crates/webdav/src/lib.rs:292`) trim a
+///   trailing slash inside `stat`.
+/// - `cpe-sftp` (`crates/sftp/src/lib.rs:334`) takes the last non-empty segment instead
+///   (`path.rsplit('/').find(|s| !s.is_empty())`) and contains **no `trim_end_matches` at all**.
+///
+/// All three derive a **display name only**; none normalises the path before the wire. And no sibling
+/// builds a `format!("{key}/")` probe: the one slash-appending construction in the family,
+/// `crates/webdav/src/lib.rs:370`, is the RFC 4918 §8.3 DELETE redirect retry, not an existence check.
+///
+/// `crates/vfs/src/connect.rs`'s `join_remote` carries a comment written specifically to retract this
+/// same overclaim — including the live WebDAV `delete` bug it was hiding — and records there that
+/// `list`/`mkdir`/`delete`/`rename` send the path verbatim on every backend. The convention is real; the
+/// uniform-trimming story about it is not. **If you edit this paragraph, re-grep the three files first**;
+/// it has now been wrong twice, each time by being restated from memory of its shape.
 ///
 /// Nothing is lost by it, because the rule is total: a key that genuinely ends in `/` is spelled with the
 /// slash doubled (`/a.txt//` → key `a.txt/`), which is just the general rule `"/" + key + "/"` applied to
