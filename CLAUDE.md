@@ -46,15 +46,23 @@ plugin, and CI builds/signs releases through GitHub Actions.
   there too (the app is deliberately kept lean). Full architecture + the extraction recipe:
   [docs/design/SERVER-ARCHITECTURE.md](docs/design/SERVER-ARCHITECTURE.md) (epic CPE-810).
 
-## Versioning — keep three files in sync
+## Versioning — keep five files in sync
 
 When releasing, bump the version in ALL of:
 
 1. `package.json`
 2. `src-tauri/Cargo.toml`
 3. `src-tauri/tauri.conf.json`
+4. `package-lock.json` — **two** places: the top-level `version` and `packages[""].version`
+5. `src-tauri/Cargo.lock` — the `cross-platform-explorer` package entry
 
 Then tag `vX.Y.Z` and push — CI does the rest.
+
+**4 and 5 are the ones that get missed**, because nothing fails when they drift: neither build passes
+`--locked`, so both lockfiles are silently rewritten at build time and the stale version never surfaces as
+an error. It surfaces instead as a **dirty working tree** the moment anyone runs `npm install` or a local
+`cargo build` — which reads as unrelated noise and gets committed by accident or discarded along with real
+work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`0.57.64` vs `0.57.67`).
 
 ## Guardrails
 
