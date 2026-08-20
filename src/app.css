@@ -64,7 +64,10 @@
   --pal-okabe-sky-blue: #198dc8;
   --pal-purple-500: #6b4fbb;
 
-  /* Log-preview WARN tone (CPE-1618) — 5.93:1 on white / 5.34:1 on --pal-gray-100, clears WCAG AA. */
+  /* Log-preview WARN tone (CPE-1618) — 5.93:1 on white / 5.34:1 on --pal-gray-100, clears WCAG AA.
+     CPE-1810: also backs the general --warn token below (light theme only needs one value — no
+     role tension the way dark/hc-dark have, since --surface here IS literal white — see --warn's
+     comment below for the full breakdown). */
   --pal-amber-700: #8a5a00;
 
   /* Syntax-highlighting palette (CPE-1631): six token-source hues for highlight.js's `hljs-*`
@@ -142,6 +145,24 @@
      level-tint only, not a general "warning" token elsewhere. ERROR/INFO reuse --danger/--accent (they
      already carry the right meaning); amber has no existing semantic token to reuse. */
   --log-warn: var(--pal-amber-700);
+
+  /* General "caution" affordance (CPE-1810) — AgentTimeline/ConsentSheet/ExplorerPane/
+     ImageCompareView/SidecarManager all used `var(--warn, <hex>)` for this with THREE different
+     undefined-fallback hexes (#b5872b/#b8860b/#d08b2b); --warn was never actually defined, so the
+     fallback always won. Unlike --log-warn above (deliberately scoped to one component's inline
+     level-tint), this is the shared token those call sites should have been reaching for.
+     --warn backs plain foreground use (text/border/tinted `color-mix` backgrounds) — 5.93:1 vs
+     --surface (white) here, clearing WCAG AA's 4.5:1 body-text floor. --warn-fill backs the ONE
+     solid-fill-background-with-white-text use (ConsentSheet's `.badge`) — same 5.93:1 white-on-fill
+     here since --surface IS literal white in this theme, so no role tension and no distinct value
+     is needed (contrast with dark/hc-dark below, where a single amber can't satisfy both a bright
+     legible-text role AND a dark-enough-for-white-text fill role at once — the same tension
+     CPE-1632/CPE-1649 already solved for --danger/--danger-fill). See
+     src/app.css.solid-fill-contrast.test.ts (light/dark) and
+     src/app.css.hc-solid-fill-contrast.test.ts (hc-light/hc-dark), which derive and assert this
+     pairing from ConsentSheet's real CSS. */
+  --warn: var(--pal-amber-700);
+  --warn-fill: var(--warn);
 
   /* Syntax highlighting (CPE-1631) — backs the `.hljs-*` rules near the end of this file. See
      --pal-hljs-* above for the WCAG AA contrast measurements. */
@@ -223,6 +244,8 @@
   --danger-on-tint: var(--danger);
   --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above */
   --log-warn: var(--pal-amber-700);
+  --warn: var(--pal-amber-700);  /* CPE-1810 — see the bare :root block's comment above */
+  --warn-fill: var(--warn);
 
   --hljs-keyword: var(--pal-hljs-keyword);
   --hljs-title: var(--pal-hljs-title);
@@ -331,6 +354,18 @@
   /* Log-preview WARN tone (CPE-1618) — 8.24:1 on --pal-dark-gray-800 (--surface) / 9.48:1 on
      --pal-dark-gray-900 (--bg), well past WCAG AA. */
   --pal-dark-amber-300: #ffb84d;
+  /* CPE-1810: --warn/--warn-fill have the SAME two-role tension CPE-1632/CPE-1649 already found for
+     --danger/--accent — (a) foreground text/border/tinted-background use (AgentTimeline/
+     ConsentSheet/ExplorerPane/ImageCompareView/SidecarManager), held to the 4.5:1 AA body-text bar
+     like --danger, and (b) the solid-fill BACKGROUND of ConsentSheet's `.badge`, paired with literal
+     white text, held to WCAG 1.4.11's 3:1 UI floor. --pal-dark-amber-300 above (--log-warn's value)
+     is far too bright for role (b) — white-on-#ffb84d is only 1.72:1. Unlike --danger's dark-theme
+     window (positive, so one value served both roles), amber's [fgSurf>=4.5, whiteOnFill>=3] window
+     is ALSO positive but much narrower (relative luminance ~[0.283, 0.30] vs red's wider band) —
+     still feasible with a single value, so no separate --warn-fill primitive is needed here (unlike
+     hc-dark below, whose window is negative). Darkened until both roles clear their bar: fgBg=5.31
+     fgSurf=4.61 whiteOnFill=3.07. See src/app.css.solid-fill-contrast.test.ts. */
+  --pal-dark-amber-500: #c38800;
 
   /* Syntax-highlighting palette (CPE-1631), dark theme — brightened re-derivations of the light
      --pal-hljs-* hues (not a flat inversion) so each clears WCAG AA >=4.5:1 against BOTH --surface
@@ -386,6 +421,8 @@
   --danger-on-tint: var(--pal-dark-red-450-notebook);
   --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above */
   --log-warn: var(--pal-dark-amber-300);
+  --warn: var(--pal-dark-amber-500);  /* CPE-1810 — see the dark palette block's comment above */
+  --warn-fill: var(--warn);
 
   --hljs-keyword: var(--pal-dark-hljs-keyword);
   --hljs-title: var(--pal-dark-hljs-title);
@@ -455,6 +492,12 @@
   --pal-hc-light-red-900: #8b0000;    /* danger — darkened past the normal #c42b1c to clear 7:1 */
   --pal-hc-light-red-950: #5c0000;    /* danger-hover */
   --pal-hc-light-green-900: #0b6623;  /* success — darkened past the normal #3a9d4a to clear 7:1 */
+  --pal-hc-light-amber-900: #734900;  /* CPE-1810: --warn/--warn-fill — hc-light's --surface is
+                                          literal white (same as normal light), so there's no role
+                                          tension here either (see the bare :root block's --warn
+                                          comment): one value clears the AAA-inspired 7:1 bar
+                                          (7.83:1 vs white) and, by the same computation, the
+                                          solid-fill white-on-fill 3:1 floor too. */
 
   /* Okabe-Ito colour-blind-safe agent set, darkened off the normal light-theme hues until each
      clears 4.5:1 against --pal-hc-light-white (--surface) — see the hc-contrast guard test. */
@@ -541,6 +584,17 @@
                                           foreground text. */
   --pal-hc-dark-green-300: #66ff66;   /* success — brightened past the normal #6bcf7f to clear 7:1 */
 
+  /* CPE-1810: --warn/--warn-fill have the SAME negative-window shape as --danger above — hc-dark's
+     AAA text bar needs >=7:1 against --surface (#0d0d0d, needs relative luminance >=0.3282); the
+     white-on-solid-fill 3:1 UI floor (ConsentSheet's `.badge`) needs relative luminance <=0.30.
+     Same non-overlapping gap, so this splits the same way: --pal-hc-dark-amber-300 stays a bright,
+     text-role-only value (13.03:1 vs --surface, comfortably past 7:1 — unaffected by the fill bar
+     since nothing reads it as a solid-fill background), and a NEW --pal-hc-dark-amber-fill carries
+     the solid-fill role instead (whiteOnFill clears 3:1 with margin — 3.28:1). See
+     src/app.css.hc-solid-fill-contrast.test.ts. */
+  --pal-hc-dark-amber-300: #ffcc66;   /* --warn (text/border/tinted-background role only) */
+  --pal-hc-dark-amber-fill: #bd8300;  /* --warn-fill (solid-fill role only) */
+
   /* Okabe-Ito colour-blind-safe agent set, brightened off the normal dark-theme hues until each
      clears 4.5:1 against --pal-hc-dark-gray-050 (--surface) — see the hc-contrast guard test. */
   --pal-hc-dark-okabe-blue: #4da6ff;
@@ -591,6 +645,8 @@
   --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above; hc-light
                                      never had this problem (white on hc-light --danger/--accent
                                      measure 10.01:1/7.79:1, both comfortably clear) */
+  --warn: var(--pal-hc-light-amber-900);  /* CPE-1810 — see that palette entry's comment above */
+  --warn-fill: var(--warn);
 
   --hljs-keyword: var(--pal-hc-light-hljs-keyword);
   --hljs-title: var(--pal-hc-light-hljs-title);
@@ -654,6 +710,8 @@
      other theme defines this identically to --danger (zero visual change there); only hc-dark needs
      a different value because only hc-dark's --danger/white-on-fill windows don't overlap. */
   --danger-fill: var(--pal-hc-dark-red-fill);
+  --warn: var(--pal-hc-dark-amber-300);  /* CPE-1810 — see that palette entry's comment above */
+  --warn-fill: var(--pal-hc-dark-amber-fill);  /* same negative-window split as --danger-fill above */
 
   --hljs-keyword: var(--pal-hc-dark-hljs-keyword);
   --hljs-title: var(--pal-hc-dark-hljs-title);

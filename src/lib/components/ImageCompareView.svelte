@@ -273,9 +273,9 @@
   .ic-note {
     padding: 6px 10px;
     font-size: 12px;
-    color: var(--warn, #b5872b);
-    background: color-mix(in srgb, var(--warn, #b5872b) 14%, transparent);
-    border: 1px solid var(--warn, #b5872b);
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+    border: 1px solid var(--warn);
     border-radius: var(--radius);
   }
   .ic-toolbar {

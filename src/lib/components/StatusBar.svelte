@@ -178,9 +178,9 @@
   .git { display: flex; align-items: center; gap: 6px; margin-left: auto; }
   .git-branch { opacity: 0.85; }
   .git-ct { font-variant-numeric: tabular-nums; opacity: 0.8; }
-  .git-dirty { color: #b5872b; }
-  .git-conflict { color: #b5872b; font-weight: 600; }
-  .git-btn.resolve { border-color: #b5872b; }
+  .git-dirty { color: var(--warn); }
+  .git-conflict { color: var(--warn); font-weight: 600; }
+  .git-btn.resolve { border-color: var(--warn); }
   .git-btn { font-size: 11px; padding: 1px 7px; cursor: pointer; border: 1px solid var(--border-strong, #555);
              background: transparent; color: inherit; border-radius: 4px; }
   .git-btn:hover { background: var(--selection, rgba(128,128,128,0.2)); }

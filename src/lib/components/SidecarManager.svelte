@@ -228,7 +228,7 @@
     font-size: 12px;
   }
   .compat.bad {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
   }
   .status {
     flex: 0 0 auto;
@@ -246,8 +246,8 @@
     border-color: #3a9d4a;
   }
   .status.warn {
-    color: var(--warn, #d08b2b);
-    border-color: var(--warn, #d08b2b);
+    color: var(--warn);
+    border-color: var(--warn);
   }
   .status.bad {
     color: #fff;
@@ -266,8 +266,8 @@
     padding-left: 8px;
   }
   .repair-msg.fail {
-    color: var(--warn, #d08b2b);
-    border-left-color: var(--warn, #d08b2b);
+    color: var(--warn);
+    border-left-color: var(--warn);
   }
   .spacer {
     flex: 1;
@@ -330,7 +330,7 @@
     padding: 0 2px;
   }
   .revoke:hover {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
   }
   .row-actions {
     display: flex;
@@ -348,7 +348,7 @@
     color: #3a9d4a;
   }
   .health .err {
-    color: var(--warn, #d08b2b);
+    color: var(--warn);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -385,8 +385,25 @@
   .log-line {
     color: var(--text-dim, #a0a0a0);
   }
+  /* CPE-1810 round 3: reverted from var(--danger)/var(--warn) — this .logs pane's real background
+     is a FIXED literal (see .logs above: `background: var(--bg-dim, <hex>)`, and --bg-dim is
+     undefined nowhere in app.css, so that fallback always wins in every theme). The theme-
+     calibrated --danger/--warn values are tuned against each theme's own --surface (white in
+     light/hc-light) — a surface this pane never renders — so tokenizing them here regressed real
+     contrast against the pane's actual fixed backdrop: light 3.39:1/3.24:1 and hc-light
+     1.92:1/2.45:1, both under the 4.5:1 AA text floor (hc-light's .log-error under even the 3:1 UI
+     floor). No existing guard catches this because none of them check a token against a
+     component-local fixed literal instead of --surface/--bg. Restoring the pre-ticket literal
+     values below (both ~6.8-7.9:1 against the pane's actual backdrop in every theme, by accident of
+     having been picked for a dark backdrop) is the honest interim fix until CPE-1821 (which now owns
+     this whole log pane) makes --bg-dim a real token — only then can this pairing be tokenized
+     correctly. Do not retune --danger/--warn to fix this: they are global tokens serving many
+     surfaces, and this pane's background is broken independently of them. `.log-error` was
+     `var(--warn, <hex>)` before this ticket ever touched it — an undefined-token-with-fallback site
+     in its own right — so a bare literal with the fallback removed is the correct shape to restore,
+     not a re-added fallback. */
   .log-error {
-    color: var(--warn, #d08b2b);
+    color: #d08b2b;
   }
   .log-warn {
     color: #c9a227;

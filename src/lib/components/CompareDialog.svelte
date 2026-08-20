@@ -221,7 +221,7 @@
   .summary { display: flex; gap: 12px; margin-bottom: 8px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
   .s-added { color: #2e9e4f; }
   .s-removed { color: var(--danger); }
-  .s-changed { color: #b8860b; }
+  .s-changed { color: var(--warn); }
   .s-identical { color: var(--text-dim); }
   .tree { height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
   .node { display: flex; align-items: baseline; gap: 6px; padding: 2px 8px; font-size: 12.5px; cursor: default; white-space: nowrap; }
@@ -231,7 +231,7 @@
   .nstatus { flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); }
   .status-added .nname { color: #2e9e4f; }
   .status-removed .nname { color: var(--danger); }
-  .status-changed .nname { color: #b8860b; }
+  .status-changed .nname { color: var(--warn); }
   .status-identical .nname { color: var(--text-dim); }
   .textcmp { padding: 8px 0; font-family: ui-monospace, monospace; font-size: 12px; }
   .tc-head { padding: 4px 10px; color: var(--text-dim); font-family: system-ui, sans-serif; font-size: 12px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }

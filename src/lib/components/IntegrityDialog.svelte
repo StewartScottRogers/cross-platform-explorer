@@ -143,7 +143,7 @@
   .counts.alarm { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
   .c-corrupted { color: var(--danger); font-weight: 600; }
   .c-missing { color: var(--danger); }
-  .c-edited { color: #b8860b; }
+  .c-edited { color: var(--warn); }
   .c-new { color: #2e9e4f; }
   .c-intact { color: var(--text-dim); }
   .group { padding: 4px 0; }

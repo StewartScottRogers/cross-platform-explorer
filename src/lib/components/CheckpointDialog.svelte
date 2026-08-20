@@ -379,7 +379,7 @@
   .preview-lead { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
   .preview-counts { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--text-dim); }
   .preview-counts span { white-space: nowrap; flex: 0 0 auto; }
-  .preview-counts .drift { color: #b8860b; font-weight: 600; }
+  .preview-counts .drift { color: var(--warn); font-weight: 600; }
   .drift-list { margin-top: 8px; max-height: 26vh; overflow: auto; }
   .drift-row { padding: 2px 0; }
   .drift-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -387,7 +387,7 @@
   .diff-btn { flex: 0 0 auto; height: 22px; padding: 0 8px; font-size: 11px; }
   .diff-panel { margin: 4px 0 6px; }
   .diff-status { padding: 6px 8px; font-size: 12px; color: var(--text-dim); }
-  .diff-status.diff-error { color: #b8860b; }
+  .diff-status.diff-error { color: var(--warn); }
   .outcome { font-size: 12.5px; color: var(--text); margin-bottom: 8px; }
   .confirm { border: 1px solid var(--danger); border-radius: var(--radius); padding: 12px; margin-bottom: 8px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); }
   .confirm-msg { color: var(--text); font-size: 12.5px; margin-bottom: 10px; }
