@@ -725,13 +725,21 @@ const ARCHIVE_TEMP_ROOT: &str = "cpe-archive";
 ///
 /// The liveness signal is the session root's own mtime, and it is free: creating each `e<seq>`
 /// subdirectory updates the mtime of the directory it is created in, on every platform this ships to. So
-/// an instance that is actively extracting keeps its own root fresh, and one hour of *no extraction at
-/// all* is the point at which another instance is allowed to conclude the session is over. The cost of
-/// being wrong is bounded and was designed for: the frontend's archive-preview cache re-validates every
-/// cached temp path before use and re-extracts if it is gone (`src/lib/archivePreview.ts`), a reader that
-/// already has the file open keeps reading it (Unix), and on Windows a file another process still holds
-/// open cannot be deleted at all, so the removal simply fails and is skipped.
-const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// an instance that is actively extracting keeps its own root fresh, and a full day of *no extraction at
+/// all* is the point at which another instance is allowed to conclude the session is over.
+///
+/// **24 hours, not one** (PR #945 review). There is no PID check here — mtime is the whole signal — so a
+/// too-short TTL makes sweeping a *live* session reachable: instance A extracts at 10:00 and the user
+/// leaves it open; at 11:05 instance B launches and removes A's whole session root. [`temp_extract_target`]
+/// recovers the *directory* on the next extraction but cannot recover the *files*, so an external editor
+/// holding an opened temp copy loses the user's Save. An hour is a realistic afternoon; a day is not, and
+/// it costs nothing: the sweep's drain rate is set by [`SWEEP_REMOVE_BUDGET`] per launch, not by the TTL.
+///
+/// The remaining exposure is narrowed further by [`SESSION_SENTINEL`], and the cost of being wrong was
+/// designed for regardless: the frontend's archive-preview cache re-validates every cached temp path
+/// before use and re-extracts if it is gone (`src/lib/archivePreview.ts`), and a reader that already has
+/// the file open keeps reading it (Unix).
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Diagnostic override for [`SESSION_TTL`], in whole seconds (`0` = sweep every foreign session root on
 /// sight). It exists so the CPE-1786 evidence run can show cross-session growth actually *stopping*
@@ -755,23 +763,57 @@ const SWEEP_EXAMINE_BUDGET: usize = 256;
 /// See [`SWEEP_EXAMINE_BUDGET`].
 const SWEEP_REMOVE_BUDGET: usize = 32;
 
-/// How many extraction directories one session keeps alive before reclaiming its oldest, and how long an
-/// extraction is protected from that reclamation no matter what.
+/// How many extraction directories one session keeps alive before reclaiming its oldest, once the
+/// process has gone quiet — see [`drain_reapable`], which is where "quiet" is defined and where the
+/// PR #945 review's blocker lives.
 ///
 /// This is the half of the ownership model that a startup sweep cannot provide: a single long-running app
 /// session that extracts all day would otherwise still grow without bound, because its own session root
-/// is only reclaimed by the *next* session. 64 is far more than the preview flow needs (it previews one
-/// selected entry at a time) and more than any drag-out batch that has completed, and the grace period is
-/// what makes it safe for the batch that has **not**: `FileList.svelte`'s alt-drag stages every selected
-/// entry in a loop and only then hands the paths to the OS, so a 500-file drag must not have its first
-/// 436 files removed out from under it mid-loop. Nothing younger than the grace is ever touched, which
-/// covers that loop and every same-interaction consumer.
-const MAX_LIVE_EXTRACTIONS: usize = 64;
-/// See [`MAX_LIVE_EXTRACTIONS`].
+/// is only reclaimed by the *next* session.
+///
+/// **512, not 64** (PR #945 review). The cap is the second line of defence behind the quiet gate, and it
+/// is what bounds the one shape the quiet gate cannot see: a staging loop whose *per-entry* time exceeds
+/// [`REAP_GRACE`], which is indistinguishable from an idle session that extracts one file a minute. With
+/// the cap at 512 that residual needs a batch of more than 512 entries each taking over a minute — more
+/// than eight hours of staging before the first file moves — which is not a drag-and-drop. The memory
+/// cost of the difference is a few hundred `PathBuf`s.
+const MAX_LIVE_EXTRACTIONS: usize = 512;
+
+/// How long the process must have started **no new extraction** before [`drain_reapable`] will reclaim
+/// anything. See that function for why it is measured against the newest entry rather than the oldest.
 const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The bound on a session that is *never* quiet — a script or an agent extracting back-to-back for
+/// hours, where [`REAP_GRACE`] never elapses and [`MAX_LIVE_EXTRACTIONS`] is therefore never applied.
+/// Past this, [`drain_reapable`] reclaims down to this figure regardless of quiet, because "unbounded"
+/// is the defect this whole ticket exists to close and a mechanism that can be held open forever by a
+/// busy caller has not closed it. Set far above any plausible single batch, so reaching it means the
+/// caller is a loop rather than an interaction.
+const HARD_CAP_EXTRACTIONS: usize = 4096;
 
 /// This process's private extraction root under `%TEMP%/cpe-archive`, claimed once on first use.
 static SESSION_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The name of the open file [`SESSION_SENTINEL`] holds inside the session root.
+const SESSION_SENTINEL_NAME: &str = "session.lock";
+
+/// An open handle on a file inside this session's root, held for the life of the process — a **second**
+/// liveness signal alongside the mtime that [`SESSION_TTL`] reads (PR #945 review).
+///
+/// mtime alone cannot distinguish a dead session from a live-but-idle one, and the consequence of
+/// guessing wrong is another instance deleting files an external application is still using. This
+/// handle is one we control and never release while the process lives, so on Windows `remove_dir_all`
+/// on the session root fails, the sweeper's attempt bounces, and the entry is skipped exactly like every
+/// other unremovable entry. Once the owning process exits the handle closes and the directory becomes
+/// removable again, so nothing is leaked by holding it. Unlike relying on the *consumer* to hold its own
+/// file open — which the PR #945 UAT measured being false for `notepad.exe` — this one is unconditional,
+/// because we are the one holding it.
+///
+/// **It is a hardening, not a guarantee, and only on Windows.** Unix happily unlinks an open file, so
+/// there the TTL is still the whole protection — which is the other reason the review raised it to a day.
+/// The name is fixed and does not collide with `e<seq>`, and the sentinel is dropped before
+/// [`cleanup_extraction_scratch`] removes our own tree, or that removal would bounce on our own handle.
+static SESSION_SENTINEL: std::sync::Mutex<Option<fs::File>> = std::sync::Mutex::new(None);
 
 /// The extraction directories this process has created, oldest first, with when it created them — the
 /// bookkeeping behind [`MAX_LIVE_EXTRACTIONS`]. Only ever holds directories **we** created exclusively,
@@ -822,8 +864,9 @@ static LIVE_EXTRACTIONS: std::sync::Mutex<std::collections::VecDeque<(PathBuf, s
 ///   `<pid>-<seq>` shape, so the old leak drains rather than being frozen in place.
 /// - **A long session reclaims its own**, oldest first, past [`MAX_LIVE_EXTRACTIONS`] and
 ///   [`REAP_GRACE`] — the case a startup-only sweep does not cover.
-/// - [`cleanup_extraction_scratch`] removes the whole session root when an embedder can tell us the
-///   session is over, which turns the common case from "an hour later" into "immediately".
+/// - [`cleanup_extraction_scratch`] removes the whole session root when an embedder tells us the session
+///   is over — **not yet wired into the app's exit path (CPE-1797)**, so today every session is reclaimed
+///   by the next launch's sweep or by the cap, never at shutdown.
 ///
 /// # Degraded mode
 ///
@@ -846,9 +889,15 @@ fn session_root() -> Result<PathBuf, String> {
     Ok(SESSION_ROOT
         .get_or_init(|| {
             let claimed = claim_session_root(&root).unwrap_or_else(|| root.clone());
+            if claimed != root {
+                // Only in a directory that is really ours — in degraded mode this would plant a file in
+                // the shared root, where it is neither a liveness signal nor anybody's to remove.
+                *SESSION_SENTINEL.lock().unwrap_or_else(|e| e.into_inner()) =
+                    fs::File::create(claimed.join(SESSION_SENTINEL_NAME)).ok();
+            }
             // Inside `get_or_init` so it runs exactly once per process, and before the first extraction
             // rather than after, so a session that extracts once still pays its share of the cleanup.
-            sweep_stale_sessions(
+            let removed = sweep_stale_sessions(
                 &root,
                 &claimed,
                 std::time::SystemTime::now(),
@@ -856,6 +905,22 @@ fn session_root() -> Result<PathBuf, String> {
                 SWEEP_EXAMINE_BUDGET,
                 SWEEP_REMOVE_BUDGET,
             );
+            // Silence on the extraction path is right; being *undiscoverable* is a different axis, and a
+            // sweep that quietly never works would look identical to one that does (PR #945 review). The
+            // one line is emitted only when the diagnostic knob is set, and written straight to the
+            // process's stderr handle rather than through `eprintln!`, which libtest swallows.
+            if std::env::var(SESSION_TTL_ENV).is_ok() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1786] swept {removed} stale session(s) under {} (examined at most {}, removal \
+                     budget {}, ttl {:?})",
+                    root.display(),
+                    SWEEP_EXAMINE_BUDGET,
+                    SWEEP_REMOVE_BUDGET,
+                    session_ttl()
+                );
+            }
             claimed
         })
         .clone())
@@ -946,8 +1011,22 @@ fn is_our_temp_dir_name(name: &str) -> bool {
 /// stronger than an aesthetic one — this runs on the first extraction of a session, so a cleanup that
 /// turned an unreadable or in-use leftover into an error would fail the user's extraction over somebody
 /// else's litter. A directory that will not be removed today is simply examined again by the next
-/// session. That also means an in-use file on Windows (which cannot be deleted while another process
-/// holds it open) protects itself for free.
+/// session. On Windows that also gives a *persistently* locked file some protection for free — but the
+/// PR #945 UAT measured the limits of that and they matter, because "open in external app" is one of the
+/// three consumers this whole ownership argument rests on. A handle held open with a share mode that
+/// denies delete (a media player, an editor that keeps the file mapped) does bounce the removal, cleanly
+/// and skipped exactly as described. **A modern `notepad.exe` does not**: it reads the file and releases
+/// the handle almost immediately, and the sweep then deleted the file out from under an open Notepad
+/// window. So this is a real mitigation for one class of consumer, not a blanket guarantee for all of
+/// them, and it is why the age thresholds rather than the OS are what actually carry the safety.
+///
+/// **The examine budget takes directory order, not age order**, so an entry that cannot be removed —
+/// another user's session root under a sticky `/tmp`, a live session holding its [`SESSION_SENTINEL`]
+/// open on Windows — permanently occupies a slot in the window every launch looks at, and the sweep sees
+/// less of the root than the budget suggests. That is acceptable for the same reason the failures are
+/// skipped: the sweep is a background drain, not a guarantee, and the entries it keeps re-examining are
+/// precisely the ones it must not remove. It is stated because a reader measuring the drain rate would
+/// otherwise compute `SWEEP_REMOVE_BUDGET` per launch and be wrong.
 ///
 /// A `keep`-shaped subtlety worth stating: an entry that is a symlink or a Windows junction is **skipped
 /// entirely, never followed**. `fs::remove_dir_all` would not delete through it either (it errors on a
@@ -994,26 +1073,63 @@ fn sweep_stale_sessions(
     removed
 }
 
-/// Record an extraction directory as this session's, and hand back whichever of its older siblings are
-/// now due for reclamation. Splitting the decision out of the removal is what makes it testable, and
-/// keeps `fs::remove_dir_all` from running while the lock is held.
+/// Which of this session's extraction directories are due for reclamation. Splitting the decision out of
+/// the removal is what makes it testable, and keeps `fs::remove_dir_all` off the lock.
+///
+/// # The grace is measured against the NEWEST entry, and the first version got that wrong
+///
+/// This is the PR #945 review's blocker, and it is worth recording exactly, because the mistake was not
+/// in the code — it was in believing a comment that the code did not implement.
+///
+/// The first version asked *"is the **oldest** entry older than the grace?"* and called that "nothing
+/// younger than the grace is ever touched, which covers the alt-drag staging loop". It does not. The
+/// queue is capped, so during a batch the front sits `max_live` entries behind the entry being pushed;
+/// the front's age is therefore `max_live × per-entry staging time`, **not** time since the batch
+/// started. `FileList.svelte`'s alt-drag stages *every* selected entry in a loop and only calls
+/// `startFileDrag(tempPaths)` afterwards, and `extract_archive_entry_any` reopens the archive and streams
+/// a fresh decoder from byte zero for each entry — O(n²), seconds per entry on a large `.tar.gz` or
+/// `.7z`. So on a 500-entry drag the front went stale mid-loop and one directory was removed on every
+/// push after that: 500 paths handed to the OS, ~64 still on disk, **436 files silently dropped**, with
+/// no error anywhere because the extraction returned `Ok` before the reap and the reap is `let _ =`.
+/// A new silent data-loss path, introduced by the fix for a leak.
+///
+/// The question that actually protects a burst is *"has this process been quiet?"* — i.e. **how long ago
+/// was the most recent extraction started**. Inside the grace window a caller may still be building a
+/// batch, and reclaiming any part of it hands the OS paths that no longer exist; once the process has
+/// been quiet for the grace, every batch that was in flight has finished by definition. That makes a
+/// burst atomically safe *however long it runs and however slow each entry is*, which is the property
+/// the per-victim age check could never have.
+///
+/// # The residual, stated rather than implied
+///
+/// "Quiet" is measured between extraction *starts*, so a loop whose **per-entry** time exceeds the grace
+/// looks exactly like an idle session — there is no signal here that can tell them apart. That batch is
+/// bounded by [`MAX_LIVE_EXTRACTIONS`] rather than protected by the grace, which is why the review raised
+/// that cap to 512: the residual now needs a batch of more than 512 entries each taking over a minute,
+/// i.e. eight hours of staging before the first file moves.
+///
+/// `hard_cap` is the other end: a caller that is *never* quiet would otherwise pin the queue open
+/// forever, so past it the reclamation runs anyway, down to `hard_cap` rather than to `max_live` — the
+/// smallest cut that restores the bound.
 fn drain_reapable(
     live: &mut std::collections::VecDeque<(PathBuf, std::time::Instant)>,
     max_live: usize,
+    hard_cap: usize,
     grace: std::time::Duration,
     now: std::time::Instant,
 ) -> Vec<PathBuf> {
+    // The newest entry's age is how long this process has been quiet. (`map_or`, not `is_none_or`:
+    // this crate's MSRV is 1.77.2 and that method is 1.82 — clippy's `incompatible_msrv` caught it.)
+    #[allow(clippy::unnecessary_map_or)]
+    let quiet = live.back().map_or(true, |(_, started)| now.duration_since(*started) >= grace);
+    let target = if quiet { max_live } else { hard_cap };
     let mut due = Vec::new();
-    while live.len() > max_live {
-        // Oldest first. The moment the front is inside the grace period every entry behind it is too,
-        // so this stops rather than scanning on.
-        match live.front() {
-            Some((_, created)) if now.duration_since(*created) >= grace => {
-                if let Some((path, _)) = live.pop_front() {
-                    due.push(path);
-                }
-            }
-            _ => break,
+    // Oldest first: within a session the oldest extraction is the one whose consumer is most likely to
+    // be finished with it, and the preview cache re-extracts on demand if it is not.
+    while live.len() > target {
+        match live.pop_front() {
+            Some((path, _)) => due.push(path),
+            None => break,
         }
     }
     due
@@ -1030,8 +1146,12 @@ fn note_extraction_dir(dir: PathBuf) {
         // valid queue, and dropping cleanup on the floor for the rest of the process because of that
         // would reintroduce the leak this function exists to stop.
         let mut live = LIVE_EXTRACTIONS.lock().unwrap_or_else(|e| e.into_inner());
-        live.push_back((dir, std::time::Instant::now()));
-        drain_reapable(&mut live, MAX_LIVE_EXTRACTIONS, REAP_GRACE, std::time::Instant::now())
+        let now = std::time::Instant::now();
+        // Decide **before** pushing: the quiet test asks how long ago the previous extraction started,
+        // and the entry being added now would answer "zero" and pin the gate open forever.
+        let due = drain_reapable(&mut live, MAX_LIVE_EXTRACTIONS, HARD_CAP_EXTRACTIONS, REAP_GRACE, now);
+        live.push_back((dir, now));
+        due
     };
     for path in due {
         let _ = fs::remove_dir_all(path);
@@ -1039,18 +1159,48 @@ fn note_extraction_dir(dir: PathBuf) {
 }
 
 /// Remove everything this process has extracted, for an embedder that knows the session is over (app
-/// shutdown). The session-end half of [`session_root`]'s ownership model: without it a closed app's
-/// directories wait for [`SESSION_TTL`] and the next launch's sweep, which is correct but slower than it
-/// needs to be when the answer is already known.
+/// shutdown). The session-end half of [`session_root`]'s ownership model.
+///
+/// **Nothing calls this yet, and that is the current behaviour rather than a detail** (PR #945 UAT,
+/// which grepped `src-tauri/**/*.rs` and every `*.ts` and found zero call sites). So today *every*
+/// session's directories wait for the next launch's sweep or for [`MAX_LIVE_EXTRACTIONS`] — which is
+/// correct and bounded, but slower than it needs to be when the answer is already known at shutdown.
+/// Wiring it into the app's exit path is **CPE-1797**. This comment says "will" rather than "does" on
+/// purpose: a doc that describes an unwired hook as if it were running is how the last round's
+/// "nothing here cleans up" sentence stayed true for months while reading as though it were handled.
 ///
 /// Best-effort and idempotent — a session that never extracted anything has nothing to remove, and a
 /// directory that will not delete is left to the sweeper exactly as everywhere else here.
+/// **The recorded directories are drained and removed, not merely forgotten** (PR #945 review). The first
+/// version `clear()`ed the queue and then handed the session root to [`remove_session_tree`] — which is
+/// correct in the normal case, where the root removal takes the recorded directories with it, and
+/// **worse than a no-op in degraded mode**, where `remove_session_tree` rightly refuses the shared root
+/// and the `clear()` has already destroyed the only record of the `e<seq>` directories sitting directly
+/// under it. Shutdown removed nothing *and* threw away what could have. Draining first makes the degraded
+/// path do real work and costs the normal path nothing.
 pub fn cleanup_extraction_scratch() {
-    {
+    let recorded: Vec<PathBuf> = {
         let mut live = LIVE_EXTRACTIONS.lock().unwrap_or_else(|e| e.into_inner());
-        live.clear();
+        live.drain(..).map(|(path, _)| path).collect()
+    };
+    // Before the tree removal, or it would bounce on our own open handle on Windows.
+    drop(SESSION_SENTINEL.lock().unwrap_or_else(|e| e.into_inner()).take());
+    cleanup_session(SESSION_ROOT.get().map(PathBuf::as_path), recorded);
+}
+
+/// The body of [`cleanup_extraction_scratch`], with the process-global state passed in.
+///
+/// Split out so it can be tested: the public function reads and mutates statics the whole process
+/// shares, so a test that called it would delete other parallel tests' live extractions — which is
+/// exactly why the degraded-mode defect this shape fixes went unnoticed.
+fn cleanup_session(session: Option<&Path>, recorded: Vec<PathBuf>) {
+    // The recorded directories first and unconditionally. In the normal case the tree removal below
+    // would have covered them; in degraded mode it refuses, and these are the only thing that can be
+    // removed at all.
+    for path in recorded {
+        let _ = fs::remove_dir_all(path);
     }
-    if let Some(session) = SESSION_ROOT.get() {
+    if let Some(session) = session {
         remove_session_tree(session);
     }
 }
@@ -3553,43 +3703,93 @@ mod tests {
         assert!(fs::symlink_metadata(&link).is_ok(), "and the link itself is left where it is");
     }
 
-    /// **In-session reclamation: the half a startup sweep cannot provide.** A session that extracts all
-    /// day is bounded by this, not by the next launch. Two properties, and the second is the one with
-    /// teeth: past the cap the oldest go, but *nothing inside the grace period is ever touched* — because
-    /// `FileList.svelte`'s alt-drag stages every selected entry in a loop before handing any of them to
-    /// the OS, so a big drag-out must not have its earlier files reclaimed out from under the loop that
-    /// is still building it.
+    /// **The blocker from PR #945's review, as a test that can actually go red.**
+    ///
+    /// The test this replaces staged all 200 of its "batch" entries with the *identical* timestamp, so
+    /// the batch was instantaneous and could never trip a time-based reap — the assertion held for every
+    /// possible `max_live` and `grace`, including the broken implementation it was supposed to be
+    /// guarding. A test that cannot fail is not evidence, and this one was sitting on the exact property
+    /// under review.
+    ///
+    /// The fix is to stage the batch the way `FileList.svelte`'s alt-drag really stages one: entries
+    /// spread **one second apart over 100 seconds**, i.e. spanning more than the grace, with the newest
+    /// pushed just now because the loop is still running. Against the old oldest-entry-age rule the front
+    /// is 100 s old, the cap is exceeded, and 36 directories are reclaimed out from under a drag that has
+    /// not been handed to the OS yet — the silent data-loss path. Against the quiet rule nothing is
+    /// touched, because the process started an extraction a moment ago.
+    ///
+    /// Verified red before the fix (`due.len()` was 36 here, and the batch shrank to 64 of its 100), and
+    /// green after.
     #[test]
-    fn cpe_1786_a_long_session_is_bounded_but_a_live_batch_is_not_touched() {
+    fn cpe_1786_a_batch_still_being_staged_is_never_reclaimed_however_long_it_takes() {
+        const CAP: usize = 64;
+        const HARD_CAP: usize = 4096;
         let grace = std::time::Duration::from_secs(60);
         // Built forwards, never backwards: `Instant - Duration` can panic on a machine that booted
         // moments ago, which a CI runner genuinely is.
-        let old = std::time::Instant::now();
-        let now = old + std::time::Duration::from_secs(300);
+        let start = std::time::Instant::now();
+        let per_entry = std::time::Duration::from_secs(1);
 
-        let mut aged: std::collections::VecDeque<(PathBuf, std::time::Instant)> = (0..100)
-            .map(|i| (PathBuf::from(format!("d{i}")), if i < 90 { old } else { now }))
-            .collect();
-        let due = drain_reapable(&mut aged, 64, grace, now);
-        assert_eq!(due.len(), 36, "100 live, cap 64 — the 36 oldest are due");
-        assert_eq!(due[0], PathBuf::from("d0"), "and they go oldest-first");
-        assert_eq!(aged.len(), 64, "the cap is what the session is bounded to");
-
+        // A 100-entry alt-drag, one second per entry (a large `.tar.gz` re-decodes from byte zero for
+        // every entry — O(n²) — so seconds per entry is the realistic figure, not the pathological one).
+        // "Now" is the moment the loop is about to stage entry 100; entry 0 is 100 seconds old.
         let mut batch: std::collections::VecDeque<(PathBuf, std::time::Instant)> =
-            (0..200).map(|i| (PathBuf::from(format!("f{i}")), now)).collect();
+            (0..100).map(|i| (PathBuf::from(format!("f{i}")), start + per_entry * i)).collect();
+        let now = start + per_entry * 100;
         assert!(
-            drain_reapable(&mut batch, 64, grace, now).is_empty(),
-            "a 200-entry drag-out still being staged is 200 files the OS is about to copy; the cap must \
-             not reclaim the first 136 of them mid-loop"
+            now.duration_since(batch.front().unwrap().1) > grace,
+            "the batch must genuinely span more than the grace, or this test proves nothing — that is \
+             the defect in the version it replaces"
         );
-        assert_eq!(batch.len(), 200);
 
-        let mut small: std::collections::VecDeque<(PathBuf, std::time::Instant)> =
-            (0..10).map(|i| (PathBuf::from(format!("s{i}")), old)).collect();
+        let due = drain_reapable(&mut batch, CAP, HARD_CAP, grace, now);
         assert!(
-            drain_reapable(&mut small, 64, grace, now).is_empty(),
+            due.is_empty(),
+            "{} directories were reclaimed from a drag-out that has not been handed to the OS yet. \
+             `startFileDrag` is called after the loop, so those paths are copied by the OS and silently \
+             dropped — with no error anywhere, because the extraction returned Ok before the reap",
+            due.len()
+        );
+        assert_eq!(batch.len(), 100, "and the batch is intact");
+
+        // The same queue once the burst is over: quiet for longer than the grace, so the cap applies.
+        let after = now + grace + std::time::Duration::from_secs(1);
+        let due = drain_reapable(&mut batch, CAP, HARD_CAP, grace, after);
+        assert_eq!(due.len(), 36, "once quiet, 100 live against a cap of 64 leaves 36 due");
+        assert_eq!(due[0], PathBuf::from("f0"), "and they go oldest-first");
+        assert_eq!(batch.len(), CAP, "the cap is what a long session is bounded to");
+
+        // Under the cap nothing goes, however old and however quiet.
+        let mut small: std::collections::VecDeque<(PathBuf, std::time::Instant)> =
+            (0..10).map(|i| (PathBuf::from(format!("s{i}")), start)).collect();
+        assert!(
+            drain_reapable(&mut small, CAP, HARD_CAP, grace, after).is_empty(),
             "under the cap nothing is reclaimed however old it is — an idle session keeps its previews"
         );
+    }
+
+    /// The other end of the quiet rule: a caller that is **never** quiet must not be able to hold the
+    /// reclamation open forever, or "bounded" is back to being a claim rather than a property. Past the
+    /// hard cap it runs anyway — and cuts only down to the hard cap, the smallest cut that restores the
+    /// bound, rather than all the way to `max_live`.
+    #[test]
+    fn cpe_1786_a_session_that_is_never_quiet_is_still_bounded() {
+        const CAP: usize = 64;
+        const HARD_CAP: usize = 4096;
+        let grace = std::time::Duration::from_secs(60);
+        let start = std::time::Instant::now();
+        let per_entry = std::time::Duration::from_millis(10);
+
+        let n = HARD_CAP + 100;
+        let mut busy: std::collections::VecDeque<(PathBuf, std::time::Instant)> = (0..n)
+            .map(|i| (PathBuf::from(format!("b{i}")), start + per_entry * (i as u32)))
+            .collect();
+        let now = start + per_entry * (n as u32);
+
+        let due = drain_reapable(&mut busy, CAP, HARD_CAP, grace, now);
+        assert_eq!(due.len(), 100, "only the overflow goes while the caller is still busy");
+        assert_eq!(busy.len(), HARD_CAP, "and it is cut to the hard cap, not to the ordinary cap");
+        assert_eq!(due[0], PathBuf::from("b0"), "oldest-first here too");
     }
 
     /// [`cleanup_extraction_scratch`]'s recursive delete refuses anything that is not a session
@@ -3614,6 +3814,42 @@ mod tests {
 
         remove_session_tree(&session);
         assert!(!session.exists(), "and a real session directory is removed, tree and all");
+    }
+
+    /// **Degraded-mode shutdown removes what it recorded** (PR #945 review). The first version `clear()`ed
+    /// the bookkeeping and then asked [`remove_session_tree`] to remove the shared root, which correctly
+    /// refuses — so shutdown removed nothing *and* destroyed the only record of the `e<seq>` directories
+    /// sitting directly under it. Both shapes are pinned here, because the normal one passing was what
+    /// made the degraded one look covered.
+    #[test]
+    fn cpe_1786_shutdown_removes_the_recorded_directories_even_when_the_tree_is_refused() {
+        let d = scratch("cpe1786_cleanup_degraded");
+
+        // Degraded mode: "session root" IS the shared root, so the tree removal must refuse — and the
+        // recorded directories are then the only thing that can be reclaimed.
+        let shared = d.join(ARCHIVE_TEMP_ROOT);
+        fs::create_dir(&shared).unwrap();
+        let recorded: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = shared.join(format!("e{i}"));
+                fs::create_dir(&p).unwrap();
+                fs::write(p.join("a.txt"), b"extracted").unwrap();
+                p
+            })
+            .collect();
+        cleanup_session(Some(&shared), recorded.clone());
+        for p in &recorded {
+            assert!(!p.exists(), "shutdown must remove what it recorded: {}", p.display());
+        }
+        assert!(shared.exists(), "while still refusing to remove the shared root itself");
+
+        // The ordinary shape: the whole session tree goes, recorded directories included.
+        let session = d.join("s1-0000000000000001");
+        fs::create_dir(&session).unwrap();
+        let inner = session.join("e0");
+        fs::create_dir(&inner).unwrap();
+        cleanup_session(Some(&session), vec![inner]);
+        assert!(!session.exists(), "and a real session tree goes in one piece");
     }
 
     /// **A recorded absence, closed by CPE-1758** (PR #906 review, finding 2 — the gap this test used to

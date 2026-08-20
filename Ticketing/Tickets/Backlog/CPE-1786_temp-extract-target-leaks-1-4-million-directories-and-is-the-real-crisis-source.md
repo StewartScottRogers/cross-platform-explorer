@@ -125,17 +125,27 @@ survive reaping, which is the property that makes any owner other than "forever"
   restaged inside the session root so the CPE-1733 guard is still genuinely exercised rather than being
   staged somewhere the extraction no longer looks.)
 - **Cross-session reclamation**: claiming the session root also sweeps the shared root for session
-  directories nothing has touched in an hour — including the pre-CPE-1786 `<pid>-<seq>` shape, so the old
-  leak drains through the same mechanism. Budgeted (256 examined / 32 removed per launch) and
+  directories nothing has touched in 24 hours — including the pre-CPE-1786 `<pid>-<seq>` shape, so the
+  old leak drains through the same mechanism. **The 1.39 million backlog was cleared by the one-shot
+  purge below, not by this sweep**: 32 removals per launch against 1.39 M is ~43,500 launches, which is
+  arithmetically true and practically not. The sweep's job is to stop the *re*-accumulation.
+- **The one-shot purge is done.** The real `%TEMP%\cpe-archive` was renamed aside first — an instant
+  same-volume move, so the live window was milliseconds rather than the hours the delete took, and no
+  concurrently running test or app had the tree pulled out from under it mid-extraction — and then
+  deleted with `rd /s /q`, detached at idle priority. `rd`, deliberately **not** `robocopy /MIR`: PR
+  #934 measured `/MIR` following a junction out of `%TEMP%` and deleting the far side *even with* `/XJ`.
+  The root now holds 3 entries (verified by the Reviewer), all of them this round's own verification-run
+  session roots — exactly the residue CPE-1797's shutdown hook exists to clear. Budgeted (256 examined / 32 removed per launch) and
   **synchronous**, because a detached sweeper thread is killed when a short-lived process exits and would
   reliably never finish. Liveness is the session root's own mtime, which creating each `e<seq>` child
   updates for free.
-- **In-session reclamation**: past 64 live extraction directories the oldest are removed, but **nothing
-  younger than 60 s is ever touched** — that grace is what protects a large drag-out batch that is still
-  being staged. This is the half a startup-only sweep cannot provide.
+- **In-session reclamation**: past 512 live extraction directories the oldest are removed, but only once
+  the process has been **quiet** for 60 s. See the correction below — the first version of this asked the
+  wrong question and introduced a data-loss path.
 - `archive::cleanup_extraction_scratch()` removes the whole session tree for an embedder that knows the
-  session is over. **Not yet wired into the app's exit path** — `src-tauri/src/lib.rs` was owned by
-  another worker this shift — so that wiring is the one follow-up this ticket leaves.
+  session is over. **It has no call sites** — `src-tauri/src/lib.rs` was owned by another worker this
+  shift — so today every session is reclaimed by the next launch's sweep or by the cap, never at
+  shutdown. Wiring it is **CPE-1797**.
 - Failures throughout are **skipped, not reported**, which is deliberately `CLAUDE.md`'s `list_dir`
   philosophy: this runs on the first extraction of a session, so a cleanup that turned somebody else's
   unreadable litter into an error would fail the user's extraction. A useful side effect on Windows: a
@@ -180,27 +190,129 @@ directory that can be reclaimed as a whole.
 like to the next launch:
 
 ```
+   diag: [CPE-1786] swept 0 stale session(s) under <TMP>\cpe-archive (examined at most 256, removal budget 32, ttl 0ns)
 run 1 -> top-level cpe-* = 1 | children of cpe-archive = 1 | grandchildren = 11
+   diag: [CPE-1786] swept 1 stale session(s) under <TMP>\cpe-archive (examined at most 256, removal budget 32, ttl 0ns)
 run 2 -> top-level cpe-* = 1 | children of cpe-archive = 1 | grandchildren = 11
+   diag: [CPE-1786] swept 1 stale session(s) under <TMP>\cpe-archive (examined at most 256, removal budget 32, ttl 0ns)
 run 3 -> top-level cpe-* = 1 | children of cpe-archive = 1 | grandchildren = 11
+   diag: [CPE-1786] swept 1 stale session(s) under <TMP>\cpe-archive (examined at most 256, removal budget 32, ttl 0ns)
 run 4 -> top-level cpe-* = 1 | children of cpe-archive = 1 | grandchildren = 11
 ```
 
 **Growth stopped.** Flat at every depth across four runs, where the same measurement before the change
-read 11 / 22 / 33 / 44.
+read 11 / 22 / 33 / 44 — and the sweep's own diagnostic line (added this round) corroborates the count
+from the inside rather than leaving it to be inferred from the directory listing.
+
+*Harness note, recorded because it briefly looked like a real defect:* an early version of this loop
+piped the child's stderr through `Select-String … | Select-Object -First 1`, which closes the pipeline
+and **kills the test process mid-run**. That produced a plausible-looking anomaly — grandchildren falling
+11 / 6 / 4 / 3 and top-level scratch directories accumulating, because a killed process runs no `Drop`.
+The numbers above are from a `Start-Process -Wait` harness that redirects to a file instead.
 
 ### Gates
 
 `cargo clippy --all-targets -- -D warnings` clean in all three CI feature modes for `crates/server`
-(default; `index`; `pdf-thumb,video-thumb,waveform,dicom-thumb`). Full `cargo test` green (2,224 lib +
-all integration binaries), and `cargo test --features index --lib` green (2,272). No new dependencies.
-No `specta::Type` struct touched, so no bindings regeneration.
+(default; `index`; `pdf-thumb,video-thumb,waveform,dicom-thumb`). Full `cargo test` green (2,226 lib +
+all integration binaries). No new dependencies. No `specta::Type` struct touched, so no bindings
+regeneration.
+
+Clippy also caught the correction round's one real portability bug before CI did: `Option::is_none_or`
+is stable since 1.82 and this crate's MSRV is **1.77.2**, so `incompatible_msrv` failed the build. Now
+`map_or`.
+
+### Correction round — PR #945 review + independent UAT
+
+The first push shipped a **new silent data-loss path that did not exist before**, because nothing was
+ever deleted before. Recording it in full, since the mistake was not in the code but in believing a
+comment the code did not implement.
+
+`drain_reapable` asked *"is the **oldest** entry older than the grace?"* and its comment claimed that
+"covers" the alt-drag staging loop. It does not. The queue is capped, so during a batch the front sits
+`max_live` entries behind the entry being pushed, and the front's age is `max_live × per-entry staging
+time` — **not** time since the batch started. `extract_archive_entry_any` reopens the archive and streams
+a fresh decoder from byte zero for every entry (O(n²)), so per-entry time on a large `.tar.gz`/`.7z` is
+seconds. The Reviewer derived the threshold arithmetically (`64 × per_entry ≥ 60 s`); the UAT, which had
+not seen that analysis, reproduced it from the outside with a 90-entry loop at ~1 s per entry:
+
+```
+MID-LOOP-LOSS at step 64: earlier batch indices [0] vanished while this batch is still being staged
+FINAL missing-of-90: [0, 1, 2, ..., 25]
+```
+
+26 of 90 files deleted before the batch had finished staging, let alone before the OS saw the drop —
+`Ok` returned before the reap, and the reap is `let _ =`, so no error anywhere.
+
+**Fixed by gating on *quiet* instead of on any individual directory's age**: reclaim only once no
+extraction has *started* in the last 60 s, decided **before** pushing the new entry, with a
+`HARD_CAP_EXTRACTIONS` of 4096 so a never-quiet caller stays bounded. That makes a burst atomically safe
+however long it runs and however slow each entry is. `MAX_LIVE_EXTRACTIONS` was also raised 64 → 512, to
+bound the one shape the quiet gate cannot see (a loop whose *per-entry* time exceeds the grace is
+indistinguishable from an idle session); that residual now needs a batch of >512 entries at >60 s each,
+i.e. eight hours of staging before the first file moves. Stated in the code rather than implied.
+
+**The test that should have caught it was the fifth "can only ever pass" shape this crew found today**:
+it built all 200 batch entries with the *identical* timestamp, so the batch was instantaneous and no
+time-based reap could ever fire — the assertion held for every possible `max_live` and `grace`, including
+the broken implementation it was guarding. Replaced with the UAT's shape: 100 entries one second apart,
+spanning more than the grace, newest pushed just now. **Red-proved by restoring the old rule**:
+
+```
+panicked at src\archive.rs:3730:
+36 directories were reclaimed from a drag-out that has not been handed to the OS yet.
+test result: FAILED. 0 passed; 1 failed
+```
+
+and green with the quiet gate. A second test pins the hard cap.
+
+Also from that round:
+
+- **`SESSION_TTL` 1 h → 24 h.** Liveness is mtime alone with no PID check, so a short TTL makes sweeping
+  a *live* session reachable: instance A extracts at 10:00 and idles, instance B launches at 11:05 and
+  removes A's session root. The recovery arm restores the directory but not the files, so an external
+  editor's open temp copy loses the user's Save. An hour is a realistic afternoon; a day is not, and the
+  drain rate is set by the removal budget per launch, not by the TTL.
+- **A `session.lock` sentinel** is now held open for the process lifetime inside the session root, so on
+  Windows a live session's removal bounces outright rather than merely being unlikely. Dropped before
+  `cleanup_extraction_scratch` removes our own tree.
+- **`cleanup_extraction_scratch` was worse than a no-op in degraded mode**: it `clear()`ed the queue
+  before `remove_session_tree` (correctly) refused the shared root, so shutdown removed nothing *and*
+  destroyed the only record of the `e<seq>` directories under it. Now drains and removes them first, and
+  the body is split into a testable `cleanup_session(session, recorded)` so the degraded shape has a test
+  that does not mutate process-global state.
+- **The Windows open-handle protection was overstated.** The UAT measured it: a genuinely locked file (a
+  `FileStream` denying delete) *is* protected and the sweep skips it cleanly, but a modern `notepad.exe`
+  reads and releases its handle immediately and the file was deleted out from under an open window. The
+  comment now says which class of consumer it covers instead of implying a blanket guarantee.
+- **The sweep's result is now logged** (`examined/removed/ttl`) when the diagnostic env var is set, via a
+  direct `writeln!` to stderr so libtest cannot swallow it — silence on the extraction path is right, but
+  a sweep that quietly never works would have looked identical to one that does.
+- **The examine budget takes directory order**, so an unremovable entry permanently occupies a slot in
+  the window; documented, because a reader would otherwise compute the drain rate and be wrong.
+- **A claim of mine was wrong and is corrected**: I wrote that CPE-1733's squat test, left where it was,
+  "would have been a test that could only ever pass". The Reviewer diffed the old body — it would have
+  **panicked** on the `strip_prefix('e')` parse, i.e. gone red. The restaging is still correct and
+  necessary; the characterisation was not.
+
+Confirmed unchanged by the UAT through the real production path: the fast path (65 rapid extractions all
+survive; after a real 61-second wait the two oldest go and 64 survive), the junction defence (a real
+Windows junction with a session-shaped name pointing outside `%TEMP%`, swept at `TTL=0`, canary
+untouched), and the before/after counts reproduced to the digit by a third party.
 
 ### Platform caveat
 
-Verified on Windows only. Two behaviours the Linux and macOS CI legs are the real check for: the
+Verified on Windows only. Three behaviours the Linux and macOS CI legs are the real check for: the
 mtime-as-liveness signal (creating a child updates the parent directory's mtime — true on all three, but
-only measured here), and `fs::symlink_metadata(..).file_type().is_symlink()` reporting `true` for a
-Windows junction (which is why the sweeper's link leg staged one at all). The link leg announces a loud
-skip via `require_staged` on any machine that cannot create a directory link, so a runner that stops
-being able to stage it goes red rather than passing vacuously.
+only measured here); `fs::symlink_metadata(..).file_type().is_symlink()` reporting `true` for a Windows
+junction (which is why the sweeper's link leg could stage one at all); and the `session.lock` sentinel,
+which is a Windows-only mitigation since Unix unlinks an open file happily. The link leg announces a loud
+`require_staged` skip on any machine that cannot create a directory link, so a runner that stops being
+able to stage it goes red rather than passing vacuously.
+
+**A genuine cross-platform exposure that CI will not catch, flagged rather than fixed** (PR #945 review):
+Linux `/tmp` is shared **between users**, where Windows `%TEMP%` is per-user. `cpe-archive` is created
+`0755` by whichever user gets there first, so a *second* user cannot create a session root inside it,
+falls into degraded mode, and then hits a hard `Err` from the per-extraction `create_dir`; and the
+sweeper will attempt to remove another user's session root, where only the sticky bit saves it. **Both
+are pre-existing** — the shared root and its permissions predate this ticket — so neither is introduced
+here, but the session directory makes the first one easier to hit and it should be a ticket of its own.
