@@ -377,6 +377,7 @@ impl FileSystemProvider for SftpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cpe_server::fsutil::{scratch_dir, ScratchDir};
     use cpe_server::known_hosts::{host_token, parse_known_hosts};
     use russh::keys::{Algorithm, PrivateKey};
     use russh::server::{Auth, Msg, Server as _, Session};
@@ -388,7 +389,7 @@ mod tests {
     use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     // --- A real filesystem-backed in-process SFTP server, rooted at a temp dir. It maps SFTP ops onto
@@ -949,10 +950,19 @@ mod tests {
     }
 
     /// Spawn the canned server on an ephemeral loopback port (its own thread + runtime), returning the
-    /// address and the host public key as `known_hosts` fields `(key_type, key_b64)`. If `accept_pubkey`
-    /// is set, the server only accepts publickey auth with that exact key (else it accepts any password).
-    fn spawn_server_with(accept_pubkey: Option<ssh_key::PublicKey>) -> (SocketAddr, KeyFields) {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
+    /// address, the host public key as `known_hosts` fields `(key_type, key_b64)`, and the guard owning
+    /// its on-disk root. If `accept_pubkey` is set, the server only accepts publickey auth with that
+    /// exact key (else it accepts any password).
+    ///
+    /// **CPE-1782:** the root used to be a bare, uniquely-named `PathBuf` never returned at all — leaked
+    /// unconditionally on every call, the same shape `cpe-net`'s `start_server`/`start_streaming_server`
+    /// had before this ticket. The [`ScratchDir`] guard is returned to the **caller** rather than armed
+    /// inside this function: the server below runs on a DETACHED thread with no join, so a guard armed
+    /// here would delete the server's data directory while it is still serving. Keep it bound
+    /// (`let (addr, hostkey, _root) = spawn_server_with(..);`), not discarded, for as long as the server
+    /// needs to keep serving — exactly the shape CPE-1693 chose for `cpe-webdav`/`cpe-s3`'s detached-thread
+    /// fixture spawners.
+    fn spawn_server_with(accept_pubkey: Option<ssh_key::PublicKey>) -> (SocketAddr, KeyFields, ScratchDir) {
         let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).expect("gen host key");
         let pub_fields = openssh_fields(key.public_key());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -961,13 +971,12 @@ mod tests {
         // is lenient) — without this the server thread panics on Linux/macOS.
         listener.set_nonblocking(true).unwrap();
 
-        // Seed a temp root: one file `readme.txt` ("hello world") + one empty dir `sub` (the OS reaper
-        // cleans temp; each server gets a unique dir).
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("cpe-sftp-srv-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(root.join(DIR_NAME)).unwrap();
-        std::fs::write(root.join(FILE_NAME), FILE_BODY).unwrap();
-        std::fs::write(root.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
+        // Seed a temp root: one file `readme.txt` ("hello world") + one empty dir `sub`.
+        let root = scratch_dir("cpe-sftp-srv");
+        let root_path = root.to_path_buf();
+        std::fs::create_dir_all(root_path.join(DIR_NAME)).unwrap();
+        std::fs::write(root_path.join(FILE_NAME), FILE_BODY).unwrap();
+        std::fs::write(root_path.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -975,46 +984,48 @@ mod tests {
                 let config = Arc::new(russh::server::Config { keys: vec![key], ..Default::default() });
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 // run_on_socket drives the full accept + per-connection session lifecycle.
-                let _ = TestServer { root, accept_pubkey }.run_on_socket(config, &listener).await;
+                let _ = TestServer { root: root_path, accept_pubkey }.run_on_socket(config, &listener).await;
             });
         });
-        (addr, pub_fields)
+        (addr, pub_fields, root)
     }
 
-    fn spawn_server() -> (SocketAddr, KeyFields) {
+    fn spawn_server() -> (SocketAddr, KeyFields, ScratchDir) {
         spawn_server_with(None)
     }
 
-    /// Like [`spawn_server`] but also returns the server's on-disk root, so a test can seed extra
-    /// (possibly hostile-named) files into it before listing, or construct an on-disk permission
-    /// condition (CPE-1692). Accepts any password. Seeds the same `readme.txt` + `sub/nested.txt` as the
-    /// other spawners. Not `#[cfg(unix)]` despite having a Unix-only first caller (a backslash filename
-    /// isn't creatable on Windows) — nothing in this function is Unix-specific, and CPE-1692's
-    /// permission-denied test needs it on every OS.
-    fn spawn_server_returning_root() -> (SocketAddr, KeyFields, PathBuf) {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
+    /// Like [`spawn_server`] but the caller can also read/stage files under the server's on-disk root
+    /// directly, so a test can seed extra (possibly hostile-named) files into it before listing, or
+    /// construct an on-disk permission condition (CPE-1692). Accepts any password. Seeds the same
+    /// `readme.txt` + `sub/nested.txt` as the other spawners. Not `#[cfg(unix)]` despite having a
+    /// Unix-only first caller (a backslash filename isn't creatable on Windows) — nothing in this
+    /// function is Unix-specific, and CPE-1692's permission-denied test needs it on every OS.
+    ///
+    /// **CPE-1782:** the 3rd element is a [`ScratchDir`] guard, not a bare `PathBuf` — same reasoning and
+    /// same "caller owns it, not armed inside this detached-thread spawner" shape as [`spawn_server_with`].
+    fn spawn_server_returning_root() -> (SocketAddr, KeyFields, ScratchDir) {
         let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).expect("gen host key");
         let pub_fields = openssh_fields(key.public_key());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
 
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("cpe-sftp-srvroot-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(root.join(DIR_NAME)).unwrap();
-        std::fs::write(root.join(FILE_NAME), FILE_BODY).unwrap();
-        std::fs::write(root.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
+        let root = scratch_dir("cpe-sftp-srvroot");
+        let root_path = root.to_path_buf();
+        std::fs::create_dir_all(root_path.join(DIR_NAME)).unwrap();
+        std::fs::write(root_path.join(FILE_NAME), FILE_BODY).unwrap();
+        std::fs::write(root_path.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
 
-        let root_ret = root.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
             rt.block_on(async move {
                 let config = Arc::new(russh::server::Config { keys: vec![key], ..Default::default() });
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                let _ = TestServer { root, accept_pubkey: None }.run_on_socket(config, &listener).await;
+                let _ =
+                    TestServer { root: root_path, accept_pubkey: None }.run_on_socket(config, &listener).await;
             });
         });
-        (addr, pub_fields, root_ret)
+        (addr, pub_fields, root)
     }
 
     /// A `known_hosts` list trusting `(key_type, key_b64)` at `127.0.0.1:port`.
@@ -1025,12 +1036,52 @@ mod tests {
     /// A fresh scratch **path** for an app-managed known_hosts store used by a test (the file itself
     /// starts absent — `connect_and_record`/`load_known_hosts` both treat that as empty). Unique per test
     /// run so parallel `cargo test` runs never collide.
-    fn scratch_known_hosts_path(tag: &str) -> std::path::PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cpe-sftp-kh-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("known_hosts")
+    ///
+    /// **CPE-1782:** returns the owning [`ScratchDir`] guard alongside the file path — this is the
+    /// "second-level helper" trap the CPE-1693 review named: a helper that creates its own scratch
+    /// directory and hands back only a bare *file* path inside it would, if the directory were a guard
+    /// dropped before returning, delete that directory before the caller could ever use the path. Keep
+    /// BOTH halves of the return bound (`let (_dir, store) = scratch_known_hosts_path(..);`), never
+    /// `let _ = ..` the first — that disarms the guard immediately.
+    fn scratch_known_hosts_path(tag: &str) -> (ScratchDir, std::path::PathBuf) {
+        let dir = scratch_dir(&format!("cpe-sftp-kh-{tag}"));
+        let store = dir.join("known_hosts");
+        (dir, store)
+    }
+
+    /// **CPE-1782, the panic-safety proof.** Every one of this crate's pre-fix cleanups was a trailing
+    /// `let _ = std::fs::remove_dir_all(..)` written AFTER the test's assertions — exactly the ordering a
+    /// panicking assertion skips, which is how `crates/sftp` accumulated leaked `cpe-sftp-*` directories
+    /// even on a green run (any earlier test in the same process that failed one assertion still leaked).
+    /// This test proves the replacement — a `scratch_dir()` guard bound to a named local, exactly as this
+    /// crate's converted helpers now do (`spawn_server`, `scratch_known_hosts_path`,
+    /// `cpe_1730_seed_victim_outside`, …) — survives that exact failure mode.
+    ///
+    /// `catch_unwind` rather than `#[should_panic]` so the directory can be inspected on the far side of
+    /// the unwind, in this same test — the point being demonstrated is not "it panics" but "the guard's
+    /// `Drop` still ran during the unwind".
+    #[test]
+    fn a_scratch_dir_guard_is_removed_even_when_the_owning_test_panics_mid_assertion() {
+        let dir = scratch_dir("cpe-sftp-panic-proof");
+        let path = dir.to_path_buf();
+        assert!(path.is_dir(), "sanity: the guard must own a real directory before the panic below");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Moved into the closure so it drops during the unwind, not after — the same "guard armed
+            // before assertions run" ordering CPE-1782 put into every converted call site in this file.
+            let _armed = dir;
+            assert_eq!(1 + 1, 3, "CPE-1782 proof: a deliberately failing assertion, mid-test");
+        }))
+        .is_err();
+
+        assert!(panicked, "the proof only proves anything if the inner assertion actually panicked");
+        assert!(
+            !path.is_dir(),
+            "CPE-1782 REGRESSION: {} still exists after its owning ScratchDir panicked out of scope — \
+             the pre-fix trailing `remove_dir_all` never covered this path, and neither would a \
+             regression back to it",
+            path.display()
+        );
     }
 
     // CPE-1512: connect_and_record completes TOFU — a first-contact connect persists the presented key to
@@ -1039,8 +1090,8 @@ mod tests {
     // refused as Changed (never silently auto-trusted).
     #[test]
     fn connect_and_record_persists_first_contact_then_trusts_the_same_key() {
-        let (addr, hostkey) = spawn_server();
-        let store = scratch_known_hosts_path("first-contact");
+        let (addr, hostkey, _root) = spawn_server();
+        let (_kh_dir, store) = scratch_known_hosts_path("first-contact");
         assert!(!store.exists(), "store starts absent, like a fresh app install");
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
 
@@ -1063,14 +1114,12 @@ mod tests {
 
         // Re-recording (Trusted, not Unknown) must not duplicate the entry.
         assert_eq!(cpe_server::known_hosts::load_known_hosts(&store).len(), 1, "no duplicate on re-record");
-
-        let _ = std::fs::remove_dir_all(store.parent().unwrap());
     }
 
     #[test]
     fn connect_and_record_refuses_a_swapped_key_without_auto_trusting() {
-        let (addr, _real_hostkey) = spawn_server();
-        let store = scratch_known_hosts_path("swapped-key");
+        let (addr, _real_hostkey, _root) = spawn_server();
+        let (_kh_dir, store) = scratch_known_hosts_path("swapped-key");
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
 
         // Simulate an app store that already recorded a DIFFERENT key for this host (e.g. from a prior,
@@ -1096,15 +1145,13 @@ mod tests {
         let after = cpe_server::known_hosts::load_known_hosts(&store);
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].key_b64, "AAAAAstalekeythatdoesnotmatch");
-
-        let _ = std::fs::remove_dir_all(store.parent().unwrap());
     }
 
     #[test]
     fn connect_and_record_with_no_record_path_behaves_like_plain_connect() {
         // A platform with no app config dir (record_path = None) must not fail the connect — persistence
         // is simply skipped.
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let provider = SftpProvider::connect_and_record(&cfg, vec![], HostKeyPolicy::Tofu, None)
             .expect("TOFU should still accept with no record_path");
@@ -1116,7 +1163,7 @@ mod tests {
     // list → stat → read, plus a TOFU accept of an unknown host.
     #[test]
     fn connects_to_a_trusted_host_then_lists_stats_and_reads() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let provider = SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
             .expect("connect to a trusted host should succeed");
@@ -1140,7 +1187,7 @@ mod tests {
 
     #[test]
     fn writes_mkdirs_lists_and_deletes_round_trip() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider = SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
             .expect("connect");
@@ -1167,7 +1214,7 @@ mod tests {
 
     #[test]
     fn walk_recurses_the_remote_tree() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
@@ -1183,32 +1230,29 @@ mod tests {
 
     #[test]
     fn download_tree_recreates_the_remote_files_locally() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
 
-        let out = std::env::temp_dir().join(format!("cpe-sftp-dl-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
+        let out = scratch_dir("cpe-sftp-dl");
         let cancel = AtomicBool::new(false);
         let files = provider.download_tree("/", &out, &cancel).expect("download");
 
         assert_eq!(files, 2, "readme.txt + sub/nested.txt");
         assert_eq!(std::fs::read(out.join("readme.txt")).unwrap(), FILE_BODY);
         assert_eq!(std::fs::read(out.join("sub").join("nested.txt")).unwrap(), b"deep");
-        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]
     fn upload_tree_recreates_local_files_on_the_remote() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
 
         // Build a local tree: a.txt + inner/b.txt.
-        let src = std::env::temp_dir().join(format!("cpe-sftp-up-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&src);
+        let src = scratch_dir("cpe-sftp-up");
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("a.txt"), b"alpha").unwrap();
         std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
@@ -1220,7 +1264,6 @@ mod tests {
         // Read them back over SFTP to confirm they landed with the right structure + content.
         assert_eq!(provider.read("/up/a.txt").unwrap(), b"alpha");
         assert_eq!(provider.read("/up/inner/b.txt").unwrap(), b"bravo");
-        let _ = std::fs::remove_dir_all(&src);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1228,27 +1271,16 @@ mod tests {
     // real SFTP wire (this rig's honest, non-idempotent `create_dir`, per CPE-1731).
     // ---------------------------------------------------------------------------------------------
 
-    /// Local scratch dir cleanup via `Drop`, armed before any assertion runs — a failed assertion
-    /// partway through a test must not leak the temp dir.
-    struct ScratchDirGuard(PathBuf);
-    impl Drop for ScratchDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
         // `/sub` is seeded by `spawn_server` (with `nested.txt` inside already) — uploading into it
         // must not trip this rig's honest, non-idempotent `create_dir`'s EEXIST refusal.
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
 
-        let src = std::env::temp_dir().join(format!("cpe-sftp-up-exists-{}", std::process::id()));
-        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
-        let _ = std::fs::remove_dir_all(&src);
+        let src = scratch_dir("cpe-sftp-up-exists"); // armed before any assertion
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("a.txt"), b"alpha").unwrap();
         std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
@@ -1266,15 +1298,12 @@ mod tests {
 
     #[test]
     fn upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
 
-        let src = std::env::temp_dir().join(format!("cpe-sftp-up-multilevel-{}", std::process::id()));
-        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
-        let _ = std::fs::remove_dir_all(&src);
-        std::fs::create_dir_all(&src).unwrap();
+        let src = scratch_dir("cpe-sftp-up-multilevel"); // armed before any assertion
         std::fs::write(src.join("z.txt"), b"zed").unwrap();
 
         // Neither "/new" nor "/new/deep" exists on the served root yet — a bare (non-recursive)
@@ -1292,14 +1321,12 @@ mod tests {
         // The partial-re-upload case: a directory INSIDE the tree (not just the base) already exists
         // remotely — transfer.rs:761's own CPE-1741 shape, shadowed until the base-level (744) fix
         // was in place.
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
 
-        let src = std::env::temp_dir().join(format!("cpe-sftp-up-partial-{}", std::process::id()));
-        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
-        let _ = std::fs::remove_dir_all(&src);
+        let src = scratch_dir("cpe-sftp-up-partial"); // armed before any assertion
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("inner").join("c.txt"), b"charlie").unwrap();
 
@@ -1316,7 +1343,7 @@ mod tests {
 
     #[test]
     fn walk_stops_promptly_when_cancelled() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
@@ -1334,7 +1361,7 @@ mod tests {
 
     #[test]
     fn rename_moves_a_file_over_sftp() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
@@ -1731,17 +1758,22 @@ mod tests {
     /// A real sibling of the rig's own temp root, not a fabricated string: the point of the ticket is
     /// that `root.join("../…")` lands on somebody's real files, so the test puts real bytes there and
     /// reads them back.
-    fn cpe_1730_seed_victim_outside(root: &Path) -> (PathBuf, PathBuf, String) {
+    ///
+    /// **CPE-1782:** `victim_dir` is a [`ScratchDir`] guard (via [`ScratchDir::adopt`], since this
+    /// directory is created with its own name derived from the caller's root rather than `scratch_dir`'s
+    /// `<prefix>-<pid>-<seq>` scheme) — a second-level helper exactly like `spawn_s3_fixture`'s
+    /// `fixture_root` in CPE-1693. Both callers below run many assertions between this call and their old
+    /// trailing `remove_dir_all`, which never ran on a failing assertion; the guard now covers that path.
+    fn cpe_1730_seed_victim_outside(root: &Path) -> (ScratchDir, PathBuf, String) {
         let name = format!(
             "{}-cpe-1730-victim",
             root.file_name().expect("the rig root has a name").to_string_lossy()
         );
         let dir = root.parent().expect("the rig root has a parent").join(&name);
-        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create the victim directory");
         let file = dir.join("victim.txt");
         std::fs::write(&file, CPE_1730_VICTIM_BYTES).expect("seed the victim file");
-        (dir, file, format!("/../{name}"))
+        (ScratchDir::adopt(dir), file, format!("/../{name}"))
     }
 
     /// Did **a guard** refuse this, carrying `sentinel`? The generalisation of
@@ -1883,8 +1915,6 @@ mod tests {
         provider.write("/ordinary.txt", b"ordinary").expect("an ordinary write must still succeed");
         assert_eq!(std::fs::read(root.join("ordinary.txt")).unwrap(), b"ordinary");
         assert_eq!(provider.read(&format!("/{FILE_NAME}")).expect("an ordinary read"), FILE_BODY);
-
-        let _ = std::fs::remove_dir_all(&victim_dir);
     }
 
     /// Escape family 2: an **absolute** request path, which replaces the served root outright because
@@ -1900,7 +1930,7 @@ mod tests {
     #[test]
     fn cpe_1730_an_absolute_request_path_cannot_replace_the_root() {
         let (addr, hostkey, root) = spawn_server_returning_root();
-        let (victim_dir, victim, _) = cpe_1730_seed_victim_outside(&root);
+        let (_victim_dir, victim, _) = cpe_1730_seed_victim_outside(&root);
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let mut provider =
             SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
@@ -1924,7 +1954,6 @@ mod tests {
             cpe_1730_is_guard_refusal(&deleted, CPE_1730_ESCAPED_ROOT_REFUSAL),
             "…refused by the guard, by its own sentinel. Got {deleted:?}"
         );
-        let _ = std::fs::remove_dir_all(&victim_dir);
     }
 
     /// The gap CPE-1731 wrote down at its own guard: `rename("/", "/x")` moved **the served root
@@ -2065,7 +2094,7 @@ mod tests {
 
     #[test]
     fn a_changed_host_key_is_refused() {
-        let (addr, _hostkey) = spawn_server();
+        let (addr, _hostkey, _root) = spawn_server();
         // Same host+type, DIFFERENT key material → Changed → connection must be refused.
         let wrong = ("ssh-ed25519".to_string(), "AAAAthisisnottherealkey".to_string());
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
@@ -2079,7 +2108,7 @@ mod tests {
     #[test]
     fn an_unknown_host_is_refused_under_strict() {
         // No known_hosts entry → Unknown → Strict refuses at the handshake (before any SFTP op).
-        let (addr, _hostkey) = spawn_server();
+        let (addr, _hostkey, _root) = spawn_server();
         let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
         let err = match SftpProvider::connect(&cfg, vec![], HostKeyPolicy::Strict) {
             Ok(_) => panic!("an unknown host must be refused under Strict"),
@@ -2099,7 +2128,7 @@ mod tests {
     fn authenticates_with_an_ssh_key_then_lists() {
         // The server accepts only this client public key; the provider auths with the matching private key.
         let (client_pub, pem) = client_keypair();
-        let (addr, hostkey) = spawn_server_with(Some(client_pub));
+        let (addr, hostkey, _root) = spawn_server_with(Some(client_pub));
         let cfg = SftpConfig::key("127.0.0.1", addr.port(), "user", pem, None);
         let provider = SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
             .expect("key auth should succeed");
@@ -2113,7 +2142,7 @@ mod tests {
         // which is still Trusted, was verified).
         let (accepted_pub, _accepted_pem) = client_keypair();
         let (_wrong_pub, wrong_pem) = client_keypair();
-        let (addr, hostkey) = spawn_server_with(Some(accepted_pub));
+        let (addr, hostkey, _root) = spawn_server_with(Some(accepted_pub));
         let cfg = SftpConfig::key("127.0.0.1", addr.port(), "user", wrong_pem, None);
         let err = match SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict) {
             Ok(_) => panic!("a wrong key must be rejected"),
@@ -2124,7 +2153,7 @@ mod tests {
 
     #[test]
     fn connect_location_bridges_an_sftp_url_to_a_provider() {
-        let (addr, hostkey) = spawn_server();
+        let (addr, hostkey, _root) = spawn_server();
         let url = format!("sftp://user@127.0.0.1:{}/", addr.port());
         let loc = cpe_server::location::parse(&url);
         let provider = connect_location(
@@ -2156,7 +2185,7 @@ mod tests {
 
     #[test]
     fn an_invalid_private_key_is_a_clear_error() {
-        let (addr, hostkey) = spawn_server_with(Some(client_keypair().0));
+        let (addr, hostkey, _root) = spawn_server_with(Some(client_keypair().0));
         let cfg = SftpConfig::key("127.0.0.1", addr.port(), "user", "not a real key", None);
         let err = match SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict) {
             Ok(_) => panic!("an invalid key must error"),
@@ -2440,16 +2469,19 @@ mod tests {
     async fn open_handler_itself_reports_the_real_cause_for_a_permission_denied_file_not_missing() {
         use russh_sftp::server::Handler;
 
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("cpe-sftp-openh-{}-{}", std::process::id(), n));
+        // CPE-1782: `root_guard` owns the temp directory (removed on drop) — declared before `_restore`
+        // below so Rust's reverse-declaration-order drop runs `_restore` FIRST (undoing the permission
+        // deny) and `root_guard` LAST (deleting the now-permission-normal directory). Getting that
+        // ordering backwards would try to recursively delete a directory still carrying a deny ACE/mode
+        // 0 on one of its entries.
+        let root_guard = scratch_dir("cpe-sftp-openh");
+        let root = root_guard.to_path_buf();
         let gp = root.join("gp");
         std::fs::create_dir_all(&gp).unwrap();
         let real_file = gp.join("real_file.txt");
         std::fs::write(&real_file, b"secret file").unwrap();
 
-        struct Restore { target: PathBuf, parent: PathBuf, root: PathBuf }
+        struct Restore { target: PathBuf, parent: PathBuf }
         impl Drop for Restore {
             fn drop(&mut self) {
                 #[cfg(windows)]
@@ -2469,10 +2501,9 @@ mod tests {
                     use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::set_permissions(&self.parent, std::fs::Permissions::from_mode(0o700));
                 }
-                let _ = std::fs::remove_dir_all(&self.root);
             }
         }
-        let _restore = Restore { target: real_file.clone(), parent: gp.clone(), root: root.clone() };
+        let _restore = Restore { target: real_file.clone(), parent: gp.clone() };
 
         #[cfg(windows)]
         {

@@ -363,10 +363,11 @@ impl FileSystemProvider for FtpProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cpe_server::fsutil::{scratch_dir, ScratchDir};
     use std::io::{BufRead, BufReader, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     const FILE_NAME: &str = "readme.txt";
     const FILE_BODY: &[u8] = b"hello ftp"; // 9 bytes
@@ -817,30 +818,36 @@ mod tests {
 
     /// Spawn the in-process fake FTP server on an ephemeral loopback port; returns `(port, root)`. Seeds a
     /// temp root: `readme.txt` ("hello ftp") + `sub/nested.txt`.
-    fn spawn_ftp_server(creds: Creds) -> (u16, PathBuf) {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("cpe-ftp-srv-{}-{}", std::process::id(), n));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(DIR_NAME)).unwrap();
-        std::fs::write(root.join(FILE_NAME), FILE_BODY).unwrap();
-        std::fs::write(root.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
+    ///
+    /// **CPE-1782:** `root` is a [`cpe_server::fsutil::ScratchDir`] guard, not a bare `PathBuf` — it used
+    /// to be thrown away as a plain path, leaked unconditionally on every one of this function's ~20 call
+    /// sites (the same shape `cpe-net`'s `start_server`/`start_streaming_server` had before this ticket).
+    /// Returned to the **caller** rather than armed inside this function: the server below runs on a
+    /// DETACHED thread with no join, so a guard armed here would delete the server's data directory while
+    /// it is still serving. Keep it bound (`let (port, _root) = exact_server();`), not discarded, for as
+    /// long as the server needs to keep serving — the same shape CPE-1693 chose for `cpe-webdav`'s and
+    /// `cpe-s3`'s detached-thread fixture spawners.
+    fn spawn_ftp_server(creds: Creds) -> (u16, ScratchDir) {
+        let root = scratch_dir("cpe-ftp-srv");
+        let root_path = root.to_path_buf();
+        std::fs::create_dir_all(root_path.join(DIR_NAME)).unwrap();
+        std::fs::write(root_path.join(FILE_NAME), FILE_BODY).unwrap();
+        std::fs::write(root_path.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let root_ret = root.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
-                let root = root.clone();
+                let root = root_path.clone();
                 let creds = creds.clone();
                 std::thread::spawn(move || handle_control(conn, root, creds));
             }
         });
-        (port, root_ret)
+        (port, root)
     }
 
-    fn exact_server() -> (u16, PathBuf) {
+    fn exact_server() -> (u16, ScratchDir) {
         spawn_ftp_server(Creds::Exact { user: "user", pass: "pw" })
     }
 
@@ -895,15 +902,6 @@ mod tests {
     // provider — the same thing `cpe-vfs`'s callers do.
     // ---------------------------------------------------------------------------------------------
 
-    /// Local scratch dir cleanup via `Drop`, armed before any assertion runs — a failed assertion
-    /// partway through a test must not leak the temp dir.
-    struct ScratchDirGuard(PathBuf);
-    impl Drop for ScratchDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
         // `/sub` is seeded by `spawn_ftp_server` (with `nested.txt` inside already) — uploading into
@@ -912,9 +910,7 @@ mod tests {
         let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
         let mut provider = FtpProvider::connect(&cfg).expect("connect");
 
-        let src = std::env::temp_dir().join(format!("cpe-ftp-up-exists-{}", std::process::id()));
-        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
-        let _ = std::fs::remove_dir_all(&src);
+        let src = scratch_dir("cpe-ftp-up-exists"); // armed before any assertion
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("a.txt"), b"alpha").unwrap();
         std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
@@ -935,10 +931,7 @@ mod tests {
         let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
         let mut provider = FtpProvider::connect(&cfg).expect("connect");
 
-        let src = std::env::temp_dir().join(format!("cpe-ftp-up-multilevel-{}", std::process::id()));
-        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
-        let _ = std::fs::remove_dir_all(&src);
-        std::fs::create_dir_all(&src).unwrap();
+        let src = scratch_dir("cpe-ftp-up-multilevel"); // armed before any assertion
         std::fs::write(src.join("z.txt"), b"zed").unwrap();
         // Only a successful MKD chain can produce a directory with no file inside it — this rig's STOR
         // does `create_dir_all(parent)` (CPE-1742), which would invent a non-empty directory's parents
@@ -967,9 +960,7 @@ mod tests {
         let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
         let mut provider = FtpProvider::connect(&cfg).expect("connect");
 
-        let src = std::env::temp_dir().join(format!("cpe-ftp-up-partial-{}", std::process::id()));
-        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
-        let _ = std::fs::remove_dir_all(&src);
+        let src = scratch_dir("cpe-ftp-up-partial"); // armed before any assertion
         std::fs::create_dir_all(src.join("inner")).unwrap();
         std::fs::write(src.join("inner").join("c.txt"), b"charlie").unwrap();
 
@@ -1532,17 +1523,22 @@ mod tests {
     /// Deliberately a real sibling of the rig's own temp root rather than a fabricated string: the point
     /// of the ticket is that `root.join("../…")` lands on somebody's real files, so the test has to put
     /// real bytes there and read them back afterwards.
-    fn seed_victim_outside(root: &Path) -> (PathBuf, PathBuf, String) {
+    ///
+    /// **CPE-1782:** `victim_dir` is a [`ScratchDir`] guard (via [`ScratchDir::adopt`], since this
+    /// directory's name is derived from the caller's root rather than `scratch_dir`'s own
+    /// `<prefix>-<pid>-<seq>` scheme) — the same second-level-helper fix as `cpe-sftp`'s sibling. Both
+    /// callers below run many assertions between this call and their old trailing `remove_dir_all`, which
+    /// never ran on a failing assertion; the guard now covers that path.
+    fn seed_victim_outside(root: &Path) -> (ScratchDir, PathBuf, String) {
         let name = format!(
             "{}-cpe-1730-victim",
             root.file_name().expect("the rig root has a name").to_string_lossy()
         );
         let dir = root.parent().expect("the rig root has a parent").join(&name);
-        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create the victim directory");
         let file = dir.join("victim.txt");
         std::fs::write(&file, VICTIM_BYTES).expect("seed the victim file");
-        (dir, file, format!("/../{name}"))
+        (ScratchDir::adopt(dir), file, format!("/../{name}"))
     }
 
     /// CPE-1730 acceptance: a request path resolving **outside** the served root is refused, and the
@@ -1665,8 +1661,6 @@ mod tests {
         provider.write("/ordinary.txt", b"ordinary").expect("an ordinary write must still succeed");
         assert_eq!(std::fs::read(root.join("ordinary.txt")).unwrap(), b"ordinary");
         assert_eq!(provider.read(&format!("/{FILE_NAME}")).expect("an ordinary read"), FILE_BODY);
-
-        let _ = std::fs::remove_dir_all(&victim_dir);
     }
 
     /// Escape family 2: an **absolute** request path, which replaces the served root outright because
@@ -1682,7 +1676,7 @@ mod tests {
     #[test]
     fn cpe_1730_an_absolute_request_path_cannot_replace_the_root() {
         let (port, root) = exact_server();
-        let (victim_dir, victim, _) = seed_victim_outside(&root);
+        let (_victim_dir, victim, _) = seed_victim_outside(&root);
         let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
         let mut provider = FtpProvider::connect(&cfg).expect("connect");
         let absolute = victim.display().to_string();
@@ -1705,7 +1699,6 @@ mod tests {
             CPE_1730_ESCAPED_ROOT_REFUSAL.trim_end_matches("\r\n"),
             "the refusal must be the confinement guard's own line, not an errno's 550"
         );
-        let _ = std::fs::remove_dir_all(&victim_dir);
     }
 
     /// The gap CPE-1731 wrote down at its own guard and could not close: `RNFR /` + `RNTO /elsewhere`
