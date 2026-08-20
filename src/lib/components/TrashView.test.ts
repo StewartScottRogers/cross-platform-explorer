@@ -119,6 +119,10 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.queryByText("Loading Trash…")).toBeNull();
     expect(screen.getByText("Trash couldn't be fully read — it may not be empty")).toBeTruthy();
     expect(screen.queryByText("Trash is empty")).toBeNull();
+    // CPE-1803 review: the titlebar's item count must not sit next to the degraded message asserting a
+    // hard "0 items" — that number is exactly what trash.degraded exists to say is NOT known. A stray
+    // "0 items" here would contradict the message one line above it.
+    expect(screen.queryByText("0 items")).toBeNull();
   });
 
   it("appends multiple batches across the same stream", async () => {

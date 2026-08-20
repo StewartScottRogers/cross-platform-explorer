@@ -158,7 +158,10 @@
     <div class="tv-titlebar">
       <span class="tv-title">
         <Icon name="delete" size={15} /> {$t("trash.title")}
-        {#if !loading && !error}<span class="tv-count">{itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}</span>{/if}
+        <!-- CPE-1803 review: a degraded pass has zero entries but that count is NOT a known fact —
+             showing "0 items" here would sit right next to trash.degraded's whole point, which is that
+             the true count is unknown. Suppress the count entirely rather than assert a number. -->
+        {#if !loading && !error && !degraded}<span class="tv-count">{itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}</span>{/if}
       </span>
       <div class="tv-tools">
         {#if entries.length > 0}
@@ -200,8 +203,12 @@
       {:else if entries.length === 0 && degraded}
         <!-- CPE-1803: a degraded listing must never render as "trash.empty" — an unreadable trash is
              not the same claim as a genuinely empty one, and telling the user "empty" here would make
-             them stop looking for files that are still sitting in the trash. -->
-        <div class="tv-empty tv-edge error">{$t("trash.degraded")}</div>
+             them stop looking for files that are still sitting in the trash. It must also read as its
+             OWN state rather than borrowing the hard-failure "error" treatment (CPE-1803 review):
+             restore still works, entries may still be there — this isn't a crash, it's a caution. -->
+        <div class="tv-empty">
+          <span class="tv-degraded-note">{$t("trash.degraded")}</span>
+        </div>
       {:else if entries.length === 0}
         <div class="tv-empty">{$t("trash.empty")}</div>
       {:else}
@@ -324,6 +331,21 @@
   .tv-body { flex: 1; overflow: auto; }
   .tv-empty { display: grid; place-items: center; height: 100%; color: var(--text-dim); }
   .tv-edge.error { color: var(--danger); }
+  /* CPE-1803: deliberately NOT `.tv-edge.error`'s red/`--danger` treatment — a degraded listing is a
+     caution (the listing came back thin; restore still works, entries may still be there), not the
+     hard-failure state `trash.error` represents. `--warn` is the established "caution, not failure"
+     token elsewhere in the app (ImageCompareView.svelte's `.ic-note`, SidecarManager.svelte, etc.). */
+  .tv-degraded-note {
+    /* One hex fallback, referenced three times below — keeps this file's ratchet-guarded inline-hex
+       footprint (src/app.css.test.ts) to a single new literal instead of three. */
+    --tv-warn: var(--warn, #b5872b);
+    color: var(--tv-warn);
+    background: color-mix(in srgb, var(--tv-warn) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--tv-warn) 40%, transparent);
+    border-radius: var(--radius);
+    padding: 8px 14px;
+    font-size: 12px;
+  }
 
   .tv-head-row,
   .tv-row {
