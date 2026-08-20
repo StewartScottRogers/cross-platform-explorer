@@ -1209,13 +1209,25 @@ jobs:
             exit 0
           fi
 
-          if [ -n "$override_reason" ]; then
+          # Review finding (blocker): `[ -n "$override_reason" ]` is "non-zero length", not
+          # "non-blank" -- a three-space string or a lazy "x" both satisfied it and rubber-stamped
+          # the override with no real reason recorded, defeating the whole point of asking for one
+          # (a reviewer seeing WHY the safety net was bypassed). Trim whitespace and require a
+          # minimum length before accepting it as a genuine reason.
+          trimmed_reason="$(printf '%s' "$override_reason" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+          if [ ${#trimmed_reason} -ge 10 ]; then
             echo "::warning::FFMPEG_BUILD_TAG=${tag} is a rolling daily, not a month-end anchor -- allowed only because release-sidecar.yml sets FFMPEG_BUILD_TAG_OVERRIDE_REASON: \"${override_reason}\". That reason is now recorded in this run's log and in the PR diff. Confirm it's still current, and repin to the newest month-end anchor (clear the override once you do) as soon as it no longer applies -- BtbN still prunes this daily on its usual ~14-day window regardless of the override."
             exit 0
+          fi
+
+          if [ -n "$trimmed_reason" ]; then
+            echo "::error::FFMPEG_BUILD_TAG_OVERRIDE_REASON is set but too short to be a real reason (\"${override_reason}\") -- explain WHY this is a deliberate daily pin (e.g. what it fixes and when it'll be reverted to an anchor), not just restate that it is one."
+            exit 1
           fi
 
           echo "::error::FFMPEG_BUILD_TAG=${tag} looks like a rolling BtbN/FFmpeg-Builds DAILY autobuild, not a month-end anchor."
           echo "::error::BtbN prunes dailies on a ~14-day window. Pinning one here restarts that clock, and the release build WILL start 404ing on its download in a couple of weeks -- exactly what CPE-1789 fixed once already after a daily pin rotted mid-cycle."
           echo "::error::Pick the newest month-end anchor tag instead (a date whose following day is the 1st of the next month -- see ffmpeg-pin-freshness.yml's cadence note for how BtbN's two retention classes work; that workflow's \"Determine current live tags to recommend\" step, or a manual workflow_dispatch of it, finds a currently-live one)."
-          echo "::error::If you genuinely need a daily for a short window, don't loosen this check to let it through silently -- set FFMPEG_BUILD_TAG_OVERRIDE_REASON in release-sidecar.yml's \"Stage native deps\" env: block to a one-line reason. That keeps the override visible in the PR diff and in every run of this guard, instead of quietly disabling it for everyone."
+          echo "::error::If you genuinely need a daily for a short window, don't loosen this check to let it through silently -- set FFMPEG_BUILD_TAG_OVERRIDE_REASON in release-sidecar.yml's \"Stage native deps\" env: block to a real, one-line reason (at least 10 characters). That keeps the override visible in the PR diff and in every run of this guard, instead of quietly disabling it for everyone."
           exit 1
