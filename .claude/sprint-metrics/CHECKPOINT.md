@@ -79,3 +79,33 @@ There is no sprint to resume — the last one ended at its bound, cleanly. Start
 `git pull`, then either `/ticketing-list` to see the queue or `/sprint-batched N` to run another
 supervised batch. Do not treat the list above as a plan; re-read the tickets, because the measurements
 in them will have aged.
+
+---
+
+## STANDING INSTRUCTION from the user, 2026-08-19 17:45 USMST
+
+**Before starting the next set of batches, BUILD → DEPLOY → RUN the application.**
+
+Given directly by the user during run `batched-2026-08-17-1929` (at batch 16 of 40). This is a
+wrap-time gate on the *current* run, not a per-batch step: as the run approaches its end, stop
+dispatching new work and do the full cycle before any next set begins.
+
+The cycle, per the standing memories — do not shortcut any of it:
+
+1. **Build** via the `Release (sidecar-enabled)` workflow. Plain `release.yml` is the wrong one.
+   The install must always be the sidecar-enabled build (AI Console), never the plain release.
+2. **Kill every process first** — every `cpe` and `ai-console`, including `--session-daemon`.
+   NSIS silently skips a file-locked sidecar and the registry version then *lies* about what is
+   installed.
+3. **Install** silently, then **verify** the installed version *and* the sidecar timestamp — a
+   launcher swap is not a host swap; host/frontend changes need the host exe rebuilt.
+4. **Launch** and confirm it is actually responding.
+5. Remember the WebView2 cache survives a reinstall, so a stale `index.html` can make a real
+   frontend fix look broken during GUI verification.
+
+Bracket the whole thing with the ASCII WAIT -> (1) BUILD -> (2) DEPLOY -> (3) RUN -> RUNNING
+narration and a closing checklist.
+
+Related memories: `gui-verify-needs-build-deploy-run`, `always-install-sidecar-build`,
+`install-kill-all-processes-first`, `sidecar-host-changes-need-host-rebuild`,
+`webview2-cache-survives-reinstall`.
