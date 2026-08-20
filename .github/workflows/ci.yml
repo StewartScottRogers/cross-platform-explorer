@@ -1313,10 +1313,17 @@ jobs:
   ffmpeg-pin-guard:
     name: ffmpeg pin is a month-end anchor
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # CPE-1802: actions:write lets the step below dispatch ffmpeg-pin-freshness.yml when this job
+      # takes the override path. Declaring a permissions: block at all drops every unlisted scope to
+      # "none", so contents: read (actions/checkout below needs it) is repeated here explicitly.
+      actions: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Assert FFMPEG_BUILD_TAG is a month-end anchor, not a rolling daily
+        id: guard
         shell: bash
         env:
           RELEASE_SIDECAR_YML: .github/workflows/release-sidecar.yml
@@ -1353,6 +1360,11 @@ jobs:
 
           if [ ${#trimmed_reason} -ge 10 ]; then
             echo "::warning::FFMPEG_BUILD_TAG=${tag} is a rolling daily, not a month-end anchor -- allowed only because release-sidecar.yml sets FFMPEG_BUILD_TAG_OVERRIDE_REASON: \"${override_reason}\". That reason is now recorded in this run's log and in the PR diff. Confirm it's still current, and repin to the newest month-end anchor (clear the override once you do) as soon as it no longer applies -- BtbN still prunes this daily on its usual ~14-day window regardless of the override."
+            # CPE-1802: mark the override as taken so the step below can decide whether to fire
+            # ffmpeg-pin-freshness.yml. Only set on THIS branch -- never on the anchor-is-fine
+            # branch above -- so a normal push with a real anchor pin never triggers an extra
+            # dispatch.
+            echo "override_active=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -1366,3 +1378,23 @@ jobs:
           echo "::error::Pick the newest month-end anchor tag instead (a date whose following day is the 1st of the next month -- see ffmpeg-pin-freshness.yml's cadence note for how BtbN's two retention classes work; that workflow's \"Determine current live tags to recommend\" step, or a manual workflow_dispatch of it, finds a currently-live one)."
           echo "::error::If you genuinely need a daily for a short window, don't loosen this check to let it through silently -- set FFMPEG_BUILD_TAG_OVERRIDE_REASON in release-sidecar.yml's \"Stage native deps\" env: block to a real, one-line reason (at least 10 characters). That keeps the override visible in the PR diff and in every run of this guard, instead of quietly disabling it for everyone."
           exit 1
+
+      # CPE-1802: while the override above is live, FFMPEG_BUILD_TAG genuinely IS a rolling daily
+      # again -- the same ~14-day pruning clock ffmpeg-pin-freshness.yml exists to watch, weekly,
+      # only because this guard normally keeps the daily path unreachable. Before this, the only
+      # mitigation on offer was "someone remembers to workflow_dispatch the freshness check by
+      # hand" -- the exact discipline-based net CPE-1796 replaced, reintroduced at the one moment
+      # someone is already doing something unusual and under time pressure. So fire it automatically
+      # instead: every push to `main` for as long as the override stays set. Push only, not PR --
+      # the override isn't live until it merges, and a fork PR's GITHUB_TOKEN couldn't dispatch
+      # anyway. During a short override window this is a small number of extra runs, which is the
+      # trade the ticket calls out explicitly over trying to express a conditional schedule in
+      # GitHub Actions (awkward to do at all).
+      - name: Fire the freshness check now that the override is live
+        if: steps.guard.outputs.override_active == 'true' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "::notice::FFMPEG_BUILD_TAG_OVERRIDE_REASON is active on main -- dispatching ffmpeg-pin-freshness.yml now instead of waiting for its weekly schedule (CPE-1802), so the daily pin's ~14-day runway is actually watched."
+          gh workflow run ffmpeg-pin-freshness.yml --ref "${{ github.ref_name }}"

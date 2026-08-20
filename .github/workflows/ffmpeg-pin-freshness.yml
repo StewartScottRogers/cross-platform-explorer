@@ -25,8 +25,11 @@ name: ffmpeg/pdfium pin freshness check
 # surprise) rather than a race against a known pruning date, so once-weekly's worse-case ~6-day
 # notice is no longer the risk it used to be. The one case that still carries the old ~14-day
 # runway -- a deliberate `FFMPEG_BUILD_TAG_OVERRIDE_REASON` daily override (see release-sidecar.yml
-# and the CI guard) -- is rare and self-documenting; run this workflow manually (workflow_dispatch)
-# during that window rather than tightening the schedule for everyone to cover it.
+# and the CI guard) -- is rare and self-documenting, and (CPE-1802) no longer relies on someone
+# remembering to workflow_dispatch this workflow by hand during that window: ci.yml's "ffmpeg pin is
+# a month-end anchor" guard job does that FOR them, automatically, on every push to `main` for as
+# long as the override stays set -- a small number of extra runs during a short window, not a
+# tightened schedule for everyone.
 #
 # ── Staleness check: exact-URL reachability, not an age heuristic -- with a THIRD verdict ───────
 # Each check is a HEAD request against the SAME URL release-sidecar.yml's "Stage native deps" step
