@@ -201,3 +201,49 @@ offenders.**
   `.btn.warn-btn:hover`) now resolves through the real `--warn-fill` token instead, which is still
   fully asserted — confirmed by reading the verbose test list before and after.) No Rust touched, so
   no `cargo clippy` run.
+**2026-08-20 (round 3 — CHANGES REQUESTED, attempt 3 of 3)** — Independent Reviewer confirmed round
+2's completeness work was sound (all 19 sites, all four role assignments, the exact 86/421 ratchet,
+the `.svelte`-only guard boundary, and the test-count drop as genuine consolidation rather than
+coverage loss). One blocking regression remained, introduced by round 2 itself.
+
+- **The bug**: `SidecarManager.svelte`'s `.logs` pane sets `background: var(--bg-dim, <hex>)`, and
+  `--bg-dim` is undefined nowhere in `app.css` — so that pane's REAL background is the fixed literal
+  fallback in every theme, never the theme's own `--surface`/`--bg` that `--danger`/`--warn` are
+  calibrated against. Round 2's `.log-error` -> `var(--danger)` / `.log-warn` -> `var(--warn)` fix
+  was measured against `--surface` (white in light/hc-light) — a surface this pane never renders.
+  Re-derived against the pane's actual fixed backdrop: light 3.39:1/3.24:1 and hc-light
+  1.92:1/2.45:1 — both under the 4.5:1 AA text floor, hc-light's `.log-error` even under the 3:1 UI
+  floor. Strictly worse than the flat pre-ticket literals it replaced (~6.8-7.9:1 against that same
+  backdrop, clearing by accident of having been picked for a dark backdrop originally). No existing
+  guard catches this shape — `app.css.dark-contrast.test.ts`, `solid-fill-contrast.test.ts`, and this
+  ticket's own `warn-token.test.ts` all check a token against `--surface`/`--bg` or white; none checks
+  a token against a component-local fixed literal.
+- **The fix — reverted, not retuned**: `.log-error`/`.log-warn` restored to their pre-ticket literal
+  values (both bare hex, matching the honest shape — `.log-error` was `var(--warn, <hex>)` before
+  this ticket ever touched it, an undefined-token-with-fallback site in its own right, so a bare
+  literal with the fallback removed is correct, not a re-added fallback). A block comment sits
+  directly above both rules explaining exactly why: the pane's fixed backdrop, the specific numbers
+  that regressed, that `--danger`/`--warn` are global tokens serving many surfaces so retuning them
+  would be the wrong lever, and that this is blocked on CPE-1821 (now extended to own this whole log
+  pane) making `--bg-dim` a real token before this pairing can be tokenized correctly. The comment
+  deliberately spells hex values without a leading `#` (e.g. writes `<hex>` as a placeholder, matching
+  the codebase's existing convention in the AgentTimeline/TrashView comments) so prose explaining the
+  bug doesn't itself inflate the hex-literal ratchet.
+- **The semantic-inversion observation from round 2 stands and is worth keeping on record**:
+  `.log-error` pointed at the caution token while `.log-warn` sat on an untokenized hex was a real
+  bug, independent of this round's finding. It just turns out the *correct* fix is blocked on
+  `--bg-dim`, and reverting to the flat literals is the honest interim — a worse-contrast token swap
+  would have been strictly worse than doing nothing, not merely equivalent.
+- **Ratchet re-tightened**, exact, no headroom: 86/421 -> **86/423** (two literals restored;
+  files-with-hex unchanged since `SidecarManager.svelte` already carried other hex literals before
+  and after this change).
+- **Red-proofed the re-tightened ratchet, minimal mutation, observed then reverted**: appended a
+  throwaway ` /* temp #123456 red-proof */` comment onto `.log-error`'s declaration in
+  `SidecarManager.svelte:406` (one extra hex occurrence) -> `total hard-coded hex literal
+  occurrences: expected 424 to be less than or equal to 423`. Reverted. No other assertion changed
+  this round (the guard test file itself was untouched — `#d08b2b`/`#c9a227` don't match its
+  `/#(?:b5872b|b8860b)\b/i` literal guard, and neither restored rule reintroduces a
+  `var(--warn[-fill], <fallback>)` call site), so no further red-proof was needed.
+- Gates re-run after the fix: `npm run check` — 0 errors, 0 warnings. `npx vitest run` (full suite) —
+  **317 test files, 4192 tests passed** (unchanged from round 2 — this round touched only production
+  code, a doc comment, and two ratchet constants; no test was added or removed).

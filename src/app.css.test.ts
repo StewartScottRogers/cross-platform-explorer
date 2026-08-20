@@ -185,9 +185,21 @@ const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 //     sat right below it on a still-bare `#c9a227` (2.42:1 on white — below AA, below even the 3:1
 //     large-text floor, and in dark only 1.27:1 separated it from `.log-error` — indistinguishable
 //     log levels). Fixed the pair: `.log-error` -> `var(--danger)`, `.log-warn` -> `var(--warn)`.
-//     One more hex literal removed. Brought it to the current 86/421.
+//     One more hex literal removed. Brought it to 86/421.
+//  4. A further review round found step 3's fix was itself wrong: SidecarManager.svelte's `.logs`
+//     pane (which `.log-error`/`.log-warn` render inside) sets `background: var(--bg-dim, <hex>)`,
+//     and `--bg-dim` is undefined nowhere in app.css — so that pane's REAL background is the fixed
+//     literal fallback in every theme, never the theme's own `--surface`/`--bg` that `--danger`/
+//     `--warn` are calibrated against. Re-measured against the pane's actual fixed backdrop, light
+//     and hc-light both fell under WCAG AA (hc-light's `.log-error` even under the 3:1 UI floor) —
+//     strictly worse than the flat pre-ticket literals, which cleared ~6.8-7.9:1 there by accident
+//     of having been picked for a dark backdrop. Reverted `.log-error`/`.log-warn` to those literal
+//     values (not retuned — `--danger`/`--warn` are global tokens serving many surfaces and this
+//     pane's background is broken independently of them) with a comment explaining why, pending
+//     CPE-1821 (which now owns this whole log pane) making `--bg-dim` real. Two hex literals back.
+//     Brought it to the current 86/423.
 const BASELINE_FILES_WITH_HEX = 86;
-const BASELINE_TOTAL_HEX_OCCURRENCES = 421;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 423;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
