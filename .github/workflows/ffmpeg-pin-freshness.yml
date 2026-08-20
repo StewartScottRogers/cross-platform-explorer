@@ -269,9 +269,27 @@ jobs:
           pdfium_live_tag=$(gh api repos/bblanchon/pdfium-binaries/releases/latest \
             -q '.tag_name' 2>/dev/null || true)
 
-          echo "ffmpeg_live_tag=${ffmpeg_live_tag:-<could not determine -- query repos/BtbN/FFmpeg-Builds/releases manually>}" >> "$GITHUB_OUTPUT"
-          echo "ffmpeg_live_ver=${ffmpeg_live_ver:-<could not determine -- read it off the release's -linux64-lgpl-*.tar.xz asset name>}" >> "$GITHUB_OUTPUT"
-          echo "pdfium_live_tag=${pdfium_live_tag:-<could not query bblanchon/pdfium-binaries -- check manually>}" >> "$GITHUB_OUTPUT"
+          # CPE-1792: these fallbacks are assigned with plain `if` statements, NOT with
+          # `${var:-prose}`. Inside a `${parameter:-word}` expansion the `word` is still parsed for
+          # quoting even when the whole expansion sits inside double quotes -- so an apostrophe in
+          # ordinary English ("the release's asset name") opens a single-quoted section that never
+          # closes, and bash fails to parse the rest of the script with
+          # `unexpected EOF while looking for matching '"'"''`. That is exactly what happened on the
+          # first live run of the stale path (run 32326260348): staleness was detected correctly and
+          # then this step died before the issue could be filed. DO NOT move these back inline.
+          if [ -z "$ffmpeg_live_tag" ]; then
+            ffmpeg_live_tag="<could not determine -- query repos/BtbN/FFmpeg-Builds/releases manually>"
+          fi
+          if [ -z "$ffmpeg_live_ver" ]; then
+            ffmpeg_live_ver="<could not determine -- read it off the release -linux64-lgpl-*.tar.xz asset name>"
+          fi
+          if [ -z "$pdfium_live_tag" ]; then
+            pdfium_live_tag="<could not query bblanchon/pdfium-binaries -- check manually>"
+          fi
+
+          echo "ffmpeg_live_tag=${ffmpeg_live_tag}" >> "$GITHUB_OUTPUT"
+          echo "ffmpeg_live_ver=${ffmpeg_live_ver}" >> "$GITHUB_OUTPUT"
+          echo "pdfium_live_tag=${pdfium_live_tag}" >> "$GITHUB_OUTPUT"
 
       - name: File an issue (deduped) so a human sees it
         if: steps.check.outputs.stale == 'true'
