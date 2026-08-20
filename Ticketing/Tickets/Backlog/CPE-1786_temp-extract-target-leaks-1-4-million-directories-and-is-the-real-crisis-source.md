@@ -140,7 +140,7 @@ survive reaping, which is the property that makes any owner other than "forever"
   reliably never finish. Liveness is the session root's own mtime, which creating each `e<seq>` child
   updates for free.
 - **In-session reclamation**: past 512 live extraction directories the oldest are removed, but only once
-  the process has been **quiet** for 60 s. See the correction below — the first version of this asked the
+  the process has been **quiet** for 10 minutes. See the corrections below — the first version of this asked the
   wrong question and introduced a data-loss path.
 - `archive::cleanup_extraction_scratch()` removes the whole session tree for an embedder that knows the
   session is over. **It has no call sites** — `src-tauri/src/lib.rs` was owned by another worker this
@@ -213,7 +213,7 @@ The numbers above are from a `Start-Process -Wait` harness that redirects to a f
 ### Gates
 
 `cargo clippy --all-targets -- -D warnings` clean in all three CI feature modes for `crates/server`
-(default; `index`; `pdf-thumb,video-thumb,waveform,dicom-thumb`). Full `cargo test` green (2,226 lib +
+(default; `index`; `pdf-thumb,video-thumb,waveform,dicom-thumb`). Full `cargo test` green (2,229 lib +
 all integration binaries). No new dependencies. No `specta::Type` struct touched, so no bindings
 regeneration.
 
@@ -247,9 +247,9 @@ FINAL missing-of-90: [0, 1, 2, ..., 25]
 extraction has *started* in the last 60 s, decided **before** pushing the new entry, with a
 `HARD_CAP_EXTRACTIONS` of 4096 so a never-quiet caller stays bounded. That makes a burst atomically safe
 however long it runs and however slow each entry is. `MAX_LIVE_EXTRACTIONS` was also raised 64 → 512, to
-bound the one shape the quiet gate cannot see (a loop whose *per-entry* time exceeds the grace is
-indistinguishable from an idle session); that residual now needs a batch of >512 entries at >60 s each,
-i.e. eight hours of staging before the first file moves. Stated in the code rather than implied.
+bound the shape the quiet gate cannot see (a gap longer than the grace is indistinguishable from an idle
+session). **The residual figure written here in round 2 was wrong and is corrected in round 3 below** —
+it needs *one* long gap, not uniformly slow entries.
 
 **The test that should have caught it was the fifth "can only ever pass" shape this crew found today**:
 it built all 200 batch entries with the *identical* timestamp, so the batch was instantaneous and no
@@ -272,9 +272,8 @@ Also from that round:
   removes A's session root. The recovery arm restores the directory but not the files, so an external
   editor's open temp copy loses the user's Save. An hour is a realistic afternoon; a day is not, and the
   drain rate is set by the removal budget per launch, not by the TTL.
-- **A `session.lock` sentinel** is now held open for the process lifetime inside the session root, so on
-  Windows a live session's removal bounces outright rather than merely being unlikely. Dropped before
-  `cleanup_extraction_scratch` removes our own tree.
+- **A `session.lock` sentinel was added and then removed again** — see the third round below. It did
+  nothing.
 - **`cleanup_extraction_scratch` was worse than a no-op in degraded mode**: it `clear()`ed the queue
   before `remove_session_tree` (correctly) refused the shared root, so shutdown removed nothing *and*
   destroyed the only record of the `e<seq>` directories under it. Now drains and removes them first, and
@@ -299,15 +298,95 @@ survive; after a real 61-second wait the two oldest go and 64 survive), the junc
 Windows junction with a session-shaped name pointing outside `%TEMP%`, swept at `TTL=0`, canary
 untouched), and the before/after counts reproduced to the digit by a third party.
 
+### Third round — two comments that asserted a hazard away
+
+Both blockers were the **same shape as round 1's**, which is the finding worth keeping: not wrong code,
+but a comment claiming a protection nobody had measured. The rule adopted for the rest of the file was
+*measure it or soften it to what you measured*.
+
+**1. The declared residual was wrong by three orders of magnitude.** The comment said the residual needed
+"more than 512 entries **each** taking over a minute — eight hours of staging". That is a *sufficient*
+condition presented as a *necessary* one. `quiet` reads only `live.back()`, so **one** inter-entry gap
+over the grace opens the gate for that single push however fast everything else was — and the O(n²)
+re-decode this same file documents means the long gaps arrive exactly when the queue is longest. The
+re-reviewer measured it on the shipped code:
+
+```
+601-entry alt-drag: entries 0..599 at 100 ms each, entry 600 takes 61 s
+PROBE: elapsed since batch start = 121s; reclaimed = 89; batch left = 512; first due = Some("f0")
+```
+
+89 directories reclaimed out from under a still-staging drag, **two minutes in, not eight hours**.
+
+- The claim is now stated as the true **necessary** condition: more than `max_live` live entries **and**
+  any single inter-arrival gap of at least the grace.
+- The real mitigation is a boundary move: **`REAP_GRACE` 1 minute → 10 minutes**, since the gap length is
+  the entire exposure. A single archive entry must now take over ten minutes, mid-batch, in a batch
+  already past 512. It costs only that an idle session tidies itself ten minutes later; the bound is
+  `HARD_CAP_EXTRACTIONS`, not the grace.
+- **The residual is now a test, not a sentence.** `cpe_1786_the_quiet_gate_protects_a_slow_batch_but_one_long_gap_is_the_known_residual`
+  pins both halves — a 601-entry batch spanning minutes with every gap under the grace is untouched, and
+  the one-long-gap probe still loses the overflow (`reclaimed = 89`, reproduced exactly). If someone
+  later closes the hole, that assertion tells them so.
+
+**The prescribed two-line fix was measured and deliberately not taken.** The prescription was: when
+`quiet`, also require the popped entry's own age ≥ grace. Timestamps are taken under the queue's own lock
+immediately before the push, so the queue is monotonic and `front` is never newer than `back`; whenever
+`quiet` holds (`now - back ≥ grace`), `now - front ≥ now - back ≥ grace` already holds for every entry.
+Verified by compiling the extra condition in and re-running the probe — **identical output, still 89
+reclaimed**. Shipping it would have added a condition that can never fire: the code-shaped version of the
+identical-timestamp test this ticket was already caught by. The invariant it rests on is pinned by
+`cpe_1786_the_live_queue_is_monotonic_so_the_front_is_never_newer_than_the_back`, so if timestamps ever
+stop being monotonic the prescription becomes live again and that test says so.
+
+**2. The session sentinel provided zero protection, measured.** The claim was that holding a file open
+inside the session root makes `remove_dir_all` fail so another instance's sweep bounces. The re-reviewer
+built two binaries and measured it cross-process:
+
+```
+[cross-process] remove_dir_all = Ok(())
+[cross-process] session still exists = false
+[cross-process] e0/a.txt still exists = false
+```
+
+`fs::File::create` uses Rust's default Windows share mode (`READ|WRITE|DELETE`) and std's
+`remove_dir_all` uses POSIX-semantics deletes, so the entire live tree went, files included.
+`share_mode(1)` does make the root survive — but the same measurement showed the **contents are deleted
+first**, so even the repaired version would not save the files it existed to protect. **The mechanism was
+removed rather than repaired**, and `SESSION_TTL` now says outright that it is the whole protection. A
+mechanism whose honest description is "the empty directory survives" is not worth the code, and an
+overstated protection is worse than none because it stops the next person checking.
+
+The irony is recorded in the code: this file already documented that an *external* application's handle
+protects only one class of consumer and not `notepad.exe` — and then made exactly that assumption about
+its own handle.
+
+**Other claims audited in the same pass**, per the Foreman's instruction to measure or soften every
+remaining one:
+
+- *"creating each `e<seq>` subdirectory updates the mtime … on every platform this ships to"* — now
+  **measured on Windows** (parent `LastWriteTimeUtc` `05:38:18.544` → `05:38:19.794` on creating one
+  child) and explicitly marked **unmeasured** on Linux/macOS rather than claimed for all three.
+- *"`remove_dir_all` would not delete through a symlink either"* — softened to "documented, not measured
+  here", with the explicit skip kept as the thing actually relied on.
+- *"a reader that already has the file open keeps reading it (Unix)"* — marked as asserted from POSIX
+  semantics, not measured here.
+- *"reading 256 of 1.39 million is cheap"* — reworded to what is actually true (`read_dir` yields
+  lazily) now that the 1.39 M is gone.
+- `RandomState` *"varies per call"* — the one claim that was cheap to **measure**, so it now is:
+  `cpe_1786_session_names_vary_between_calls` draws 64 names and asserts all distinct. A fixed-seed
+  hasher would make every process pick the same session name and turn the exclusive `create_dir` into a
+  permanent collision.
+
 ### Platform caveat
 
-Verified on Windows only. Three behaviours the Linux and macOS CI legs are the real check for: the
-mtime-as-liveness signal (creating a child updates the parent directory's mtime — true on all three, but
-only measured here); `fs::symlink_metadata(..).file_type().is_symlink()` reporting `true` for a Windows
-junction (which is why the sweeper's link leg could stage one at all); and the `session.lock` sentinel,
-which is a Windows-only mitigation since Unix unlinks an open file happily. The link leg announces a loud
-`require_staged` skip on any machine that cannot create a directory link, so a runner that stops being
-able to stage it goes red rather than passing vacuously.
+Verified on Windows only. Two behaviours the Linux and macOS CI legs are the real check for: the
+mtime-as-liveness signal (creating a child updates the parent directory's mtime — **measured here on
+Windows**, ordinary POSIX behaviour elsewhere but not measured); and
+`fs::symlink_metadata(..).file_type().is_symlink()` reporting `true` for a Windows junction, which is why
+the sweeper's link leg could stage one at all. The link leg announces a loud `require_staged` skip on any
+machine that cannot create a directory link, so a runner that stops being able to stage it goes red
+rather than passing vacuously.
 
 **A genuine cross-platform exposure that CI will not catch, flagged rather than fixed** (PR #945 review):
 Linux `/tmp` is shared **between users**, where Windows `%TEMP%` is per-user. `cpe-archive` is created
