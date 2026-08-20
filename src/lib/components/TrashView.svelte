@@ -328,10 +328,20 @@
              (see its own guard), so when Restore/Empty drains the list to zero mid-stream, THIS is the
              only place the caveat is visible at all — without a live region here, a screen reader that
              heard "Still loading…" from the title bar a moment ago hears nothing when that text moves
-             here, and nothing again once it resolves either way. This is a freshly-mounted node each
-             time this branch's condition starts being true, which is the correct live-region shape for
-             genuinely NEW information (unlike the title-bar slot's persistent-node shape, chosen there
-             because that slot's content changes IN PLACE across states rather than mounting fresh). -->
+             here, and nothing again once it resolves either way. Net effect: best-effort announcement
+             instead of guaranteed silence — strictly better than before this fix, never worse.
+             CPE-1816 review round 4 (a11y correction, tracked as a follow-up rather than fixed here):
+             this node is freshly mounted WITH its text already present, which is the WEAKER of the two
+             live-region shapes, not the correct one — a node inserted already containing its content is
+             frequently not announced at all (WebView2 + Windows AT is a particularly weak combination
+             for it), unlike the title-bar slot's persistent-node shape (content changes IN PLACE inside
+             an already-mounted node across states), which IS the reliable pattern and is what CPE-1816's
+             actual scope — the mid-stream caveat — correctly uses. An earlier version of this comment
+             claimed the opposite (that fresh-mount was "the correct... shape for genuinely NEW
+             information"), inverting the accepted guidance and contradicting the reasoning applied
+             correctly to the title-bar slot above; that claim was wrong and is corrected here. The
+             mechanism (this `role="status"`) is left as-is regardless — still strictly better than no
+             live region at all — pending a proper fix in the follow-up ticket. -->
         <div class="tv-empty">
           <span class="tv-degraded-note" role="status">{noticeMessage}</span>
         </div>
@@ -376,9 +386,11 @@
                  branch's condition becomes true (no `degraded`-aware branch in that slot's `{#if}` chain
                  shows anything once `complete && degraded`, other than a possible selection count), so
                  without a live region on THIS element a screen reader hears the pass finish and then
-                 hears nothing — not a count, not "unreadable", nothing. This node mounts fresh exactly
-                 when it has something new to say, which is the live-region shape for it (see the
-                 empty-pane note above for the same reasoning spelled out). -->
+                 hears nothing — not a count, not "unreadable", nothing. Best-effort announcement instead
+                 of guaranteed silence — see the empty-pane note above for the same reasoning, INCLUDING
+                 the round-4 correction: this node mounts fresh already containing its text, which is the
+                 weaker, not-guaranteed live-region shape (unlike the title-bar slot's reliable
+                 persistent-node shape), tracked as a follow-up rather than fixed here. -->
             <div class="tv-degraded-banner">
               <span class="tv-degraded-note" role="status">{degradedMessage}</span>
             </div>
@@ -458,46 +470,44 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
-  /* CPE-1816 review round 2 (finding 5) / round 3 (BLOCKING 1): a bare flex child grows to its content
-     width and can force the row to wrap / the toolbar to jump at a narrow window width — that's what
-     round 2's plain `min-width: 0` was for. But round 2 shipped it WITHOUT a floor, and paired with
-     `.tv-tools` never shrinking at all (it had no `min-width: 0` of its own, so its content width was an
-     effective hard minimum), 100% of every width deficit landed on `.tv-title`: at the app's permitted
-     minimum window (600px, `.min_inner_size` in `src-tauri/src/lib.rs`) the round-2 CSS let the title
-     collapse to a few px, clipping the icon, the word "Trash", AND the caveat this ticket exists to keep
-     visible — CPE-1816's original bug, reintroduced by its own round-2 CSS fix.
-     Round 3 fixes both halves:
-     - `.tv-title` gets a FLOOR instead of an open-ended `min-width: 0` — small enough to still shrink and
-       stop the wrap/jump, large enough that the caveat never disappears down to 600px. Reasoned budget
-       (ch ≈ 7.5px at this component's ~13px font; not pixel-measured — a real-browser render is needed
-       to confirm exactly, which is the Visual Critic's tooling, not this harness): icon + its two 8px
-       flex gaps ≈ 31px ≈ 4ch; "Trash" ≈ 6ch; the longest `trash.stillLoading` translation across the 12
-       shipped locales (Italian "Caricamento in corso…" / Russian "Продолжается загрузка…", ~21-22
-       characters) ≈ 22ch; a few ch of safety margin for locales this reasoning underestimates (Cyrillic
-       glyphs commonly render wider than the Latin "0" `ch` is defined from) ≈ 2ch. Total ≈ 34ch. This
-       covers the BASE caveat alone, not the caveat plus a live "· N selected" suffix — the onset sweep
-       showed that combination clipping starts at a materially wider ~860px, well outside the reasoned
-       floor's target of the 600px minimum, so it's accepted as a secondary, non-blocking degradation
-       rather than budgeted for here.
-     - `.tv-tools` gets `min-width: 0` too (below), so it actually PARTICIPATES in the shrink instead of
-       acting as a hard floor equal to its full button-row content width. Below the point where both
-       floors are satisfied simultaneously (the toolbar alone is already wider than the entire budget at
-       600px — 4 text buttons plus 3 icon buttons — regardless of what `.tv-title` does), the toolbar's
-       own buttons visually crowd or overflow; that is a pre-existing toolbar-density limit this ticket
-       does not attempt to redesign, only stops from being paid for entirely out of the caveat's budget.
-     `text-overflow: ellipsis` is REMOVED, not kept: it never worked here. Ellipsis truncates ONE block-
-     level box's own text; `.tv-title` is the flex CONTAINER holding three separate flex items (the icon,
-     an anonymous text item for "Trash", and the `.tv-count` span), and a flex container's `ellipsis`
-     does not summarize its children's combined overflow — the round-2 comment claiming otherwise was
-     wrong, and the round-2 render showed a literal hard mid-word cut ("Tr"), never a "…". If content ever
-     exceeds the floor above (not expected within the supported width range), it hard-clips with no
-     ellipsis marker — a lesser problem than the false claim that a truncation indicator would appear. */
+  /* CPE-1816 review round 2 (finding 5) / round 3 (BLOCKING 1) / round 4 (converging fix): a bare flex
+     child grows to its content width and can force the row to wrap / the toolbar to jump at a narrow
+     window width — that's what round 2's plain `min-width: 0` was for. Round 2 shipped it WITHOUT a
+     floor, and paired with `.tv-tools` never shrinking (no `min-width: 0` of its own, so its content
+     width was an effective hard minimum), 100% of every width deficit landed on `.tv-title`, collapsing
+     it — and the caveat inside it — to a few px at the app's permitted minimum window (600px). Round 3
+     tried to fix that with a reasoned `min-width: 34ch` floor on `.tv-title` plus `min-width: 0` on
+     `.tv-tools` (to make the toolbar share the shrink) — but `.tv-tools`'s BUTTONS kept their own default
+     `min-width: auto`, so the box shrank while its content stayed ~608px wide and spilled out under
+     `overflow: visible`, silently clipped by `.tv-panel`'s `overflow: hidden`. That pushed round 3's own
+     regression onto the toolbar instead: Refresh, Docs, and the Close button became unreachable in a
+     ~700-880px band that was fully fine before this ticket (and had no Escape-key fallback), which is a
+     worse defect than the one this ticket exists to fix.
+     Round 4 removes BOTH `min-width` overrides (`.tv-title`'s floor and `.tv-tools`'s `min-width: 0`)
+     rather than continuing to patch the toolbar side. No floor is needed at all: real-browser sweeps
+     across every width 520-1200px, all three listing states, and all 12 shipped locales confirm the
+     caveat is never clipped and never lost with `.tv-title` left to its own default sizing — instead,
+     text that doesn't fit wraps the titlebar onto a second line (this component's original, pre-CPE-1816
+     behaviour) rather than being cut off. `.tv-tools` reverts to its own default sizing too, restoring
+     its pre-this-ticket toolbar layout exactly, so the ~700-880px close-button regression is gone, not
+     relocated. The remaining cost — the titlebar wrapping (taller) at <=800px, worse with a row selected
+     — is CPE-1816's own round-2/3 changes making an ALREADY-KNOWN issue (finding 5, ranked lowest of five
+     visual findings, present before this ticket) marginally more visible; it needs a toolbar-density
+     decision (icon-only buttons under a breakpoint, an overflow menu, or accepting the wrap), not another
+     CSS-only patch here, so it is intentionally left as-is and tracked in a follow-up ticket rather than
+     addressed in this one.
+     `text-overflow: ellipsis` stays removed (round 3): it never worked here regardless of any floor.
+     Ellipsis truncates ONE block-level box's own text; `.tv-title` is the flex CONTAINER holding three
+     separate flex items (the icon, an anonymous text item for "Trash", and the `.tv-count` span), and a
+     flex container's `ellipsis` does not summarize its children's combined overflow — the round-2 comment
+     claiming otherwise was wrong, and the round-2 render showed a literal hard mid-word cut ("Tr"), never
+     a "…". Without a floor, this component now wraps rather than clips when it runs out of room, so
+     there's nothing left for an ellipsis to truncate in the first place. */
   .tv-title {
     display: flex;
     align-items: center;
     gap: 8px;
     font-weight: 600;
-    min-width: 34ch;
     overflow: hidden;
     white-space: nowrap;
   }
@@ -507,11 +517,13 @@
      "provisional status text" from the plain count/selection text this same slot shows once resolved,
      without a second colour (the slot is already dim via `.tv-count`'s opacity). */
   .tv-count-loading { font-style: italic; }
-  /* CPE-1816 review round 3 (BLOCKING 1, paired with `.tv-title`'s floor above): without this, `.tv-tools`
-     keeps flexbox's default `min-width: auto`, which resolves to its full button-row content width and
-     makes it a de facto hard minimum — every px of shrink at a narrow window was landing on `.tv-title`
-     alone. `min-width: 0` lets it shrink and share the deficit instead. */
-  .tv-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  /* CPE-1816 review round 3 tried `min-width: 0` here so `.tv-tools` would share the shrink with
+     `.tv-title`, paired with that round's floor there. It backfired (see `.tv-title`'s comment above):
+     the buttons inside kept their own default sizing, so the BOX shrank while its CONTENT stayed the
+     same width and spilled out silently clipped by `.tv-panel`. Round 4 removes it — `.tv-tools` is back
+     to flexbox's default `min-width: auto` (its full button-row content width, same as this component's
+     original pre-CPE-1816 behaviour), which is what keeps every button, including Close, reachable. */
+  .tv-tools { display: flex; align-items: center; gap: 8px; }
   .tv-btn {
     font: inherit;
     font-size: 12px;

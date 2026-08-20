@@ -298,3 +298,65 @@ a new one). Still no `.rs` files touched — frontend-only, no cargo gates or bi
 
 Files changed this round: `src/lib/components/TrashView.svelte`, `src/lib/components/TrashView.test.ts`,
 `src/lib/bidiEscape.guard.test.ts` (REGISTRY line re-anchor only), `src/docs/38-trash.md`.
+
+**2026-08-20, round 4 (converging fix, per the Foreman)** — Visual Critic re-measured round 3: the
+title-collapse regression (round 3's own BLOCKING 1 fix) was completely gone — `title.w`, `tb.h`,
+`tools.x` all identical across states at every measured width, no clipping, no jump, the 34ch budget's
+own arithmetic confirmed sound (computed floor 245.4px vs. worst base caveat 204px = 41px margin) — but
+the fix had pushed the damage onto the toolbar instead: `.tv-tools { min-width: 0 }` shrank the BOX
+while its buttons kept their own default `min-width: auto`, so the box shrank but its ~608px of button
+content didn't, spilling out under `overflow: visible` and getting silently clipped by `.tv-panel`'s
+`overflow: hidden`. Refresh, Docs, and the Close button (no Escape-key fallback exists) became
+unreachable in a ~700-880px band that was fully fine before this ticket and in round 1 — a worse defect
+than the one being fixed, and a NEW regression (the pre-existing <=684px debt was not this PR's own).
+
+Per the Foreman's explicit, already-measured instruction: deleted BOTH `min-width` declarations
+(`.tv-title`'s `min-width: 34ch` floor and `.tv-tools`'s `min-width: 0`), keeping every other round-3
+change (the `text-overflow: ellipsis` removal, the BLOCKING 2 `role="status"` additions, the `&nbsp;`
+separator fix, all markup/logic changes). The Critic's own sweep on this exact diff confirmed: the
+caveat is never clipped and never lost across every width 520-1200px, all three listing states, AND
+all 12 shipped locales — no floor turns out to be necessary at all; instead of clipping, `.tv-title`
+now wraps onto a second line when it runs out of room (this component's original, pre-CPE-1816
+behaviour), and `.tv-tools` reverts to its own pre-this-ticket sizing, restoring the close button (and
+Refresh/Docs) exactly. Cost: the titlebar wraps taller (`tb.h` 49->53, 69 with a selection) at
+<=800px — this is the Critic's original finding 5 (ranked last of five, present before CPE-1816
+touched this file at all, and made progressively worse by two rounds of CSS-only patches trying to
+avoid it). Per the Foreman, this needs an actual toolbar-density decision (icon-only buttons under a
+breakpoint, an overflow menu, or accepting the wrap) rather than another patch here, so it is
+intentionally left as-is and tracked in a follow-up ticket the Foreman is filing separately — NOT fixed
+in this PR. Rewrote the CSS comments on `.tv-title` and `.tv-tools` accordingly: no leftover prose
+describing a 34ch budget rule that no longer exists.
+
+Also corrected a false claim in the round-3 a11y comments (Foreman review, not a mechanism change):
+both `role="status"` additions on `.tv-degraded-note` had claimed a freshly-mounted node "already
+containing its text" was "the correct live-region shape for genuinely NEW information." That inverts
+the accepted guidance — a node inserted WITH its content already present in the same DOM mutation is
+frequently NOT announced at all (WebView2 + Windows AT is a particularly weak combination for it),
+unlike the title-bar slot's persistent-node shape (content changes IN PLACE inside an already-mounted
+node), which IS the reliable pattern — and it contradicted the reasoning already correctly applied to
+the title-bar slot's own comment two paragraphs above it. Fixed both comments to state this plainly:
+net effect is best-effort announcement rather than guaranteed silence (strictly better than before this
+fix, never worse), with the actual reliability fix tracked as a follow-up rather than attempted here,
+per the Foreman's explicit instruction to leave the mechanism (the `role="status"` attributes
+themselves) untouched. No test changes needed — the existing tests assert the `role="status"` attribute
+is present, which remains true and correct; they never asserted anything about live-region reliability.
+
+Confirmed passing this round, untouched: `.tv-sticky-stack` occlusion fix (no overlap, checkbox
+hit-testable in both degraded and streaming states); streaming-vs-complete geometry (no row jump);
+theme contrast (6.35:1 light / 7.06:1 dark, no hard-coded colour); and the separator fix
+(`"3 items · 1 selected"` / `"Still loading… · 1 selected"`, verified via `textContent` in round 3's
+own tests, which still pass unchanged).
+
+No new tests this round — the change is a pure CSS deletion (removing two declarations that were
+actively causing the toolbar regression) plus comment corrections; the existing test suite already
+covers the affected markup/behaviour and continues to pass unchanged. The CSS-value claims themselves
+remain unpinnable in this harness for the same reason established in round 3 (jsdom applies no
+component-scoped CSS to `getComputedStyle`), so their correctness rests on the Critic's real-browser
+sweep, exactly as documented in the rewritten code comments.
+
+Gates: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 4190 passed (4190), 0 failed
+(unchanged from round 3 — no tests added or removed this round). Still no `.rs` files touched —
+frontend-only, no cargo gates or bindings regen this round.
+
+Files changed this round: `src/lib/components/TrashView.svelte` only (two CSS deletions + comment
+rewrites on `.tv-title`/`.tv-tools`, plus the two a11y comment corrections on `.tv-degraded-note`).
