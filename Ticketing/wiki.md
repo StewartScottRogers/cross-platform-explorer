@@ -458,3 +458,20 @@ in one line, files the ticket, then works it to Done.
 Do NOT intercept (just do the thing): answering questions, analysis, running build / check / commit /
 push / git ops, cutting or publishing a release, managing tickets or the skill system, trivial
 one-liners being iterated live, or anything the user says to "just do." If borderline, ask first.
+
+## External findings (GitHub issues filed by a scheduled workflow)
+
+A scheduled GitHub Actions workflow that detects a real problem (a stale pin, a broken upstream
+dependency, anything CI itself notices outside a PR) files a **GitHub issue**, not a ticket directly —
+see CPE-1763's `ffmpeg-pin-freshness.yml` for the first instance (label `dep-pin-stale`). It does not
+try to allocate a `CPE-NNN` ID and push a ticket file to `main` itself: that risks colliding with a
+ticket a human or another agent files concurrently, and a scheduled job has no business writing to the
+ticket queue unattended.
+
+**Intake:** at the start of the next sprint (or whenever `/ticketing-list` runs), the Foreman checks
+`gh issue list --state open` for anything filed since the last check and, for each one, files a
+`CPE-NNN` ticket via `/ticketing-new` that names the source issue in its Notes, then closes the GitHub
+issue (`gh issue close --comment "filed as CPE-NNN"`) so it doesn't linger open once tracked. A GitHub
+issue found already open when triaged still needs a ticket even if the run that created it has since
+gone green again (the underlying condition may have recurred, or the fix may be a still-open PR) —
+close the issue only once a ticket exists for it, not just because the check is quiet today.
