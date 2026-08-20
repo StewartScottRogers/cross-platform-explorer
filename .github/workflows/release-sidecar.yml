@@ -247,6 +247,17 @@ jobs:
           FFMPEG_BUILD_TAG: "autobuild-2026-07-31-14-10"
           FFMPEG_BUILD_VER: "n8.1.2-34-g9b6c8969e0"
           FFMPEG_SRC_TAG: "n8.1.2"
+          # CPE-1796: deliberate escape hatch for ci.yml's "ffmpeg pin is a month-end anchor" guard,
+          # which otherwise fails a PR that repins FFMPEG_BUILD_TAG to a rolling daily instead of a
+          # month-end anchor. Leave this EMPTY on every normal pin (including this one). Only set it
+          # -- to a one-line reason, e.g. "urgent decoder fix only shipped in the latest daily,
+          # revert to an anchor by 2026-09-05" -- when FFMPEG_BUILD_TAG above is intentionally a
+          # daily: the guard reads this exact string and prints it in its own output, so a reviewer
+          # sees WHY the safety net was bypassed (right there in the PR diff), not just that it was.
+          # A daily pin still has BtbN's ~14-day pruning clock running against it whether or not the
+          # guard is silenced, so treat this as a short-lived, revisited override, not a way to
+          # switch back to dailies permanently.
+          FFMPEG_BUILD_TAG_OVERRIDE_REASON: ""
         run: |
           set -euo pipefail
           mkdir -p native-deps/ffmpeg/windows native-deps/ffmpeg/unix native-deps/pdfium/windows native-deps/pdfium/unix

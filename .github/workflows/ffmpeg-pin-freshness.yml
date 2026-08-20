@@ -10,16 +10,23 @@ name: ffmpeg/pdfium pin freshness check
 # repo activity -- not a concern here (this repo pushes daily), but worth knowing if it ever goes
 # quiet on a dormant fork.
 #
-# ── Cadence: twice weekly, Mondays + Thursdays 07:00 UTC ────────────────────────────────────────
-# Measured 2026-08-19 (`gh api repos/BtbN/FFmpeg-Builds/releases --paginate`): BtbN keeps TWO
-# retention classes, not one -- 14 rolling DAILY autobuilds, then ~23 permanent MONTH-END anchors
-# retained indefinitely back to 2024-09. A freshly-set pin (always a daily) therefore has ~14 days
-# of runway, not weeks. A once-weekly check would give only two chances to catch that and, in the
-# worst case, ~6 days' notice; live proof it is not academic -- the pin currently in
-# release-sidecar.yml, autobuild-2026-08-15-13-02, sits at position 5 of the 14 live dailies and is
-# due to be pruned around 2026-08-29. Twice weekly (~3-4 day gaps) keeps several checks inside every
-# pin's runway with a comfortable margin. (CPE-1789 tracks re-pinning ahead of that date -- not this
-# ticket's job, just the reason twice-weekly and not once-weekly.)
+# ── Cadence: weekly, Mondays 07:00 UTC ───────────────────────────────────────────────────────────
+# Was twice weekly (Mondays + Thursdays) while release-sidecar.yml's pin was a rolling DAILY
+# autobuild. Measured 2026-08-19 (`gh api repos/BtbN/FFmpeg-Builds/releases --paginate`): BtbN keeps
+# TWO retention classes, not one -- ~14 rolling DAILY autobuilds it prunes on a ~14-day window, then
+# one MONTH-END anchor per month retained indefinitely (~23 of them, back to 2024-09). A freshly-set
+# DAILY pin has ~14 days of runway, not weeks, and a once-weekly check would give only two chances
+# to catch that -- worst case ~6 days' notice. That was this check's situation until CPE-1789
+# repinned to a month-end anchor, which does not rot on any known schedule (verified: an anchor ~23
+# months old still returns 200). CPE-1796 went further and added a mechanical CI guard (ci.yml,
+# "ffmpeg pin is a month-end anchor") that rejects a PR that repins to a daily in the first place --
+# so by default there is no rotting clock running against the pin this check watches at all anymore.
+# Weekly now is a general safety net (upstream unexpectedly deleting an anchor, or some other
+# surprise) rather than a race against a known pruning date, so once-weekly's worse-case ~6-day
+# notice is no longer the risk it used to be. The one case that still carries the old ~14-day
+# runway -- a deliberate `FFMPEG_BUILD_TAG_OVERRIDE_REASON` daily override (see release-sidecar.yml
+# and the CI guard) -- is rare and self-documenting; run this workflow manually (workflow_dispatch)
+# during that window rather than tightening the schedule for everyone to cover it.
 #
 # ── Staleness check: exact-URL reachability, not an age heuristic -- with a THIRD verdict ───────
 # Each check is a HEAD request against the SAME URL release-sidecar.yml's "Stage native deps" step
@@ -85,7 +92,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "0 7 * * 1,4" # twice weekly, Mondays + Thursdays 07:00 UTC -- see cadence note above
+    - cron: "0 7 * * 1" # weekly, Mondays 07:00 UTC -- see cadence note above
 
 permissions:
   contents: read
@@ -297,15 +304,15 @@ jobs:
           # indefinitely but prunes dailies on a ~14-day rolling window, so a daily recommended
           # today could itself be gone by the time someone reads the issue and acts on it days
           # later -- "restarting the exact cycle this ticket exists to stop" (review finding).
-          # Walk the tag list (already newest-first) and take the first tag whose date is the last
-          # day of its month.
+          # Walk the tag list (already newest-first) and take the first tag `is_ffmpeg_anchor_tag`
+          # (CPE-1796) calls an anchor -- the SAME rule the ci.yml pin-shape guard asserts against
+          # release-sidecar.yml's current pin, sourced from one file so there is only one copy of
+          # "what counts as an anchor" to ever get out of sync.
+          source .github/workflows/scripts/ffmpeg-anchor-check.sh
           ffmpeg_live_tag=""
           for t in $(gh api repos/BtbN/FFmpeg-Builds/releases --paginate \
                        -q '[.[] | select(.tag_name | startswith("autobuild"))][].tag_name' 2>/dev/null); do
-            d=$(echo "$t" | grep -oP '^autobuild-\K\d{4}-\d{2}-\d{2}' || true)
-            [ -z "$d" ] && continue
-            next_day=$(date -u -d "${d} +1 day" +%d 2>/dev/null || true)
-            if [ "$next_day" = "01" ]; then
+            if is_ffmpeg_anchor_tag "$t"; then
               ffmpeg_live_tag="$t"
               break
             fi
@@ -492,7 +499,7 @@ jobs:
               printf '%s\n' "Check https://github.com/BtbN/FFmpeg-Builds/releases manually and pick a stable month-end anchor tag (not a rolling daily -- see the workflow's cadence comment) on the SAME release line release-sidecar.yml already pins (currently suffixed -lgpl-${FFMPEG_SUFFIX}). If that release line no longer exists upstream at all, moving to a different line is a deliberate human call, not this check's -- update BOTH release-sidecar.yml's suffix and this recommendation logic to match whichever line is chosen."
             fi
             printf '%s\n\n' "- pdfium (bblanchon/pdfium-binaries): \`${PDFIUM_LIVE_TAG}\`"
-            printf '%s\n' "Update \`FFMPEG_BUILD_TAG\` / \`FFMPEG_BUILD_VER\` / \`PDFIUM_TAG\` in the \"Stage native deps\" step of \`.github/workflows/release-sidecar.yml\` (see CPE-1762, and CPE-1789 for the currently-known-due re-pin). Then re-run this workflow via workflow_dispatch to confirm the new pin is reachable before it blocks a release."
+            printf '%s\n' "Update \`FFMPEG_BUILD_TAG\` / \`FFMPEG_BUILD_VER\` / \`PDFIUM_TAG\` in the \"Stage native deps\" step of \`.github/workflows/release-sidecar.yml\` (see CPE-1762, and CPE-1789 for the anchor re-pin that fixed this once already). Whatever tag you pick, it must be a month-end anchor, not a rolling daily -- BtbN prunes dailies on a ~14-day window, so a daily pin here restarts this exact cycle, and ci.yml's \"ffmpeg pin is a month-end anchor\" guard (CPE-1796) will reject the PR unless FFMPEG_BUILD_TAG_OVERRIDE_REASON is deliberately set. Then re-run this workflow via workflow_dispatch to confirm the new pin is reachable before it blocks a release."
             printf '\n%s\n' "Filed automatically by CPE-1763. Please convert to a CPE-NNN ticket on triage (see Ticketing/wiki.md, \"External findings\")."
           } > "$body_file"
 
