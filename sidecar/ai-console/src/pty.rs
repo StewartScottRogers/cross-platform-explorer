@@ -276,6 +276,28 @@ mod tests {
         }
     }
 
+    /// CPE-1818: assert `pid` is gone, but **bounded-poll** rather than checking once and panicking
+    /// immediately. `pid_is_alive` (above) asks the OS's own process table (`tasklist`/`ps`) whether the
+    /// PID is still enumerable, and releasing our last handle to a child does not guarantee that table
+    /// is scrubbed synchronously -- on Windows in particular, `CloseHandle` schedules the process
+    /// object's deletion but doesn't have to complete it before the call returns, so `tasklist` can
+    /// still see the PID for a few milliseconds after the handle is gone, worse under a loaded runner.
+    /// Retrying for a couple of seconds absorbs that scheduling gap without weakening the guarantee: a
+    /// PID that is genuinely still alive (a real leak) never satisfies `!pid_is_alive` and this still
+    /// reds at the deadline, deterministically, exactly like the single-shot assert did -- it just no
+    /// longer mistakes "not reaped *yet*" for "not reaped at all". Ported from the app-side
+    /// `src-tauri/src/pty.rs` fix for the same flake (CPE-1818's sibling sweep).
+    fn assert_pid_reaped_within(pid: u32, timeout: Duration, msg: &str) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !pid_is_alive(pid) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{msg}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn kill_reaps_the_child_synchronously_with_no_zombie_left_behind() {
         // CPE-1246 (porting CPE-1244): `kill()` now does its own final `wait()`, so the reap should be
@@ -291,7 +313,10 @@ mod tests {
 
         // No sleep/poll: kill()'s own follow-up wait() must have already reaped it.
         assert!(session.try_wait().is_some(), "child was not reaped synchronously by kill()");
-        assert!(!pid_is_alive(pid), "OS process should be gone right after kill()");
+        // CPE-1818: bounded-poll -- `session` (and its held `child`) is still in scope here, and the OS
+        // process-table teardown following `kill()`'s reap is asynchronous, same reasoning as
+        // `assert_pid_reaped_within`'s doc comment.
+        assert_pid_reaped_within(pid, Duration::from_secs(2), "OS process should be gone right after kill()");
     }
 
     #[test]
@@ -308,7 +333,8 @@ mod tests {
 
         drop(session); // no explicit kill() -- Drop alone must terminate + reap the child
 
-        assert!(!pid_is_alive(pid), "OS process should be gone right after drop");
+        // CPE-1818: bounded-poll, same reasoning as `assert_pid_reaped_within`'s doc comment.
+        assert_pid_reaped_within(pid, Duration::from_secs(2), "OS process should be gone right after drop");
     }
 
     #[test]
