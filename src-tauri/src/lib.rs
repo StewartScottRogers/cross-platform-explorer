@@ -14159,20 +14159,20 @@ mod tests {
     /// `getenv` in the same process (PR #940 review).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn lock_real_trash() -> TrashTestGuard<'static> {
-        // CPE-1785 DIAGNOSTIC VARIANT A (PR #940 review, blocker 1 red-first proof): mutex NEUTRALISED,
-        // redirect kept -- each call gets its OWN private mutex instead of sharing one, so the five
-        // real-trash tests no longer serialise against each other. THROWAWAY, reverted via `git checkout
-        // --` before the next diagnostic commit. Do not merge.
-        let leaked_mutex: &'static std::sync::Mutex<()> = Box::leak(Box::new(std::sync::Mutex::new(())));
-        let mutex = leaked_mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Named to match `crates/server/src/shell_menu.rs`'s `HOME_ENV_LOCK` — same pattern (a named
+        // poison-tolerant mutex guarding a process-global env var mutation), greppable as one family.
+        static TRASH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let mutex = TRASH_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(target_os = "linux")]
         {
             let scratch = cpe_server::fsutil::scratch_dir("cpe-1785-trash-xdg");
             let previous_xdg = std::env::var_os("XDG_DATA_HOME");
-            // SAFETY: test-only, guarded by TRASH_ENV_LOCK above so no other test observes a torn value;
-            // restored in `TrashTestGuard::drop` (still under the same lock) before any other test can
-            // observe the overridden value. Matches `shell_menu.rs`'s `HOME_ENV_LOCK` pattern.
-            unsafe { std::env::set_var("XDG_DATA_HOME", &scratch) };
+            // CPE-1785 DIAGNOSTIC VARIANT B (PR #940 review, blocker 1 red-first proof): redirect
+            // NEUTRALISED, mutex kept -- the scratch dir is still created (so the struct shape and
+            // Drop restore path are unchanged) but XDG_DATA_HOME is deliberately left untouched, so
+            // every guarded test is serialised but still shares the one real OS trash. THROWAWAY,
+            // reverted via `git checkout --` before the final restore commit. Do not merge.
+            // unsafe { std::env::set_var("XDG_DATA_HOME", &scratch) };
             TrashTestGuard { _scratch: scratch, previous_xdg, _mutex: mutex }
         }
         #[cfg(not(target_os = "linux"))]
