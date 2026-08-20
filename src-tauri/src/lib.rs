@@ -14495,7 +14495,15 @@ mod tests {
         // CPE-1268: skip (don't fail) on a runner with no working trash round-trip — see
         // `trash_roundtrip_available`. The product guarantee is proven on any real desktop / a CI
         // runner whose Recycle Bin works (Linux does; a headless Windows Server session may not).
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: routed through `require_staged` — `supported_here = cfg!(target_os = "linux")`
+        // matches the measured verdict right above (Linux's round-trip works; a headless Windows
+        // Server CI session may not), so a Linux runner that stops staging goes RED instead of
+        // silently voiding this test, while Windows keeps the legitimate loud skip.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping trash round-trip test: this environment cannot delete→list→restore via the \
                  OS trash (e.g. a headless CI Windows Server session with no working Recycle Bin) — \
@@ -14640,7 +14648,11 @@ mod tests {
     // ---- Trash listing / restore / empty (CPE-1558, epic CPE-1486 slice 1) --------------------------
     // `trash::os_limited::{list, restore_all, purge_all}` only round-trips on a real desktop session —
     // a headless CI runner can lack a working Recycle Bin (CPE-1268) — so every test below that touches
-    // the real OS trash guards on `trash_roundtrip_available()` and skips (doesn't fail) when it's false.
+    // the real OS trash guards on `trash_roundtrip_available()`, routed through `require_staged`
+    // (CPE-1806): a legitimate loud skip on Windows (a headless CI session may genuinely lack a working
+    // Recycle Bin), but a hard failure on Linux, where the round-trip is measured to work, so a runner
+    // that stops staging there is a bug, not an environment gap, and must go red rather than silently
+    // pass with none of these tests' assertions ever having run.
     // `select_trash_targets` is pure and never calls `purge_all`, so it's tested unconditionally and never
     // risks the developer's or CI runner's actual trash contents.
 
@@ -14783,7 +14795,15 @@ mod tests {
     #[test]
     fn list_trash_then_restore_trash_items_round_trips_a_probe_file() {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
+        // doc comment for the measured per-platform verdict this mirrors. Red-proofed by temporarily
+        // forcing (true, false) here and confirming a CI=true run panics with the CPE-1717 message
+        // naming "trash_roundtrip" — see the ticket's Work Log for the captured output.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping list_trash/restore_trash_items round-trip test: this environment cannot \
                  delete→list→restore via the OS trash (e.g. a headless CI Windows Server session with no \
@@ -14820,7 +14840,13 @@ mod tests {
     #[test]
     fn restore_trash_items_reports_a_collision_as_a_distinguishable_per_item_error_without_aborting_the_batch() {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
+        // doc comment for the measured per-platform verdict this mirrors.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping restore_trash_items collision test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
@@ -14884,7 +14910,13 @@ mod tests {
     #[test]
     fn empty_trash_purges_only_the_selected_probe_item() {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
+        // doc comment for the measured per-platform verdict this mirrors.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping empty_trash selective-purge test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
@@ -14926,7 +14958,13 @@ mod tests {
     #[test]
     fn list_trash_stream_flushes_batches_over_the_channel_and_matches_the_collect_variant() {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
+        // doc comment for the measured per-platform verdict this mirrors.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping list_trash_stream test: this environment cannot delete→list→restore via the OS \
                  trash — CPE-1268"
@@ -14983,7 +15021,16 @@ mod tests {
     #[test]
     fn trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file() {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: routed through `require_staged` (`supported_here = true` — this block is
+        // `#[cfg(target_os = "linux")]`, and the round-trip is measured to work there; see
+        // `trash_roundtrip_available`'s doc comment) so a runner that stopped staging goes RED under
+        // CI instead of silently voiding the CPE-1803 `degraded` assertions below, which this
+        // Linux-only panic-boundary test is the *only* execution any of that Linux behaviour ever gets.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            true,
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping malformed-trashinfo resilience test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
@@ -15062,7 +15109,15 @@ mod tests {
     fn restore_and_empty_trash_fail_loudly_instead_of_reporting_false_success_when_the_dependency_panics()
     {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available(&trash_guard) {
+        // CPE-1806: routed through `require_staged` (`supported_here = true` — this block is
+        // `#[cfg(target_os = "linux")]`, and the round-trip is measured to work there; see
+        // `trash_roundtrip_available`'s doc comment) so a runner that stopped staging goes RED under
+        // CI rather than silently voiding this Linux-only panic-boundary coverage.
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            true,
+            trash_roundtrip_available(&trash_guard),
+        ) {
             cpe_server::skip_notice!(
                 "skipping restore/empty panic-honesty test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
