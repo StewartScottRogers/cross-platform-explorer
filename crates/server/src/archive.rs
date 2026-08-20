@@ -485,6 +485,14 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // note that on POSIX `EPERM`-vs-`EACCES` **is** a real same-kind collision, which is where round 2's
 // story would have been true if it had been told about the right platform.
 //
+// **That refusal is ZIP-only, and round 4 caught the help claiming otherwise.** `materialise_entry_symlink`
+// has exactly one call site — inside `extract_zip_archive_stream` (rows 16/23). Rows 21–22 hand link
+// creation to `tar`'s `unpack_in`, whose failure both sinks propagate with `?`, so a tar link that the
+// volume cannot hold still aborts. Bringing tar to parity is a behaviour change, filed separately; what
+// this round fixed is the *sentence*, in the help and in three places here. The pattern across rounds
+// 2–4 is one thing: every wrong claim was reasoned from the shape of the code instead of read off the
+// path. The implementation was right or nearly right each time; the story about it was not.
+//
 // The one judgement call left is that a machine which *categorically* has no links refuses rather than
 // fails: it is a standing property of the machine, and every ordinary entry in the archive still
 // extracts — see [`link_creation_is_categorical`] for the causes that qualify and the ones that
@@ -978,6 +986,11 @@ fn create_entry_symlink(_out: &Path, _target: &Path) -> std::io::Result<()> {
 /// *why*. That is the same shape as the "abort leaves nothing partial" premise this very ticket
 /// demolished — inherited, plausible, and never measured — reproduced by its own author two commits
 /// later.
+///
+/// **And the red count from that mutation is platform-conditional**, which is worth stating because
+/// the number was quoted flat: on Windows it reds three tests, on Linux and macOS exactly one — the
+/// `EACCES` leg of `cpe1759_link_creation_separates_a_categorical_refusal_from_a_failure`. Everything
+/// above about 1314 compiles nowhere but Windows.
 #[cfg(windows)]
 const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 
@@ -990,8 +1003,25 @@ const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
 /// **Measured for their `ErrorKind`, not for their occurrence.** 50 and 1 decode to `Uncategorized` (see
 /// [`ERROR_PRIVILEGE_NOT_HELD`]), which is why they need naming here at all. That these are the codes
 /// Windows *emits* for a link-less volume comes from the platform documentation, not from a runner: no
-/// CI leg can mount a FAT volume. Being wrong about one costs a refusal that arrives as an abort — the
-/// pre-CPE-1759 behaviour, and the safe direction — never the reverse.
+/// CI leg can mount a FAT volume.
+///
+/// # The two ways this list can be wrong are NOT symmetric
+///
+/// An earlier version of this comment said being wrong "costs a refusal that arrives as an abort — the
+/// safe direction — never the reverse". That is true of one error and backwards for the other:
+///
+/// - **Omission** — a code that really does mean "this volume has no links" is missing. The entry is
+///   refused as an abort instead of a skip: the pre-CPE-1759 behaviour, noisy, and safe.
+/// - **Inclusion** — a code listed here can also arise from something that is *not* a link-less volume.
+///   That files a **failure as a refusal**: `Ok`, one entry quietly absent. It is the exact defect class
+///   this ticket exists to remove, arriving through the list meant to fix a different one.
+///
+/// **`ERROR_INVALID_FUNCTION` (1) is the entry carrying that risk**, and it is named rather than
+/// averaged into the set: 50 and 120 are specific ("not supported", "not implemented"), while 1 is
+/// Windows' generic "the device cannot do this" and is not exclusively a link-support answer. It is
+/// kept because a FAT/network volume is documented to produce it and the alternative is the broken
+/// promise round 3 fixed — but it is the one to revisit first if this list ever needs narrowing, and
+/// narrowing it is a behaviour change rather than a comment fix.
 #[cfg(windows)]
 const WINDOWS_NO_LINK_SUPPORT: &[i32] = &[1, 50, 120];
 
@@ -1008,6 +1038,14 @@ const WINDOWS_NO_LINK_SUPPORT: &[i32] = &[1, 50, 120];
 /// `remove_file` returns `EPERM` on a sticky-bit directory such as `/tmp`, and classifying *that* as
 /// "this filesystem has no links" would file a failure as a refusal, the exact defect review round 2
 /// existed to remove.
+///
+/// **And it is load-bearing on macOS specifically, which round 3 stated too weakly** (the round-4
+/// reviewer supplied this; it is from the platform's `unlink(2)`, not from a runner here — no CI leg
+/// stages it). Darwin's `unlink` answers `EPERM` for *"the named file is a directory"*, where Linux
+/// answers `EISDIR`. So without the direct return, the directory-occupant leg of
+/// `cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure` would flip from
+/// abort to refusal **on the macOS leg alone** — the sticky-bit case is the hypothetical one, and this
+/// is the one already sitting in this PR's own test matrix.
 ///
 /// `EPERM` is 1 on Linux, macOS and every BSD (the original UNIX errno ordering); it is spelled out
 /// rather than taken from `libc` because this crate has no such dependency and is not gaining one.
@@ -1026,12 +1064,22 @@ const EPERM: i32 = 1;
 /// Measured, `Unsupported` is reachable from Windows 120 and from the
 /// `not(any(unix, windows))` arm of [`create_entry_symlink`] that no CI leg compiles — while the codes a
 /// real FAT volume produces (Windows 1/50, POSIX `EPERM`) all aborted. The help promised a skip the code
-/// did not deliver. It is delivered now, on [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`].
+/// did not deliver. It is delivered now, on [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`] — **for ZIP**,
+/// which is the only format whose link creation this function sees; see the next paragraph, and the
+/// in-app help says so rather than claiming every format.
 ///
-/// That mattered beyond the broken promise: before CPE-1759 the streamed loop wrote a symlink entry's
-/// target out as *text*, so extracting a source tarball onto a FAT stick never failed. Materialising
-/// real links without this arm would have turned that into a dead extraction — a regression introduced
-/// by a fix, on a platform combination nothing here can test.
+/// That mattered beyond the broken promise, and the reason is **ZIP-specific** — an earlier version of
+/// this paragraph said "source tarball", which is the one format the fix does not cover. Checked
+/// against the paths rather than inferred: [`materialise_entry_symlink`] has exactly one call site,
+/// inside [`extract_zip_archive_stream`]. TAR's links are created by `tar`'s own `unpack_in`
+/// (`entry.rs:560`, a bare `symlink(&src, dst)`), whose error both tar sinks propagate with `?`.
+///
+/// So: before CPE-1759 the **ZIP** loop wrote a symlink entry's target out as *text*, and a zip
+/// carrying link entries extracted onto a FAT stick without failing. Materialising real links without
+/// this arm would have turned that into a dead extraction — a regression introduced by a fix, on a
+/// platform combination nothing here can test. A **tar** with links on that same stick failed before
+/// this ticket and still fails: `unpack_in` owns the write, this classifier is not on that path, and
+/// bringing it there is a behaviour change outside CPE-1759's scope rather than a wording choice.
 fn link_creation_is_categorical(e: &std::io::Error) -> bool {
     if e.kind() == std::io::ErrorKind::Unsupported {
         return true;
