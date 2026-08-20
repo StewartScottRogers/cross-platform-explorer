@@ -2280,6 +2280,186 @@ fn stream_trash_entries(
     }
 }
 
+// ---- CPE-1791: contain a dependency panic at the trash-listing boundary --------------------------
+// `trash::os_limited::list()` panics on Linux (`trash-5.2.6/src/freedesktop.rs:139-140`, a
+// `split.next().unwrap()`) when a `.trashinfo` file's body has a line with no `=` — reachable from an
+// ordinary race (another app's non-atomic trash write caught mid-write) or a foreign tool's
+// non-conforming file, so it is not exotic. Before this fix that panic surfaced through
+// `tauri::async_runtime::spawn_blocking` as an opaque `JoinError`, taking out the whole Trash view for
+// one bad entry — the exact thing `CLAUDE.md`'s "filesystem commands skip entries they can't read"
+// rule forbids for `list_dir`, and the Trash view is a filesystem listing too.
+//
+// Two layers, both applied to every call site that invokes `list()`:
+//
+// 1. (Linux only) [`quarantine_malformed_trashinfo_files`] read-only-scans each real `.trashinfo` file
+//    for the exact malformed shape and moves ONLY those files aside — a plain rename within the same
+//    trash folder, so it's cheap and can't cross a filesystem boundary — before `list()` runs, then
+//    restores them afterward (even through a panic: `Drop` still runs while unwinding). `list()` then
+//    never walks the malformed files, so every OTHER entry in the same folder still lists normally —
+//    a genuine per-entry skip. A bare `catch_unwind` alone cannot do this: `list()`'s `result` Vec is
+//    local to that function and is discarded whole on an unwind (verified against the dependency
+//    source), so catching the panic without first excluding the bad file would silently return an
+//    empty listing instead of "every other entry, minus the one bad one" — this layer is what actually
+//    delivers that guarantee.
+//
+//    This deliberately does NOT reimplement `.trashinfo` parsing (URI-decoding, mount/top-dir
+//    resolution for a relative `Path=`, date parsing) — that would duplicate what `list()` already
+//    does correctly, and a subtly-wrong reimplementation risks a `TrashItem` whose `id`/`original_parent`
+//    disagree with what `restore_all`/`purge_all` expect later: a worse, silent data-integrity failure
+//    mode than the listing bug being fixed here. That full-reimplementation alternative was considered
+//    and rejected on this trade-off (see CPE-1791's "what to do").
+//
+// 2. `catch_unwind`, on every platform, always: covers what layer 1 cannot — a file that turns
+//    malformed in the race window between the pre-scan and the `list()` call itself, or any other
+//    panic inside the dependency the pre-scan doesn't anticipate. On a caught panic the listing
+//    degrades to "no entries from this pass" rather than propagating as an opaque `JoinError`; it
+//    self-heals on the next listing once the race settles. A custom, thread-local-gated panic hook
+//    (installed once, process-wide) suppresses the default noisy backtrace-style dump for JUST this
+//    known, handled panic, without touching how any unrelated panic on any other thread is reported.
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+thread_local! {
+    /// Set for the duration of the `trash::os_limited::list()` call inside
+    /// [`list_trash_catching_dependency_panics`] on THIS thread, and only this thread. Each
+    /// `spawn_blocking` closure runs to completion on its own blocking-pool thread before that thread
+    /// picks up another task, so per-thread state here is race-free without needing to save/restore
+    /// the process-global panic hook on every call.
+    static SUPPRESS_TRASH_LIST_PANIC_SPEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Installed once. While [`SUPPRESS_TRASH_LIST_PANIC_SPEW`] is set on the panicking thread — i.e. the
+/// panic came from inside the `catch_unwind`ed `list()` call below — print one clean diagnostic line
+/// instead of letting the default hook dump its full backtrace-style spew, since the caller is about
+/// to catch and handle this anyway. A panic on any other thread (the flag unset there) falls through
+/// to the previous hook completely unchanged.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn install_trash_list_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if SUPPRESS_TRASH_LIST_PANIC_SPEW.with(std::cell::Cell::get) {
+                eprintln!(
+                    "cpe: trash::os_limited::list() panicked inside the `trash` crate ({info}) — caught \
+                     at the boundary; this listing pass returns what it has instead of crashing (CPE-1791)"
+                );
+            } else {
+                previous(info);
+            }
+        }));
+    });
+}
+
+/// Boundary containment for `trash::os_limited::list()` (CPE-1791) — see the module comment above this
+/// section for the full two-layer design. Every production call site that used to call
+/// `trash::os_limited::list()` directly goes through this instead.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn list_trash_catching_dependency_panics() -> Result<Vec<trash::TrashItem>, String> {
+    #[cfg(target_os = "linux")]
+    let _quarantine = quarantine_malformed_trashinfo_files();
+
+    install_trash_list_panic_hook();
+    SUPPRESS_TRASH_LIST_PANIC_SPEW.with(|f| f.set(true));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(trash::os_limited::list));
+    SUPPRESS_TRASH_LIST_PANIC_SPEW.with(|f| f.set(false));
+    match outcome {
+        Ok(inner) => inner.map_err(|e| e.to_string()),
+        Err(_) => {
+            eprintln!(
+                "cpe: trash::os_limited::list() panicked and was caught at the boundary — returning an \
+                 empty listing for this pass instead of failing the whole Trash view; a later refresh \
+                 recovers once the race settles (CPE-1791)"
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// RAII guard from [`quarantine_malformed_trashinfo_files`]: restores every quarantined `.trashinfo`
+/// file to its original location on drop — including while unwinding through a caught panic, since
+/// `Drop` still runs during unwind — so nothing quarantined is ever permanently lost, only hidden from
+/// `list()` for this guard's own lifetime.
+#[cfg(target_os = "linux")]
+struct QuarantinedTrashinfoFiles {
+    moved: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for QuarantinedTrashinfoFiles {
+    fn drop(&mut self) {
+        for (original, quarantined) in self.moved.drain(..) {
+            if let Err(e) = std::fs::rename(&quarantined, &original) {
+                eprintln!(
+                    "cpe: could not restore quarantined trash-info file {} back to {} — it stays hidden \
+                     from the Trash listing until this is fixed by hand: {e} (CPE-1791)",
+                    quarantined.display(),
+                    original.display()
+                );
+            }
+        }
+    }
+}
+
+/// Read-only-scans every `.trashinfo` file under every real OS trash folder ([`trash::os_limited::trash_folders`],
+/// which — like `list()` — honours `XDG_DATA_HOME`, so this sees the same redirected trash a test's
+/// `TrashTestGuard` points at) for the exact shape that panics `list()` on Linux, and moves ONLY those
+/// files aside for the returned guard's lifetime. See the module comment above this section for why
+/// this exists instead of a bare `catch_unwind`, and why it deliberately does not reimplement full
+/// `.trashinfo` parsing.
+#[cfg(target_os = "linux")]
+fn quarantine_malformed_trashinfo_files() -> QuarantinedTrashinfoFiles {
+    let mut moved = Vec::new();
+    let Ok(folders) = trash::os_limited::trash_folders() else {
+        return QuarantinedTrashinfoFiles { moved };
+    };
+    for folder in folders {
+        let info_dir = folder.join("info");
+        let Ok(entries) = std::fs::read_dir(&info_dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if !is_file || !trashinfo_body_has_a_line_without_equals(&path) {
+                continue;
+            }
+            // Quarantine into a sibling directory of `info/`, not a subdirectory of it — a subdirectory
+            // would itself be enumerated by `list()`'s `read_dir(&info_folder)` (harmlessly warned-and-
+            // skipped, since it's not a file, but there is no reason to invite that).
+            let quarantine_dir = folder.join(".cpe-1791-quarantine");
+            if std::fs::create_dir_all(&quarantine_dir).is_err() {
+                continue;
+            }
+            let Some(name) = path.file_name() else { continue };
+            let dest = quarantine_dir.join(name);
+            match std::fs::rename(&path, &dest) {
+                Ok(()) => {
+                    eprintln!(
+                        "cpe: trash listing is skipping malformed trash-info file {} (a body line has no \
+                         '=') — every other entry still lists normally (CPE-1791)",
+                        path.display()
+                    );
+                    moved.push((path, dest));
+                }
+                Err(e) => eprintln!(
+                    "cpe: could not quarantine malformed trash-info file {}, leaving it for the panic \
+                     boundary to catch instead: {e} (CPE-1791)",
+                    path.display()
+                ),
+            }
+        }
+    }
+    QuarantinedTrashinfoFiles { moved }
+}
+
+/// True if `path`'s body — every line after the mandatory first `[Trash Info]` line — contains a line
+/// with no `=`: the exact shape `trash-5.2.6/src/freedesktop.rs:139-140` panics on via
+/// `split.next().unwrap()`. Read-only. Any I/O error reads as "not malformed" — this scan only needs to
+/// catch the one known panic shape; `list()` itself already handles a file it can't open by skipping it.
+#[cfg(target_os = "linux")]
+fn trashinfo_body_has_a_line_without_equals(path: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else { return false };
+    contents.lines().skip(1).any(|line| !line.contains('='))
+}
+
 /// Collect-to-vec Trash listing, for tests and any caller that wants the whole list at once.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tauri::command]
@@ -2290,7 +2470,7 @@ async fn list_trash() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn list_trash_impl() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
-    let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    let items = list_trash_catching_dependency_panics()?;
     let mut out = Vec::new();
     stream_trash_entries(items, TRASH_LIST_BATCH, |batch| out.extend(batch));
     Ok(out)
@@ -2308,7 +2488,7 @@ async fn list_trash_stream(
     on_entry: tauri::ipc::Channel<Vec<cpe_server::model::TrashEntry>>,
 ) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+        let items = list_trash_catching_dependency_panics()?;
         let mut count = 0usize;
         stream_trash_entries(items, TRASH_LIST_BATCH, |batch| {
             count += batch.len();
@@ -14739,6 +14919,98 @@ mod tests {
             let _ = restore_trash_items_impl(vec![entry.id.clone()]);
         }
         let _ = fs::remove_file(&probe);
+    }
+
+    // CPE-1791: one malformed `.trashinfo` file must not take out the whole listing. Linux-only, for two
+    // independent reasons: `trash::os_limited::list()` only actually panics on this shape on Linux
+    // (`trash-5.2.6/src/freedesktop.rs:139-140` — confirmed by reading the dependency source; Windows's
+    // Recycle Bin listing doesn't parse text `.trashinfo` files at all), and the fix this test proves
+    // (`quarantine_malformed_trashinfo_files`) is itself `#[cfg(target_os = "linux")]`. This crew runs on
+    // Windows, so this test can only be compiled and executed by CI's Linux leg of the 3-OS matrix — not
+    // locally. `catch_unwind`, the OTHER half of the fix, is cross-platform and does run (trivially, since
+    // nothing panics) as part of every other trash test in this file on every OS.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trash_listing_survives_one_malformed_trashinfo_file() {
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !trash_roundtrip_available(&trash_guard) {
+            cpe_server::skip_notice!(
+                "skipping malformed-trashinfo resilience test: this environment cannot delete→list→restore \
+                 via the OS trash — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let good_a = dir.path().join("cpe-1791-good-a.tmp");
+        let good_b = dir.path().join("cpe-1791-good-b.tmp");
+        fs::write(&good_a, b"a").unwrap();
+        fs::write(&good_b, b"b").unwrap();
+        trash::delete(&good_a).unwrap();
+        trash::delete(&good_b).unwrap();
+
+        // Plant the malformed file directly into the redirected trash's info/ folder (the two real
+        // deletes above guarantee that folder now exists, and the redirect guarantees this is a private
+        // scratch trash, never a real developer's). Its body's only line after the mandatory
+        // `[Trash Info]` header has no `=` — the exact shape that panics
+        // `trash-5.2.6/src/freedesktop.rs:139-140` via `split.next().unwrap()`.
+        let scratch = trash_guard.scratch_path().expect("the Linux XDG_DATA_HOME redirect must be active");
+        let info_dir = scratch.join("Trash").join("info");
+        assert!(info_dir.is_dir(), "the two real deletes above must have created the info/ folder");
+        let malformed = info_dir.join("cpe-1791-malformed.trashinfo");
+        fs::write(&malformed, "[Trash Info]\nPath\n").unwrap();
+
+        // RED: prove the dependency itself really does panic on this on-disk shape — not a rewritten
+        // test double, the actual `trash::os_limited::list()` this codebase calls in production. If this
+        // assertion ever starts failing, the dependency was fixed upstream and CPE-1791's quarantine
+        // layer may be simplifiable (or droppable) — see that ticket.
+        let raw_outcome = std::panic::catch_unwind(trash::os_limited::list);
+        assert!(
+            raw_outcome.is_err(),
+            "expected trash::os_limited::list() to panic on a malformed .trashinfo body line with no \
+             '=' (trash-5.2.6/src/freedesktop.rs:139-140) — if this now passes, see the comment above"
+        );
+
+        // GREEN: our own wrapper must survive the exact same on-disk state and list every OTHER entry —
+        // not just avoid crashing, but actually keep the good rows (a bare `catch_unwind` around `list()`
+        // could not do this alone: `list()`'s `result` accumulator is local to that function and is
+        // discarded whole on an unwind, so recovering only the bad entry requires keeping it out of
+        // `list()`'s view in the first place — which is what `quarantine_malformed_trashinfo_files` does).
+        let listed = list_trash_impl().expect("list_trash_impl must not fail the whole listing");
+        let good_a_path = good_a.to_string_lossy().to_string();
+        let good_b_path = good_b.to_string_lossy().to_string();
+        assert!(
+            listed.iter().any(|e| e.original_path == good_a_path),
+            "the first well-formed entry must still be listed despite its malformed neighbour: {listed:?}"
+        );
+        assert!(
+            listed.iter().any(|e| e.original_path == good_b_path),
+            "the second well-formed entry must still be listed despite its malformed neighbour: {listed:?}"
+        );
+        assert!(
+            !listed.iter().any(|e| e.name == "cpe-1791-malformed.trashinfo"),
+            "the malformed entry itself must never surface as a listed row: {listed:?}"
+        );
+
+        // The quarantine guard restores the malformed file to its original location before
+        // `list_trash_impl` even returns (its lifetime is scoped to the single `list()` call) — so by
+        // now it must be back in info/, and the quarantine dir must be empty again. Nothing is
+        // permanently lost, only hidden from `list()` for the moment it was actually dangerous.
+        assert!(
+            malformed.exists(),
+            "the malformed .trashinfo must be restored to info/ once the listing call completes"
+        );
+        let quarantine_dir = scratch.join("Trash").join(".cpe-1791-quarantine");
+        if quarantine_dir.is_dir() {
+            assert!(
+                fs::read_dir(&quarantine_dir).unwrap().next().is_none(),
+                "the quarantine dir must be empty again once the listing call completes"
+            );
+        }
+
+        // No manual restore/cleanup needed: this test's whole trash tree lives under the redirected
+        // XDG_DATA_HOME scratch dir, which `trash_guard`'s `ScratchDir` recursively removes on drop
+        // (unlike the real-shared-trash tests above, which must clean up by hand).
     }
 
     #[test]
