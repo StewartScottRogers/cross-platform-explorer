@@ -6957,7 +6957,10 @@ mod tests {
     /// object path, and interpolates key text into XML unescaped), and it is why this store decodes the
     /// request path into a genuine key and stores it under exactly those bytes. It is deliberately small: the
     /// five verbs this crate sends, no sentinels, no pagination.
-    fn spawn_key_exact_store() -> (String, Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>) {
+    /// The bucket contents of a [`spawn_key_exact_store`]: real S3 key -> the object's bytes.
+    type KeyExactBucket = Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>;
+
+    fn spawn_key_exact_store() -> (String, KeyExactBucket) {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let store: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>> = Default::default();
