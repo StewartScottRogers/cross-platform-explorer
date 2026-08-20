@@ -454,9 +454,29 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // create. A failure is the write itself not working: `File::create`, `io::copy`, `fs::hard_link`, an
 // unreadable slot ([`EntrySlotAction::Abort`]). Failures abort at every row, including the ones this
 // ticket touched — measured and pinned rather than left implied: a tar hard link whose target is simply
-// missing still takes the run down (`cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails`).
-// The one judgement call is the missing-symlink-privilege case, which is filed as a *refusal* because it
-// is a standing property of the machine rather than an incident — see [`link_creation_refusal`].
+// missing still takes the run down (`cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails`),
+// and so does a slot whose `symlink_metadata` fails
+// (`cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`).
+//
+// **CPE-1759's own review found the rule broken in two places by the commit that stated it**, which is
+// the argument for stating it as a testable line rather than a principle:
+//
+// - `tar_entry_refusal` collapsed `Skip(m) | Abort(m)` into one arm. That arm had been *dead* on `main`
+//   — only `link_target_action` fed it, and it never returns `Abort` — and adding the slot guard made it
+//   live, so an unreadable slot became a silent tar skip returning `Ok`. UAT finding 6 verbatim, three
+//   functions from the comment warning about it.
+// - The link-creation fallback swallowed every `io::ErrorKind` into a refusal asserting the cause was
+//   the Windows symlink privilege, so a full disk produced a green extraction advising Developer Mode.
+//   [`link_creation_is_categorical`] now draws the line, on the **raw OS code** rather than
+//   `ErrorKind` — Rust decodes `ERROR_PRIVILEGE_NOT_HELD` and `ERROR_ACCESS_DENIED` to the same kind,
+//   so a classifier written against the kind cannot tell "this machine has no links" from "you may not
+//   write here". That mutation is one of this ticket's red-proofs and it reproduces the false message
+//   exactly.
+//
+// The one judgement call left is that a machine which *categorically* has no links refuses rather than
+// fails: it is a standing property of the machine, and every ordinary entry in the archive still
+// extracts — see [`link_creation_is_categorical`] for the two causes that qualify and the ones that
+// deliberately do not.
 //
 // ## The three extractors that are NOT our write loop — measured one at a time, because they differ
 //
@@ -885,10 +905,11 @@ fn link_target_action(dest: &Path, out: &Path, target: &Path) -> EntrySlotAction
 /// [`link_target_action`]'s, already answered before this is called) — it picks the wrong link *flavour*,
 /// which on Windows means a directory link that does not behave like one.
 ///
-/// **A platform that refuses to create the link is a SKIP, never an abort** — see the call site. The
-/// common case is not exotic: `symlink_file` on Windows needs `SeCreateSymbolicLinkPrivilege`
-/// (administrator, or Developer Mode), so an ordinary user extracting a zip authored on macOS/Linux meets
-/// it. The `not(any(unix, windows))` arm returns `Unsupported` rather than copying the crate's
+/// **A platform that *categorically* will not create links is a SKIP; everything else is a FAILURE and
+/// aborts** — [`materialise_entry_symlink`] draws that line, and the first version of CPE-1759 did not
+/// draw it at all (it swallowed every `io::ErrorKind` into a refusal that asserted the cause was the
+/// Windows privilege, while `File::create` twelve lines away aborted on the same errors). The
+/// `not(any(unix, windows))` arm returns `Unsupported` rather than copying the crate's
 /// write-the-target-as-a-file fallback, because that fallback is precisely the defect measured above; no
 /// CI leg compiles it (the matrix is Linux/macOS/Windows).
 #[cfg(unix)]
@@ -918,20 +939,100 @@ fn create_entry_symlink(_out: &Path, _target: &Path) -> std::io::Result<()> {
     ))
 }
 
-/// The refusal for a link entry this platform would not let us create (CPE-1759) — in one place so the
-/// wording cannot drift, and phrased so the user can act on it.
+/// Windows `ERROR_PRIVILEGE_NOT_HELD` — `symlink_file`/`symlink_dir` without
+/// `SeCreateSymbolicLinkPrivilege` (administrator, or Developer Mode).
 ///
-/// It is a **skip**, not an abort, and not a silent write-something-else: on Windows the overwhelmingly
-/// common cause is the missing symlink privilege, which is a property of the *machine*, not of the
-/// archive, so taking the whole extraction down over it would deny an ordinary user every other entry
-/// in a source zip that happens to carry one link.
+/// Matched on the **raw OS code, not on `ErrorKind`**, and that is load-bearing: Rust's Windows
+/// `decode_error_kind` maps 1314 to `PermissionDenied`, the same kind it gives `ERROR_ACCESS_DENIED`
+/// (5) — a genuine "you may not write here" that must abort. The kind cannot tell the two apart; the
+/// code can.
+#[cfg(windows)]
+const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+/// **The refusal/failure line for link creation** (CPE-1759, review round 2).
+///
+/// `true` only for *categorical* refusals — this machine or filesystem does not do symbolic links at
+/// all, for anyone, until something about the machine changes:
+///
+/// - **`ErrorKind::Unsupported`** — the filesystem has no links (a FAT/exFAT volume, some network
+///   mounts). Rust maps POSIX `ENOSYS`/`EOPNOTSUPP` here, and it is what this module's own
+///   `not(any(unix, windows))` arm of [`create_entry_symlink`] returns.
+/// - **Windows [`ERROR_PRIVILEGE_NOT_HELD`]** — the missing symlink privilege.
+///
+/// Everything else is a **failure** and aborts, with the same treatment `File::create` and `io::copy`
+/// get in the same loop: `PermissionDenied` on the directory, `NotFound`, a full disk, `EIO`. The first
+/// version of this code had no such test — it mapped *every* error to a refusal whose text asserted the
+/// cause was the Windows privilege, so a full disk produced a green extraction advising the user to
+/// enable Developer Mode.
+fn link_creation_is_categorical(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(windows)]
+    if e.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) {
+        return true;
+    }
+    false
+}
+
+/// The wording for a link entry this machine categorically will not create (CPE-1759) — in one place so
+/// it cannot drift, and **it no longer guesses the cause**. The first version said "On Windows that
+/// normally means…" for every error it was handed, including ones that had nothing to do with
+/// privileges; now the two causes [`link_creation_is_categorical`] admits are named separately, because
+/// they need different things from the user.
 fn link_creation_refusal(target: &Path, e: &std::io::Error) -> String {
+    let remedy = if e.kind() == std::io::ErrorKind::Unsupported {
+        "this folder is on a filesystem that has no links"
+    } else {
+        "creating a link needs administrator rights or Developer Mode on Windows"
+    };
     format!(
-        "this entry is a link to \"{}\", and this system would not create it ({e}). On Windows that \
-         normally means symbolic links need administrator rights or Developer Mode. Skipped; the rest \
-         of the archive still extracts",
+        "this entry is a link to \"{}\", and it could not be created here — {remedy} ({e}). Skipped; \
+         the rest of the archive still extracts",
         target.display()
     )
+}
+
+/// Create the link a symlink entry asks for, classifying what happens into this module's two outcomes:
+/// `Ok(None)` created, `Ok(Some(reason))` **refused** (skip), `Err(e)` **failed** (abort).
+///
+/// # The `AlreadyExists` retry, and why it is not a new policy
+///
+/// `symlink`/`symlink_file` are exclusive-create: they fail `AlreadyExists` over *anything* already at
+/// the name. The slot has already been proven **not a link** by `entry_sink_action` one step earlier, so
+/// what is there is an ordinary file or directory — and *"overwriting an ordinary existing file is
+/// unaffected, that stays allowed"* is this module's documented, long-standing contract (see the section
+/// comment's rows 6–14 note, and `src/docs/explorer-archives.md`). The file branch of the same loop
+/// honours it via `File::create`'s truncate; `tar` honours it for its own links the same way
+/// (`remove_file` then retry, `tar-0.4.46/src/entry.rs:562-568`). So this branch honours it too, rather
+/// than inventing a link-shaped exception to it.
+///
+/// **The first version of this code got that backwards** and, worse, pinned it: it reported
+/// `AlreadyExists` as "this system would not create it — enable Developer Mode", and its only test
+/// staged an ordinary file in the slot and asserted the file survived. The behaviour was wrong, the
+/// message was untrue, and the test certified both.
+///
+/// A `remove_file` that fails — because the occupant is a **directory**, most obviously — is a failure
+/// and aborts, exactly as `File::create` would on the same path.
+fn materialise_entry_symlink(out: &Path, target: &Path) -> Result<Option<String>, String> {
+    let err = match create_entry_symlink(out, target) {
+        Ok(()) => return Ok(None),
+        Err(e) => e,
+    };
+    let err = if err.kind() == std::io::ErrorKind::AlreadyExists {
+        match fs::remove_file(out).and_then(|()| create_entry_symlink(out, target)) {
+            Ok(()) => return Ok(None),
+            Err(retried) => retried,
+        }
+    } else {
+        err
+    };
+    if link_creation_is_categorical(&err) {
+        return Ok(Some(link_creation_refusal(target, &err)));
+    }
+    // Names the path, unlike the bare `e.to_string()` its neighbours use: an OS string alone ("Access is
+    // denied.") tells the user nothing about *which* of an archive's entries died on it.
+    Err(format!("could not create the link \"{}\": {err}", out.display()))
 }
 
 /// Row 17: create an extraction's destination folder, and **say something true when that fails**
@@ -2080,9 +2181,9 @@ const UNSAFE_NAME_SKIP: &str = "unsafe entry name, skipped";
 /// **`dest.join(name)` — with no `\`-to-`/` normalisation.** That normalisation was a live escape on
 /// POSIX; the measurement and the reasoning are on [`link_target_action`]. This is also exactly what the
 /// sibling ZIP loop ([`extract_zip_archive_stream`]) already does for its own `out`.
-fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> Option<String> {
+fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> EntrySlotAction {
     if !entry_name_is_safe(name) {
-        return Some(UNSAFE_NAME_SKIP.to_string());
+        return EntrySlotAction::Skip(UNSAFE_NAME_SKIP.to_string());
     }
     let out = dest.join(name);
     let slot = match kind {
@@ -2091,12 +2192,19 @@ fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> Option<
     };
     match slot {
         EntrySlotAction::Write => {}
-        // Both arms skip here, unlike rows 15/16 where `Abort` means "an I/O failure we must not report
-        // as success". These two sinks have the same reason to skip an unreadable slot that they have to
-        // skip a readable link: `unpack_in` owns the write, so handing it a slot we could not classify is
-        // the one thing we must not do, and the alternative — aborting — is precisely the behaviour this
-        // ticket is removing from the zip branch. It is recorded either way on the streamed path.
-        EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => return Some(m),
+        // **Both arms are propagated, not collapsed** — and the first version of CPE-1759 collapsed them,
+        // which is the whole reason this paragraph exists. Before this ticket the `Abort` arm here was
+        // *dead*: the only producer was `link_target_action`, which never returns it. Adding
+        // `entry_sink_action` above made it live, and mapping it to a skip meant an unreadable slot —
+        // classified as a **failure** by [`EntrySlotAction`]'s own doc, and aborted by all three zip
+        // sinks — dropped a tar entry silently while the run returned `Ok`. That is UAT finding 6
+        // verbatim, reintroduced three functions from the comment warning about it.
+        //
+        // The rule this module states is *refusals skip, failures abort*, and "`unpack_in` owns the
+        // write" is not an exception to it: the caller can abort just as easily as it can skip, and a
+        // slot we could not classify is not a refusal we chose — it is a question the filesystem would
+        // not answer.
+        decided => return decided,
     }
     let (target, decision) = match kind {
         TarEntryKind::Symlink(t) => (t, link_target_action(dest, &out, t)),
@@ -2106,15 +2214,15 @@ fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> Option<
         // base is worth one `..` of real escape per level of disagreement — see [`link_target_action`]
         // for the round of this that shipped a live hole.
         TarEntryKind::HardLink(t) => (t, hard_link_target_action(dest, t)),
-        TarEntryKind::Directory | TarEntryKind::Other => return None,
+        TarEntryKind::Directory | TarEntryKind::Other => return EntrySlotAction::Write,
     };
     if target.as_os_str().is_empty() {
-        return Some(EMPTY_LINK_SKIP.to_string());
+        return EntrySlotAction::Skip(EMPTY_LINK_SKIP.to_string());
     }
-    match decision {
-        EntrySlotAction::Write => None,
-        EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => Some(m),
-    }
+    // Neither target guard can return `Abort` — both are pure containment verdicts over
+    // `confined_to`, which fails *closed* into `Skip` rather than reporting that it could not tell.
+    // Propagated whole anyway, so that stays true by construction rather than by this comment.
+    decision
 }
 
 /// The containment decision for a **hard link** entry's target (CPE-1759).
@@ -2248,8 +2356,12 @@ fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
         let link = tar_link_target(&entry);
         let entry_type = entry.header().entry_type();
         let is_dir = entry_type.is_dir();
-        if tar_entry_refusal(&root, &name, tar_entry_kind(entry_type, link.as_deref())).is_some() {
-            continue;
+        match tar_entry_refusal(&root, &name, tar_entry_kind(entry_type, link.as_deref())) {
+            EntrySlotAction::Write => {}
+            EntrySlotAction::Skip(_) => continue,
+            // Not skippable: an unreadable slot is an I/O failure, and silently dropping the entry
+            // would report success about a file that is missing (UAT finding 6) — same as row 15.
+            EntrySlotAction::Abort(e) => return Err(e),
         }
         if is_dir {
             directories.push(entry);
@@ -2965,11 +3077,10 @@ fn extract_zip_archive_stream(
                 };
                 let refusal = match refusal {
                     Some(m) => Some(m),
-                    // A machine that will not create links refuses the ENTRY, not the archive — see
-                    // `link_creation_refusal`.
-                    None => create_entry_symlink(&out, &target)
-                        .err()
-                        .map(|e| link_creation_refusal(&target, &e)),
+                    // A machine that categorically has no links refuses the ENTRY; anything else that
+                    // goes wrong is a failure and takes the run down, like every other write in this
+                    // loop. `materialise_entry_symlink` draws that line and owns the overwrite retry.
+                    None => materialise_entry_symlink(&out, &target)?,
                 };
                 match refusal {
                     Some(m) => report.skip(&name, &m),
@@ -3075,17 +3186,23 @@ fn extract_tar_stream<R: std::io::Read>(
         // [`tar_entry_refusal`] for the three questions and the measurements behind each.
         let link = tar_link_target(&entry);
         let entry_type = entry.header().entry_type();
-        if let Some(reason) = tar_entry_refusal(dest, &name, tar_entry_kind(entry_type, link.as_deref())) {
-            report.skip(&name, &reason);
-            // Counted as a done *item* so the progress bar still reaches its total — but only for a
-            // non-directory entry, because [`tar_totals`] counts only those into `total_items` (unlike
-            // the ZIP loop, whose total is `archive.len()`). Incrementing here for a refused directory
-            // would push `done_items` past `total_items` and show a bar over 100%.
-            if !is_dir {
-                prog.done_items += 1;
+        match tar_entry_refusal(dest, &name, tar_entry_kind(entry_type, link.as_deref())) {
+            EntrySlotAction::Write => {}
+            EntrySlotAction::Skip(reason) => {
+                report.skip(&name, &reason);
+                // Counted as a done *item* so the progress bar still reaches its total — but only for a
+                // non-directory entry, because [`tar_totals`] counts only those into `total_items`
+                // (unlike the ZIP loop, whose total is `archive.len()`). Incrementing here for a refused
+                // directory would push `done_items` past `total_items` and show a bar over 100%.
+                if !is_dir {
+                    prog.done_items += 1;
+                }
+                emit(&prog);
+                continue;
             }
-            emit(&prog);
-            continue;
+            // Not skippable — see row 16 (UAT finding 6). An unreadable slot is a failure, and this
+            // path having somewhere to *record* a skip is not a reason to reclassify one as a skip.
+            EntrySlotAction::Abort(e) => return Err(e),
         }
         let unpacked = entry.unpack_in(dest).map_err(|e| e.to_string())?;
         if unpacked {
@@ -5649,58 +5766,217 @@ mod tests {
         }
     }
 
-    /// **CPE-1759: a link entry the OS refuses to create is a counted skip, not an abort.**
+    /// **CPE-1759 review round 2: the refusal/failure line for link creation, both sides, as a pure
+    /// classifier.**
     ///
-    /// The branch this covers is not exotic. `extract_zip_archive_stream` now materialises a real symlink
-    /// for a symlink entry, and `std::os::windows::fs::symlink_file` needs
-    /// `SeCreateSymbolicLinkPrivilege` — administrator, or Developer Mode — so an ordinary Windows user
-    /// extracting a zip authored on macOS or Linux meets exactly this failure. Taking the whole archive
-    /// down over a property of the *machine* would be the abort behaviour this ticket removed, arriving
-    /// by a different door.
+    /// The first version of this ticket had no such line — it mapped **every** `io::Error` from
+    /// `create_entry_symlink` to a refusal whose text asserted the cause was the missing Windows symlink
+    /// privilege, so a full disk or a read-only directory produced a green extraction advising the user
+    /// to turn on Developer Mode, while `File::create` twelve lines away aborted on the same errors.
     ///
-    /// **Staged portably by occupying the slot with a plain file** rather than by dropping privileges,
-    /// which no test can do here: `symlink`/`symlink_file` then fails `AlreadyExists` on every supported
-    /// platform, which is a real `create_entry_symlink` error reaching the real fallback. A plain file is
-    /// also a slot `entry_sink_action` deliberately allows through (it is not a link), so the refusal
-    /// under test is the one being staged and not the leaf-link guard firing early — asserted below.
+    /// This is a pure test for the reason `entry_slot_action`'s is: the two arms that matter cannot be
+    /// staged on demand anywhere. `ERROR_PRIVILEGE_NOT_HELD` needs an unprivileged Windows account and
+    /// `Unsupported` needs a filesystem without links, so with the classification inline the arms that
+    /// were wrong would again be the arms nothing reaches.
+    ///
+    /// **The `PermissionDenied` leg is the one that would have caught the original defect**, and on
+    /// Windows it is not a formality: Rust's `decode_error_kind` maps `ERROR_PRIVILEGE_NOT_HELD` (1314)
+    /// and `ERROR_ACCESS_DENIED` (5) to the *same* `ErrorKind`, so a classifier written against the kind
+    /// cannot tell "this machine does not do links" from "you may not write here". Only the raw code can.
     #[test]
-    fn cpe1759_a_link_entry_this_system_will_not_create_is_a_counted_skip() {
-        let d = scratch("cpe1759_linkfail");
-        let ap = d.join("link.zip");
-        fs::write(&ap, craft_zip_with_symlink("good_link", "ok.txt")).unwrap();
-        let dest = d.join("out");
-        fs::create_dir_all(&dest).unwrap();
-        // Occupy the slot with an ordinary file, so creating the link cannot succeed.
-        fs::write(dest.join("good_link"), b"IN THE WAY").unwrap();
+    fn cpe1759_link_creation_separates_a_categorical_refusal_from_a_failure() {
+        use std::io::{Error, ErrorKind};
 
-        let report = extract_archive_streamed(
-            &ap.to_string_lossy(),
-            &dest.to_string_lossy(),
-            &AtomicBool::new(false),
-            |_| {},
-        )
-        .expect("a link this system will not create must not abort the whole extraction");
-
-        assert_eq!(
-            fs::read(dest.join("good_link")).unwrap(),
-            b"IN THE WAY".to_vec(),
-            "the file already at the name must be left exactly as it was — neither replaced by a link \
-             nor overwritten with the link's target text"
-        );
-        assert_eq!(
-            fs::read(dest.join("ok.txt")).unwrap(),
-            b"ORDINARY".to_vec(),
-            "and the rest of the archive still extracts — `ok.txt` sits after the link entry"
-        );
-        assert_eq!(report.skipped, 1, "the refusal must be counted (CPE-1775); got {report:?}");
         assert!(
-            report.errors.iter().any(|e| e.starts_with("good_link: ") && e.contains("would not create it")),
-            "and recorded as a LINK-CREATION refusal naming the entry — not as the leaf-link guard \
-             (\"is a link\"), which would mean this test staged the wrong condition, and not as a bare \
-             I/O string. Got {:?}",
-            report.errors
+            link_creation_is_categorical(&Error::new(ErrorKind::Unsupported, "no links here")),
+            "a filesystem with no links at all is a refusal — the entry is impossible, not the write"
         );
-        let _ = fs::remove_dir_all(&d);
+        #[cfg(windows)]
+        assert!(
+            link_creation_is_categorical(&Error::from_raw_os_error(ERROR_PRIVILEGE_NOT_HELD)),
+            "ERROR_PRIVILEGE_NOT_HELD is the Windows symlink privilege, a property of the machine"
+        );
+        #[cfg(windows)]
+        assert!(
+            !link_creation_is_categorical(&Error::from_raw_os_error(5)),
+            "...but ERROR_ACCESS_DENIED is an ordinary permission failure and must ABORT — and it \
+             decodes to the SAME ErrorKind as 1314, which is exactly why this classifier reads the raw \
+             code. A version matching on `PermissionDenied` passes the leg above and fails here"
+        );
+        for (label, e) in [
+            ("permission", Error::from(ErrorKind::PermissionDenied)),
+            ("disk full", Error::other("No space left on device")),
+            ("not found", Error::from(ErrorKind::NotFound)),
+            ("already exists", Error::from(ErrorKind::AlreadyExists)),
+        ] {
+            assert!(
+                !link_creation_is_categorical(&e),
+                "{label}: a failure of the write must ABORT, like `File::create`'s does in the same \
+                 loop — reporting it as a skip returns Ok with an entry silently missing"
+            );
+        }
+
+        // And the wording names the right remedy for each, because the first version named one remedy
+        // for everything it was handed.
+        let unsupported =
+            link_creation_refusal(Path::new("t"), &Error::new(ErrorKind::Unsupported, "nope"));
+        assert!(
+            unsupported.contains("filesystem that has no links") && !unsupported.contains("Developer Mode"),
+            "an unsupported filesystem must not be reported as a Windows privilege problem: {unsupported}"
+        );
+    }
+
+    /// **CPE-1759 review round 2: a link entry replaces an ordinary file, the way a file entry does.**
+    ///
+    /// `symlink`/`symlink_file` are exclusive-create, so they fail `AlreadyExists` over anything already
+    /// at the name. The first version of this ticket reported that as *"this system would not create it
+    /// — enable Developer Mode"*, skipped the entry, and **pinned it** with a test asserting the
+    /// occupying file survived. All three were wrong: `entry_sink_action` has already proven the slot is
+    /// not a link, and *"overwriting an ordinary existing file is unaffected — that stays allowed"* is
+    /// this module's documented contract, honoured by `File::create`'s truncate for a file entry and by
+    /// `tar`'s own `remove_file`-and-retry for its links.
+    ///
+    /// The **directory** leg is the other side of the same call: `remove_file` cannot remove a
+    /// directory, that is the write failing rather than a guard refusing, and it aborts.
+    #[test]
+    fn cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure() {
+        let probe = scratch("cpe1759_linkprobe");
+        fs::write(probe.join("t.txt"), b"x").unwrap();
+        if !crate::fsutil::require_staged(
+            "live_file_symlink",
+            cfg!(any(windows, unix)),
+            stage_live_link(&probe.join("t.txt"), &probe.join("l")),
+        ) {
+            crate::skip_notice!(
+                "[CPE-1759] SKIPPED the link-overwrite legs: this machine cannot create symlinks, so \
+                 every outcome below would be the categorical refusal instead."
+            );
+            let _ = fs::remove_dir_all(&probe);
+            return;
+        }
+        let _ = fs::remove_dir_all(&probe);
+
+        for occupant in ["file", "dir"] {
+            let d = scratch("cpe1759_linkover");
+            let ap = d.join("link.zip");
+            fs::write(&ap, craft_zip_with_symlink("good_link", "ok.txt")).unwrap();
+            let dest = d.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            let slot = dest.join("good_link");
+            if occupant == "file" {
+                fs::write(&slot, b"IN THE WAY").unwrap();
+            } else {
+                fs::create_dir_all(&slot).unwrap();
+            }
+
+            let outcome = extract_archive_streamed(
+                &ap.to_string_lossy(),
+                &dest.to_string_lossy(),
+                &AtomicBool::new(false),
+                |_| {},
+            );
+
+            if occupant == "dir" {
+                let err = outcome.expect_err(
+                    "a link entry that cannot displace a DIRECTORY is the write failing, not a guard \
+                     refusing — it aborts, like `File::create` on the same path would",
+                );
+                assert!(
+                    err.contains("good_link") && err.contains("could not create the link"),
+                    "and the failure must name the entry and what was being attempted, not be a bare OS \
+                     string — an `is_err()` check here would stay green through the guard firing for \
+                     some entirely different reason. Got: {err}"
+                );
+                let _ = fs::remove_dir_all(&d);
+                continue;
+            }
+
+            let report = outcome.expect("replacing an ordinary file must not abort the extraction");
+            assert!(
+                fs::symlink_metadata(&slot).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "the ordinary file must be REPLACED by the archive's link. Leaving it in place was the \
+                 first version's behaviour and it contradicted this module's own promise that \
+                 overwriting an ordinary existing file stays allowed"
+            );
+            assert_eq!(
+                fs::read_to_string(&slot).unwrap(),
+                "ORDINARY",
+                "...and the link must resolve to the archive's own file, not to the displaced bytes"
+            );
+            assert_eq!(
+                (report.skipped, report.errors.len()),
+                (0, 0),
+                "an overwrite is not a refusal and must produce NO skip notice at all; got {report:?}"
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    /// **CPE-1759 review round 2: an unreadable slot ABORTS the tar paths, it is not skipped.**
+    ///
+    /// The `Abort` arm of `tar_entry_refusal` was **dead** before this ticket — its only producer was
+    /// `link_target_action`, which never returns it. Adding `entry_sink_action` made it live, and the
+    /// first version of CPE-1759 wrote `Skip(m) | Abort(m) => Some(m)`, collapsing the two. That turned
+    /// a slot whose `symlink_metadata` fails for a reason other than `NotFound` — a **failure**, per
+    /// `EntrySlotAction`'s own doc, aborted by all three zip sinks — into a silent tar skip with the run
+    /// returning `Ok`. UAT finding 6, reintroduced three functions from the comment warning about it.
+    ///
+    /// Staged with `deny_stat_of`, the same mechanism the rest of this crate uses for the arm no
+    /// portable API can produce, and routed through `require_staged` so a runner that *should* manage it
+    /// goes red rather than quietly covering nothing (CPE-1717).
+    #[test]
+    fn cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped() {
+        for streamed in [false, true] {
+            let d = scratch("cpe1759_tar_unreadable");
+            let tgz = d.join("in.tar.gz");
+            compress_to_targz(&two_source_files(&d), &tgz.to_string_lossy()).unwrap();
+            let dest = d.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            let slot = dest.join("a.txt");
+            fs::write(&slot, b"PRE-EXISTING").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&slot, &d);
+
+            if !crate::fsutil::deny_stat_of(&slot) {
+                crate::skip_notice!(
+                    "[CPE-1759] SKIPPED the unreadable-slot tar leg (streamed={streamed}): could not \
+                     deny stat of {}. NOTHING in this test covered that route on this run.",
+                    slot.display()
+                );
+                return;
+            }
+
+            let outcome = if streamed {
+                extract_archive_streamed(
+                    &tgz.to_string_lossy(),
+                    &dest.to_string_lossy(),
+                    &AtomicBool::new(false),
+                    |_| {},
+                )
+                .map(|r| format!("{r:?}"))
+            } else {
+                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy())
+            };
+
+            let err = outcome.expect_err(
+                "an unreadable slot is an I/O FAILURE, not a policy refusal: skipping it drops an entry \
+                 for a reason that has nothing to do with the archive and still reports success. Every \
+                 zip sink aborts on it and tar must too",
+            );
+            assert!(
+                err.contains("could not check"),
+                "and it must be the GUARD's `Unknown` wording, not an incidental read failure from \
+                 somewhere else in the run — those are the same red for opposite reasons and only this \
+                 string tells them apart. Got: {err}"
+            );
+        }
     }
 
     /// **CPE-1759: the unix mode bits `zip::ZipArchive::extract` restored, restored by our loop too.**
@@ -6984,20 +7260,25 @@ mod tests {
         let stays = format!("{}inside.txt", "../".repeat(depth - 1));
 
         let refused = tar_entry_refusal(&dest, NAME, TarEntryKind::Symlink(Path::new(&escapes)));
+        // `Skip`, specifically — not "anything that isn't Write". An escaping link target is a
+        // *refusal*; if it ever arrives as `Abort` the entry stops costing one entry and starts costing
+        // the archive, which is the distinction CPE-1759 exists to keep straight.
+        let EntrySlotAction::Skip(ref reason) = refused else {
+            panic!(
+                "a target that escapes from where the extractor ACTUALLY creates the link must be \
+                 SKIPPED. Measured on Linux before the fix: this returned Write, because the guard \
+                 resolved from an invented `dest/a/b` while `unpack_in` wrote the link straight into \
+                 `dest` — every `..` was worth one level more of real escape than the guard accounted \
+                 for. target={escapes:?}, got {refused:?}"
+            )
+        };
         assert!(
-            refused.is_some(),
-            "a target that escapes from where the extractor ACTUALLY creates the link must be refused. \
-             Measured on Linux before the fix: this returned None, because the guard resolved from an \
-             invented `dest/a/b` while `unpack_in` wrote the link straight into `dest` — every `..` was \
-             worth one level more of real escape than the guard accounted for. target={escapes:?}"
-        );
-        assert!(
-            refused.as_deref().unwrap_or_default().contains("outside the extraction folder"),
+            reason.contains("outside the extraction folder"),
             "and refused as a link-target escape, not for some unrelated reason: {refused:?}"
         );
         assert_eq!(
             tar_entry_refusal(&dest, NAME, TarEntryKind::Symlink(Path::new(&stays))),
-            None,
+            EntrySlotAction::Write,
             "...while one level less — still inside the extraction folder from that same real directory \
              — must still be allowed, or this guard has become blanket-refuse-everything and the \
              assertion above proves nothing. target={stays:?}"
