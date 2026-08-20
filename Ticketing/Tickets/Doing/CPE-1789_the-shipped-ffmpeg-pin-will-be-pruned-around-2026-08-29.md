@@ -107,4 +107,8 @@ meaningfully worse in a build from 19 days earlier. Going forward, `FFMPEG_BUILD
 be moved between month-end anchors, never to a daily, even when a daily is more "current."
 
 2026-08-19 — Ran `gh workflow run ffmpeg-pin-freshness.yml --ref CPE-1789-repin-ffmpeg-to-month-end-anchor`
-against this branch as live proof the new pin resolves; see run id/outcome appended below.
+against this branch as live proof the new pin resolves: run
+https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/32328780548 (id
+`32328780548`), dispatched without `override_ffmpeg_build_tag` so it exercises the real path. Per
+sprint contract this Worker does not poll/watch CI to completion — the Foreman verifies the run
+outcome (expected: green and silent).
