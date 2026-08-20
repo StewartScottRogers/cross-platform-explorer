@@ -3,11 +3,11 @@ id: CPE-1759
 title: tar destroys a link at an entry name, and one-shot zip aborts where streamed zip skips
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-15
-closed:
+closed: 2026-08-20
 ---
 
 ## Why this exists
@@ -97,3 +97,50 @@ and the *Safety limits* format bullet in `src/docs/explorer-archives.md` in the 
 Filed by the CPE-1744 worker, 2026-08-15. Related: **CPE-1744** (the containment half + two wording
 defects, closed), **CPE-1733** (the enumeration and the leaf-link guards), **CPE-1746** (the 7z half),
 **CPE-1758** (the other CPE-1744 remainder).
+
+## Work Log
+
+- 2026-08-20 — merged as **#958** (`232ad326`), batch 34. **Four rework rounds**, three independent reviews
+  and one UAT.
+
+### What "destroys" meant
+Unlink-and-replace, not follow-and-overwrite. `tar-0.4.46` opens the destination with `create_new(true)`;
+a symlink there yields `AlreadyExists`, so tar calls `remove_file` and retries. `remove_file` does not
+follow a symlink, so the user's link was deleted and a regular file written in its place — and the call
+returned `Ok`, which is why nothing could report the loss.
+
+### Abort vs skip — skip, and the reason two tickets were wrong
+**Abort's stated virtue did not exist.** CPE-1744 and the CPE-1773/1774 review both recorded the one-shot
+zip abort as leaving an empty destination. Both were measuring archives poisoned at **entry 0**. Poison
+entry two of three and `a.txt` is on disk, `c.txt` is not, and the error names neither. The reviewer
+confirmed it at the source — `zip-2.4.2/src/read.rs:782-785` says outright: *"Extraction is not atomic. If
+an error is encountered, some of the files may be left on disk."* The UAT then reproduced it independently
+on its own fixtures. **A false premise had survived two tickets.**
+
+So the real choice was "partial, with an error naming neither half" versus "complete-but-one, with a counted
+refusal" — and skip was already the contract at 22 of 23 sinks.
+
+### What else came out of it
+- Symlink materialisation moved into the shared loop, so the **streamed** path — the one every shipping
+  user hits — now creates real links instead of writing a text file containing the target's name.
+- An escaping tar **hard**-link entry no longer kills the whole run; it is a counted skip, resolved against
+  the base the crate itself uses.
+- **A genuine same-`ErrorKind` collision on POSIX**: `EPERM` and `EACCES` share one kind, and `remove_file`
+  answers `EPERM` on macOS for a directory — so without a direct return, this PR's own test would have
+  flipped abort→refusal **on the macOS leg alone**.
+
+### The rework pattern, recorded because it is the lesson
+Rounds 2, 3 and 4 all found the same species of defect: **the code was right and the sentence about it was
+false.** The author's own diagnosis: *"the measurement discipline stopped at the boundary of the thing under
+test and didn't extend to the sentence about it."* The 1314/`PermissionDenied` claim was measured false
+(1314 is `Uncategorized`); the in-app help promised a refusal the code did not deliver; three further
+statements generalised from the mechanism's shape. The final round swept its own remaining claims and found
+a fourth. The one claim that could not be checked — which Windows codes a FAT volume emits — is now labelled
+documentation-derived with the direction of error stated.
+
+### Left as tickets
+**CPE-1812** (the leaf-link guard is not independently pinned — removing it alone leaves the suite green),
+**CPE-1813** (TAR still does not deliver the no-link-support refusal ZIP does), **CPE-1814** (a dead
+`Skip|Abort` collapse, a staging failure that `return`s, dangling cfg-gated doc links, an unqualified
+taxonomy line), **CPE-1807** (the fourth, unmerged zip loop), **CPE-1808** (the flake fix's untouched twin),
+**CPE-1809** (an unfailable `contains` assertion).

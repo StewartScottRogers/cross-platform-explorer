@@ -26,6 +26,13 @@ left out of it rather than widening a PR that already took three rework rounds:
    compiled, so `cargo doc` on the other platform emits a broken link.
 4. **A false comment at `:3081`** claiming a consolidated loop "is now the only zip extractor". See
    CPE-1807 — `extract_zip_encrypted` is a fourth, unmerged loop.
+5. **An unqualified taxonomy entry at `:451-455`.** The decision-kind taxonomy CPE-1759 added as its own
+   checkable rule still lists "a link this platform will not create" among refusals **without the ZIP/TAR
+   qualification** the rest of that PR spent three rounds getting right. It is new in CPE-1759 and its
+   final delta did not reach it. Non-blocking there because it is an internal comment rather than shipped
+   help, it describes *kinds of decision* rather than a format promise, and the same comment block
+   corrects it 33 lines down at `:488` — but a taxonomy that contradicts itself within one block is worth
+   one line of work. **Fix it together with CPE-1813**, whose whole subject is that split.
 
 ## Why it matters
 
