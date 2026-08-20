@@ -59,19 +59,23 @@ mod tests {
         cpe_server::fsutil::scratch_dir(&format!("cpe-net-{tag}"))
     }
 
-    /// Start a Server on an ephemeral loopback port with the given security chain, and return
-    /// its address. The Server runs on a detached thread for the life of the test process.
-    fn start_server(chain: SecurityChain) -> SocketAddr {
+    /// Start a Server on an ephemeral loopback port with the given security chain, and return its
+    /// address plus the [`ScratchDir`] guard owning its data directory. The Server runs on a detached
+    /// thread for the life of the test process.
+    ///
+    /// **CPE-1782:** the guard used to be `mem::forget`-ten here — a deliberate, but *unforced*, leak
+    /// (~19 directories per `cpe-net` test run). It is now returned to the **caller** instead: the guard
+    /// must not be armed *inside* this function (the server thread below is detached with no join, so a
+    /// guard dropped here would delete the server's data directory while it is still serving), but the
+    /// caller's binding drops at the end of the `#[test]` fn, exactly the shape CPE-1693 chose for
+    /// `cpe-webdav`'s and `cpe-s3`'s detached-thread fixture spawners. The detached thread then serves
+    /// against a deleted root after the test returns, which is fine — nothing connects to it anymore.
+    /// Keep the guard bound (`let (addr, _base) = start_server(..);`), not discarded.
+    fn start_server(chain: SecurityChain) -> (SocketAddr, cpe_server::fsutil::ScratchDir) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
-        // DETACHED thread for the life of the test process (per this fn's own doc comment above),
-        // outliving both this function and the test that called it, so a guard armed here would delete
-        // the server's own data directory out from under it. Left to the OS temp reaper, exactly as
-        // before CPE-1693.
         let base = scratch("srvbase");
         let base_path = base.path().to_path_buf();
-        std::mem::forget(base);
         let rt = Arc::new(ServerRuntime::new(
             Dispatcher::with_builtins(),
             chain,
@@ -80,7 +84,7 @@ mod tests {
         std::thread::spawn(move || {
             let _ = rt.serve(listener);
         });
-        addr
+        (addr, base)
     }
 
     #[test]
@@ -88,7 +92,7 @@ mod tests {
         let dir = scratch("browse");
         std::fs::write(dir.join("a.txt"), b"hi").unwrap();
 
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         let mut client = Client::connect(addr).unwrap();
         let val = client
             .call("list_dir", serde_json::json!({ "path": dir.to_string_lossy() }))
@@ -109,7 +113,7 @@ mod tests {
         // WebSocket text frames through the same handshake + dispatch loop the raw Client(Rust) uses.
         let dir = scratch("wsbrowse");
         std::fs::write(dir.join("w.txt"), b"hi").unwrap();
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
 
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
@@ -183,7 +187,7 @@ mod tests {
         // RFC 6455 §5.5.2: the server must answer a client Ping with a Pong echoing its payload — a
         // browser/proxy keepalive that goes unanswered drops the connection mid-session. The server
         // handles control frames while awaiting the next envelope, so a Ping right after upgrade replies.
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream
             .write_all(
@@ -222,7 +226,7 @@ mod tests {
     fn two_calls_reuse_one_connection() {
         let dir = scratch("twocalls");
         std::fs::write(dir.join("x.txt"), b"1").unwrap();
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         let mut client = Client::connect(addr).unwrap();
 
         let path = serde_json::json!({ "path": dir.to_string_lossy() });
@@ -238,7 +242,7 @@ mod tests {
 
         // The very same call that succeeds under the local chain (above) must be refused when
         // the boundary is a default-deny chain — proving the request never reached dispatch.
-        let addr = start_server(SecurityChain::default_deny());
+        let (addr, _base) = start_server(SecurityChain::default_deny());
         let mut client = Client::connect(addr).unwrap();
         let err = client
             .call("list_dir", serde_json::json!({ "path": dir.to_string_lossy() }))
@@ -272,7 +276,7 @@ mod tests {
         // proving the AuthZ plane (not just an unconfigured boundary) holds over the remote path.
         let root = scratch("scoped");
         std::fs::write(root.join("ok.txt"), b"x").unwrap();
-        let addr = start_server(path_scoped_chain(root.to_string_lossy().into_owned()));
+        let (addr, _base) = start_server(path_scoped_chain(root.to_string_lossy().into_owned()));
         let mut client = Client::connect(addr).unwrap();
 
         // A path under the granted root is authorized → dispatched (a real listing comes back).
@@ -313,7 +317,7 @@ mod tests {
             authentication: plane(CombinePolicy::FirstMatch, &[PASSTHROUGH]),
             authorization: plane(CombinePolicy::AllMustPass, &["capability"]),
         };
-        let addr = start_server(reg.build(&config, Box::new(NullAudit)).unwrap());
+        let (addr, _base) = start_server(reg.build(&config, Box::new(NullAudit)).unwrap());
         let mut client = Client::connect(addr).unwrap();
         let err = client
             .call("list_dir", serde_json::json!({ "path": "/anything" }))
@@ -341,7 +345,7 @@ mod tests {
             authentication: plane(CombinePolicy::AnyPasses, &["api_token"]), // no passthrough authn
             authorization: plane(CombinePolicy::FirstMatch, &[PASSTHROUGH]),
         };
-        let addr = start_server(reg.build(&config, Box::new(NullAudit)).unwrap());
+        let (addr, _base) = start_server(reg.build(&config, Box::new(NullAudit)).unwrap());
         let mut client = Client::connect(addr).unwrap();
         let err = client
             .call("list_dir", serde_json::json!({ "path": "/anything" }))
@@ -354,15 +358,15 @@ mod tests {
         );
     }
 
-    /// Start a Server that also exposes a `count_stream` streaming method yielding `n` items.
-    fn start_streaming_server(chain: SecurityChain) -> SocketAddr {
+    /// Start a Server that also exposes a `count_stream` streaming method yielding `n` items. Returns
+    /// its address plus the [`ScratchDir`] guard owning its data directory — see [`start_server`]'s doc
+    /// for why the guard is returned to the caller rather than armed (or `mem::forget`-ten, CPE-1782)
+    /// inside this detached-thread spawner.
+    fn start_streaming_server(chain: SecurityChain) -> (SocketAddr, cpe_server::fsutil::ScratchDir) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        // CPE-1693: same deliberate exemption as `start_server` above — the detached server thread
-        // outlives this function and its caller, so the scratch dir must not be guard-cleaned here.
         let base = scratch("streambase");
         let base_path = base.path().to_path_buf();
-        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
@@ -382,12 +386,13 @@ mod tests {
         std::thread::spawn(move || {
             let _ = rt.serve(listener);
         });
-        addr
+        (addr, base)
     }
 
     #[test]
     fn streaming_method_delivers_items_then_ends_over_the_wire() {
-        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let (addr, _base) = start_streaming_server(SecurityChain::local());
+        let mut client = Client::connect(addr).unwrap();
         let out = client
             .call_stream("count_stream", serde_json::json!({ "n": 3 }))
             .expect("stream should complete");
@@ -411,12 +416,12 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
-        // DETACHED thread that outlives this test function, so a guard armed here would delete the
-        // server's own data directory out from under it. Left to the OS temp reaper, as before.
+        // CPE-1782: `base` (the `ScratchDir` guard) stays bound here — NOT `mem::forget`-ten — and drops
+        // at the end of this test function, after the assertions below run. The server thread is
+        // detached and outlives the function, but nothing connects to it once the test returns, so
+        // deleting its data directory then is safe (same shape as `start_server`'s doc above).
         let base = scratch("liststreambase");
         let base_path = base.path().to_path_buf();
-        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
@@ -450,12 +455,10 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
-        // DETACHED thread that outlives this test function, so a guard armed here would delete the
-        // server's own data directory out from under it. Left to the OS temp reaper, as before.
+        // CPE-1782: `base` stays bound (NOT `mem::forget`-ten) and drops after this test's assertions —
+        // see `liststream`'s sibling test above for the full reasoning.
         let base = scratch("searchstreambase");
         let base_path = base.path().to_path_buf();
-        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
@@ -490,12 +493,10 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
-        // DETACHED thread that outlives this test function, so a guard armed here would delete the
-        // server's own data directory out from under it. Left to the OS temp reaper, as before.
+        // CPE-1782: `base` stays bound (NOT `mem::forget`-ten) and drops after this test's assertions —
+        // see `liststream`'s sibling test above for the full reasoning.
         let base = scratch("contentstreambase");
         let base_path = base.path().to_path_buf();
-        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
@@ -527,7 +528,8 @@ mod tests {
     /// accumulate-then-check code path `call_stream` uses in production.
     #[test]
     fn a_stream_exceeding_the_item_cap_errors_instead_of_accumulating_unbounded() {
-        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let (addr, _base) = start_streaming_server(SecurityChain::local());
+        let mut client = Client::connect(addr).unwrap();
         let err = client
             .call_stream_capped("count_stream", serde_json::json!({ "n": 1_000_000 }), 5, u64::MAX)
             .expect_err("a stream past the item cap must error, not accumulate forever");
@@ -539,7 +541,8 @@ mod tests {
     /// enforced independently of the item-count cap (a server sending fewer, larger items).
     #[test]
     fn a_stream_exceeding_the_byte_cap_errors_instead_of_accumulating_unbounded() {
-        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let (addr, _base) = start_streaming_server(SecurityChain::local());
+        let mut client = Client::connect(addr).unwrap();
         let err = client
             .call_stream_capped("count_stream", serde_json::json!({ "n": 1_000_000 }), usize::MAX, 32)
             .expect_err("a stream past the byte cap must error, not accumulate forever");
@@ -551,7 +554,8 @@ mod tests {
     /// only bite a runaway/hostile peer, never a legitimate small stream.
     #[test]
     fn a_stream_under_the_caps_completes_normally() {
-        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let (addr, _base) = start_streaming_server(SecurityChain::local());
+        let mut client = Client::connect(addr).unwrap();
         let out = client
             .call_stream_capped("count_stream", serde_json::json!({ "n": 3 }), 5, u64::MAX)
             .expect("a stream under the caps must complete");
@@ -563,7 +567,8 @@ mod tests {
     fn a_streaming_call_is_security_guarded_over_the_wire() {
         // The same stream method under a default-deny boundary yields no items — the denial arrives as
         // the stream's error, proving streaming enforces the security chain exactly like a unary call.
-        let mut client = Client::connect(start_streaming_server(SecurityChain::default_deny())).unwrap();
+        let (addr, _base) = start_streaming_server(SecurityChain::default_deny());
+        let mut client = Client::connect(addr).unwrap();
         let err = client
             .call_stream("count_stream", serde_json::json!({ "n": 3 }))
             .expect_err("a denied stream must error, not stream items");
@@ -572,7 +577,7 @@ mod tests {
 
     #[test]
     fn mismatched_major_is_rejected_cleanly() {
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         let incompatible = ContractVersion::new(CONTRACT_VERSION.major + 1, 0);
         match Client::connect_as(addr, incompatible, None) {
             Err(ConnectError::Rejected(r)) => assert_eq!(r.code, RejectCode::IncompatibleVersion),
@@ -583,7 +588,7 @@ mod tests {
 
     #[test]
     fn compatible_client_negotiates_and_calls() {
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         // Same major as the server; negotiation yields the lower minor.
         let client =
             Client::connect_as(addr, ContractVersion::new(CONTRACT_VERSION.major, 0), None).unwrap();
@@ -593,7 +598,7 @@ mod tests {
 
     #[test]
     fn unknown_method_reports_not_found_over_the_wire() {
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         let mut client = Client::connect(addr).unwrap();
         let err = client
             .call("does_not_exist", serde_json::json!({}))
@@ -625,7 +630,7 @@ mod tests {
         let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let dispatcher = Dispatcher::with_builtins();
         // Over loopback: the identical calls through the client/server.
-        let addr = start_server(SecurityChain::local());
+        let (addr, _base) = start_server(SecurityChain::local());
         let mut client = Client::connect(addr).unwrap();
 
         let mut best_in = Duration::MAX;
