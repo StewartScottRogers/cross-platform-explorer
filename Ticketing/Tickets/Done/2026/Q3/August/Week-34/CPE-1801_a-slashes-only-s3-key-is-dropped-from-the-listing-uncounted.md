@@ -3,11 +3,11 @@ id: CPE-1801
 title: a slashes-only S3 key is dropped from the listing and not counted, so the listing is quietly one short
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
@@ -50,3 +50,25 @@ else, declined to fix it in-flight, and left a failing-if-touched pin rather tha
 why it is a ticket instead of a discovery someone makes in six months.
 
 Related: **CPE-1704** (the counting contract), **CPE-1722** (the path grammar that surfaced it).
+
+## Work Log
+
+- 2026-08-20 — merged as **#959** (`9785ce53`), batch 31.
+- **Decision: count it as filtered, do not synthesise a display name.** `stat` on the same key already
+  returns `name: ""`, so inventing a name on the `list` side would make the two projections disagree about
+  the identity of one object. The reviewer added the decisive argument the worker had not made:
+  `crates/vfs/src/connect.rs:273` builds each row's URI from its name, so a synthesised name would produce
+  a row addressing a key that does not exist — openable, and *deletable* (S3 answers `204` for a missing
+  key, so it would look like it worked). CPE-1704 round 3 had already tried and withdrawn exactly that.
+- The fix removes the early `continue` and falls through to `is_safe_s3_leaf`, whose **first** arm already
+  refuses an empty leaf — so it is counted like any other unsafe leaf with no new branch.
+- **The ticket understated the bug.** Its UAT built a live key-exact fixture and deleted a directory whose
+  only content was a slashes-only key: pre-fix, `delete` returned **`Ok(())`** while the content survived
+  in the store, orphaned and unreachable through the client. Not a cosmetic miscount — silent data loss on
+  the delete belt, defeated by our own parser rather than by a lying server.
+- The `Contents` empty-leaf arm was confirmed **correctly exempt**, with a structural reason neither the
+  worker nor the ticket gave: `leaf_under_prefix` is `strip_prefix`, so an empty `Contents` leaf is
+  reachable only when `key == key_prefix` — it *is* the directory marker, by definition.
+- The pin was **updated in place** (`filtered == 0` → `1`), not deleted. Both reviewer and UAT reproduced
+  the red-proof independently rather than taking the worker's word.
+- Left for **CPE-1811**: two doc comments this fix falsified.
