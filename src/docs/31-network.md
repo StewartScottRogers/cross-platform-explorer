@@ -153,8 +153,10 @@ client, and none of this applies to it yet.
   the object whose key really is `/report.pdf` rather than overwriting `report.pdf`. The rule is that a
   path is a `/` followed by the key, plus an optional final `/` when you mean the folder rather than the
   file — so a key that genuinely ends in a slash is typed with that slash doubled (`/archive.zip//`), and
-  a key made only of slashes works too. You still can't get to these by clicking; only by typing, since
-  no listing offers one.
+  a key made only of slashes works too. This describes how the app addresses such a key **once S3
+  connections are openable in your build**; today an S3 row reports an unsupported protocol when you
+  click it (see Limits). Even then you won't reach these by clicking, only by typing, since no listing
+  offers one.
 - **One shape of key can't be reached yet: a `.` or `..` between the slashes.** A key like
   `photos/../logo.png` is, to S3, an ordinary object with nothing to do with `logo.png` — but the HTTP
   library the app uses rewrites those segments away while building the request, so the app would end up

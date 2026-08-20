@@ -96,6 +96,17 @@
 //! exercise the `list-type=2` arm; CPE-1684 (`stat`/`read`/`write`/`delete`/`mkdir`) should extend this
 //! same function rather than standing up a second in-process server.
 //!
+//! # The path grammar, and the two places a key can still be lost
+//! **A provider path is `/` + the S3 key + an optional `/` addressing it as a directory** (CPE-1722).
+//! One leading slash is stripped and at most one trailing slash; every other byte is key. That grammar
+//! is decided in exactly one place — [`rooted_key_bytes`], shared by [`provider_path_to_object_key`] and
+//! [`provider_path_to_key_prefix`] — and their agreement is asserted as a property, not a table.
+//!
+//! The one key shape this crate still cannot reach is a `.`/`..` path segment, because `ureq` 2 rewrites
+//! it between signing and sending. **CPE-1721's decision, and the `ureq` 2 vs 3 measurement it rests
+//! on, are recorded on [`guard_path_survives_the_client`]** — alongside the original CPE-1684
+//! measurement they follow from, rather than split across two doc blocks.
+//!
 //! # The `mkdir` marker-key shape (agreed here, for CPE-1684 to depend on)
 //! [`provider_path_to_key_prefix`] is the single source of truth for both this ticket's `ListObjectsV2`
 //! `prefix` parameter *and* the exact key CPE-1684's `mkdir` must write its zero-byte marker object under:
@@ -468,8 +479,21 @@ fn is_url_dot_segment(segment: &str) -> bool {
 /// # CPE-1721's decision, and the measurement it rests on
 ///
 /// CPE-1721 offered three options and asked for a decision rather than a fix. **Option 2 was measured
-/// first, as that ticket instructed, and it works**: the same raw-socket recorder, driven against both
-/// majors from one probe, reports
+/// first, as that ticket instructed, and it works.**
+///
+/// **How to re-run this** — the table below is the whole evidentiary basis for the CPE-1800 migration
+/// decision, so it must not be a number nobody can reproduce. Exact versions probed: **`ureq` 2.12.1**
+/// (this crate's current pin, `Cargo.lock`) against **`ureq` 3.3.0** with `default-features = false`,
+/// pulling **`ureq-proto` 0.6.0** and **`http` 1.5.0**, on Rust 1.97.0. The probe is a ~50-line throwaway
+/// binary depending on both majors under renamed keys (`ureq2`/`ureq3`), asking each for the same
+/// loopback URL and reading the request line off a bare `TcpListener`; it was NOT landed in the tree,
+/// because adding a permanent dev-dependency on the major this crate has not adopted is precisely the
+/// dependency-budget question CPE-1800 exists to decide. **Whoever takes CPE-1800 should land it there**,
+/// as an `#[ignore]`d test alongside the migration, so the comparison becomes re-runnable at the moment
+/// it starts mattering. Until then, reproducing it is: a two-dependency scratch crate and the loop below.
+///
+/// The same raw-socket technique as [`tests::spawn_a_request_line_recorder`], driven against both majors
+/// from one probe, reports
 ///
 /// ```text
 /// ASKED /test-bucket/a/../b//c%252Fd.txt   ureq2 /test-bucket/b//c%252Fd.txt        REWROTE
@@ -630,11 +654,20 @@ fn rooted_key_bytes(path: &str) -> &str {
 ///
 /// # Why a *trailing* slash is still not part of the object key
 ///
-/// This is the one deliberate asymmetry, and it is a cross-backend contract rather than a concession.
-/// Every other [`FileSystemProvider`] (local, SFTP, WebDAV, FTP) treats `/a` and `/a/` as the same path,
-/// and `stat`/`delete` build their prefix probe as `format!("{key}/")`. A trailing slash therefore means
-/// "address this as a directory", which on S3 is exactly what a key ending in `/` *is* — the zero-byte
-/// marker convention this module's own `mkdir` writes.
+/// This is the one deliberate asymmetry, and the reason is a specific, checkable one: **the shared
+/// `cpe-vfs` layer puts that slash there.** `cpe_vfs::connect::join_remote` appends a trailing `/` to
+/// every directory child URI it builds, for every remote backend, so a directory path arriving at any
+/// provider routinely carries one. A trailing slash therefore means "address this as a directory" — and
+/// on S3 that is exactly what a key ending in `/` *is*, the zero-byte marker convention this module's
+/// own `mkdir` writes.
+///
+/// Do **not** restate this as "every other provider trims a trailing slash" or "the siblings build a
+/// `format!("{key}/")` probe". Both are false, and an earlier version of this comment said them: the
+/// `trim_end_matches` calls in `cpe-ftp`, `cpe-sftp` and `cpe-webdav` are all inside `stat`, deriving a
+/// **display name only**, while `list`/`mkdir`/`delete`/`rename` send the path verbatim on every
+/// backend. `crates/vfs/src/connect.rs`'s `join_remote` carries a comment written specifically to
+/// retract that same overclaim — including the live WebDAV `delete` bug it was hiding. The convention is
+/// real; the uniform-trimming story about it is not.
 ///
 /// Nothing is lost by it, because the rule is total: a key that genuinely ends in `/` is spelled with the
 /// slash doubled (`/a.txt//` → key `a.txt/`), which is just the general rule `"/" + key + "/"` applied to
@@ -2196,7 +2229,14 @@ impl FileSystemProvider for S3Provider {
                 return Ok(ProviderEntry { name: "/".to_string(), is_dir: true, size: 0 });
             }
         };
-        let name = key.rsplit('/').next().unwrap_or(&key).to_string();
+        // Trim the trailing slash BEFORE taking the last segment. A key ending in `/` is a shape
+        // CPE-1722 made reachable for the first time (`/trail.txt//` addresses the key `trail.txt/`),
+        // and `rsplit('/')` on it yields `""` — so `stat` reported an empty display name for an object
+        // that `list` shows as `trail.txt`, i.e. the two projections this ticket exists to unify
+        // disagreeing about the same object. Mirrors `parse_list_bucket_result`'s `<CommonPrefixes>` arm
+        // and the sibling precedent in `crates/webdav/src/lib.rs`'s `stat`. For a key that is only
+        // slashes the leaf is genuinely empty, which is the same answer the listing gives.
+        let name = key.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
         let target = self.config.object_target(&key)?;
         let (url, req) = self.signed_request(
             "HEAD",
@@ -7169,6 +7209,14 @@ mod tests {
                 body.len() as u64,
                 "stat({path:?}) reported a size for something other than the object just written"
             );
+            // The whole point of this ticket is that the two projections agree, so the name `stat`
+            // reports must be the name the listing shows for the same object. A key ending in `/` is a
+            // shape only CPE-1722 makes reachable, and `rsplit('/')` on one yields `""`.
+            assert_eq!(
+                entry.name,
+                want_leaf.unwrap_or("").to_string(),
+                "stat({path:?}) named the object differently from how list({list_at:?}) shows it"
+            );
 
             let got = provider.read(path).unwrap_or_else(|e| panic!("read({path:?}): {e}"));
             assert_bytes_eq(&got, &body, &format!("read({path:?})"));
@@ -7316,37 +7364,64 @@ mod tests {
         assert!(err.contains("dot segment"), "the error must name what it found: {err}");
         assert!(err.contains("CPE-1721"), "the error must point at the fix: {err}");
 
-        // The object verbs still refuse the same shape, and an ordinary prefix is unaffected.
-        assert!(provider.read("/a/../b/c.txt").is_err(), "the child was openable after all");
-        let (base2, _store) = spawn_key_exact_store();
+        // The object verbs still refuse the same shape. Driven against the key-exact store, NOT the
+        // request-line recorder: the recorder answers nothing parseable, so `is_err()` against it holds
+        // with or without the guard and would have been coverage this test did not provide. Asserting
+        // the message distinguishes a real refusal from a transport failure.
+        let (base2, store) = spawn_key_exact_store();
         let ok = S3Provider::connect(&cfg(&base2));
+        let child = ok.read("/a/../b/c.txt").expect_err("the child was openable after all");
+        assert!(child.contains("dot segment"), "a refusal, not a transport failure: {child}");
+        assert!(store.lock().unwrap().is_empty(), "a refused read must not have reached the store");
+        // And an ordinary prefix is unaffected.
         ok.list_with_filtered_count("/a/b").expect("an ordinary prefix must still list");
     }
 
     /// The negative control for the fixture claim above, so "the filesystem-backed fixture cannot serve
     /// these keys" is a measurement in the test suite rather than a sentence in a doc comment.
     ///
-    /// If a future change makes `Path` stop collapsing these, this reds and the key-exact store can be
-    /// retired in favour of the simpler fixture.
+    /// # This test is deliberately written against the REAL fixture
+    ///
+    /// An earlier version asserted properties of `std::path::Path` with a locally re-implemented copy of
+    /// [`handle`]'s join expression. It contained no repo symbol at all, so **no change to `crates/s3`
+    /// could have turned it red** — including the very change it claims to be watching for. Its own
+    /// docstring promised the opposite ("if a future change makes this stop collapsing, this reds"),
+    /// which made it worse than absent: it certified the claim justifying [`spawn_key_exact_store`]'s
+    /// existence while being incapable of noticing that claim going stale.
+    ///
+    /// So it now drives [`spawn_s3_fixture`] itself. Two writes to two genuinely distinct S3 keys land
+    /// on **one** file, and the first object's bytes are gone — which is exactly the silent overwrite
+    /// CPE-1722 fixes in the provider, reproduced here in the *fixture* to prove the harness cannot tell
+    /// the two keys apart. The day someone gives that fixture key-exactness, this reds and the key-exact
+    /// store can be retired in favour of the simpler one.
     #[test]
     fn the_filesystem_backed_fixture_provably_cannot_represent_these_key_shapes() {
-        let root = Path::new("/root");
-        let joined = |key: &str| root.join(key.trim_start_matches('/'));
+        let (base, root, _requests) = spawn_s3_fixture();
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        // Two different S3 keys — `report.pdf` and `/report.pdf`. The provider now addresses them
+        // correctly (that is CPE-1722, pinned by the key-exact tests above); this is about what the
+        // `std::fs`-backed fixture can HOLD once they arrive.
+        provider.write("/report.pdf", b"the original").expect("write the ordinary key");
+        provider.write("//report.pdf", b"the impostor").expect("write the leading-slash key");
+
+        let files: Vec<String> = std::fs::read_dir(AsRef::<Path>::as_ref(&root))
+            .expect("the fixture root must be readable")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
         assert_eq!(
-            joined("a//b.txt"),
-            joined("a/b.txt"),
-            "a filesystem path collapses the empty segment that makes these two distinct S3 keys"
+            files,
+            vec!["report.pdf".to_string()],
+            "the fixture was handed two distinct S3 keys and should be shown to hold only one file — if \
+             it now holds both, it has become key-exact and `spawn_key_exact_store` is redundant"
         );
-        assert_eq!(joined("a/./b.txt"), joined("a/b.txt"), "and the single-dot segment");
-        assert_eq!(
-            joined("/lead.txt"),
-            joined("lead.txt"),
-            "and `trim_start_matches` eats the leading slash that distinguishes them"
-        );
-        assert_eq!(
-            PathBuf::from("trail.txt/").file_name(),
-            PathBuf::from("trail.txt").file_name(),
-            "and a filesystem holds no name ending in the separator"
+        assert_bytes_eq(
+            &std::fs::read(root.join("report.pdf")).expect("the one file must exist"),
+            b"the impostor",
+            "the second key overwrote the first ON DISK: the filesystem is the thing that collapses \
+             these keys, which is why a round-trip test built on this fixture would pass without ever \
+             producing the interesting case",
         );
     }
 }
