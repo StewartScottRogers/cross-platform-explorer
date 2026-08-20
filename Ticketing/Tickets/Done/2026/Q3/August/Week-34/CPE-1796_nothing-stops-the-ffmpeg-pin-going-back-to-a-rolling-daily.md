@@ -3,7 +3,7 @@ id: CPE-1796
 title: nothing mechanical stops the ffmpeg pin going back to a rolling daily — and a neighbouring comment now names a pin that no longer exists
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19

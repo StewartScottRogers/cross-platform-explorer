@@ -3,7 +3,7 @@ id: CPE-1791
 title: one malformed .trashinfo file takes out the whole Trash view — a dependency panic escapes to the caller
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-19
