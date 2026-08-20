@@ -2396,11 +2396,16 @@ impl TrashListOutcome {
     /// For a *listing* pass (`list_trash_impl`/`list_trash_stream`): a caught panic degrades to an
     /// empty `Vec` for this one pass rather than failing the whole Trash view. A genuine error still
     /// propagates — unaffected by CPE-1791, this is the pre-existing behaviour.
-    fn degrade_panic_to_empty(self) -> Result<Vec<trash::TrashItem>, String> {
+    ///
+    /// The returned `bool` is `true` only when THIS pass degraded from a caught panic — never inferred
+    /// from the `Vec` being empty, since a genuinely empty Trash also produces an empty `Vec` and the two
+    /// must stay distinguishable (CPE-1803). Both listing call sites thread it straight through to the
+    /// frontend instead of collapsing it back into "empty".
+    fn degrade_panic_to_empty(self) -> Result<(Vec<trash::TrashItem>, bool), String> {
         match self {
-            Self::Ok(items) => Ok(items),
+            Self::Ok(items) => Ok((items, false)),
             Self::Error(e) => Err(e),
-            Self::PanicCaught => Ok(Vec::new()),
+            Self::PanicCaught => Ok((Vec::new(), true)),
         }
     }
 
@@ -2448,19 +2453,22 @@ fn list_trash_catching_dependency_panics() -> TrashListOutcome {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn list_trash() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
+async fn list_trash() -> Result<cpe_server::model::TrashListing, String> {
     tauri::async_runtime::spawn_blocking(list_trash_impl).await.map_err(|e| e.to_string())?
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn list_trash_impl() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
+fn list_trash_impl() -> Result<cpe_server::model::TrashListing, String> {
     // CPE-1791: a caught dependency panic degrades THIS ONE listing pass to empty rather than failing
     // the whole Trash view — see `TrashListOutcome::degrade_panic_to_empty`. Restore/empty call sites
     // do NOT do this; they use `.or_fail()` instead.
-    let items = list_trash_catching_dependency_panics().degrade_panic_to_empty()?;
-    let mut out = Vec::new();
-    stream_trash_entries(items, TRASH_LIST_BATCH, |batch| out.extend(batch));
-    Ok(out)
+    //
+    // CPE-1803: `degraded` rides along on the response instead of being swallowed here, so the frontend
+    // can render "the Trash couldn't be read" instead of misreporting a degraded pass as "Trash is empty".
+    let (items, degraded) = list_trash_catching_dependency_panics().degrade_panic_to_empty()?;
+    let mut entries = Vec::new();
+    stream_trash_entries(items, TRASH_LIST_BATCH, |batch| entries.extend(batch));
+    Ok(cpe_server::model::TrashListing { entries, degraded })
 }
 
 /// Streamed Trash listing (STREAMING.md): flushes batches over `on_entry` as they're mapped so a large
@@ -2473,17 +2481,19 @@ fn list_trash_impl() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn list_trash_stream(
     on_entry: tauri::ipc::Channel<Vec<cpe_server::model::TrashEntry>>,
-) -> Result<usize, String> {
+) -> Result<cpe_server::model::TrashStreamSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // CPE-1791: see the comment in `list_trash_impl` — this pass degrades to empty on a caught
-        // panic rather than failing the whole Trash view.
-        let items = list_trash_catching_dependency_panics().degrade_panic_to_empty()?;
+        // panic rather than failing the whole Trash view. CPE-1803: `degraded` rides along on the
+        // returned summary — the streamed entries themselves carry no room for it, since a degraded
+        // pass sends none — so the frontend reaches the same distinguishable state as `list_trash`.
+        let (items, degraded) = list_trash_catching_dependency_panics().degrade_panic_to_empty()?;
         let mut count = 0usize;
         stream_trash_entries(items, TRASH_LIST_BATCH, |batch| {
             count += batch.len();
             let _ = on_entry.send(batch);
         });
-        Ok(count)
+        Ok(cpe_server::model::TrashStreamSummary { count, degraded })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -14657,6 +14667,32 @@ mod tests {
         assert_eq!(just_b[0].id.to_string_lossy(), "b");
     }
 
+    /// CPE-1803: `TrashListOutcome::degrade_panic_to_empty` is the one place that decides whether a
+    /// listing pass is reported as "degraded" — get this wrong and every downstream consumer
+    /// (`list_trash_impl`/`list_trash_stream`/the frontend) inherits the mistake. Pure and OS-trash-free
+    /// (constructs the enum by hand), so — unlike the Linux-only malformed-`.trashinfo` tests elsewhere in
+    /// this module — it runs on every OS, including this Windows dev machine.
+    ///
+    /// Both halves are asserted in ONE test on purpose: a test that only checked the panic case could
+    /// pass even if `degraded` were hardcoded to `true`, which is exactly the "half a test" the ticket
+    /// warns against — a genuinely empty `Vec` (`TrashListOutcome::Ok(vec![])`, the real shape a healthy
+    /// but empty Trash produces) must come back `degraded: false`, or a healthy empty Trash would
+    /// permanently render as "couldn't be read".
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn degrade_panic_to_empty_distinguishes_a_genuinely_empty_list_from_a_caught_panic() {
+        let (items, degraded) = TrashListOutcome::Ok(Vec::new()).degrade_panic_to_empty().unwrap();
+        assert!(items.is_empty());
+        assert!(!degraded, "a genuinely empty listing must not be reported as degraded");
+
+        let (items, degraded) = TrashListOutcome::PanicCaught.degrade_panic_to_empty().unwrap();
+        assert!(items.is_empty(), "a caught panic still degrades this pass to no entries");
+        assert!(
+            degraded,
+            "a caught panic must be reported as degraded — indistinguishable-from-empty is the CPE-1803 bug"
+        );
+    }
+
     // CPE-1651 (sibling audit of `delete_permanent`): `empty_trash` carried the same ungated promise —
     // "the UI must confirm before calling this with `None`". These exercise `empty_trash_gated` with the
     // two OS calls injected, so the refusal is proven to reach NEITHER `list` nor `purge_all` without
@@ -14762,8 +14798,10 @@ mod tests {
         trash::delete(&probe).unwrap();
 
         let listed = list_trash_impl().expect("list_trash_impl should succeed");
+        assert!(!listed.degraded, "a normal listing must not report itself as degraded");
         let probe_path = probe.to_string_lossy().to_string();
         let entry = listed
+            .entries
             .iter()
             .find(|e| e.original_path == probe_path)
             .expect("the probe file should appear in the trash listing")
@@ -14806,10 +14844,10 @@ mod tests {
         let colliding_path = colliding.to_string_lossy().to_string();
         let clean_path = clean.to_string_lossy().to_string();
         let collision_id = listed
-            .iter().find(|e| e.original_path == colliding_path)
+            .entries.iter().find(|e| e.original_path == colliding_path)
             .expect("colliding probe should be listed").id.clone();
         let clean_id = listed
-            .iter().find(|e| e.original_path == clean_path)
+            .entries.iter().find(|e| e.original_path == clean_path)
             .expect("clean probe should be listed").id.clone();
 
         let results = restore_trash_items_impl(vec![collision_id.clone(), clean_id.clone()]);
@@ -14865,9 +14903,9 @@ mod tests {
         let listed = list_trash_impl().unwrap();
         let keep_path = keep.to_string_lossy().to_string();
         let purge_path = purge.to_string_lossy().to_string();
-        let keep_id = listed.iter().find(|e| e.original_path == keep_path)
+        let keep_id = listed.entries.iter().find(|e| e.original_path == keep_path)
             .expect("keep probe should be listed").id.clone();
-        let purge_id = listed.iter().find(|e| e.original_path == purge_path)
+        let purge_id = listed.entries.iter().find(|e| e.original_path == purge_path)
             .expect("purge probe should be listed").id.clone();
 
         // Deliberately never call `empty_trash_impl(None)` here — on this real machine that would purge
@@ -14876,8 +14914,8 @@ mod tests {
         empty_trash_impl(Some(vec![purge_id.clone()]), true).expect("selective empty_trash should succeed");
 
         let after = list_trash_impl().unwrap();
-        assert!(after.iter().any(|e| e.id == keep_id), "an item NOT named in `ids` must survive a selective purge");
-        assert!(!after.iter().any(|e| e.id == purge_id), "the targeted item must be gone after purging");
+        assert!(after.entries.iter().any(|e| e.id == keep_id), "an item NOT named in `ids` must survive a selective purge");
+        assert!(!after.entries.iter().any(|e| e.id == purge_id), "the targeted item must be gone after purging");
 
         // Clean up: restore `keep`'s probe entry rather than leaving it in the real trash.
         let _ = restore_trash_items_impl(vec![keep_id]);
@@ -14903,11 +14941,12 @@ mod tests {
 
         let collected: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
         let on_entry = collecting_channel(collected.clone());
-        let streamed_count = tauri::async_runtime::block_on(list_trash_stream(on_entry))
+        let summary = tauri::async_runtime::block_on(list_trash_stream(on_entry))
             .expect("list_trash_stream dispatches");
+        assert!(!summary.degraded, "a normal stream must not report itself as degraded");
 
         let batches = collected.lock().unwrap();
-        assert_eq!(batches.len(), streamed_count, "every streamed entry must have gone out over the channel");
+        assert_eq!(batches.len(), summary.count, "every streamed entry must have gone out over the channel");
         let probe_path = probe.to_string_lossy().to_string();
         assert!(
             batches.iter().any(|v| v.get("original_path").and_then(|p| p.as_str()) == Some(probe_path.as_str())),
@@ -14916,7 +14955,7 @@ mod tests {
 
         // Clean up: restore + remove so the probe doesn't linger in the real trash.
         let listed = list_trash_impl().unwrap();
-        if let Some(entry) = listed.iter().find(|e| e.original_path == probe_path) {
+        if let Some(entry) = listed.entries.iter().find(|e| e.original_path == probe_path) {
             let _ = restore_trash_items_impl(vec![entry.id.clone()]);
         }
         let _ = fs::remove_file(&probe);
@@ -14985,8 +15024,16 @@ mod tests {
         // module comment): a malformed file makes a listing come back thin, not wrong, not crashed.
         let listed = list_trash_impl().expect("list_trash_impl must return Ok, never propagate the panic");
         assert!(
-            listed.is_empty(),
+            listed.entries.is_empty(),
             "a caught dependency panic must degrade this pass to empty, not partially succeed: {listed:?}"
+        );
+        // CPE-1803: this empty page must be flagged `degraded`, not indistinguishable from a genuinely
+        // empty Trash — the frontend renders a different message for each. Pinning both in the same test
+        // (rather than only asserting `degraded`) is what actually proves the two states are
+        // distinguishable instead of `degraded` just being permanently `true`.
+        assert!(
+            listed.degraded,
+            "a listing thinned by a caught dependency panic must be reported as degraded: {listed:?}"
         );
 
         // Recovery: once the malformed file is gone, listing works normally again — nothing was
@@ -14994,8 +15041,13 @@ mod tests {
         let _ = fs::remove_file(&malformed);
         let listed_after = list_trash_impl().expect("list_trash_impl should succeed once the bad file is gone");
         assert!(
-            listed_after.iter().any(|e| e.original_path == good.to_string_lossy()),
+            listed_after.entries.iter().any(|e| e.original_path == good.to_string_lossy()),
             "the good probe should reappear once the malformed file is out of the way: {listed_after:?}"
+        );
+        assert!(
+            !listed_after.degraded,
+            "a fully-recovered listing must NOT still be reported as degraded, or a genuinely healthy \
+             Trash would be told it's unreadable forever: {listed_after:?}"
         );
     }
 
@@ -15069,7 +15121,7 @@ mod tests {
         let _ = fs::remove_file(&malformed);
         let listed = list_trash_impl().expect("list_trash_impl should succeed once the bad file is gone");
         assert!(
-            listed.iter().any(|e| e.original_path == good_path),
+            listed.entries.iter().any(|e| e.original_path == good_path),
             "the good entry must have survived the failed Empty Trash call untouched: {listed:?}"
         );
     }

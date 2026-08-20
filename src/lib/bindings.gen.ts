@@ -1138,7 +1138,7 @@ async restoreFromTrash(paths: string[]) : Promise<OpResult[]> {
 /**
  * Collect-to-vec Trash listing, for tests and any caller that wants the whole list at once.
  */
-async listTrash() : Promise<Result<TrashEntry[], string>> {
+async listTrash() : Promise<Result<TrashListing, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_trash") };
 } catch (e) {
@@ -1153,7 +1153,7 @@ async listTrash() : Promise<Result<TrashEntry[], string>> {
  * visible-window batches — this has no cancel registry; a listing is bounded by what's literally
  * sitting in the Recycle Bin.
  */
-async listTrashStream(onEntry: TAURI_CHANNEL<TrashEntry[]>) : Promise<Result<number, string>> {
+async listTrashStream(onEntry: TAURI_CHANNEL<TrashEntry[]>) : Promise<Result<TrashStreamSummary, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_trash_stream", { onEntry }) };
 } catch (e) {
@@ -6024,6 +6024,31 @@ time_deleted: number;
  * trash-metadata as an entry count, not a byte size) or when metadata couldn't be read for this item.
  */
 size: number | null }
+/**
+ * Result of the collect-to-vec Trash listing (`list_trash`). Wraps `entries` with a `degraded` flag so a
+ * listing that came back empty because `trash::os_limited::list()` panicked and was caught at the
+ * boundary (CPE-1791) is distinguishable, on the frontend, from a genuinely empty Trash (CPE-1803) —
+ * the same `bool` the streamed command reports via [`TrashStreamSummary`]. Set by the adapter in
+ * `src-tauri/src/lib.rs`, which owns the panic-catching boundary; this DTO carries no `trash` crate
+ * dependency of its own.
+ */
+export type TrashListing = { entries: TrashEntry[]; 
+/**
+ * True when this pass could not fully read the OS trash and degraded to an empty page rather than
+ * the whole Trash view crashing — NOT the same as a genuinely empty Trash. See CPE-1791/CPE-1803.
+ */
+degraded: boolean }
+/**
+ * Result of the streamed Trash listing (`list_trash_stream`), returned once every batch has gone out
+ * over the channel. `count` is the total number of entries streamed; `degraded` is the same
+ * caught-panic signal as [`TrashListing::degraded`], carried separately here because the streamed
+ * command can't attach it to the (already-sent) entries themselves.
+ */
+export type TrashStreamSummary = { count: number; 
+/**
+ * See [`TrashListing::degraded`].
+ */
+degraded: boolean }
 /**
  * One node of a scanned tree (CPE-779). Serialized camelCase to match the frontend `CompareNode`
  * (`isDir`).

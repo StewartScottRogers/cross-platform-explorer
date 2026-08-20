@@ -133,6 +133,33 @@ pub fn trash_entry(
     TrashEntry { id, name, original_path, time_deleted, size }
 }
 
+/// Result of the collect-to-vec Trash listing (`list_trash`). Wraps `entries` with a `degraded` flag so a
+/// listing that came back empty because `trash::os_limited::list()` panicked and was caught at the
+/// boundary (CPE-1791) is distinguishable, on the frontend, from a genuinely empty Trash (CPE-1803) —
+/// the same `bool` the streamed command reports via [`TrashStreamSummary`]. Set by the adapter in
+/// `src-tauri/src/lib.rs`, which owns the panic-catching boundary; this DTO carries no `trash` crate
+/// dependency of its own.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct TrashListing {
+    pub entries: Vec<TrashEntry>,
+    /// True when this pass could not fully read the OS trash and degraded to an empty page rather than
+    /// the whole Trash view crashing — NOT the same as a genuinely empty Trash. See CPE-1791/CPE-1803.
+    pub degraded: bool,
+}
+
+/// Result of the streamed Trash listing (`list_trash_stream`), returned once every batch has gone out
+/// over the channel. `count` is the total number of entries streamed; `degraded` is the same
+/// caught-panic signal as [`TrashListing::degraded`], carried separately here because the streamed
+/// command can't attach it to the (already-sent) entries themselves.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct TrashStreamSummary {
+    pub count: usize,
+    /// See [`TrashListing::degraded`].
+    pub degraded: bool,
+}
+
 /// A sidebar quick-access location (special folder or drive).
 #[derive(Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
