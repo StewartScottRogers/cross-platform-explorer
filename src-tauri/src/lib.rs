@@ -2237,7 +2237,41 @@ const TRASH_LIST_BATCH: usize = 256;
 /// under-counted.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn trash_item_to_entry(item: &trash::TrashItem) -> Option<cpe_server::model::TrashEntry> {
-    let size = trash::os_limited::metadata(item).ok().and_then(|meta| meta.size.size());
+    trash_item_to_entry_with_size(item, trash_item_size(item))
+}
+
+/// The one part of the mapping that touches the OS: this item's size, or `None` when the lookup fails.
+/// Split out (CPE-1804 review, #962 Linux red) so the skip decision below can be exercised without it.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn trash_item_size(item: &trash::TrashItem) -> Option<u64> {
+    trash::os_limited::metadata(item).ok().and_then(|meta| meta.size.size())
+}
+
+/// The entire skip-or-keep decision, with `size` supplied rather than looked up — so it depends only on
+/// the item's three `OsStr` fields and reaches no OS call at all.
+///
+/// This split exists because routing *fabricated* `TrashItem`s through [`trash_item_size`] panicked on
+/// Linux CI: `trash::os_limited::metadata` derives the in-trash file path from `item.id` via
+/// `Path::new(id).parent().unwrap().parent().unwrap()` (`trash-5.2.6/src/freedesktop.rs:350`), and a
+/// bare, non-path-shaped id has fewer than two ancestors. On Windows the same call is a COM lookup that
+/// merely returns `Err`, which is why a Windows-green run did not generalise.
+///
+/// That panic is **not** a production bug and deliberately did NOT get wrapped in CPE-1791's
+/// `catch_unwind` boundary: every real `id` comes from `list()`, which sets it to the full
+/// `<trash>/info/<name>.trashinfo` path (`freedesktop.rs:121`), so both `.parent()` calls always
+/// succeed. Extending the catch to `metadata` would have been a test accommodation dressed as
+/// hardening — it would only ever fire for input production cannot produce.
+///
+/// `size` cannot affect the outcome (it is passed straight through to `trash_entry_from_fields`'s
+/// last argument, which never gates the `?` chain), so nothing about the skip is stubbed by supplying
+/// it — which is what makes leaving the OS call out of the walker's unit tests honest rather than
+/// convenient. That contract is itself pinned by
+/// `trash_entry_from_fields_degrades_to_none_size_when_metadata_lookup_failed`.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn trash_item_to_entry_with_size(
+    item: &trash::TrashItem,
+    size: Option<u64>,
+) -> Option<cpe_server::model::TrashEntry> {
     trash_entry_from_fields(
         item.id.to_str(),
         item.name.to_str(),
@@ -2275,17 +2309,24 @@ fn trash_entry_from_fields(
 /// Returns **how many items were skipped** (CPE-1804). Counting here rather than at each call site is
 /// what keeps the two commands honest in lockstep: the count comes out of the same loop that does the
 /// skipping, so a skip that is not counted is not reachable.
+/// `map` is always [`trash_item_to_entry`] in production — passed explicitly rather than hardcoded so
+/// the OS size lookup inside it can be left out of a unit test (CPE-1804 review, #962 Linux red). See
+/// [`trash_item_to_entry_with_size`] for why fabricated items must not reach that lookup, and why
+/// hardening it instead would have been a test accommodation rather than a fix. Tests pass the *real*
+/// skip decision with only `size` supplied, so the genuine `OsStr::to_str()` behaviour on the genuine
+/// fields is still what is under test — nothing about skipping is stubbed.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[must_use = "the skipped count is how the frontend learns this listing is incomplete (CPE-1804)"]
 fn stream_trash_entries(
     items: Vec<trash::TrashItem>,
     batch: usize,
+    map: impl Fn(&trash::TrashItem) -> Option<cpe_server::model::TrashEntry>,
     mut flush: impl FnMut(Vec<cpe_server::model::TrashEntry>),
 ) -> usize {
     let mut buf = Vec::with_capacity(batch.min(items.len()));
     let mut skipped = 0usize;
     for item in &items {
-        if let Some(entry) = trash_item_to_entry(item) {
+        if let Some(entry) = map(item) {
             buf.push(entry);
             if buf.len() >= batch {
                 flush(std::mem::take(&mut buf));
@@ -2488,21 +2529,64 @@ async fn list_trash() -> Result<cpe_server::model::TrashListing, String> {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn list_trash_impl() -> Result<cpe_server::model::TrashListing, String> {
-    // CPE-1791: a caught dependency panic degrades THIS ONE listing pass to empty rather than failing
-    // the whole Trash view — see `TrashListOutcome::degrade_panic_to_empty`. Restore/empty call sites
-    // do NOT do this; they use `.or_fail()` instead.
-    //
-    // CPE-1803: `degraded` rides along on the response instead of being swallowed here, so the frontend
-    // can render "the Trash couldn't be read" instead of misreporting a degraded pass as "Trash is empty".
-    //
-    // CPE-1804: the SECOND route into an incomplete listing — items skipped for a non-UTF-8
-    // id/name/original_parent — rides along too, as a count. Unlike the panic route this one can leave
-    // `entries` non-empty, which is why `degraded` must not be read as "and therefore empty" (CPE-1805).
-    let (items, panic_degraded) = list_trash_catching_dependency_panics().degrade_panic_to_empty()?;
+    list_trash_from(list_trash_catching_dependency_panics(), trash_item_to_entry)
+}
+
+/// The whole body of [`list_trash_impl`], with its one uncontrollable input — the outcome of the OS
+/// `list()` call — taken as a parameter instead of read from the machine's real Recycle Bin. Mirrors
+/// [`empty_trash_gated`]'s injection seam, and exists for the same reason: the interesting behaviour is
+/// what this function *does* with that outcome, and a test can only pin it if it can choose the outcome.
+///
+/// CPE-1804 review (#962, blocking 1): without this split, substituting `degraded: panic_degraded` below
+/// left the entire suite green — the walker tests never build a listing, the [`listing_is_degraded`]
+/// truth-table test never checks that anyone *calls* it, and the real-trash round-trip tests only ever
+/// exercise the clean pass, where the two expressions agree. "Both commands fold both routes" was
+/// guaranteed by reading the code, which is exactly the certified-by-omission shape this ticket
+/// criticised in the old pin. It is now guaranteed by a test that constructs its own input.
+///
+/// CPE-1791: a caught dependency panic degrades THIS ONE listing pass to empty rather than failing the
+/// whole Trash view — see `TrashListOutcome::degrade_panic_to_empty`. Restore/empty call sites do NOT do
+/// this; they use `.or_fail()` instead.
+///
+/// CPE-1803: `degraded` rides along on the response instead of being swallowed here, so the frontend can
+/// render "the Trash couldn't be read" instead of misreporting a degraded pass as "Trash is empty".
+///
+/// CPE-1804: the SECOND route into an incomplete listing — items skipped for a non-UTF-8
+/// id/name/original_parent — rides along too, as a count. Unlike the panic route this one can leave
+/// `entries` non-empty, which is why `degraded` must not be read as "and therefore empty" (CPE-1805).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn list_trash_from(
+    outcome: TrashListOutcome,
+    map: impl Fn(&trash::TrashItem) -> Option<cpe_server::model::TrashEntry>,
+) -> Result<cpe_server::model::TrashListing, String> {
+    let (items, panic_degraded) = outcome.degrade_panic_to_empty()?;
     let mut entries = Vec::new();
-    let skipped = stream_trash_entries(items, TRASH_LIST_BATCH, |batch| entries.extend(batch));
+    let skipped = stream_trash_entries(items, TRASH_LIST_BATCH, map, |batch| entries.extend(batch));
     Ok(cpe_server::model::TrashListing {
         entries,
+        degraded: listing_is_degraded(panic_degraded, skipped),
+        skipped,
+    })
+}
+
+/// Streamed twin of [`list_trash_from`] — same injected outcome, plus the batch sink injected too, so
+/// the streamed command's fold is pinned by a test rather than by inspection (CPE-1804 review, blocking
+/// 1). Keeping the two bodies adjacent and identically shaped is what makes a divergence between them
+/// visible; keeping them both testable is what makes one *fail*.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn trash_stream_summary_from(
+    outcome: TrashListOutcome,
+    map: impl Fn(&trash::TrashItem) -> Option<cpe_server::model::TrashEntry>,
+    mut send: impl FnMut(Vec<cpe_server::model::TrashEntry>),
+) -> Result<cpe_server::model::TrashStreamSummary, String> {
+    let (items, panic_degraded) = outcome.degrade_panic_to_empty()?;
+    let mut count = 0usize;
+    let skipped = stream_trash_entries(items, TRASH_LIST_BATCH, map, |batch| {
+        count += batch.len();
+        send(batch);
+    });
+    Ok(cpe_server::model::TrashStreamSummary {
+        count,
         degraded: listing_is_degraded(panic_degraded, skipped),
         skipped,
     })
@@ -2520,25 +2604,11 @@ async fn list_trash_stream(
     on_entry: tauri::ipc::Channel<Vec<cpe_server::model::TrashEntry>>,
 ) -> Result<cpe_server::model::TrashStreamSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        // CPE-1791: see the comment in `list_trash_impl` — this pass degrades to empty on a caught
-        // panic rather than failing the whole Trash view. CPE-1803: `degraded` rides along on the
-        // returned summary — the streamed entries themselves carry no room for it, since a degraded
-        // pass sends none — so the frontend reaches the same distinguishable state as `list_trash`.
-        //
-        // CPE-1804: `skipped` rides along the same way, and matters MORE here than on the flag alone —
-        // this route can have flushed real batches and still be incomplete, so the frontend cannot infer
-        // anything from "rows arrived". Both fields come from the shared walker + `listing_is_degraded`,
-        // so this command and `list_trash_impl` cannot drift apart.
-        let (items, panic_degraded) = list_trash_catching_dependency_panics().degrade_panic_to_empty()?;
-        let mut count = 0usize;
-        let skipped = stream_trash_entries(items, TRASH_LIST_BATCH, |batch| {
-            count += batch.len();
+        // CPE-1791/CPE-1803/CPE-1804: the body lives in `trash_stream_summary_from` so it can be tested
+        // against a chosen `TrashListOutcome` — see that function's doc comment. All this adapter adds is
+        // the two things a test genuinely can't supply: the real OS listing and the Tauri channel.
+        trash_stream_summary_from(list_trash_catching_dependency_panics(), trash_item_to_entry, |batch| {
             let _ = on_entry.send(batch);
-        });
-        Ok(cpe_server::model::TrashStreamSummary {
-            count,
-            degraded: listing_is_degraded(panic_degraded, skipped),
-            skipped,
         })
     })
     .await
@@ -14836,18 +14906,77 @@ mod tests {
 
     /// A `trash::TrashItem` whose three UTF-8-validated fields are individually switchable between a
     /// decodable and an undecodable value, so a walker test can build a mixed listing.
+    ///
+    /// The `id` is deliberately **shaped like a real one** — `<trash>/info/<name>.trashinfo`, which is
+    /// exactly what `list()` produces (`trash-5.2.6/src/freedesktop.rs:121`) — and the undecodable bytes
+    /// go in the *filename component* rather than replacing the whole path, which is also what a real
+    /// undecodable trash entry looks like: an ordinary trash directory holding a file whose name is not
+    /// valid UTF-8.
+    ///
+    /// This is not cosmetic. The first version used a bare `"id-ok"`, and on Linux CI that panicked
+    /// inside the dependency (`freedesktop.rs:350` does `.parent().unwrap().parent().unwrap()` on the
+    /// id, and a bare name has fewer than two ancestors) — the very panic family CPE-1791 exists for,
+    /// triggered by unrealistic test input rather than by anything production can produce. Windows never
+    /// showed it because its `metadata` is a COM lookup that simply returns `Err`.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn item_with_undecodable(field: Option<&str>) -> trash::TrashItem {
         let bad = undecodable_os_string();
+        // A path that does not exist, so any real metadata lookup takes its ordinary `Err` route — the
+        // same one a genuinely concurrent purge produces between `list()` and `metadata()`.
+        let info_dir = std::env::temp_dir().join("cpe-1804-no-such-trash").join("info");
+        let mut file_name = if field == Some("id") { bad.clone() } else { "ok".into() };
+        file_name.push(".trashinfo");
         trash::TrashItem {
-            id: if field == Some("id") { bad.clone() } else { "id-ok".into() },
+            id: info_dir.join(file_name).into_os_string(),
             name: if field == Some("name") { bad.clone() } else { "ok.txt".into() },
             original_parent: if field == Some("parent") {
-                std::path::PathBuf::from(bad)
+                std::env::temp_dir().join(bad)
             } else {
                 std::env::temp_dir()
             },
             time_deleted: 0,
+        }
+    }
+
+    /// The production skip decision with the OS size lookup left out — what the CPE-1804 tests map with.
+    /// See [`trash_item_to_entry_with_size`]: `size` cannot influence the skip, so this stubs nothing
+    /// that matters, and it keeps these tests free of a dependency call that has no bearing on what they
+    /// assert. The *real* mapper, metadata lookup included, stays covered by the real-trash round-trip
+    /// tests further down, which list an actually-trashed probe.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn map_without_metadata(item: &trash::TrashItem) -> Option<cpe_server::model::TrashEntry> {
+        trash_item_to_entry_with_size(item, None)
+    }
+
+    /// Tripwire for the #962 Linux red, runnable on the platform that could not see it.
+    ///
+    /// No CPE-1804 test routes a fabricated item through `trash::os_limited::metadata` any more, so this
+    /// is belt-and-braces — but the fixture is one careless edit away from being reused somewhere that
+    /// does, and the failure mode is a dependency panic on a platform this machine cannot execute. So
+    /// the precondition that dependency imposes is asserted here directly: `freedesktop.rs:350-351`
+    /// unwraps `Path::new(id).parent().parent()` and `file_stem()`, which is precisely what a bare
+    /// `"id-ok"` could not satisfy.
+    ///
+    /// Windows `Path` semantics stand in for Linux ones, which is sound for exactly this claim: the id
+    /// is built by `join`ing an absolute `temp_dir()` with two more components, so its ancestor count is
+    /// the same on both platforms. This asserts the fixture is *shaped* correctly; it does not — and
+    /// cannot, from Windows — prove the dependency's behaviour on Linux.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn fabricated_trash_item_ids_satisfy_the_dependencys_path_preconditions() {
+        for field in [None, Some("id"), Some("name"), Some("parent")] {
+            let item = item_with_undecodable(field);
+            let id = std::path::Path::new(&item.id);
+            assert!(
+                id.parent().and_then(std::path::Path::parent).is_some(),
+                "a fabricated id needs two ancestors or `trash` panics unwrapping them on Linux \
+                 (freedesktop.rs:350) — field {field:?}, id {id:?}"
+            );
+            assert!(
+                id.file_stem().is_some(),
+                "a fabricated id needs a file stem for the same reason (freedesktop.rs:351) — \
+                 field {field:?}, id {id:?}"
+            );
         }
     }
 
@@ -14862,6 +14991,12 @@ mod tests {
     /// The counted half is asserted against real undecodable `OsString`s through the actual walker, not
     /// against the `Option::None` stand-in, because the stand-in is exactly the thing that can't tell you
     /// whether the count is wired to anything.
+    ///
+    /// Runs on every OS and cannot skip itself (the CPE-1806 trap): it builds its own input and reaches
+    /// no OS call at all — `map_without_metadata` supplies `size` instead of looking it up, which stubs
+    /// nothing that can affect a skip. That last part is not a convenience: the first version DID route
+    /// these fabricated items through `trash::os_limited::metadata`, which is harmless on Windows and
+    /// panics on Linux, so a green local run said nothing about CI (#962).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn a_non_utf8_field_skips_the_entry_and_the_skip_is_counted_not_silent() {
@@ -14881,7 +15016,8 @@ mod tests {
         for field in ["id", "name", "parent"] {
             let items = vec![item_with_undecodable(None), item_with_undecodable(Some(field))];
             let mut entries = Vec::new();
-            let skipped = stream_trash_entries(items, TRASH_LIST_BATCH, |b| entries.extend(b));
+            let skipped =
+                stream_trash_entries(items, TRASH_LIST_BATCH, map_without_metadata, |b| entries.extend(b));
             assert_eq!(entries.len(), 1, "the decodable sibling must still list ({field})");
             assert_eq!(
                 skipped, 1,
@@ -14894,7 +15030,8 @@ mod tests {
         // be a constant and the warning it drives would fire on every healthy Trash.
         let clean = vec![item_with_undecodable(None), item_with_undecodable(None)];
         let mut entries = Vec::new();
-        let skipped = stream_trash_entries(clean, TRASH_LIST_BATCH, |b| entries.extend(b));
+        let skipped =
+            stream_trash_entries(clean, TRASH_LIST_BATCH, map_without_metadata, |b| entries.extend(b));
         assert_eq!(entries.len(), 2);
         assert_eq!(skipped, 0, "a fully decodable listing must report no skips");
     }
@@ -14916,11 +15053,13 @@ mod tests {
         };
 
         let mut collected = Vec::new();
-        let collect_skipped = stream_trash_entries(mixed(), TRASH_LIST_BATCH, |b| collected.extend(b));
+        let collect_skipped = stream_trash_entries(mixed(), TRASH_LIST_BATCH, map_without_metadata, |b| {
+            collected.extend(b)
+        });
 
         let mut streamed = Vec::new();
         let mut batches = 0usize;
-        let stream_skipped = stream_trash_entries(mixed(), 1, |b| {
+        let stream_skipped = stream_trash_entries(mixed(), 1, map_without_metadata, |b| {
             batches += 1;
             streamed.extend(b);
         });
@@ -14935,6 +15074,10 @@ mod tests {
     /// routes into the flag the frontend renders from. All four rows are asserted together on purpose —
     /// a test that only checked the true rows would pass with the function hardcoded to `true`, which
     /// would put the "couldn't be fully read" notice on every healthy Trash forever.
+    ///
+    /// This pins the fold's *arithmetic* only. That both commands actually PERFORM it is a separate
+    /// claim, pinned by `both_commands_fold_a_per_item_skip_into_degraded` below — see its comment for
+    /// why one test cannot stand in for the other.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn listing_is_degraded_folds_both_incompleteness_routes_and_stays_false_for_a_clean_pass() {
@@ -14942,6 +15085,73 @@ mod tests {
         assert!(listing_is_degraded(true, 0), "a caught panic degrades the pass (CPE-1791/CPE-1803)");
         assert!(listing_is_degraded(false, 1), "a skipped undecodable item degrades the pass (CPE-1804)");
         assert!(listing_is_degraded(true, 3), "both at once is still degraded");
+    }
+
+    /// CPE-1804 review (#962, blocking 1): the fold existing and being correct is not the same claim as
+    /// both commands USING it. Before this test, substituting `degraded: panic_degraded` at either call
+    /// site left the whole suite green — the walker tests never build a listing, the truth-table test
+    /// above never checks that anyone calls the function, and the real-trash round-trip tests only cover
+    /// the clean pass, where `panic_degraded` and `listing_is_degraded(..)` happen to agree. That is the
+    /// certified-by-omission shape this ticket set out to remove from the old pin; leaving it one layer
+    /// up would have been the same mistake with a better view.
+    ///
+    /// Drives BOTH command bodies through their injected-outcome seams with input the test constructs
+    /// itself, so it is deterministic on every machine and never consults the real Recycle Bin.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn both_commands_fold_a_per_item_skip_into_degraded() {
+        let mixed = || {
+            TrashListOutcome::Ok(vec![item_with_undecodable(None), item_with_undecodable(Some("name"))])
+        };
+
+        // --- collect-to-vec. `panic_degraded` is FALSE here (no panic), so `degraded` can only be true
+        // if this command folded the skip in. `degraded: panic_degraded` fails exactly here.
+        let listed =
+            list_trash_from(mixed(), map_without_metadata).expect("a listable outcome must not error");
+        assert_eq!(listed.entries.len(), 1, "the decodable item must still be listed");
+        assert_eq!(listed.skipped, 1, "list_trash must report the skip it made");
+        assert!(listed.degraded, "list_trash must fold a per-item skip into `degraded` (CPE-1804)");
+
+        // --- streamed. Same claim, and additionally that the entries really went out over the sink:
+        // this route can flush real batches and still be incomplete, which is the case CPE-1805 covers.
+        let mut sent = Vec::new();
+        let summary = trash_stream_summary_from(mixed(), map_without_metadata, |batch| sent.extend(batch))
+            .expect("a listable outcome must not error");
+        assert_eq!(summary.count, 1);
+        assert_eq!(sent.len(), 1, "the decodable item must have been streamed, not just counted");
+        assert_eq!(summary.skipped, 1, "list_trash_stream must report the skip it made");
+        assert!(summary.degraded, "list_trash_stream must fold a per-item skip into `degraded`");
+
+        // --- the two commands must agree, entry for entry, on the same input.
+        assert_eq!(listed.entries, sent, "the two commands must surface identical entries");
+
+        // --- asymmetric half: an all-decodable outcome must come back CLEAN from both, or `degraded`
+        // would be a constant and every healthy Trash would carry the notice forever.
+        let clean = || TrashListOutcome::Ok(vec![item_with_undecodable(None)]);
+        let listed = list_trash_from(clean(), map_without_metadata).unwrap();
+        assert!(!listed.degraded, "a clean pass must not be reported as degraded by list_trash");
+        assert_eq!(listed.skipped, 0);
+        let summary = trash_stream_summary_from(clean(), map_without_metadata, |_| {}).unwrap();
+        assert!(!summary.degraded, "a clean pass must not be reported as degraded by list_trash_stream");
+        assert_eq!(summary.skipped, 0);
+
+        // --- and the OTHER route still folds, through the same seam: a caught panic degrades both
+        // commands with no per-item count to show for it (CPE-1791/CPE-1803 behaviour, unchanged).
+        let listed = list_trash_from(TrashListOutcome::PanicCaught, map_without_metadata).unwrap();
+        assert!(listed.entries.is_empty());
+        assert!(listed.degraded, "a caught panic must still degrade list_trash");
+        assert_eq!(listed.skipped, 0, "the panic route wipes the pass; it has no per-item count");
+        let summary =
+            trash_stream_summary_from(TrashListOutcome::PanicCaught, map_without_metadata, |_| {}).unwrap();
+        assert!(summary.degraded, "a caught panic must still degrade list_trash_stream");
+        assert_eq!(summary.skipped, 0);
+
+        // --- a genuine `trash::Error` is still an error, not a degraded-but-successful listing.
+        assert!(list_trash_from(TrashListOutcome::Error("boom".into()), map_without_metadata).is_err());
+        assert!(
+            trash_stream_summary_from(TrashListOutcome::Error("boom".into()), map_without_metadata, |_| {})
+                .is_err()
+        );
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -14963,8 +15173,19 @@ mod tests {
         trash::delete(&probe).unwrap();
 
         let listed = list_trash_impl().expect("list_trash_impl should succeed");
-        assert!(!listed.degraded, "a normal listing must not report itself as degraded");
-        assert_eq!(listed.skipped, 0, "a normal listing must not report skipped items (CPE-1804)");
+        // CPE-1804 review (#962, blocking 2): `degraded`/`skipped` are properties of the WHOLE trash this
+        // pass read, not of the probe this test created — and on Windows that is the developer's or CI
+        // runner's real Recycle Bin, whose contents this test does not control. Asserting `!degraded`
+        // here would fail on any machine whose trash happens to hold one non-UTF-8 name, i.e. under
+        // precisely the condition CPE-1804 exists to handle: a flake with a plausible-looking cause,
+        // which is the kind someone "fixes" by changing the code. (Linux is safe — `lock_real_trash`
+        // redirects `XDG_DATA_HOME` to a scratch dir — but the assertion has to hold on both.)
+        //
+        // Both flags are pinned deterministically instead, on constructed input, by
+        // `both_commands_fold_a_per_item_skip_into_degraded`, which covers strictly more than this line
+        // did: clean AND panic AND per-item-skip AND error, on BOTH commands. So this is a relocation of
+        // CPE-1803's claim to somewhere it can actually be proven, not a dropped guard — what remains
+        // here is what only a real round-trip can show, that a genuinely trashed file lists and restores.
         let probe_path = probe.to_string_lossy().to_string();
         let entry = listed
             .entries
@@ -15109,8 +15330,11 @@ mod tests {
         let on_entry = collecting_channel(collected.clone());
         let summary = tauri::async_runtime::block_on(list_trash_stream(on_entry))
             .expect("list_trash_stream dispatches");
-        assert!(!summary.degraded, "a normal stream must not report itself as degraded");
-        assert_eq!(summary.skipped, 0, "a normal stream must not report skipped items (CPE-1804)");
+        // CPE-1804 review (#962, blocking 2): no `degraded`/`skipped` assertion here either — same
+        // reason as in the round-trip test above (both describe the ambient trash, not this probe), and
+        // both are pinned deterministically by `both_commands_fold_a_per_item_skip_into_degraded`. What
+        // this test uniquely proves — that the streamed batches and the summary count agree against a
+        // real OS listing — is below and unaffected.
 
         let batches = collected.lock().unwrap();
         assert_eq!(batches.len(), summary.count, "every streamed entry must have gone out over the channel");
