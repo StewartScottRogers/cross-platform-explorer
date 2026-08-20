@@ -3,7 +3,7 @@ id: CPE-1760
 title: A filename reaches MediaPlayer's aria-labels raw through a prop, which the render guard cannot see
 type: bug
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-15
