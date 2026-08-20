@@ -96,6 +96,17 @@
 //! exercise the `list-type=2` arm; CPE-1684 (`stat`/`read`/`write`/`delete`/`mkdir`) should extend this
 //! same function rather than standing up a second in-process server.
 //!
+//! # The path grammar, and the two places a key can still be lost
+//! **A provider path is `/` + the S3 key + an optional `/` addressing it as a directory** (CPE-1722).
+//! One leading slash is stripped and at most one trailing slash; every other byte is key. That grammar
+//! is decided in exactly one place — [`rooted_key_bytes`], shared by [`provider_path_to_object_key`] and
+//! [`provider_path_to_key_prefix`] — and their agreement is asserted as a property, not a table.
+//!
+//! The one key shape this crate still cannot reach is a `.`/`..` path segment, because `ureq` 2 rewrites
+//! it between signing and sending. **CPE-1721's decision, and the `ureq` 2 vs 3 measurement it rests
+//! on, are recorded on [`guard_path_survives_the_client`]** — alongside the original CPE-1684
+//! measurement they follow from, rather than split across two doc blocks.
+//!
 //! # The `mkdir` marker-key shape (agreed here, for CPE-1684 to depend on)
 //! [`provider_path_to_key_prefix`] is the single source of truth for both this ticket's `ListObjectsV2`
 //! `prefix` parameter *and* the exact key CPE-1684's `mkdir` must write its zero-byte marker object under:
@@ -464,6 +475,55 @@ fn is_url_dot_segment(segment: &str) -> bool {
 /// URL and the signature cannot disagree" guarantee ends at the crate boundary; this is where it ends, said
 /// out loud. Actually reaching such a key needs an HTTP client that does not normalise URLs, which is
 /// **CPE-1721**, filed from this measurement.
+///
+/// # CPE-1721's decision, and the measurement it rests on
+///
+/// CPE-1721 offered three options and asked for a decision rather than a fix. **Option 2 was measured
+/// first, as that ticket instructed, and it works.**
+///
+/// **How to re-run this** — the table below is the whole evidentiary basis for the CPE-1800 migration
+/// decision, so it must not be a number nobody can reproduce. Exact versions probed: **`ureq` 2.12.1**
+/// (this crate's current pin, `Cargo.lock`) against **`ureq` 3.3.0** with `default-features = false`,
+/// pulling **`ureq-proto` 0.6.0** and **`http` 1.5.0**, on Rust 1.97.0. The probe is a ~50-line throwaway
+/// binary depending on both majors under renamed keys (`ureq2`/`ureq3`), asking each for the same
+/// loopback URL and reading the request line off a bare `TcpListener`; it was NOT landed in the tree,
+/// because adding a permanent dev-dependency on the major this crate has not adopted is precisely the
+/// dependency-budget question CPE-1800 exists to decide. **Whoever takes CPE-1800 should land it there**,
+/// as an `#[ignore]`d test alongside the migration, so the comparison becomes re-runnable at the moment
+/// it starts mattering. Until then, reproducing it is: a two-dependency scratch crate and the loop below.
+///
+/// The same raw-socket technique as [`tests::spawn_a_request_line_recorder`], driven against both majors
+/// from one probe, reports
+///
+/// ```text
+/// ASKED /test-bucket/a/../b//c%252Fd.txt   ureq2 /test-bucket/b//c%252Fd.txt        REWROTE
+///                                          ureq3 /test-bucket/a/../b//c%252Fd.txt   OK
+/// ASKED /test-bucket/a/./b.txt             ureq2 /test-bucket/a/b.txt               REWROTE
+///                                          ureq3 /test-bucket/a/./b.txt             OK
+/// ASKED /test-bucket/a/%2e%2e/b.txt        ureq2 /test-bucket/b.txt                 REWROTE
+///                                          ureq3 /test-bucket/a/%2e%2e/b.txt        OK
+/// ```
+///
+/// `ureq` 3 routes the request target through `http::Uri` (via `ureq-proto`) instead of the `url` crate —
+/// `url` is an *optional* dependency there — and `http::Uri` is a syntax-only parser that performs no
+/// dot-segment removal. So the dot-segment gap is a property of `ureq` 2 specifically, not of HTTP.
+///
+/// **The same probe also closes the "just encode the dots" escape hatch**, which is the obvious cheap fix
+/// and does not work: WHATWG URL parsing defines a double-dot segment as `..` *or* a case-insensitive
+/// `.%2e` / `%2e.` / `%2e%2e`, so `%2e%2e` is resolved away too (measured above), and the only spelling
+/// that survives — `%252e%252e` — percent-decodes at S3 to the key `%2e%2e`, a *different* object. There
+/// is no encoding of `.` that `url` passes through and S3 decodes back to `.`.
+///
+/// **The swap is not made here.** It is a `ureq` major migration — a rewrite of this crate's whole request
+/// layer (agent construction, the per-request vs per-read deadline split CPE-1706/1727 tuned, the gzip and
+/// `Response` surfaces, the error mapping) — and it pulls a new dependency family (`ureq-proto`, `http`,
+/// `rustls` 0.23) into a crate whose `Cargo.toml` records "adds NO new dependency family at all" as a
+/// decision, while the sibling `cpe-webdav` still pins `ureq` 2. That is its own ticket with its own
+/// dependency-budget question, not a rider on a path-grammar fix. What CPE-1721 asked for and what is
+/// delivered here is the decision recorded against the measurement: **option 2 is viable and is the fix;
+/// until it lands the refusal stands**, and — see [`S3Provider::list_with_filtered_count`] — `list` now
+/// refuses such a prefix too, so the crate no longer offers a browsable folder whose every child it will
+/// then decline to open.
 fn guard_path_survives_the_client(encoded_path: &str) -> Result<(), String> {
     if let Some(segment) = encoded_path.split('/').find(|s| is_url_dot_segment(s)) {
         return Err(format!(
@@ -514,13 +574,44 @@ fn xml_nesting_too_deep(xml: &str, max_depth: usize) -> bool {
 ///
 /// The bucket root (`""` or `"/"`) maps to the empty prefix (list the whole bucket); it has no marker
 /// object and is never filtered as one.
+///
+/// # One rooting step, two projections (CPE-1722)
+///
+/// This used to carry its own `path.trim_matches('/')`, identical to the one in the object-key helper.
+/// Two copies of a path grammar is how the two drift apart, and CPE-1722's acceptance criterion is that
+/// the grammar is decided **once, for the whole crate**, with `list`/`mkdir`/`stat`/`delete` all
+/// agreeing. So both helpers now share [`rooted_key_bytes`] — the single place a provider path loses its
+/// `/`-rooting — and differ only in what they do with a trailing slash: the object form strips at most
+/// one, the prefix form ensures exactly one.
+///
+/// **They agree wherever both have an answer**: `prefix(p) == object_key(p) + "/"` for every path with an
+/// object key, which [`tests::the_object_key_and_the_prefix_key_agree_on_every_path_that_has_both`]
+/// asserts as a property rather than a table. The one path where they differ is `"//"`, which has **no**
+/// object key (its key would be the zero-length one S3 does not have) but is a perfectly real prefix,
+/// `"/"` — the virtual directory holding a key like `/lead.txt`. Deriving this function from the
+/// object-key helper alone would make that directory unlistable while its contents stayed addressable,
+/// which is the listing-vs-object asymmetry CPE-1721 is separately about.
 pub fn provider_path_to_key_prefix(path: &str) -> String {
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
+    let rooted = rooted_key_bytes(path);
+    if rooted.is_empty() {
+        // The bucket root: list the whole bucket. It has no marker object and is never filtered as one.
         String::new()
+    } else if rooted.ends_with('/') {
+        rooted.to_string()
     } else {
-        format!("{trimmed}/")
+        format!("{rooted}/")
     }
+}
+
+/// Strip the `/`-rooting every provider path carries — **exactly one leading slash, never all of them** —
+/// leaving the S3 key bytes untouched.
+///
+/// This is the single place that decision is made, shared by [`provider_path_to_object_key`] and
+/// [`provider_path_to_key_prefix`] so the two cannot disagree about where a path's key starts. The second
+/// slash of `//a.txt` is the first byte of the key `/a.txt`, not more rooting: an S3 key is an opaque byte
+/// string, and `a.txt`, `/a.txt` and `//a.txt` are three different objects (CPE-1689, CPE-1722).
+fn rooted_key_bytes(path: &str) -> &str {
+    path.strip_prefix('/').unwrap_or(path)
 }
 
 /// Convert a `/`-rooted provider path into the S3 key of **one object** (CPE-1684) — the `stat`/`read`/
@@ -531,21 +622,68 @@ pub fn provider_path_to_key_prefix(path: &str) -> String {
 /// else — the same refusal, for the same reason, that [`S3Config::object_target`] already applies to an
 /// empty key ("S3 has no zero-length key").
 ///
-/// # KNOWN GAP (CPE-1722): `trim_matches('/')` collapses the ends, and CPE-1689 does not cover that
+/// # The path grammar, decided once for the whole crate (CPE-1722)
 ///
-/// Say this plainly, because the CPE-1689 reference below otherwise implies a guarantee this function
-/// does not provide. [`S3Config::object_target`] genuinely preserves a leading slash — `"/a.txt"` builds
-/// `/bucket//a.txt` — so `a.txt`, `/a.txt` and `//a.txt` really are three distinct objects *at that
-/// layer*. **This function sits above it and trims both ends first**, so a provider path of `//a.txt`
-/// reaches `object_target` as the key `a.txt`. Measured to the wire by the CPE-1684 round-2 UAT:
-/// `"//a.txt"` → `/test-bucket/a.txt`. `write("//report.pdf", …)` therefore overwrites `report.pdf`.
+/// **A provider path is `"/"` + the S3 key + an optional `"/"` marking that the key is being addressed
+/// as a directory/prefix.** Exactly one leading slash is removed and at most one trailing slash; every
+/// other byte, at either end or in the middle, is part of the key and survives untouched.
 ///
-/// Not fixed here, deliberately, and CPE-1722 carries the full reasoning: the sibling
-/// [`provider_path_to_key_prefix`] (merged, CPE-1683) has the identical trim and feeds `list`/`mkdir`, so
-/// changing one alone would leave two path grammars inside one provider; and trailing-slash
-/// insignificance is a cross-backend `FileSystemProvider` contract that `stat`/`delete` rely on when they
-/// build a probe prefix as `format!("{key}/")`. Reachable only by a hand-typed path — `is_safe_s3_leaf`
-/// refuses any leaf containing `/`, so no listing can surface one.
+/// That makes every S3 key spellable, which is the whole point — a key is an opaque byte string, so
+/// `a.txt`, `/a.txt` and `//a.txt` are three different objects and a bucket written by a tool that joined
+/// paths carelessly genuinely holds all three:
+///
+/// | provider path  | object key | prefix (marker) key |
+/// |----------------|------------|---------------------|
+/// | `/a.txt`       | `a.txt`    | `a.txt/`            |
+/// | `/a.txt/`      | `a.txt`    | `a.txt/`            |
+/// | `//a.txt`      | `/a.txt`   | `/a.txt/`           |
+/// | `/a//b.txt`    | `a//b.txt` | `a//b.txt/`         |
+/// | `/a.txt//`     | `a.txt/`   | `a.txt//`           |
+/// | `///`          | `/`        | `//`                |
+/// | `/` or `//`    | *(none — the bucket root)* | *(empty)* |
+///
+/// # What this replaced, and why the old shape was a data-loss bug
+///
+/// Until CPE-1722 this was `path.trim_matches('/')`, which strips **every** leading and trailing slash.
+/// [`S3Config::object_target`] one layer below has always been byte-exact (CPE-1689: `"/a.txt"` builds
+/// `/bucket//a.txt`), so the guarantee was correct at the layer that documented it and thrown away at the
+/// layer callers actually use. Measured to the wire by the CPE-1684 round-2 UAT: provider path `"//a.txt"`
+/// reached the socket as `/test-bucket/a.txt`. `write("//report.pdf", …)` therefore **overwrote**
+/// `report.pdf` — the silently-wrong-object failure CPE-1689 exists to prevent, arriving one layer up
+/// from where that ticket looked.
+///
+/// # Why a *trailing* slash is still not part of the object key
+///
+/// This is the one deliberate asymmetry, and the reason is a specific, checkable one: **the shared
+/// `cpe-vfs` layer puts that slash there.** `cpe_vfs::connect::join_remote` appends a trailing `/` to
+/// every directory child URI it builds, for every remote backend, so a directory path arriving at any
+/// provider routinely carries one. A trailing slash therefore means "address this as a directory" — and
+/// on S3 that is exactly what a key ending in `/` *is*, the zero-byte marker convention this module's
+/// own `mkdir` writes.
+///
+/// Do **not** restate this as "every other provider trims a trailing slash" or "the siblings build a
+/// `format!("{key}/")` probe". Both are false, and two successive versions of this comment said them —
+/// so here are the actual call sites, checked one at a time rather than described by shape:
+///
+/// - `cpe-ftp` (`crates/ftp/src/lib.rs:301`) and `cpe-webdav` (`crates/webdav/src/lib.rs:292`) trim a
+///   trailing slash inside `stat`.
+/// - `cpe-sftp` (`crates/sftp/src/lib.rs:334`) takes the last non-empty segment instead
+///   (`path.rsplit('/').find(|s| !s.is_empty())`) and contains **no `trim_end_matches` at all**.
+///
+/// All three derive a **display name only**; none normalises the path before the wire. And no sibling
+/// builds a `format!("{key}/")` probe: the one slash-appending construction in the family,
+/// `crates/webdav/src/lib.rs:370`, is the RFC 4918 §8.3 DELETE redirect retry, not an existence check.
+///
+/// `crates/vfs/src/connect.rs`'s `join_remote` carries a comment written specifically to retract this
+/// same overclaim — including the live WebDAV `delete` bug it was hiding — and records there that
+/// `list`/`mkdir`/`delete`/`rename` send the path verbatim on every backend. The convention is real; the
+/// uniform-trimming story about it is not. **If you edit this paragraph, re-grep the three files first**;
+/// it has now been wrong twice, each time by being restated from memory of its shape.
+///
+/// Nothing is lost by it, because the rule is total: a key that genuinely ends in `/` is spelled with the
+/// slash doubled (`/a.txt//` → key `a.txt/`), which is just the general rule `"/" + key + "/"` applied to
+/// a key whose last byte happens to be a slash. So `stat`/`delete` keep the grammar every other backend
+/// speaks, and no S3 key becomes unreachable.
 ///
 /// # No `is_safe_s3_leaf` pass here, and this is a deliberate decision, not an omission
 ///
@@ -568,14 +706,17 @@ pub fn provider_path_to_key_prefix(path: &str) -> String {
 /// outside the unreserved set into the path (so a `\n` in a key travels as `%0A`, never as a request-line
 /// break), and [`guard_header_sendable`] covers the header side.
 fn provider_path_to_object_key(path: &str) -> Result<String, String> {
-    let key = path.trim_matches('/').to_string();
+    let rooted = rooted_key_bytes(path);
+    // At most ONE trailing slash, which is the "address this as a directory" marker described above —
+    // never all of them, so `/a.txt//` keeps the key `a.txt/`.
+    let key = rooted.strip_suffix('/').unwrap_or(rooted);
     if key.is_empty() {
         return Err(format!(
             "s3: {path:?} addresses the bucket itself, which is not an object — S3 has no zero-length \
              key, so there is nothing here to stat, read, write or delete"
         ));
     }
-    Ok(key)
+    Ok(key.to_string())
 }
 
 /// Turn a non-2xx response into an error, choosing the rule by whether the response actually carried a
@@ -1878,6 +2019,29 @@ impl S3Provider {
     /// is non-zero instead of the listing reading as an ordinary, indistinguishable-from-real empty folder.
     pub fn list_with_filtered_count(&self, path: &str) -> Result<(Vec<ProviderEntry>, usize), String> {
         let key_prefix = provider_path_to_key_prefix(path);
+        // CPE-1721 (folded in from CPE-1723 item 2): close the query-string/path asymmetry.
+        //
+        // `list` puts the prefix in the QUERY STRING, which `ureq`/`url` does not normalise, so
+        // `list("/a/../b")` used to succeed and hand back a folder that opened and browsed normally.
+        // `stat`/`read`/`write` put the key in the PATH, which *is* normalised, so every single file
+        // inside that folder was then refused by `guard_path_survives_the_client`. A browsable folder in
+        // which nothing is openable is a worse answer than a refusal that names the cause, so the same
+        // guard is applied here, to the object target a child of this prefix would be fetched under.
+        //
+        // Checked against the real object target rather than by re-scanning the raw key, so it is the
+        // one guard making the decision in both places: `encode_path` escapes a literal `%` on the way
+        // in, so a raw key segment of `%2e` becomes `%252e` and is correctly NOT a dot segment, while a
+        // bare `.`/`..` stays one. A hand-rolled second check here would have to re-derive that and
+        // would eventually re-derive it wrong.
+        if !key_prefix.is_empty() {
+            guard_path_survives_the_client(&self.config.object_target(&key_prefix)?.encoded_path)
+                .map_err(|e| {
+                    format!(
+                        "s3: list {path:?}: this prefix would list children that this crate then could \
+                         not open. {e}"
+                    )
+                })?;
+        }
         let target = self.config.bucket_target()?;
 
         let mut out = Vec::new();
@@ -2076,7 +2240,14 @@ impl FileSystemProvider for S3Provider {
                 return Ok(ProviderEntry { name: "/".to_string(), is_dir: true, size: 0 });
             }
         };
-        let name = key.rsplit('/').next().unwrap_or(&key).to_string();
+        // Trim the trailing slash BEFORE taking the last segment. A key ending in `/` is a shape
+        // CPE-1722 made reachable for the first time (`/trail.txt//` addresses the key `trail.txt/`),
+        // and `rsplit('/')` on it yields `""` — so `stat` reported an empty display name for an object
+        // that `list` shows as `trail.txt`, i.e. the two projections this ticket exists to unify
+        // disagreeing about the same object. Mirrors `parse_list_bucket_result`'s `<CommonPrefixes>` arm
+        // and the sibling precedent in `crates/webdav/src/lib.rs`'s `stat`. For a key that is only
+        // slashes the leaf is genuinely empty, which is the same answer the listing gives.
+        let name = key.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
         let target = self.config.object_target(&key)?;
         let (url, req) = self.signed_request(
             "HEAD",
@@ -6813,5 +6984,455 @@ mod tests {
 
         assert!(!provider.capabilities().supports_rename);
         assert!(!provider.capabilities().has_real_dirs);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1722 / CPE-1721: an S3 key is an opaque byte string, not a filesystem path.
+    // ---------------------------------------------------------------------------------------------
+
+    /// A **key-exact** object store: a `HashMap` from the real S3 key to its bytes, with no filesystem
+    /// anywhere in it.
+    ///
+    /// # Why the existing [`handle`] fixture could not be used for CPE-1722, stated plainly
+    ///
+    /// [`handle`] maps keys onto `std::fs` (`root.join(path.trim_start_matches('/'))`), and **the
+    /// filesystem is the exact thing that performs the normalisation under test**. Every key shape this
+    /// ticket is about collapses before it reaches disk: `Path::new("a//b")` and `Path::new("a/./b")` both
+    /// have the components `a`, `b`; `a/../b` resolves to `b` and escapes the directory; `trim_start_matches`
+    /// eats the leading slash that distinguishes `/a.txt` from `a.txt`; a key of only slashes lands on the
+    /// root itself; and no filesystem holds a name ending in the separator. A round-trip test written against
+    /// that fixture would pass **because the fixture never produced the interesting case** — the harness would
+    /// be answering about `a/b` while the test believed it was asking about `a//b`.
+    ///
+    /// This is the same class of limit CPE-1736 already filed against [`handle`] (it never percent-decodes an
+    /// object path, and interpolates key text into XML unescaped), and it is why this store decodes the
+    /// request path into a genuine key and stores it under exactly those bytes. It is deliberately small: the
+    /// five verbs this crate sends, no sentinels, no pagination.
+    /// The bucket contents of a [`spawn_key_exact_store`]: real S3 key -> the object's bytes.
+    type KeyExactBucket = Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>;
+
+    fn spawn_key_exact_store() -> (String, KeyExactBucket) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let store: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>> = Default::default();
+        let store_thread = Arc::clone(&store);
+        std::thread::spawn(move || {
+            for mut req in server.incoming_requests() {
+                let method = req.method().to_string().to_uppercase();
+                let full = req.url().to_string();
+                let (raw_path, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
+                // The request path is `/{bucket}` + the percent-encoded key. Decoding it is what makes
+                // this store key-exact and is precisely what `handle` does not do.
+                let after_bucket =
+                    raw_path.strip_prefix(&format!("/{TEST_BUCKET}")).unwrap_or(raw_path);
+                let key = percent_decode(after_bucket.strip_prefix('/').unwrap_or(after_bucket));
+                let params = parse_query(raw_query);
+                let param = |n: &str| params.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str());
+
+                if method == "GET" && param("list-type") == Some("2") {
+                    let prefix = param("prefix").unwrap_or("");
+                    let mut contents: Vec<(String, usize)> = Vec::new();
+                    let mut common: BTreeSet<String> = BTreeSet::new();
+                    for (k, v) in store_thread.lock().unwrap().iter() {
+                        let Some(rest) = k.strip_prefix(prefix) else { continue };
+                        match rest.find('/') {
+                            // `delimiter=/` rolls everything below this level up into a CommonPrefix.
+                            Some(i) => {
+                                common.insert(format!("{prefix}{}", &rest[..=i]));
+                            }
+                            None => contents.push((k.clone(), v.len())),
+                        }
+                    }
+                    let mut xml = String::from(
+                        "<?xml version=\"1.0\"?><ListBucketResult \
+                         xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><IsTruncated>false\
+                         </IsTruncated>",
+                    );
+                    for (k, n) in contents {
+                        xml.push_str(&format!("<Contents><Key>{k}</Key><Size>{n}</Size></Contents>"));
+                    }
+                    for p in common {
+                        xml.push_str(&format!("<CommonPrefixes><Prefix>{p}</Prefix></CommonPrefixes>"));
+                    }
+                    xml.push_str("</ListBucketResult>");
+                    let ct =
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..])
+                            .unwrap();
+                    let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+                    continue;
+                }
+
+                match method.as_str() {
+                    "PUT" => {
+                        let mut body = Vec::new();
+                        let _ = req.as_reader().read_to_end(&mut body);
+                        store_thread.lock().unwrap().insert(key, body);
+                        let _ = req.respond(tiny_http::Response::empty(200));
+                    }
+                    "GET" => match store_thread.lock().unwrap().get(&key) {
+                        Some(v) => {
+                            let _ = req.respond(tiny_http::Response::from_data(v.clone()));
+                        }
+                        None => {
+                            let _ = req.respond(tiny_http::Response::empty(404));
+                        }
+                    },
+                    "HEAD" => match store_thread.lock().unwrap().get(&key) {
+                        Some(v) => {
+                            let len = tiny_http::Header::from_bytes(
+                                &b"Content-Length"[..],
+                                v.len().to_string().as_bytes(),
+                            )
+                            .unwrap();
+                            let _ =
+                                req.respond(tiny_http::Response::empty(200).with_header(len));
+                        }
+                        None => {
+                            let _ = req.respond(tiny_http::Response::empty(404));
+                        }
+                    },
+                    "DELETE" => {
+                        store_thread.lock().unwrap().remove(&key);
+                        let _ = req.respond(tiny_http::Response::empty(204));
+                    }
+                    _ => {
+                        let _ = req.respond(tiny_http::Response::empty(405));
+                    }
+                }
+            }
+        });
+        (format!("http://{addr}"), store)
+    }
+
+    /// **CPE-1722, to the wire** — the acceptance criterion asks for the chosen behaviour driven through
+    /// the request-line recorder, "asserting the sent path — not merely that a helper returns a string".
+    ///
+    /// Every row is a provider path whose key the old `trim_matches('/')` collapsed onto a *different*
+    /// object. Restore that trim and this reds on the first row with the exact wire path it produced.
+    #[test]
+    fn the_slashes_at_both_ends_of_a_provider_path_reach_the_wire_as_key_bytes() {
+        // (provider path, the request target the key must produce)
+        let cases: &[(&str, &str)] = &[
+            // The ticket's headline case: `//report.pdf` must NOT address `report.pdf`.
+            ("//report.pdf", "/test-bucket//report.pdf"),
+            ("///deep.txt", "/test-bucket///deep.txt"),
+            // Interior slashes were already preserved (CPE-1689); pinned here so the new rule cannot
+            // regress them while fixing the ends.
+            ("/a//b.txt", "/test-bucket/a//b.txt"),
+            // A key that genuinely ends in a slash is spelled with the slash doubled.
+            ("/trail.txt//", "/test-bucket/trail.txt/"),
+            // A key that is nothing but slashes.
+            ("///", "/test-bucket//"),
+            ("////", "/test-bucket///"),
+            // The ordinary shapes must be untouched by all of the above.
+            ("/plain.txt", "/test-bucket/plain.txt"),
+            ("/photos/2024/x.jpg", "/test-bucket/photos/2024/x.jpg"),
+        ];
+
+        for (path, want) in cases {
+            let (base, seen) = spawn_a_request_line_recorder();
+            let provider = S3Provider::connect(&cfg(&base));
+            let outcome = provider.read(path);
+
+            let lines = seen.lock().unwrap().clone();
+            assert_eq!(
+                lines.len(),
+                1,
+                "read({path:?}) should have sent exactly one request (outcome was {outcome:?})"
+            );
+            assert_eq!(
+                lines[0], *want,
+                "read({path:?}) addressed the wrong object. The key is an opaque byte string: a slash \
+                 at either end is a key byte, and collapsing it silently retargets the request"
+            );
+        }
+    }
+
+    /// The same rule for the verb that made this a data-loss bug rather than a lookup miss: `write`.
+    ///
+    /// Asserts on **what the server ends up holding**, not on the `Result` — the whole failure was a
+    /// `write` that returned `Ok` having overwritten a different object.
+    #[test]
+    fn writing_to_a_doubled_leading_slash_creates_a_second_object_instead_of_overwriting_the_first() {
+        let (base, store) = spawn_key_exact_store();
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        provider.write("/report.pdf", b"the original").expect("write the ordinary key");
+        provider.write("//report.pdf", b"the impostor").expect("write the leading-slash key");
+
+        let held = store.lock().unwrap().clone();
+        assert_eq!(
+            held.keys().cloned().collect::<Vec<_>>(),
+            vec!["/report.pdf".to_string(), "report.pdf".to_string()],
+            "these are two different S3 keys and the server must be holding both — before CPE-1722 the \
+             second write overwrote the first and the bucket held one object"
+        );
+        assert_bytes_eq(
+            held.get("report.pdf").unwrap(),
+            b"the original",
+            "the ordinary key's object was overwritten by a write to a different key",
+        );
+        assert_bytes_eq(held.get("/report.pdf").unwrap(), b"the impostor", "the leading-slash key");
+
+        // And the reads come back to the right caller, not crossed over.
+        assert_bytes_eq(&provider.read("/report.pdf").unwrap(), b"the original", "read the ordinary key");
+        assert_bytes_eq(&provider.read("//report.pdf").unwrap(), b"the impostor", "read the other one");
+    }
+
+    /// **The Foreman's round-trip**: every legal-in-S3 key shape this crate can reach must survive
+    /// create → list → stat → read → delete, against a store that keeps keys byte-exact.
+    ///
+    /// The two dot-segment shapes (`a/./b`, `a/../b`) are deliberately absent and are covered by
+    /// [`the_dot_segment_refusal_now_covers_list_too_so_no_folder_lists_children_it_cannot_open`]; they are
+    /// unreachable through `ureq` 2 for the reason recorded on [`guard_path_survives_the_client`].
+    #[test]
+    fn every_reachable_legal_key_shape_round_trips_create_list_stat_read_delete() {
+        // (provider path, the S3 key it must address, the prefix path that lists it, the leaf name that
+        // listing must show — `None` for a key with no displayable leaf, which must be *filtered and
+        // counted* rather than shown under an invented name)
+        let cases: &[(&str, &str, &str, Option<&str>)] = &[
+            ("/a//b.txt", "a//b.txt", "/a//", Some("b.txt")),
+            ("//lead.txt", "/lead.txt", "//", Some("lead.txt")),
+            // A key ending in a slash is the directory-marker convention, so `delimiter=/` rolls it up
+            // as a CommonPrefix — it lists as the *directory* `trail.txt`, which is what it is.
+            ("/trail.txt//", "trail.txt/", "/", Some("trail.txt")),
+            // A key that is nothing but slashes: addressable, but its leaf is the empty string, so
+            // `is_safe_s3_leaf` (CPE-1704) correctly declines to surface it as a navigable child name.
+            ("///", "/", "/", None),
+            ("/plain.txt", "plain.txt", "/", Some("plain.txt")),
+        ];
+
+        for (path, want_key, list_at, want_leaf) in cases {
+            let (base, store) = spawn_key_exact_store();
+            let mut provider = S3Provider::connect(&cfg(&base));
+            let body = format!("body for {path}").into_bytes();
+
+            provider.write(path, &body).unwrap_or_else(|e| panic!("write({path:?}): {e}"));
+            assert_eq!(
+                store.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
+                vec![want_key.to_string()],
+                "write({path:?}) stored the wrong key"
+            );
+
+            let entry = provider.stat(path).unwrap_or_else(|e| panic!("stat({path:?}): {e}"));
+            assert_eq!(
+                entry.size,
+                body.len() as u64,
+                "stat({path:?}) reported a size for something other than the object just written"
+            );
+            // The whole point of this ticket is that the two projections agree, so the name `stat`
+            // reports must be the name the listing shows for the same object. A key ending in `/` is a
+            // shape only CPE-1722 makes reachable, and `rsplit('/')` on one yields `""`.
+            assert_eq!(
+                entry.name,
+                want_leaf.unwrap_or("").to_string(),
+                "stat({path:?}) named the object differently from how list({list_at:?}) shows it"
+            );
+
+            let got = provider.read(path).unwrap_or_else(|e| panic!("read({path:?}): {e}"));
+            assert_bytes_eq(&got, &body, &format!("read({path:?})"));
+
+            // `list` reaches the same key through the QUERY STRING rather than the path, so it is a
+            // genuinely independent check that the two agree about where this key lives.
+            let (entries, filtered) =
+                provider.list_with_filtered_count(list_at).unwrap_or_else(|e| panic!("list: {e}"));
+            let names: Vec<&String> = entries.iter().map(|e| &e.name).collect();
+            match want_leaf {
+                Some(leaf) => assert!(
+                    entries.iter().any(|e| e.name == *leaf),
+                    "list({list_at:?}) did not surface {leaf:?} for key {want_key:?}; it returned {names:?}"
+                ),
+                // A key of only slashes has an empty leaf, so it cannot be surfaced as a navigable child
+                // name. What it must NOT do is appear under an invented one.
+                //
+                // NAMED LIMITATION, not an assertion of correctness: `parse_list_bucket_result` drops an
+                // empty `<CommonPrefixes>` leaf with a bare `continue` *before* the `filtered_count`
+                // arm, so this key is invisible AND uncounted — the listing is quietly one shorter than
+                // the bucket. That is CPE-1704's counting contract, which the `delete` belt reads as
+                // `entries.len() + filtered_count`; changing it is a decision for that ticket, not a
+                // rider on a path-grammar fix. Pinned here as `0` so the day someone does count it, this
+                // test reds and the limitation gets revisited deliberately rather than drifting.
+                None => {
+                    assert!(
+                        names.is_empty(),
+                        "key {want_key:?} has no displayable leaf, so list({list_at:?}) must not show \
+                         it under an invented name; it returned {names:?}"
+                    );
+                    assert_eq!(
+                        filtered, 0,
+                        "pinning the known limitation: an empty-leaf key is currently dropped uncounted"
+                    );
+                }
+            }
+
+            provider.delete(path).unwrap_or_else(|e| panic!("delete({path:?}): {e}"));
+            assert!(
+                store.lock().unwrap().is_empty(),
+                "delete({path:?}) left the bucket holding {:?} — it removed a different key, or none",
+                store.lock().unwrap().keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The grammar, as one table, at the boundary itself. [`provider_path_to_key_prefix`] is asserted
+    /// alongside [`provider_path_to_object_key`] on every row because CPE-1722's first acceptance
+    /// criterion is that the two **agree** — `list`/`mkdir` and `stat`/`read`/`write`/`delete` must not
+    /// end up with two path grammars inside one provider.
+    #[test]
+    fn one_path_grammar_decides_both_the_object_key_and_the_prefix_key() {
+        // (provider path, object key or None for the bucket root, prefix key)
+        let cases: &[(&str, Option<&str>, &str)] = &[
+            ("/a.txt", Some("a.txt"), "a.txt/"),
+            ("/a.txt/", Some("a.txt"), "a.txt/"),
+            ("//a.txt", Some("/a.txt"), "/a.txt/"),
+            ("///a.txt", Some("//a.txt"), "//a.txt/"),
+            ("/a//b.txt", Some("a//b.txt"), "a//b.txt/"),
+            ("/a.txt//", Some("a.txt/"), "a.txt//"),
+            ("///", Some("/"), "//"),
+            ("////", Some("//"), "///"),
+            ("/photos/2024", Some("photos/2024"), "photos/2024/"),
+            ("photos/2024/", Some("photos/2024"), "photos/2024/"),
+            // Dot segments are ordinary key bytes at this layer; only the transport refuses them.
+            ("/a/../b.txt", Some("a/../b.txt"), "a/../b.txt/"),
+            // The bucket root has no object key. `"//"` is the one path where the two projections
+            // legitimately differ: no object key (that key would be zero-length), but a real prefix —
+            // the virtual directory that holds a key like `/lead.txt`.
+            ("", None, ""),
+            ("/", None, ""),
+            ("//", None, "/"),
+        ];
+
+        for (path, want_key, want_prefix) in cases {
+            match want_key {
+                Some(k) => assert_eq!(
+                    provider_path_to_object_key(path).as_deref(),
+                    Ok(*k),
+                    "object key for {path:?}"
+                ),
+                None => assert!(
+                    provider_path_to_object_key(path).is_err(),
+                    "{path:?} is the bucket root, which is not an object"
+                ),
+            }
+            assert_eq!(provider_path_to_key_prefix(path), *want_prefix, "prefix key for {path:?}");
+        }
+    }
+
+    /// CPE-1722's first acceptance criterion is that the grammar is decided **once**, with `list`/`mkdir`
+    /// and `stat`/`read`/`write`/`delete` agreeing. A table can only assert that on the rows someone
+    /// thought to write down, so the agreement is asserted here as a **property** over a generated
+    /// cross-product of slash shapes: wherever a path has an object key, its prefix key must be exactly
+    /// that key plus one slash.
+    ///
+    /// Give either helper back its own independent `trim_matches('/')` and this reds immediately.
+    #[test]
+    fn the_object_key_and_the_prefix_key_agree_on_every_path_that_has_both() {
+        let slashes = ["", "/", "//", "///"];
+        let bodies = ["", "a.txt", "a/b.txt", "a//b.txt", "a/../b.txt", "photos"];
+        let mut checked = 0usize;
+        for lead in slashes {
+            for body in bodies {
+                for trail in slashes {
+                    let path = format!("{lead}{body}{trail}");
+                    if let Ok(key) = provider_path_to_object_key(&path) {
+                        assert_eq!(
+                            provider_path_to_key_prefix(&path),
+                            format!("{key}/"),
+                            "the two helpers disagree about {path:?} — two path grammars inside one \
+                             provider is exactly what CPE-1722 forbids"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 50, "the property must actually have been exercised, not vacuously true");
+    }
+
+    /// **CPE-1721's folded-in extra criterion**: "a folder must not list children that the same provider
+    /// will refuse to open."
+    ///
+    /// `list` puts the prefix in the query string, which `ureq`/`url` does not normalise, so this used to
+    /// return a perfectly browsable folder — while `stat`/`read`/`write` put the key in the path, which
+    /// *is* normalised, so every child of that folder was refused. Now the same guard decides both.
+    #[test]
+    fn the_dot_segment_refusal_now_covers_list_too_so_no_folder_lists_children_it_cannot_open() {
+        let (base, seen) = spawn_a_request_line_recorder();
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let outcome = provider.list_with_filtered_count("/a/../b");
+
+        // The harm first (CPE-1743): if the guard stops firing, red on the request that reached the
+        // server rather than on "expected an error".
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            0,
+            "list must refuse before sending: it would otherwise hand back a browsable folder whose \
+             every child this same provider then declines to open (outcome was {outcome:?})"
+        );
+        let err = outcome.expect_err("a prefix whose children are unopenable must be refused");
+        assert!(err.contains("could not open"), "the error must say what the asymmetry is: {err}");
+        assert!(err.contains("dot segment"), "the error must name what it found: {err}");
+        assert!(err.contains("CPE-1721"), "the error must point at the fix: {err}");
+
+        // The object verbs still refuse the same shape. Driven against the key-exact store, NOT the
+        // request-line recorder: the recorder answers nothing parseable, so `is_err()` against it holds
+        // with or without the guard and would have been coverage this test did not provide. Asserting
+        // the message distinguishes a real refusal from a transport failure.
+        let (base2, store) = spawn_key_exact_store();
+        let ok = S3Provider::connect(&cfg(&base2));
+        let child = ok.read("/a/../b/c.txt").expect_err("the child was openable after all");
+        assert!(child.contains("dot segment"), "a refusal, not a transport failure: {child}");
+        assert!(store.lock().unwrap().is_empty(), "a refused read must not have reached the store");
+        // And an ordinary prefix is unaffected.
+        ok.list_with_filtered_count("/a/b").expect("an ordinary prefix must still list");
+    }
+
+    /// The negative control for the fixture claim above, so "the filesystem-backed fixture cannot serve
+    /// these keys" is a measurement in the test suite rather than a sentence in a doc comment.
+    ///
+    /// # This test is deliberately written against the REAL fixture
+    ///
+    /// An earlier version asserted properties of `std::path::Path` with a locally re-implemented copy of
+    /// [`handle`]'s join expression. It contained no repo symbol at all, so **no change to `crates/s3`
+    /// could have turned it red** — including the very change it claims to be watching for. Its own
+    /// docstring promised the opposite ("if a future change makes this stop collapsing, this reds"),
+    /// which made it worse than absent: it certified the claim justifying [`spawn_key_exact_store`]'s
+    /// existence while being incapable of noticing that claim going stale.
+    ///
+    /// So it now drives [`spawn_s3_fixture`] itself. Two writes to two genuinely distinct S3 keys land
+    /// on **one** file, and the first object's bytes are gone — which is exactly the silent overwrite
+    /// CPE-1722 fixes in the provider, reproduced here in the *fixture* to prove the harness cannot tell
+    /// the two keys apart. The day someone gives that fixture key-exactness, this reds and the key-exact
+    /// store can be retired in favour of the simpler one.
+    #[test]
+    fn the_filesystem_backed_fixture_provably_cannot_represent_these_key_shapes() {
+        let (base, root, _requests) = spawn_s3_fixture();
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        // Two different S3 keys — `report.pdf` and `/report.pdf`. The provider now addresses them
+        // correctly (that is CPE-1722, pinned by the key-exact tests above); this is about what the
+        // `std::fs`-backed fixture can HOLD once they arrive.
+        provider.write("/report.pdf", b"the original").expect("write the ordinary key");
+        provider.write("//report.pdf", b"the impostor").expect("write the leading-slash key");
+
+        let files: Vec<String> = std::fs::read_dir(AsRef::<Path>::as_ref(&root))
+            .expect("the fixture root must be readable")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            files,
+            vec!["report.pdf".to_string()],
+            "the fixture was handed two distinct S3 keys and should be shown to hold only one file — if \
+             it now holds both, it has become key-exact and `spawn_key_exact_store` is redundant"
+        );
+        assert_bytes_eq(
+            &std::fs::read(root.join("report.pdf")).expect("the one file must exist"),
+            b"the impostor",
+            "the second key overwrote the first ON DISK: the filesystem is the thing that collapses \
+             these keys, which is why a round-trip test built on this fixture would pass without ever \
+             producing the interesting case",
+        );
     }
 }

@@ -146,23 +146,28 @@ client, and none of this applies to it yet.
   for, and `s3:ListBucket` as the permission to grant — plus whatever the server itself said.
 - **Uploads are a single request**, so an individual file larger than 5 GB isn't uploadable
   (multi-part upload isn't planned for the first version).
-- **Keys are taken literally in the middle, but the app currently tidies the ends.** A key is an opaque
-  string to S3, so `report.pdf`, `/report.pdf` and `//report.pdf` are genuinely three different objects,
-  and a bucket written by a tool that joined paths carelessly can hold all three. Inside a key the app
-  preserves that exactly — `a//b.txt` keeps its doubled slash. **At the start and end of a path it does
-  not yet:** typing `//report.pdf` currently addresses `report.pdf`, so writing to it would overwrite
-  that object rather than create a separate one. Reaching such a key deliberately isn't possible today;
-  you can't get there by clicking, only by typing it, and this is tracked as a known gap rather than
-  intended behaviour.
+- **Keys are taken literally, including the slashes.** A key is an opaque string to S3, so `report.pdf`,
+  `/report.pdf` and `//report.pdf` are genuinely three different objects, and a bucket written by a tool
+  that joined paths carelessly can hold all three. The app now preserves that everywhere in a path, at
+  the ends as well as the middle: `a//b.txt` keeps its doubled slash, and typing `//report.pdf` addresses
+  the object whose key really is `/report.pdf` rather than overwriting `report.pdf`. The rule is that a
+  path is a `/` followed by the key, plus an optional final `/` when you mean the folder rather than the
+  file — so a key that genuinely ends in a slash is typed with that slash doubled (`/archive.zip//`), and
+  a key made only of slashes works too. This describes how the app addresses such a key **once S3
+  connections are openable in your build**; today an S3 row reports an unsupported protocol when you
+  click it (see Limits). Even then you won't reach these by clicking, only by typing, since no listing
+  offers one.
 - **One shape of key can't be reached yet: a `.` or `..` between the slashes.** A key like
   `photos/../logo.png` is, to S3, an ordinary object with nothing to do with `logo.png` — but the HTTP
   library the app uses rewrites those segments away while building the request, so the app would end up
   asking for a different object than the one it signed for. Rather than silently fetch the wrong object,
-  the app refuses such a key and says why. Keys like this are rare and usually accidental; support for
-  them needs a different HTTP library and is tracked separately. One rough edge while that's outstanding:
-  *listing* such a folder isn't affected by the rewriting, so if you type a path like `/a/../b` you get a
-  folder that opens and browses normally — but every file shown inside it will refuse to open, for the
-  reason above. You can't reach one by clicking; only by typing it.
+  the app refuses such a key and says why. Keys like this are rare and usually accidental. Support for
+  them needs a different HTTP library; that has now been tested and does work, so this is a change the
+  app can make rather than a permanent limitation, and it's tracked as its own piece of work. In the
+  meantime the app is at least *consistent* about it: typing a path like `/a/../b` used to give you a
+  folder that opened and browsed normally while every file inside it refused to open, and now the folder
+  is refused up front with the same explanation, so you're never browsing a folder whose contents the app
+  already knows it can't show you.
 - **A key the app can't show safely is left out of the listing, and counted.** If a listing contains a
   key whose name the app can't render safely — an embedded `/`, a literal `..` — that entry is dropped
   rather than shown. The folder still opens normally, and the status bar tells you how many were left
@@ -289,9 +294,8 @@ there's no NFS client yet, so an NFS row can't be turned into a saved connection
 ## Limits
 
 S3 connections carry their own limits — no rename, a refusal to delete a folder that still has contents,
-virtual directories, single-request uploads, keys with `.`/`..` segments being unreachable, leading and
-trailing slashes on a typed path being tidied away, and access-key-only credentials — all described in
-the S3 section above. If a saved S3 row reports an
+virtual directories, single-request uploads, keys with `.`/`..` segments being unreachable, and
+access-key-only credentials — all described in the S3 section above. If a saved S3 row reports an
 unsupported protocol when you click it, your build has the form but not yet the provider.
 
 Reconnecting after an app restart may ask for your password/passphrase again even if you didn't
