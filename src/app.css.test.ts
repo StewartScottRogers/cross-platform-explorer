@@ -160,14 +160,7 @@ describe("app.css theme-token layering (CPE-1534)", () => {
 // zero-tolerance rule.
 const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 const BASELINE_FILES_WITH_HEX = 90;
-// 466 -> 467: CPE-1803 added ONE new hex fallback to TrashView.svelte -- `--tv-warn: var(--warn,
-// #b5872b)`, declared once and referenced three times via `var(--tv-warn)` rather than repeating the
-// literal, keeping the growth to the minimum this pattern requires. Same `var(--warn, #b5872b)`
-// caution-not-failure idiom already used by ImageCompareView.svelte/SidecarManager.svelte/etc.
-// (`--warn` itself isn't a defined semantic token, see the note above) -- not a new pattern, just
-// another call site of an existing one, which is why this is a deliberate baseline bump rather than a
-// token migration.
-const BASELINE_TOTAL_HEX_OCCURRENCES = 467;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 466;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

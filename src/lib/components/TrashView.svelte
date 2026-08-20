@@ -331,17 +331,20 @@
   .tv-body { flex: 1; overflow: auto; }
   .tv-empty { display: grid; place-items: center; height: 100%; color: var(--text-dim); }
   .tv-edge.error { color: var(--danger); }
-  /* CPE-1803: deliberately NOT `.tv-edge.error`'s red/`--danger` treatment — a degraded listing is a
-     caution (the listing came back thin; restore still works, entries may still be there), not the
-     hard-failure state `trash.error` represents. `--warn` is the established "caution, not failure"
-     token elsewhere in the app (ImageCompareView.svelte's `.ic-note`, SidecarManager.svelte, etc.). */
+  /* CPE-1803 review: deliberately NOT `.tv-edge.error`'s red/`--danger` treatment — a degraded listing
+     is a caution (the listing came back thin; restore still works, entries may still be there), not the
+     hard-failure state `trash.error` represents. Also deliberately NOT `var(--warn, <hex>)` — `--warn`
+     is never defined as a real token anywhere in `src/`, so that fallback always resolves to the literal
+     hex (AgentTimeline.svelte's `.hd-unclean-note` comment calls this out by name as an "older ... fallback
+     idiom" to avoid) — a fixed hex would render identically, and least legibly, in the dark theme, which
+     is exactly what the WCAG contrast guard exists to catch. Uses the same real, always-defined semantic
+     tokens `.hd-unclean-note` uses instead (`--border-strong`/`--surface-alt` + `--text`), so distinctness
+     from "empty" (plain dim text, no box) and "error" (red text, no box) comes from the bordered/filled
+     box, not from hue — no ratchet growth, no fixed-hex contrast risk. */
   .tv-degraded-note {
-    /* One hex fallback, referenced three times below — keeps this file's ratchet-guarded inline-hex
-       footprint (src/app.css.test.ts) to a single new literal instead of three. */
-    --tv-warn: var(--warn, #b5872b);
-    color: var(--tv-warn);
-    background: color-mix(in srgb, var(--tv-warn) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--tv-warn) 40%, transparent);
+    border: 1px solid var(--border-strong, var(--border));
+    background: var(--surface-alt, transparent);
+    color: var(--text);
     border-radius: var(--radius);
     padding: 8px 14px;
     font-size: 12px;
