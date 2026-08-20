@@ -3,7 +3,7 @@ id: CPE-1774
 title: A zip symlink entry creates a real link pointing outside the extraction folder, and reading it reads the outside file
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17

@@ -3,7 +3,7 @@ id: CPE-1775
 title: A refused archive entry is invisible — the toast still says "extracted" and the count is quietly lower
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17

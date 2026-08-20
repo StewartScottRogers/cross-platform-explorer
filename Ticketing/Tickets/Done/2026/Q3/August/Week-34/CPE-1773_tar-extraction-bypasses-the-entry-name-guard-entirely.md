@@ -3,7 +3,7 @@ id: CPE-1773
 title: Tar extraction bypasses the entry-name guard entirely, so a tar entry still vanishes into an NTFS stream
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17
