@@ -3,11 +3,11 @@ id: CPE-1810
 title: "--warn is not a theme token, so every caution colour in the app is a hard-coded hex"
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem

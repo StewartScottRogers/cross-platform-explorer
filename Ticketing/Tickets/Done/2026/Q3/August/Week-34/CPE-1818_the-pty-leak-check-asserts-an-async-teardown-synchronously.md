@@ -3,11 +3,11 @@ id: CPE-1818
 title: the PTY leak check asserts an asynchronous teardown synchronously, so it flakes on a loaded Windows runner
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
