@@ -45,6 +45,21 @@ name: ffmpeg/pdfium pin freshness check
 # out of release-sidecar.yml and expands them with the extracted pins via `envsubst`, so there is
 # structurally nothing left here to retype or drift.
 #
+# ── Recommending the right release line, and proving the recommendation resolves (CPE-1795) ─────
+# A single BtbN autobuild tag ships THREE parallel ffmpeg release lines as separate asset sets (e.g.
+# a bare -lgpl master snapshot, -lgpl-7.1, -lgpl-8.1), each with its own filename suffix. Grepping
+# for "the first -linux64-lgpl-*.tar.xz asset" picks whichever line happens to sort first -- not
+# necessarily the line release-sidecar.yml is pinned to -- and composing that version with
+# release-sidecar.yml's real suffix (extracted, never hand-typed) produces a URL for an asset that
+# does not exist. "Determine current live tags to recommend" now filters the live release's assets to
+# the SAME suffix "Extract pins" pulled from release-sidecar.yml, so the recommended version and the
+# suffix it will be combined with are two views of the one release line already in use, not
+# independently chosen. On top of that, "Validate the recommendation before publishing it" HEAD-checks
+# the exact URL that recommendation builds -- the same way the pin above is checked -- and withholds
+# a tag/version from the filed issue rather than publish one that itself 404s. Both bugs (wrong line,
+# unvalidated advice) were found the same way: constructing the recommended URL and a HEAD request
+# against it, by hand, after trusting a human-written ticket over this workflow's own output.
+#
 # ── Notification: a GitHub issue AND a red run, not a red badge alone ────────────────────────────
 # Nobody watches the Actions tab for a job that only exists to check dates -- a red scheduled run
 # would sit unseen the same way the rotted pin itself did before CPE-1762. On a confirmed 404 this
@@ -82,7 +97,7 @@ env:
 jobs:
   check-pins:
     runs-on: ubuntu-latest
-    timeout-minutes: 25 # sum of every step's own timeout (5+5+5+5=20) plus slack for local steps
+    timeout-minutes: 30 # sum of every step's own timeout (5x5=25, incl. CPE-1795's validate step) plus slack for local steps
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
@@ -113,6 +128,28 @@ jobs:
           ffmpeg_build_ver="$(extract FFMPEG_BUILD_VER)"
           pdfium_tag="$(extract PDFIUM_TAG)"
 
+          # CPE-1795: the ffmpeg filename suffix (e.g. "8.1") ties an asset to its release line, and
+          # like FFMPEG_BUILD_TAG/VER above it is NOT retyped here -- it's pulled straight from
+          # release-sidecar.yml's own linux64 fetch line. A single BtbN autobuild tag ships several
+          # parallel ffmpeg release lines (a bare -lgpl master snapshot, -lgpl-7.1, -lgpl-8.1, ...) as
+          # separate asset sets; "Determine current live tags to recommend" below uses this suffix to
+          # pick the SAME release line release-sidecar.yml already pins, instead of grabbing whichever
+          # asset sorts first -- the bug this ticket exists to fix.
+          # Uniqueness-checked the same way match_for() below checks fetch-URL matches: `| head -1`
+          # alone would silently pick whichever line sorts first if this pattern ever matched twice
+          # (even a stray comment) -- the exact "first match wins" failure shape this ticket exists
+          # to close, one step earlier than where the recommendation itself is built.
+          ffmpeg_suffix_matches=$(grep -oP 'linux64-lgpl-\K[0-9.]+(?=\.tar\.xz)' "$RELEASE_SIDECAR_YML" || true)
+          ffmpeg_suffix_count=$(printf '%s\n' "$ffmpeg_suffix_matches" | grep -c . || true)
+          if [ "$ffmpeg_suffix_count" != "1" ]; then
+            echo "::error::expected exactly one ffmpeg linux64 lgpl suffix (e.g. '8.1') in" \
+                 "${RELEASE_SIDECAR_YML}, found ${ffmpeg_suffix_count} -- its fetch line moved," \
+                 "was reformatted, or gained a second reference. Fix the extraction in" \
+                 "ffmpeg-pin-freshness.yml before trusting this workflow again." >&2
+            exit 1
+          fi
+          ffmpeg_suffix="$ffmpeg_suffix_matches"
+
           # Test hook (CPE-1763): a manual dispatch can override the extracted ffmpeg tag to dry-run
           # the stale-pin path (e.g. against the known-pruned autobuild-2026-08-01-13-21) without
           # ever touching the real pin in release-sidecar.yml. Empty on every scheduled run.
@@ -124,10 +161,12 @@ jobs:
           echo "ffmpeg_build_tag=${ffmpeg_build_tag}" >> "$GITHUB_OUTPUT"
           echo "ffmpeg_build_ver=${ffmpeg_build_ver}" >> "$GITHUB_OUTPUT"
           echo "pdfium_tag=${pdfium_tag}" >> "$GITHUB_OUTPUT"
+          echo "ffmpeg_suffix=${ffmpeg_suffix}" >> "$GITHUB_OUTPUT"
           echo "extracted from ${RELEASE_SIDECAR_YML}:"
           echo "  FFMPEG_BUILD_TAG=${ffmpeg_build_tag}"
           echo "  FFMPEG_BUILD_VER=${ffmpeg_build_ver}"
           echo "  PDFIUM_TAG=${pdfium_tag}"
+          echo "  ffmpeg suffix (release line)=${ffmpeg_suffix}"
 
       # CPE-1763 review finding (blocker #2): do not reassemble asset URLs from parts with a
       # hand-typed filename suffix. Pull release-sidecar.yml's own `fetch "https://…"` lines and
@@ -146,7 +185,7 @@ jobs:
             exit 1
           fi
 
-          url_for() {
+          match_for() {
             local needle="$1"
             local matches count
             matches=$(grep -oP 'fetch "\Khttps://[^"]+' "$RELEASE_SIDECAR_YML" | grep -F "$needle" || true)
@@ -155,7 +194,10 @@ jobs:
               echo "::error::expected exactly one fetch URL containing '${needle}' in ${RELEASE_SIDECAR_YML}, found ${count} -- its download step was restructured; update the extraction in ffmpeg-pin-freshness.yml to match" >&2
               exit 1
             fi
-            printf '%s' "$matches" | envsubst
+            printf '%s' "$matches"
+          }
+          url_for() {
+            match_for "$1" | envsubst
           }
 
           {
@@ -164,6 +206,13 @@ jobs:
             echo "pdfium_win64_url=$(url_for 'pdfium-win-x64.tgz')"
             echo "pdfium_linux64_url=$(url_for 'pdfium-linux-x64.tgz')"
             echo "pdfium_macos_url=$(url_for 'pdfium-mac-arm64.tgz')"
+            # CPE-1795: raw (unexpanded, still containing literal ${FFMPEG_BUILD_TAG}/${FFMPEG_BUILD_VER})
+            # templates, reused by "Validate the recommendation before publishing it" below to build
+            # the SAME URLs against a CANDIDATE tag/version before ever recommending it -- one
+            # template, two expansions (the current pin above, the recommended pin later), never a
+            # second hand-typed copy of the suffix.
+            echo "ffmpeg_win64_url_tmpl=$(match_for 'win64-lgpl')"
+            echo "ffmpeg_linux64_url_tmpl=$(match_for 'linux64-lgpl')"
           } >> "$GITHUB_OUTPUT"
 
       - name: HEAD-check pinned assets
@@ -241,6 +290,7 @@ jobs:
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
+          FFMPEG_SUFFIX: ${{ steps.pins.outputs.ffmpeg_suffix }}
         run: |
           set -uo pipefail
           # Recommend the newest MONTH-END anchor, not the newest daily: BtbN retains anchors
@@ -262,9 +312,17 @@ jobs:
           done
           ffmpeg_live_ver=""
           if [ -n "$ffmpeg_live_tag" ]; then
+            # CPE-1795: filter to the SAME release-line suffix release-sidecar.yml is already pinned
+            # to (extracted in "Extract pins" above, e.g. "8.1") -- not just the first -lgpl-* asset
+            # that matches. A single autobuild tag ships several parallel ffmpeg release lines (a bare
+            # -lgpl master snapshot, -lgpl-7.1, -lgpl-8.1, ...) as separate asset sets, and grabbing
+            # whichever sorts first recommends a version whose filename suffix release-sidecar.yml was
+            # never updated to match -- producing a URL that 404s. This is exactly the bug that broke
+            # a release when someone followed this check's advice.
+            ffmpeg_suffix_re=$(printf '%s' "$FFMPEG_SUFFIX" | sed 's/\./\\./g')
             ffmpeg_live_ver=$(gh api "repos/BtbN/FFmpeg-Builds/releases/tags/${ffmpeg_live_tag}" \
               -q '.assets[].name' 2>/dev/null \
-              | grep -oP 'ffmpeg-\K.+(?=-linux64-lgpl-[0-9.]+\.tar\.xz)' | head -1 || true)
+              | grep -oP "ffmpeg-\K.+(?=-linux64-lgpl-${ffmpeg_suffix_re}\.tar\.xz)" | head -1 || true)
           fi
           pdfium_live_tag=$(gh api repos/bblanchon/pdfium-binaries/releases/latest \
             -q '.tag_name' 2>/dev/null || true)
@@ -278,10 +336,10 @@ jobs:
           # first live run of the stale path (run 32326260348): staleness was detected correctly and
           # then this step died before the issue could be filed. DO NOT move these back inline.
           if [ -z "$ffmpeg_live_tag" ]; then
-            ffmpeg_live_tag="<could not determine -- query repos/BtbN/FFmpeg-Builds/releases manually>"
+            ffmpeg_live_tag="<could not determine -- query repos/BtbN/FFmpeg-Builds/releases manually; pick a month-end anchor tag, not a rolling daily -- see this workflow's cadence comment>"
           fi
           if [ -z "$ffmpeg_live_ver" ]; then
-            ffmpeg_live_ver="<could not determine -- read it off the release -linux64-lgpl-*.tar.xz asset name>"
+            ffmpeg_live_ver="<could not determine -- read it off the -linux64-lgpl-${FFMPEG_SUFFIX}.tar.xz asset name, on the release line release-sidecar.yml already pins>"
           fi
           if [ -z "$pdfium_live_tag" ]; then
             pdfium_live_tag="<could not query bblanchon/pdfium-binaries -- check manually>"
@@ -291,8 +349,104 @@ jobs:
           echo "ffmpeg_live_ver=${ffmpeg_live_ver}" >> "$GITHUB_OUTPUT"
           echo "pdfium_live_tag=${pdfium_live_tag}" >> "$GITHUB_OUTPUT"
 
-      - name: File an issue (deduped) so a human sees it
+      # CPE-1795: this is the fix's second half. Picking the right release line (above) closes the
+      # bug that actually shipped; this step is the backstop for the NEXT variant of it -- it
+      # HEAD-checks the URL this workflow is about to recommend, using the exact same fetch-line
+      # templates "HEAD-check pinned assets" used for the CURRENT pin (only the tag/version expanded
+      # into them differ). A recommendation that itself 404s is worse than no recommendation: a human
+      # trusts it, repins, and breaks the very release build this workflow exists to protect. Refuse
+      # to publish an unvalidated one.
+      #
+      # Review finding: an earlier version of this step treated ANY non-200 (a confirmed 404, a
+      # transient 403/429/5xx, or curl's connect-level "000") as equally "unverified" -- exactly the
+      # "inconclusive != a confirmed problem" conflation "HEAD-check pinned assets" above already
+      # guards against for the CURRENT pin, just moved one level downstream to the recommendation.
+      # Mirrors that step's 200/404/inconclusive classification instead: a confirmed 404 withholds
+      # the recommendation with a "this candidate is wrong" message; an inconclusive result fails
+      # this step loudly (mirroring the sibling exactly) but "File an issue" below still runs
+      # (`if: always()`) because the CURRENT pin's staleness is a separately-confirmed fact that a
+      # rate limit while checking the *candidate* must never suppress -- it instead publishes a
+      # clearly-labeled "could not confirm, re-run before trusting" note, never a confident-and-wrong
+      # or a confident-and-silent one.
+      - name: Validate the recommendation before publishing it
+        id: validate
         if: steps.check.outputs.stale == 'true'
+        timeout-minutes: 5
+        env:
+          FFMPEG_BUILD_TAG: ${{ steps.live.outputs.ffmpeg_live_tag }}
+          FFMPEG_BUILD_VER: ${{ steps.live.outputs.ffmpeg_live_ver }}
+          FFMPEG_WIN64_URL_TMPL: ${{ steps.urls.outputs.ffmpeg_win64_url_tmpl }}
+          FFMPEG_LINUX64_URL_TMPL: ${{ steps.urls.outputs.ffmpeg_linux64_url_tmpl }}
+        run: |
+          set -uo pipefail
+          export FFMPEG_BUILD_TAG FFMPEG_BUILD_VER
+          verified="true"
+          inconclusive="false"
+          not_found_note=""
+          inconclusive_note=""
+
+          if [[ "$FFMPEG_BUILD_TAG" == "<could not determine"* || -z "$FFMPEG_BUILD_TAG" \
+             || "$FFMPEG_BUILD_VER" == "<could not determine"* || -z "$FFMPEG_BUILD_VER" ]]; then
+            verified="false"
+            not_found_note="the live ffmpeg tag/version could not be determined upstream -- see the run log above\n"
+          else
+            win64_url=$(printf '%s' "$FFMPEG_WIN64_URL_TMPL" | envsubst)
+            linux64_url=$(printf '%s' "$FFMPEG_LINUX64_URL_TMPL" | envsubst)
+            for entry in "win64 ${win64_url}" "linux64 ${linux64_url}"; do
+              label=${entry%% *}
+              url=${entry#* }
+              code=$(curl -sSL --max-time 30 --retry 3 --retry-delay 2 --retry-connrefused \
+                -o /dev/null -w '%{http_code}' --head "$url")
+              echo "  recommended ffmpeg ${label}: HTTP ${code} (${url})"
+              # Same three-way split as "HEAD-check pinned assets" above: 200 fine, 404 a CONFIRMED
+              # problem with this candidate, anything else inconclusive (never treated as a
+              # confirmed problem, never silently swallowed either).
+              case "$code" in
+                200) ;;
+                404)
+                  verified="false"
+                  not_found_note="${not_found_note}recommended ffmpeg ${label} asset confirmed missing: HTTP 404 - ${url}\n"
+                  ;;
+                *)
+                  verified="false"
+                  inconclusive="true"
+                  inconclusive_note="${inconclusive_note}recommended ffmpeg ${label} check was inconclusive: HTTP ${code} - ${url}\n"
+                  ;;
+              esac
+            done
+          fi
+
+          echo "verified=${verified}" >> "$GITHUB_OUTPUT"
+          echo "inconclusive=${inconclusive}" >> "$GITHUB_OUTPUT"
+          {
+            echo "not_found_note<<RECNOTFOUND_EOF"
+            echo -e "$not_found_note"
+            echo "RECNOTFOUND_EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "inconclusive_note<<RECINCONCLUSIVE_EOF"
+            echo -e "$inconclusive_note"
+            echo "RECINCONCLUSIVE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$inconclusive" = "true" ]; then
+            echo "::error::could not conclusively verify the recommended ffmpeg asset(s) (non-200, non-404 status -- looks like a transient network/CDN/rate-limit issue, NOT evidence the recommendation is wrong):"
+            echo -e "$inconclusive_note"
+            echo "::error::not treating this as a confirmed-bad recommendation. The filed issue will say so and ask for a re-run -- see 'File an issue' below, which still runs despite this step failing."
+            exit 1
+          elif [ "$verified" != "true" ]; then
+            echo "::warning::the recommended ffmpeg tag/version failed its own pre-publish HEAD-check (confirmed 404, or could not be determined) -- withholding it from the issue"
+          fi
+
+      # `if: always()` is load-bearing: "Validate the recommendation" above intentionally exits 1 on
+      # an inconclusive HEAD-check (mirroring "HEAD-check pinned assets"'s fail-loud convention), but
+      # the CURRENT pin's staleness was already confirmed (not inconclusive) by that earlier step --
+      # a rate limit while checking the *candidate* replacement must never suppress the notification
+      # about the pin that is ALREADY confirmed broken. Without always() here, GitHub Actions would
+      # skip this step whenever validate fails, silently dropping the primary "file an issue" signal
+      # -- the exact swallowed-notification failure mode CPE-1763's design note above warns against.
+      - name: File an issue (deduped) so a human sees it
+        if: always() && steps.check.outputs.stale == 'true'
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -300,6 +454,11 @@ jobs:
           FFMPEG_LIVE_TAG: ${{ steps.live.outputs.ffmpeg_live_tag }}
           FFMPEG_LIVE_VER: ${{ steps.live.outputs.ffmpeg_live_ver }}
           PDFIUM_LIVE_TAG: ${{ steps.live.outputs.pdfium_live_tag }}
+          REC_VERIFIED: ${{ steps.validate.outputs.verified }}
+          REC_INCONCLUSIVE: ${{ steps.validate.outputs.inconclusive }}
+          REC_NOT_FOUND_NOTE: ${{ steps.validate.outputs.not_found_note }}
+          REC_INCONCLUSIVE_NOTE: ${{ steps.validate.outputs.inconclusive_note }}
+          FFMPEG_SUFFIX: ${{ steps.pins.outputs.ffmpeg_suffix }}
         run: |
           set -uo pipefail
           label="dep-pin-stale"
@@ -316,8 +475,22 @@ jobs:
           {
             printf '%s\n\n' "The ffmpeg/pdfium pin freshness check (\`.github/workflows/ffmpeg-pin-freshness.yml\`, run [${GITHUB_RUN_ID}](${run_url})) found one or more pinned native-dep downloads used by \`release-sidecar.yml\` are no longer reachable:"
             echo -e "$FAILURES"
-            printf '\n%s\n' "Upstream's current live tag to bump to (a stable month-end anchor, not a rolling daily -- see the workflow's cadence comment):"
-            printf '%s\n' "- ffmpeg (BtbN/FFmpeg-Builds): tag \`${FFMPEG_LIVE_TAG}\`, version \`${FFMPEG_LIVE_VER}\`"
+            if [ "$REC_VERIFIED" = "true" ]; then
+              printf '\n%s\n' "Upstream's current live tag to bump to (HEAD-checked 200 on the SAME release line release-sidecar.yml already pins before this issue was filed; a stable month-end anchor, not a rolling daily -- see the workflow's cadence comment):"
+              printf '%s\n' "- ffmpeg (BtbN/FFmpeg-Builds): tag \`${FFMPEG_LIVE_TAG}\`, version \`${FFMPEG_LIVE_VER}\`"
+            elif [ "$REC_INCONCLUSIVE" = "true" ]; then
+              # Distinct from the confirmed-404 branch below on purpose (review finding): this is NOT
+              # evidence the candidate is wrong, only that checking it did not conclusively succeed --
+              # conflating the two would be exactly the "confident and wrong" failure mode CPE-1795
+              # exists to close, moved one level downstream from the pin to the recommendation.
+              printf '\n%s\n' "**Could not confirm the ffmpeg recommendation** -- this is NOT a confirmed-bad candidate, just an inconclusive check (a transient network/CDN/rate-limit issue), so treat it as unconfirmed rather than wrong:"
+              printf '%s\n' "$REC_INCONCLUSIVE_NOTE" | sed '/^$/d; s/^/- /'
+              printf '%s\n' "Unconfirmed candidate: tag \`${FFMPEG_LIVE_TAG}\`, version \`${FFMPEG_LIVE_VER}\` -- it may well be correct. Re-run this workflow via workflow_dispatch to get a validated recommendation before trusting it."
+            else
+              printf '\n%s\n' "**Could not produce a validated ffmpeg recommendation** -- the automatically-derived tag/version was confirmed unusable (see below), so it is withheld rather than risk repeating CPE-1795 (a wrong recommendation once broke the very release this check protects):"
+              printf '%s\n' "$REC_NOT_FOUND_NOTE" | sed '/^$/d; s/^/- /'
+              printf '%s\n' "Check https://github.com/BtbN/FFmpeg-Builds/releases manually and pick a stable month-end anchor tag (not a rolling daily -- see the workflow's cadence comment) on the SAME release line release-sidecar.yml already pins (currently suffixed -lgpl-${FFMPEG_SUFFIX}). If that release line no longer exists upstream at all, moving to a different line is a deliberate human call, not this check's -- update BOTH release-sidecar.yml's suffix and this recommendation logic to match whichever line is chosen."
+            fi
             printf '%s\n\n' "- pdfium (bblanchon/pdfium-binaries): \`${PDFIUM_LIVE_TAG}\`"
             printf '%s\n' "Update \`FFMPEG_BUILD_TAG\` / \`FFMPEG_BUILD_VER\` / \`PDFIUM_TAG\` in the \"Stage native deps\" step of \`.github/workflows/release-sidecar.yml\` (see CPE-1762, and CPE-1789 for the currently-known-due re-pin). Then re-run this workflow via workflow_dispatch to confirm the new pin is reachable before it blocks a release."
             printf '\n%s\n' "Filed automatically by CPE-1763. Please convert to a CPE-NNN ticket on triage (see Ticketing/wiki.md, \"External findings\")."
