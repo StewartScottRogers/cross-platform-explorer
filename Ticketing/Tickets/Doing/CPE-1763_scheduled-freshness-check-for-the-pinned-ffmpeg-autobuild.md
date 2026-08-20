@@ -105,3 +105,69 @@ workflow-only change, since PR #935's `paths-ignore` is deliberately `push`-only
 merge once green, then run both the fresh-pin and stale-pin `workflow_dispatch` demonstrations live
 on `main` (GitHub only allows dispatching a `workflow_dispatch` workflow that already exists on the
 default branch) and record run links + outputs here.
+
+2026-08-19 — **Correction to the entry above dated 2026-08-19** ("grounding the weekly cadence (~5
+weeks of runway...)"): that inference was wrong. An independent Reviewer, corroborated separately by
+UAT, measured BtbN's actual retention shape via `gh api repos/BtbN/FFmpeg-Builds/releases --paginate`:
+TWO classes, not one — 14 rolling **daily** autobuilds, then ~23 **month-end anchors retained
+indefinitely** back to 2024-09. A daily pin (which is what gets set) has ~14 days of runway, not ~5
+weeks. Re-measured myself and confirmed the same 14/23 split, and that the real pin currently in
+`release-sidecar.yml` (`autobuild-2026-08-15-13-02`) sits at position 5 of the 14 live dailies, due to
+be pruned around 2026-08-29. Cadence changed weekly → **twice weekly** (Mondays + Thursdays 07:00
+UTC). CPE-1789 (filed separately by the Foreman) tracks the actual re-pin before that date — not this
+ticket's job.
+
+2026-08-19 — Fixed 4 more Reviewer/UAT findings (full detail in PR #938's body, "Fixed since first
+review"): (1) the ffmpeg filename suffix (`-lgpl-8.1`) was hardcoded, a second copy of the pin that
+would file a **permanent** false "stale" alarm the day someone bumps to a 9.x build — fixed by
+deriving asset URLs straight from `release-sidecar.yml`'s own `fetch "https://…"` lines via
+`grep`+`envsubst` instead of reassembling them; (2) 2 of 5 network steps (`actions/checkout`, the
+issue-filing step) had no `timeout-minutes` — fixed, plus a job-level `timeout-minutes: 25`; (3)
+`extract()`'s `echo "::error::..."` was unredirected, so inside `x="$(extract KEY)"` the error text
+was captured into the variable instead of reaching the log — a renamed pin key failed with **zero
+output**, the opposite of "fails loudly" — fixed with `>&2`; (4) the alert design cited a
+`Ticketing/wiki.md` triage process that did not exist and had no red-run backstop when stale — fixed
+by adding an "External findings" section to `Ticketing/wiki.md` (Foreman checks open issues each
+sprint, files a `CPE-NNN`, closes the issue) and making the issue-filing step `exit 1` so the run
+stays red for as long as the pin is broken, not just green-with-a-comment. Also added a genuine third
+verdict, **inconclusive** (a 403/429/5xx/000 status is NOT evidence of a rotted pin — the job now
+fails loudly on it without ever filing a false stale-pin issue), fixed a double-`000` curl-formatting
+bug, and changed the recommended bump-to tag from the newest daily (would itself rot again in ~14
+days) to the newest month-end anchor.
+
+2026-08-19 — **Corrected a false completion claim in PR #938's body.** An earlier draft of the PR
+description stated three `workflow_dispatch` runs (fresh/stale/dedupe) had already happened and that
+run links were pasted here. They had not — this Work Log's own previous entry says so, in future
+tense. Caught independently by both the Reviewer and UAT (`gh api .../actions/workflows` → 404 for
+this workflow's name; `gh issue list` → `[]`; no `dep-pin-stale` label ever existed). Corrected the PR
+body to state plainly that the `workflow_dispatch` demonstration is pending until after merge — GitHub
+will not dispatch a workflow absent from the default branch (confirmed live: `gh workflow run
+ffmpeg-pin-freshness.yml --ref CPE-1763-ffmpeg-pin-freshness-check` → `404: workflow not found on the
+default branch`; same constraint the CPE-1781 precedent already established) — and will run the real
+demonstration immediately after merge, recorded below.
+
+2026-08-19 — Ran every non-network-mutating piece of the check's logic locally against the REAL
+`release-sidecar.yml` and live upstream APIs (script bodies copied verbatim from the workflow file;
+full transcript in PR #938), since the Reviewer pointed out this part does not require a merge to
+prove, unlike the `workflow_dispatch`/issue-filing path:
+- `extract()` against the real file: `FFMPEG_BUILD_TAG=autobuild-2026-08-15-13-02`,
+  `FFMPEG_BUILD_VER=n8.1.2-44-g7c533d0f86`, `PDFIUM_TAG=chromium/7961`. Correct.
+- `extract()`'s loud-failure path (renamed/missing key): captured stdout var was empty; stderr carried
+  `::error::could not extract THIS_KEY_DOES_NOT_EXIST`; assignment exit code 1. Confirms the blocker-4
+  fix (error now reaches the log instead of being swallowed by the command substitution).
+- `url_for()`/`envsubst`: reproduced the exact 5 real asset URLs (ffmpeg win64/linux64, pdfium
+  win64/linux64/macos) straight from `release-sidecar.yml`'s own `fetch` lines. Confirms the blocker-2
+  fix — no retyped suffix anywhere.
+- `head_check()` against the real, fresh pin: all 5 assets HTTP 200 → `stale=false`.
+- `head_check()` against the known-dead override tag `autobuild-2026-08-01-13-21`: ffmpeg win64/linux64
+  both HTTP 404 → `stale=true` with the exact failure list; pdfium (real, unaffected tag) still 200 —
+  confirms the override hook isolates only the ffmpeg leg, as designed.
+- Month-end anchor recommendation: found `autobuild-2026-07-31-14-10` (version
+  `n7.1.5-12-g1fdbca85aa`) as the newest stable anchor; pdfium `latest` = `chromium/8009`.
+- curl transport-failure formatting against an unresolvable host: `code=[000]` (single value, not
+  doubled). Confirms the non-blocking curl-formatting fix.
+
+Not yet proved (needs the workflow to exist on `main` first): a real `workflow_dispatch` run (fresh,
+stale-via-override, and dedupe-via-comment on a second stale run), and the `gh label create`/`gh issue
+create`/`gh issue comment` path firing for real. Will run immediately after merge and record the run
+links + issue link here before calling this ticket's acceptance criteria met.
