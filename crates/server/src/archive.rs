@@ -712,7 +712,7 @@ fn extraction_dest_error(dest: &Path, e: &std::io::Error) -> String {
 /// in a private directory cannot collide with itself, so **exhaustion is no longer reachable by
 /// accumulation**; every attempt after the first would have to lose a race with something that is
 /// deliberately squatting names inside our own session directory. The bound stays because that squatter
-/// (a same-user process, or our own [`row1_a_squatted_temp_directory_is_stepped_over_not_written_into`]
+/// (a same-user process, or our own `row1_a_squatted_temp_directory_is_stepped_over_not_written_into`
 /// test) must still end as a clear error rather than an infinite loop.
 const TEMP_TARGET_ATTEMPTS: u64 = 1024;
 
