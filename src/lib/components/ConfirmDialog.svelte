@@ -1,7 +1,18 @@
 <script lang="ts">
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
+  import { displaySafeName } from "../filename";
 
+  // CPE-1790: `title`/`message` arrive as free-text strings a caller has already composed around an
+  // escaped name (e.g. `` `"${displaySafeName(item.name)}" will be moved...` ``) — this dialog has no
+  // way to know which substring, if any, is filesystem-derived. Escaping the WHOLE string on arrival is
+  // safe regardless: `displaySafeName` only replaces the twelve bidi/format control characters (never an
+  // ordinary letter), so it's a no-op on plain prose and idempotent on a caller's own already-escaped
+  // substring (its replacement text — `[RLO]`, `[LRM]`, … — is plain ASCII, containing none of the
+  // characters it looks for, so a second pass finds nothing left to replace; see `src/lib/filename.ts`'s
+  // own doc comment). That makes this LEAF the single point of truth instead of a caller-remembered
+  // convention: every render below is provably safe to `bidiEscape.guard.test.ts`
+  // (`src/lib/bidiRenderScan.ts`) whether or not the caller wrapped its own name first.
   export let title = "Are you sure?";
   export let message = "";
   export let confirmLabel = "OK";
@@ -18,9 +29,9 @@
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <h2>
       {#if danger}<span class="warn"><Icon name="delete" size={18} /></span>{/if}
-      {title}
+      {displaySafeName(title)}
     </h2>
-    <p>{message}</p>
+    <p>{displaySafeName(message)}</p>
     <div class="actions">
       <button class="btn" on:click={() => dispatch("cancel")}>Cancel</button>
       <button class="btn primary" class:danger on:click={() => dispatch("confirm")}>

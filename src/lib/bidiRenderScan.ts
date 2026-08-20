@@ -603,10 +603,10 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
   return [...offenders].sort(compareOffenders);
 }
 
-/** CPE-1768 (widened this round — reviewer B1): the membership CRITERION — a `.svelte` file must carry a
- *  `REGISTRY` entry in `bidiEscape.guard.test.ts` (even `[]`, once `findUnsafeRenderLines` proves it draws
- *  nothing unsafe) if its source references a value shaped like a filesystem entry's identity, in ANY of
- *  the concrete shapes this codebase actually uses for one:
+/** CPE-1768 (widened this round — reviewer B1; widened again CPE-1790): the membership CRITERION — a
+ *  `.svelte` file must carry a `REGISTRY` entry in `bidiEscape.guard.test.ts` (even `[]`, once
+ *  `findUnsafeRenderLines` proves it draws nothing unsafe) if its source references a value shaped like a
+ *  filesystem entry's identity, in ANY of the concrete shapes this codebase actually uses for one:
  *   - a `.name`/`.path`/`.fullPath`/`.oldName`/`.cwd`/`.root`/`.folder`/`.dir`/`.target`/`.fileName`/
  *     `.filePath`/`.linkPath` property access (`entry.name`, `e.path`, `f.fullPath`, `rc.oldName`,
  *     `s.cwd`, `rule.root`, `job.source`, `sig.target`, …),
@@ -614,8 +614,21 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *     fileName`, or a plain `let folder = outDir` deriving one from a differently-named prop — the exact
  *     "intermediate variable" shape this module's own header (line 7) already names as a render pattern),
  *   - a call to one of this codebase's own path-splitting helpers: `baseName(`/`basename(`/`parentDir(`,
- *   - an `{#each … as { name }}`/`{ path }` (or plain JS `const { name } = …`) destructuring pattern, or
- *   - `["name"]`/`['path']` bracket property access.
+ *   - an `{#each … as { name }}`/`{ path }` (or plain JS `const { name } = …`) destructuring pattern,
+ *   - `["name"]`/`['path']` bracket property access, or
+ *   - CPE-1790: a call to the escape helpers themselves, `displaySafeName(`/`displaySafePath(`. Every
+ *     other trigger above recognizes a component by the SHAPE of the value it receives; this one instead
+ *     recognizes a component by the shape of what it DOES with an opaque value it received under a
+ *     generic prop name (`title`/`message`/`error` — none of which match any bullet above) — the "leaf
+ *     escapes what it renders" model CPE-1760 confirmed for `MediaPlayer` and CPE-1790 applied to
+ *     `ConfirmDialog`/`PasswordPromptDialog`. A component that already calls the escape helper is, by
+ *     construction, handling filesystem-derived text and must be pinned in `REGISTRY` so a regression
+ *     that later deletes the call (reverting to a raw `{message}`) reds the exact-equality check instead
+ *     of silently going unwatched again. Confirmed non-disruptive: every `.svelte` file under
+ *     `src/lib/components/` that already calls either helper was independently already a `REGISTRY` key
+ *     before this bullet existed (verified by sweeping the codebase at CPE-1790 time), so this addition
+ *     only ever newly flags a file the moment it starts (or stops, at the git-blame level) doing exactly
+ *     the thing REGISTRY exists to pin.
  *  The first CPE-1768 pass shipped only the first bullet's five spellings plus `export let name`/`path` —
  *  literally a five-property regex, the same "regex zoo" shape the header above (lines 4-10) says this
  *  module's CORE engine already replaced, just relocated from expressions to filenames. Review confirmed
@@ -626,15 +639,30 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  **In scope** (example): `<div title={entry.path}>{entry.name}</div>` — the ordinary shape of a
  *  directory-listing row, a dialog operating on selected files, or a component fed a name/path prop by
  *  its parent (`<TagEditor name={entry.name} />`); equally, `export let root: string;` — any prop whose
- *  OWN NAME reads as a filesystem location, regardless of what expression eventually renders it.
+ *  OWN NAME reads as a filesystem location, regardless of what expression eventually renders it; equally,
+ *  `<p>{displaySafeName(message)}</p>` — a component whose OWN prop name is generic but which itself
+ *  calls the escape helper on arrival.
  *  **Out of scope** (example): `StatusBar.svelte` as it stands today — item counts, a disk-free label, git
  *  branch/ahead/behind, a plain `notice` string. Nothing in it is a filesystem entry's name or path (or a
- *  variable NAMED like one), so it doesn't match this pattern and carries no `REGISTRY` entry. The moment
- *  it (or any file) starts rendering one of these shapes, `isCandidateComponent` flags it and the
- *  membership test in `bidiEscape.guard.test.ts` reds until it's registered — registration becomes the
- *  thing you cannot forget, not the thing you must remember. See that test's own mutation-probe
- *  demonstration (CPE-1768 AC: the review's original `StatusBar.svelte` injected-render probe, reproduced
- *  without leaving a permanent unregistered fixture in the tree).
+ *  variable NAMED like one), and it doesn't call either escape helper, so it doesn't match this pattern
+ *  and carries no `REGISTRY` entry. The moment it (or any file) starts rendering one of these shapes,
+ *  `isCandidateComponent` flags it and the membership test in `bidiEscape.guard.test.ts` reds until it's
+ *  registered — registration becomes the thing you cannot forget, not the thing you must remember. See
+ *  that test's own mutation-probe demonstration (CPE-1768 AC: the review's original `StatusBar.svelte`
+ *  injected-render probe, reproduced without leaving a permanent unregistered fixture in the tree).
+ *
+ *  **Still not exhaustive (CPE-1790's own honest boundary):** a component with a generic prop name that
+ *  neither matches a name/path SHAPE nor yet calls `displaySafeName`/`displaySafePath` — the exact bug
+ *  this ticket fixed for `ConfirmDialog`/`PasswordPromptDialog` before they called the helper — is still
+ *  invisible to this criterion until either it starts calling the helper (this bullet) or a future caller
+ *  happens to pass it something matching a name/path SHAPE (the bullets above). There is no general
+ *  textual signal for "this opaque prop will someday carry a filesystem name": that is exactly the
+ *  component-prop-pass-through boundary this module's header already states rather than hides. CPE-1790's
+ *  sweep of `export let (label|caption|text|detail|body|notice|heading|desc|description|content|summary)`
+ *  across every component found one further structural sibling, `MacroParamPrompt.svelte` (same
+ *  `title`/`message` shape as `PasswordPromptDialog`, reused for the macro-parameter prompt) — currently
+ *  fed only static copy by its one caller, so left unregistered rather than defensively escaped, but
+ *  worth the same treatment the moment a caller composes it around a real name.
  *
  *  Deliberately broad and heuristic, not a parser — the exact inversion of the "regex zoo" this module's
  *  core engine (`isSafeExpr`/`findUnsafeRenderLines`) replaced. That's fine here because a false positive
@@ -648,7 +676,7 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  KNOWN to use for a filesystem location today; a genuinely novel prop name (`export let whereItLives`)
  *  is still invisible to it, same honest boundary every heuristic in this file states rather than hides. */
 export const CANDIDATE_PATTERN =
-  /\.(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|(?:export\s+)?let\s+(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|\b(?:baseName|basename|parentDir)\s*\(|\{\s*(?:name|path)\s*\}|\[\s*["'](?:name|path)["']\s*\]/;
+  /\.(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|(?:export\s+)?let\s+(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|\b(?:baseName|basename|parentDir|displaySafeName|displaySafePath)\s*\(|\{\s*(?:name|path)\s*\}|\[\s*["'](?:name|path)["']\s*\]/;
 
 /** True if `src` (a whole `.svelte` file's text — script and markup both, unlike `findUnsafeRenderLines`
  *  which only ever looks at markup) matches `CANDIDATE_PATTERN` and therefore must carry a `REGISTRY`
