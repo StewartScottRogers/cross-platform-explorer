@@ -90,3 +90,36 @@ Filed by the Foreman, 2026-08-19, from the post-merge demonstration of PR #938, 
 
 Related: **CPE-1763** (the check itself), **CPE-1789** (the pin it watches, due to be pruned around
 2026-08-29 — so this needs to work *before* then), **CPE-1767** (the same apostrophe-parsing class).
+
+## Work Log — 2026-08-19, branch CPE-1792-freshness-stale-path-apostrophe
+
+**Fix.** Replaced all three `${var:-prose}` fallbacks in the "Determine current live tags" step with
+plain `if [ -z ... ]` assignments, which are immune to punctuation, and left a comment at the site
+explaining why they must not be moved back inline.
+
+**Verification — both paths proven live, for the first time in this workflow's existence.** The
+pre-merge demonstration was genuinely impossible (GitHub 404s a workflow absent from the default
+branch). Now that CPE-1763 has merged, `--ref <branch>` dispatch works, so the fix was proven on its own
+branch *before* merging:
+
+| Run | Ref | Input | Result |
+|-----|-----|-------|--------|
+| [32326252755](https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/32326252755) | `main` | none (real pin) | **success** — fresh path, filed nothing |
+| [32326260348](https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/32326260348) | `main` | `override_ffmpeg_build_tag=autobuild-2026-08-01-13-21` | **failure at step 6** — the bug: staleness detected, then the step died on the apostrophe and step 7 was skipped |
+| [32326450303](https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/32326450303) | this branch | same override | **step 6 success, step 7 filed the issue** and exited non-zero as designed |
+
+That middle row is the red-proof: same input, same workflow, only the quoting differs, and it is the
+difference between "reports nothing" and "reports correctly".
+
+**The notification path is now exercised end-to-end.** Run 32326450303 created the `dep-pin-stale`
+label (which had never existed) and filed issue #942 — the first issue ever opened on this repo. Its
+body names both failing URLs with their HTTP status, recommends a **month-end anchor** rather than a
+soon-pruned daily (`autobuild-2026-07-31-14-10`, version `n7.1.5-12-g1fdbca85aa`), points at the exact
+step in `release-sidecar.yml` to edit, cross-references CPE-1789, and tells the reader to re-run via
+`workflow_dispatch` to confirm before it blocks a release. Actionable without spelunking.
+
+Issue #942 has been closed as the deliberate test artifact it was.
+
+**Still open, deliberately not done here:** a `bash -n` / shellcheck pass over this file's `run:` blocks
+in CI. A syntax error that only manifests on a rarely-taken branch is exactly what a static check is
+for, and it is the thing that would have caught this before merge. Worth its own ticket.
