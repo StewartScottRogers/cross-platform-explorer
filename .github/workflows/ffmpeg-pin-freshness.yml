@@ -27,9 +27,10 @@ name: ffmpeg/pdfium pin freshness check
 # runway -- a deliberate `FFMPEG_BUILD_TAG_OVERRIDE_REASON` daily override (see release-sidecar.yml
 # and the CI guard) -- is rare and self-documenting, and (CPE-1802) no longer relies on someone
 # remembering to workflow_dispatch this workflow by hand during that window: ci.yml's "ffmpeg pin is
-# a month-end anchor" guard job does that FOR them, automatically, on every push to `main` for as
-# long as the override stays set -- a small number of extra runs during a short window, not a
-# tightened schedule for everyone.
+# a month-end anchor" guard job does that FOR them, automatically, on every push to `main` that
+# reaches that job (its own paths-ignore, CPE-1781, skips a ticket-bookkeeping-only push, which can't
+# be the one that sets/clears the override anyway), for as long as the override stays set -- a small
+# number of extra runs during a short window, not a tightened schedule for everyone.
 #
 # ── Staleness check: exact-URL reachability, not an age heuristic -- with a THIRD verdict ───────
 # Each check is a HEAD request against the SAME URL release-sidecar.yml's "Stage native deps" step

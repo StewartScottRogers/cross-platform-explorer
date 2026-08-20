@@ -258,9 +258,9 @@ jobs:
           # guard is silenced, so treat this as a short-lived, revisited override, not a way to
           # switch back to dailies permanently. CPE-1802: setting this ALSO arms a second net
           # automatically -- once this merges to main, ci.yml's guard job dispatches
-          # ffmpeg-pin-freshness.yml on every push to main for as long as this stays set, so that
-          # ~14-day runway is actually watched instead of relying on someone remembering to
-          # workflow_dispatch it by hand.
+          # ffmpeg-pin-freshness.yml on every push to main that reaches that job, for as long as this
+          # stays set, so that ~14-day runway is actually watched instead of relying on someone
+          # remembering to workflow_dispatch it by hand.
           FFMPEG_BUILD_TAG_OVERRIDE_REASON: ""
         run: |
           set -euo pipefail

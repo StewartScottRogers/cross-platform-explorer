@@ -1385,16 +1385,26 @@ jobs:
       # mitigation on offer was "someone remembers to workflow_dispatch the freshness check by
       # hand" -- the exact discipline-based net CPE-1796 replaced, reintroduced at the one moment
       # someone is already doing something unusual and under time pressure. So fire it automatically
-      # instead: every push to `main` for as long as the override stays set. Push only, not PR --
-      # the override isn't live until it merges, and a fork PR's GITHUB_TOKEN couldn't dispatch
-      # anyway. During a short override window this is a small number of extra runs, which is the
-      # trade the ticket calls out explicitly over trying to express a conditional schedule in
-      # GitHub Actions (awkward to do at all).
+      # instead: every push to `main` that reaches this job, for as long as the override stays set.
+      # Push only, not PR -- the override isn't live until it merges, and a fork PR's GITHUB_TOKEN
+      # couldn't dispatch anyway. NOT literally every push to the branch: this workflow's own
+      # `paths-ignore` (CPE-1781) skips a ticket-bookkeeping-only push under `Ticketing/Tickets/**` /
+      # `Ticketing/Sprints/**` entirely, so this job (and this step) doesn't run for one of those --
+      # harmless here, since a bookkeeping-only commit can't be the one that sets or clears
+      # FFMPEG_BUILD_TAG_OVERRIDE_REASON in release-sidecar.yml anyway. During a short override
+      # window this is still a small number of extra runs, which is the trade the ticket calls out
+      # explicitly over trying to express a conditional schedule in GitHub Actions (awkward to do at
+      # all).
       - name: Fire the freshness check now that the override is live
         if: steps.guard.outputs.override_active == 'true' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Not interpolated directly into the run: script below (the canonical Actions
+          # script-injection shape) even though the push trigger's `branches: [main]` makes this
+          # provably always "main" today -- routing it through env: means widening that trigger list
+          # later can't reopen an injection path here even if nobody remembers this comment.
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           echo "::notice::FFMPEG_BUILD_TAG_OVERRIDE_REASON is active on main -- dispatching ffmpeg-pin-freshness.yml now instead of waiting for its weekly schedule (CPE-1802), so the daily pin's ~14-day runway is actually watched."
-          gh workflow run ffmpeg-pin-freshness.yml --ref "${{ github.ref_name }}"
+          gh workflow run ffmpeg-pin-freshness.yml --ref "$REF_NAME"
