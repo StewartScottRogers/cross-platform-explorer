@@ -82,7 +82,9 @@ enforcement decision).
 
 **2026-08-14 — enumeration published, then guards written from it.**
 
-The table is in `crates/server/src/archive.rs`'s "Archive creation & extraction" section comment (17 rows).
+The table is in `crates/server/src/archive.rs`'s "Archive creation & extraction" section comment (17 rows
+as first published; **23 today** — see the amendment at the bottom of this file, which is the part of this
+ticket that turned out to matter most).
 Split:
 
 - **Rows 1–5 — app-owned.** Every single-entry extractor (`extract_archive_entry`, `extract_tar_entry`,
@@ -247,3 +249,32 @@ estimate revised M → S, and its checklist widened to `extract_7z_safe` (the on
 registered Tauri command); CPE-1744 given the two UAT addenda — the docs' "still follows a folder
 shortcut" sentence is false for TAR, and `create_empty_zip` onto a plain existing file still returns a
 bare `"The file exists. (os error 80)"`.
+
+---
+
+## Amendment — 2026-08-20 (CPE-1773 / CPE-1774): the table had a hole, and the hole was load-bearing
+
+The enumeration published above listed **17 rows and named no TAR sink at all**. That omission is the
+single most consequential artefact this ticket produced, because scope for the follow-ups was taken *from
+this table*:
+
+- **CPE-1758** widened entry_name_is_safe (colons/ADS, ..evil, Windows device names, trailing dot and
+  space) and applied it at rows 15/16/19/20 — the rows this table listed. It was never called on the TAR
+  path, so .tar/.tar.gz/.tgz kept writing ile:stream into an NTFS alternate data stream, on the
+  path right-click → Extract actually uses, with errors: []. **CPE-1773.**
+- Nothing in the table asked about a **link entry's target** at all, because every row asks about a
+  *destination path* and this attack's payload is the link's *content*. Both zip::ZipArchive::extract
+  and 	ar's Entry::unpack_in materialise an archive-declared symlink with its raw stored target and no
+  check of any kind. **CPE-1774**, and the TAR half of it was live in the shipping UI.
+
+The table now carries **rows 21–23** (	ar_unpack, extract_tar_stream, and extract_archive's zip
+fallback) with their guards, plus a measured note that sevenz-rust 0.6.1 cannot materialise a link at
+all (the string symlink appears zero times in its source), so 7z is genuinely out of that group rather
+than merely unexamined. The create_dir_all reconciliation count moved 10 → 11 for row 21's own dest
+creation.
+
+**The lesson this ticket should carry forward:** a sink omitted from an inventory that bills itself as
+*the* inventory is a sink nobody is scheduled to guard, and every later ticket that scopes itself from
+that inventory inherits the hole silently. The row-count reconciliation line was added for exactly this
+reason and it did not catch this one, because it reconciles File::create calls — and rows 19–23 own
+none.

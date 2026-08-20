@@ -268,12 +268,17 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // link is written as an ordinary file whose contents are the target text. CPE-1746 already covers a link
 // **already sitting in `dest`** on that path, which is the other half.
 //
-// **The row count reconciles to the source.** `archive.rs` has 10 `create_dir_all` calls: 2 in row 1 (the
+// **The row count reconciles to the source.** `archive.rs` has 11 `create_dir_all` calls: 2 in row 1 (the
 // shared root, and re-creating this session's own root if another instance's sweeper removed it —
 // CPE-1786), 4 in row 17 (the extraction `dest` roots), 4 in row 18 (per-entry, inside the two ZIP
-// loops), plus row 1's two exclusive `fs::create_dir`s (the session root, then the per-extraction
+// loops), **1 in row 21** (`tar_unpack`'s, which is `tar::Archive::_unpack`'s own `dst` creation,
+// reproduced along with the rest of that loop — CPE-1773; it is a row-17-shaped call, on the same
+// user-named `dest`, and shares row 17's wording guard via `extraction_dest_error`), plus row 1's two
+// exclusive `fs::create_dir`s (the session root, then the per-extraction
 // directory inside it). Rows 2–16 are the 13 `File::create` calls, the 1
-// `fs::write` and the 1 `create_new`. Row 18 was missing from the first version of this table, which
+// `fs::write` and the 1 `create_new`. Rows 21–23 add no `File::create` of their own (the writes are
+// `tar`'s and `zip`'s), so the `File::create` count is unchanged by CPE-1773/1774.
+// Row 18 was missing from the first version of this table, which
 // billed itself as the inventory — the count line exists so the next reader can check that claim in one
 // subtraction instead of trusting it (PR #906 review).
 //
@@ -5817,7 +5822,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CPE-1773 / CPE-1774 / CPE-1775 â€” the tar name guard, link targets, and the visible refusal
+    // CPE-1773 / CPE-1774 / CPE-1775 — the tar name guard, link targets, and the visible refusal
     // -----------------------------------------------------------------------
 
     /// A tar holding one regular-file entry with an arbitrary raw `name`.
@@ -5873,8 +5878,8 @@ mod tests {
     }
 
     /// The six names CPE-1758 taught `entry_name_is_safe` to refuse, plus the payload that makes the
-    /// first one visible. `x.` and `x ` and the device names are Windows-only shapes â€” `entry_name_is_safe`
-    /// is the identity on other platforms for those â€” so the expectation is computed from the guard
+    /// first one visible. `x.` and `x ` and the device names are Windows-only shapes — `entry_name_is_safe`
+    /// is the identity on other platforms for those — so the expectation is computed from the guard
     /// itself rather than hard-coded per name, which is what lets one table serve both platforms AND
     /// makes the tar-vs-zip agreement assertion below meaningful rather than circular (the two formats
     /// are compared to **each other**, not to the guard).
@@ -5885,7 +5890,7 @@ mod tests {
     /// `Path::exists`/`fs::read` are the wrong question for this family and each is wrong differently:
     /// on Windows `fs::read("<dir>/nul")` opens the NUL **device** and returns `Ok(vec![])` whether or
     /// not anything was written, and `fs::read("<dir>/file:stream")` opens an alternate data stream that
-    /// no directory listing shows. What the user meets is the listing, so that is what this asks â€” with
+    /// no directory listing shows. What the user meets is the listing, so that is what this asks — with
     /// the stream case checked separately at the call site, since a listing can never reveal one.
     fn dest_lists(dest: &Path, name: &str) -> bool {
         let out = dest.join(name);
@@ -5897,13 +5902,13 @@ mod tests {
     /// **CPE-1773's core: tar and zip must answer identically, and the harm is asserted before the
     /// `Result` is unwrapped.**
     ///
-    /// Measured on `main` through the real streamed path, i.e. what right-click â†’ Extract did:
+    /// Measured on `main` through the real streamed path, i.e. what right-click → Extract did:
     ///
     /// ```text
     /// [M1 tar      STREAMED] Ok(done:1, errors:[])   ADS bytes = Some("ADS PAYLOAD 24 bytes ok!!")
     /// [M1 tar.gz   STREAMED] Ok(done:1, errors:[])   ADS bytes = Some("ADS PAYLOAD 24 bytes ok!!")
-    /// [M1 "..evil"/"con"/"x."/"x "] Ok(done:1, errors:[])  â€” written literally
-    /// [M1 "nul"]                    Err("failed to unpack `â€¦\\nul`")  â€” took the whole archive down
+    /// [M1 "..evil"/"con"/"x."/"x "] Ok(done:1, errors:[])  — written literally
+    /// [M1 "nul"]                    Err("failed to unpack `…\\nul`")  — took the whole archive down
     /// ```
     ///
     /// This family **fails by succeeding**, so every filesystem assertion runs before `expect`.
@@ -5963,7 +5968,7 @@ mod tests {
                     );
                     if name.contains(':') {
                         // The ADS-specific half. `read_dir` cannot see an alternate data stream at all
-                        // â€” that is exactly why the original bug was invisible â€” so the only way to ask
+                        // — that is exactly why the original bug was invisible — so the only way to ask
                         // whether the payload landed is to open the stream by name.
                         assert!(
                             fs::read(dest.join(name)).is_err(),
@@ -5975,7 +5980,7 @@ mod tests {
                 }
 
                 let report = report.expect(
-                    "a refused entry must not abort the extraction â€” on main `nul` did exactly that, \
+                    "a refused entry must not abort the extraction — on main `nul` did exactly that, \
                      taking every other entry down with it (CPE-1773)",
                 );
                 assert_eq!(
@@ -5987,7 +5992,7 @@ mod tests {
                 if expected_refused {
                     assert_eq!(
                         report.skipped, 1,
-                        "{ext}/{name:?}: the refusal must be COUNTED (CPE-1775) â€” a count of 0 is the \
+                        "{ext}/{name:?}: the refusal must be COUNTED (CPE-1775) — a count of 0 is the \
                          success toast that hides it; got {report:?}"
                     );
                     assert!(
@@ -6010,7 +6015,7 @@ mod tests {
                 // carries only the one entry (`craft_zip_with_entry_name` is a hand-built single-entry
                 // zip, because the zip WRITER refuses several of these names) while the tar carries the
                 // bystander too, so their `done` counts are not the same quantity. Both halves of what
-                // the user actually meets â€” refused or not, and what the report says about it â€” are.
+                // the user actually meets — refused or not, and what the report says about it — are.
                 let zr = zip_report.as_ref().expect("the zip reference run must succeed");
                 assert_eq!(
                     (report.skipped, report.errors.clone()),
@@ -6076,7 +6081,7 @@ mod tests {
     }
 
     /// The four escaping link-target shapes CPE-1774 lists, as `(label, target)` built against `outside`
-    /// â€” a victim file that sits beside, not inside, the extraction folder.
+    /// — a victim file that sits beside, not inside, the extraction folder.
     fn cpe1774_escaping_targets(outside: &Path) -> Vec<(&'static str, String)> {
         vec![
             ("plain-parent", format!("..{}victim.txt", std::path::MAIN_SEPARATOR)),
@@ -6087,7 +6092,7 @@ mod tests {
     }
 
     /// **CPE-1774, the zip half.** The Security Auditor's reproduction, re-run: a zip entry named
-    /// `evil_link` (a name our guard accepts, and correctly â€” it is perfectly ordinary) whose stored
+    /// `evil_link` (a name our guard accepts, and correctly — it is perfectly ordinary) whose stored
     /// content is a path that leaves the extraction folder. Measured on `main`:
     ///
     /// ```text
@@ -6121,7 +6126,7 @@ mod tests {
             );
             assert!(
                 fs::read_to_string(&leaf).unwrap_or_default() != "SECRET",
-                "{label}: and reading the 'extracted file' must not return the victim's contents â€” that \
+                "{label}: and reading the 'extracted file' must not return the victim's contents — that \
                  is the measurement the auditor took, and it is the one that matters even if the link's \
                  file type ever changes"
             );
@@ -6137,7 +6142,7 @@ mod tests {
             );
             assert!(
                 err.contains("evil_link") && err.contains("outside the extraction folder"),
-                "{label}: the refusal must name the ENTRY and say the target left the folder â€” an \
+                "{label}: the refusal must name the ENTRY and say the target left the folder — an \
                  `is_err()` check here would stay green through a straight revert, because the crate \
                  already errors on some malformed archives. Got: {err}"
             );
@@ -6145,7 +6150,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// **CPE-1774, the tar half â€” the one the ticket could only reason about from crate source, and the
+    /// **CPE-1774, the tar half — the one the ticket could only reason about from crate source, and the
     /// one that turned out to be live in the shipping UI.** `Entry::unpack_in` canonicalisation-validates
     /// a HARD link's target (`validate_inside_dst`) and calls `symlink(&src, dst)` with the raw bytes for
     /// a SYMLINK. Measured on `main`, both tar paths, `evil_link` -> an absolute target:
@@ -6218,7 +6223,7 @@ mod tests {
                         report.errors.iter().any(|e| {
                             e.starts_with("evil_link: ") && e.contains("outside the extraction folder")
                         }),
-                        "{label}: and record WHICH entry and WHY â€” the entry name is ordinary, so the \
+                        "{label}: and record WHICH entry and WHY — the entry name is ordinary, so the \
                          target is the only thing that tells the user what happened; got {:?}",
                         report.errors
                     );
@@ -6233,7 +6238,7 @@ mod tests {
     ///
     /// A legitimate relative link pointing *inside* the extraction root must still be materialised. If
     /// this runner cannot make one, `require_staged` decides whether that is a legitimate skip or a red
-    /// build (CPE-1717) â€” which is exactly the question "did the escape tests above verify anything?"
+    /// build (CPE-1717) — which is exactly the question "did the escape tests above verify anything?"
     #[test]
     fn cpe1774_a_legitimate_link_pointing_inside_the_extraction_root_still_extracts() {
         let d = scratch("cpe1774_ok");
@@ -6261,7 +6266,7 @@ mod tests {
             let leaf = dest.join("good_link");
             assert!(
                 fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
-                "{label}: a link whose target stays inside the extraction folder must still be created â€” \
+                "{label}: a link whose target stays inside the extraction folder must still be created — \
                  refusing every link entry was one of the three policies CPE-1774 offered and it is NOT \
                  the one taken, because source tarballs legitimately carry internal links"
             );
@@ -6277,7 +6282,7 @@ mod tests {
     /// **CPE-1775's invariant, across every streamed skip path at once.**
     ///
     /// `ArchiveReport::skipped` is what the headline notice reads and `errors` is the reason behind it.
-    /// Before this ticket only the second existed, and the frontend read it **only when `failed > 0`** â€”
+    /// Before this ticket only the second existed, and the frontend read it **only when `failed > 0`** —
     /// so a refused entry produced a plain "1 item extracted" toast with the count quietly one lower.
     /// This asserts the two halves stay in step whichever guard fired, which is what makes
     /// `ArchiveReport::skip` the only way to record a skip.
@@ -6312,7 +6317,7 @@ mod tests {
             assert_eq!(
                 report.skipped as usize,
                 report.errors.len(),
-                "{label}: every recorded reason must be counted and every count must have a reason â€” \
+                "{label}: every recorded reason must be counted and every count must have a reason — \
                  they are two halves of one record and a site that grows one without the other is \
                  exactly the CPE-1775 defect, re-made. Got {report:?}"
             );

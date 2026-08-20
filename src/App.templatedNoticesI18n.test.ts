@@ -27,6 +27,10 @@ const SAMPLES: { key: string; params: Record<string, string | number> }[] = [
   { key: "notice.macroGone", params: { name: "Nightly cleanup" } },
   { key: "notice.vaultReadFailed", params: { name: "secrets.cpevault", error: "permission denied" } },
   { key: "notice.extractedTo", params: { entry: "archive.zip", dest: "Documents/archive" } },
+  // CPE-1775's headline half. Here because it is the notice that tells a user their archive contained
+  // something that could not be written safely — a locale that silently fell back to English for it, or
+  // dropped the count, would hide exactly what the ticket exists to surface.
+  { key: "notice.archiveSkippedMany", params: { count: 2 } },
   { key: "notice.selectedItemsMatchingOne", params: { count: 1, pattern: "*.md" } },
   { key: "notice.selectedItemsMatchingMany", params: { count: 7, pattern: "*.md" } },
   { key: "op.failedSingleMove", params: { name: "budget.xlsx", error: "disk full" } },

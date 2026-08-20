@@ -6,6 +6,31 @@
   import Icon from "./Icon.svelte";
   import { displaySafePath } from "../filename";
 
+  /** The disclosure button's text (CPE-1775) — a count plus literals, no filesystem text of any kind.
+   *  A **skip** and a **failure** must read differently: a refused entry did not fail, and calling it a
+   *  failure is as wrong as the success toast this ticket removed. */
+  function whyLabel(t: TransferState): string {
+    const n = t.report?.errors.length ?? 0;
+    if ((t.report?.skipped ?? 0) > 0 && (t.report?.failed ?? 0) === 0) return `· ${n} skipped — why?`;
+    return `· ${n} problem${n === 1 ? "" : "s"} — why?`;
+  }
+
+  /** Which finished rows have their reason list open (CPE-1775). Ids, so a dismissed row forgets. */
+  let expanded = new Set<number>();
+  function toggleReasons(id: number) {
+    expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+    expanded = expanded; // Svelte 4: reassign to trigger reactivity on a mutated Set
+  }
+
+  // Reason lines are rendered through `displaySafePath` AT THE RENDER SITE below, not via a local
+  // helper: every one starts with an **archive-controlled entry name** (`"{name}: {reason}"`), so it is
+  // attacker-supplied text whose bidi/format controls would reorder the line — the CPE-1712 spoof, in
+  // the one place that reports a hostile archive. `displaySafePath` rather than `displaySafeName`
+  // because a reason routinely carries full paths. Inlined because `bidiRenderScan` can only prove a
+  // literal `displaySafeName(…)`/`displaySafePath(…)` call safe; a wrapper named anything else reads as
+  // a raw render to the guard, which is exactly the class of miss that guard was rebuilt to catch.
+  // Before CPE-1775 this text was drawn raw into a hover-only `title=` tooltip.
+
   /** Past-tense verb for the row's op — "copied"/"moved"/"compressed"/"extracted" (CPE-1184). */
   function verb(t: TransferState): string {
     switch (t.op) {
@@ -50,8 +75,18 @@
         <div class="sub">
           {percent(t)}%
           {#if t.total_items > 0}<span class="dim"> · {t.done_items}/{t.total_items} files</span>{/if}
-          {#if t.report && t.report.errors.length > 0}<span class="dim" title={t.report.errors.join("\n")}> · {t.report.errors.length} error{t.report.errors.length === 1 ? "" : "s"}</span>{/if}
+          <!-- CPE-1775: the reasons were hover-only, on a `title=` tooltip, in a panel the user has no
+               reason to open — so a security refusal was effectively unreadable. A button instead, with
+               the wording naming what actually happened (skipped vs failed) and the list one click away. -->
+          {#if t.report && t.report.errors.length > 0}
+            <button class="why" aria-expanded={expanded.has(t.id)} on:click={() => toggleReasons(t.id)}>{whyLabel(t)}</button>
+          {/if}
         </div>
+        {#if t.report && expanded.has(t.id) && t.report.errors.length > 0}
+          <ul class="reasons">
+            {#each t.report.errors as e}<li>{displaySafePath(e)}</li>{/each}
+          </ul>
+        {/if}
       </div>
     {/each}
   </div>
@@ -77,4 +112,18 @@
   .fill.err { background: var(--danger); }
   .sub { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .dim { color: var(--text-faint); }
+  .why {
+    font: inherit; color: var(--text-dim); background: none; border: 0; padding: 0 0 0 2px;
+    cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .why:hover { color: var(--text); }
+  .reasons {
+    margin: 6px 0 0; padding: 6px 8px; list-style: none;
+    background: var(--surface-alt); border-radius: 6px;
+    font-size: 11px; color: var(--text); max-height: 132px; overflow-y: auto;
+  }
+  /* The reason text is a full sentence naming an entry and a path, so it WRAPS rather than ellipsing —
+     truncating it would put the user back where CPE-1775 found them. */
+  .reasons li { overflow-wrap: anywhere; }
+  .reasons li + li { margin-top: 4px; }
 </style>

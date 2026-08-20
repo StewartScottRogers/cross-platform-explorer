@@ -126,7 +126,7 @@
   import { initDropStack, addToDropStack, dropStackEntries, removeFromDropStack } from "./lib/dropStack";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
-  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
+  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, archiveSkipNotice, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import NearDuplicatesDialog from "./lib/components/NearDuplicatesDialog.svelte";
@@ -6172,14 +6172,24 @@
           if (!r.cancelled && r.failed === 0) {
             const ONE = r.op === "compress" ? "notice.archiveCompressedOne" : "notice.archiveExtractedOne";
             const MANY = r.op === "compress" ? "notice.archiveCompressedMany" : "notice.archiveExtractedMany";
-            showNotice($t(r.transferred === 1 ? ONE : MANY, { count: r.transferred }));
+            // CPE-1775: a refused entry has to reach the headline, not only the panel. `archiveSkipNotice`
+            // returns null when nothing was skipped, so the ordinary case is byte-identical to before.
+            const skipped = archiveSkipNotice(r, $t);
+            if (skipped) showNotice(skipped, true);
+            else showNotice($t(r.transferred === 1 ? ONE : MANY, { count: r.transferred }));
             loadPath(currentPath).catch(() => {});
           }
           return;
         }
         if (r.cancelled) { showNotice(pending.cancelledNotice); return; }
         if (r.failed > 0) { showNotice(r.errors[0] || pending.failedNotice, true); return; }
+        // `onSuccess` runs synchronously inside this `Promise.resolve(...)` and shows the call site's own
+        // "Extracted X to Y" notice; the skip notice deliberately REPLACES it (CPE-1775), because a
+        // headline that says only "extracted" about a run that refused an entry is the whole bug. The
+        // refresh in `.then()` is unaffected either way.
         Promise.resolve(pending.onSuccess()).then(() => refreshBatchApplyTarget(pending.dir)).catch(() => {});
+        const skipped = archiveSkipNotice(r, $t);
+        if (skipped) showNotice(skipped, true);
         return;
       }
       // CPE-1533: a Drop-Stack "Copy all here" is tagged in `dropStackTransferOps` with the exact paths
