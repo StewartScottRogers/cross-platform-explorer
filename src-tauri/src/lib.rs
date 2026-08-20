@@ -14159,10 +14159,12 @@ mod tests {
     /// `getenv` in the same process (PR #940 review).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn lock_real_trash() -> TrashTestGuard<'static> {
-        // Named to match `crates/server/src/shell_menu.rs`'s `HOME_ENV_LOCK` — same pattern (a named
-        // poison-tolerant mutex guarding a process-global env var mutation), greppable as one family.
-        static TRASH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let mutex = TRASH_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // CPE-1785 DIAGNOSTIC VARIANT A (PR #940 review, blocker 1 red-first proof): mutex NEUTRALISED,
+        // redirect kept -- each call gets its OWN private mutex instead of sharing one, so the five
+        // real-trash tests no longer serialise against each other. THROWAWAY, reverted via `git checkout
+        // --` before the next diagnostic commit. Do not merge.
+        let leaked_mutex: &'static std::sync::Mutex<()> = Box::leak(Box::new(std::sync::Mutex::new(())));
+        let mutex = leaked_mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(target_os = "linux")]
         {
             let scratch = cpe_server::fsutil::scratch_dir("cpe-1785-trash-xdg");
