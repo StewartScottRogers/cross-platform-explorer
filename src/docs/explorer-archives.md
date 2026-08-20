@@ -44,6 +44,11 @@ A `.zip`/`.tar`/`.tar.gz`/`.tgz`/`.gz`/`.7z`/`.iso`/`.rar` file gets two read-on
   (rename, delete, paste, new folder, …) is refused with *"This is a read-only view inside an archive."*
 - **Opening a file** from inside an archive extracts just that one entry to a temporary file and opens
   the temp copy — the archive itself is never touched by opening something inside it.
+- **Those temp copies clean themselves up.** Everything extracted this way goes into one folder for the
+  current app session, under your system temp folder. The app tidies away finished sessions the next time
+  it extracts anything, and a session that stays open all day keeps only its most recent extractions. If
+  you edit an opened temp copy and want to keep the changes, save it somewhere real — it is a scratch
+  copy, not the file inside the archive.
 - A **password-protected zip can't be listed** without its password. Double-clicking one prompts for the
   password and, once given, extracts it to a sibling folder instead of opening in place (with a notice
   explaining what happened) — the preview-pane listing, by contrast, just reports it can't be opened, with
