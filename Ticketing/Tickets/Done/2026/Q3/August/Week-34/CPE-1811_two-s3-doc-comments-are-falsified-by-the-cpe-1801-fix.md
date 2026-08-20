@@ -3,11 +3,11 @@ id: CPE-1811
 title: two S3 doc comments are falsified by the CPE-1801 fix, and the guard's own doc omits the arm it now leans on
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
