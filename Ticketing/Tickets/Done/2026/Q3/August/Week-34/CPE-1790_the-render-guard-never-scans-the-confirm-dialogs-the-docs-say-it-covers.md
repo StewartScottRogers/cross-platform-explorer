@@ -3,7 +3,7 @@ id: CPE-1790
 title: the render guard never scans the confirm dialogs the docs claim it covers
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
