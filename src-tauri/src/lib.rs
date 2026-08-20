@@ -14143,20 +14143,35 @@ mod tests {
     /// OWN trash directory instead of merely taking turns with the shared one. That removes the sharing
     /// entirely rather than just scheduling around it, and — the same objection the round-trip probe's
     /// own comment raises about the Windows Recycle Bin — it also stops this suite from ever touching a
-    /// real Linux developer's actual trash. `trash::os_limited` has no equivalent redirection knob on
-    /// Windows (the Recycle Bin is addressed by drive, not by an env var), so there the mutex alone is
-    /// the fix; Windows CI has not been observed to hit this race, but the shared resource is the same
-    /// shape, so the tests are serialised there too rather than left exposed.
+    /// real Linux developer's actual trash (and, as a side effect, fixes a hole that predates this
+    /// ticket: on any machine where `/tmp` is its own mount — e.g. a tmpfs `/tmp` — these tests were
+    /// already landing in the shared per-mount `.Trash-$uid` rather than the home trash, PR #940 review).
+    /// `trash::os_limited` has no equivalent redirection knob on Windows (the Recycle Bin is addressed by
+    /// drive, not by an env var), so there the mutex alone is the fix; Windows CI has not been observed
+    /// to hit this race, but the shared resource is the same shape, so the tests are serialised there
+    /// too rather than left exposed.
+    ///
+    /// **The mutex is not redundant with the redirect and may not be dropped as such.** It is the only
+    /// available fix on Windows, and on Linux it is what makes the save/mutate/restore of the
+    /// process-global `XDG_DATA_HOME` atomic against the ~183 other tests in this binary that read it
+    /// indirectly via `std::env::temp_dir()` (`tempfile::tempdir()`, `cpe_server::fsutil::scratch_dir`
+    /// itself) — without it, `setenv`'s possible `environ` reallocation on glibc races every concurrent
+    /// `getenv` in the same process (PR #940 review).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn lock_real_trash() -> TrashTestGuard<'static> {
-        static TRASH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let mutex = TRASH_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Named to match `crates/server/src/shell_menu.rs`'s `HOME_ENV_LOCK` — same pattern (a named
+        // poison-tolerant mutex guarding a process-global env var mutation), greppable as one family.
+        static TRASH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let mutex = TRASH_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(target_os = "linux")]
         {
             let scratch = cpe_server::fsutil::scratch_dir("cpe-1785-trash-xdg");
             let previous_xdg = std::env::var_os("XDG_DATA_HOME");
-            std::env::set_var("XDG_DATA_HOME", &scratch);
-            TrashTestGuard { _mutex: mutex, _scratch: scratch, previous_xdg }
+            // SAFETY: test-only, guarded by TRASH_ENV_LOCK above so no other test observes a torn value;
+            // restored in `TrashTestGuard::drop` (still under the same lock) before any other test can
+            // observe the overridden value. Matches `shell_menu.rs`'s `HOME_ENV_LOCK` pattern.
+            unsafe { std::env::set_var("XDG_DATA_HOME", &scratch) };
+            TrashTestGuard { _scratch: scratch, previous_xdg, _mutex: mutex }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -14167,23 +14182,44 @@ mod tests {
     /// RAII guard returned by [`lock_real_trash`]. On Linux, dropping it restores `XDG_DATA_HOME` to
     /// whatever it was before (or removes it, if it was unset) — the restore runs before the mutex guard
     /// field drops, so the environment is back to normal before the next queued test can enter the
-    /// critical section. The scratch directory's own guard ([`cpe_server::fsutil::ScratchDir`]) removes
-    /// the redirected trash directory itself.
+    /// critical section. Fields are declared `_scratch` (and `previous_xdg`) BEFORE `_mutex` so struct
+    /// fields, which drop in declaration order, finish removing the redirected trash directory before
+    /// the mutex releases — the next queued test doesn't start mutating a fresh scratch dir while this
+    /// one's `remove_dir_all_with_retries` might still be retrying (PR #940 review nit).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     struct TrashTestGuard<'a> {
-        _mutex: std::sync::MutexGuard<'a, ()>,
         #[cfg(target_os = "linux")]
         _scratch: cpe_server::fsutil::ScratchDir,
         #[cfg(target_os = "linux")]
         previous_xdg: Option<std::ffi::OsString>,
+        _mutex: std::sync::MutexGuard<'a, ()>,
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    impl TrashTestGuard<'_> {
+        /// The private trash directory `XDG_DATA_HOME` was redirected to for this guard's lifetime.
+        /// `None` on Windows, where no such redirection exists (see [`lock_real_trash`]'s doc comment).
+        /// Used by [`trash_roundtrip_available`] to assert the redirect actually took effect (CPE-1785,
+        /// PR #940 review, blocker 2) rather than trusting it on faith.
+        fn scratch_path(&self) -> Option<&std::path::Path> {
+            #[cfg(target_os = "linux")]
+            {
+                Some(self._scratch.path())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                None
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
     impl Drop for TrashTestGuard<'_> {
         fn drop(&mut self) {
             match self.previous_xdg.take() {
-                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-                None => std::env::remove_var("XDG_DATA_HOME"),
+                // SAFETY: see the SAFETY comment in `lock_real_trash` — same lock, same invariant.
+                Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+                None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
             }
         }
     }
@@ -14196,10 +14232,12 @@ mod tests {
     /// skip (not fail) when this returns false. This is purely a test-environment probe: real desktops
     /// round-trip fine, and the product guarantee is unchanged.
     ///
-    /// **Caller must hold [`lock_real_trash`] before calling this** — it performs its own real
-    /// delete→list→restore probe against the same shared OS trash the guarded tests use (CPE-1785).
+    /// Takes the [`TrashTestGuard`] from [`lock_real_trash`] by reference — not just as a convention
+    /// documented in prose, but so the guard must already have been constructed (and therefore the real
+    /// OS trash locked, and on Linux redirected) before this function's own real delete→list→restore
+    /// probe can run against the same shared OS trash the guarded tests use (CPE-1785).
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    fn trash_roundtrip_available() -> bool {
+    fn trash_roundtrip_available(guard: &TrashTestGuard) -> bool {
         let dir = match tempfile::tempdir() {
             Ok(d) => d,
             Err(_) => return false,
@@ -14222,6 +14260,29 @@ mod tests {
             Some(i) => i,
             None => return false,
         };
+        // CPE-1785 (PR #940 review, blocker 2): prove the Linux redirect actually took effect, rather
+        // than trusting `home_trash()`'s uncached `var_os` read on faith. The redirect's correctness
+        // rests on an unstated invariant — `scratch_dir`'s root and `tempfile::tempdir()`'s root share a
+        // mount, so `trash`'s `delete_all_canonicalized` takes the `home_trash` branch
+        // (`freedesktop.rs:36-58`) rather than the shared per-mount `.Trash-$uid` branch. If that ever
+        // stops holding (a CI image with `/tmp` on its own mount, a container with a different
+        // `TMPDIR`, `scratch_dir` moving off `std::env::temp_dir()`), this guard silently degrades back
+        // to the shared trash and every existing assertion here would still pass (they only check that
+        // the probe is listed, and it would be, just from the wrong directory). Assert containment
+        // explicitly so that degrades LOUDLY instead. `item.id` is an absolute path to the `.trashinfo`
+        // file on Linux (`trash` crate doc comment on `TrashItem::id`), so it must sit inside the
+        // redirected scratch directory once the fix is doing its job.
+        if let Some(scratch) = guard.scratch_path() {
+            let trashinfo_path = std::path::Path::new(&item.id);
+            assert!(
+                trashinfo_path.starts_with(scratch),
+                "the probe's trashinfo file ({}) is not inside the redirected scratch trash ({}) — \
+                 XDG_DATA_HOME redirection silently did not take effect, so this test just touched the \
+                 REAL shared OS trash (CPE-1785, PR #940 review, blocker 2)",
+                trashinfo_path.display(),
+                scratch.display()
+            );
+        }
         // ...and restorable to that path.
         if trash::os_limited::restore_all([item]).is_err() {
             return false;
@@ -14239,11 +14300,11 @@ mod tests {
     fn macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash() {
         // CPE-1785: serialise against every other test touching the real OS trash (and, on Linux,
         // redirect it to a private scratch directory) before doing anything else in this test.
-        let _trash_guard = lock_real_trash();
+        let trash_guard = lock_real_trash();
         // CPE-1268: skip (don't fail) on a runner with no working trash round-trip — see
         // `trash_roundtrip_available`. The product guarantee is proven on any real desktop / a CI
         // runner whose Recycle Bin works (Linux does; a headless Windows Server session may not).
-        if !trash_roundtrip_available() {
+        if !trash_roundtrip_available(&trash_guard) {
             cpe_server::skip_notice!(
                 "skipping trash round-trip test: this environment cannot delete→list→restore via the \
                  OS trash (e.g. a headless CI Windows Server session with no working Recycle Bin) — \
@@ -14504,8 +14565,8 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn list_trash_then_restore_trash_items_round_trips_a_probe_file() {
-        let _trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available() {
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !trash_roundtrip_available(&trash_guard) {
             cpe_server::skip_notice!(
                 "skipping list_trash/restore_trash_items round-trip test: this environment cannot \
                  delete→list→restore via the OS trash (e.g. a headless CI Windows Server session with no \
@@ -14539,8 +14600,8 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn restore_trash_items_reports_a_collision_as_a_distinguishable_per_item_error_without_aborting_the_batch() {
-        let _trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available() {
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !trash_roundtrip_available(&trash_guard) {
             cpe_server::skip_notice!(
                 "skipping restore_trash_items collision test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
@@ -14603,8 +14664,8 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn empty_trash_purges_only_the_selected_probe_item() {
-        let _trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available() {
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !trash_roundtrip_available(&trash_guard) {
             cpe_server::skip_notice!(
                 "skipping empty_trash selective-purge test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
@@ -14645,8 +14706,8 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn list_trash_stream_flushes_batches_over_the_channel_and_matches_the_collect_variant() {
-        let _trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !trash_roundtrip_available() {
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !trash_roundtrip_available(&trash_guard) {
             cpe_server::skip_notice!(
                 "skipping list_trash_stream test: this environment cannot delete→list→restore via the OS \
                  trash — CPE-1268"
@@ -14678,6 +14739,51 @@ mod tests {
             let _ = restore_trash_items_impl(vec![entry.id.clone()]);
         }
         let _ = fs::remove_file(&probe);
+    }
+
+    // ---- CPE-1785 TEMPORARY red-proof diagnostic — REMOVE before this PR merges -----------------------
+    // PR #940 review, blocker 1: the Evidence section can't stay a placeholder, and a single green Linux
+    // CI run proves nothing about a bug whose whole character is that it's usually green. This shells
+    // out to a fresh `cargo test --lib trash -- --test-threads=8` N times in a row (each one a complete,
+    // independent process — a faithful repeat of exactly what CI itself runs, not a synthetic stand-in)
+    // and tallies pass/fail, so the count is measured from the real call path rather than asserted.
+    // `#[ignore]` is stripped for each diagnostic push (so the existing unfiltered `cargo test` CI step
+    // picks it up with no workflow change) and restored — the test then reads `#[ignore]`d again — before
+    // the final, fix-restored push. Writes go straight to `std::io::stderr()` rather than `eprintln!`
+    // (Ticketing/wiki.md Evidence Rule 3: `eprintln!` output is swallowed by libtest's capture buffer
+    // unless the test fails, so a passing diagnostic run's tally would reach nobody).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpe_1785_diagnostic_stress_loop_temporary() {
+        use std::io::Write as _;
+        let n: u32 = std::env::var("CPE_1785_STRESS_N").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
+        let mut failures = 0u32;
+        let mut first_failure_output = String::new();
+        for i in 0..n {
+            let out = std::process::Command::new(env!("CARGO"))
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .args(["test", "--lib", "trash", "--", "--test-threads=8"])
+                .output()
+                .expect("failed to spawn nested `cargo test`");
+            if !out.status.success() {
+                failures += 1;
+                let combined = format!(
+                    "--- iter {i} STDOUT ---\n{}\n--- iter {i} STDERR ---\n{}\n",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                writeln!(std::io::stderr(), "CPE-1785 STRESS: iter {i}/{n} FAILED\n{combined}").ok();
+                if first_failure_output.is_empty() {
+                    first_failure_output = combined;
+                }
+            }
+        }
+        writeln!(std::io::stderr(), "CPE-1785 STRESS RESULT: {failures}/{n} nested runs failed").ok();
+        assert_eq!(
+            failures, 0,
+            "CPE-1785 stress loop: {failures}/{n} nested `cargo test --lib trash` runs failed \
+             (see CPE-1785 STRESS lines above for the panic output); first failure:\n{first_failure_output}"
+        );
     }
 
     #[test]
