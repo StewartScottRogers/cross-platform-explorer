@@ -116,8 +116,9 @@ survive reaping, which is the property that makes any owner other than "forever"
 ### What shipped
 
 - **One session root per process**, `%TEMP%/cpe-archive/s<pid>-<random>`, claimed with an exclusive
-  `fs::create_dir`. The random half comes from `std::collections::hash_map::RandomState` — OS-seeded, in
-  `std`, **no new dependency**.
+  `fs::create_dir`. The trailing half hashes an OS-seeded `std::collections::hash_map::RandomState`
+  together with a nanosecond clock reading — both in `std`, **no new dependency**. (What is measured is
+  that the *name* varies; see round 4 on why the individual contributions are not claimed.)
 - **Extractions are numbered inside it** (`e<seq>`). This is what stops the namespace exhausting: a
   monotonic counter inside a directory this process created moments ago and that nothing else numbers
   into cannot collide with itself. The 1024-attempt bound stays, but it now only guards a *deliberate*
@@ -335,9 +336,10 @@ immediately before the push, so the queue is monotonic and `front` is never newe
 `quiet` holds (`now - back ≥ grace`), `now - front ≥ now - back ≥ grace` already holds for every entry.
 Verified by compiling the extra condition in and re-running the probe — **identical output, still 89
 reclaimed**. Shipping it would have added a condition that can never fire: the code-shaped version of the
-identical-timestamp test this ticket was already caught by. The invariant it rests on is pinned by
-`cpe_1786_the_live_queue_is_monotonic_so_the_front_is_never_newer_than_the_back`, so if timestamps ever
-stop being monotonic the prescription becomes live again and that test says so.
+identical-timestamp test this ticket was already caught by. **Independently confirmed in round 4**: the
+final verifier compiled the guard in with an `eprintln!` on fire and it never printed once. The invariant
+it rests on is pinned by `cpe_1786_the_live_queue_is_monotonic_so_the_front_is_never_newer_than_the_back`
+— which *itself* had to be fixed in round 4 before that sentence became true; see below.
 
 **2. The session sentinel provided zero protection, measured.** The claim was that holding a file open
 inside the session root makes `remove_dir_all` fail so another instance's sweep bounces. The re-reviewer
@@ -373,10 +375,66 @@ remaining one:
   semantics, not measured here.
 - *"reading 256 of 1.39 million is cheap"* — reworded to what is actually true (`read_dir` yields
   lazily) now that the 1.39 M is gone.
-- `RandomState` *"varies per call"* — the one claim that was cheap to **measure**, so it now is:
-  `cpe_1786_session_names_vary_between_calls` draws 64 names and asserts all distinct. A fixed-seed
-  hasher would make every process pick the same session name and turn the exclusive `create_dir` into a
-  permanent collision.
+- `RandomState` *"varies per call"* — a test was added drawing 64 names and asserting all distinct.
+  **Round 4 found this still did not measure what it claimed** — see below.
+
+### Fourth round — the guard offered in round 3 was itself vacuous
+
+The final verifier **confirmed the round-3 refusal by experiment**: it compiled the prescribed guard into
+`drain_reapable` with an `eprintln!` on fire, re-ran the CPE-1786 tests — all passed, `reclaimed` still
+89, and *the "guard FIRED" line never printed once*. It also traced the monotonicity invariant by code
+(one `push_back` site; the `Instant::now()` sample taken inside the same critical section as the push; no
+`push_front`/`insert`/`rotate`/sort anywhere; retry and error arms `continue` before any push; a poisoned
+lock still yields the guard; `Instant` saturates rather than wrapping, so a broken clock fails toward
+*less* reaping). Its verdict, recorded here at the Foreman's instruction: *"Declining it on measured
+grounds was good engineering, not obstruction."*
+
+**And then it found that the guard offered in exchange was the same defect one level up.**
+`cpe_1786_the_live_queue_is_monotonic_...` locked the process-global queue and iterated whatever it
+contained — which, instrumented, was nothing:
+
+```
+[VERIFIER] monotonic test saw queue len = 0   (isolated run)
+[VERIFIER] monotonic test saw queue len = 0   (full lib run, 2229 tests)
+[VERIFIER] monotonic test saw queue len = 0   (full lib run, repeat)
+[VERIFIER] monotonic test saw queue len = 0   (full lib run, repeat)
+```
+
+Four for four the assertion loop never executed. The only test that populates the queue does 25 real zip
+extractions; this one finished in 0.00 s and won the race every time. Three paragraphs — on
+`drain_reapable`, on the test, and in this ticket — promised that a broken invariant would turn it red.
+It would not have. *The code-shaped identical-timestamp test, inside the artifact built to stop
+identical-timestamp tests.*
+
+**Fixed by making the test earn its assertion**: it now pushes 32 entries through the real
+`note_extraction_dir` from four threads (so the ordering claim meets genuine lock contention), then
+asserts *both* non-decreasing order *and* that it observed at least the 32 it pushed — so **an empty
+queue is a failure**. Well under `MAX_LIVE_EXTRACTIONS`, and the paths are real directories under the
+test's own scratch, so the best-effort removal inside `note_extraction_dir` cannot reach anything else.
+Red-proved in **both** directions:
+
+```
+A. population neutralised  -> "observed only 0 of the 32 entries it pushed"        FAILED
+B. push_back -> push_front -> "the live-extraction queue went backwards at ..."    FAILED
+C. restored                                                                        ok
+```
+
+Two smaller corrections in the same pass:
+
+- **The `RandomState` claim was still not measured.** `session_dir_name()` also folds in a nanosecond
+  clock reading, so 64 distinct draws do not isolate `RandomState`'s contribution — the verifier swapped
+  in a fixed-seed `DefaultHasher` and the test **still passed, all 64 distinct**. The doc no longer
+  claims a fixed-seed hasher would collide; it now says what is measured (the *name* varies, which is the
+  operationally load-bearing property) and why both inputs are kept anyway (they fail differently: the
+  clock separates two calls in one process, the OS seed separates two processes starting in the same
+  nanosecond and is what makes the name unguessable).
+- **`REAP_GRACE`'s "an idle session tidies itself ten minutes later" was wrong.** Reclamation is
+  push-driven — `note_extraction_dir` is the only caller of `drain_reapable` — so an idle session never
+  tidies at all. Corrected to: *the next extraction after ten minutes of quiet is the one that tidies*,
+  with the idle-forever case (the next launch's sweep takes the whole root) spelled out.
+- Optional item taken: the sweeper's recognition of the legacy `<pid>-<seq>` shape now says plainly that
+  it is about **not re-accumulating**, not about clearing the backlog — at 32 removals per launch, 1.39
+  million would need ~43,500 launches, and the one-shot purge is what actually cleared it.
 
 ### Platform caveat
 

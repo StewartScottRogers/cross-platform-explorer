@@ -815,8 +815,14 @@ const MAX_LIVE_EXTRACTIONS: usize = 512;
 /// residual is a single inter-entry gap longer than this value, so the value is the whole exposure: at
 /// 60 s the re-reviewer reclaimed 89 directories out from under a still-staging 601-entry drag two
 /// minutes in, because one entry crossed a minute. Ten minutes means a *single* archive entry must take
-/// over ten minutes to extract, mid-batch, in a batch already past [`MAX_LIVE_EXTRACTIONS`]. It costs
-/// only that an idle session tidies itself ten minutes later, which nothing depends on — the bound is
+/// over ten minutes to extract, mid-batch, in a batch already past [`MAX_LIVE_EXTRACTIONS`] — a strictly
+/// rarer event, so the exposure shrinks rather than merely moving.
+///
+/// What it costs is one sentence that is easy to get wrong, so precisely: reclamation is **push-driven**
+/// — [`note_extraction_dir`] is the only thing that calls [`drain_reapable`] — so an idle session never
+/// tidies itself at all. **The next extraction after ten minutes of quiet is the one that tidies.** A
+/// session that goes idle forever keeps its directories until the process exits and the next launch's
+/// [`sweep_stale_sessions`] takes the whole root. Nothing depends on the timing either way; the bound is
 /// [`HARD_CAP_EXTRACTIONS`], not this.
 ///
 /// It is deliberately *not* claimed to close the hole. `drain_reapable` documents exactly what remains,
@@ -954,9 +960,20 @@ fn session_ttl() -> std::time::Duration {
 /// A per-process session directory name: `s<pid>-<16 hex digits>`.
 ///
 /// The PID is kept because it makes the directory identifiable in a process listing when something goes
-/// wrong; the random half is what carries the uniqueness, since a PID alone is exactly what CPE-1786
-/// measured colliding. [`std::collections::hash_map::RandomState`] is seeded from the OS and varies per
-/// call, which is all this needs — and it is in `std`, so the naming does not cost a dependency.
+/// wrong; the trailing half is what carries the uniqueness, since a PID alone is exactly what CPE-1786
+/// measured colliding.
+///
+/// That half is the hash of **two** inputs — an [`std::collections::hash_map::RandomState`] seed and a
+/// nanosecond wall-clock reading — and the honest claim is only about their *combination*. The PR #945
+/// final verifier measured why that distinction matters: swapping in a fixed-seed `DefaultHasher`, the
+/// names **still all came out distinct**, because the nanosecond term alone varies between calls. So
+/// "`RandomState` is what makes these unique" was not something the test below established, and it is not
+/// claimed here. What is relied on, and what *is* measured, is that `session_dir_name()` does not repeat.
+///
+/// Both inputs are kept anyway, because they fail differently: the clock reading is what separates two
+/// calls in one process, and the OS-seeded state is what separates two processes that start in the same
+/// nanosecond (and is unguessable, which is what retires the pre-CPE-1786 denial-of-service residual).
+/// Both are in `std`, so the naming costs no dependency.
 fn session_dir_name() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -990,7 +1007,10 @@ fn claim_session_root(root: &Path) -> Option<PathBuf> {
 /// - `s<pid>-<hex>` — a session root (CPE-1786);
 /// - `e<seq>` — an extraction directory, which only appears directly under the shared root in
 ///   [`session_root`]'s degraded mode;
-/// - `<pid>-<seq>` — the pre-CPE-1786 shape. Named explicitly so the 1.39 million already on disk drain
+/// - `<pid>-<seq>` — the pre-CPE-1786 shape. **Recognising it is about not re-accumulating, not about
+///   clearing the backlog**: at [`SWEEP_REMOVE_BUDGET`] per launch, 1.39 million would need roughly
+///   43,500 launches, so the existing pile was cleared by a one-shot purge and this sweep is what keeps
+///   it from coming back. Named explicitly so the leftovers still on disk drain
 ///   through the same mechanism instead of needing a person to remember them.
 ///
 /// Everything else is left alone. `%TEMP%/cpe-archive` is a shared directory — on a Unix `/tmp` it is
@@ -3616,11 +3636,16 @@ mod tests {
     /// The one load-bearing property of the session name, measured rather than asserted: **it varies**.
     ///
     /// The whole reason the session directory is not just `s<pid>` is that a recycled PID is exactly what
-    /// CPE-1786 measured colliding, so the random half has to actually be random. That rests on
-    /// `RandomState::new()` producing different keys per call — documented, but this file has been caught
-    /// twice now believing documentation about a protection, so it is checked here. A fixed-seed hasher
-    /// would make every session in every process pick the same name and turn the exclusive `create_dir`
-    /// into a permanent collision.
+    /// CPE-1786 measured colliding, so the trailing half has to actually differ between calls. A name
+    /// that repeated would turn the exclusive `create_dir` in [`claim_session_root`] into a permanent
+    /// collision and drop every session into degraded mode.
+    ///
+    /// **What this does NOT measure** (PR #945 final verifier, and the reason this paragraph exists):
+    /// it does not isolate `RandomState`'s contribution. [`session_dir_name`] also folds in a nanosecond
+    /// clock reading, and with a fixed-seed `DefaultHasher` swapped in, this test **still passed** — all
+    /// 64 distinct, on the clock term alone. So this is evidence for exactly one sentence, "the name
+    /// varies", which is the operationally load-bearing one; it is not evidence about either input on its
+    /// own, and the doc on `session_dir_name` no longer claims otherwise.
     #[test]
     fn cpe_1786_session_names_vary_between_calls() {
         let names: std::collections::BTreeSet<String> = (0..64).map(|_| session_dir_name()).collect();
@@ -3907,25 +3932,81 @@ mod tests {
     /// would have added a condition that cannot fire: code-shaped version of the identical-timestamp
     /// test this ticket has already been caught by once.
     ///
-    /// The real mitigation taken instead was raising [`REAP_GRACE`], which moves the boundary rather
+    /// The real mitigation taken instead was raising [`REAP_GRACE`], which shrinks the boundary rather
     /// than decorating it. If a future change ever makes these timestamps non-monotonic (a different
     /// clock, an out-of-order push, a queue reordered on removal) this test goes red, and the
     /// prescription becomes live again.
+    ///
+    /// # It has to actually observe entries, and the first version did not
+    ///
+    /// As first written this locked the process-global queue and iterated whatever it happened to
+    /// contain — which, instrumented by the PR #945 final verifier, was **nothing**:
+    ///
+    /// ```text
+    /// [VERIFIER] monotonic test saw queue len = 0   (isolated run)
+    /// [VERIFIER] monotonic test saw queue len = 0   (full lib run, 2229 tests)
+    /// [VERIFIER] monotonic test saw queue len = 0   (full lib run, repeat)
+    /// [VERIFIER] monotonic test saw queue len = 0   (full lib run, repeat)
+    /// ```
+    ///
+    /// Four for four the assertion loop never executed. The only test that populates the queue does 25
+    /// real zip extractions; this one finished in 0.00 s and reliably won the race. So the guard offered
+    /// in exchange for declining the prescribed fix was **the code-shaped identical-timestamp test,
+    /// inside the artifact built to stop identical-timestamp tests** — a vacuous pass, three rounds after
+    /// the first one was caught.
+    ///
+    /// It now **pushes its own entries through the real [`note_extraction_dir`]** — several threads, so
+    /// the ordering claim is exercised against genuine lock contention rather than a single-threaded
+    /// sequence — and then asserts *both* that the order is non-decreasing *and* that it saw at least
+    /// what it pushed. **An empty queue is now a failure**, which is the property the first version was
+    /// missing. The count is well under [`MAX_LIVE_EXTRACTIONS`] so nothing is evicted, and the paths are
+    /// real directories under this test's own scratch, so the best-effort removal in `note_extraction_dir`
+    /// can never touch anything else even if a future change did evict them.
     #[test]
     fn cpe_1786_the_live_queue_is_monotonic_so_the_front_is_never_newer_than_the_back() {
+        const THREADS: usize = 4;
+        const PER_THREAD: usize = 8;
+        const PUSHED: usize = THREADS * PER_THREAD;
+
+        let d = scratch("cpe1786_monotonic");
+        let root = d.to_path_buf();
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let root = root.clone();
+                s.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        let dir = root.join(format!("t{t}-e{i}"));
+                        fs::create_dir_all(&dir).unwrap();
+                        note_extraction_dir(dir);
+                    }
+                });
+            }
+        });
+
         let live = LIVE_EXTRACTIONS.lock().unwrap_or_else(|e| e.into_inner());
         let mut previous: Option<std::time::Instant> = None;
+        let mut seen = 0usize;
         for (path, started) in live.iter() {
             if let Some(previous) = previous {
                 assert!(
                     *started >= previous,
                     "the live-extraction queue went backwards at {} — `drain_reapable`'s reasoning that \
-                     the front is always at least as old as the back no longer holds",
+                     the front is always at least as old as the back no longer holds, and the two-line \
+                     guard declined in PR #945 stops being a no-op. Re-read its residual section.",
                     path.display()
                 );
             }
             previous = Some(*started);
+            if path.starts_with(&root) {
+                seen += 1;
+            }
         }
+        assert!(
+            seen >= PUSHED,
+            "this test observed only {seen} of the {PUSHED} entries it pushed, so the ordering assertion \
+             above proved little or nothing. An empty or truncated queue must FAIL here — a silent pass \
+             is exactly the defect this test was rewritten to remove."
+        );
     }
 
     /// The other end of the quiet rule: a caller that is **never** quiet must not be able to hold the
