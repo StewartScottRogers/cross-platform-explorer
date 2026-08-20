@@ -223,7 +223,7 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //
 // | # | Site                                       | Primitive        | Destination provenance                      | Guard |
 // |---|--------------------------------------------|------------------|---------------------------------------------|-------|
-// |  1| `temp_extract_target`                      | `create_dir_all` + **exclusive `create_dir`** | shared `%TEMP%/cpe-archive` root, then a private `<pid>-<seq>` | link on the root + exclusive create |
+// |  1| `temp_extract_target` / `session_root`     | `create_dir_all` + **exclusive `create_dir`** | shared `%TEMP%/cpe-archive` root, then a private `s<pid>-<random>` session root, then `e<seq>` inside it | link on the root + exclusive create (twice) |
 // |  2| `extract_archive_entry`                    | `File::create`   | inside row 1's private dir + `file_name()`   | none — carried by row 1 |
 // |  3| `extract_tar_entry`                        | `File::create`   | `out`, always a `temp_extract_target`        | none — carried by row 1 |
 // |  4| `extract_7z_entry`                         | `File::create`   | `out`, always a `temp_extract_target`        | none — carried by row 1 |
@@ -244,9 +244,11 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // | 19| `extract_7z_safe`'s callback                | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** (skip) + `entry_name_is_safe` |
 // | 20| `extract_7z_stream`'s callback              | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** (skip, recorded) + `entry_name_is_safe` |
 //
-// **The row count reconciles to the source.** `archive.rs` has 9 `create_dir_all` calls: 1 in row 1 (the
-// shared root), 4 in row 17 (the extraction `dest` roots), 4 in row 18 (per-entry, inside the two ZIP
-// loops), plus row 1's one exclusive `fs::create_dir`. Rows 2–16 are the 13 `File::create` calls, the 1
+// **The row count reconciles to the source.** `archive.rs` has 10 `create_dir_all` calls: 2 in row 1 (the
+// shared root, and re-creating this session's own root if another instance's sweeper removed it —
+// CPE-1786), 4 in row 17 (the extraction `dest` roots), 4 in row 18 (per-entry, inside the two ZIP
+// loops), plus row 1's two exclusive `fs::create_dir`s (the session root, then the per-extraction
+// directory inside it). Rows 2–16 are the 13 `File::create` calls, the 1
 // `fs::write` and the 1 `create_new`. Row 18 was missing from the first version of this table, which
 // billed itself as the inventory — the count line exists so the next reader can check that claim in one
 // subtraction instead of trusting it (PR #906 review).
@@ -314,6 +316,13 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // retrying the next sequence number. Once that returns `Ok`, this process is the only thing that has ever
 // been inside, so rows 2–5's leaf really is unreachable. The full measurement, the residuals it does not
 // close, and why "never reused" was only ever true *within* a process are on `temp_extract_target` itself.
+//
+// **CPE-1786 added a directory between the shared root and that leaf** — a per-process `s<pid>-<random>`
+// session root, also claimed with an exclusive `create_dir` — because the per-extraction directories were
+// never removed (1,394,403 of them on one machine) and the resulting `<pid>-<seq>` name pressure was
+// producing real failures. That is a *lifetime* change, not a provenance one: every sentence above about
+// who created what still holds, one level deeper. Who owns an extraction directory and for how long is on
+// `session_root`.
 //
 // ## Rows 15–16 — what they cover, and the two things they do NOT
 //
@@ -508,15 +517,20 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // would be a contract change smuggled in as a link fix. The link hazard was measured on its own, so it is
 // guarded on its own. See `create_slot_link_refusal`'s doc for the full argument.
 
-/// The flat temp-file target for a single-entry extraction: `%TEMP%/cpe-archive/<basename of inner>`
-/// (CPE-242/1102/1180). Shared by every format's single-entry extractor so they all land in the same
-/// place the frontend expects. Creates the directory; does not create the file itself.
 /// Monotonic counter making each single-entry extraction land in its own temp subdir. Without this,
 /// two concurrent extractions of same-named entries (e.g. two `a.txt`) shared one flat
 /// `cpe-archive/<base>` path and raced — one call would read a file another had already replaced or
 /// removed. That made `extract_archive_entry_any_delegates_zip_to_the_zip_extractor` flaky and it
 /// failed deterministically on the macOS CI leg (CPE-1195); it's also a real app hazard for two
 /// concurrent extract-and-opens of same-named files.
+///
+/// **CPE-1786 moved what this counts under.** It used to number directories directly under the shared
+/// `%TEMP%/cpe-archive` root (`<pid>-<seq>`), a namespace shared with every other process that has ever
+/// run and never cleaned — so a fresh process with a recycled PID could walk over a previous run's whole
+/// range and exhaust [`TEMP_TARGET_ATTEMPTS`]. It now numbers directories inside **this process's own
+/// session root** (`e<seq>`, see [`session_root`]), which was created exclusively moments ago and which
+/// nothing else numbers into. A monotonic counter inside a private directory cannot collide with itself,
+/// so the namespace cannot exhaust; see [`temp_extract_target`].
 static EXTRACT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Refuse before creating a file at `dest` when a **link** already occupies that name (CPE-1733) — the
@@ -683,13 +697,378 @@ fn extraction_dest_error(dest: &Path, e: &std::io::Error) -> String {
     }
 }
 
-/// How many `<pid>-<seq>` names [`temp_extract_target`] will try before giving up. Exclusive creation
-/// makes a name that already exists a *retry*, not a failure, and names that already exist are ordinary
-/// here rather than exotic: `EXTRACT_SEQ` restarts at 0 in every process, PIDs are reused by the OS, and
-/// **nothing ever cleans `cpe-archive/`** — CPE-1693 found 145,000 leftover directories on one machine.
-/// So a fresh process with a recycled PID can genuinely walk over a previous run's whole range. The bound
-/// exists so a hostile pre-creation of a large range ends as a clear error instead of an infinite loop.
+/// How many `e<seq>` names [`temp_extract_target`] will try before giving up. Exclusive creation makes a
+/// name that already exists a *retry*, not a failure.
+///
+/// **CPE-1786 changed what this bound protects against, and it is worth being precise about.** Before
+/// that ticket the loop numbered into the shared `cpe-archive` root, where `EXTRACT_SEQ` restarts at 0 in
+/// every process, PIDs are reused by the OS, and nothing ever cleaned up — so a fresh process with a
+/// recycled PID could genuinely walk over a previous run's whole range, and on the machine CPE-1786 was
+/// filed from (1,394,403 leftover directories) it **did**: `could not claim a private extraction
+/// directory … after 1024 attempts` was a real, observed failure, not a theoretical one.
+///
+/// Numbering now happens inside [`session_root`] — a directory this process created exclusively moments
+/// ago, which no other process numbers into and which nothing has ever been inside. A monotonic counter
+/// in a private directory cannot collide with itself, so **exhaustion is no longer reachable by
+/// accumulation**; every attempt after the first would have to lose a race with something that is
+/// deliberately squatting names inside our own session directory. The bound stays because that squatter
+/// (a same-user process, or our own [`row1_a_squatted_temp_directory_is_stepped_over_not_written_into`]
+/// test) must still end as a clear error rather than an infinite loop.
 const TEMP_TARGET_ATTEMPTS: u64 = 1024;
+
+/// The shared root every extraction directory lives under, named once so the claim, the sweeper and the
+/// tests cannot drift apart.
+const ARCHIVE_TEMP_ROOT: &str = "cpe-archive";
+
+/// How long a session root that is **not ours** must have gone untouched before [`sweep_stale_sessions`]
+/// will remove it.
+///
+/// The liveness signal is the session root's own mtime, and it is free: creating each `e<seq>`
+/// subdirectory updates the mtime of the directory it is created in, on every platform this ships to. So
+/// an instance that is actively extracting keeps its own root fresh, and one hour of *no extraction at
+/// all* is the point at which another instance is allowed to conclude the session is over. The cost of
+/// being wrong is bounded and was designed for: the frontend's archive-preview cache re-validates every
+/// cached temp path before use and re-extracts if it is gone (`src/lib/archivePreview.ts`), a reader that
+/// already has the file open keeps reading it (Unix), and on Windows a file another process still holds
+/// open cannot be deleted at all, so the removal simply fails and is skipped.
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Diagnostic override for [`SESSION_TTL`], in whole seconds (`0` = sweep every foreign session root on
+/// sight). It exists so the CPE-1786 evidence run can show cross-session growth actually *stopping*
+/// inside a single measurement instead of asserting that it would an hour later, and so the sweep is
+/// exercisable from a test harness. Same shape as this crate's other diagnostic env switches
+/// (`CPE_STAGING_STRICT`, `CPE_STAGING_SABOTAGE`). Not a supported production setting: with a short TTL a
+/// second instance will reclaim a *live* instance's directories.
+const SESSION_TTL_ENV: &str = "CPE_ARCHIVE_TEMP_TTL_SECS";
+
+/// How many entries of the shared root one process will look at while sweeping, and how many it will
+/// remove. Deliberately small and deliberately **synchronous**.
+///
+/// Synchronous because the alternative does not work: a detached sweeper thread is killed when the
+/// process exits, and the processes that create most of these directories (test binaries, a `/run`
+/// launch) are short-lived — the sweep would reliably never finish. Small because the root it reads may
+/// legitimately hold a very large number of entries (`read_dir` streams, so *reading* 256 of 1.39 million
+/// is cheap, but removing is not), and because this runs on the first extraction of a session, where a
+/// visible stall would be paid by the user opening a file inside a zip. One process launch therefore
+/// reclaims at most 32 dead sessions, which is far more than the ~1 it creates: the steady state drains.
+const SWEEP_EXAMINE_BUDGET: usize = 256;
+/// See [`SWEEP_EXAMINE_BUDGET`].
+const SWEEP_REMOVE_BUDGET: usize = 32;
+
+/// How many extraction directories one session keeps alive before reclaiming its oldest, and how long an
+/// extraction is protected from that reclamation no matter what.
+///
+/// This is the half of the ownership model that a startup sweep cannot provide: a single long-running app
+/// session that extracts all day would otherwise still grow without bound, because its own session root
+/// is only reclaimed by the *next* session. 64 is far more than the preview flow needs (it previews one
+/// selected entry at a time) and more than any drag-out batch that has completed, and the grace period is
+/// what makes it safe for the batch that has **not**: `FileList.svelte`'s alt-drag stages every selected
+/// entry in a loop and only then hands the paths to the OS, so a 500-file drag must not have its first
+/// 436 files removed out from under it mid-loop. Nothing younger than the grace is ever touched, which
+/// covers that loop and every same-interaction consumer.
+const MAX_LIVE_EXTRACTIONS: usize = 64;
+/// See [`MAX_LIVE_EXTRACTIONS`].
+const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// This process's private extraction root under `%TEMP%/cpe-archive`, claimed once on first use.
+static SESSION_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The extraction directories this process has created, oldest first, with when it created them — the
+/// bookkeeping behind [`MAX_LIVE_EXTRACTIONS`]. Only ever holds directories **we** created exclusively,
+/// so nothing here can name something another process owns.
+static LIVE_EXTRACTIONS: std::sync::Mutex<std::collections::VecDeque<(PathBuf, std::time::Instant)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Who owns an extraction directory, and for how long — **the whole of CPE-1786** (see also
+/// [`temp_extract_target`], which is where the lifetime is handed out).
+///
+/// # The question, and why the obvious answers are all wrong
+///
+/// `temp_extract_target` created `%TEMP%/cpe-archive/<pid>-<seq>/` per extraction and never removed it.
+/// The measurement that opened the ticket: **1,394,403** directories on one machine, and a clean-slate
+/// run of one crate's test module adding thousands more — live growth, not history. It is user-facing
+/// too: every archive entry a real user opens or drags out leaves a directory behind forever.
+///
+/// The test-helper half of the same class (CPE-1693) was fixed with a `Drop` guard. **That cannot work
+/// here**, and the reason is the ticket: the whole point of the extracted file is that it *outlives* the
+/// call that made it. So the question is who owns it instead. Reading the three real consumers:
+///
+/// 1. **Open-in-external** (`App.svelte`) hands the path to `open_external` — an arbitrary OS
+///    application. When it is finished, or whether it ever opened, is not observable from here.
+/// 2. **Drag-out** (`FileList.svelte`, alt-drag) hands a batch of paths to the native drag; the OS copies
+///    them at drop time, after the function that staged them has long returned. The research note for
+///    that feature already concluded *"do NOT delete on Dropped — the OS copy may still be reading;
+///    session/periodic cleanup"*.
+/// 3. **Archive preview** (`src/lib/archivePreview.ts`) caches the path per (archive, entry) **for the
+///    whole session**, and — decisively — *re-validates the cached path before every reuse and
+///    re-extracts if it is gone*, because "the temp file can be reaped mid-session".
+///
+/// So: the extraction call cannot own the directory (the path escapes it), and neither can the consuming
+/// operation (it ends inside another process). **The session owns it** — and consumer 3 is already
+/// written to survive reaping, which is the property that makes an owner other than "forever" possible at
+/// all. This function is that owner made explicit.
+///
+/// # The shape
+///
+/// - **One session root per process**, `cpe-archive/s<pid>-<random>`, created with an exclusive
+///   `fs::create_dir`. The random half is what stops a recycled PID from inheriting a previous run's
+///   name; it comes from [`std::collections::hash_map::RandomState`], which is seeded by the OS and adds
+///   no dependency.
+/// - **Extractions are numbered inside it** (`e<seq>`), so the namespace that exhausted at 1024 attempts
+///   is now private to one process and monotonic — it cannot collide with itself. See
+///   [`TEMP_TARGET_ATTEMPTS`].
+/// - **The next session reclaims dead ones.** Claiming the root also sweeps the shared root, budgeted, for
+///   session directories nothing has touched in [`SESSION_TTL`] — including the pre-CPE-1786
+///   `<pid>-<seq>` shape, so the old leak drains rather than being frozen in place.
+/// - **A long session reclaims its own**, oldest first, past [`MAX_LIVE_EXTRACTIONS`] and
+///   [`REAP_GRACE`] — the case a startup-only sweep does not cover.
+/// - [`cleanup_extraction_scratch`] removes the whole session root when an embedder can tell us the
+///   session is over, which turns the common case from "an hour later" into "immediately".
+///
+/// # Degraded mode
+///
+/// If the session root cannot be claimed at all, this returns the shared root itself and extractions are
+/// numbered directly under it. That is strictly the old behaviour, which is the right failure mode: an
+/// extraction still works, it is still an exclusive `create_dir` on a private directory, and only the
+/// leak-freedom is lost. Refusing to extract because a *cleanup* mechanism could not be set up would be a
+/// worse trade than the leak it prevents.
+fn session_root() -> Result<PathBuf, String> {
+    let root = std::env::temp_dir().join(ARCHIVE_TEMP_ROOT);
+    // The shared root is the one directory here we cannot own exclusively. Refuse it if it is a link:
+    // everything below would be redirected wholesale, and unlike a squatted leaf that is not something a
+    // per-extraction guard can catch later. Re-checked on every call, not just the first, because the
+    // root outlives us and this is cheap.
+    refuse_link_at_new_file(&root)?;
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    if let Some(existing) = SESSION_ROOT.get() {
+        return Ok(existing.clone());
+    }
+    Ok(SESSION_ROOT
+        .get_or_init(|| {
+            let claimed = claim_session_root(&root).unwrap_or_else(|| root.clone());
+            // Inside `get_or_init` so it runs exactly once per process, and before the first extraction
+            // rather than after, so a session that extracts once still pays its share of the cleanup.
+            sweep_stale_sessions(
+                &root,
+                &claimed,
+                std::time::SystemTime::now(),
+                session_ttl(),
+                SWEEP_EXAMINE_BUDGET,
+                SWEEP_REMOVE_BUDGET,
+            );
+            claimed
+        })
+        .clone())
+}
+
+/// [`SESSION_TTL`], with the [`SESSION_TTL_ENV`] override applied. An unparseable value is ignored rather
+/// than reported: this is a diagnostic knob on a best-effort cleanup path, and failing an extraction over
+/// a typo in an environment variable would be the worse outcome.
+fn session_ttl() -> std::time::Duration {
+    std::env::var(SESSION_TTL_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(SESSION_TTL, std::time::Duration::from_secs)
+}
+
+/// A per-process session directory name: `s<pid>-<16 hex digits>`.
+///
+/// The PID is kept because it makes the directory identifiable in a process listing when something goes
+/// wrong; the random half is what carries the uniqueness, since a PID alone is exactly what CPE-1786
+/// measured colliding. [`std::collections::hash_map::RandomState`] is seeded from the OS and varies per
+/// call, which is all this needs — and it is in `std`, so the naming does not cost a dependency.
+fn session_dir_name() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    if let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(since.as_nanos());
+    }
+    format!("s{}-{:016x}", std::process::id(), hasher.finish())
+}
+
+/// Claim a fresh session directory under `root`, exclusively. `None` means every attempt was taken or the
+/// filesystem refused — see [`session_root`]'s "degraded mode".
+fn claim_session_root(root: &Path) -> Option<PathBuf> {
+    /// A random 64-bit name colliding once is already implausible; eight in a row means something other
+    /// than chance is happening, and that something is better handled by degrading than by looping.
+    const ATTEMPTS: u32 = 8;
+    for _ in 0..ATTEMPTS {
+        let dir = root.join(session_dir_name());
+        match fs::create_dir(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Whether `name` is a directory name **this code has ever created** under the shared root, and therefore
+/// one the sweeper may remove. Three shapes, all of them ours:
+///
+/// - `s<pid>-<hex>` — a session root (CPE-1786);
+/// - `e<seq>` — an extraction directory, which only appears directly under the shared root in
+///   [`session_root`]'s degraded mode;
+/// - `<pid>-<seq>` — the pre-CPE-1786 shape. Named explicitly so the 1.39 million already on disk drain
+///   through the same mechanism instead of needing a person to remember them.
+///
+/// Everything else is left alone. `%TEMP%/cpe-archive` is a shared directory — on a Unix `/tmp` it is
+/// shared between *users* — and a sweeper that removed names it did not recognise would be a recursive
+/// delete pointed at whatever someone else happened to put there.
+fn is_our_temp_dir_name(name: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if let Some(rest) = name.strip_prefix('s') {
+        return match rest.split_once('-') {
+            Some((pid, token)) => digits(pid) && hex(token),
+            None => false,
+        };
+    }
+    if let Some(rest) = name.strip_prefix('e') {
+        return digits(rest);
+    }
+    match name.split_once('-') {
+        Some((pid, seq)) => digits(pid) && digits(seq),
+        None => false,
+    }
+}
+
+/// Remove session directories under `root` that nothing has touched for `ttl`, skipping `keep` (ours).
+/// Returns how many were removed — the value the tests assert on, and the only reason this returns
+/// anything at all.
+///
+/// `now` and `ttl` are parameters rather than reads of the clock so the age decision can be tested
+/// without waiting an hour or forging a directory's mtime (which has no portable API in `std`).
+///
+/// **Failures are skipped, not reported**, which is deliberately the same philosophy `CLAUDE.md` pins on
+/// `list_dir`: *skip entries you can't read rather than failing the whole listing*. The analogue here is
+/// stronger than an aesthetic one — this runs on the first extraction of a session, so a cleanup that
+/// turned an unreadable or in-use leftover into an error would fail the user's extraction over somebody
+/// else's litter. A directory that will not be removed today is simply examined again by the next
+/// session. That also means an in-use file on Windows (which cannot be deleted while another process
+/// holds it open) protects itself for free.
+///
+/// A `keep`-shaped subtlety worth stating: an entry that is a symlink or a Windows junction is **skipped
+/// entirely, never followed**. `fs::remove_dir_all` would not delete through it either (it errors on a
+/// symlink), but the check is explicit here because the CPE-1693 purge measured a bulk-delete mechanism
+/// following a junction out of `%TEMP%` and destroying the far side, and a reader of this function should
+/// not have to know `remove_dir_all`'s reparse-point semantics to be sure it does not.
+fn sweep_stale_sessions(
+    root: &Path,
+    keep: &Path,
+    now: std::time::SystemTime,
+    ttl: std::time::Duration,
+    examine_budget: usize,
+    remove_budget: usize,
+) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.take(examine_budget) {
+        if removed >= remove_budget {
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_our_temp_dir_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        // `symlink_metadata`, never `metadata`: the question is what the NAME is, not what it points at.
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else { continue };
+        // `duration_since` errs when `modified` is in the future (clock skew, a copied tree): not stale.
+        if now.duration_since(modified).is_ok_and(|age| age >= ttl) && fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Record an extraction directory as this session's, and hand back whichever of its older siblings are
+/// now due for reclamation. Splitting the decision out of the removal is what makes it testable, and
+/// keeps `fs::remove_dir_all` from running while the lock is held.
+fn drain_reapable(
+    live: &mut std::collections::VecDeque<(PathBuf, std::time::Instant)>,
+    max_live: usize,
+    grace: std::time::Duration,
+    now: std::time::Instant,
+) -> Vec<PathBuf> {
+    let mut due = Vec::new();
+    while live.len() > max_live {
+        // Oldest first. The moment the front is inside the grace period every entry behind it is too,
+        // so this stops rather than scanning on.
+        match live.front() {
+            Some((_, created)) if now.duration_since(*created) >= grace => {
+                if let Some((path, _)) = live.pop_front() {
+                    due.push(path);
+                }
+            }
+            _ => break,
+        }
+    }
+    due
+}
+
+/// The [`MAX_LIVE_EXTRACTIONS`] half of the ownership model, applied. Best-effort and single-attempt on
+/// purpose: unlike `fsutil::ScratchDir`'s retrying removal this runs **on the extraction path**, where a
+/// few hundred milliseconds of retry-and-sleep against a file some other application is holding open
+/// would be paid by the user opening a file inside an archive. A directory that resists removal is left
+/// for [`sweep_stale_sessions`], which will see it in a later session.
+fn note_extraction_dir(dir: PathBuf) {
+    let due = {
+        // A poisoned lock means some *other* thread panicked while holding it; the queue is still a
+        // valid queue, and dropping cleanup on the floor for the rest of the process because of that
+        // would reintroduce the leak this function exists to stop.
+        let mut live = LIVE_EXTRACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        live.push_back((dir, std::time::Instant::now()));
+        drain_reapable(&mut live, MAX_LIVE_EXTRACTIONS, REAP_GRACE, std::time::Instant::now())
+    };
+    for path in due {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+/// Remove everything this process has extracted, for an embedder that knows the session is over (app
+/// shutdown). The session-end half of [`session_root`]'s ownership model: without it a closed app's
+/// directories wait for [`SESSION_TTL`] and the next launch's sweep, which is correct but slower than it
+/// needs to be when the answer is already known.
+///
+/// Best-effort and idempotent — a session that never extracted anything has nothing to remove, and a
+/// directory that will not delete is left to the sweeper exactly as everywhere else here.
+pub fn cleanup_extraction_scratch() {
+    {
+        let mut live = LIVE_EXTRACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        live.clear();
+    }
+    if let Some(session) = SESSION_ROOT.get() {
+        remove_session_tree(session);
+    }
+}
+
+/// The recursive delete behind [`cleanup_extraction_scratch`], with the one check that makes it safe to
+/// arm: **it removes a session directory and refuses anything else.**
+///
+/// In [`session_root`]'s degraded mode `SESSION_ROOT` holds the *shared* `cpe-archive` root, which
+/// belongs to every process on the machine (and, on a Unix `/tmp`, every user on it). Passing that to
+/// `remove_dir_all` would turn a shutdown tidy-up into deleting other people's live extractions. The
+/// `s` prefix is what distinguishes the two, so it is checked here rather than assumed at the call site —
+/// the same lesson `fsutil::ScratchDir::adopt` learned in CPE-1693's PR #934 review, where an
+/// unconditional recursive delete sat in a helper and one wrong argument was all it took.
+fn remove_session_tree(session: &Path) {
+    if session.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('s')) {
+        let _ = fs::remove_dir_all(session);
+    }
+}
 
 /// Row 1 of the CPE-1733 table — **and the row the PR #906 review corrected, which is the point of the
 /// enumeration existing at all.**
@@ -735,45 +1114,58 @@ const TEMP_TARGET_ATTEMPTS: u64 = 1024;
 /// ever been inside that directory, so the leaf — and therefore rows 2–5 — really is unreachable by a
 /// pre-placed link. That sentence is now earned rather than assumed.
 ///
+/// **CPE-1786 raised the floor under that argument** without changing it: the exclusive `create_dir` is
+/// still what carries the claim, but it now happens inside [`session_root`] — a directory created
+/// exclusively by this process, whose default permissions keep other users out of it on a shared `/tmp`
+/// in the first place. The squat hazard is therefore narrower than it was (a same-user process), and the
+/// guard against it is unchanged, because "narrower" is not "gone".
+///
 /// # Residuals, stated rather than implied
 ///
 /// - **The `cpe-archive` root itself is still shared.** On a multi-user `/tmp` another user can create it
-///   first as an ordinary directory. The link check below refuses the symlink case; the ordinary-directory
+///   first as an ordinary directory. The link check refuses the symlink case; the ordinary-directory
 ///   case is not refused, because that is the normal state of affairs on every second run. The exclusive
 ///   subdirectory creation is what makes that safe, not the root.
-/// - **`<pid>-<seq>` is still predictable**, so a hostile local user can pre-create a range and force the
-///   `TEMP_TARGET_ATTEMPTS` error. That is a denial of service, not a redirect — it fails loudly instead
-///   of writing somewhere unintended, which is the trade this module makes everywhere.
-/// - **Nothing here cleans up.** CPE-1693 tracks the 145,000 leftover directories; this change adds one
-///   more directory per extraction just as before.
+/// - **The session directory is no longer predictable**, which retires the denial-of-service residual
+///   this list used to carry. `<pid>-<seq>` could be pre-created in bulk by a hostile local user to force
+///   the [`TEMP_TARGET_ATTEMPTS`] error; `s<pid>-<random>` cannot be guessed, and inside it the sequence
+///   starts from a directory that was empty a moment ago.
+/// - **Cleanup is owned, not absent.** The pre-CPE-1786 version of this list said *"nothing here cleans
+///   up"*, and it was the truest sentence in the file: 1,394,403 leftover directories. What owns them
+///   now, and why it cannot simply be a `Drop` guard, is on [`session_root`].
 fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
     let base = Path::new(inner)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .ok_or_else(|| "invalid entry name".to_string())?;
-    let root = std::env::temp_dir().join("cpe-archive");
-    // The shared root is the one directory here we cannot own exclusively. Refuse it if it is a link:
-    // everything below would be redirected wholesale, and unlike a squatted leaf that is not something a
-    // per-extraction guard can catch later.
-    refuse_link_at_new_file(&root)?;
-    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let session = session_root()?;
     for _ in 0..TEMP_TARGET_ATTEMPTS {
-        // Per-extraction unique subdir (pid + monotonic seq) so the basename is preserved for the opened
-        // file while concurrent extractions can never collide (CPE-1195).
+        // Per-extraction unique subdir (monotonic seq inside this session's private root) so the basename
+        // is preserved for the opened file while concurrent extractions can never collide (CPE-1195).
         let seq = EXTRACT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = root.join(format!("{}-{}", std::process::id(), seq));
+        let dir = session.join(format!("e{seq}"));
         match fs::create_dir(&dir) {
             // Exclusive: this returning `Ok` is the whole basis for rows 2–5 being unguarded.
-            Ok(()) => return Ok(dir.join(base)),
-            // Occupied by a leftover, a concurrent run, or a squatter — all three want the same answer.
+            Ok(()) => {
+                note_extraction_dir(dir.clone());
+                return Ok(dir.join(base));
+            }
+            // Occupied by a concurrent run or a squatter — both want the same answer.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Our session root is gone: another instance's sweeper decided we were dead (a session that
+            // extracted nothing for `SESSION_TTL`), or a user emptied `%TEMP%`. Re-create it and carry
+            // on rather than failing an extraction over a cleanup decision made elsewhere.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = fs::create_dir_all(&session);
+                continue;
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
     Err(format!(
         "could not claim a private extraction directory under \"{}\" after {TEMP_TARGET_ATTEMPTS} attempts — \
          every name tried was already taken. Nothing was extracted; clearing that folder should fix it",
-        root.display()
+        session.display()
     ))
 }
 
@@ -853,7 +1245,8 @@ fn extract_7z_entry(path: &str, inner: &str, out: &Path) -> Result<bool, String>
 /// Extract a single entry from any supported non-zip archive format to a temp file and return its path
 /// (CPE-1180): tar, gzip-compressed tar (.tar.gz/.tgz), and 7-Zip. Zip delegates to the existing
 /// [`extract_archive_entry`] (kept separate since the `zip` crate already indexes by name efficiently).
-/// Mirrors `extract_archive_entry`'s contract — a flat temp file at `%TEMP%/cpe-archive/<basename>` — so
+/// Mirrors `extract_archive_entry`'s contract — a temp file named `<basename>` in a private directory
+/// under `%TEMP%/cpe-archive` ([`temp_extract_target`]) — so
 /// the frontend's open-leaf flow doesn't need to know which extractor served it. `inner` is validated
 /// with [`entry_name_is_safe`] up front so a path-traversal entry name is rejected before any extraction
 /// is attempted, regardless of format.
@@ -887,7 +1280,8 @@ pub fn extract_archive_entry_any(path: &str, inner: &str) -> Result<String, Stri
 /// Extract a single **STORED** entry from a `.rar` to a temp file and return its path (CPE-1360). RAR's
 /// compression is proprietary with no free decoder, so only uncompressed (STORE) entries can be served;
 /// a compressed entry is a clean `Err` from [`crate::rar::rar_extract_entry`]. Mirrors
-/// [`extract_archive_entry`]'s contract — a flat temp file at `%TEMP%/cpe-archive/<basename>` — so the
+/// [`extract_archive_entry`]'s contract — a temp file named `<basename>` in a private directory under
+/// `%TEMP%/cpe-archive` ([`temp_extract_target`]) — so the
 /// frontend's open-leaf / extract-for-preview flow doesn't need to know which extractor served it. The
 /// entry name is [`entry_name_is_safe`]-validated before anything is written.
 pub fn extract_rar_entry(path: &str, inner: &str) -> Result<String, String> {
@@ -2887,10 +3281,12 @@ mod tests {
             return;
         }
 
-        let root = std::env::temp_dir().join("cpe-archive");
-        fs::create_dir_all(&root).unwrap();
-        let pid = std::process::id();
-
+        // CPE-1786 moved the numbered directories from the shared root into this process's own session
+        // root, so the squat has to move with them or it would stage the hazard somewhere the extraction
+        // no longer looks — a test that could only ever pass. The hazard itself is unchanged (a same-user
+        // process, or this test, pre-creating the name the extraction is about to claim); only its
+        // address moved.
+        let root = session_root().unwrap();
         for _ in 0..STAGE_ATTEMPTS {
             let start = EXTRACT_SEQ.load(std::sync::atomic::Ordering::Relaxed);
             let end = start + SQUAT_BLOCK;
@@ -2898,7 +3294,7 @@ mod tests {
             // sibling — also occupied, so it is walked over too; we simply cannot plant a link in it.
             let mut ours: Vec<std::path::PathBuf> = Vec::new();
             for seq in start..end {
-                let dir = root.join(format!("{pid}-{seq}"));
+                let dir = root.join(format!("e{seq}"));
                 if fs::create_dir(&dir).is_ok() {
                     // The leaf name is archive-controlled: an attacker supplying the archive knows it.
                     stage_live_link(&victim, &dir.join("a.txt"));
@@ -2921,13 +3317,13 @@ mod tests {
             let landed_seq: u64 = landed_dir
                 .file_name()
                 .and_then(|n| n.to_str())
-                .and_then(|n| n.rsplit('-').next())
+                .and_then(|n| n.strip_prefix('e'))
                 .and_then(|n| n.parse().ok())
                 .unwrap_or_else(|| panic!("row 1: unrecognised extraction directory name {landed_dir:?}"));
 
             assert!(
                 landed_seq >= end,
-                "row 1: the extraction claimed <pid>-{landed_seq}, INSIDE the squatted block \
+                "row 1: the extraction claimed e{landed_seq}, INSIDE the squatted block \
                  [{start}, {end}) — every one of those names was already taken, so exclusive creation \
                  must have stepped over all of them. Claiming a directory it did not create is what makes \
                  rows 2–5's leaf reachable by a pre-planted link (landed {landed})"
@@ -2953,6 +3349,271 @@ mod tests {
              the earlier version of this test claimed to have and did not."
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ─── CPE-1786: extraction directories own their lifetime ─────────────────────────────────────
+    //
+    // The bug these pin is not a wrong answer, it is an *unbounded* one, and the reason it survived two
+    // tickets is that the obvious measurement cannot see it: `%TEMP%/cpe-archive` is a single top-level
+    // entry, so 1,394,403 leaked directories inside it register as **one**. Every test below therefore
+    // asserts on structure one level *down* — how many directories an extraction adds under the shared
+    // root, and what reclaims them — rather than on the count of the root itself.
+
+    /// **The shape of the fix, as an assertion: N extractions add ONE directory to the shared root.**
+    ///
+    /// Before CPE-1786 each extraction added its own `<pid>-<seq>` directly under `cpe-archive`, so N
+    /// extractions were N new children of the shared root, forever. Now they are N children of *this
+    /// process's* session root, which is one child of the shared root and is reclaimed as a unit. Both
+    /// halves are asserted, because dropping either would be a regression in opposite directions:
+    /// collapsing the per-extraction directories would bring back the CPE-1195 same-name race, and
+    /// putting them back under the shared root would bring back the leak.
+    #[test]
+    fn cpe_1786_many_extractions_add_one_directory_to_the_shared_root() {
+        const N: usize = 25;
+
+        let d = scratch("cpe1786_session");
+        let src = d.join("a.txt");
+        fs::write(&src, b"ARCHIVED A").unwrap();
+        let zip = d.join("in.zip");
+        compress_to_zip(&[src.to_string_lossy().to_string()], &zip.to_string_lossy()).unwrap();
+
+        let mut dirs = std::collections::BTreeSet::new();
+        let mut parents = std::collections::BTreeSet::new();
+        for _ in 0..N {
+            let out = extract_archive_entry(&zip.to_string_lossy(), "a.txt").unwrap();
+            let dir = Path::new(&out).parent().unwrap().to_path_buf();
+            parents.insert(dir.parent().unwrap().to_path_buf());
+            dirs.insert(dir);
+        }
+
+        assert_eq!(
+            dirs.len(),
+            N,
+            "each extraction must still get its own private directory — that is CPE-1195's fix, and \
+             collapsing it would re-race two concurrent extractions of same-named entries"
+        );
+        assert_eq!(
+            parents.len(),
+            1,
+            "all {N} extractions must sit inside ONE session directory; {} distinct parents means they \
+             are being added to the shared root again, which is the leak CPE-1786 measured at 1,394,403 \
+             directories",
+            parents.len()
+        );
+
+        let session = parents.into_iter().next().unwrap();
+        assert_eq!(session, session_root().unwrap(), "and that parent must be this session's root");
+        let name = session.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with('s') && is_our_temp_dir_name(&name),
+            "the session directory {name} must carry the unguessable `s<pid>-<random>` name — a bare \
+             `<pid>` is what a recycled PID collides with"
+        );
+        assert_eq!(
+            session.parent().unwrap(),
+            std::env::temp_dir().join(ARCHIVE_TEMP_ROOT),
+            "and it must live under the shared root the frontend and the sweeper both expect"
+        );
+
+        for dir in dirs {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The sweeper's licence to delete, pinned name by name. It runs `remove_dir_all` inside a directory
+    /// shared with every other process on the machine — and, on a Unix `/tmp`, every other *user* — so
+    /// "which names are ours" is a safety property, not a formatting detail.
+    #[test]
+    fn cpe_1786_only_names_this_module_creates_are_sweepable() {
+        for ours in ["s1234-00000000deadbeef", "s7-0000000000000000", "e0", "e991", "4321-7", "1-1"] {
+            assert!(is_our_temp_dir_name(ours), "{ours} is a name this module creates");
+        }
+        for theirs in [
+            "",
+            "s",
+            "e",
+            "s1234",              // no random half — not a shape this ever wrote
+            "s1234-nothex",       // the random half must be hex
+            "sabcd-00000000",     // the pid half must be digits
+            "ea",                 // `e` + a non-number
+            "cpe-archive-staging",
+            "someone-elses-junk",
+            "-7",
+            "rustc-uplift",
+        ] {
+            assert!(
+                !is_our_temp_dir_name(theirs),
+                "{theirs} was NOT created by this module, and a sweeper that removes unrecognised names \
+                 in a shared temp directory is a recursive delete pointed at somebody else's data"
+            );
+        }
+    }
+
+    /// **Cross-session reclamation: the half that stops growth between runs.** A dead session's directory
+    /// is removed, this session's is not, a stranger's is not, and the pre-CPE-1786 `<pid>-<seq>` shape is
+    /// reclaimed too — which is how the 1.39 million already on disk drain rather than being frozen.
+    ///
+    /// The age decision is driven by the `now` parameter rather than by sleeping or by forging a
+    /// directory's mtime (which `std` has no portable API for), so the one-hour behaviour is actually
+    /// asserted instead of being assumed from a shorter proxy.
+    #[test]
+    fn cpe_1786_sweep_reclaims_dead_sessions_and_leaves_everything_else() {
+        let ttl = std::time::Duration::from_secs(60 * 60);
+        let d = scratch("cpe1786_sweep");
+        let root = d.to_path_buf();
+
+        let keep = root.join("s999-00000000000000ff");
+        fs::create_dir(&keep).unwrap();
+        let dead: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = root.join(format!("s{i}-000000000000000{i}"));
+                fs::create_dir(&p).unwrap();
+                // A real extraction directory with a real file in it, so the removal is recursive.
+                fs::create_dir(p.join("e0")).unwrap();
+                fs::write(p.join("e0").join("a.txt"), b"leftover").unwrap();
+                p
+            })
+            .collect();
+        let legacy = root.join("4321-7"); // the pre-CPE-1786 shape
+        fs::create_dir(&legacy).unwrap();
+        let stranger = root.join("someone-elses-junk");
+        fs::create_dir(&stranger).unwrap();
+        let not_a_dir = root.join("1234-1"); // our name shape, but a file
+        fs::write(&not_a_dir, b"not a directory").unwrap();
+
+        let now = std::time::SystemTime::now();
+        assert_eq!(
+            sweep_stale_sessions(&root, &keep, now, ttl, 64, 32),
+            0,
+            "nothing here is an hour old yet — sweeping a session that might still be live is the one \
+             way this mechanism could break a running instance"
+        );
+
+        let later = now + std::time::Duration::from_secs(2 * 60 * 60);
+        assert_eq!(
+            sweep_stale_sessions(&root, &keep, later, ttl, 64, 2),
+            2,
+            "the remove budget is what keeps this off the critical path of the first extraction; \
+             ignoring it would let one launch pay for 1.39 million directories"
+        );
+        assert_eq!(
+            sweep_stale_sessions(&root, &keep, later, ttl, 64, 32),
+            2,
+            "the remaining two stale directories go on the next pass"
+        );
+
+        for p in &dead {
+            assert!(!p.exists(), "a session untouched for {ttl:?} must be reclaimed: {}", p.display());
+        }
+        assert!(!legacy.exists(), "the pre-CPE-1786 `<pid>-<seq>` shape must drain through the same sweep");
+        assert!(keep.exists(), "this session's own root must never be swept by this session");
+        assert!(stranger.exists(), "a name we did not create must be left alone");
+        assert!(not_a_dir.exists(), "a file wearing one of our names is not a session directory");
+    }
+
+    /// The sweeper must not delete through a link. `%TEMP%` is a place a junction can be planted without
+    /// privilege on Windows, and CPE-1693's PR #934 measured a bulk-delete mechanism following exactly
+    /// that out of `%TEMP%` and destroying the far side (`robocopy /MIR`, even with `/XJ`). The entry is
+    /// skipped outright rather than trusted to `remove_dir_all`'s reparse-point semantics.
+    #[test]
+    fn cpe_1786_sweep_never_deletes_through_a_link() {
+        let d = scratch("cpe1786_sweep_link");
+        let root = d.join("root");
+        fs::create_dir(&root).unwrap();
+        let victim = d.join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::write(victim.join("canary.txt"), b"CANARY").unwrap();
+
+        let link = root.join("s4242-00000000deadbeef");
+        if !crate::fsutil::make_dir_link(&victim, &link) {
+            crate::skip_notice!(
+                "[CPE-1786] SKIPPED the sweeper's link leg: this machine could not create a directory \
+                 link, so the follow-a-junction-out-of-%TEMP% shape was NOT covered on this run."
+            );
+            return;
+        }
+        let keep = root.join("s1-0000000000000001");
+        fs::create_dir(&keep).unwrap();
+
+        let removed = sweep_stale_sessions(
+            &root,
+            &keep,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(2 * 60 * 60),
+            std::time::Duration::from_secs(60 * 60),
+            64,
+            32,
+        );
+
+        assert_eq!(removed, 0, "a link wearing a session name must be skipped, not removed");
+        assert!(
+            victim.join("canary.txt").exists(),
+            "the sweep followed a link out of the shared root and deleted the far side — the exact \
+             mechanism CPE-1693's purge had to be rewritten to avoid"
+        );
+        assert!(fs::symlink_metadata(&link).is_ok(), "and the link itself is left where it is");
+    }
+
+    /// **In-session reclamation: the half a startup sweep cannot provide.** A session that extracts all
+    /// day is bounded by this, not by the next launch. Two properties, and the second is the one with
+    /// teeth: past the cap the oldest go, but *nothing inside the grace period is ever touched* — because
+    /// `FileList.svelte`'s alt-drag stages every selected entry in a loop before handing any of them to
+    /// the OS, so a big drag-out must not have its earlier files reclaimed out from under the loop that
+    /// is still building it.
+    #[test]
+    fn cpe_1786_a_long_session_is_bounded_but_a_live_batch_is_not_touched() {
+        let grace = std::time::Duration::from_secs(60);
+        // Built forwards, never backwards: `Instant - Duration` can panic on a machine that booted
+        // moments ago, which a CI runner genuinely is.
+        let old = std::time::Instant::now();
+        let now = old + std::time::Duration::from_secs(300);
+
+        let mut aged: std::collections::VecDeque<(PathBuf, std::time::Instant)> = (0..100)
+            .map(|i| (PathBuf::from(format!("d{i}")), if i < 90 { old } else { now }))
+            .collect();
+        let due = drain_reapable(&mut aged, 64, grace, now);
+        assert_eq!(due.len(), 36, "100 live, cap 64 — the 36 oldest are due");
+        assert_eq!(due[0], PathBuf::from("d0"), "and they go oldest-first");
+        assert_eq!(aged.len(), 64, "the cap is what the session is bounded to");
+
+        let mut batch: std::collections::VecDeque<(PathBuf, std::time::Instant)> =
+            (0..200).map(|i| (PathBuf::from(format!("f{i}")), now)).collect();
+        assert!(
+            drain_reapable(&mut batch, 64, grace, now).is_empty(),
+            "a 200-entry drag-out still being staged is 200 files the OS is about to copy; the cap must \
+             not reclaim the first 136 of them mid-loop"
+        );
+        assert_eq!(batch.len(), 200);
+
+        let mut small: std::collections::VecDeque<(PathBuf, std::time::Instant)> =
+            (0..10).map(|i| (PathBuf::from(format!("s{i}")), old)).collect();
+        assert!(
+            drain_reapable(&mut small, 64, grace, now).is_empty(),
+            "under the cap nothing is reclaimed however old it is — an idle session keeps its previews"
+        );
+    }
+
+    /// [`cleanup_extraction_scratch`]'s recursive delete refuses anything that is not a session
+    /// directory. In degraded mode the process's "session root" *is* the shared `cpe-archive` root, and
+    /// removing that on shutdown would delete every other running instance's extractions.
+    #[test]
+    fn cpe_1786_session_cleanup_refuses_the_shared_root() {
+        let d = scratch("cpe1786_cleanup");
+        let session = d.join("s1-0000000000000001");
+        fs::create_dir(&session).unwrap();
+        fs::write(session.join("a.txt"), b"x").unwrap();
+        let shared = d.join(ARCHIVE_TEMP_ROOT);
+        fs::create_dir(&shared).unwrap();
+        fs::write(shared.join("a.txt"), b"x").unwrap();
+
+        remove_session_tree(&shared);
+        assert!(
+            shared.exists(),
+            "the shared root is what degraded mode holds; deleting it on shutdown would take other \
+             instances' live extractions with it"
+        );
+
+        remove_session_tree(&session);
+        assert!(!session.exists(), "and a real session directory is removed, tree and all");
     }
 
     /// **A recorded absence, closed by CPE-1758** (PR #906 review, finding 2 — the gap this test used to
