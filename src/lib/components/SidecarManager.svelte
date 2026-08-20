@@ -386,9 +386,9 @@
     color: var(--text-dim, #a0a0a0);
   }
   .log-error {
-    color: var(--warn);
+    color: var(--danger);
   }
   .log-warn {
-    color: #c9a227;
+    color: var(--warn);
   }
 </style>

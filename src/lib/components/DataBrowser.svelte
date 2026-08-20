@@ -151,6 +151,6 @@
   .db-grid th, .db-grid td { border: 1px solid var(--border); padding: 2px 8px; text-align: left; white-space: nowrap; }
   .db-grid th { position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; z-index: 1; }
   .db-sort { margin-left: 4px; opacity: 0.7; }
-  .db-error { padding: 12px; color: #b5872b; white-space: pre-wrap; }
+  .db-error { padding: 12px; color: var(--warn); white-space: pre-wrap; }
   .db-empty { padding: 12px; color: var(--text-faint); }
 </style>

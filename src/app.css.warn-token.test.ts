@@ -5,7 +5,7 @@
 // theme (least legible in the one theme — dark — that most needed it right). This is the guard
 // that CPE-1810 shipped alongside the fix, so it can't silently regress back to that shape.
 //
-// Two invariants, independent of every other app.css guard:
+// Three invariants, independent of every other app.css guard:
 //  (a) `--warn`/`--warn-fill` resolve to a concrete hex in ALL FOUR live themes (light, dark,
 //      hc-light, hc-dark) — not just light/dark. This is deliberately a HARD failure, unlike
 //      src/app.css.solid-fill-contrast.test.ts's/hc-solid-fill-contrast.test.ts's own resolution,
@@ -16,6 +16,15 @@
 //  (b) no `.svelte` component still writes `var(--warn` (or `var(--warn-fill`) with a fallback —
 //      the "half-migration" the ticket explicitly calls worse than none, since it would leave some
 //      call sites live-themed and others silently stuck on a hex again.
+//  (c) neither raw literal this ticket exists to retire — `#b5872b`/`#b8860b` (both named by the
+//      ticket's own "Why it matters") — appears anywhere in a `.svelte` file for a caution/warning
+//      use. (a) and (b) above were written against the FIRST sweep's own blind spot: grepping for
+//      `var(--token, <fallback>)` only ever finds sites that already reference `--warn` through
+//      `var()` — it is structurally incapable of seeing a site that hard-codes the identical amber
+//      literal directly with NO token reference at all, which is exactly how a PR review round found
+//      19 more real call sites (20 occurrences) this ticket's first pass had missed entirely. This
+//      third invariant guards the actual literals, not the idiom around them, so that blind spot
+//      can't recur the same way twice.
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -160,3 +169,30 @@ describe("no .svelte component falls back to a hard-coded hex for --warn/--warn-
     expect(offenders, `component(s) still using var(--warn[-fill], <fallback>) instead of the real token: ${offenders.join(", ")}`).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// The bare literals this ticket exists to retire must not reappear for a caution/warning use
+// anywhere in a .svelte file, independent of whether they arrive via var(--warn, <fallback>) —
+// (b) above — or with no token reference at all, which is the shape (b) is structurally blind to
+// (see this file's header comment). A PR review round found 19 such sites (20 occurrences) across
+// 11 components on the first pass alone, so this guard exists specifically because grep-for-the-
+// idiom was proven insufficient once already.
+const WARN_LITERAL_RE = /#(?:b5872b|b8860b)\b/i;
+
+describe("the raw --warn hex literals (#b5872b/#b8860b) never reappear in a .svelte file (CPE-1810)", () => {
+  it("no .svelte file hard-codes #b5872b or #b8860b", () => {
+    const offenders: string[] = [];
+    for (const f of walkSvelte(SRC)) {
+      // Only .svelte files are walked (see walkSvelte above) — src/lib/sessionChip.ts's own
+      // #b5872b is a .ts file and so is never a candidate here. That exclusion is deliberate even
+      // beyond the file-extension scope: sessionChip.ts's amber is a FIXED categorical
+      // session-identity palette colour (one of several stable hues assigned round-robin to
+      // distinguish concurrent agent sessions), not a caution/warning semantic — its own comment
+      // says so — so it must stay theme-invariant and must never be pointed at --warn.
+      const content = readFileSync(f, "utf8");
+      if (WARN_LITERAL_RE.test(content)) offenders.push(f.replace(SRC, "src").replace(/\\/g, "/"));
+    }
+    expect(offenders, `.svelte file(s) still hard-coding the raw --warn hex instead of the token: ${offenders.join(", ")}`).toEqual([]);
+  });
+});
+

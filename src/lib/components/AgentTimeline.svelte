@@ -1304,7 +1304,7 @@
     color: #fff;
   }
   .tl-badge.created { background: #3a9d4a; }
-  .tl-badge.modified { background: #b5872b; }
+  .tl-badge.modified { background: var(--warn-fill); }
   .tl-badge.renamed { background: #3a72b5; }
   .tl-badge.removed { background: var(--danger-fill); }
   /* CPE-405: a read is the weakest signal — a hollow, muted badge, visually subordinate to changes. */

@@ -1039,7 +1039,7 @@
   .drive-usage { padding: 2px 10px 6px 34px; display: flex; flex-direction: column; gap: 2px; }
   .drive-bar { height: 5px; border-radius: 3px; background: rgba(128, 128, 128, 0.28); overflow: hidden; }
   .drive-bar-fill { height: 100%; border-radius: 3px; background: var(--accent, #2f6fed); }
-  .drive-bar-fill.warn { background: #b5872b; }
+  .drive-bar-fill.warn { background: var(--warn); }
   .drive-bar-fill.full { background: var(--danger); }
   .drive-free { font-size: 10px; opacity: 0.55; }
   /* Eject affordance on REMOVABLE drive rows only (CPE-1278). Sits at the row's trailing edge; faint

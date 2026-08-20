@@ -159,15 +159,35 @@ describe("app.css theme-token layering (CPE-1534)", () => {
 // and out of scope for CPE-1534 (a pure app.css refactor) — this is a growth guard, not a
 // zero-tolerance rule.
 const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
-// CPE-1810 ratcheted these down: migrating AgentTimeline/ConsentSheet/ExplorerPane/
-// ImageCompareView/SidecarManager off the undefined `--warn` token's `var(--warn, <hex>)` fallback
-// idiom (onto the now-real `--warn`/`--warn-fill` semantic tokens) deleted one hard-coded hex
-// literal per fallback call site — 24 in total across those 5 files — and dropped
-// ImageCompareView.svelte out of the "has hex" set entirely (its only hex literals were --warn
-// fallbacks). Was 90/466 (actual pre-CPE-1810 count was 88/466 — the files count already had
-// 2 free of slack before this ticket).
-const BASELINE_FILES_WITH_HEX = 87;
-const BASELINE_TOTAL_HEX_OCCURRENCES = 442;
+// CPE-1810 ratcheted these down in two passes:
+//  1. Migrating AgentTimeline/ConsentSheet/ExplorerPane/ImageCompareView/SidecarManager off the
+//     undefined `--warn` token's `var(--warn, <hex>)` fallback idiom (onto the now-real
+//     `--warn`/`--warn-fill` semantic tokens) deleted one hard-coded hex literal per fallback call
+//     site — 24 in total across those 5 files — and dropped ImageCompareView.svelte out of the
+//     "has hex" set entirely (its only hex literals were --warn fallbacks). Was 90/466 (actual
+//     pre-CPE-1810 count was 88/466 — the files count already had 2 free of slack before this
+//     ticket). That pass brought it to 87/442.
+//  2. A PR review round then found the first pass's own grep shape (`var(--token, <fallback>)`)
+//     was blind to sites that hard-code the SAME amber literals (`#b5872b`/`#b8860b`) directly with
+//     NO token reference at all — the exact shape the ticket's "Why it matters" named those two
+//     hexes for. A follow-up sweep (AgentTimeline/CheckpointDialog/CompareDialog/ConflictDialog/
+//     DataBrowser/ExplorerPane/FileList/IntegrityDialog/Sidebar/StatusBar/SyncDialog — 19 call
+//     sites, 20 hex occurrences since one SyncDialog rule carried the literal twice) migrated those
+//     onto `--warn`/`--warn-fill` too and dropped DataBrowser.svelte out of the "has hex" set
+//     entirely (its only hex literal was this same amber). `src/lib/sessionChip.ts`'s `#b5872b` is
+//     NOT part of this — it's a `.ts` file (this ratchet only walks `.svelte`), and even if it were
+//     `.svelte` it would still be excluded: it's a fixed categorical session-identity palette,
+//     deliberately theme-invariant by its own comment, not a caution/warning semantic. That pass
+//     brought it to 86/422.
+//  3. The same review round's Visual Critic pass found a semantic INVERSION this ticket's own
+//     migration had frozen in place: SidecarManager.svelte's `.log-error` had been pointed at
+//     `var(--warn)` (wrong — that's the caution token marking an actual error) while `.log-warn`
+//     sat right below it on a still-bare `#c9a227` (2.42:1 on white — below AA, below even the 3:1
+//     large-text floor, and in dark only 1.27:1 separated it from `.log-error` — indistinguishable
+//     log levels). Fixed the pair: `.log-error` -> `var(--danger)`, `.log-warn` -> `var(--warn)`.
+//     One more hex literal removed. Brought it to the current 86/421.
+const BASELINE_FILES_WITH_HEX = 86;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 421;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

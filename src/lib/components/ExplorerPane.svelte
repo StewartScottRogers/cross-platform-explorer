@@ -697,7 +697,7 @@
     max-width: 180px;
   }
   .agent-chip.created { background: #3a9d4a; }
-  .agent-chip.modified { background: #b5872b; }
+  .agent-chip.modified { background: var(--warn-fill); }
   .agent-chip.renamed { background: #3a72b5; }
   .agent-chip.removed { background: var(--danger-fill); }
   .agent-log-btn {

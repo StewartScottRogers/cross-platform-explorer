@@ -224,7 +224,7 @@
   .res { flex: 1; min-height: 120px; resize: none; font-family: var(--mono, monospace); font-size: 12px;
     padding: 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-alt); color: inherit; }
   .res-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-  .warn { color: #b5872b; font-size: 11px; margin: 0 0 8px; }
+  .warn { color: var(--warn); font-size: 11px; margin: 0 0 8px; }
 
   .status { padding: 6px 16px; font-size: 12px; min-height: 20px; color: var(--text-dim);
     border-top: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

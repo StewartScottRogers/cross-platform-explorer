@@ -217,7 +217,7 @@
     border: 1px solid var(--border-strong); background: var(--surface-alt);
     font-variant-numeric: tabular-nums;
   }
-  .chip.dirty { color: #b5872b; }
+  .chip.dirty { color: var(--warn); }
   .chip.ok { color: var(--text-dim); }
   .policy { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
   .policy span { font-size: 12px; color: var(--text-dim); }
@@ -242,14 +242,14 @@
   .auto-interval select { height: 28px; padding: 0 6px; border: 1px solid var(--border-strong);
     border-radius: var(--radius); background: var(--surface-alt); color: inherit; }
   .auto-note { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-bottom: 12px; }
-  .warn-text { color: #b5872b; font-size: 12px; }
+  .warn-text { color: var(--warn); font-size: 12px; }
   .warn-text.small { font-size: 11px; margin-top: 6px; }
   .log {
     margin-bottom: 14px; max-height: 140px; overflow: auto;
     background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px;
     padding: 8px; font-size: 11px; font-family: var(--mono, monospace);
   }
-  .log.failed { border-color: #b5872b; }
+  .log.failed { border-color: var(--warn); }
   .log-line { white-space: pre-wrap; word-break: break-word; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   .btn {
@@ -260,6 +260,6 @@
   .btn:disabled { opacity: 0.5; cursor: default; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:not(:disabled):hover { background: var(--accent-hover); }
-  .btn.warn-btn { border-color: #b5872b; color: #b5872b; }
-  .btn.warn-btn:not(:disabled):hover { background: #b5872b; color: #fff; }
+  .btn.warn-btn { border-color: var(--warn); color: var(--warn); }
+  .btn.warn-btn:not(:disabled):hover { background: var(--warn-fill); color: #fff; }
 </style>

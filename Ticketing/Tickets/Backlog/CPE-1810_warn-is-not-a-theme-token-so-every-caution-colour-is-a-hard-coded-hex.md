@@ -123,3 +123,81 @@ Related: **CPE-1803**, **CPE-1492/1493** (the dark theme and its contrast guard)
   so no `cargo clippy` run.
 - Not user-facing in the CPE-579 sense (no new Section/control — a colour-correctness bug fix to
   existing UI), so no `src/docs/*.md`/`sectionDocs.ts` change.
+
+**2026-08-20 (round 2 — CHANGES REQUESTED, attempt 2 of 3)** — Independent Reviewer + Visual Critic
+both found the same root cause: **the round-1 grep methodology was structurally blind to bare-literal
+offenders.**
+
+- **Corrected methodology.** Round 1's completeness check grepped for `var(--token, <fallback>)` —
+  that shape can only ever find a call site that already references `--warn` through `var()`. It
+  cannot see a site that hard-codes the identical amber literal directly with no token reference at
+  all, which turned out to be the shape of most of the remaining offenders. Round 2's actual check
+  was a plain literal grep — `grep -rn "#b5872b\|#b8860b" src --include="*.svelte" --include="*.ts"`
+  — cross-referenced against every hit's surrounding CSS rule to judge foreground/border/tint
+  (`--warn`) vs. solid-fill-with-white-text (`--warn-fill`) role by hand. This is the check that
+  should have been run in round 1 instead of (or alongside) the `var()`-shaped one.
+- **19 more real call sites found this way (20 hex occurrences — one SyncDialog rule carried the
+  literal twice), across 11 components not previously touched**, migrated onto `--warn`/`--warn-fill`:
+  `--warn-fill` (solid-fill-with-white-text, same role `--danger-fill` already established for
+  `.tl-badge.removed`/etc.): `AgentTimeline.svelte:1307` `.tl-badge.modified`,
+  `ExplorerPane.svelte:700` `.agent-chip.modified`, `FileList.svelte:926` `.agent-badge.modified`,
+  `SyncDialog.svelte:264` `.btn.warn-btn:hover`. `--warn` (foreground/border/tint, everything else):
+  `CheckpointDialog.svelte:382,390`, `CompareDialog.svelte:224,234`, `ConflictDialog.svelte:227`,
+  `DataBrowser.svelte:154` (found by my own fresh grep, not on the Reviewer's list — a genuine
+  `.db-error` state, but the codebase's own precedent, per CPE-1803's TrashView comment,
+  distinguishes a recoverable/soft failure rendered in the caution amber from a hard failure in
+  `--danger` red; treated as a mechanical literal migration, not a severity redesign),
+  `IntegrityDialog.svelte:146`, `Sidebar.svelte:1042` (`.drive-bar-fill.warn` — plain fill, no
+  overlaid text, so `--warn` not `--warn-fill`, matching its sibling `.full { background:
+  var(--danger); }` which also isn't `--danger-fill`), `StatusBar.svelte:181-183`,
+  `SyncDialog.svelte:220,245,252,263`.
+- **Semantic inversion fixed** (Visual Critic finding, not on the Reviewer's list):
+  `SidecarManager.svelte`'s `.log-error` had been pointed at `var(--warn)` in round 1 — backwards,
+  the caution token marking an actual error — while `.log-warn` sat directly below it on a still-bare
+  `#c9a227` (2.42:1 on white, below AA and below the 3:1 large-text floor even in the high-contrast
+  light theme; in dark only 1.27:1 separated it from `.log-error`, i.e. WARN and ERROR log lines
+  rendered indistinguishably). Fixed the pair: `.log-error` -> `var(--danger)`, `.log-warn` ->
+  `var(--warn)`. Flagging explicitly per the Foreman's instruction: **a migration that freezes a
+  semantic inversion in place is worse than the hex was** — round 1 touched this exact line and
+  picked the wrong token without checking what the surrounding pair actually meant.
+- **Confirmed already-correct from round 1**: `AgentTimeline.svelte:1307`'s `.tl-badge.modified` was
+  independently flagged by both the Reviewer and the Visual Critic as a within-panel amber mismatch
+  regression risk — but it was already migrated to `var(--warn-fill)` as part of this round's literal
+  sweep (see above), so no separate action was needed once the sweep landed.
+- **Deliberately left untouched, per the Foreman**: `src/lib/sessionChip.ts:14`'s `#b5872b` (fixed
+  categorical session-identity palette, theme-invariant by its own comment — excluded in both the
+  Work Log and in the new guard test's comment). Also explicitly out of scope, filed separately by
+  the Foreman: hc-dark never overriding `--log-warn` (inherits the light value at 3.28:1 on
+  `#0d0d0d`), and `.tl-badge.created`/`.tl-badge.renamed` (`#3a9d4a`/`#3a72b5`) being the same
+  un-themed solid-fill shape in green/blue, with `#3a9d4a` also duplicated in `SidecarManager
+  .status.ok`.
+- **Ratchet re-tightened** in `src/app.css.test.ts`, exact, no headroom: 87/442 -> 86/422 (the 19-site
+  sweep, 20 occurrences, minus the 1 file — DataBrowser.svelte — that dropped out of the "has hex" set
+  entirely) -> 86/421 (the log-warn fix, one more literal removed; files-with-hex unchanged since
+  SidecarManager still carries other hex elsewhere).
+- **Extended `src/app.css.warn-token.test.ts`** with a third invariant: a direct regex guard
+  (`/#(?:b5872b|b8860b)\b/i`) that no `.svelte` file may hard-code either raw literal, independent of
+  whether it arrives via `var(--warn, <fallback>)` or with no token reference at all — closing the
+  exact blind spot round 1's methodology had. `sessionChip.ts` is excluded (a) structurally, since the
+  guard only walks `.svelte` files and that file is `.ts`, and (b) explained in the guard's own
+  in-file comment for why it would stay excluded even if the walker were ever widened.
+- **Red-proofed every new/changed assertion, minimal breakage, each observed then reverted**:
+  - New literal guard: put `#b5872b` back into `ConflictDialog.svelte:227`'s `.warn` rule ->
+    `.svelte file(s) still hard-coding the raw --warn hex instead of the token:
+    src/lib/components/ConflictDialog.svelte`. Reverted.
+  - Re-tightened ratchet (the log-warn fix specifically): put `#c9a227` back into
+    `SidecarManager.svelte:391`'s `.log-warn` rule -> `total hard-coded hex literal occurrences:
+    expected 422 to be less than or equal to 421`. Reverted.
+  - (The ratchet's earlier 86/422 tightening from the literal sweep itself was red-proofed the same
+    way against 87/442 before this round's further fix landed; not repeated here since the value has
+    since moved again — see the two proofs above for the current 86/421.)
+- Gates re-run after all fixes: `npm run check` — 0 errors, 0 warnings. `npx vitest run` (full suite)
+  — **317 test files, 4192 tests passed**. (Down 1 from round 1's 4193, not a regression: added 1 new
+  test to `app.css.warn-token.test.ts`'s invariant (c), but the auto-derived
+  `solid-fill-contrast.test.ts`/`hc-solid-fill-contrast.test.ts` scanners each lost their
+  theme-invariant "white on hard-coded #b5872b" literal-pairing test — 1 per file, 2 total — because
+  there are no longer any literal-hex solid-fill-with-white-text consumers of that hex left anywhere;
+  every one of them (`.tl-badge.modified`/`.agent-chip.modified`/`.agent-badge.modified`/
+  `.btn.warn-btn:hover`) now resolves through the real `--warn-fill` token instead, which is still
+  fully asserted — confirmed by reading the verbose test list before and after.) No Rust touched, so
+  no `cargo clippy` run.
