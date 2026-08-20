@@ -3,7 +3,7 @@ id: CPE-1795
 title: the freshness check recommends a version from the wrong ffmpeg release line — following it 404s
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19

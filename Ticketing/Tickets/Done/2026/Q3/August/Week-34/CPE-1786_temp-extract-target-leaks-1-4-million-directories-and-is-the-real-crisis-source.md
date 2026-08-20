@@ -3,7 +3,7 @@ id: CPE-1786
 title: temp_extract_target leaks 1.4 million directories in production code — the real source CPE-1693 did not touch
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-19
