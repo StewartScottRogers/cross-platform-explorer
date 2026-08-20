@@ -204,7 +204,9 @@ const ALLOWLIST: AllowlistEntry[] = [
     // 5330 -> 5342: CPE-1803 added one `trash.degraded` line to several locale blocks above this line
     // (including this line's own Portuguese block, ahead of "NÃO" itself). Re-anchored on `contains`
     // below, same as the note above -- the exact arithmetic doesn't matter, only that this stays in sync.
-    line: 5342,
+    // 5342 -> 5357: CPE-1804 added `trash.skipped{One,Many}` to every locale block (2 lines apiece, plus
+    // a 5-line explanatory comment in the English one), so 15 lines landed above this one. Same story.
+    line: 5357,
     kind: "mojibake",
     reason:
       'Legitimate Portuguese "NÃO" (N + A-tilde + O) -- Ã followed by the ASCII letter "O", not a CP1252 ' +
