@@ -162,11 +162,49 @@ job and tallies pass/fail via direct (capture-proof) stderr writes.
 - **Variant B** (commit `35e608f1`, throwaway): redirect neutralised (the scratch directory is
   still created but `XDG_DATA_HOME` is deliberately left unset), mutex kept (restored to the real
   shared `TRASH_ENV_LOCK` via `git checkout b2717976 -- src-tauri/src/lib.rs` before applying B).
-  Answers the remaining question: with tests serialised but still sharing the one real OS trash,
-  does the original `freedesktop.rs:140` panic return? CI run `32329693244` — result pending.
-- **Fix restored, diagnostic test removed:** final green confirmation, and confirming the branch
-  contains only the real fix (no throwaway commits' code, `cpe_1785_diagnostic_stress_loop_temporary`
-  gone), queued behind variant B's result.
+  Intended to answer: with tests serialised but still sharing the one real OS trash, does the
+  original `freedesktop.rs:140` panic return? Run `32329693244`:
+
+  ```
+  CPE-1785 STRESS RESULT: 50/50 nested runs failed
+  test result: FAILED. 183 passed; 6 failed
+  ```
+
+  **This result is confounded and does NOT show the redirect is independently necessary to
+  prevent the race — the PR #940 review caught this before it was mis-banked as evidence.**
+  Counting the failure modes in the log: **260** occurrences of *"the probe's trashinfo file … is
+  not inside the redirected scratch trash — XDG_DATA_HOME redirection silently did not take
+  effect"* (the blocker-2 assertion), and **0** occurrences of `freedesktop.rs` — the original
+  panic never appeared once. Commenting out `set_var` makes the blocker-2 assertion fail
+  *deterministically*, on every guarded test, immediately, long before any race between
+  concurrent tests could manifest. So variant B as constructed only re-proves that the assertion
+  detects a missing redirect (already known from variant A, where it caught the clobbering
+  in-flight) — it says nothing about whether the redirect independently prevents
+  `freedesktop.rs:140`. The clean design would have neutralised the redirect **and** its own
+  assertion together, so the guarded tests actually ran unprotected against the shared trash. That
+  rerun was not taken: variant A already establishes the mutex is load-bearing with a number and a
+  mechanism, and the redirect is kept regardless of what a corrected variant B would show (see
+  below), so a second CI cycle would have bought a satisfying number rather than a different
+  decision.
+
+  **Methodological lesson, worth carrying forward:** an assertion added to catch a silent failure
+  can mask the very failure a later fault-injection experiment is trying to measure. Blocker 2's
+  assertion is exactly right for production/test use — it is what caught variant A's clobbering —
+  and it is precisely what made variant B unable to see past it. If a fault-injection variant
+  neutralises the thing an assertion watches, disable that assertion in the same variant, or the
+  result is a tautology dressed as evidence.
+
+- **Redirect kept regardless, on independent grounds:** the redirect's value never rested solely
+  on race prevention. It also stops these tests touching a **developer's real trash** on Linux —
+  the same objection the test's own comment raises about the Windows Recycle Bin, and the
+  independent UAT confirmed that exact exposure remains on Windows today precisely because no
+  redirect knob exists there. So both mechanisms (mutex + redirect) stay in the merged fix
+  regardless of variant B's outcome.
+- **Fix restored, diagnostic test removed** (this commit): variant B's redirect-neutralisation
+  reverted, `cpe_1785_diagnostic_stress_loop_temporary` deleted entirely (it was un-ignored and
+  shelled out to `cargo test` 50 times — left in place it would have added roughly a minute to
+  every future CI run). `git diff b2717976..HEAD -- src-tauri/src/lib.rs` shows only the
+  stress-test removal — no residue from either throwaway variant.
 
 **Interim conclusions already supported by variant A alone:**
 1. The mutex is load-bearing, now with a number: 66% failure without it (33/50) vs. 0 failures
@@ -180,8 +218,8 @@ job and tallies pass/fail via direct (capture-proof) stderr writes.
    degraded, every test still green" failure mode the review predicted for a missing invariant
    check.
 
-This section will be updated with variant B's pass/fail counts once that run completes; the PR
-body's Evidence section is being kept in sync with this one.
+Both the PR body's Evidence section and this Work Log now carry final numbers for variant A,
+variant B (with its confound explained), and the restore-and-cleanup commit.
 
 ### Gates
 

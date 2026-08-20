@@ -14167,12 +14167,10 @@ mod tests {
         {
             let scratch = cpe_server::fsutil::scratch_dir("cpe-1785-trash-xdg");
             let previous_xdg = std::env::var_os("XDG_DATA_HOME");
-            // CPE-1785 DIAGNOSTIC VARIANT B (PR #940 review, blocker 1 red-first proof): redirect
-            // NEUTRALISED, mutex kept -- the scratch dir is still created (so the struct shape and
-            // Drop restore path are unchanged) but XDG_DATA_HOME is deliberately left untouched, so
-            // every guarded test is serialised but still shares the one real OS trash. THROWAWAY,
-            // reverted via `git checkout --` before the final restore commit. Do not merge.
-            // unsafe { std::env::set_var("XDG_DATA_HOME", &scratch) };
+            // SAFETY: test-only, guarded by TRASH_ENV_LOCK above so no other test observes a torn value;
+            // restored in `TrashTestGuard::drop` (still under the same lock) before any other test can
+            // observe the overridden value. Matches `shell_menu.rs`'s `HOME_ENV_LOCK` pattern.
+            unsafe { std::env::set_var("XDG_DATA_HOME", &scratch) };
             TrashTestGuard { _scratch: scratch, previous_xdg, _mutex: mutex }
         }
         #[cfg(not(target_os = "linux"))]
@@ -14741,51 +14739,6 @@ mod tests {
             let _ = restore_trash_items_impl(vec![entry.id.clone()]);
         }
         let _ = fs::remove_file(&probe);
-    }
-
-    // ---- CPE-1785 TEMPORARY red-proof diagnostic — REMOVE before this PR merges -----------------------
-    // PR #940 review, blocker 1: the Evidence section can't stay a placeholder, and a single green Linux
-    // CI run proves nothing about a bug whose whole character is that it's usually green. This shells
-    // out to a fresh `cargo test --lib trash -- --test-threads=8` N times in a row (each one a complete,
-    // independent process — a faithful repeat of exactly what CI itself runs, not a synthetic stand-in)
-    // and tallies pass/fail, so the count is measured from the real call path rather than asserted.
-    // `#[ignore]` is stripped for each diagnostic push (so the existing unfiltered `cargo test` CI step
-    // picks it up with no workflow change) and restored — the test then reads `#[ignore]`d again — before
-    // the final, fix-restored push. Writes go straight to `std::io::stderr()` rather than `eprintln!`
-    // (Ticketing/wiki.md Evidence Rule 3: `eprintln!` output is swallowed by libtest's capture buffer
-    // unless the test fails, so a passing diagnostic run's tally would reach nobody).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cpe_1785_diagnostic_stress_loop_temporary() {
-        use std::io::Write as _;
-        let n: u32 = std::env::var("CPE_1785_STRESS_N").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
-        let mut failures = 0u32;
-        let mut first_failure_output = String::new();
-        for i in 0..n {
-            let out = std::process::Command::new(env!("CARGO"))
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .args(["test", "--lib", "trash", "--", "--test-threads=8"])
-                .output()
-                .expect("failed to spawn nested `cargo test`");
-            if !out.status.success() {
-                failures += 1;
-                let combined = format!(
-                    "--- iter {i} STDOUT ---\n{}\n--- iter {i} STDERR ---\n{}\n",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                writeln!(std::io::stderr(), "CPE-1785 STRESS: iter {i}/{n} FAILED\n{combined}").ok();
-                if first_failure_output.is_empty() {
-                    first_failure_output = combined;
-                }
-            }
-        }
-        writeln!(std::io::stderr(), "CPE-1785 STRESS RESULT: {failures}/{n} nested runs failed").ok();
-        assert_eq!(
-            failures, 0,
-            "CPE-1785 stress loop: {failures}/{n} nested `cargo test --lib trash` runs failed \
-             (see CPE-1785 STRESS lines above for the panic output); first failure:\n{first_failure_output}"
-        );
     }
 
     #[test]
