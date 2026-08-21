@@ -626,13 +626,22 @@ async fn list_dir(path: String) -> Result<ListDirResult, String> {
     }
 }
 
+/// The `(Vec<DirEntry>, unreadable)` → `ListDirResult` link for the LOCAL arm (CPE-1780 Reviewer round
+/// 2) — pulled out of `local_list_dir_result` below so it's independently unit testable with a NON-ZERO
+/// count, mirroring `listing_to_result`/`stream_result_for` (the remote/streaming twins) already in this
+/// file. `filtered` is always `0` (a local listing has no name-guard filtering to report); `unreadable`
+/// carries straight across — nothing here can silently zero it.
+fn local_list_dir_result_from(entries: Vec<DirEntry>, unreadable: usize) -> ListDirResult {
+    ListDirResult { entries, filtered: 0, unreadable }
+}
+
 /// `list_dir`'s LOCAL arm (CPE-1708): a free function so the "a local listing always reports
 /// `filtered: 0`" AC line ("Confirm every other provider (SFTP, WebDAV, FTP, local) reports zero and is
 /// unaffected") is independently unit testable against the SAME code the real command calls, not a
 /// hand-duplicated copy of it that could silently drift from what `list_dir` actually runs.
 fn local_list_dir_result(path: &str) -> Result<ListDirResult, String> {
     cpe_server::listing::list_dir_with_unreadable(path)
-        .map(|(entries, unreadable)| ListDirResult { entries, filtered: 0, unreadable })
+        .map(|(entries, unreadable)| local_list_dir_result_from(entries, unreadable))
 }
 
 /// The `RemoteListing` → `ListDirResult` link of the CPE-1708 chain: a free function (not a `From` impl —
@@ -693,11 +702,7 @@ async fn list_dir_stream(
     match cpe_server::fs_route::route(&path) {
         cpe_server::fs_route::Route::Local => {
             tauri::async_runtime::spawn_blocking(move || {
-                list_dir_stream_impl(path, stream_id, on_entry).map(|stats| StreamDirResult {
-                    total: stats.total,
-                    filtered: 0,
-                    unreadable: stats.unreadable,
-                })
+                list_dir_stream_impl(path, stream_id, on_entry).map(local_stream_result_for)
             })
             .await
             .map_err(|e| e.to_string())?
@@ -730,6 +735,17 @@ fn list_dir_stream_impl(
     });
     dir_stream_registry().lock().unwrap().remove(&stream_id);
     result
+}
+
+/// The `DirWalkStats` → `StreamDirResult` link for a LOCAL walk (CPE-1780 Reviewer round 2) — pulled out
+/// of `list_dir_stream`'s local arm above so it's independently unit testable with a NON-ZERO count,
+/// mirroring `stream_result_for` (the remote twin) and `local_list_dir_result_from` above. `filtered` is
+/// always `0` (a local listing has no name-guard filtering to report); `unreadable` carries straight
+/// across — nothing here can silently zero it (the exact mutation the Reviewer's review proved possible
+/// before this existed: `unreadable: stats.unreadable` mutated to `unreadable: 0` left the whole Rust
+/// suite green).
+fn local_stream_result_for(stats: cpe_server::listing::DirWalkStats) -> StreamDirResult {
+    StreamDirResult { total: stats.total, filtered: 0, unreadable: stats.unreadable }
 }
 
 /// Signal an in-flight `list_dir_stream` to stop at the next batch boundary (CPE-665). A no-op if the
@@ -13893,6 +13909,30 @@ mod tests {
         // `list_dir_with_unreadable` — not left at whatever `Default`/leftover value a struct-literal typo
         // would silently produce.
         assert_eq!(result.unreadable, 0, "an ordinary local listing has nothing unreadable to report");
+    }
+
+    /// Reviewer round 2: the test above only ever exercises an ORDINARY directory, whose real
+    /// `unreadable` is 0 regardless of whether the wiring is correct — so it cannot catch
+    /// `local_list_dir_result_from`'s `unreadable` argument being dropped/hardcoded to `0`. This feeds a
+    /// non-zero count directly, without touching the filesystem at all.
+    #[test]
+    fn local_list_dir_result_from_carries_the_real_unreadable_count_through() {
+        let result = local_list_dir_result_from(vec![], 5);
+        assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
+        assert_eq!(result.unreadable, 5, "list_dir's local arm must carry the real unreadable count through, not 0");
+    }
+
+    /// Reviewer round 2's other proven mutation: `list_dir_stream`'s local arm (`unreadable:
+    /// stats.unreadable`) could be silently changed to `unreadable: 0` with the ENTIRE Rust suite staying
+    /// green, because every other assertion on the streaming local arm also only ever exercised an
+    /// ordinary (zero-unreadable) directory. This feeds a non-zero `DirWalkStats` directly.
+    #[test]
+    fn local_stream_result_for_carries_the_real_unreadable_count_through() {
+        let stats = cpe_server::listing::DirWalkStats { total: 3, unreadable: 2 };
+        let result = local_stream_result_for(stats);
+        assert_eq!(result.total, 3);
+        assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
+        assert_eq!(result.unreadable, 2, "list_dir_stream's local arm must carry the real unreadable count through, not 0");
     }
 
     // ---- Safety-scan command smoke tests (CPE-1287, epic CPE-1002) ----------------------------------

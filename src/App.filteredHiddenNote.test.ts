@@ -137,13 +137,13 @@ describe("unreadable-entries status-bar note (CPE-1780)", () => {
   it("shows nothing when nothing was unreadable (the common case)", async () => {
     unreadable = 0;
     await navigateIntoDrive();
-    expect(screen.queryByText(/could not be read/)).toBeNull();
+    expect(screen.queryByText(/couldn.t read/i)).toBeNull();
   });
 
   it("shows the honest, person-facing note on the VERY FIRST paint of a listing with an unreadable row — not only after a later cache revalidation", async () => {
     unreadable = 3;
     await navigateIntoDrive();
-    await waitFor(() => expect(screen.getByText("3 entries could not be read")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy());
     // Never implies the LISTING failed — it succeeded; "ok.txt" is right there on screen too.
     expect(screen.queryByText(/fail|error|could not load/i)).toBeNull();
   });
@@ -154,12 +154,12 @@ describe("unreadable-entries status-bar note (CPE-1780)", () => {
   it("clears the note on Ctrl+T (new tab lands on Home, which has no listing at all)", async () => {
     unreadable = 3;
     await navigateIntoDrive();
-    await waitFor(() => expect(screen.getByText("3 entries could not be read")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy());
 
     await fireEvent.keyDown(window, { key: "t", ctrlKey: true });
 
     await waitFor(() => expect(screen.queryByText("ok.txt")).toBeNull());
-    expect(screen.queryByText(/could not be read/)).toBeNull();
+    expect(screen.queryByText(/couldn.t read/i)).toBeNull();
   });
 
   // CPE-1780 AC: the two counts are different facts and must never be conflated. Both non-zero at once
@@ -173,6 +173,6 @@ describe("unreadable-entries status-bar note (CPE-1780)", () => {
         screen.getByText("2 entries were hidden because their names could not be shown safely"),
       ).toBeTruthy(),
     );
-    expect(screen.getByText("3 entries could not be read")).toBeTruthy();
+    expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy();
   });
 });

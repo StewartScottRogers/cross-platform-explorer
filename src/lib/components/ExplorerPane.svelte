@@ -307,6 +307,14 @@
   // mutation pass useCache=false so our own changes never show stale. Populates the bound `entries`
   // (+ `loading`/`error`); returns whether this load is still the current one (false = superseded).
   let loadGen = 0;
+  /** The stream id most recently handed to `list_dir_stream` — tracked explicitly (CPE-1780 Reviewer
+   *  round 2) rather than derived as `loadGen - 1`. `invalidateListing()` below can bump `loadGen`
+   *  WITHOUT ever starting a stream (a "phantom" generation) — deriving the id to cancel from mere
+   *  adjacency would then target a stream id that was never used, while the REAL backend walk for the
+   *  folder just left keeps running to completion, defeating CPE-665 cancellation. `0` means "nothing is
+   *  currently owed a cancel" — either no stream has started yet, or the last one already finished or was
+   *  already cancelled. */
+  let lastStreamId = 0;
   const dirCache = new Map<string, DirEntry[]>(); // insertion order == LRU recency
   const DIR_CACHE_MAX = 48;
   // Keyed by canonicalPath (CPE-1737 round 2), NOT the raw path: a remote directory row's `path`
@@ -350,17 +358,47 @@
    *  Without this, a `revalidateDir`/stream scheduled for the folder just left can still fire afterward
    *  and pass its `gen === loadGen` check, silently reassigning `entries` (and `filteredHidden`/
    *  `unreadableCount`) for a view that is no longer showing that folder — the CPE-756 class of bug: the
-   *  generation token must cover every way you can LEAVE a listing, not just every way you enter one. */
+   *  generation token must cover every way you can LEAVE a listing, not just every way you enter one.
+   *
+   *  CPE-1780 Reviewer round 2 (two proven regressions, both fixed here rather than deferred to the next
+   *  real `loadListing`):
+   *   1. Cancel the ACTUAL in-flight backend stream (`lastStreamId`, if any) HERE, at the moment we're
+   *      leaving — not derived as `loadGen - 1` at the NEXT load (see `lastStreamId`'s doc for why that
+   *      derivation breaks once this function can bump `loadGen` without starting a stream). Without this
+   *      the backend keeps walking the folder we just left to completion even though nothing on screen
+   *      still wants it, exactly what CPE-665 exists to prevent.
+   *   2. Settle `loading`/`error` here too. `loadListing`'s own `finally` only clears `loading` when
+   *      `gen === loadGen` — a check THIS bump just invalidates for any load still in flight. None of
+   *      App's `exitSmartFolder`/`exitStructuredSearch`/`exitArchive` reload the plain listing either, so
+   *      without settling here a load in flight when the user opens a smart folder / archive / structured
+   *      search would leave `loading` stuck true forever: `FileList` checks `loading` AHEAD of the
+   *      overlay's own entries, so the overlay would render "Loading…" over its rows indefinitely.
+   *
+   *  Reviewer round 2 non-blocking note: a stale-while-revalidate `setTimeout` still pending when this
+   *  runs is silently discarded (its later `revalidateDir` will see `gen !== loadGen` and no-op) — the
+   *  folder just left with a cache-served view simply won't revalidate again until the user opens it as a
+   *  plain listing once more. Acceptable for now (correctness over freshness; nothing renders stale data),
+   *  but worth knowing if a future change makes re-scheduling cheap. */
   export function invalidateListing(): void {
+    if (lastStreamId > 0) {
+      rawInvoke("cancel_dir_stream", { streamId: lastStreamId }).catch(() => {});
+      lastStreamId = 0;
+    }
     loadGen++;
+    loading = false;
+    error = "";
   }
 
   /** Fetch + stream `path` into `entries`. Owns supersede + cache. Returns false if superseded (the caller
    *  must then skip its post-load work). App keeps the navigation orchestration + HOME handling. */
   export async function loadListing(path: string, useCache = false): Promise<boolean> {
     const gen = ++loadGen;
-    // Stop the backend walking the folder we just left (CPE-665); no-op if it already finished.
-    if (gen > 1) rawInvoke("cancel_dir_stream", { streamId: gen - 1 }).catch(() => {});
+    // Stop the backend walking the folder we just left (CPE-665) — the ACTUAL last-started stream id
+    // (`lastStreamId`, see its doc), not `gen - 1`; no-op if nothing is currently owed a cancel.
+    if (lastStreamId > 0) {
+      rawInvoke("cancel_dir_stream", { streamId: lastStreamId }).catch(() => {});
+      lastStreamId = 0;
+    }
 
     // Perf instrumentation (CPE-691/CPE-1304): time-to-first-paint (first batch actually in the DOM)
     // and time-to-settled (stream done AND the reactive `visible = sortEntries(...)` pipeline above has
@@ -397,6 +435,10 @@
       filteredHidden = 0;
       unreadableCount = 0;
       loading = true;
+      // This IS the stream id about to be started below (`streamId: gen` on `list_dir_stream`) — record
+      // it so a later cancel (from a real navigation OR `invalidateListing()`) targets the walk that is
+      // ACTUALLY running, not a value merely adjacent to `loadGen` (CPE-1780 Reviewer round 2).
+      lastStreamId = gen;
       try {
         // Coalesce stream batches (CPE-689): buffer and flush once per animation frame so `visible`
         // re-sorts a handful of times, not once per 256-row batch; the first frame still paints live.
@@ -431,6 +473,10 @@
         if (gen === loadGen) { entries = []; error = friendlyError(String(e)); }
       } finally {
         if (gen === loadGen) loading = false;
+        // This stream settled on its own (success or error) — nothing left running for `gen`, so it's no
+        // longer owed a cancel. Guarded by identity (not `gen === loadGen`): a NEWER load may already have
+        // recorded ITS OWN `lastStreamId` by the time this `finally` runs, and this must not clobber that.
+        if (lastStreamId === gen) lastStreamId = 0;
       }
       if (gen === loadGen) cachePut(path, entries);
     }

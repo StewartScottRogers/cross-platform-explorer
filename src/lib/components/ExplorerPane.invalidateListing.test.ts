@@ -14,6 +14,17 @@
  * bug class at the App level; this covers `entries` itself, the deeper thing CPE-1708 only worked around
  * at its own point of consumption.
  *
+ * Reviewer round 2 proved `invalidateListing()`'s FIRST implementation (a bare `loadGen++`) caused two
+ * distinct regressions, both covered below:
+ *   - Blocker 1: bumping `loadGen` while a `loadListing` was still awaiting `list_dir_stream` left
+ *     `loading` stuck `true` forever — `loadListing`'s own `finally` guards on `gen === loadGen`, which
+ *     the bump had just invalidated, and none of App's `exitSmartFolder`/`exitStructuredSearch`/
+ *     `exitArchive` reload the plain listing to clear it either.
+ *   - Blocker 2: `loadListing`'s CPE-665 cancel-the-previous-stream logic derived the id to cancel as
+ *     `loadGen - 1`. A bare `loadGen++` burns a generation no stream ever used (a "phantom" generation),
+ *     so the NEXT real load's cancel would target an id that was never used, leaving the REAL in-flight
+ *     backend walk running to completion — defeating CPE-665.
+ *
  * Mocking follows this repo's established component-test pattern (`InstantSearch.test.ts` /
  * `ExplorerPane.metaColumns.test.ts`): mock `@tauri-apps/api/core`'s `invoke`/`Channel` (both the typed
  * `commands.*` client and the raw `rawInvoke`/`createChannel` seam flow through it), and use fake timers
@@ -22,6 +33,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/svelte";
+import { tick } from "svelte";
 import ExplorerPane from "./ExplorerPane.svelte";
 import { emptySelection } from "../selection";
 import type { DirEntry } from "../types";
@@ -50,7 +62,10 @@ const entryStale: DirEntry = {
   is_symlink: false,
 };
 
-const invoke = vi.fn((cmd: string, args?: any) => {
+/** The default `invoke` behaviour every test starts from (re-installed in `beforeEach` so a test that
+ *  overrides it with `invoke.mockImplementation(...)` can never leak into a LATER test — `mockClear()`
+ *  alone only clears call history, not an overridden implementation). */
+function defaultInvokeImpl(cmd: string, args?: any): Promise<any> {
   if (cmd === "list_dir_stream") {
     args.onEntry.onmessage([entryA]);
     return Promise.resolve({ total: 1, filtered: 0, unreadable: 0 });
@@ -60,7 +75,9 @@ const invoke = vi.fn((cmd: string, args?: any) => {
   }
   if (cmd === "cancel_dir_stream") return Promise.resolve();
   return Promise.reject(new Error(`unexpected command: ${cmd}`));
-});
+}
+
+const invoke = vi.fn(defaultInvokeImpl);
 
 vi.mock("@tauri-apps/api/core", () => {
   class Channel<T> {
@@ -71,7 +88,8 @@ vi.mock("@tauri-apps/api/core", () => {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  invoke.mockClear();
+  invoke.mockReset();
+  invoke.mockImplementation(defaultInvokeImpl);
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -118,5 +136,72 @@ describe("ExplorerPane.invalidateListing (CPE-1780 F1)", () => {
     await vi.advanceTimersByTimeAsync(400);
 
     expect(await screen.findByText("stale-from-old-folder.txt")).toBeTruthy();
+  });
+});
+
+describe("ExplorerPane.invalidateListing settles the pane (CPE-1780 Reviewer round 2, blocker 1)", () => {
+  it("clears `loading` for a load that was still in flight when invalidateListing() bumped the generation", async () => {
+    invoke.mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "list_dir_stream" && args.path === "/slow") {
+        // The backend walk never resolves inside this test — "still in flight", exactly the moment a
+        // real navigation (e.g. opening a smart folder) could interrupt it.
+        return new Promise<never>(() => {});
+      }
+      return Promise.reject(new Error(`unexpected command in this test: ${cmd}`));
+    });
+
+    const { component } = render(ExplorerPane, { selection: emptySelection(), entries: [] });
+    void (component as any).loadListing("/slow", false); // fire-and-forget: intentionally never resolves
+
+    await tick();
+    expect(screen.getByText("Loading…")).toBeTruthy(); // sanity: it really is showing "Loading…" right now
+
+    // The user opens a smart folder (or archive/structured search) while this load is still in flight —
+    // App calls invalidateListing() at that transition (CPE-1780 F1). Before this fix, `loadListing`'s
+    // `finally { if (gen === loadGen) loading = false; }` would never run (`gen` no longer matches
+    // `loadGen` once this bump happens), stranding the pane at "Loading…" forever — none of App's
+    // `exitSmartFolder`/`exitStructuredSearch`/`exitArchive` reload the plain listing to clear it either.
+    (component as any).invalidateListing();
+    await tick();
+
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
+});
+
+describe("ExplorerPane.invalidateListing cancels the REAL in-flight stream (CPE-1780 Reviewer round 2, blocker 2)", () => {
+  it("cancels the actual last-started stream id, not a loadGen-derived phantom one", async () => {
+    let bArgs: { streamId: number; path: string } | null = null;
+    invoke.mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "list_dir_stream") {
+        if (args.path === "/a") {
+          args.onEntry.onmessage([entryA]);
+          return Promise.resolve({ total: 1, filtered: 0, unreadable: 0 });
+        }
+        if (args.path === "/b") {
+          bArgs = args;
+          return new Promise<never>(() => {}); // still walking when invalidateListing() fires below
+        }
+      }
+      if (cmd === "cancel_dir_stream") return Promise.resolve();
+      return Promise.reject(new Error(`unexpected command: ${cmd}`));
+    });
+
+    const { component } = render(ExplorerPane, { selection: emptySelection(), entries: [] });
+
+    // /a completes normally first — its own stream finishes on its own, so nothing is left owed a cancel.
+    await (component as any).loadListing("/a", false);
+    invoke.mockClear();
+
+    // /b starts and its list_dir_stream call is STILL AWAITING (never resolves in this test) when the
+    // user navigates away.
+    void (component as any).loadListing("/b", false);
+    await tick();
+    expect(bArgs).toBeTruthy(); // sanity: /b's real stream really was started, and we captured its id
+
+    (component as any).invalidateListing();
+
+    const cancelCalls = invoke.mock.calls.filter(([cmd]) => cmd === "cancel_dir_stream");
+    expect(cancelCalls).toHaveLength(1);
+    expect(cancelCalls[0][1]).toEqual({ streamId: (bArgs as unknown as { streamId: number }).streamId });
   });
 });

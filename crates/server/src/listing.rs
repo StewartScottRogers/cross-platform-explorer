@@ -4,6 +4,7 @@
 //! streaming command keeps its `ipc::Channel` (and cancel registry) in the adapter and feeds this walker.
 
 use std::fs;
+use std::io;
 
 use crate::fsutil::to_epoch_ms;
 use crate::model::{extension_of, is_hidden, DirEntry};
@@ -66,24 +67,46 @@ fn fold_walk_entry(outcome: Option<DirEntry>, buf: &mut Vec<DirEntry>, unreadabl
 /// Unreadable entries are skipped (never fail the listing) but counted in the returned stats'
 /// `unreadable` field rather than silently dropped (CPE-1780) — see [`DirWalkStats`]. `flush` returns a
 /// `ControlFlow` so a streaming caller can stop the walk early (cancellation, CPE-665) at a batch
-/// boundary; `unreadable` only reflects rows actually seen before a break.
+/// boundary; `unreadable` only reflects rows actually seen before a break. A thin `fs::read_dir` wrapper
+/// around [`stream_dir_entries_over`] — see that function's doc for why the walk loop itself lives there.
 pub fn stream_dir_entries(
     path: &str,
     batch: usize,
-    mut flush: impl FnMut(Vec<DirEntry>) -> std::ops::ControlFlow<()>,
+    flush: impl FnMut(Vec<DirEntry>) -> std::ops::ControlFlow<()>,
 ) -> Result<DirWalkStats, String> {
     let read = fs::read_dir(path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(stream_dir_entries_over(read, batch, flush))
+}
+
+/// The walk loop itself, generalised over any `io::Result<fs::DirEntry>` iterator rather than hard-wired
+/// to `fs::read_dir`'s `ReadDir` (CPE-1780 Reviewer round 2). [`stream_dir_entries`] above is a thin
+/// wrapper that supplies the real one; a test below instead supplies a SYNTHETIC iterator — a real
+/// `fs::DirEntry` (borrowed from an incidental `read_dir` call; the type has no public constructor,
+/// so it can't be fabricated outright) spliced with a synthetic `Err` — to drive an iteration failure
+/// through this EXACT production loop and prove `DirWalkStats.unreadable` increments (and `total` does
+/// not) without racing the OS for a genuine one. UAT round (2026-08-20) confirmed there is no
+/// deterministic way to stage a real one: the repo's only ACL-staging helper, `fsutil::deny_stat_of`,
+/// denies list-directory on the PARENT too (so `fs::read_dir` itself fails for the whole directory, a
+/// different failure shape than one bad row among good ones), and denying only the target file's own read
+/// permission doesn't reproduce the failure at all on Windows — `DirEntry::metadata()` reuses data already
+/// cached from the `FindNextFileW` enumeration rather than re-opening the file, so a target with its read
+/// permission revoked AFTER being enumerated still reports `unreadable: 0`.
+fn stream_dir_entries_over(
+    iter: impl Iterator<Item = io::Result<fs::DirEntry>>,
+    batch: usize,
+    mut flush: impl FnMut(Vec<DirEntry>) -> std::ops::ControlFlow<()>,
+) -> DirWalkStats {
     let cap = batch.min(1024);
     let mut buf: Vec<DirEntry> = Vec::with_capacity(cap);
     let mut total = 0usize;
     let mut unreadable = 0usize;
-    for entry in read {
+    for entry in iter {
         let outcome = entry.ok().and_then(|e| dir_entry_from(&e));
         fold_walk_entry(outcome, &mut buf, &mut unreadable);
         if buf.len() >= batch {
             total += buf.len();
             if flush(std::mem::replace(&mut buf, Vec::with_capacity(cap))).is_break() {
-                return Ok(DirWalkStats { total, unreadable });
+                return DirWalkStats { total, unreadable };
             }
         }
     }
@@ -91,7 +114,7 @@ pub fn stream_dir_entries(
         total += buf.len();
         let _ = flush(buf);
     }
-    Ok(DirWalkStats { total, unreadable })
+    DirWalkStats { total, unreadable }
 }
 
 /// Collect-to-vec directory listing: every readable entry of `path`. A missing/unreadable `path` is an
@@ -107,6 +130,14 @@ pub fn list_dir(path: &str) -> Result<Vec<DirEntry>, String> {
     Ok(out)
 }
 
+/// The `DirWalkStats` → `(Vec<DirEntry>, unreadable)` link [`list_dir_with_unreadable`] wraps its walk
+/// result in (CPE-1780 Reviewer round 2) — pulled out so "carry `unreadable` through, never zero it" is
+/// independently unit testable with a non-zero count, without needing a real unreadable directory entry
+/// (see [`stream_dir_entries_over`]'s doc for why the WALK's own counting is proven that way instead).
+fn walk_result_tuple(out: Vec<DirEntry>, stats: DirWalkStats) -> (Vec<DirEntry>, usize) {
+    (out, stats.unreadable)
+}
+
 /// Collect-to-vec directory listing PLUS how many rows the walk had to skip because they couldn't be read
 /// (CPE-1780) — the entry point the UI-facing `list_dir` Tauri command uses so the status bar can say so,
 /// distinct from [`list_dir`] above (whose other callers don't want the count).
@@ -116,7 +147,7 @@ pub fn list_dir_with_unreadable(path: &str) -> Result<(Vec<DirEntry>, usize), St
         out.extend(batch);
         std::ops::ControlFlow::Continue(())
     })?;
-    Ok((out, stats.unreadable))
+    Ok(walk_result_tuple(out, stats))
 }
 
 #[cfg(test)]
@@ -271,5 +302,50 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(unreadable, 0, "an ordinary directory has nothing unreadable");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Reviewer round 2: `fold_walk_entry`'s two tests above prove the COUNTING RULE in isolation, but
+    /// mutating the WIRING around it (`crates/server/src/listing.rs:118`, `Ok((out, stats.unreadable))` →
+    /// `Ok((out, 0))`) left the whole suite green, because nothing drove a real iteration failure through
+    /// the ACTUAL production loop end to end. This does: a real `fs::DirEntry` (borrowed from an
+    /// incidental `read_dir` — the type has no public constructor) spliced with a synthetic `io::Error`,
+    /// fed straight into `stream_dir_entries_over` — the exact function `stream_dir_entries` (and
+    /// therefore `list_dir`/`list_dir_with_unreadable`) delegates to.
+    #[test]
+    fn stream_dir_entries_over_counts_a_synthetic_iteration_error_as_unreadable_through_the_real_walk_loop() {
+        let d = scratch("unreadable-synthetic");
+        fs::write(d.join("ok.txt"), b"x").unwrap();
+        let real_entry = fs::read_dir(&d)
+            .unwrap()
+            .next()
+            .expect("scratch dir has exactly one real entry")
+            .expect("the real read_dir entry itself must be Ok");
+
+        let synthetic: Vec<io::Result<fs::DirEntry>> =
+            vec![Ok(real_entry), Err(io::Error::other("synthetic unreadable row"))];
+
+        let mut collected: Vec<DirEntry> = Vec::new();
+        let stats = stream_dir_entries_over(synthetic.into_iter(), 256, |batch| {
+            collected.extend(batch);
+            std::ops::ControlFlow::Continue(())
+        });
+
+        assert_eq!(stats.total, 1, "only the real, readable row counts toward total");
+        assert_eq!(stats.unreadable, 1, "the synthetic iteration error must be counted as unreadable");
+        assert_eq!(collected.len(), 1, "the synthetic error must never be pushed into the batch as a fake row");
+        assert_eq!(collected[0].name, "ok.txt");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Reviewer round 2's other proven mutation: `src-tauri/src/lib.rs:699`'s `unreadable: stats.unreadable`
+    /// could be mutated to `unreadable: 0` with zero test failures — this crate's own equivalent risk is
+    /// `walk_result_tuple` above, so it gets the same direct, non-zero-count mapping test (mirrors the
+    /// `local_stream_result_for`/`local_list_dir_result_from` tests added in `src-tauri/src/lib.rs`).
+    #[test]
+    fn walk_result_tuple_carries_the_real_unreadable_count_through() {
+        let stats = DirWalkStats { total: 4, unreadable: 3 };
+        let (entries, unreadable) = walk_result_tuple(vec![], stats);
+        assert_eq!(entries.len(), 0);
+        assert_eq!(unreadable, 3, "list_dir_with_unreadable must carry the real unreadable count through, not 0");
     }
 }

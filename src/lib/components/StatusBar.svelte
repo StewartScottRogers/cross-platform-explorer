@@ -81,9 +81,12 @@
   // CPE-1780: the `unreadableCount` twin of the hoisting above — same "one sentence backs both the
   // (possibly truncated) visible text and the title tooltip" reasoning, DIFFERENT wording from
   // `filteredHiddenText` (see `unreadableCount`'s doc for why the two facts must never share a sentence).
+  // UAT round (2026-08-20): both notes previously led with "N entries…", so a fast skim could
+  // momentarily read them as one count. Leads with a different word than `filteredHiddenText` now —
+  // same fact, same words otherwise, just reordered so the two are distinct at a glance.
   $: unreadableText = unreadableCount === 1
-    ? "1 entry could not be read"
-    : `${unreadableCount} entries could not be read`;
+    ? "Couldn't read 1 entry"
+    : `Couldn't read ${unreadableCount} entries`;
   $: unreadableTitle = `${unreadableText} — the rest of the folder loaded successfully.`;
 </script>
 
@@ -164,40 +167,66 @@
 </div>
 
 <style>
-  /* CPE-1780 (Visual Critic, round 2): wrap-safety ordering for EVERY direct child of `.statusbar`
-     (`.resize-grip` excluded — it's `position: absolute`, out of flex flow). `.statusbar` never wraps
-     rows (no `flex-wrap`), so an unprotected child's TEXT wraps onto a second line instead and spills
-     out of the fixed 26px bar — first found on `.disk` (fixed below), then, once `.disk` could shrink
-     safely, the deficit moved to the NEXT unprotected child in flex order (the leading item-count span).
-     Moving the bug from element to element is the actual failure mode here, so every child below is now
-     deliberately assigned one of two roles, in flex order:
-       1. STAYS WHOLE, never truncates — `.item-count`, `.selected-count`, `.dim` (so "Hidden files
-          shown"): short, load-bearing facts the user should always be able to read in full. Each gets
-          `min-width: 0; white-space: nowrap;` so it CAN shrink (never wraps to a 2nd line) but no
-          `overflow`/`text-overflow`, so at an extreme it overflows its own box horizontally rather than
-          growing the bar's height — the least-bad failure for a fact this short and this important.
-       2. ALLOWED TO TRUNCATE, in this order when space runs out: `.filtered-hidden`/`.unreadable`/
-          `.notice` (variable-length prose, but framed as an already-established status), then `.git-branch`
-          (a branch name can be long; the rest of `.git` — counts, dirty dot, buttons — stays fixed-size,
-          `flex: 0 0 auto`, since shrinking a clickable button is worse than truncating a name), then
-          `.disk` LAST (free-space is the least essential fact on the bar). Each gets `min-width: 0;
-          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;` — the full text stays reachable
-          via each element's own `title` tooltip. */
-  .dim { color: var(--text-faint); flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+  /* CPE-1780 (Visual Critic, round 3 — corrects round 2's comment, which was wrong): in a fixed-height
+     single-row `.statusbar` (no `flex-wrap`) there is NO SUCH THING as a child that "never truncates" —
+     round 2 gave `.item-count`/`.selected-count`/`.dim` `min-width: 0; white-space: nowrap;` with NO
+     `overflow: hidden`, on the theory that they'd just overflow their own box harmlessly at an extreme.
+     Measured reality: with `min-width: 0` removing their content-width floor and nothing clipping the
+     result, their text shrinks its BOX but keeps painting at full width — it visually overlaps the NEXT
+     element instead of wrapping ("42 item12 selected", genuinely illegible). Worse than the wrap it
+     replaced. The honest semantic is SHRINK PRIORITY, not immunity: every child below now gets `min-width:
+     0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;` — so nothing can ever overlap its
+     neighbour or wrap the bar taller — and a `flex-shrink` weight encodes which group gives up space
+     first. `--priority-shrink: 10` (defined once below, referenced by every "shrinks first" rule) is
+     picked LARGE relative to `--priority-stay: 1` specifically so the flexbox shrink-then-freeze algorithm
+     drains the whole "shrinks first" group toward its own floor (0, courtesy of `min-width: 0`) before the
+     "shrinks last" group gives up any meaningful width — not just proportionally-less, but LAST in
+     practice for any deficit this bar will realistically see. Once a "shrinks last" element genuinely runs
+     out of room (the "shrinks first" group already at/near zero), it ellipses too — it is never immune,
+     only lowest priority. Two groups, in flex order:
+       1. SHRINKS LAST (`--priority-stay`) — `.item-count`, `.selected-count`, `.dim` (so "Hidden files
+          shown"): short, load-bearing facts, kept whole as long as there is ANY room to spare elsewhere.
+       2. SHRINKS FIRST (`--priority-shrink`), in this sub-order when even THAT group runs out of shared
+          room: `.filtered-hidden`/`.unreadable`/`.notice` (variable-length prose, but already-established
+          status), then `.git`/`.git-branch` (a branch name can be long; `.git`'s counts/dirty-dot/buttons
+          stay `flex: 0 0 auto` — genuinely never shrink, since shrinking a clickable button is worse than
+          truncating a name), then `.disk` (free-space is the least essential fact on the bar). Every
+          element's full text stays reachable via its own `title` tooltip regardless of which group is
+          currently truncating. */
+  .statusbar {
+    --priority-stay: 1;
+    --priority-shrink: 10;
+  }
+  .dim {
+    color: var(--text-faint);
+    flex: 0 var(--priority-stay) auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   /* The item/selection counts (unclassed `<span>`s in markup before CPE-1780) are the FIRST children of
-     `.statusbar`, so before this fix they absorbed the wrap-of-last-resort: once every LATER sibling could
-     shrink safely, the narrow-width deficit flexbox has to put SOMEWHERE landed here instead and wrapped
-     "42 items" onto two lines. Short + load-bearing, so `.item-count`/`.selected-count` deliberately have
-     NO ellipsis (see the ordering comment above `.dim`) — they must stay legible whole, never truncated. */
-  .item-count, .selected-count { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+     `.statusbar`, so before round 2's fix they absorbed the wrap-of-last-resort: once every LATER sibling
+     could shrink safely, the narrow-width deficit had to land SOMEWHERE and wrapped "42 items" onto two
+     lines. `--priority-stay` (see the ordering comment above `.dim`) keeps them lowest-priority to shrink
+     — but, per that same comment, never immune: `overflow: hidden; text-overflow: ellipsis;` so if they
+     DO ever have to give up width, they clip cleanly instead of painting over `.selected-count`/`.dim`. */
+  .item-count, .selected-count {
+    flex: 0 var(--priority-stay) auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   /* CPE-1708: `--accent` is this app's INFO tone (app.css: "ERROR/INFO reuse --danger/--accent") — never
      `--danger`, which would read as "this folder failed to load" when it didn't. Same overflow strategy
      as `.notice` below (CPE-1660): truncate to an ellipsis, with the SAME sentence (`filteredHiddenText`
      above) plus the "loaded successfully" reassurance always readable via the `title` tooltip
      (`filteredHiddenTitle`) — so a narrow window that ellipsis-truncates the visible text never loses
-     either the count or the reassurance, and the status bar's fixed height never grows for a long count. */
+     either the count or the reassurance, and the status bar's fixed height never grows for a long count.
+     `--priority-shrink` (see the ordering comment above `.dim`) — this is a SHRINKS-FIRST element. */
   .filtered-hidden {
     color: var(--accent);
     max-width: 45%;
@@ -205,7 +234,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 0 1 auto;
+    flex: 0 var(--priority-shrink) auto;
   }
 
   /* CPE-1780: same overflow/truncation strategy as `.filtered-hidden` above (same reasoning — a narrow
@@ -218,7 +247,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 0 1 auto;
+    flex: 0 var(--priority-shrink) auto;
   }
 
   /* The notice/toast text (CPE-1660): a plain <span> had no overflow strategy at all, so a notice
@@ -237,25 +266,34 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 0 1 auto;
+    flex: 0 var(--priority-shrink) auto;
   }
   /* Git sync + free space sit at the far right, away from the item/selection counts. `.git` itself
-     (CPE-1780) gets `min-width: 0; flex: 0 1 auto;` so the WHOLE block can shrink as a unit rather than
-     forcing the row wider or wrapping — a `display: flex` container has no `white-space` of its own, so
-     what actually needs to shrink is its variable-length child, `.git-branch`, below. */
-  .git { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; flex: 0 1 auto; }
+     (CPE-1780) gets `min-width: 0;` plus the SHRINKS-FIRST priority (see the ordering comment above
+     `.dim`) so the WHOLE block can shrink as a unit rather than forcing the row wider or wrapping — a
+     `display: flex` container has no `white-space` of its own, so what actually needs to shrink is its
+     variable-length child, `.git-branch`, below. */
+  .git {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    min-width: 0;
+    flex: 0 var(--priority-shrink) auto;
+  }
   /* A branch name can be arbitrarily long (CPE-1780): shrinks + truncates to an ellipsis like the other
-     ALLOWED-TO-TRUNCATE elements (see the ordering comment above `.dim`), full name still in `title` via
-     the parent `.git` span. `flex: 0 1 auto` so it — not the counts/dot/buttons below — absorbs the
-     shrink; those stay `flex: 0 0 auto` (never shrink) since they're short and functionally load-bearing
-     (clickable), the same STAYS-WHOLE judgement as `.item-count`/`.selected-count`/`.dim`. */
+     SHRINKS-FIRST elements (see the ordering comment above `.dim`), full name still in `title` via the
+     parent `.git` span. Its OWN `flex-shrink` value only matters relative to ITS git-only siblings below
+     (counts/dot/buttons), which are all `flex: 0 0 auto` — genuinely never shrink, since shrinking a
+     clickable button is worse than truncating a name — so `.git-branch` absorbs 100% of whatever `.git`
+     as a whole gives up. */
   .git-branch {
     opacity: 0.85;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 0 1 auto;
+    flex: 0 var(--priority-shrink) auto;
   }
   .git-ct { font-variant-numeric: tabular-nums; opacity: 0.8; flex: 0 0 auto; }
   .git-dirty { color: var(--warn); flex: 0 0 auto; }
@@ -264,16 +302,16 @@
   .git-btn { font-size: 11px; padding: 1px 7px; cursor: pointer; border: 1px solid var(--border-strong, #555);
              background: transparent; color: inherit; border-radius: 4px; flex: 0 0 auto; }
   .git-btn:hover { background: var(--selection, rgba(128,128,128,0.2)); }
-  /* CPE-1780 Visual Critic finding: `.disk` had NO overflow strategy at all (unlike `.filtered-hidden`/
-     `.unreadable`/`.notice` above), so it had never been forced to shrink hard enough to wrap — until
-     both new notes on screen at once, at the app's own 600px floor (`.min_inner_size`, `src-tauri/src/
-     lib.rs`), left it no room and its text wrapped to a second line, spilling OUTSIDE the statusbar's
-     fixed 26px box. Same fix as `.notice`: shrinkable (`min-width: 0`), never wraps (`white-space:
-     nowrap`), truncates to an ellipsis instead (`overflow: hidden; text-overflow: ellipsis`) — the
-     full label is still reachable via the `title` attribute already on the span in markup above. */
+  /* CPE-1780 Visual Critic finding (round 1): `.disk` had NO overflow strategy at all (unlike
+     `.filtered-hidden`/`.unreadable`/`.notice` above), so it had never been forced to shrink hard enough
+     to wrap — until both new notes on screen at once, at the app's own 600px floor (`.min_inner_size`,
+     `src-tauri/src/lib.rs`), left it no room and its text wrapped to a second line, spilling OUTSIDE the
+     statusbar's fixed 26px box. Same fix as `.notice`, now also SHRINKS-FIRST priority (see the ordering
+     comment above `.dim`) — free-space is the least essential fact on the bar, so it's last in the
+     shrinks-first sub-order (git-branch and the notes above give up room before `.disk` does). */
   .disk {
     margin-left: 12px;
-    flex: 0 1 auto;
+    flex: 0 var(--priority-shrink) auto;
     min-width: 0;
     white-space: nowrap;
     overflow: hidden;

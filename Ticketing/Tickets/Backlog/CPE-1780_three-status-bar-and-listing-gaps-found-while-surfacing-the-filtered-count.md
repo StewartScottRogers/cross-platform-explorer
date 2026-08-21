@@ -158,3 +158,83 @@ flow) and assigned each a deliberate role, documented in a new ordering comment 
 Re-ran gates: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 320 files / 4224 tests, all
 green (same counts as both prior rounds — CSS-only, invisible to jsdom, exactly as expected). Pushed to
 the same branch `cpe-1780-listing-gaps` / PR #974.
+
+**2026-08-20 (Reviewer round: CHANGES REQUESTED — three blockers, two proven regressions in F1)** — An
+independent Reviewer returned CHANGES REQUESTED on PR #974. Two blockers were proven causal regressions in
+`invalidateListing()` (F1); the third was a real test-coverage gap in the `unreadable` wiring (F3). Fixed
+all three; F2 (pane B documented-not-fixed) was re-confirmed unaffected.
+
+- **Blocker 1 (regression):** bumping `loadGen` inside `invalidateListing()` while a `loadListing` was
+  still awaiting `list_dir_stream` left `loading` stuck `true` forever — `loadListing`'s own `finally`
+  guards on `gen === loadGen`, which the bump had just invalidated, and none of App's
+  `exitSmartFolder`/`exitStructuredSearch`/`exitArchive` reload the plain listing to clear it. Proven: the
+  Reviewer rendered `ExplorerPane`, started a `loadListing` whose stream stayed pending, called
+  `invalidateListing()`, and the DOM stuck at "Loading…". Fixed by settling `loading`/`error` INSIDE
+  `invalidateListing()` itself (the Reviewer's preferred fix — "a helper that leaves its caller responsible
+  for finishing the job is how call site three gets it wrong").
+- **Blocker 2 (regression):** the CPE-665 cancel-the-previous-stream logic derived the id to cancel as
+  `loadGen - 1`. A bare `loadGen++` (what `invalidateListing()` used to do) burns a generation no stream
+  ever used — a "phantom" generation — so the NEXT real load's cancel targets an id that was never used,
+  leaving the REAL in-flight backend walk running to completion. Fixed by tracking the actual last-started
+  stream id explicitly (`lastStreamId`, a new pane-local var) instead of deriving it from adjacency, and
+  cancelling it directly inside `invalidateListing()` at the moment of leaving, not deferred to the next
+  real load.
+- **Blocker 3 (test-coverage gap, not a regression):** the Reviewer mutation-tested the `unreadable` wiring
+  and found it could be made completely inert (`crates/server/src/listing.rs`'s `list_dir_with_unreadable`
+  hardcoded to `0`, and `src-tauri/src/lib.rs`'s `list_dir_stream` local-arm mapping hardcoded to `0`) with
+  the ENTIRE Rust suite staying green, because every existing assertion only ever exercised an ORDINARY
+  (zero-unreadable) directory. UAT independently investigated whether a real unreadable entry could be
+  staged (using the repo's own `fsutil::deny_stat_of` ACL helper) and confirmed it categorically cannot on
+  this codebase's tooling: `deny_stat_of` denies list-directory on the PARENT too (so `fs::read_dir` fails
+  for the whole directory, a different failure shape than one bad row among good ones), and denying only
+  the target file's own read permission doesn't reproduce the failure at all on Windows — `DirEntry::
+  metadata()` reuses data already cached from the `FindNextFileW` enumeration rather than re-opening the
+  file, so a target with its permission revoked AFTER being enumerated still reports `unreadable: 0`. Fixed
+  by building the seam the Reviewer prescribed: `stream_dir_entries` split into a thin `fs::read_dir`
+  wrapper plus a new `stream_dir_entries_over`, generalised over `impl Iterator<Item = io::Result<fs::
+  DirEntry>>`, so a test can splice a REAL `fs::DirEntry` (borrowed from an incidental `read_dir` call —
+  the type has no public constructor) with a SYNTHETIC `io::Error` and drive an iteration failure through
+  the real production loop. Plus two free-fn "carry the count through, never zero it" mappings pulled out
+  and independently tested with non-zero stats, mirroring this file's existing `stream_result_for`/
+  `local_list_dir_result` precedent: `walk_result_tuple` (crates/server) and `local_stream_result_for`
+  (src-tauri). Both of the Reviewer's exact mutations re-run and confirmed red, then reverted.
+- **Non-blocking, addressed:** a doc sentence added to `invalidateListing()` noting a pending
+  stale-while-revalidate is silently discarded when it runs (acceptable — correctness over freshness).
+- **Non-blocking, assessed and left open:** a direct test of `revalidateDir`'s `filteredHidden`/
+  `unreadableCount` assignments (reading `ExplorerPane`'s exported props off the component instance) is
+  blocked by Svelte 4's `accessors` compiler option not being enabled project-wide; enabling it as a side
+  effect of a non-blocking nice-to-have was judged out of scope. Left as a known, documented gap rather
+  than forcing a workaround.
+- **UAT (informational, no changes needed):** drove all five `invalidateListing()` call sites through a
+  real `App.svelte` harness and found only ONE where the pre-fix stale-row leak was externally observable
+  today — `enterArchive` followed by Up at the archive root — red/green-proofing it directly. The other
+  four are masked by overlays/HomeView today, per the ticket's own "luck, not a guard" framing, so the
+  prophylactic bumps at all five sites remain correct.
+- **Cosmetic (UAT nit, addressed):** both status-bar notes previously led with "N entries…", risking a
+  fast-skim one-count misread. Reworded `unreadableText` to lead with "Couldn't read N entries" instead —
+  same fact, same words otherwise, distinct at a glance from `filteredHiddenText`'s "N entries were
+  hidden…".
+
+Gates re-run: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 320 files / 4227 tests, all green.
+`cargo clippy --all-targets -- -D warnings` + `cargo test`, src-tauri default — clean, 202 passed. Same,
+`--features sidecar-platform` — clean, 257 passed. `cpe-server` (crates/server) — clean, 2256 passed, 4
+ignored (pre-existing, unrelated). `cpe-net` (crates/net) — clean, 37 passed. Pushed to the same branch
+`cpe-1780-listing-gaps` / PR #974.
+
+**2026-08-20 (Visual Critic round 3 — CSS priority-ordering correction)** — Round 2's fix gave
+`.item-count`/`.selected-count`/`.dim` `min-width: 0; white-space: nowrap;` with NO `overflow: hidden`, on
+the (wrong) theory they'd just overflow their own box harmlessly if ever squeezed. Measured reality: with
+no clipping, their text kept painting at full width while its BOX shrank — it visually overlapped the next
+element ("42 item12 selected", genuinely illegible) instead of wrapping. Worse than the wrap it replaced.
+Corrected the model: in a fixed-height single-row bar there is no such thing as an element that never
+truncates, only SHRINK PRIORITY. Every child now gets `min-width: 0; white-space: nowrap; overflow: hidden;
+text-overflow: ellipsis;` (so nothing can ever overlap a neighbour), and a CSS custom-property pair on
+`.statusbar` (`--priority-stay: 1`, `--priority-shrink: 10`) encodes which group gives up space first —
+`.filtered-hidden`/`.unreadable`/`.notice`/`.git`/`.git-branch`/`.disk` shrink first (weight 10); `.item-
+count`/`.selected-count`/`.dim` shrink only once that group is exhausted (weight 1), and can still
+ultimately ellipsis themselves rather than being immune. Corrected the round-2 comment that had claimed
+these elements "never truncate" — the false record this crew has been removing all day.
+
+Gates re-run: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 320 files / 4227 tests, all green
+(unchanged — CSS-only, invisible to jsdom, as every round). Pushed to the same branch
+`cpe-1780-listing-gaps` / PR #974.

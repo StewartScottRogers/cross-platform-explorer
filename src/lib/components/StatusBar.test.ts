@@ -77,24 +77,34 @@ describe("StatusBar filtered-hidden note (CPE-1708)", () => {
 describe("StatusBar unreadable-entry note (CPE-1780)", () => {
   it("shows nothing when nothing was unreadable — the overwhelming majority of listings", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 0 });
-    expect(screen.queryByText(/could not be read/)).toBeNull();
+    expect(screen.queryByText(/couldn.t read/i)).toBeNull();
   });
 
-  it("says N entries could not be read, for a person, when the count is non-zero", () => {
+  it("says it couldn't read N entries, for a person, when the count is non-zero", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 3 });
-    expect(screen.getByText("3 entries could not be read")).toBeTruthy();
+    expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy();
   });
 
   it("uses the singular for exactly one", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 1 });
-    expect(screen.getByText("1 entry could not be read")).toBeTruthy();
+    expect(screen.getByText("Couldn't read 1 entry")).toBeTruthy();
   });
 
   it("puts the full sentence — plus the rest-loaded-successfully reassurance — in the title tooltip", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 3 });
-    const note = screen.getByText("3 entries could not be read");
-    expect(note.getAttribute("title")).toContain("3 entries could not be read");
+    const note = screen.getByText("Couldn't read 3 entries");
+    expect(note.getAttribute("title")).toContain("Couldn't read 3 entries");
     expect(note.getAttribute("title")).toContain("loaded successfully");
+  });
+
+  // UAT round (2026-08-20): both notes previously led with "N entries…", risking a fast-skim
+  // one-count misread. `unreadableText` now leads with "Couldn't read" instead — this proves it reads
+  // distinctly from `filteredHiddenText` at a glance, not just that the two counts differ.
+  it("leads with a different word than filteredHidden's note, so a fast skim can't read them as one count", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 2, unreadableCount: 3 });
+    const filtered = screen.getByText("2 entries were hidden because their names could not be shown safely");
+    const unreadable = screen.getByText("Couldn't read 3 entries");
+    expect(filtered.textContent?.trim().split(/\s+/)[0]).not.toBe(unreadable.textContent?.trim().split(/\s+/)[0]);
   });
 
   // CPE-1780 AC: "No count conflates 'name could not be shown safely' with 'could not be read'." Both
@@ -106,9 +116,9 @@ describe("StatusBar unreadable-entry note (CPE-1780)", () => {
     expect(
       screen.getByText("2 entries were hidden because their names could not be shown safely"),
     ).toBeTruthy();
-    expect(screen.getByText("3 entries could not be read")).toBeTruthy();
+    expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy();
     // Neither note's wording is a superset of the other's fact.
-    expect(screen.queryByText(/5 entries|hidden.*could not be read|could not be read.*hidden/i)).toBeNull();
+    expect(screen.queryByText(/5 entries|hidden.*couldn.t read|couldn.t read.*hidden/i)).toBeNull();
   });
 });
 
