@@ -45,3 +45,57 @@ does not exist.
 Filed by the Foreman from the independent review of PR #958, 2026-08-20.
 
 Related: **CPE-1759**, **CPE-1773/1774/1775**, **CPE-1786**.
+
+## Work Log
+
+### 2026-08-20 — merged, audited, docs fixed
+
+**Audit (against `extract_zip_archive_stream`'s guards), before merging:**
+- `entry_name_is_safe` (zip-slip / reserved-name refusal) — already present in the old loop, identical.
+- `entry_dir_action`/`entry_sink_action` (leaf-link + per-component containment) — already present,
+  identical order (asked before `create_dir_all(parent)`).
+- Symlink-entry containment (`link_target_action`, via `entry.is_symlink()`) — **missing** in the old
+  one-shot loop. A zip entry's symlink flag and declared target are central-directory metadata, which the
+  `zip` crate does not AES-encrypt (only the entry's content stream is), so this guard reads correctly on
+  a password-protected entry without decrypting anything — the streamed encrypted extractor
+  (`extract_zip_encrypted_streamed`) already proved this by already calling the shared loop. No finding:
+  merging *adds* a guard, drops none.
+- Unix permission-bit restoration (`unix_mode()`) — same reasoning, also metadata, also newly gained.
+- No guard the old loop had is dropped by the merge, and the password itself is threaded unchanged:
+  `archive.by_index_decrypt(i, password.as_bytes())` is now called from inside the shared loop instead of
+  the old loop's own body, at the same point in the per-entry sequence.
+
+**Decision: merge.** No guard justified keeping encryption on a separate path — decryption only changes
+*which bytes* `entry`'s reader yields, not any of the metadata the guards inspect. `extract_zip_encrypted`
+now delegates to `extract_zip_archive_stream(&mut archive, dest_path, Some(password), &never, &mut |_| {})`,
+the same pattern `extract_archive`'s zip branch (row 23) already used for the plain path. The skip stays
+**silent** on this path (unchanged `Result<String, String>` signature — no `ArchiveReport` to put a note
+in), same limitation row 23 already carries.
+
+**Docs fixed:** the broken `[`zip_entry_out`]` intra-doc link (that pre-pass function was deleted by
+CPE-1773/1774/1775) now points at the current zip-side caller of `link_target_action`
+(`extract_zip_archive_stream`). `extract_zip_archive_stream`'s own doc, which as of CPE-1814 correctly
+said `extract_zip_encrypted` was "a fourth, unmerged loop", now says there is no fourth loop left. Updated
+the CPE-1733 guard table's rows 15/17/18 and its `create_dir_all`/`File::create` count reconciliation
+paragraph, which the merge changed (8 `create_dir_all` calls, down from 11; 12 `File::create` calls, down
+from 13 — both re-verified against the source with `grep`, not assumed) — a stale count is exactly the
+kind of restated-from-memory claim this ticket exists to stop.
+
+**Scope held:** did not touch CPE-1808/1809/1812/1829 — no code in their territory was changed.
+
+**Red-proof (no tests added/changed — the existing suite already exercises this function; verified it
+would still catch a broken merge):** changed `Some(password)` → `None` in the new delegating call at
+`extract_zip_encrypted` (one word). Result: 6 tests failed immediately with `"unsupported Zip archive:
+Password required to decrypt file"` — `encrypted_zip_round_trips_and_rejects_a_wrong_password`,
+`compress_to_zip_encrypted_streamed_round_trips_and_rejects_a_wrong_password`,
+`row15_extract_zip_encrypted_skips_an_entry_that_lands_on_a_link`,
+`rows_15_and_16_refuse_a_live_link_and_still_extract_the_rest`,
+`rows_15_to_20_refuse_a_file_entry_addressed_through_a_symlinked_intermediate_directory`,
+`row18_refuses_a_directory_entry_that_would_be_created_outside_the_extraction_folder`. Reverted; all green
+again.
+
+**Gates:** `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets -- -D warnings` — clean,
+no warnings. `cargo test --manifest-path crates/server/Cargo.toml --lib` — `2272 passed; 0 failed; 4
+ignored`.
+
+PR: see branch `cpe-1807-encrypted-zip-loop`.
