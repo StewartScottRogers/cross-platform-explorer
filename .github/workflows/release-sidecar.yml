@@ -271,14 +271,67 @@ jobs:
           # after the wrong thing entirely. It cost a whole release to diagnose once. BtbN publishes a new
           # autobuild daily and PRUNES the old ones, so a pinned ffmpeg URL has a shelf life of weeks and
           # this WILL happen again; when it does, the first error line should say so.
+          #
+          # CPE-1764: status 200 is necessary but not sufficient - a CDN/proxy error page, a login or
+          # captive-portal redirect, or a body cut short by a dropped connection can all come back 200.
+          # Measured: fetching an HTML page (https://httpbin.org/html) as if it were an archive got a
+          # clean 200 and the HTML was written to the output path, headed straight for tar. So every
+          # `fetch` call below now also takes the type this call site expects (magic bytes + a label)
+          # and checks the body actually starts with them, plus a minimum plausible size as a second,
+          # independent signal - a "197-byte archive" isn't one even if its first bytes happen to line up.
+          MIN_ARCHIVE_BYTES=65536
           fetch() {
-            url="$1"; out="$2"
+            url="$1"; out="$2"; magic="$3"; label="$4"
             code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url") || true
             code="${code:-000}"
             if [ "$code" != "200" ]; then
               echo "::error::download failed (HTTP $code): $url"
               echo "::error::If this is a BtbN ffmpeg URL, the pinned autobuild has been deleted upstream -"
               echo "::error::bump FFMPEG_BUILD_TAG/FFMPEG_BUILD_VER to a current release. See CPE-1762."
+              exit 1
+            fi
+            size=$(wc -c < "$out" | tr -d ' ')
+            magic_len=$(( ${#magic} / 2 ))
+            actual=$(head -c "$magic_len" "$out" | od -An -tx1 | tr -d ' \n')
+            if [ "$actual" != "$magic" ]; then
+              echo "::error::download body is not a $label archive: $url"
+              echo "::error::expected magic bytes $magic, got ${actual:-<empty>} (HTTP 200, $size bytes)."
+              echo "::error::A 200 status doesn't mean the body is right - this looks like an HTML error"
+              echo "::error::page, a login/interception redirect, or a placeholder, not the archive. CPE-1764."
+              exit 1
+            fi
+            if [ "$size" -lt "$MIN_ARCHIVE_BYTES" ]; then
+              echo "::error::download body for $url is only $size bytes - too small to be a real $label"
+              echo "::error::archive (minimum plausible size: $MIN_ARCHIVE_BYTES bytes), even though the"
+              echo "::error::magic bytes matched. A short body with a valid header can still be a"
+              echo "::error::truncated transfer that never finished. See CPE-1764."
+              exit 1
+            fi
+          }
+
+          # CPE-1764: BtbN publishes a `checksums.sha256` alongside every release, covering every asset
+          # in it - strictly stronger than magic-bytes + size, because it also catches a body that has
+          # the right header AND is past the size floor but is still wrong (truncated past that floor,
+          # or corrupted in transit): a real gap the magic/size checks above admit they can't close. So
+          # every BtbN ffmpeg download below is also checksum-verified. bblanchon (pdfium) does NOT
+          # publish a plain checksum file for comparison - only a Sigstore attestation bundle
+          # (`pdfium-attestation.json`), which needs `gh attestation verify`/cosign, not curl+sha256sum;
+          # verifying that is a heavier follow-up, not done here (checked both during CPE-1764).
+          verify_btbn_checksum() {
+            file="$1"; asset_name="$2"; url="$3"
+            sums=$(curl -sSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/checksums.sha256") || true
+            expected=$(printf '%s\n' "$sums" | awk -v n="$asset_name" '$2 == n { print $1 }')
+            if [ -z "$expected" ]; then
+              echo "::error::no checksum entry for $asset_name in BtbN's checksums.sha256 (tag $FFMPEG_BUILD_TAG)"
+              echo "::error::can't verify $url against a published checksum. See CPE-1764."
+              exit 1
+            fi
+            actual=$(sha256sum "$file" | awk '{print $1}')
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::checksum mismatch for $url"
+              echo "::error::expected sha256 $expected (from BtbN's published checksums.sha256), got $actual."
+              echo "::error::The body doesn't match the published checksum - truncated, corrupted, or"
+              echo "::error::tampered in transit. This is exactly what magic-bytes+size can miss. CPE-1764."
               exit 1
             fi
           }
@@ -296,26 +349,32 @@ jobs:
 
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
             echo "--- pdfium (Windows) ---"
-            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz" pdfium.tgz
+            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz" pdfium.tgz "1f8b" "gzip (.tgz)"
             tar xzf pdfium.tgz bin/pdfium.dll LICENSE
             mv bin/pdfium.dll native-deps/pdfium/windows/pdfium.dll
             mv LICENSE native-deps/pdfium/windows/LICENSE.txt
 
             echo "--- ffmpeg (Windows, BtbN LGPL static) ---"
-            fetch "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-win64-lgpl-8.1.zip" ffmpeg.zip
+            FFMPEG_WIN_ASSET="ffmpeg-${FFMPEG_BUILD_VER}-win64-lgpl-8.1.zip"
+            FFMPEG_WIN_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/${FFMPEG_WIN_ASSET}"
+            fetch "$FFMPEG_WIN_URL" ffmpeg.zip "504b0304" "zip"
+            verify_btbn_checksum ffmpeg.zip "$FFMPEG_WIN_ASSET" "$FFMPEG_WIN_URL"
             unzip -q ffmpeg.zip "*/bin/ffmpeg.exe" "*/LICENSE.txt"
             mv */bin/ffmpeg.exe native-deps/ffmpeg/windows/ffmpeg.exe
             mv */LICENSE.txt native-deps/ffmpeg/windows/LICENSE.txt
 
           elif [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
             echo "--- pdfium (Linux) ---"
-            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz" pdfium.tgz
+            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz" pdfium.tgz "1f8b" "gzip (.tgz)"
             tar xzf pdfium.tgz lib/libpdfium.so LICENSE
             mv lib/libpdfium.so native-deps/pdfium/unix/libpdfium.so
             mv LICENSE native-deps/pdfium/unix/LICENSE.txt
 
             echo "--- ffmpeg (Linux, BtbN LGPL static) ---"
-            fetch "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-linux64-lgpl-8.1.tar.xz" ffmpeg.tar.xz
+            FFMPEG_LINUX_ASSET="ffmpeg-${FFMPEG_BUILD_VER}-linux64-lgpl-8.1.tar.xz"
+            FFMPEG_LINUX_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/${FFMPEG_LINUX_ASSET}"
+            fetch "$FFMPEG_LINUX_URL" ffmpeg.tar.xz "fd377a585a00" "xz (.tar.xz)"
+            verify_btbn_checksum ffmpeg.tar.xz "$FFMPEG_LINUX_ASSET" "$FFMPEG_LINUX_URL"
             mkdir -p ffmpeg-extract
             tar xJf ffmpeg.tar.xz -C ffmpeg-extract --strip-components=1
             mv ffmpeg-extract/bin/ffmpeg native-deps/ffmpeg/unix/ffmpeg
@@ -323,12 +382,17 @@ jobs:
 
           elif [ "${{ matrix.platform }}" = "macos-latest" ]; then
             echo "--- pdfium (macOS arm64) ---"
-            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz" pdfium.tgz
+            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz" pdfium.tgz "1f8b" "gzip (.tgz)"
             tar xzf pdfium.tgz lib/libpdfium.dylib LICENSE
             mv lib/libpdfium.dylib native-deps/pdfium/unix/libpdfium.dylib
             mv LICENSE native-deps/pdfium/unix/LICENSE.txt
             xattr -d com.apple.quarantine native-deps/pdfium/unix/libpdfium.dylib 2>/dev/null || true
 
+            # CPE-1764: the macOS ffmpeg leg below does NOT go through `fetch` - it's a `git clone` of
+            # FFmpeg's own source (built from source, not a downloaded pre-built archive), so there is
+            # no single-file HTTP body for a magic-bytes/size/checksum check to examine. Confirmed out
+            # of scope for this ticket; a bad clone fails at `./configure`/`make` below instead, which
+            # is git's/the build's own loud failure, not a silently-accepted wrong body.
             echo "--- ffmpeg (macOS arm64, built from official source, LGPL-only) ---"
             git clone --depth 1 --branch "$FFMPEG_SRC_TAG" https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
             (
