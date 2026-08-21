@@ -3,11 +3,11 @@ id: CPE-1783
 title: dispatch.rs still carries three mojibake arrows CPE-1752 missed
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-19
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
