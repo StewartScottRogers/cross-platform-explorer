@@ -3,11 +3,11 @@ id: CPE-1814
 title: archive.rs carries a dead Skip|Abort collapse, a staging failure that returns instead of continues, and dangling cfg-gated doc links
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
@@ -142,3 +142,26 @@ failed; 4 ignored; 0 measured; 0 filtered out`. Both run on Windows only (this m
 not run locally — left to CI's 3-OS matrix. `src-tauri`/`src/` untouched, so those gates don't apply.
 
 PR: see the branch `cpe-1814-archive-cleanups`.
+
+## Foreman note at merge (2026-08-20)
+
+The Work Log says **8** further occurrences of the swallowed-loop-exit shape remain. Both the
+independent Reviewer and the UAT tester enumerated them separately and both counted **7**, agreeing on
+the same list. Corrected here so the next person greps for the right number:
+
+,
+,
+,
+,
+,
+,
+.
+
+None of the seven is currently taking the silent-skip path on this machine (UAT ran all seven).
+
+Also recorded: on CI this change is a **no-op**, because  is true there and
+ already panics inside  before the boolean reaches the assert. The value
+is local: a developer running the suite on a root/elevated machine now gets a loud failure instead of
+a test that quietly verifies nothing. The Reviewer notes this makes the assert inconsistent with the
+~7 other  call sites in the file, which still  and continue -- worth
+settling one way or the other if this area is opened again.
