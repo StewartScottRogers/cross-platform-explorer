@@ -1824,9 +1824,6 @@
     selectedTag = "";
     search = "";
     selection = emptySelection();
-    // CPE-1780 (F1): mirrors `enterArchive` above — `visible` now renders `smartOverride`, so bump the
-    // generation token to guard against an in-flight `revalidateDir` reassigning `entries` underneath it.
-    explorerPane.invalidateListing();
   }
   function exitSmartFolder() {
     smartFolder = null;
@@ -1861,9 +1858,6 @@
     selectedTag = "";
     search = "";
     selection = emptySelection();
-    // CPE-1780 (F1): mirrors `openSmartFolder`/`enterArchive` above — `visible` now renders
-    // `smartOverride` (structuredSearchEntries), so bump the generation token for the same reason.
-    explorerPane.invalidateListing();
   }
   function exitStructuredSearch() {
     structuredSearch = null;
@@ -1932,10 +1926,6 @@
       archive = { zipPath: entry.path, zipName: entry.name, entries, inner: "" };
       selection = emptySelection();
       search = "";
-      // CPE-1780 (F1): the pane's `visible` now renders `archiveOverride` instead of `entries`-derived
-      // rows, so bump the generation token here too — a `revalidateDir` in flight for the folder we were
-      // just browsing can otherwise still fire and reassign `entries` while the archive overlay is up.
-      explorerPane.invalidateListing();
     } catch (e) {
       // AES-encrypted zips can't be LISTED without the password either (the `zip` crate needs it just
       // to construct the per-entry reader) — there's no password-aware entry lister, only a
@@ -2177,12 +2167,6 @@
     if (path === HOME) {
       entries = [];
       loading = false;
-      // CPE-1780 (F1): bump the pane's generation token even though we're not calling `loadListing` here
-      // — Home has no listing to fetch. Without this, a `revalidateDir` scheduled ~300ms earlier (from a
-      // cache hit on the PREVIOUS folder) can still fire after this point and pass its stale
-      // `gen === loadGen` check (never bumped on this short-circuit path), silently reassigning `entries`
-      // for a view that isn't showing a folder at all. See `invalidateListing`'s doc.
-      explorerPane.invalidateListing();
       return;
     }
 
@@ -2242,10 +2226,6 @@
     if (path === HOME) {
       entriesB = [];
       loadingB = false;
-      // CPE-1780 (F1): mirrors pane A's `loadPath` HOME short-circuit above — bump pane B's own
-      // generation token so a `revalidateDir` in flight for pane B's previous folder can't fire afterward
-      // and silently reassign `entriesB` while pane B is showing Home.
-      explorerPaneB?.invalidateListing();
       return;
     }
     await explorerPaneB?.loadListing(path, useCache);

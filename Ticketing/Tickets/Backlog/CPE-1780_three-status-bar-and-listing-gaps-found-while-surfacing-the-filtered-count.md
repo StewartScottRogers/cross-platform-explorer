@@ -63,8 +63,12 @@ shown safely"; an unreadable entry is a different fact and needs different words
 
 ## Acceptance criteria
 
-- [x] A `revalidateDir` in flight when the user navigates to Home / into an archive / into a smart folder
-      cannot mutate `entries`. Breaking the fix reds a distinct test.
+- [ ] A `revalidateDir` in flight when the user navigates to Home / into an archive / into a smart folder
+      cannot mutate `entries`. Breaking the fix reds a distinct test. **SPLIT OUT (2026-08-20, see Work
+      Log): the Reviewer proved two regressions in the fix that shipped for this, and a third form of the
+      same defect (a false "empty" statement) in the round-2 patch for those. The Foreman is filing a
+      separate ticket for a proper design pass on this generation mechanism rather than a fourth patch
+      here — number to follow.** Not done in this PR.
 - [x] Pane B's behaviour is either fixed or documented — not left implicit.
 - [x] An unreadable local entry is either counted under its own name with its own wording, or the decision
       not to count it is recorded at the call site.
@@ -238,3 +242,74 @@ these elements "never truncate" — the false record this crew has been removing
 Gates re-run: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 320 files / 4227 tests, all green
 (unchanged — CSS-only, invisible to jsdom, as every round). Pushed to the same branch
 `cpe-1780-listing-gaps` / PR #974.
+
+**2026-08-20 (Foreman: SCOPE SPLIT — F1 removed from this PR)** — The Foreman set a condition when
+dispatching the three Reviewer blockers: fix all three if the F1 fixes stayed contained; stop and report
+if fixing blocker 1 or 2 rippled the generation mechanism further. Blocker 2 (the `gen - 1` → `lastStreamId`
+fix) was genuinely contained and the Reviewer verified it correct by measurement (stream 2 now cancelled;
+`lastStreamId` staleness handled correctly across early-throw, two rapid navigations, cache-served loads,
+and remount). But blocker 1's fix (`invalidateListing()` settling `loading`/`error`) turned out to
+reintroduce the EXACT class of defect this ticket exists to remove, deterministically, not as a race:
+
+- Open a permission-denied folder, click a saved search, close it — the pane now says "This folder is
+  empty" instead of the real permission-denied error.
+- An abandoned in-flight load leaves `entries = []` presented as a COMPLETE, successful listing, where
+  before this ticket's changes that load would have completed normally and shown the real rows.
+
+Root cause: `loadListing`'s `entries = []` / `error = ""` are only ever safe because a load ALWAYS follows
+them. `invalidateListing()` settles the pane with NO load behind it, so it publishes "empty, no error" as
+a finished listing — a listing quietly shorter (or falser) than the folder really is, which is precisely
+what CPE-1708 and this ticket exist to remove. The Reviewer's prescribed remedy (have the three exit
+functions — `exitSmartFolder`/`exitStructuredSearch`/`exitArchive` — actually re-load pane A) is sound but
+ripples beyond `invalidateListing()` into three more call sites: the condition for a stop-and-report.
+
+**Decision: split.** F1 (the generation-token/`invalidateListing()` work — AC item 1) is pulled out of this
+PR entirely for a proper design pass in a separate ticket (the Foreman is filing it; number to follow — AC
+item 1 above updated to note the split and left unchecked). F3 (unreadable-count, all of it) and F2
+(pane B documented-not-fixed) stay, along with all the status-bar CSS work, and ship in this PR.
+
+Removed from the branch:
+- `ExplorerPane.svelte`: `invalidateListing()` (the export, both its doc comment and body) and
+  `lastStreamId`, reverting `loadListing`'s CPE-665 cancel logic to the original `gen - 1` derivation.
+  **`lastStreamId` was judged NOT worth keeping standalone**: the phantom-generation problem it exists to
+  solve is created ONLY by something bumping `loadGen` without starting a stream — and with
+  `invalidateListing()` gone, `loadGen` is again bumped exclusively by `loadListing()`'s own `++loadGen`,
+  once per call, so consecutive real loads are always exactly 1 apart and `gen - 1` is provably correct
+  again (control-flow argument, not a coincidence). A cache-served load still bumps `loadGen` without
+  starting a stream, same as before this ticket — but that was already true pre-CPE-1780 and is harmless:
+  cancelling a stream id nothing ever registered is a documented no-op in the Rust command
+  (`cancel_dir_stream`'s doc: "no-op if the stream already finished (its id is gone from the registry)").
+  So `lastStreamId` existed only to serve `invalidateListing()`; removed with it.
+- `App.svelte`: all five call sites (`loadPath`'s HOME short-circuit, `navigateB`'s HOME short-circuit,
+  `enterArchive`, `openSmartFolder`, `openStructuredSearch`) and their CPE-1780 comments, reverted to their
+  pre-ticket bodies.
+- `src/lib/components/ExplorerPane.invalidateListing.test.ts` — deleted entirely (existed only to cover
+  `invalidateListing()`/`lastStreamId`).
+- `src/lib/bidiEscape.guard.test.ts` — REGISTRY line numbers re-anchored to the post-removal file shapes.
+
+**Correcting a claim from the prior Work Log entry, before it lands.** That entry said the Reviewer's two
+mutations (in `crates/server/src/listing.rs` and `src-tauri/src/lib.rs`) "now red" after the F3 fixes. The
+Foreman re-ran both verbatim and got the full Rust suite green (cpe-server 2256/0 failed, src-tauri
+202/0 failed) — the claim was wrong. What is actually true, stated plainly: the extracted helpers
+themselves ARE pinned — mutating `walk_result_tuple`'s, `local_stream_result_for`'s, or
+`local_list_dir_result_from`'s own body reds a named test
+(`walk_result_tuple_carries_the_real_unreadable_count_through`,
+`local_stream_result_for_carries_the_real_unreadable_count_through`,
+`local_list_dir_result_from_carries_the_real_unreadable_count_through`), and `stream_dir_entries_over` is
+the right seam for the walk loop itself (proven with a real `fs::DirEntry` spliced with a synthetic
+`io::Error`, driven through the production loop). The ORIGINAL two mutation sites the Reviewer named no
+longer exist as one-token-mutable inline closures — they're now point-free delegations
+(`.map(local_stream_result_for)`, etc.), so zeroing them takes rewriting the expression, not typing `0`,
+which closes the realistic accidental-regression class. But that is a narrower claim than "both mutations
+red": one site is STILL one-token mutable and green — `local_list_dir_result`'s
+`.map(|(entries, unreadable)| local_list_dir_result_from(entries, unreadable))` → mutating the second
+argument to a literal `0` is not caught by any existing test. Left as-is per the Foreman's instruction
+(state it accurately, not close it in this round).
+
+Gates re-run after the F1 removal: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 319 files /
+4223 tests, all green (down from 320/4227 — one file removed, four tests removed, exactly matching the
+deleted `ExplorerPane.invalidateListing.test.ts`). `cargo clippy --all-targets -- -D warnings` + `cargo
+test`, src-tauri default — clean, 202 passed (unchanged, no Rust touched this round). Same,
+`--features sidecar-platform` — clean, 257 passed (unchanged). `cpe-server` — clean, 2256 passed, 4 ignored
+(unchanged). `cpe-net` — clean, 37 passed (unchanged). Pushed to the same branch `cpe-1780-listing-gaps` /
+PR #974; PR body corrected to match this entry (no "both mutations now red" claim).
