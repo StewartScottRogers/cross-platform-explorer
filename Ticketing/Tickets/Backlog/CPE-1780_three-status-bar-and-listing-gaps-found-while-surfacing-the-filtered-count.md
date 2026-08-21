@@ -137,3 +137,24 @@ Re-ran gates after the CSS fix: `npm run check` — 0 errors, 0 warnings. `npx v
 CSS to `getComputedStyle` under this project's vitest config, so no test could pin the pixel-level bug or
 its fix — visual correctness here rests on the Critic's real-browser measurement, not the harness).
 Pushed to the same branch `cpe-1780-listing-gaps` / PR #974.
+
+**2026-08-20 (follow-up, round 2)** — The Foreman relayed a second Visual Critic finding: the `.disk`
+spill was genuinely fixed, but the deficit MOVED rather than disappeared — with both notes on at
+600/684px, the LEADING unclassed item-count span ("42 items") now wrapped and spilled instead, because it
+was the next unprotected child once `.disk` could shrink safely. Fixing one element at a time was moving
+the same bug, not removing it.
+
+Audited every direct child of `.statusbar` (the resize grip excluded — `position: absolute`, out of flex
+flow) and assigned each a deliberate role, documented in a new ordering comment in
+`src/lib/components/StatusBar.svelte`:
+- **Stays whole, never truncates:** the (now classed) `.item-count`/`.selected-count` spans and `.dim`
+  ("Hidden files shown") — `min-width: 0; white-space: nowrap;` only (no ellipsis), since these are short
+  and load-bearing.
+- **Allowed to truncate, in this order:** `.filtered-hidden`/`.unreadable`/`.notice` (unchanged from
+  before), then `.git-branch` (a repo branch name can be long — `.git`'s counts/dirty-dot/buttons stay
+  `flex: 0 0 auto`, fixed-size, since shrinking a clickable button is worse than truncating a name), then
+  `.disk` last.
+
+Re-ran gates: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 320 files / 4224 tests, all
+green (same counts as both prior rounds — CSS-only, invisible to jsdom, exactly as expected). Pushed to
+the same branch `cpe-1780-listing-gaps` / PR #974.

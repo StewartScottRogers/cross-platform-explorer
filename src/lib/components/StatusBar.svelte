@@ -88,7 +88,7 @@
 </script>
 
 <div class="statusbar">
-  <span>
+  <span class="item-count">
     {#if isFiltered}
       {itemCount} of {totalCount} items
     {:else}
@@ -97,7 +97,7 @@
   </span>
 
   {#if selectedCount > 0}
-    <span>
+    <span class="selected-count">
       {selectedCount} selected{selectedSize > 0 ? ` — ${formatSize(selectedSize)}` : ""}
     </span>
   {/if}
@@ -164,7 +164,33 @@
 </div>
 
 <style>
-  .dim { color: var(--text-faint); }
+  /* CPE-1780 (Visual Critic, round 2): wrap-safety ordering for EVERY direct child of `.statusbar`
+     (`.resize-grip` excluded — it's `position: absolute`, out of flex flow). `.statusbar` never wraps
+     rows (no `flex-wrap`), so an unprotected child's TEXT wraps onto a second line instead and spills
+     out of the fixed 26px bar — first found on `.disk` (fixed below), then, once `.disk` could shrink
+     safely, the deficit moved to the NEXT unprotected child in flex order (the leading item-count span).
+     Moving the bug from element to element is the actual failure mode here, so every child below is now
+     deliberately assigned one of two roles, in flex order:
+       1. STAYS WHOLE, never truncates — `.item-count`, `.selected-count`, `.dim` (so "Hidden files
+          shown"): short, load-bearing facts the user should always be able to read in full. Each gets
+          `min-width: 0; white-space: nowrap;` so it CAN shrink (never wraps to a 2nd line) but no
+          `overflow`/`text-overflow`, so at an extreme it overflows its own box horizontally rather than
+          growing the bar's height — the least-bad failure for a fact this short and this important.
+       2. ALLOWED TO TRUNCATE, in this order when space runs out: `.filtered-hidden`/`.unreadable`/
+          `.notice` (variable-length prose, but framed as an already-established status), then `.git-branch`
+          (a branch name can be long; the rest of `.git` — counts, dirty dot, buttons — stays fixed-size,
+          `flex: 0 0 auto`, since shrinking a clickable button is worse than truncating a name), then
+          `.disk` LAST (free-space is the least essential fact on the bar). Each gets `min-width: 0;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;` — the full text stays reachable
+          via each element's own `title` tooltip. */
+  .dim { color: var(--text-faint); flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+
+  /* The item/selection counts (unclassed `<span>`s in markup before CPE-1780) are the FIRST children of
+     `.statusbar`, so before this fix they absorbed the wrap-of-last-resort: once every LATER sibling could
+     shrink safely, the narrow-width deficit flexbox has to put SOMEWHERE landed here instead and wrapped
+     "42 items" onto two lines. Short + load-bearing, so `.item-count`/`.selected-count` deliberately have
+     NO ellipsis (see the ordering comment above `.dim`) — they must stay legible whole, never truncated. */
+  .item-count, .selected-count { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
 
   /* CPE-1708: `--accent` is this app's INFO tone (app.css: "ERROR/INFO reuse --danger/--accent") — never
      `--danger`, which would read as "this folder failed to load" when it didn't. Same overflow strategy
@@ -213,15 +239,30 @@
     white-space: nowrap;
     flex: 0 1 auto;
   }
-  /* Git sync + free space sit at the far right, away from the item/selection counts. */
-  .git { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-  .git-branch { opacity: 0.85; }
-  .git-ct { font-variant-numeric: tabular-nums; opacity: 0.8; }
-  .git-dirty { color: var(--warn); }
-  .git-conflict { color: var(--warn); font-weight: 600; }
+  /* Git sync + free space sit at the far right, away from the item/selection counts. `.git` itself
+     (CPE-1780) gets `min-width: 0; flex: 0 1 auto;` so the WHOLE block can shrink as a unit rather than
+     forcing the row wider or wrapping — a `display: flex` container has no `white-space` of its own, so
+     what actually needs to shrink is its variable-length child, `.git-branch`, below. */
+  .git { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; flex: 0 1 auto; }
+  /* A branch name can be arbitrarily long (CPE-1780): shrinks + truncates to an ellipsis like the other
+     ALLOWED-TO-TRUNCATE elements (see the ordering comment above `.dim`), full name still in `title` via
+     the parent `.git` span. `flex: 0 1 auto` so it — not the counts/dot/buttons below — absorbs the
+     shrink; those stay `flex: 0 0 auto` (never shrink) since they're short and functionally load-bearing
+     (clickable), the same STAYS-WHOLE judgement as `.item-count`/`.selected-count`/`.dim`. */
+  .git-branch {
+    opacity: 0.85;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
+  }
+  .git-ct { font-variant-numeric: tabular-nums; opacity: 0.8; flex: 0 0 auto; }
+  .git-dirty { color: var(--warn); flex: 0 0 auto; }
+  .git-conflict { color: var(--warn); font-weight: 600; flex: 0 0 auto; }
   .git-btn.resolve { border-color: var(--warn); }
   .git-btn { font-size: 11px; padding: 1px 7px; cursor: pointer; border: 1px solid var(--border-strong, #555);
-             background: transparent; color: inherit; border-radius: 4px; }
+             background: transparent; color: inherit; border-radius: 4px; flex: 0 0 auto; }
   .git-btn:hover { background: var(--selection, rgba(128,128,128,0.2)); }
   /* CPE-1780 Visual Critic finding: `.disk` had NO overflow strategy at all (unlike `.filtered-hidden`/
      `.unreadable`/`.notice` above), so it had never been forced to shrink hard enough to wrap — until
