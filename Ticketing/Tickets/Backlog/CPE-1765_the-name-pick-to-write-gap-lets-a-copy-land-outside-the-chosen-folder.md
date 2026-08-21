@@ -289,3 +289,40 @@ from.
 **Still not verified locally:** Linux and macOS; the birth-mode test is `cfg(unix)` and has never run
 here. The cross-volume test drives the real `EXDEV` tail directly rather than staging two volumes, so the
 volume boundary itself is exercised by the Reviewer's C:→Z: measurement, not by CI.
+
+### 2026-08-20 - CI went red on Linux, which is the point
+
+Every round of this ticket carried the same caveat: *"Not verified locally: Linux and macOS. CI's 3-OS
+matrix owns those legs."* It was not throat-clearing. `Server crates (ubuntu-latest)` failed:
+
+```text
+error: constant `COPY_CHUNK` is never used
+error: could not compile `cpe-server` (lib) due to 1 previous error
+error: could not compile `cpe-server` (lib test) due to 1 previous error
+```
+
+`COPY_CHUNK` is read only by the non-Linux arm of `stream_bytes` - Linux keeps `std::io::copy` for the
+`copy_file_range`/reflink specialisation - so on Linux the constant is dead, and CI runs clippy with
+`-D warnings`. Windows and macOS both take the loop arm, so nothing local could have caught it. Every
+other job on the head was green: Backend on all three OSes, Frontend, Sidecar platform on all three,
+Network E2E, GUI smoke, ffmpeg pin.
+
+**Fixed by gating the constant with the loop's predicate, copied verbatim** -
+`#[cfg(not(any(target_os = "linux", target_os = "android")))]` - verified byte-for-byte identical to the
+one on `stream_bytes` so the two cannot drift. Both intra-doc `[`COPY_CHUNK`]` links were demoted to plain
+code spans as well, since on Linux they would point at an item that no longer exists.
+
+**Reproduced and red-proofed locally without a Linux box**, by temporarily swapping `target_os = "linux"`
+for `target_os = "windows"` in both predicates so this machine took the `io::copy` arm exactly as Linux
+does: clippy reproduced the CI error verbatim, the fix turned it green on that arm, and the predicates
+were then restored. That is a repeatable technique for cfg-gated code on a single-platform workstation.
+
+**Audited the rest of the PR for the same shape**, since a second dead item on macOS would cost another
+full CI cycle. Every cfg-gated item added by this ticket defines **both** arms - `stream_bytes`,
+`birth_mode_of`, `carry_file_times`, `same_object` - and every consumer of them is unconditional, so no
+item can exist in only one platform's build. `COPY_CHUNK` was the only single-consumer item, and macOS
+is just (loop arm) + (unix arms), a combination containing nothing that Windows and Linux do not each
+already compile.
+
+Lesson worth keeping: a cfg-gated helper is safe, but a cfg-gated *consumer* of an ungated item is not,
+and `-D warnings` makes that a build failure rather than a warning.

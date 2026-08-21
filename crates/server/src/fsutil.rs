@@ -714,7 +714,7 @@ pub fn claim_dir_slot(target: &Path) -> Result<(), String> {
 /// dangling link is the *easiest* shape to plant because its target need not exist. So the flag is
 /// rejected on evidence, not on taste.
 ///
-/// What is left is a genuine trade with no free option, and the numbers are in [`COPY_CHUNK`]:
+/// What is left is a genuine trade with no free option, and the numbers are in `COPY_CHUNK`:
 /// `create_new` + a 1 MiB stream reaches ~66% of `CopyFileExW`'s throughput and is airtight, while
 /// `create_new` + `CopyFileExW` over our own placeholder would reach 100% and keep every stream, at the
 /// price of re-opening the destination **by path** — which an actor who deletes our placeholder in that
@@ -853,6 +853,20 @@ fn carry_file_times(_src: &std::fs::Metadata, _dst: &std::fs::File) {}
 /// 1 MiB is where the curve flattens: it recovers 2.5× over the 8 KiB default and lands at ~66% of the
 /// kernel fast path, where 4 MiB and 8 MiB buy ~1% for 4–8× the memory per concurrent copy. See
 /// [`copy_file_into_claimed_slot`]'s "why not the kernel fast path" section for the remaining 1.5×.
+///
+/// **Gated with the SAME predicate as the arm that reads it**, and that is not tidiness: with no gate at
+/// all this is dead code on Linux, where `stream_bytes` keeps `std::io::copy`, and CI's
+/// `Server crates (ubuntu-latest)` job runs clippy with `-D warnings`. It went red exactly there, on the
+/// one platform this PR said all along it could not test locally:
+///
+/// ```text
+/// error: constant `COPY_CHUNK` is never used
+/// error: could not compile `cpe-server` (lib) due to 1 previous error
+/// ```
+///
+/// Copy the predicate from `stream_bytes` verbatim if either is ever edited. A second spelling that
+/// happens to mean the same thing today is how the two drift apart tomorrow.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const COPY_CHUNK: usize = 1024 * 1024;
 
 /// Move `r`'s bytes into `w`, by the best route the platform gives us for two open file handles.
@@ -862,7 +876,7 @@ const COPY_CHUNK: usize = 1024 * 1024;
 /// i.e. effectively instant and using no new space. Replacing that with a hand-rolled buffer loop would
 /// have traded a Windows regression for a much larger Linux one. Everywhere else `io::copy` has no such
 /// specialisation and its 8 KiB buffer is the measured problem, so those platforms take the
-/// [`COPY_CHUNK`] loop.
+/// `COPY_CHUNK` loop.
 ///
 /// Not verified on macOS — this machine is Windows and CI's matrix owns the other two legs. The reasoning
 /// there is that a 1 MiB loop cannot be worse than the same loop at 8 KiB, which is what `io::copy` would
