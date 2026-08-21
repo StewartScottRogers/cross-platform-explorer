@@ -26,6 +26,22 @@
  * code point -- i.e. two different, unrelated interpretations of the same bytes both parse cleanly, which
  * essentially never happens by chance in real prose. This needs no hand-picked shape list, so it can't
  * miss a shape by omission the way the pair table did.
+ *
+ * CPE-1788 (round 3) covers the same PowerShell-round-trip root cause landing in the OTHER two encodings
+ * PowerShell 5.1 can leave behind instead of UTF-8, both of which passed round 2 silently:
+ *   - `Out-File`/`>` default to UTF-16LE with a leading BOM (`FF FE`). A file rewritten that way has NUL
+ *     bytes throughout, so the tree scan's `looksBinary` (NUL in the first 4 KB) skipped it before any
+ *     check ran, and `hasLeadingBom` only ever matched the UTF-8 BOM. {@link detectUtf16Bom} below closes
+ *     this: a repo source file must never legitimately open with a UTF-16 BOM, so finding one is a
+ *     violation in its own right, independent of whatever is (or isn't) further wrong with the content.
+ *   - `Set-Content` (no `-Encoding` given) defaults to the system ANSI codepage (CP1252 on this repo's
+ *     Windows dev machines). Re-encoding a CORRECTLY-read Unicode string through CP1252 can turn a
+ *     multi-byte UTF-8 character into a single CP1252 byte (an em dash, 3 UTF-8 bytes `E2 80 94`, becomes
+ *     one byte `0x97`) that is not, on its own, a valid UTF-8 sequence at all -- so the previous scan's
+ *     `bytes.toString("utf8")` silently substituted U+FFFD and reported zero hits on a genuinely corrupted
+ *     file. {@link findFirstInvalidUtf8Byte} below closes this: it re-validates UTF-8 well-formedness at
+ *     the byte level (not through a lossy decode) and reports the exact offset of the first byte that
+ *     breaks it.
  */
 
 /** CP1252 byte value (0x00-0xFF) -> the Unicode code point it decodes to. Bytes 0x00-0x7F and 0xA0-0xFF
@@ -184,4 +200,105 @@ export function findMojibake(text: string): MojibakeOffender[] {
  *  ordinary mojibake text instead (see the `ignoreBOM` note above and this file's "mojibake'd BOM" test). */
 export function hasLeadingBom(bytes: Uint8Array): boolean {
   return bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+}
+
+/** CPE-1788: which UTF-16 BOM (if any) `bytes` opens with. `"LE"` is `FF FE` (PowerShell 5.1's
+ *  `Out-File`/`>` default, and the far more likely of the two in this repo's Windows-dev-machine
+ *  reality). `"BE"` (`FE FF`) is checked too, even though nothing in this repo's toolchain is known to
+ *  produce it: a repo source file must never legitimately be UTF-16 in either byte order, so limiting the
+ *  check to only the shape already seen would repeat round 1's exact mistake (a hand-picked shape list
+ *  that misses whatever wasn't in it yet). Checking this does not require the file to already have failed
+ *  `looksBinary`: it is meant to run BEFORE that skip (see `mojibakeGuard.test.ts`'s `scanOneFile`),
+ *  because the same NULs that make `looksBinary` true are exactly what a UTF-16 rewrite produces -- this
+ *  is the check that turns "silently skipped as binary" into "reported". */
+export function detectUtf16Bom(bytes: Uint8Array): "LE" | "BE" | null {
+  if (bytes.length < 2) return null;
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return "LE";
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return "BE";
+  return null;
+}
+
+/** Returns the 0-based byte offset of the first UTF-8 well-formedness violation in `bytes` -- an invalid
+ *  lead byte, a missing or out-of-range continuation byte, an overlong encoding, an encoded surrogate
+ *  (U+D800-U+DFFF, never legal in UTF-8), or a code point past U+10FFFF -- or `null` if `bytes` is
+ *  entirely well-formed UTF-8. This re-validates at the BYTE level, independent of `decodeSingleCodepointUtf8`
+ *  (which only ever sees code points a lossy `TextDecoder`/`Buffer#toString` has already produced, which is
+ *  exactly the information a "not valid UTF-8 at all" check needs to recover -- a lossy decode has already
+ *  thrown away which byte(s) were the problem by the time a caller could ask). CPE-1788: this is what
+ *  catches PowerShell `Set-Content`'s ANSI/CP1252 default -- re-encoding a correctly-read Unicode string
+ *  through CP1252 can turn one multi-byte UTF-8 character into a single CP1252 byte (an em dash's 3 UTF-8
+ *  bytes `E2 80 94` becomes one byte `0x97`) that, read back as UTF-8, is not a valid sequence at all: a
+ *  lone continuation-range byte with no lead byte in front of it. Exact byte offsets (not "somewhere in
+ *  this file") are the point: `scanOneFile` in `mojibakeGuard.test.ts` turns this into a file:line report
+ *  by counting newlines up to the returned offset, matching the existing `mojibake`/`bom` violations'
+ *  file-and-line specificity instead of a bare "this file isn't UTF-8". */
+export function findFirstInvalidUtf8Byte(bytes: Uint8Array): number | null {
+  let i = 0;
+  while (i < bytes.length) {
+    const b0 = bytes[i];
+    if (b0 <= 0x7f) {
+      i++;
+      continue;
+    }
+    let need: number;
+    let min: number; // smallest code point this lead byte may legally encode (rejects overlong forms)
+    let cp: number;
+    if (b0 >= 0xc2 && b0 <= 0xdf) {
+      need = 1;
+      min = 0x80;
+      cp = b0 & 0x1f;
+    } else if (b0 >= 0xe0 && b0 <= 0xef) {
+      need = 2;
+      min = 0x800;
+      cp = b0 & 0x0f;
+    } else if (b0 >= 0xf0 && b0 <= 0xf4) {
+      need = 3;
+      min = 0x10000;
+      cp = b0 & 0x07;
+    } else {
+      // 0x80-0xC1: a bare continuation byte, or a two-byte lead that can only ever be overlong. 0xF5-0xFF:
+      // would encode past U+10FFFF. Neither is ever a valid UTF-8 lead byte.
+      return i;
+    }
+    if (i + need >= bytes.length) return i; // truncated: fewer continuation bytes than declared before EOF
+    for (let k = 1; k <= need; k++) {
+      const cb = bytes[i + k];
+      if (cb < 0x80 || cb > 0xbf) return i;
+      cp = (cp << 6) | (cb & 0x3f);
+    }
+    if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return i;
+    i += 1 + need;
+  }
+  return null;
+}
+
+/** CPE-1788 test/fixture helper -- the mirror image of {@link simulateCp1252Corruption}. That function
+ *  corrupts by MISREADING correct UTF-8 bytes as CP1252 on the way in (`Get-Content`'s no-BOM default, or
+ *  `Set-Content -Encoding utf8`'s read side); this one corrupts by MISENCODING a correctly-read Unicode
+ *  string as CP1252 on the way OUT -- `Set-Content`'s true, no-flag-given default. Reuses {@link
+ *  CP1252_ENCODE}, the exact inverse of the decode table above, so both simulators are provably consistent
+ *  with each other and with the one CP1252 table this module trusts. A character with no CP1252 encoding
+ *  throws rather than silently substituting a placeholder byte: a silent substitution would fabricate a
+ *  DIFFERENT corruption shape than the real tool produces, which is exactly the mistake this whole module
+ *  exists to avoid making about itself. */
+export function simulatePowerShellAnsiRewrite(text: string): Uint8Array {
+  const bytes: number[] = [];
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    const byte = CP1252_ENCODE.get(cp);
+    if (byte === undefined) {
+      throw new Error(`simulatePowerShellAnsiRewrite: U+${cp.toString(16)} has no CP1252 encoding`);
+    }
+    bytes.push(byte);
+  }
+  return Uint8Array.from(bytes);
+}
+
+/** CPE-1788 test/fixture helper: PowerShell 5.1's `Out-File`/`>` redirection default -- UTF-16LE with a
+ *  leading BOM (`FF FE`). Node's `"utf16le"` Buffer encoding matches .NET's `Encoding.Unicode` byte for
+ *  byte (both little-endian UTF-16, both encoding an astral code point as the same surrogate pair), so
+ *  this is a faithful reproduction of the real tool's output, not an approximation of it. */
+export function simulatePowerShellUtf16Rewrite(text: string): Uint8Array {
+  const body = Buffer.from(text, "utf16le");
+  return new Uint8Array(Buffer.concat([Buffer.from([0xff, 0xfe]), body]));
 }

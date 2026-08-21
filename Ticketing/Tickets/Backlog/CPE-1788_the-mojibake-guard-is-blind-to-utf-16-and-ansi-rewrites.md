@@ -76,3 +76,52 @@ negative from that direction — this ticket is about the encodings, not the heu
 Related: **CPE-1771** (the guard this extends), **CPE-1783** (real corruption in `dispatch.rs`),
 **CPE-1784** (683 occurrences across `Ticketing/`), and the release that motivated all of them,
 `86888aed`.
+
+## Work Log
+
+**2026-08-20** — Implemented both checks in `src/lib/mojibakeGuard.ts` (`detectUtf16Bom`,
+`findFirstInvalidUtf8Byte`, plus fixture-simulator helpers `simulatePowerShellAnsiRewrite`/
+`simulatePowerShellUtf16Rewrite`) and wired them into `scanOneFile` in `src/lib/mojibakeGuard.test.ts`
+(extracted from `scanRepo`'s loop body so the CI walk and the fixture red-proof tests run the identical
+per-file check sequence), each with its own `kind` (`"utf16"`, `"not-utf8"`) alongside the existing
+`"mojibake"`/`"bom"`.
+
+Deviated from the ticket's suggested `Buffer.compare(Buffer.from(text,"utf8"), bytes) !== 0` approach for
+the ANSI check: that gives a boolean, not a byte offset, and rule 4 (fail loudly and specifically) needs
+an exact location. Wrote a byte-level UTF-8 well-formedness walker instead (`findFirstInvalidUtf8Byte`)
+that returns the 0-based offset of the first invalid byte, which `scanOneFile` turns into a `file:line`
+report the same way `findMojibake`'s line tracking does.
+
+Deviated from the ticket's "Consider... a strict alternating NUL pattern" UTF-16 heuristic: skipped it.
+PowerShell's `Out-File`/`>` UTF-16LE default always writes the BOM (`Encoding.Unicode`), so the BOM check
+alone covers the realistic case the ticket opens with ("the single most common accidental PowerShell
+rewrite"); the alternating-NUL heuristic only matters for a deliberate `-NoBOM` write, which is out of
+scope for "the same PowerShell round-trip" this ticket is about, and adds false-positive surface (a NUL-
+heavy binary that happens to alternate) for no real-world case currently seen in this repo.
+
+Deviated from red-proofing via a real `powershell.exe Out-File`/`Set-Content` run: per the Foreman's
+explicit override (this repo has a standing memory note that PowerShell writes have broken a release
+here, most recently blocking 0.57.66), fixtures are built with explicit, documented byte-level
+constructors (`simulatePowerShellAnsiRewrite`/`simulatePowerShellUtf16Rewrite`) reusing the module's own
+CP1252 table, written to disk via node's `fs.writeFileSync` (never PowerShell) in an untracked OS temp
+directory, and read back with the same `fs.readFileSync` + `scanOneFile` path the real tree scan uses.
+Independently cross-checked the byte sequences against python's `str.encode("cp1252")`/`"utf-16-le")`
+during development (see the PR body) rather than trusting the TS-side construction alone.
+
+False-positive sweep: ran both new checks against every git-tracked file outside `Ticketing/` and
+`samples/` (3246 tracked, ~3198 in scope) — zero files trip either check. `samples/**` (48 files,
+deliberately non-UTF-8/BOM'd fixture corpus per CPE-1042) remains excluded via the existing
+`EXCLUDE_PREFIXES`, unchanged; no new exclusion was needed.
+
+Red-proofed all three claims by hand before committing: (1) zeroed out the `utf16` check in `scanOneFile`
+— its dedicated fixture test failed (`expected [] to have a length of 1 but got +0`), reverted; (2) same
+for the `not-utf8` check, same failure shape, reverted; (3) appended a real CP1252-shape mojibake em-dash
+(the original CPE-1771 corruption, generated via python's `.encode("utf-8").decode("cp1252")`, not typed
+by hand) to `CLAUDE.md`, ran the tree-wide guard, got `CLAUDE.md:245 [mojibake] -- contains the mojibake
+signature "â€”"`, reverted with `git checkout -- CLAUDE.md`. All three reverts confirmed clean via `git
+diff --numstat` before proceeding.
+
+Gates: `npx vitest run src/lib/mojibakeGuard.test.ts` — 62/62 passed. Full `npx vitest run` — 319 test
+files, 4233 tests, all passed. `npm run check` — 0 errors, 0 warnings.
+
+PR: see branch `cpe-1788-guard-utf16-ansi`.
