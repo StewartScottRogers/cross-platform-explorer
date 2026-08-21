@@ -2425,8 +2425,8 @@ pub fn compress_to_zip_encrypted(paths: &[String], dest: &str, password: &str) -
 ///   `zip` crate does not encrypt (only the entry's *content* stream is AES-protected); the streamed
 ///   encrypted extractor already proved the guard fires on real ciphertext, since it already routed
 ///   through this loop.
-/// - **User-visible consequence of that widening — documented here, not fixed (filed as a separate
-///   ticket):** an entry the old loop always wrote as a readable text file — including one whose target
+/// - **User-visible consequence of that widening — documented here, not fixed (filed as CPE-1837):**
+///   an entry the old loop always wrote as a readable text file — including one whose target
 ///   escapes `dest` — can now instead vanish with no note when [`link_target_action`] refuses it, because
 ///   this signature predates [`ArchiveReport`] and still has nowhere to put one. A successful-looking
 ///   extraction quietly missing a file is exactly the hazard shape this module reports everywhere else it

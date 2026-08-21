@@ -116,7 +116,7 @@ the code:
    real link AT ALL, benign or escaping (one of `link_target_action`'s own doc's three SAFE policies for
    CPE-1774). Rewrote the bullet: the merge is what makes this path *able* to create a real symlink for
    the first time, and `link_target_action` is what keeps that new ability from being escaped. Added a
-   line documenting the user-visible consequence, filed separately per the Foreman's instruction: an entry
+   line documenting the user-visible consequence, filed as CPE-1837: an entry
    that used to appear as a readable (if wrong-looking) text file can now vanish with no note on refusal,
    since this signature still has nowhere to put one.
 3. **Nothing pinned the merge.** Added `cpe1807_encrypted_zip_symlink_entry_whose_target_escapes_creates_no_link`,
@@ -131,11 +131,18 @@ the code:
    catches the regression; reverted, confirmed green again, then re-ran clippy and the full suite.
 
 **Follow-ups mentioned per the Foreman's instruction, not fixed here:**
-4. This round's doc rewrite adds a few more `public documentation for X links to private item` rustdoc
-   warnings (measured on this branch: 20 such warnings in `archive.rs` alone, of 487 total in the crate;
-   no exact prior baseline re-measured this round). No CI gate runs `cargo doc`, and the module already
-   carries this warning class throughout, so this is style-consistent noise, not a regression — but it is
-   real and not zero.
+4. This round's doc rewrite adds `public documentation for X links to private item` rustdoc warnings.
+   Corrected figures per the Reviewer's re-measurement on `84b77849` (the first pass through this Work Log
+   had the crate total wrong): 505 total warnings in the crate, 21 in `archive.rs`, of which 20 are the
+   `links to private item` class. Net delta from this PR versus main: +7 (main 498 → 505 crate-wide;
+   `archive.rs` 14 → 21; `extract_zip_encrypted`'s own doc comment alone went from 1 to 9). **Platform
+   note:** a clean `cargo doc --manifest-path crates/server/Cargo.toml --no-deps --lib` on this Windows
+   dev box reproducibly shows fewer (487 total, 20 in `archive.rs`, matching the Reviewer's `links to
+   private item` subset exactly) — plausibly `#[cfg(unix)]`-gated doc content that only compiles, and so
+   only gets doc-linted, on a unix target; not independently resolved this round. No CI gate runs
+   `cargo doc` either way, and the module already carries this warning class throughout, so this is
+   style-consistent noise, not a regression — but it is real, not zero, and both platforms' counts are
+   now on the record rather than one unreproduced figure.
 5. On unix, the shared loop's deferred `set_permissions` pass can now turn a fully-written encrypted
    extraction into an `Err` after every file has landed, which the old one-shot loop could not do (it had
    no mode-restoration pass at all). Same shape as rows 16/23 already have, so not a regression relative to
@@ -144,3 +151,38 @@ the code:
 **Gates, re-run after all three blocker fixes:** `cargo clippy --manifest-path crates/server/Cargo.toml
 --all-targets -- -D warnings` — clean, no warnings. `cargo test --manifest-path crates/server/Cargo.toml
 --lib` — `2273 passed; 0 failed; 4 ignored` (2272 + the 1 new test).
+
+
+### 2026-08-20 — PR #975 APPROVED; three record fixes before merge
+
+The Reviewer independently reproduced the trap in the first draft of `cpe1807_encrypted_zip_symlink_entry_whose_target_escapes_creates_no_link`
+and went further: it patched the assertion into a non-fatal probe and measured all four escaping-target
+shapes against the re-duplicated loop, not just the first. Every one came back `is_symlink=false` with
+content that is neither a link nor the victim's bytes (`plain-parent` -> `..\victim.txt`, `absolute` ->
+the full outside path, `dot-chain` -> `x/../../victim.txt`, `mixed-separators` -> `..//..\victim.txt`),
+confirming `!leaf.exists()` really is the only assertion that discriminates skip from regression on any
+of them, not just the one this session's own red-proof happened to trip over first (the run aborts at the
+first failing assertion, so the code comment saying "failed on all four shapes" and the Work Log above
+saying "failed on plain-parent" are both true at once -- first-to-fail versus all-independently-trigger).
+
+Three more record fixes required before merge, all doc/Work-Log, no further code or test changes:
+
+1. **A doc comment claimed a ticket that did not exist.** `archive.rs:2428` said the silent-vanish
+   consequence was "filed as a separate ticket" before it had actually been filed. It is filed now,
+   **CPE-1837**, and the doc comment plus this Work Log (above) now name it directly rather than saying
+   "filed separately."
+2. **Corrected the rustdoc warning counts above** (see the updated point 4): crate total is 505, not 487;
+   `archive.rs` carries 21 warnings, 20 of the `links to private item` class; net delta from this PR is
+   +7 versus main (498 -> 505 crate-wide, 14 -> 21 in `archive.rs`, 1 -> 9 on `extract_zip_encrypted`'s own
+   doc comment alone).
+3. **Added the silent-vanish consequence and follow-up 5 (unix `set_permissions` on an encrypted
+   extraction) to the PR body**, not just this ticket -- they are the two user-visible/behaviour-relevant
+   facts a reviewer deciding whether to merge would want on the page, not buried in the ticket file.
+
+**Gates, re-run after these three fixes:** `cargo clippy --manifest-path crates/server/Cargo.toml
+--all-targets -- -D warnings` -- clean, no warnings. `cargo test --manifest-path crates/server/Cargo.toml
+--lib` -- `2273 passed; 0 failed; 4 ignored` (unchanged from the previous round: only doc/Work-Log text moved, no code or test bodies touched).
+
+Note carried forward, not acted on: `cpe1807_encrypted_zip_symlink_entry_whose_target_escapes_creates_no_link`
+is not platform-gated, so CI's Linux/macOS legs exercise real symlink creation that this Windows dev box
+only partly can; if CI reds, look there first.
