@@ -3,11 +3,11 @@ id: CPE-1748
 title: remote_stat and remote_read collapse a directory onto its same-named file, reopening CPE-1737 the moment they are wired up
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
