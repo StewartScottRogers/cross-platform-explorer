@@ -3,11 +3,11 @@ id: CPE-1813
 title: TAR does not deliver the no-link-support refusal that ZIP does, so the two formats still disagree
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem

@@ -3,11 +3,11 @@ id: CPE-1816
 title: a partial trash listing renders as complete while the stream is still in flight
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem

@@ -3,11 +3,11 @@ id: CPE-1787
 title: ci.yml has five unhardened apt-get sites that can silently hang
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
