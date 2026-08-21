@@ -3,11 +3,11 @@ id: CPE-1807
 title: the encrypted-zip extractor is a fourth unmerged zip loop, and a doc comment claims it does not exist
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
