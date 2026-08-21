@@ -243,30 +243,6 @@ const ALLOWLIST: AllowlistEntry[] = [
     contains: "md.replace(/^",
   },
   {
-    file: "crates/server/src/dispatch.rs",
-    line: 6,
-    kind: "mojibake",
-    reason:
-      "Real, un-repaired mojibake (an arrow, U+2192, corrupted the same way as CLAUDE.md's) that CPE-1752's " +
-      "repair of this same file missed. crates/ was off-limits during CPE-1771's sprint slot (a concurrent " +
-      "worker was live in it) -- tracked as CPE-1783, NOT a false positive. Remove this entry when CPE-1783 lands.",
-    contains: "an unknown method",
-  },
-  {
-    file: "crates/server/src/dispatch.rs",
-    line: 7,
-    kind: "mojibake",
-    reason: "Same CPE-1783 arrow corruption as line 6, a second occurrence two lines down.",
-    contains: "deserialize",
-  },
-  {
-    file: "crates/server/src/dispatch.rs",
-    line: 11,
-    kind: "mojibake",
-    reason: "Same CPE-1783 arrow corruption as line 6, a third occurrence.",
-    contains: "A handler never panics the dispatcher.",
-  },
-  {
     file: "src/lib/mediaTransport.ts",
     line: 33,
     kind: "mojibake",

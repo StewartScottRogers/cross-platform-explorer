@@ -58,3 +58,7 @@ ticket should **remove that allowlist entry**, not just fix the arrows.
 Found by the mojibake guard built for **CPE-1771**, 2026-08-19. Related: CPE-1752 (the original
 `dispatch.rs` repair, which evidently missed these three lines), CPE-1771 (the guard that found them and
 allowlists them pending this ticket).
+
+## Work Log
+
+2026-08-20 17:37 UTC — Fixed all three mojibake arrows in dispatch.rs (lines 6, 7, 11) by replacing byte-exact UTF-8 sequences. Removed the corresponding three entries from MOJIBAKE_ALLOWLIST in mojibakeGuard.test.ts. All gates passed: cargo clippy --all-targets (-D warnings), cargo test (crates/server), and npx vitest run src/lib/mojibakeGuard.test.ts (42 tests, all passed).
