@@ -3,11 +3,11 @@ id: CPE-1788
 title: the mojibake guard is blind to UTF-16 and ANSI rewrites — the same PowerShell round-trip, different output encoding
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
