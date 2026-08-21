@@ -1066,7 +1066,10 @@ const EPERM: i32 = 1;
 /// Measured, `Unsupported` is reachable from Windows 120 and from the
 /// `not(any(unix, windows))` arm of [`create_entry_symlink`] that no CI leg compiles — while the codes a
 /// real FAT volume produces (Windows 1/50, POSIX `EPERM`) all aborted. The help promised a skip the code
-/// did not deliver. It is delivered now, on [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`].
+/// did not deliver. It is delivered now, on `WINDOWS_NO_LINK_SUPPORT` and `EPERM` — plain code text, not
+/// an intra-doc link, because each name only compiles under its own platform's `cfg`: linking either one
+/// from this unconditionally-compiled function resolves on the platform that has it and dangles on the
+/// other (CPE-1814).
 ///
 /// **This function itself only ever sees ZIP's syscall error directly** — [`materialise_entry_symlink`]
 /// has exactly one call site, inside [`extract_zip_archive_stream`] — but it is no longer the only
@@ -1168,8 +1171,10 @@ const TAR_HARDLINK_MARKER: &str = " when hard linking ";
 /// Walk `e`'s `source()` chain — **never `e` itself**, see below — for the one level that is provably
 /// `tar`'s own wrap of the `symlink`/`hard_link` syscall's `io::Error`, and reconstruct an error
 /// carrying that level's real `kind()` and, where parseable, its raw OS code — the seam that lets TAR
-/// reuse [`link_creation_is_categorical`] instead of a second copy of
-/// [`WINDOWS_NO_LINK_SUPPORT`]/[`EPERM`] that could drift from it. `None` means `e` did not genuinely
+/// reuse [`link_creation_is_categorical`] instead of a second copy of `WINDOWS_NO_LINK_SUPPORT`/`EPERM`
+/// (plain code text, not a link — each is `cfg`-gated to one platform, and this function is not, so a
+/// link to either dangles on the other platform's `cargo doc`; CPE-1814) that could drift from it. `None`
+/// means `e` did not genuinely
 /// come from the link-creation syscall, however it is shaped; [`tar_link_creation_outcome`] then treats
 /// it as an ordinary failure, exactly as before this ticket.
 ///
@@ -1185,7 +1190,9 @@ const TAR_HARDLINK_MARKER: &str = " when hard linking ";
 /// further `TarError::desc` sites — `:684`, `:721`, `:793`, `:881`, `:940`, plus this crate's own
 /// `archive.rs:222`/`:237` — but none of them fires on the file/symlink/hard-link arms a link entry takes,
 /// so they are out of scope rather than overlooked). A crafted symlink entry named literally
-/// `payload (os error 1)` recovered code 1 (in [`WINDOWS_NO_LINK_SUPPORT`]) from a genuine
+/// `payload (os error 1)` recovered code 1 (in `WINDOWS_NO_LINK_SUPPORT` — plain code text, not a link:
+/// this function is not `cfg`-gated, and `WINDOWS_NO_LINK_SUPPORT` only compiles on Windows, so linking
+/// it here dangles `cargo doc` on every other platform; CPE-1814) from a genuine
 /// `ERROR_ACCESS_DENIED` (5) failure, turning a real write failure into a silent skip — the exact
 /// failure-filed-as-refusal defect [`materialise_entry_symlink`]'s own doc names. `e` is never inspected
 /// at all now; only `e.source()` onward.
@@ -1324,7 +1331,9 @@ fn tar_link_creation_outcome(
 /// A `remove_file` that fails — because the occupant is a **directory**, most obviously — is a failure
 /// and aborts, exactly as `File::create` would on the same path. **Its error is returned directly and
 /// never handed to [`link_creation_outcome`]**, which is not tidiness: `remove_file` answers `EPERM` on
-/// a sticky-bit directory such as `/tmp`, and [`EPERM`] is one of the codes that classifier reads as
+/// a sticky-bit directory such as `/tmp`, and `EPERM` is one of the codes that classifier reads as (plain
+/// code text, not a link: `EPERM` only compiles under `cfg(unix)` and `materialise_entry_symlink` is not
+/// itself `cfg`-gated, so a link here dangles `cargo doc` on Windows; CPE-1814)
 /// "this filesystem has no links". Routing it there would file a failure as a refusal — the defect this
 /// whole review chain is about — on POSIX only, where nothing here runs.
 fn materialise_entry_symlink(out: &Path, target: &Path) -> Result<Option<String>, String> {
@@ -3319,12 +3328,16 @@ fn extract_zip_stream(
     extract_zip_archive_stream(&mut archive, dest, None, cancel, emit)
 }
 
-/// Shared zip-extraction loop for **every** zip extraction in this module — the plain and
-/// password-protected streamed extractors, and (since CPE-1759) [`extract_archive`]'s one-shot zip
-/// branch. Iterate entries, skip a zip-slip name, otherwise write it out, checking `cancel` and emitting
-/// progress between entries.
+/// Shared zip-extraction loop for the plain and password-protected streamed extractors, and (since
+/// CPE-1759) [`extract_archive`]'s one-shot zip branch. Iterate entries, skip a zip-slip name, otherwise
+/// write it out, checking `cancel` and emitting progress between entries.
 ///
-/// # CPE-1759: this is now the only zip extractor, and why
+/// **Not every zip extraction in this module** (CPE-1814 correction: the heading below used to claim it
+/// was). [`extract_zip_encrypted`] is a fourth, unmerged loop — its own `for i in 0..archive.len()`, not a
+/// call into this one — because it predates `ArchiveReport` and has nowhere to put a per-entry skip note;
+/// see CPE-1807, which is tracking the merge this loop's own history argues for.
+///
+/// # CPE-1759: three of the four zip extractors now share this loop, and why
 ///
 /// `extract_archive` used to hand its zip branch to `zip::ZipArchive::extract`, which is all-or-nothing:
 /// one refused entry ended the run. Its streamed sibling skipped the entry and kept going. Two shipped
@@ -3429,7 +3442,16 @@ fn extract_zip_archive_stream(
                 } else {
                     match link_target_action(dest, &out, &target) {
                         EntrySlotAction::Write => None,
-                        EntrySlotAction::Skip(m) | EntrySlotAction::Abort(m) => Some(m),
+                        EntrySlotAction::Skip(m) => Some(m),
+                        // Propagated, not collapsed with `Skip` — CPE-1814. This is the identical
+                        // construct `tar_entry_refusal` collapsed before CPE-1759: dead today (only
+                        // `link_target_action` feeds it, and that function returns `Write`/`Skip` only,
+                        // never `Abort`), and dead is exactly what it was there too, until a new feeder
+                        // made the collapsed arm live and an entry started silently skipping where the
+                        // rule (`EntrySlotAction`'s own doc) says it must abort — UAT finding 6.
+                        // Matching it explicitly, rather than folding it back into `Skip`, is what keeps
+                        // a future feeder honest instead of reintroducing that bug a third time.
+                        EntrySlotAction::Abort(e) => return Err(e),
                     }
                 };
                 let refusal = match refusal {
@@ -6983,14 +7005,19 @@ mod tests {
             }
             let _r = Restore { target: &slot, parent: &dest, root: &d };
 
-            if !crate::fsutil::deny_stat_of(&slot) {
-                crate::skip_notice!(
-                    "[CPE-1759] SKIPPED the unreadable-slot tar leg (streamed={streamed}): could not \
-                     deny stat of {}. NOTHING in this test covered that route on this run.",
-                    slot.display()
-                );
-                return;
-            }
+            // CPE-1814: this used to be `if !deny_stat_of(&slot) { skip_notice!(..); return; }` — a
+            // staging failure on the FIRST loop iteration (`streamed=false`) `return`ed out of the whole
+            // `for streamed` loop, so a lenient local run that could not stage silently checked NEITHER
+            // leg while the test still reported `ok`. `require_staged` inside `deny_stat_of` already
+            // turns a staging failure red under CI (CPE-1717); the `assert!` below closes the matching
+            // gap for a lenient local run — a fixture that cannot be staged is a broken test, not a
+            // smaller one, so this fails loudly instead of quietly shrinking to zero legs checked.
+            assert!(
+                crate::fsutil::deny_stat_of(&slot),
+                "[CPE-1814] could not deny stat of {} for the unreadable-slot tar leg (streamed={streamed}). \
+                 NOTHING in this test would have covered that route — failing loudly rather than skipping.",
+                slot.display()
+            );
 
             let outcome = if streamed {
                 extract_archive_streamed(
