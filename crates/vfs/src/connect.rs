@@ -763,4 +763,81 @@ mod tests {
             file_row.path
         );
     }
+
+    /// CPE-1748 — traces the distinguishing bit the WHOLE way through this module, not just at the two
+    /// endpoints the tests above already cover separately (`child_uri` builds it; a fake `list` shows it
+    /// survives to a `DirEntry`). This proves that when a directory child's OWN `DirEntry.path` (built by
+    /// `child_uri`, trailing `/` and all) later comes back in as the `uri` argument to `remote_stat`/
+    /// `remote_read` — a favourite, a re-navigation, or CPE-1499's still-to-come remote-open wiring — the
+    /// trailing `/` reaches the literal string handed to `provider.stat`/`provider.read` UNCHANGED. No
+    /// intermediate step in `remote_stat`/`remote_read` (nor `location::parse`, which both route through)
+    /// may quietly normalise it away before the provider ever sees it.
+    ///
+    /// What a real provider then DOES with that distinction is the provider's own responsibility — this
+    /// crate deliberately does not depend on `cpe-s3` (CPE-1685), so `cpe-s3::provider`'s own tests
+    /// (`stat_on_the_colliding_keyspace_...`, `read_on_the_colliding_keyspace_...`) cover that half.
+    #[test]
+    fn the_trailing_slash_that_marks_a_directory_reaches_the_provider_unchanged_for_stat_and_read() {
+        /// Records the exact path string `stat`/`read` were called with — the point here is what
+        /// REACHES the provider, not what a real backend would do with it.
+        struct Recording {
+            seen: Mutex<Vec<String>>,
+        }
+        impl FileSystemProvider for Recording {
+            fn list(&self, _p: &str) -> Result<Vec<ProviderEntry>, String> {
+                unreachable!()
+            }
+            fn stat(&self, p: &str) -> Result<ProviderEntry, String> {
+                self.seen.lock().unwrap().push(p.to_string());
+                Ok(ProviderEntry { name: "photos".into(), is_dir: p.ends_with('/'), size: 0 })
+            }
+            fn read(&self, p: &str) -> Result<Vec<u8>, String> {
+                self.seen.lock().unwrap().push(p.to_string());
+                Ok(b"x".to_vec())
+            }
+            fn write(&mut self, _p: &str, _d: &[u8]) -> Result<(), String> {
+                unreachable!()
+            }
+            fn mkdir(&mut self, _p: &str) -> Result<(), String> {
+                unreachable!()
+            }
+            fn delete(&mut self, _p: &str) -> Result<(), String> {
+                unreachable!()
+            }
+            fn rename(&mut self, _f: &str, _t: &str) -> Result<(), String> {
+                unreachable!()
+            }
+        }
+
+        let recording = Recording { seen: Mutex::new(Vec::new()) };
+        let loc = location::parse(uri());
+
+        // The exact two child URIs `dir_entry_from_provider` would build for a name collision — "photos"
+        // the object, "photos" the prefix — built through the SAME `child_uri` function a real listing
+        // uses, so this is a round trip from a real `DirEntry.path`, not a hand-typed lookalike string.
+        let file_uri = child_uri(uri(), &loc, "photos", false);
+        let dir_uri = child_uri(uri(), &loc, "photos", true);
+        assert_ne!(file_uri, dir_uri, "sanity: the two child URIs must differ (CPE-1737)");
+
+        remote_stat(&recording, &file_uri).unwrap();
+        remote_stat(&recording, &dir_uri).unwrap();
+        remote_read(&recording, &file_uri).unwrap();
+        // Reading a directory has no sane byte answer in production (a real provider like `cpe-s3` now
+        // refuses it) — this test only cares which STRING reached the provider, not what it did with it.
+        remote_read(&recording, &dir_uri).unwrap();
+
+        let seen = recording.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                "/srv/photos".to_string(),
+                "/srv/photos/".to_string(),
+                "/srv/photos".to_string(),
+                "/srv/photos/".to_string(),
+            ],
+            "the object path and the directory path must reach `provider.stat`/`provider.read` as \
+             DIFFERENT strings in every case — losing the trailing '/' anywhere in this module is exactly \
+             the CPE-1737 collision reopened for stat/read"
+        );
+    }
 }

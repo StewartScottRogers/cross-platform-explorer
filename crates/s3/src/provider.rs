@@ -719,6 +719,28 @@ fn provider_path_to_object_key(path: &str) -> Result<String, String> {
     Ok(key.to_string())
 }
 
+/// CPE-1748: does `path` (the caller's ORIGINAL, un-stripped provider path) explicitly address a
+/// directory, per the same trailing-`/` convention `cpe_vfs::connect::join_remote`/`with_dir_suffix`
+/// build a directory child's URI with (CPE-1737)?
+///
+/// [`provider_path_to_object_key`] strips that marker to compute `key`, on purpose — object addressing
+/// is deliberately blind to it, which is exactly what makes it lose the CPE-1737 distinction: `stat`/
+/// `read`/`write`/`delete` end up with an **identical** `key` for `/photos` (the object) and `/photos/`
+/// (the same-named prefix), because the one byte that told them apart is already gone by the time `key`
+/// exists. Callers that need to keep telling them apart (`stat`/`read`/`delete`) have to read the
+/// distinction off `path` itself, before it is discarded — this is that read.
+///
+/// **Single vs double trailing slash matters, and this is why it is `!key.ends_with('/')` and not just
+/// `path.ends_with('/')`.** A path with exactly one trailing slash (`/photos/`) strips down to a `key`
+/// with none (`photos`) — pure directory-marker, no information lost by treating it as directory intent.
+/// A path with *two* trailing slashes (`/a.txt//`) strips down to a `key` that STILL ends in `/`
+/// (`a.txt/`) — CPE-1722's real, doubled-slash key shape, an object whose key is genuinely `a.txt/`, not
+/// a directory-marker at all. Collapsing that case into "directory" here would make that legitimate key
+/// permanently unreachable through `stat`/`read`/`delete`, which is the opposite of this ticket's goal.
+fn path_addresses_a_directory(path: &str, key: &str) -> bool {
+    path.ends_with('/') && !key.ends_with('/')
+}
+
 /// Turn a non-2xx response into an error, choosing the rule by whether the response actually carried a
 /// body — the CPE-1682 error path when there is something to parse, an explicit status+method rule when
 /// there is not (CPE-1684).
@@ -2270,6 +2292,37 @@ impl FileSystemProvider for S3Provider {
         // and the sibling precedent in `crates/webdav/src/lib.rs`'s `stat`. For a key that is only
         // slashes the leaf is genuinely empty, which is the same answer the listing gives.
         let name = key.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+
+        // CPE-1748 — the bug this ticket exists to close. `path` explicitly addressing a directory
+        // (a trailing `/`, CPE-1737's convention) must resolve as the PREFIX, full stop: never fall
+        // through to the HEAD-on-object-key logic below, which would happily report `is_dir: false`
+        // for `/photos/` whenever an unrelated object named `photos` also exists — exactly the
+        // directory-collapses-onto-its-same-named-file collision this ticket is about. The bare path
+        // (no trailing slash) is untouched below: it still resolves the OBJECT first, falling back to
+        // a directory only when no object exists at that exact key.
+        if path_addresses_a_directory(path, &key) {
+            let key_prefix = format!("{key}/");
+            let (raw_entries, _, _) = self.probe_prefix(&key_prefix).map_err(|e| {
+                probe_failure(
+                    "stat",
+                    path,
+                    &key_prefix,
+                    "the path explicitly addresses a directory (a trailing '/'), so this checks whether \
+                     anything exists under that prefix — and the check failed.",
+                    &e,
+                )
+            })?;
+            return if raw_entries > 0 {
+                Ok(ProviderEntry { name, is_dir: true, size: 0 })
+            } else {
+                Err(format!(
+                    "s3: stat {path:?}: not found — no object or marker exists under this prefix \
+                     (checked as a directory because the path explicitly addresses one with its \
+                     trailing '/', even though an object of the same bare name may exist)"
+                ))
+            };
+        }
+
         let target = self.config.object_target(&key)?;
         let (url, req) = self.signed_request(
             "HEAD",
@@ -2360,6 +2413,17 @@ impl FileSystemProvider for S3Provider {
     /// stops sending, not when the file is big. Memory is bounded separately, by `read_cap` above.
     fn read(&self, path: &str) -> Result<Vec<u8>, String> {
         let key = provider_path_to_object_key(path)?;
+        // CPE-1748: `path` explicitly addressing a directory (a trailing '/', CPE-1737's convention)
+        // must never silently GET the same-named object instead — a directory cannot be read as a
+        // file, and without this check `read("/photos/")` and `read("/photos")` would fetch the exact
+        // same bytes whenever an unrelated object named `photos` also exists at the colliding keyspace.
+        if path_addresses_a_directory(path, &key) {
+            return Err(format!(
+                "s3: read {path:?}: this path explicitly addresses a directory (a trailing '/'), and a \
+                 directory cannot be read as a file — even though an object of the same bare name may \
+                 exist"
+            ));
+        }
         let target = self.config.object_target(&key)?;
         let (url, req) =
             self.signed_request("GET", &target, &[], sigv4::EMPTY_PAYLOAD_SHA256, None)?;
@@ -2620,7 +2684,15 @@ impl FileSystemProvider for S3Provider {
                 // names an object, which a pure prefix can never do — so the DELETE below removes exactly
                 // one object and cannot orphan a subtree. Anything else (404, 403, a transport failure)
                 // leaves the question unanswered, and an unanswered question is refused, not guessed.
-                if self.head_proves_object(&key).unwrap_or(false) {
+                //
+                // CPE-1748: that HEAD-proves-object fallback is only sound when `path` left it OPEN which
+                // of the two colliding rows was meant. When `path` explicitly addresses the DIRECTORY (a
+                // trailing '/', CPE-1737's convention) the caller has already said which one they meant —
+                // and it was not the object — so a probe failure here must stay a refusal, never fall
+                // through to silently deleting the same-named FILE instead. Without this guard, an
+                // explicit directory delete whose ListBucket probe happens to fail (e.g. a permissions
+                // change, a transient 5xx) would delete an unrelated object the user never selected.
+                if !path_addresses_a_directory(path, &key) && self.head_proves_object(&key).unwrap_or(false) {
                     let target = self.config.object_target(&key)?;
                     let (status, body) = self
                         .signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))
@@ -3291,6 +3363,17 @@ mod tests {
                     "DELETE" => {
                         keys_thread.lock().unwrap().remove(&key);
                         let _ = req.respond(tiny_http::Response::empty(204));
+                    }
+                    // CPE-1748: `read` needs a body, not just HEAD's existence check, to prove which
+                    // object a `GET` actually reached over the colliding keyspace. 4 bytes, matching the
+                    // `Content-Length: 4` the HEAD arm above already answers for the same key set.
+                    "GET" => {
+                        let exists = keys_thread.lock().unwrap().contains(&key);
+                        if exists {
+                            let _ = req.respond(tiny_http::Response::from_string("data"));
+                        } else {
+                            let _ = req.respond(tiny_http::Response::empty(404));
+                        }
                     }
                     _ => {
                         let _ = req.respond(tiny_http::Response::empty(405));
@@ -5873,6 +5956,109 @@ mod tests {
             vec![("photos".to_string(), false), ("photos".to_string(), true)],
             "the object and the prefix are two independent rows with the same name — so the row carries \
              the distinction that `delete(path)` then loses"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1748 — the bug this ticket exists to close: `stat`/`read`/`delete` used to compute the SAME
+    // object key for `/photos` and `/photos/`, so a directory silently collapsed onto its same-named
+    // file the moment either op was wired up. Exercised over the exact colliding keyspace CPE-1737
+    // uses, per this ticket's own acceptance criteria.
+    // ---------------------------------------------------------------------------------------------
+
+    /// **The bug, for `stat`.** Before this fix, `S3Provider::stat("/photos/")` and
+    /// `S3Provider::stat("/photos")` computed the identical object key (`provider_path_to_object_key`
+    /// strips the trailing `/` on the way in), so BOTH answered `is_dir: false` — the directory row
+    /// silently collapsed onto the file. Breaking the fix (deleting the
+    /// `path_addresses_a_directory(path, &key)` guard clause in `stat`, so it falls straight through to
+    /// the HEAD-on-object logic below) reds this at the FIRST assertion, with `is_dir: false` where a
+    /// directory was asked for — naming which object was actually returned, not a mismatched string.
+    #[test]
+    fn stat_on_the_colliding_keyspace_resolves_the_trailing_slash_to_the_prefix_and_the_bare_path_to_the_object()
+    {
+        let (base, _keys) = spawn_a_keyspace_server_with_listbucket(&[
+            "photos",
+            "photos/a.jpg",
+            "photos/b.jpg",
+        ]);
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let dir_entry = provider.stat("/photos/").expect("the prefix has content under it");
+        assert!(
+            dir_entry.is_dir,
+            "stat(\"/photos/\") must resolve to the DIRECTORY — got a FILE result (is_dir: false), \
+             which is the exact CPE-1737 collision reopened at the stat layer"
+        );
+
+        let file_entry = provider.stat("/photos").expect("the bare path resolves to the object");
+        assert!(
+            !file_entry.is_dir,
+            "stat(\"/photos\") must resolve to the OBJECT — got a DIRECTORY result (is_dir: true), \
+             which would mean the bare path can no longer reach the file at all"
+        );
+        assert_eq!(file_entry.size, 4, "the object's own size, proving this is the object and not a \
+             directory placeholder");
+    }
+
+    /// **The bug, for `read`.** Before this fix, `read("/photos/")` and `read("/photos")` issued a `GET`
+    /// on the identical key, so reading the DIRECTORY row silently returned the FILE's bytes. Now the
+    /// directory-addressed path is refused outright — reading a directory has no sane byte answer — while
+    /// the bare path still reads the object normally. Breaking the fix (removing the
+    /// `path_addresses_a_directory` check at the top of `read`) reds this: the "must be refused" call
+    /// starts returning `Ok(b"data")`, i.e. the FILE's bytes for what was asked as a directory.
+    #[test]
+    fn read_on_the_colliding_keyspace_refuses_the_trailing_slash_and_reads_the_bare_path_as_the_object() {
+        let (base, _keys) = spawn_a_keyspace_server_with_listbucket(&[
+            "photos",
+            "photos/a.jpg",
+            "photos/b.jpg",
+        ]);
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let err = provider
+            .read("/photos/")
+            .expect_err("reading a path that explicitly addresses a directory must be refused, not \
+                          silently answer with the same-named object's bytes");
+        assert!(err.contains("directory"), "the refusal must say WHY, got: {err}");
+
+        let bytes = provider.read("/photos").expect("the bare path reads the object");
+        assert_eq!(bytes, b"data", "the bare path must still read the object's real bytes");
+    }
+
+    /// **The bug, for `delete` — the narrow slice of it CPE-1748 fixes (see its Notes for what stays
+    /// CPE-1735's).** Without `s3:ListBucket` the directory-content probe fails outright, and `delete`
+    /// used to fall back to "a 2xx HEAD on the key proves object-ness" with NO regard for whether the
+    /// caller's path said "delete the directory" — so `delete("/photos/")` (an explicit directory
+    /// delete) could silently delete the unrelated FILE `photos` the moment the probe couldn't answer.
+    /// Now an explicit directory path never takes that fallback: a failed probe stays a refusal.
+    /// Breaking the fix (deleting the `!path_addresses_a_directory(path, &key) &&` clause added to the
+    /// HEAD-fallback condition) reds this: the "must refuse" delete instead reports `Ok`, and the `photos`
+    /// key — which the caller never selected — is gone from the server's key set.
+    #[test]
+    fn delete_of_an_explicit_directory_path_never_falls_back_to_deleting_the_same_named_object_on_a_failed_probe()
+    {
+        let (base, keys) = spawn_a_keyspace_server_without_listbucket(&[
+            "photos",
+            "photos/a.jpg",
+            "photos/b.jpg",
+        ]);
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        let outcome = provider.delete("/photos/");
+
+        // Assert the harm BEFORE unwrapping (CPE-1743 convention): if the guard ever answers `Ok`, this
+        // must still red on WHICH key vanished, not on "expected an error".
+        let left: Vec<String> = keys.lock().unwrap().iter().cloned().collect();
+        assert_eq!(
+            left,
+            vec!["photos".to_string(), "photos/a.jpg".to_string(), "photos/b.jpg".to_string()],
+            "the caller asked to delete the DIRECTORY \"/photos/\" — nothing must be removed, and \
+             specifically the unrelated object `photos` must survive (outcome was {outcome:?})"
+        );
+        outcome.expect_err(
+            "without s3:ListBucket the directory-content probe cannot answer, and an explicitly \
+             directory-addressed delete must stay refused rather than falling back to deleting the \
+             same-named object",
         );
     }
 
