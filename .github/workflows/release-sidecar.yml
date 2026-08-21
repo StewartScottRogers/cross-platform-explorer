@@ -310,17 +310,40 @@ jobs:
           }
 
           # CPE-1764: BtbN publishes a `checksums.sha256` alongside every release, covering every asset
-          # in it - strictly stronger than magic-bytes + size, because it also catches a body that has
-          # the right header AND is past the size floor but is still wrong (truncated past that floor,
-          # or corrupted in transit): a real gap the magic/size checks above admit they can't close. So
-          # every BtbN ffmpeg download below is also checksum-verified. bblanchon (pdfium) does NOT
-          # publish a plain checksum file for comparison - only a Sigstore attestation bundle
-          # (`pdfium-attestation.json`), which needs `gh attestation verify`/cosign, not curl+sha256sum;
-          # verifying that is a heavier follow-up, not done here (checked both during CPE-1764).
+          # in it - catches a body that has the right header AND is past the size floor but is still
+          # wrong (truncated past that floor, or corrupted in transit): a real gap the magic/size checks
+          # above admit they can't close. So every BtbN ffmpeg download below is also checksum-verified.
+          #
+          # What this does NOT buy: tamper resistance. `checksums.sha256` is fetched from the SAME
+          # release, the SAME origin, the SAME TLS channel, with the SAME curl as the artifact itself -
+          # there is no independent trust anchor (no hash pinned in this repo, no signature, no second
+          # origin). Anyone who can serve a malicious archive can serve a matching checksums.sha256 in
+          # the same breath. A mismatch here means the body differs from what BtbN CURRENTLY publishes -
+          # corruption, truncation, or a substitution that didn't also rewrite the checksum - not
+          # "verified authentic". The real authenticity upgrade is pinning the expected hashes IN THIS
+          # REPO (reviewed alongside the tag bump), not fetching them from upstream at build time. Also
+          # note: PDFIUM_TAG/FFMPEG_BUILD_TAG are literal pins and nothing floats, but GitHub release
+          # ASSETS are mutable within a tag - the tag pin does not pin content.
+          #
+          # bblanchon (pdfium) does NOT publish a plain checksum file - but it DOES publish something
+          # stronger: a Sigstore attestation bundle (`pdfium-attestation.json`, Fulcio-issued cert),
+          # which has a genuine independent trust anchor. That's the STRONGER mechanism, currently
+          # UNUSED here (needs `gh attestation verify`/cosign, not curl+sha256sum - a heavier follow-up,
+          # not built in this ticket). BtbN's same-origin sha256, wired up below, is the WEAKER of the
+          # two available mechanisms - don't read "ffmpeg has a checksum, pdfium doesn't" as "ffmpeg is
+          # more verified"; for authenticity it's the other way around. This layer only adds
+          # integrity-over-the-wire, on top of the magic-bytes/size checks above.
           verify_btbn_checksum() {
             file="$1"; asset_name="$2"; url="$3"
-            sums=$(curl -sSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/checksums.sha256") || true
-            expected=$(printf '%s\n' "$sums" | awk -v n="$asset_name" '$2 == n { print $1 }')
+            sums_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/checksums.sha256"
+            sums_code=$(curl -sSL --write-out '%{http_code}' -o checksums.sha256.tmp "$sums_url") || true
+            sums_code="${sums_code:-000}"
+            if [ "$sums_code" != "200" ]; then
+              echo "::error::couldn't fetch BtbN's checksums.sha256 (HTTP $sums_code): $sums_url"
+              echo "::error::can't verify $url without it. See CPE-1764."
+              exit 1
+            fi
+            expected=$(awk -v n="$asset_name" '$2 == n { print $1 }' checksums.sha256.tmp)
             if [ -z "$expected" ]; then
               echo "::error::no checksum entry for $asset_name in BtbN's checksums.sha256 (tag $FFMPEG_BUILD_TAG)"
               echo "::error::can't verify $url against a published checksum. See CPE-1764."
@@ -330,8 +353,9 @@ jobs:
             if [ "$actual" != "$expected" ]; then
               echo "::error::checksum mismatch for $url"
               echo "::error::expected sha256 $expected (from BtbN's published checksums.sha256), got $actual."
-              echo "::error::The body doesn't match the published checksum - truncated, corrupted, or"
-              echo "::error::tampered in transit. This is exactly what magic-bytes+size can miss. CPE-1764."
+              echo "::error::The body doesn't match BtbN's published checksum for this release -"
+              echo "::error::corruption, truncation, or a substitution that didn't also rewrite the"
+              echo "::error::checksum (this is NOT tamper resistance - see the comment above). CPE-1764."
               exit 1
             fi
           }
