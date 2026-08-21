@@ -3,12 +3,12 @@
 //! function. This is what a network `Client(Rust)` drives over a socket in CPE-820 — here with **no
 //! transport**, so it's fully unit-testable. Adding a method = register a handler, no core changes.
 //!
-//! Error taxonomy at the boundary: an unknown method â†’ [`ErrorCode::NotFound`], params that don't
-//! deserialize â†’ [`ErrorCode::BadRequest`]; a domain `Err(String)` from a **path-taking** handler goes
+//! Error taxonomy at the boundary: an unknown method → [`ErrorCode::NotFound`], params that don't
+//! deserialize → [`ErrorCode::BadRequest`]; a domain `Err(String)` from a **path-taking** handler goes
 //! through [`domain_path`], which is `NotFound` when the path genuinely doesn't exist and `Internal`
 //! otherwise (including when the path's existence can't even be determined, e.g. a permission-denied
 //! parent-directory traversal — "we don't know" must never be reported as "it isn't there"); every other
-//! domain `Err(String)` â†’ [`ErrorCode::Internal`] via [`domain`]. A handler never panics the dispatcher.
+//! domain `Err(String)` → [`ErrorCode::Internal`] via [`domain`]. A handler never panics the dispatcher.
 
 use std::collections::BTreeMap;
 
