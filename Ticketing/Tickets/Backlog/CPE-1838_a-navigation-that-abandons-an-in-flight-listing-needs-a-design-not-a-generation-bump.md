@@ -61,6 +61,36 @@ always follows them, so any helper that settles the pane *without* a load behind
   there.
 - Cover pane B, not just pane A.
 
+## A pre-existing bug in the same mechanism, found while reviewing the split
+
+`DIR_STREAM_CANCELS` is a **process-global** `HashMap<u64, …>` (`src-tauri/src/lib.rs:727`, `:736`,
+`:757`), but `stream_id` is each pane's own `loadGen` — and **both panes start at 0**.
+
+So in dual-pane mode pane A's stream 1 and pane B's stream 1 collide on a single key. The later `insert`
+replaces the earlier pane's cancel flag; the earlier walk's `remove` deletes the *other* pane's live
+entry; and a cancel issued by either pane can terminate the other pane's walk early. The result is a
+silently truncated listing with nothing on screen to say so — the same defect class this ticket family
+exists to remove.
+
+Entirely pre-existing: `streamId: gen` is unchanged from main, and the `lastStreamId` tracker that
+CPE-1780 briefly added would have used the same colliding value. Found by code reading during the
+CPE-1780 review; **no live repro was staged**, so confirm it before designing around it.
+
+Whatever design lands here has to give streams an identity that is unique across panes — not merely
+unique within one.
+
+## Also write down the invariant
+
+At `let loadGen = 0` in `src/lib/components/ExplorerPane.svelte`, record what the cancel derivation
+depends on:
+
+> bumped only by `loadListing`; anything that bumps it without starting a stream breaks the `gen - 1`
+> cancel derivation.
+
+That single comment is what stops this ticket silently reintroducing the phantom-generation bug, since
+re-touching this mechanism is precisely its job. The Reviewer asked for it here rather than by reopening
+the frozen CPE-1780 diff.
+
 ## Acceptance criteria
 
 - [ ] The design is written down and agreed before implementation — that is the first deliverable.
