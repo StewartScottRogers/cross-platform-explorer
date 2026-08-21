@@ -30,6 +30,11 @@ out:
 - `ci.yml:501` — `choco install ffmpeg`
 - `ci.yml:499`, `:511`, `:529` — pdfium `curl` fetches that pass `--retry` but **no `--max-time`**,
   so a *stalled* transfer is unbounded even though a failed one retries
+- `release-sidecar.yml:322` — **added 2026-08-20 by CPE-1764**, a sixth `curl` (fetching BtbN's
+  `checksums.sha256`) with no `--max-time`, no `--connect-timeout`, and no `timeout-minutes` on its
+  step. Confirmed by the CPE-1764 reviewer as a new site this ticket must pick up. Note it also has no
+  `--fail`, so a 404 returns exit 0 with an error page in the variable — that half is CPE-1764's to fix,
+  but check it landed before assuming this site only needs a timeout.
 
 ## Why it matters
 
