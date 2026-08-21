@@ -121,8 +121,8 @@ Three independent protections apply automatically — you don't opt into any of 
   never true of TAR, and is no longer true of anything.)
 
   These are the entries this app *refuses*. One neighbouring case — a shortcut inside the archive that
-  the system cannot create at all — is a refusal in a ZIP but a failure in a TAR; see *A refused entry
-  is skipped* below.
+  the system cannot create at all, such as extracting onto a FAT-formatted USB stick — used to be a
+  refusal in a ZIP but a failure in a TAR; both now refuse. See *A refused entry is skipped* below.
 - **A refused entry is never silent.** Whenever any guard below turns an entry away, the finishing notice
   says so — *"3 items extracted. 2 entries were skipped — they couldn't be written safely. Open the
   operations panel to see which."* — instead of a plain success message with a quietly lower count. The
@@ -173,13 +173,16 @@ Three independent protections apply automatically — you don't opt into any of 
   disk, a permission error on the folder, a TAR hard link whose target is not in the archive. Refusals
   cost you one entry and are listed in the operations panel; failures stop the run and say so. The
   difference is whether trying the next entry could plausibly work.
-  **One case is ZIP-only, and it is worth knowing which way round:** a shortcut this system cannot
-  create at all — on Windows without administrator rights or Developer Mode, or on a drive whose
-  filesystem has no shortcuts, such as a FAT-formatted USB stick — is a *refusal* in a ZIP, so the rest
-  of the archive still extracts. In a **TAR** the same situation is a *failure* and stops the
-  extraction, because the shortcut is created by the tar decoder rather than by this app, and it is the
-  decoder that gives up. Extracting a TAR that contains shortcuts onto a drive that cannot hold them
-  has never worked and still does not.
+  **A shortcut this system cannot create at all — on Windows without administrator rights or Developer
+  Mode, or on a drive whose filesystem has no shortcuts, such as a FAT-formatted USB stick — is a
+  *refusal*, for ZIP and TAR alike, so the rest of the archive still extracts.** This app creates a ZIP
+  entry's shortcut itself; a TAR's shortcut is still made by the tar decoder rather than by this app, but
+  this app now reads what the decoder's failure actually meant before deciding whether to give up: "this
+  machine or volume cannot hold shortcuts" skips just that one entry; anything else about the write
+  failing — a permission error unrelated to shortcuts, a full disk — still stops the extraction, exactly
+  as it always has. (Earlier versions of this page said the TAR case was always a failure, because it
+  used to be: telling "no shortcuts here" apart from an unrelated write failure, without the decoder
+  itself saying which, took reading its error text rather than a return code.)
 - **Zip-bomb / expansion-ratio scoring**, via **Check archive safety…** — for the ordinary case, reads a
   ZIP's central directory (no extraction) and compares every entry's compressed size against its
   uncompressed size. It reports the overall compression ratio, total compressed → uncompressed size, how
@@ -302,9 +305,13 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
   the operations panel, and the rest of the archive still extracts. Anything *else* that stops
   the shortcut being created (a permission error on the folder, a directory sitting at the name) is a
   failure, not a refusal, and stops the extraction with a message naming the entry.
-  **All of this paragraph is about ZIP.** A TAR's shortcuts are created by the tar decoder, not by this
-  app, so none of these refusals apply to one: a TAR shortcut that cannot be created stops the
-  extraction. That was true before this change and is unchanged by it.
+  **This now covers TAR too, not only ZIP.** A TAR's shortcuts are still created by the tar decoder
+  rather than by this app, but this app now reads what the decoder's failure meant rather than treating
+  every failure the same: "this machine or volume cannot hold shortcuts" is skipped like the ZIP case
+  above, and the rest of a `.tar`/`.tar.gz`/`.tgz` extraction still proceeds; anything else about the
+  write failing still stops the extraction. (An earlier version of this bullet said this paragraph was
+  ZIP-only and that every TAR shortcut failure stopped the extraction — that was true when it was
+  written and no longer is.)
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
   decompression verification, and the verification time/byte caps are all fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —
