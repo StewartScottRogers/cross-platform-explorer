@@ -472,10 +472,19 @@ pub fn execute_plan_walk(
                     if count == 1 { "it" } else { "them" }
                 ));
             }
-            return Err(format!(
-                "refusing to run: {}, and `confirmed_overwrite` was not set on the batch job",
-                reasons.join("; and ")
-            ));
+            // **Reviewer finding.** The trailing "`confirmed_overwrite` was not set" clause is true of
+            // every refusal here (it is the outer `if` guard) but is only INFORMATIVE when confirming
+            // could actually change the outcome. Tacked onto a link-only refusal it directly contradicts
+            // the sentence right before it ("setting `confirmed_overwrite` will NOT unblock it... and
+            // `confirmed_overwrite` was not set") — the same defect the UAT found in the message wording
+            // itself, in miniature. Suppressed on a link-only refusal; kept for the mixed and non-link
+            // cases, where it is genuinely the next thing to try.
+            let confirm_note = if other_overwrites.is_empty() {
+                String::new()
+            } else {
+                ", and `confirmed_overwrite` was not set on the batch job".to_string()
+            };
+            return Err(format!("refusing to run: {}{confirm_note}", reasons.join("; and ")));
         }
     }
 
@@ -2410,6 +2419,16 @@ mod tests {
     /// wording with nothing else mixed in — a looser "contains some link text somewhere" assertion could
     /// pass even if the misleading "re-plan with an explicit confirmation" sentence were still present
     /// alongside it.
+    ///
+    /// **Second Reviewer finding, same test.** The trailing "`confirmed_overwrite` was not set on the
+    /// batch job" clause is true of every refusal here (it's the outer `if` guard) but only INFORMATIVE
+    /// when confirming could change the outcome. Tacked onto a link-only refusal it directly contradicts
+    /// the sentence right before it — "will NOT unblock it... AND `confirmed_overwrite` was not set" reads
+    /// as self-contradictory and invites exactly the wrong next action, the same defect in miniature. So
+    /// this test pins its **absence** on the link-only leg below, and its **presence** on a companion
+    /// non-link leg (a real pre-existing foreign file — genuinely fixable by confirming), so a fix that
+    /// suppressed the clause unconditionally would fail the second half just as surely as leaving it in
+    /// unconditionally fails the first.
     #[test]
     fn cpe_1769_the_refusal_message_for_a_link_output_does_not_claim_confirming_would_help() {
         let d = scratch("cpe1769-link-message");
@@ -2446,6 +2465,40 @@ mod tests {
             !err.contains("re-plan with an explicit confirmation"),
             "a link-only refusal must NOT carry the generic advice that confirming would help — that is \
              the exact wording the UAT followed and found to be false for this cause: {err}"
+        );
+        assert!(
+            !err.contains("was not set on the batch job"),
+            "a link-only refusal must not ALSO say confirmed_overwrite was not set — right after saying \
+             confirming will not help, that clause reads as self-contradictory: {err}"
+        );
+
+        // Companion leg: a real pre-existing foreign file, no link involved. Confirming genuinely does
+        // fix this one, so the trailing clause must still be present here — it is the correct next step.
+        let foreign_input = d.join("photo.png");
+        fs::write(&foreign_input, png_bytes(10, 10)).unwrap();
+        let foreign_output = d.join("vacation.png");
+        let foreign_original = png_bytes(4, 4);
+        fs::write(&foreign_output, &foreign_original).unwrap();
+        let mut foreign_job = BatchJob::new(vec![MediaOp::Rename { template: "vacation".into() }]);
+        foreign_job.non_destructive = false;
+        let foreign_items = plan(&foreign_job, &[foreign_input.to_string_lossy().to_string()]).unwrap();
+        assert_eq!(
+            foreign_items[0].output,
+            foreign_output.to_string_lossy(),
+            "sanity: the rename lands exactly on the foreign file, not a link"
+        );
+
+        let foreign_err = execute_plan(&foreign_items, &foreign_job)
+            .expect_err("an unconfirmed overwrite of a real foreign file must still be refused");
+        assert!(
+            foreign_err.contains("was not set on the batch job"),
+            "a non-link refusal is genuinely fixable by confirming, so the clause naming that must stay: \
+             {foreign_err}"
+        );
+        assert_eq!(
+            fs::read(&foreign_output).unwrap(),
+            foreign_original,
+            "sanity: the foreign file itself must be untouched by either refused plan"
         );
     }
 
