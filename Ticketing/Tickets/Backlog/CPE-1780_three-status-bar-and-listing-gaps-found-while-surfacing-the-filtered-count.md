@@ -108,3 +108,32 @@ Gates: `npm run check` (0 errors), `npx vitest run` (320 files / 4224 tests, all
 `--features sidecar-platform`: 255 tests), plus `cpe-server`/`cpe-net` clippy+test (2254 / 37 tests).
 `bindings.gen.ts` regenerated (`ListDirResult`/`StreamDirResult` gained `unreadable`). PR: see the branch
 `cpe-1780-listing-gaps`.
+
+**2026-08-20 (follow-up)** — Foreman relayed a MERGE BLOCKER from the independent Visual Critic
+(Playwright over the real `StatusBar.svelte` + `src/app.css`, 1200/880/800/684/600px, light/dark, five
+prop scenarios): with `filteredHidden > 0` AND `unreadableCount > 0` at the same time, at 684px and
+600px, the pre-existing `.disk` free-space label had no overflow strategy at all (unlike
+`.filtered-hidden`/`.unreadable`/`.notice`, which this ticket's own new note correctly mirrored) — its
+text wrapped onto a second line and spilled outside the status bar's fixed 26px box. Latent bug in old
+code; this ticket's own acceptance scenario (both notes non-zero at once) was the first thing able to
+trigger it, since `filteredHidden` and `unreadableCount` could never both be non-zero before this ticket.
+
+Fixed inline, one CSS rule (`src/lib/components/StatusBar.svelte`'s `.disk`), matching `.notice`'s exact
+treatment: `flex: 0 1 auto; min-width: 0; white-space: nowrap;` plus `overflow: hidden; text-overflow:
+ellipsis;`. The app's window floor is 600×400 (`.min_inner_size`, `src-tauri/src/lib.rs`), so 600px is a
+size the app explicitly permits. `.disk` is the last flex item before the (position:absolute) resize
+grip, and every other sibling already carries the same nowrap/ellipsis/min-width:0 treatment, so shrinking
+`.disk` further doesn't push overflow onto any neighbour.
+
+Two a11y findings from the same Critic pass are explicitly follow-up, NOT fixed here (per the Foreman's
+instruction) — filed for a later ticket: (1) neither the status bar nor either note carries
+`role="status"`/`aria-live`, and the correct fix is a persistent always-mounted container whose text
+changes, not a naive attribute add to the conditionally-mounted span; (2) at ≤684px both notes truncate
+to an ellipsis with the full sentence reachable only via `title` (mouse-hover-only), pre-existing for
+`.filtered-hidden` and now doubled by `.unreadable`.
+
+Re-ran gates after the CSS fix: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 320 files /
+4224 tests, all green (same counts as before; this is a CSS-only fix and jsdom does not apply component
+CSS to `getComputedStyle` under this project's vitest config, so no test could pin the pixel-level bug or
+its fix — visual correctness here rests on the Critic's real-browser measurement, not the harness).
+Pushed to the same branch `cpe-1780-listing-gaps` / PR #974.

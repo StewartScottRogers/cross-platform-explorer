@@ -223,7 +223,21 @@
   .git-btn { font-size: 11px; padding: 1px 7px; cursor: pointer; border: 1px solid var(--border-strong, #555);
              background: transparent; color: inherit; border-radius: 4px; }
   .git-btn:hover { background: var(--selection, rgba(128,128,128,0.2)); }
-  .disk { margin-left: 12px; }
+  /* CPE-1780 Visual Critic finding: `.disk` had NO overflow strategy at all (unlike `.filtered-hidden`/
+     `.unreadable`/`.notice` above), so it had never been forced to shrink hard enough to wrap — until
+     both new notes on screen at once, at the app's own 600px floor (`.min_inner_size`, `src-tauri/src/
+     lib.rs`), left it no room and its text wrapped to a second line, spilling OUTSIDE the statusbar's
+     fixed 26px box. Same fix as `.notice`: shrinkable (`min-width: 0`), never wraps (`white-space:
+     nowrap`), truncates to an ellipsis instead (`overflow: hidden; text-overflow: ellipsis`) — the
+     full label is still reachable via the `title` attribute already on the span in markup above. */
+  .disk {
+    margin-left: 12px;
+    flex: 0 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   /* Classic bottom-right sizing grip: three diagonal strokes in the corner, clipped to the
      lower-right triangle. Theme-variable coloured so it reads identically light/dark (CPE-842). */
