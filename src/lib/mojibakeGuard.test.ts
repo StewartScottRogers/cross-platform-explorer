@@ -27,11 +27,36 @@
 //   - The tree-wide scan, which is the actual CI guard: it fails if any tracked, non-binary file contains
 //     the mojibake signature or opens with a UTF-8 BOM, unless the exact (file, line, kind) is in
 //     `ALLOWLIST` with a recorded reason.
+//
+// CPE-1788 extends the guard to the same PowerShell round-trip landing in UTF-16 or ANSI instead of UTF-8
+// (see `mojibakeGuard.ts`'s header for the full root-cause account) and adds a fourth kind of test:
+//   - Unit tests of `detectUtf16Bom`/`findFirstInvalidUtf8Byte` against hand-built byte arrays (these are
+//     BYTE-level checks, not text-level, so there is no lossy-decode round trip to reuse the way
+//     `simulateCp1252Corruption` lets the text-level tests avoid hand-typed literals).
+//   - `simulatePowerShellAnsiRewrite`/`simulatePowerShellUtf16Rewrite` (in `mojibakeGuard.ts`), the
+//     byte-level equivalent of `simulateCp1252Corruption`: explicit, documented, provably-inverse-table
+//     reproductions of what `Set-Content`'s ANSI default and `Out-File`/`>`'s UTF-16LE default actually
+//     write, cross-checked independently against python's own `str.encode("cp1252")`/`"utf-16-le"` during
+//     development (see this ticket's PR description) rather than trusted on assertion alone.
+//   - A red-proof block that stages genuinely corrupted fixture FILES on disk (a real `fs.writeFileSync`,
+//     never PowerShell, using the two simulator functions above) and reads them back with the exact same
+//     `fs.readFileSync` + `scanOneFile` code path the tree-wide scan below uses -- not a re-implementation
+//     of the check for the test's benefit. Fixtures live in an untracked OS temp directory, never in the
+//     repo tree, so they can never reach `scanRepo()`'s own `git ls-files` walk.
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { findMojibake, hasLeadingBom, simulateCp1252Corruption } from "./mojibakeGuard";
+import { tmpdir } from "node:os";
+import {
+  findMojibake,
+  hasLeadingBom,
+  simulateCp1252Corruption,
+  detectUtf16Bom,
+  findFirstInvalidUtf8Byte,
+  simulatePowerShellAnsiRewrite,
+  simulatePowerShellUtf16Rewrite,
+} from "./mojibakeGuard";
 
 const ROOT = process.cwd();
 
@@ -148,6 +173,150 @@ describe("hasLeadingBom (CPE-1771)", () => {
   });
 });
 
+describe("detectUtf16Bom (CPE-1788)", () => {
+  it("detects a UTF-16LE BOM (FF FE) -- PowerShell 5.1 Out-File/> default", () => {
+    expect(detectUtf16Bom(new Uint8Array([0xff, 0xfe, 0x61, 0x00]))).toBe("LE");
+  });
+
+  it("detects a UTF-16BE BOM (FE FF)", () => {
+    expect(detectUtf16Bom(new Uint8Array([0xfe, 0xff, 0x00, 0x61]))).toBe("BE");
+  });
+
+  it("does not false-positive on ordinary UTF-8 content, including a leading UTF-8 BOM", () => {
+    expect(detectUtf16Bom(new Uint8Array([0x7b, 0x0a, 0x20]))).toBeNull();
+    expect(detectUtf16Bom(new Uint8Array([0xef, 0xbb, 0xbf, 0x7b]))).toBeNull();
+  });
+
+  it("does not throw on a too-short buffer", () => {
+    expect(detectUtf16Bom(new Uint8Array([0xff]))).toBeNull();
+    expect(detectUtf16Bom(new Uint8Array([]))).toBeNull();
+  });
+});
+
+describe("findFirstInvalidUtf8Byte (CPE-1788)", () => {
+  it("returns null for plain ASCII", () => {
+    expect(findFirstInvalidUtf8Byte(new TextEncoder().encode("hello world"))).toBeNull();
+  });
+
+  it("returns null for well-formed multi-byte UTF-8 (2-, 3-, and 4-byte sequences)", () => {
+    expect(findFirstInvalidUtf8Byte(new TextEncoder().encode("café"))).toBeNull(); // 2-byte (é)
+    expect(findFirstInvalidUtf8Byte(new TextEncoder().encode("日本語"))).toBeNull(); // 3-byte (CJK)
+    expect(findFirstInvalidUtf8Byte(new TextEncoder().encode("\u{1f389}"))).toBeNull(); // 4-byte (emoji)
+  });
+
+  it("catches a lone CP1252-rewrite byte: an em dash re-encoded as CP1252 0x97 is not valid UTF-8 on its own", () => {
+    // This is the exact shape Set-Content's ANSI default produces: a real em dash (U+2014, correctly
+    // read) re-encoded as the single CP1252 byte 0x97, which -- read back as UTF-8 -- is a bare
+    // continuation-range byte with no lead byte in front of it.
+    const bytes = new TextEncoder().encode("before ");
+    const withBadByte = Uint8Array.from([...bytes, 0x97, ...new TextEncoder().encode(" after")]);
+    expect(findFirstInvalidUtf8Byte(withBadByte)).toBe(bytes.length);
+  });
+
+  it("catches a truncated multi-byte sequence at EOF", () => {
+    // "a" (1 byte) + the first two of a 3-byte sequence (e.g. E2 82 AC, the euro sign), with the third
+    // byte missing entirely.
+    expect(findFirstInvalidUtf8Byte(new Uint8Array([0x61, 0xe2, 0x82]))).toBe(1);
+  });
+
+  it("catches an overlong encoding (U+0000 re-encoded as a 3-byte sequence instead of 1 byte)", () => {
+    expect(findFirstInvalidUtf8Byte(new Uint8Array([0xe0, 0x80, 0x80]))).toBe(0);
+  });
+
+  it("catches an encoded UTF-16 surrogate (never legal in UTF-8, only in UTF-16)", () => {
+    expect(findFirstInvalidUtf8Byte(new Uint8Array([0xed, 0xa0, 0x80]))).toBe(0); // encodes U+D800
+  });
+
+  it("catches a code point past U+10FFFF", () => {
+    expect(findFirstInvalidUtf8Byte(new Uint8Array([0xf4, 0x90, 0x80, 0x80]))).toBe(0); // encodes U+110000
+  });
+
+  it("catches a bare continuation byte with nothing in front of it", () => {
+    expect(findFirstInvalidUtf8Byte(new Uint8Array([0x80]))).toBe(0);
+  });
+});
+
+describe("simulatePowerShellAnsiRewrite / simulatePowerShellUtf16Rewrite (CPE-1788 fixture helpers)", () => {
+  it("simulatePowerShellUtf16Rewrite produces bytes detectUtf16Bom flags as UTF-16LE", () => {
+    const bytes = simulatePowerShellUtf16Rewrite("ordinary text");
+    expect(detectUtf16Bom(bytes)).toBe("LE");
+  });
+
+  it("simulatePowerShellUtf16Rewrite round-trips content correctly (it is not itself corrupting the text)", () => {
+    const bytes = simulatePowerShellUtf16Rewrite("hello");
+    expect(Buffer.from(bytes.slice(2)).toString("utf16le")).toBe("hello");
+  });
+
+  it("simulatePowerShellAnsiRewrite produces bytes findFirstInvalidUtf8Byte flags as not valid UTF-8", () => {
+    const bytes = simulatePowerShellAnsiRewrite("a normal dependency — it pulls only serde.");
+    expect(findFirstInvalidUtf8Byte(bytes)).not.toBeNull();
+  });
+
+  it("simulatePowerShellAnsiRewrite round-trips plain ASCII unchanged (no corruption when nothing is CP1252-special)", () => {
+    const bytes = simulatePowerShellAnsiRewrite("plain ascii, no surprises");
+    expect(findFirstInvalidUtf8Byte(bytes)).toBeNull();
+    expect(Buffer.from(bytes).toString("ascii")).toBe("plain ascii, no surprises");
+  });
+
+  it("simulatePowerShellAnsiRewrite throws rather than fabricating a byte for a character CP1252 cannot encode", () => {
+    expect(() => simulatePowerShellAnsiRewrite("中文")).toThrow(/no CP1252 encoding/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// CPE-1788 red-proof: genuinely corrupted fixture FILES, staged on disk and read back exactly the way
+// scanRepo() reads the real tree (fs.readFileSync), not just in-memory byte arrays. The bytes are built
+// with simulatePowerShellUtf16Rewrite/simulatePowerShellAnsiRewrite (explicit, byte-exact construction --
+// see those functions' doc comments) and written with node's fs.writeFileSync, never PowerShell, which is
+// the very tool that produces this corruption in the first place and has broken a release here before.
+// Fixtures live in a temp directory outside the repo tree (mkdtempSync under the OS temp dir, removed in
+// `finally`), never git-tracked, so they can never be picked up by scanRepo()'s own git-ls-files walk.
+// ---------------------------------------------------------------------------------------------------
+
+describe("CPE-1788 red-proof: real fixture files on disk", () => {
+  it("catches a UTF-16LE-rewritten file (Out-File/> shape) as kind utf16, at line 1 byte 0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mojibake-guard-utf16-"));
+    try {
+      const abs = join(dir, "rewritten.txt");
+      writeFileSync(abs, simulatePowerShellUtf16Rewrite("clean ASCII content\nsecond line\n"));
+      const violations = scanOneFile("fixtures/rewritten.txt", readFileSync(abs));
+      expect(violations).toHaveLength(1);
+      expect(violations[0].kind).toBe("utf16");
+      expect(violations[0].line).toBe(1);
+      expect(violations[0].detail).toMatch(/UTF-16LE BOM \(FF FE\).*at byte 0/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("catches an ANSI/CP1252-rewritten file (Set-Content default shape) as kind not-utf8, with the correct line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mojibake-guard-ansi-"));
+    try {
+      const abs = join(dir, "rewritten.txt");
+      // The em dash lands on line 2, so the guard's reported line must be 2, not 1.
+      writeFileSync(abs, simulatePowerShellAnsiRewrite("clean first line\na normal dependency — end.\n"));
+      const violations = scanOneFile("fixtures/rewritten.txt", readFileSync(abs));
+      expect(violations).toHaveLength(1);
+      expect(violations[0].kind).toBe("not-utf8");
+      expect(violations[0].line).toBe(2);
+      expect(violations[0].detail).toMatch(/invalid byte 0x97 at offset \d+/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT flag a clean UTF-8 file written the same way (no false positive from the fixture machinery itself)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mojibake-guard-clean-"));
+    try {
+      const abs = join(dir, "clean.txt");
+      writeFileSync(abs, Buffer.from("plain, correctly-encoded UTF-8 text with no surprises.\n", "utf8"));
+      expect(scanOneFile("fixtures/clean.txt", readFileSync(abs))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------------------------------
 // The tree-wide CI guard.
 // ---------------------------------------------------------------------------------------------------
@@ -170,10 +339,16 @@ const EXCLUDE_PREFIXES = [
   "samples/",
 ];
 
+/** CPE-1788 adds "utf16" (a UTF-16 BOM where a repo source file should be UTF-8) and "not-utf8" (bytes
+ *  that fail UTF-8 well-formedness outright, PowerShell `Set-Content`'s ANSI/CP1252 default) alongside
+ *  CPE-1771's original "mojibake"/"bom" split -- same reasoning as that split: a future entry for one kind
+ *  must never silently swallow a different kind of violation landing on the same (file, line). */
+type ViolationKind = "mojibake" | "bom" | "utf16" | "not-utf8";
+
 interface AllowlistEntry {
   file: string; // repo-relative, forward-slash
   line: number;
-  kind: "mojibake" | "bom";
+  kind: ViolationKind;
   reason: string;
   /** A distinctive substring the entry's line must still contain -- the staleness check below verifies
    *  this instead of re-matching the detector, so a genuine false-positive entry (which is SUPPOSED to
@@ -256,15 +431,26 @@ const ALLOWLIST: AllowlistEntry[] = [
   },
 ];
 
-function isAllowlisted(relFile: string, line: number, kind: "mojibake" | "bom"): boolean {
+function isAllowlisted(relFile: string, line: number, kind: ViolationKind): boolean {
   return ALLOWLIST.some((e) => e.file === relFile && e.line === line && e.kind === kind);
 }
 
 interface Violation {
   file: string;
   line: number;
-  kind: "mojibake" | "bom";
+  kind: ViolationKind;
   detail: string;
+}
+
+/** 1-based line number containing byte offset `offset` in `bytes` -- counts `\n` (0x0A) bytes before it,
+ *  the same convention `findMojibake` uses for text, but at the raw byte level (needed here because the
+ *  file's content around `offset` is, by construction, not valid UTF-8 text to search line-by-line). */
+function lineAtByteOffset(bytes: Uint8Array, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset && i < bytes.length; i++) {
+    if (bytes[i] === 0x0a) line++;
+  }
+  return line;
 }
 
 /** Every file `git` tracks, as repo-relative forward-slash paths -- the walk this guard scans. Driven by
@@ -286,6 +472,79 @@ function looksBinary(bytes: Buffer): boolean {
   return bytes.subarray(0, 4096).includes(0);
 }
 
+/** Runs every check this guard has (CPE-1771's `mojibake`/`bom`, CPE-1788's `utf16`/`not-utf8`) against
+ *  one already-read file and returns whatever it finds, unfiltered by the allowlist -- callers decide
+ *  whether to consult `isAllowlisted`. Extracted out of `scanRepo`'s loop body so the exact production
+ *  check sequence can also be exercised directly against on-disk fixture files (see the "CPE-1788 red-proof"
+ *  describe block below), not re-implemented or approximated for the test.
+ *
+ * Order matters and is deliberate:
+ *   1. UTF-16 BOM, unconditionally, BEFORE the binary skip -- per CPE-1788, this is the check that used
+ *      to never run at all, because the same NULs a UTF-16 rewrite produces are exactly what `looksBinary`
+ *      treats as "this isn't text, skip it". If found, this is the one loud fact worth reporting for this
+ *      file: the rest of its content is UTF-16 code units, not UTF-8 bytes, so decoding it as UTF-8 for
+ *      the checks below would scan garbage and could only add noise, never signal. Stop here.
+ *   2. `looksBinary` -- unchanged from CPE-1771: a genuine binary (icon, font, archive) has NULs
+ *      throughout for reasons that have nothing to do with UTF-16, and was never meant to be scanned.
+ *   3. UTF-8 BOM -- unchanged from CPE-1771.
+ *   4. Byte-level UTF-8 well-formedness (CPE-1788's `not-utf8`) -- catches `Set-Content`'s ANSI/CP1252
+ *      default, which a lossy `bytes.toString("utf8")` decode alone reports as clean (see the header note
+ *      above). If the bytes are not valid UTF-8 at all, the lossy text below is U+FFFD-riddled garbage;
+ *      scanning IT for mojibake would add noise, not signal, for the same reason step 1 stops early. Stop
+ *      here too.
+ *   5. `findMojibake` over the lossy-decoded text -- unchanged from CPE-1771, and only reached once steps
+ *      1-4 have confirmed the bytes are actually valid UTF-8 to begin with. */
+function scanOneFile(relFile: string, bytes: Buffer): Violation[] {
+  const violations: Violation[] = [];
+
+  const utf16 = detectUtf16Bom(bytes);
+  if (utf16 !== null) {
+    const bomHex = utf16 === "LE" ? "FF FE" : "FE FF";
+    violations.push({
+      file: relFile,
+      line: 1,
+      kind: "utf16",
+      detail: `file opens with a UTF-16${utf16} BOM (${bomHex}) -- this file should be UTF-8, not UTF-16, at byte 0`,
+    });
+    return violations; // rest of the bytes are UTF-16 code units, not UTF-8 -- nothing below applies
+  }
+
+  if (looksBinary(bytes)) return violations;
+
+  if (hasLeadingBom(bytes)) {
+    violations.push({ file: relFile, line: 1, kind: "bom", detail: "file opens with a UTF-8 BOM (EF BB BF)" });
+  }
+
+  const badByteOffset = findFirstInvalidUtf8Byte(bytes);
+  if (badByteOffset !== null) {
+    const line = lineAtByteOffset(bytes, badByteOffset);
+    const byteHex = bytes[badByteOffset].toString(16).padStart(2, "0");
+    violations.push({
+      file: relFile,
+      line,
+      kind: "not-utf8",
+      detail:
+        `file is not valid UTF-8 -- invalid byte 0x${byteHex} at offset ${badByteOffset}, likely a ` +
+        "PowerShell Set-Content ANSI/CP1252 rewrite (a multi-byte UTF-8 character re-encoded as a single " +
+        "CP1252 byte that isn't, on its own, a valid UTF-8 sequence)",
+    });
+    return violations; // the lossy decode below is U+FFFD-riddled garbage for a file already known bad
+  }
+
+  const text = bytes.toString("utf8"); // safe here: findFirstInvalidUtf8Byte just confirmed bytes IS
+  // valid UTF-8, so this decode is lossless and exact, not the lossy substitution CPE-1788 was filed about.
+  for (const offender of findMojibake(text)) {
+    violations.push({
+      file: relFile,
+      line: offender.line,
+      kind: "mojibake",
+      detail: `contains the mojibake signature "${offender.match}"`,
+    });
+  }
+
+  return violations;
+}
+
 function scanRepo(): Violation[] {
   const violations: Violation[] = [];
   for (const relFile of listTrackedFiles()) {
@@ -297,31 +556,8 @@ function scanRepo(): Violation[] {
     } catch {
       continue; // e.g. a tracked symlink whose target isn't materialized on this checkout/OS
     }
-    if (looksBinary(bytes)) continue;
-    if (hasLeadingBom(bytes) && !isAllowlisted(relFile, 1, "bom")) {
-      violations.push({ file: relFile, line: 1, kind: "bom", detail: "file opens with a UTF-8 BOM (EF BB BF)" });
-    }
-    const text = bytes.toString("utf8"); // Buffer#toString never throws -- lossy on genuinely non-UTF-8
-    // content (substitutes U+FFFD). That is safe in one direction only: a lossy decode can never
-    // FABRICATE a match (U+FFFD is not CP1252-producible), so it cannot turn a clean file into a false
-    // failure. It can, however, LOSE one -- and that is a real residual gap, not a harmless detail.
-    //
-    // Two shapes of the very corruption this guard exists for pass it silently (CPE-1788):
-    //   - A file rewritten as UTF-16 (PowerShell 5.1's > and Out-File default to UTF-16LE) has NUL
-    //     bytes in its first 4 KB, so looksBinary skips it entirely, and hasLeadingBom only matches
-    //     the UTF-8 BOM EF BB BF, never FF FE / FE FF.
-    //   - A file rewritten as ANSI/CP1252 (PowerShell 5.1 Set-Content's default) is not valid UTF-8,
-    //     so this decode yields U+FFFD and the scan reports zero hits on a genuinely corrupted file.
-    // Both are the same root cause -- a PowerShell text round-trip -- in a different output encoding.
-    // Named here rather than left implied as covered; tracked in CPE-1788.
-    for (const offender of findMojibake(text)) {
-      if (isAllowlisted(relFile, offender.line, "mojibake")) continue;
-      violations.push({
-        file: relFile,
-        line: offender.line,
-        kind: "mojibake",
-        detail: `contains the mojibake signature "${offender.match}"`,
-      });
+    for (const v of scanOneFile(relFile, bytes)) {
+      if (!isAllowlisted(v.file, v.line, v.kind)) violations.push(v);
     }
   }
   return violations;
@@ -336,16 +572,17 @@ describe("repo-wide mojibake guard (CPE-1771)", () => {
     expect(tracked.length).toBeGreaterThan(500);
   });
 
-  it("has no un-allowlisted mojibake signature or UTF-8 BOM anywhere in the scanned tree", () => {
+  it("has no un-allowlisted mojibake/BOM/UTF-16/not-UTF-8 violation anywhere in the scanned tree", () => {
     const violations = scanRepo();
     if (violations.length > 0) {
       const lines = violations.map((v) => `  ${v.file}:${v.line} [${v.kind}] -- ${v.detail}`).join("\n");
       throw new Error(
-        `Found ${violations.length} un-allowlisted mojibake/BOM violation(s) (CPE-1771):\n${lines}\n\n` +
+        `Found ${violations.length} un-allowlisted violation(s) (CPE-1771/CPE-1788):\n${lines}\n\n` +
           "If this is a genuine corruption, repair it byte-exact (iconv/sed/python/an editor tool -- " +
           "never a PowerShell text round-trip, which is the root cause of this bug class). If it's a " +
           "deliberate literal or a coincidental false positive, add it to ALLOWLIST in " +
-          "src/lib/mojibakeGuard.test.ts with its exact kind (\"mojibake\" or \"bom\") and a reason.",
+          'src/lib/mojibakeGuard.test.ts with its exact kind ("mojibake", "bom", "utf16", or "not-utf8") ' +
+          "and a reason.",
       );
     }
     expect(violations).toEqual([]);
