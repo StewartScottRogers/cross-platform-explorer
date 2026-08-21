@@ -580,19 +580,16 @@ fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
 }
 
 /// Recursively copy a directory tree.
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
+///
+/// **CPE-1765.** Was `create_dir_all` + `fs::copy` per file — both of which *follow* a symlink at the
+/// final component, so a link planted at a name between [`unique_target`]'s pick and this write sent the
+/// tree outside the folder the user chose. It is now a one-line delegation to
+/// [`cpe_server::fsutil::copy_tree_into_claimed_slot`], which claims every directory and file name it
+/// creates with `create_dir`/`create_new`; see that function for the measurement and the trade-offs.
+/// Kept as a named wrapper only so this module's call sites and its `copy_dir_all_copies_the_whole_tree`
+/// test read unchanged.
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
+    cpe_server::fsutil::copy_tree_into_claimed_slot(src, dst)
 }
 
 /// List the immediate children of `path`.
@@ -2927,12 +2924,27 @@ fn do_copy_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
         return Err("Cannot copy a folder into itself".to_string());
     }
     let target = unique_target(dest_dir, file_name);
+    write_copy_into_picked_slot(src, target)
+}
+
+/// The write half of [`do_copy_into`], split at the seam [`unique_target`] hands over at (CPE-1765).
+///
+/// **Extracted so a test can call the real one.** The defect this closes lives *between* the pick and the
+/// write, and there is no way to plant something at a picked name mid-call from outside the process
+/// without a race — so the reproduction stages the gap by calling this with a `target` that is already a
+/// link (or already occupied), which is byte-for-byte the state the production write meets when it loses
+/// the race. A test that rebuilt this branch itself would pin `std`'s semantics rather than this app's
+/// use of them, which is the same mistake `cpe_server::fsutil::create_exclusive`'s doc records.
+///
+/// Both arms claim the name atomically (`create_new` / `create_dir`) rather than writing to a name a
+/// probe pronounced free; see [`cpe_server::fsutil::copy_file_into_claimed_slot`].
+fn write_copy_into_picked_slot(src: &Path, target: PathBuf) -> Result<PathBuf, String> {
     let result = if src.is_dir() {
         copy_dir_all(src, &target)
     } else {
-        fs::copy(src, &target).map(|_| ())
+        cpe_server::fsutil::copy_file_into_claimed_slot(src, &target).map(|_| ())
     };
-    result.map(|()| target).map_err(|e| e.to_string())
+    result.map(|()| target)
 }
 
 /// Move `src` into `dest_dir` (auto-renaming on collision), returning the path actually written. Falls
@@ -2950,41 +2962,109 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
         return Err("Cannot move a folder into itself".to_string());
     }
     let target = unique_target(dest_dir, file_name);
-    // CPE-1710: NOT `rename_into_slot`. `unique_target` has already *picked* a name it believes is free,
-    // so the paired guard's occupancy half would refuse the name this function just chose. The residual
-    // hazard — `unique_target`'s probe following links, so a dangling link read as a free name and this
-    // rename destroyed it — is closed at the source: `unique_target` (via `probe_name_pick_slot`) now
-    // treats a link slot as occupied and advances past it, rather than this site refusing the name
-    // `unique_target` already committed to (CPE-1715).
-    #[allow(clippy::disallowed_methods)]
-    if fs::rename(src, &target).is_ok() {
-        let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
-        let _ = cpe_server::snapshot_schedule::reschedule(
-            ctx,
-            &src.to_string_lossy(),
-            &target.to_string_lossy(),
-        );
-        return Ok(target);
-    }
-    // Cross-volume move: copy, then remove the original only if the copy fully succeeded.
-    let copied = if src.is_dir() {
-        copy_dir_all(src, &target)
-    } else {
-        fs::copy(src, &target).map(|_| ())
-    };
-    copied.map_err(|e| e.to_string())?;
-    let removed = if src.is_dir() {
-        fs::remove_dir_all(src)
-    } else {
-        fs::remove_file(src)
-    };
-    removed.map_err(|e| format!("Copied, but could not remove original: {e}"))?;
+    let target = write_move_into_picked_slot(src, target)?;
     let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
     let _ = cpe_server::snapshot_schedule::reschedule(
         ctx,
         &src.to_string_lossy(),
         &target.to_string_lossy(),
     );
+    Ok(target)
+}
+
+/// The write half of [`do_move_into`], split at the same seam and for the same reason as
+/// [`write_copy_into_picked_slot`] (CPE-1765). The tag/snapshot re-keying stays with the caller so this
+/// is purely "get the bytes to the picked name, or say why not".
+///
+/// **CPE-1710 said this site must NOT use `rename_into_slot`**, because that guard's occupancy half would
+/// refuse the very name `unique_target` just chose. That reasoning still holds and this is not a reversal
+/// of it: [`cpe_server::fsutil::rename_into_claimed_slot`] does not *ask* whether the name is free, it
+/// **takes** it with the same atomic primitive the copy path uses, and only then renames — onto this
+/// process's own placeholder. The pre-CPE-1765 code renamed straight onto the picked name, which
+/// `fs::rename` replaces silently: the auditor measured it destroying a link that appeared in the gap and
+/// reporting success. Now a name taken in the gap is a **refusal that names the path**, and — this is the
+/// part a re-probe could never give — the name is genuinely occupied for every other picker while the
+/// move runs.
+///
+/// A `SlotTaken` verdict deliberately does **not** fall through to the copy-then-delete path: the name is
+/// not ours, so copying to it is exactly the mistake being fixed. Only a `RenameFailed` (the ordinary
+/// cross-volume `EXDEV`) falls through, and by then the placeholder has already been dropped, so the
+/// fallback finds the name as it left it and re-claims it atomically.
+fn write_move_into_picked_slot(src: &Path, target: PathBuf) -> Result<PathBuf, String> {
+    use cpe_server::fsutil::RenameIntoSlot;
+    match cpe_server::fsutil::rename_into_claimed_slot(src, &target) {
+        RenameIntoSlot::Renamed => return Ok(target),
+        RenameIntoSlot::SlotTaken(msg) => return Err(msg),
+        RenameIntoSlot::RenameFailed(_) => {}
+    }
+    cross_volume_move_into_picked_slot(src, target)
+}
+
+/// The cross-volume tail of [`write_move_into_picked_slot`] — what runs once `fs::rename` has refused
+/// with `EXDEV`/`ERROR_NOT_SAME_DEVICE`.
+///
+/// **Extracted so a test can call the real one** (PR #968 review round 2, finding 1), the same argument
+/// as `cpe_server::fsutil::create_exclusive`'s. Round 2's F1 fix was tested only against a same-volume
+/// move, and a same-volume test cannot reach this branch at all — every fixture sits under one scratch
+/// directory. Rather than mock `EXDEV`, the test calls this directly, which is precisely the state the
+/// production path is in when the OS refuses the rename.
+fn cross_volume_move_into_picked_slot(src: &Path, target: PathBuf) -> Result<PathBuf, String> {
+    // CPE-1765 (PR #968 review round 2, finding 1) — THE CROSS-VOLUME HALF OF F1.
+    //
+    // Round 2's fix corrected the same-volume rename and stopped there, so this path was still the
+    // unfixed one: `write_copy_into_picked_slot` branches on `src.is_dir()`, which FOLLOWS the link, and
+    // the removal below used the same predicate. A directory shortcut moved to another volume was
+    // therefore dereferenced — its target's contents copied to the destination and the shortcut deleted —
+    // with `Ok` returned. Measured against production, C: to Z:, two real NTFS volumes:
+    //
+    //   result              = Ok("Z:\...\ssh-shortcut")   <- REPORTS SUCCESS
+    //   landed_is_link      = Ok(false)
+    //   id_rsa_on_Z         = true       id_rsa_contents = Some("PRIVATE KEY")
+    //   source_shortcut_left= false
+    //
+    // The doc comment justifying the same-volume fix used "move it to a USB stick" as its example. A USB
+    // stick is a different volume, so the scenario chosen to explain the severity was the one still open.
+    //
+    // **Refuse, rather than recreate.** Re-creating the link on the far volume would mean choosing
+    // between `symlink_dir` (needs `SeCreateSymbolicLinkPrivilege`), a junction (Windows-only, absolute
+    // targets only) and `symlink` (Unix), and deciding what a relative target means once the link has
+    // moved to a different root — a new mechanism, at the end of a review chain whose lesson is that new
+    // mechanisms are where the holes came from. Refusing is one branch, loses nothing the user had, and
+    // leaves both the link and its target exactly where they were. The message says what to do instead.
+    //
+    // Scoped to MOVE deliberately: `do_copy_into` dereferences a link and should — copying a shortcut to
+    // another volume and getting the contents is what a copy means, and `src/docs/03-explorer.md` says so.
+    //
+    // **This guard covers THIS path only, and `run_transfer` is not on it — CPE-1831.** The
+    // progress-panel transfer engine has its own `RenameFailed` arm which falls into `copy_tree_streamed`
+    // → `stream_copy_file`, whose `File::open` follows the link, so a cross-volume move of a shortcut
+    // there still copies the target's contents out and deletes the shortcut. Measured C: → Z: through
+    // production on PR #968 round 3: `transferred=1 failed=0`, `landed_is_link=false`,
+    // `landed_bytes=Some("PRIVATE KEY")`, `src_link_left=false`.
+    //
+    // That path is **pre-existing and unchanged by CPE-1765** — it behaved identically before this
+    // ticket. It is deliberately NOT fixed here: a second refusal branch in a different engine is a new
+    // mechanism at the end of a review chain whose whole lesson is that new mechanisms are where the
+    // holes came from. `src/docs/03-explorer.md` states the split rather than promising a refusal the
+    // transfer panel does not make.
+    if std::fs::symlink_metadata(src).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "\"{}\" is a shortcut (a symbolic link or junction), and the destination is on a different \
+             drive, so it cannot be moved there as a shortcut — nothing was moved, copied or deleted. \
+             Moving it would have had to copy out everything it points at instead, which is not what \
+             moving a shortcut means. Copy it instead if you want its contents on that drive, or recreate \
+             the shortcut there by hand.",
+            src.display()
+        ));
+    }
+    // Cross-volume move: copy, then remove the original only if the copy fully succeeded.
+    let target = write_copy_into_picked_slot(src, target)?;
+    let removed = if src.is_dir() {
+        fs::remove_dir_all(src)
+    } else {
+        fs::remove_file(src)
+    };
+    removed.map_err(|e| format!("Copied, but could not remove original: {e}"))?;
     Ok(target)
 }
 
@@ -3381,8 +3461,33 @@ fn resolve_conflict(
             // action is removal.
             cpe_server::fsutil::contained_under(base_target, dest_dir)
                 .map_err(|e| format!("refusing to overwrite: {e}"))?;
+            // CPE-1765 (PR #968 review, finding C): this removal's failure used to be swallowed, which
+            // was survivable only because the write that followed was `create_dir_all` — it returned
+            // `Ok` on the surviving directory and the transfer merged into it file by file. Now that the
+            // write CLAIMS the name, a partial removal (a locked file inside, routine on Windows) fails
+            // the item with "the name was free when this operation picked it and is not free now" — which
+            // is simply untrue: the user chose Replace, the name was never free, and the real problem is
+            // that the old copy could not be deleted. Surfacing the removal error says what actually
+            // happened and names the path, instead of blaming a race that did not occur.
             if base_target.is_dir() {
-                let _ = fs::remove_dir_all(base_target);
+                // The wording is deliberately "nothing new was written" and NOT "nothing was replaced"
+                // (PR #968 UAT round 2). `remove_dir_all` walks and deletes as it goes, so by the time it
+                // hits an undeletable entry it has already removed that entry's siblings. UAT staged a
+                // locked file and measured the folder afterwards holding ONLY the locked file — the two
+                // unlocked siblings were gone. Claiming the folder is untouched would be false, and this
+                // family's whole subject is messages that overclaim.
+                //
+                // Not a regression: the pre-CPE-1765 code made the identical unconditional
+                // `remove_dir_all` call and destroyed the same siblings while reporting SUCCESS. Refusing
+                // loudly is a strict improvement over that; it is just not a promise of intactness.
+                fs::remove_dir_all(base_target).map_err(|e| {
+                    format!(
+                        "refusing to overwrite \"{}\": the existing folder could not be fully removed, so \
+                         nothing new was written — {e}. Replace deletes the existing item before writing, \
+                         so part of it may already have been removed; check the folder before retrying",
+                        base_target.display()
+                    )
+                })?;
             } else if fs::remove_file(base_target).is_err() {
                 // CPE-1715: a dangling *directory* link — the NTFS junction `make_dangling_link` falls
                 // back to when `SeCreateSymbolicLinkPrivilege` is absent, which is what an unprivileged
@@ -3392,7 +3497,27 @@ fn resolve_conflict(
                 // reparse point and Windows will not `DeleteFile` one. `remove_dir` removes the reparse
                 // point itself without following it, which is exactly the slot the user authorised
                 // replacing, and it is the call that actually succeeds here.
-                let _ = fs::remove_dir(base_target);
+                //
+                // CPE-1765 (PR #968 review round 2, finding 4): this arm's failure is no longer discarded
+                // either. The directory arm above was fixed in round 2 and this one was left, so Replace
+                // onto a FILE that is open in another program — the ordinary Windows case — still fell
+                // through to a claim that then failed with "the name was free when this operation picked
+                // it and is not free now". That message is untrue and misdirects: the user chose Replace,
+                // the name was never free, and the real problem is that the old file could not be deleted.
+                //
+                // Both removals have to fail before this refuses, because a junction reaches here having
+                // *legitimately* failed `remove_file` (see above) and succeeds on `remove_dir`.
+                if let Err(e) = fs::remove_dir(base_target) {
+                    // "nothing new was written", matching the directory arm above. A single file is
+                    // removed atomically so this arm really does leave it intact — but the two arms must
+                    // not disagree about what the same refusal means, and a user cannot tell from the
+                    // message which arm produced it.
+                    return Err(format!(
+                        "refusing to overwrite \"{}\": the existing item could not be removed, so nothing \
+                         new was written — {e}",
+                        base_target.display()
+                    ));
+                }
             }
             Ok(Some(base_target.to_path_buf()))
         }
@@ -3413,7 +3538,16 @@ fn stream_copy_file(
     use std::io::{Read, Write};
     use std::sync::atomic::Ordering;
     let mut r = fs::File::open(src)?;
-    let mut w = fs::File::create(dst)?;
+    // CPE-1765: `create_exclusive` (`create_new`), not `File::create`. `File::create` opens
+    // create-or-truncate and FOLLOWS a symlink at the final component, so a link planted at this name
+    // after `resolve_conflict` picked it sent the user's bytes straight out of the destination folder —
+    // measured on PR #924. `create_new` makes the create its own existence check and refuses a link
+    // rather than following it. The error is re-worded through `slot_taken_message` so it names the
+    // DESTINATION path: `copy_tree_streamed`'s per-item error line names the source, and "the file
+    // exists" about a name the app itself invented is unreadable without the path it is about.
+    let mut w = cpe_server::fsutil::create_exclusive(dst).map_err(|e| {
+        std::io::Error::new(e.kind(), cpe_server::fsutil::slot_taken_message(dst, &e))
+    })?;
     let mut buf = vec![0u8; 128 * 1024];
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -3457,9 +3591,21 @@ fn copy_tree_streamed(
         }
     };
     if ft.is_dir() {
-        if let Err(e) = fs::create_dir_all(dst) {
+        // CPE-1765: `claim_dir_slot` (`create_dir`), not `create_dir_all`. `create_dir_all` returns `Ok`
+        // whenever the path already RESOLVES to a directory — so a directory link (an NTFS junction, a
+        // POSIX symlink) planted at this name was accepted and the whole tree was then written through
+        // it, outside the folder the user chose. That is reachable in the shipped Overwrite path today:
+        // on Unix `resolve_conflict`'s `remove_dir_all` fails on a symlink-to-directory and leaves it
+        // standing. `create_dir` never follows the final component and refuses, naming the path.
+        //
+        // The push is the bare message where its siblings use `format!("{}: {e}", dst.display())`, and
+        // that asymmetry is deliberate rather than an oversight (PR #968 review): `slot_taken_message`
+        // already opens with the quoted destination path, so prefixing would print it twice in the
+        // operations panel. `run_transfer`'s own `SlotTaken` arm does prefix with `{name}`, because there
+        // the per-item report is keyed by the source's name, not the destination's.
+        if let Err(e) = cpe_server::fsutil::claim_dir_slot(dst) {
             report.failed += 1;
-            report.errors.push(format!("{}: {e}", dst.display()));
+            report.errors.push(e);
             return true;
         }
         let Ok(rd) = fs::read_dir(src) else { return true };
@@ -3621,14 +3767,29 @@ fn run_transfer(
         // the source in `resolve_conflict` itself (via `probe_name_pick_slot`), which now treats a link
         // slot — dangling or live — as occupied rather than handing it back as a free target for this
         // rename to land on (CPE-1715).
-        #[allow(clippy::disallowed_methods)]
-        if kind == TransferKind::Move && fs::rename(src, &target).is_ok() {
-            report.transferred += 1;
-            prog.done_bytes += sb;
-            prog.done_items += sf;
-            last_emit = prog.done_bytes;
-            emit(&prog);
-            continue;
+        //
+        // CPE-1765: the rename now goes through `rename_into_claimed_slot`, which CLAIMS the resolved
+        // name before renaming onto it, so a name taken between `resolve_conflict` and here is a loud
+        // per-item failure instead of a silent replace. `SlotTaken` must not fall through to the copy
+        // below — the name is not ours — while `RenameFailed` (cross-volume `EXDEV`) still does, exactly
+        // as before, with the placeholder already cleaned up.
+        if kind == TransferKind::Move {
+            match cpe_server::fsutil::rename_into_claimed_slot(src, &target) {
+                cpe_server::fsutil::RenameIntoSlot::Renamed => {
+                    report.transferred += 1;
+                    prog.done_bytes += sb;
+                    prog.done_items += sf;
+                    last_emit = prog.done_bytes;
+                    emit(&prog);
+                    continue;
+                }
+                cpe_server::fsutil::RenameIntoSlot::SlotTaken(msg) => {
+                    report.failed += 1;
+                    report.errors.push(format!("{name}: {msg}"));
+                    continue;
+                }
+                cpe_server::fsutil::RenameIntoSlot::RenameFailed(_) => {}
+            }
         }
         let failed_before = report.failed;
         if !copy_tree_streamed(src, &target, cancel, &mut prog, &mut emit, &mut last_emit, &mut report) {
@@ -18302,6 +18463,392 @@ overlay / overlay rw,relatime 0 0
         copy_dir_all(&src, &dst).unwrap();
         assert_eq!(fs::read(dst.join("a/b/leaf.txt")).unwrap(), b"leaf");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1765: the gap between `unique_target`/`resolve_conflict` picking a name and this module
+    // writing to it. `cpe_server::fsutil`'s tests pin the primitives on all three OSes; these pin the
+    // APP's four write sites — the two `do_*_into` halves and the two transfer-engine walkers — because a
+    // primitive nothing calls fixes nothing.
+    //
+    // **How the race is staged without a race.** The defect lives *between* the pick and the write, and
+    // nothing can plant a file there mid-call from outside the process except by luck. So each test calls
+    // the production **write half** directly with a name that is already taken — which is byte-for-byte
+    // the state the write meets when it loses the race. That is why `write_copy_into_picked_slot` and
+    // `write_move_into_picked_slot` are extracted functions rather than inline code: a test that rebuilt
+    // the branch itself would pin `std`'s semantics rather than this module's use of them.
+    //
+    // Every assertion about **harm** comes before the `Result` is looked at. This family fails by
+    // succeeding.
+
+    /// The auditor's copy-shaped escape, at `do_copy_into`'s own write. A hard link needs no symlink
+    /// privilege, so this runs on Windows, Linux and macOS alike.
+    #[test]
+    fn cpe_1765_write_copy_into_picked_slot_cannot_land_outside_the_destination_folder() {
+        use std::io::Write;
+        let d = scratch("cpe1765_copy_gap");
+        let evil_dir = d.join("evil_dir");
+        fs::create_dir(&evil_dir).unwrap();
+        let outside = evil_dir.join("outside.txt");
+        fs::write(&outside, b"PRE-EXISTING OUTSIDE FILE").unwrap();
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let src = d.join("src.txt");
+        fs::write(&src, b"USER CONTENT").unwrap();
+
+        // THE GAP: `unique_target` proved `dest/victim.txt` free, then this appeared at it.
+        let picked = dest.join("victim.txt");
+        if !cpe_server::fsutil::require_staged(
+            "hard_link_in_the_gap",
+            true,
+            fs::hard_link(&outside, &picked).is_ok(),
+        ) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the do_copy_into gap leg: no hard link on this filesystem"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = write_copy_into_picked_slot(&src, picked.clone());
+
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap(),
+            "PRE-EXISTING OUTSIDE FILE",
+            "the copy wrote through the link and landed OUTSIDE the folder the user chose (result {r:?})"
+        );
+        let e = r.expect_err("a name taken in the gap must not report success");
+        assert!(e.contains(&picked.display().to_string()), "the refusal must name the path: {e}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The rename-shaped half, at `do_move_into`'s own write: the occupant must survive and the move must
+    /// say so, instead of `fs::rename`'s silent replace.
+    #[test]
+    fn cpe_1765_write_move_into_picked_slot_refuses_a_name_taken_in_the_gap() {
+        let d = scratch("cpe1765_move_gap");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let src = d.join("src.txt");
+        fs::write(&src, b"USER CONTENT").unwrap();
+        let picked = dest.join("victim.txt");
+        fs::write(&picked, b"SOMEONE ELSE'S FILE").unwrap();
+
+        let r = write_move_into_picked_slot(&src, picked.clone());
+
+        assert_eq!(
+            fs::read_to_string(&picked).unwrap(),
+            "SOMEONE ELSE'S FILE",
+            "the move replaced a file that appeared in the gap, silently (result {r:?})"
+        );
+        assert!(src.exists(), "a refused move must leave the source where it was");
+        let e = r.expect_err("a name taken in the gap must not report success");
+        assert!(e.contains(&picked.display().to_string()), "the refusal must name the path: {e}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The F1 regression, at the production write half, exactly as both reviewers measured it**
+    /// (PR #968 — found independently by the Security Auditor and the code Reviewer).
+    ///
+    /// `write_move_into_picked_slot` asked `metadata(src).is_dir()`, which follows the link, so moving a
+    /// directory shortcut staked a *directory* placeholder, the rename failed, and the cross-volume
+    /// fallback then dereferenced the link a second time — copying the linked-to tree into the
+    /// destination and deleting the user's shortcut. The Reviewer's probe:
+    ///
+    /// ```text
+    /// [REV] result = Ok(".../dest/shortcut")        <- REPORTS SUCCESS
+    /// [REV] landed is a link                 = Ok(false)
+    /// [REV] landed is a real dir with a COPY = true
+    /// [REV] source shortcut still present    = false
+    /// ```
+    ///
+    /// Point the shortcut at `~/.ssh` or a password vault and move it to a USB stick, and that is where
+    /// the contents go. Every assertion here is about what landed, before the `Result` is read.
+    #[test]
+    fn cpe_1765_moving_a_directory_shortcut_moves_the_link_not_what_it_points_at() {
+        use std::io::Write;
+        let d = scratch("cpe1765_move_link_src");
+        let secret = d.join("secret_dir");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("id_rsa"), b"PRIVATE KEY").unwrap();
+        let shortcut = d.join("shortcut");
+        if !cpe_server::fsutil::make_dir_link(&secret, &shortcut) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the move-a-shortcut leg: no directory link on this machine. NOTHING \
+                 on this run covered the dereference route."
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        let r = write_move_into_picked_slot(&shortcut, dest.join("shortcut"));
+
+        let landed = dest.join("shortcut");
+        assert_eq!(
+            fs::read_to_string(secret.join("id_rsa")).unwrap(),
+            "PRIVATE KEY",
+            "the linked-to tree must be untouched by moving the link (result {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&landed).is_ok_and(|m| m.file_type().is_symlink()),
+            "what landed is not a link — the shortcut was dereferenced and its target's contents were \
+             materialised in the destination the user chose (result {r:?})"
+        );
+        assert!(
+            !landed.join("id_rsa").is_file()
+                || fs::symlink_metadata(&landed).unwrap().file_type().is_symlink(),
+            "the private key was copied into the destination as a real file"
+        );
+        r.expect("moving a shortcut onto a free name is an ordinary move");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **PR #968 review round 2, finding 1 — the CROSS-VOLUME half of F1, which round 2 left open.**
+    ///
+    /// The same-volume test above stages everything under one scratch directory, so it can never reach
+    /// the `RenameFailed(EXDEV)` branch. The Reviewer measured production across two real NTFS volumes:
+    ///
+    /// ```text
+    /// [REV2] result              = Ok("Z:\...\ssh-shortcut")   <- REPORTS SUCCESS
+    /// [REV2] landed_is_link      = Ok(false)
+    /// [REV2] id_rsa_on_Z         = true   id_rsa_contents = Some("PRIVATE KEY")
+    /// [REV2] source_shortcut_left= false
+    /// ```
+    ///
+    /// A USB stick is a different volume, which is the example the fix's own doc comment used. Rather
+    /// than simulate `EXDEV`, this drives the real branch by calling the cross-volume tail directly —
+    /// the rename is skipped, exactly as it is when the OS refuses it — so the assertion is about
+    /// production code and not about a mock.
+    #[test]
+    fn cpe_1765_a_cross_volume_move_of_a_shortcut_refuses_instead_of_copying_out_its_target() {
+        use std::io::Write;
+        let d = scratch("cpe1765_xvol_link");
+        let secret = d.join("secret_dir");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("id_rsa"), b"PRIVATE KEY").unwrap();
+        let shortcut = d.join("ssh-shortcut");
+        if !cpe_server::fsutil::make_dir_link(&secret, &shortcut) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the cross-volume shortcut leg: no directory link on this machine"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let target = dest.join("ssh-shortcut");
+
+        // The cross-volume tail: what `write_move_into_picked_slot` runs once the rename returns EXDEV.
+        let r = cross_volume_move_into_picked_slot(&shortcut, target.clone());
+
+        // HARM FIRST — the pre-fix path returned Ok having copied the key out and deleted the shortcut.
+        assert!(
+            !target.join("id_rsa").exists(),
+            "the shortcut was dereferenced and the private key was copied onto the other volume \
+             (result {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&shortcut).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's shortcut was deleted (result {r:?})"
+        );
+        assert_eq!(
+            fs::read_to_string(secret.join("id_rsa")).unwrap(),
+            "PRIVATE KEY",
+            "the linked-to tree must be untouched"
+        );
+        let e = r.expect_err("a cross-volume move of a shortcut must refuse, not dereference");
+        assert!(e.contains("shortcut"), "the refusal must explain what it refused: {e}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The other direction: the cross-volume path must still WORK** (PR #968 review round 3, finding 2).
+    ///
+    /// The refusal leg above is the only thing that pinned `cross_volume_move_into_picked_slot`, so the
+    /// Reviewer mutated its predicate to `if true` — refuse *every* cross-volume move — and all 207 tests
+    /// stayed green. Copy-then-delete is the path behind every move to another drive, a USB stick or a
+    /// network share, and it was unpinned in the "still works" direction: the classic hazard of extracting
+    /// a function to test one branch of it.
+    ///
+    /// Both legs assert the bytes landed AND the source is gone, because a move that copies without
+    /// deleting, or deletes without copying, are different bugs that a bare `is_ok()` would miss.
+    #[test]
+    fn cpe_1765_a_cross_volume_move_still_moves_ordinary_files_and_folders() {
+        let d = scratch("cpe1765_xvol_ok");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        // A plain file.
+        let file_src = d.join("real.txt");
+        fs::write(&file_src, b"REAL BYTES").unwrap();
+        let file_dst = dest.join("real.txt");
+        let r = cross_volume_move_into_picked_slot(&file_src, file_dst.clone());
+        assert_eq!(
+            fs::read_to_string(&file_dst).ok().as_deref(),
+            Some("REAL BYTES"),
+            "an ordinary cross-volume file move must still land the bytes (result {r:?})"
+        );
+        assert!(!file_src.exists(), "and must remove the source (result {r:?})");
+        r.expect("an ordinary cross-volume file move must succeed");
+
+        // A folder, which takes the tree arm and the `remove_dir_all` arm.
+        let dir_src = d.join("tree");
+        fs::create_dir_all(dir_src.join("sub")).unwrap();
+        fs::write(dir_src.join("sub/leaf.txt"), b"LEAF").unwrap();
+        let dir_dst = dest.join("tree");
+        let r = cross_volume_move_into_picked_slot(&dir_src, dir_dst.clone());
+        assert_eq!(
+            fs::read_to_string(dir_dst.join("sub/leaf.txt")).ok().as_deref(),
+            Some("LEAF"),
+            "an ordinary cross-volume folder move must still land the whole tree (result {r:?})"
+        );
+        assert!(!dir_src.exists(), "and must remove the source folder (result {r:?})");
+        r.expect("an ordinary cross-volume folder move must succeed");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The transfer engine's per-file writer — the one every copy the progress dialog shows goes through.
+    /// It used `File::create`, which follows a link at the final component.
+    #[test]
+    fn cpe_1765_stream_copy_file_refuses_a_link_at_the_destination_name() {
+        use std::io::Write;
+        let d = scratch("cpe1765_stream_gap");
+        let evil_dir = d.join("evil_dir");
+        fs::create_dir(&evil_dir).unwrap();
+        let outside = evil_dir.join("outside.txt");
+        fs::write(&outside, b"PRE-EXISTING OUTSIDE FILE").unwrap();
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let src = d.join("src.txt");
+        fs::write(&src, b"USER CONTENT").unwrap();
+        let picked = dest.join("victim.txt");
+        if !cpe_server::fsutil::require_staged(
+            "hard_link_in_the_gap",
+            true,
+            fs::hard_link(&outside, &picked).is_ok(),
+        ) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the stream_copy_file gap leg: no hard link on this filesystem"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut prog = new_test_progress();
+        let mut emit: Box<dyn FnMut(&TransferProgress)> = Box::new(|_| {});
+        let mut last_emit = 0u64;
+        let r = stream_copy_file(&src, &picked, &cancel, &mut prog, &mut *emit, &mut last_emit);
+
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap(),
+            "PRE-EXISTING OUTSIDE FILE",
+            "the transfer engine wrote through the link, outside the destination folder (result {r:?})"
+        );
+        let e = r.expect_err("a name taken in the gap must not report success");
+        assert!(
+            e.to_string().contains(&picked.display().to_string()),
+            "the refusal must name the destination path, not just the source: {e}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The transfer engine's directory walker. `create_dir_all` returns `Ok` for a name that already
+    /// *resolves* to a directory, so a directory link at the resolved name swallowed the whole tree.
+    #[test]
+    fn cpe_1765_copy_tree_streamed_refuses_a_directory_link_at_the_destination_name() {
+        use std::io::Write;
+        let d = scratch("cpe1765_tree_gap");
+        let evil_dir = d.join("evil_dir");
+        fs::create_dir(&evil_dir).unwrap();
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let src = d.join("src_tree");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("a.txt"), b"USER CONTENT").unwrap();
+
+        let picked = dest.join("src_tree");
+        if !cpe_server::fsutil::make_dir_link(&evil_dir, &picked) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the copy_tree_streamed gap leg: no directory link on this machine"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut prog = new_test_progress();
+        let mut emit: Box<dyn FnMut(&TransferProgress)> = Box::new(|_| {});
+        let mut last_emit = 0u64;
+        let mut report = TransferReport { id: 1, op: TransferOp::from(TransferKind::Copy), ..Default::default() };
+        let cancelled =
+            !copy_tree_streamed(&src, &picked, &cancel, &mut prog, &mut *emit, &mut last_emit, &mut report);
+
+        let escaped: Vec<_> = fs::read_dir(&evil_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "the tree was written THROUGH the link, outside the destination folder: {escaped:?}"
+        );
+        assert!(!cancelled, "a refused item is a per-item failure, not a cancelled batch");
+        assert_eq!(report.failed, 1, "the refusal must be reported: {:?}", report.errors);
+        assert!(
+            report.errors.iter().any(|e| e.contains(&picked.display().to_string())),
+            "the refusal must name the path: {:?}",
+            report.errors
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Regression: the ordinary path — a free name and an auto-renamed collision — still lands inside the
+    /// destination folder with the right bytes. A fix that refuses everything would pass every test above.
+    #[test]
+    fn cpe_1765_do_copy_into_still_lands_inside_the_folder_and_still_auto_renames() {
+        let d = scratch("cpe1765_copy_ok");
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let src = d.join("report.txt");
+        fs::write(&src, b"USER CONTENT").unwrap();
+
+        let first = do_copy_into(&src, &dest).expect("a free name must copy");
+        assert_eq!(first, dest.join("report.txt"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), "USER CONTENT");
+
+        let second = do_copy_into(&src, &dest).expect("a collision must auto-rename, not fail");
+        assert_eq!(second, dest.join("report - Copy.txt"));
+        assert_eq!(fs::read_to_string(&second).unwrap(), "USER CONTENT");
+
+        // …and the same for a directory tree, which takes the `copy_dir_all` arm.
+        let tree = d.join("tree");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(tree.join("sub/leaf.txt"), b"leaf").unwrap();
+        let t1 = do_copy_into(&tree, &dest).expect("a free name must copy the tree");
+        assert_eq!(fs::read_to_string(t1.join("sub/leaf.txt")).unwrap(), "leaf");
+        let t2 = do_copy_into(&tree, &dest).expect("a colliding tree must auto-rename");
+        assert_eq!(t2, dest.join("tree - Copy"));
+        assert_eq!(fs::read_to_string(t2.join("sub/leaf.txt")).unwrap(), "leaf");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A `TransferProgress` for the two engine tests above — the struct has no `Default` and its `id`/`op`
+    /// are irrelevant to what they assert.
+    fn new_test_progress() -> TransferProgress {
+        TransferProgress {
+            id: 1,
+            op: TransferOp::from(TransferKind::Copy),
+            total_bytes: 0,
+            done_bytes: 0,
+            total_items: 0,
+            done_items: 0,
+            current: String::new(),
+        }
     }
 
     fn wa(kind: &str, resolved: &str) -> WatchAction {

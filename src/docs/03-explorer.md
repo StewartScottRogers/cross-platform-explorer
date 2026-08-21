@@ -229,6 +229,35 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
   renames, so they don't need the panel.) If a copy would overwrite files that already exist, a prompt
   asks once how to handle the whole batch — **Replace**, **Keep both** (auto-numbered), or **Skip**.
+- **"…was free when this operation picked the name and is not free now"** — a copy or move can report
+  this against one item. It means something else — another app, a sync client like OneDrive or Dropbox,
+  a second window, a script — created a file, folder or shortcut at exactly the name the transfer had
+  already chosen, in the instant between choosing it and writing to it. **Nothing was overwritten and
+  nothing was written outside the folder you picked**: the destination name is claimed up front now, so
+  a name that gets taken in that gap fails loudly instead of quietly replacing what appeared there (or,
+  when the newcomer was a shortcut, following it and putting your file somewhere else entirely). The
+  rest of the batch continues; just run the operation again for the item that failed and it will pick a
+  fresh name.
+- **Replace deletes before it writes.** Choosing **Replace** removes the existing item first and only
+  then writes the new one. That matters when the removal fails: if something inside an existing *folder*
+  is open in another program, the delete stops partway, so the folder can be left holding only the files
+  that could not be removed. The transfer then reports **"the existing folder could not be fully removed,
+  so nothing new was written"** and names the path — nothing new is written, but the old folder may
+  already be partly gone, so check it before retrying. A single *file* is removed in one step, so that
+  case really does leave the original untouched. Previously this situation merged the new files into the
+  old folder and reported success, which quietly left a mixture of both.
+- **Moving a shortcut moves the shortcut — on the same drive.** Dragging a symbolic link, junction or
+  shortcut to another folder on the **same drive** moves *the shortcut itself*: it does not copy out the
+  contents of whatever it points at, and does not leave the original behind.
+  **Moving one to a different drive is a different matter, and is best avoided.** A move across drives
+  has to be done as a copy-then-delete, and copying a shortcut follows it — so such a move can write out
+  everything the shortcut points at (which could be a whole home directory) and then delete the shortcut.
+  Moves made through the **Move** command refuse this outright, with a message naming the shortcut and
+  leaving both it and its target alone. Moves that run through the **transfer panel** do not yet, and
+  still copy the contents out. Until the two agree, don't move a shortcut across drives: copy what it
+  points at deliberately if you want the contents on the other drive, or recreate the shortcut there by
+  hand.
+  **Copying** a shortcut still copies what it points at, on any drive, as it always has.
 
 ## Add metadata columns
 
