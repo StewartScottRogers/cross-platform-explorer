@@ -191,6 +191,15 @@ enum OutputOccupancy {
     /// silently folding into `Free` (the bug) or `File` (which a link, dangling or not, never is — a live
     /// file link IS a real occupant too, but `metadata()` already reports that case as `File` by following
     /// it, so `Link` here is reached only for the case `metadata()` cannot resolve).
+    ///
+    /// **Read this severity claim precisely.** A dangling link at a batch output was already refused
+    /// *at write time*, before this fix, by `batch_media::open_output_verified` — it opens with the
+    /// no-follow flag and re-verifies via `symlink_metadata`, so no byte was ever written through it.
+    /// The pre-fix bug was that the refusal happened silently *per item*, landing in `report.skipped`
+    /// inside an otherwise-`Ok`, "the batch succeeded" report. What `Link` restores is the **up-front,
+    /// whole-batch** confirmation gate `is_foreign_overwrite` already gives a real occupied file — not
+    /// a byte-escape hole. Do not read the diff as closing one; do not "simplify" this state away on the
+    /// theory that the write-time guard already covers it — it covers the bytes, not the confirmation.
     Link,
     /// The `stat` failed for a reason other than the path being absent — permission denied along the
     /// resolved path, a dead network mount, an I/O error. We do **not** know whether bytes are there.
@@ -299,6 +308,13 @@ fn is_foreign_overwrite(item: &PlannedItem, input_keys: &std::collections::HashS
         // — fail CLOSED exactly like `Unknown`, for the identical reason: the only cost of being wrong
         // this way is a confirmation prompt, the only cost of being wrong the other way is a write that
         // lands outside the folder the user chose.
+        //
+        // This refusal is a confirmation gate, not the last line of defence — `open_output_verified`'s
+        // write-time no-follow check refuses any link regardless of what this function decides. Before
+        // this fix, a `Link` here fell into the `Free` arm, so the batch ran without asking, that check
+        // caught it at write time anyway, and the file was quietly skip-listed inside a report the caller
+        // reads as a success. This arm is what makes the batch refuse UP FRONT, the way it already does
+        // for a real occupied file — closing a silent, unconfirmed skip, not a byte-escape hole.
         OutputOccupancy::Unknown | OutputOccupancy::Link => return true, // refuse without consent
         OutputOccupancy::File => {}
     }
@@ -418,14 +434,47 @@ pub fn execute_plan_walk(
     let input_keys = LazyInputKeys::new(items);
 
     if !job.confirmed_overwrite {
-        let count = items.iter().filter(|it| is_foreign_overwrite(it, input_keys.get())).count();
-        if count > 0 {
+        // **CPE-1769 UAT finding.** `is_foreign_overwrite` says only THAT an output is foreign, not WHY —
+        // and the generic "re-plan with an explicit confirmation" wording below is actively wrong for one
+        // of its causes. A `Link`-occupied output is refused unconditionally at write time by
+        // `batch_media::open_output_verified` (its no-follow open plus a `symlink_metadata` re-check),
+        // regardless of `confirmed_overwrite` — an independently-run UAT followed this message's own
+        // advice, re-ran with `confirmed_overwrite: true`, and the batch still did not write through the
+        // link; it silently fell back to a per-item skip inside an otherwise-`Ok` report, which is the
+        // exact silent-skip failure this ticket exists to eliminate. So a `Link` cause gets its own,
+        // truthful wording — "confirming will not help, remove the link or rename the output" — while
+        // every other cause keeps the original message, since confirming genuinely does unblock those.
+        let input_keys_ref = input_keys.get();
+        let (link_outputs, other_overwrites): (Vec<_>, Vec<_>) = items
+            .iter()
+            .filter(|it| is_foreign_overwrite(it, input_keys_ref))
+            .partition(|it| output_occupancy(Path::new(&it.output)) == OutputOccupancy::Link);
+        if !link_outputs.is_empty() || !other_overwrites.is_empty() {
+            let mut reasons = Vec::new();
+            if !other_overwrites.is_empty() {
+                let count = other_overwrites.len();
+                reasons.push(format!(
+                    "this plan would overwrite {count} file{} not explicitly part of this batch (either \
+                     the same file as its own input, or an existing file this batch never selected) — \
+                     re-plan with an explicit confirmation or change the job so every output stays clear \
+                     of existing files",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            if !link_outputs.is_empty() {
+                let count = link_outputs.len();
+                reasons.push(format!(
+                    "{count} planned output{} {} occupied by a symlink or NTFS junction, which a batch \
+                     never writes through no matter what — setting `confirmed_overwrite` will NOT unblock \
+                     {}; remove the link, or change the job so this output uses a different name",
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "is" } else { "are" },
+                    if count == 1 { "it" } else { "them" }
+                ));
+            }
             return Err(format!(
-                "refusing to run: this plan would overwrite {count} file{} not explicitly part of this \
-                 batch (either the same file as its own input, or an existing file this batch never \
-                 selected), and `confirmed_overwrite` was not set on the batch job — re-plan with an \
-                 explicit confirmation or change the job so every output stays clear of existing files",
-                if count == 1 { "" } else { "s" }
+                "refusing to run: {}, and `confirmed_overwrite` was not set on the batch job",
+                reasons.join("; and ")
             ));
         }
     }
@@ -2348,6 +2397,56 @@ mod tests {
             "the output slot must still hold the link, not a real file written through it"
         );
         assert!(!err.is_empty(), "the refusal must carry a specific reason");
+    }
+
+    /// **CPE-1769 UAT finding.** The generic refusal wording ("re-plan with an explicit confirmation")
+    /// is actively wrong when the cause is a `Link`: an independently-run UAT followed that advice,
+    /// re-ran with `confirmed_overwrite: true`, and the batch STILL did not write through the link — it
+    /// silently fell back to a per-item skip inside an `Ok` report, the exact silent-skip failure this
+    /// ticket exists to close. So the message for a link-only refusal must say the true thing instead:
+    /// that confirming will not help, and the fix is to remove the link or rename the output.
+    ///
+    /// Pins the message text directly, on a single-item batch so the whole error is the link-specific
+    /// wording with nothing else mixed in — a looser "contains some link text somewhere" assertion could
+    /// pass even if the misleading "re-plan with an explicit confirmation" sentence were still present
+    /// alongside it.
+    #[test]
+    fn cpe_1769_the_refusal_message_for_a_link_output_does_not_claim_confirming_would_help() {
+        let d = scratch("cpe1769-link-message");
+        let input = d.join("in.png");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let output = d.join("out.png");
+        if !crate::fsutil::make_dangling_link(&output) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1769] SKIPPED the link-refusal-message leg: this machine could not stage a link or \
+                 junction at all. NOTHING in this test covered CPE-1769 on this run."
+            );
+            return;
+        }
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: output.to_string_lossy().to_string(),
+            summary: "an output occupied by a dangling link".into(),
+        }];
+        let job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        assert!(!job.confirmed_overwrite, "sanity: no confirmation was given");
+
+        let err = execute_plan(&items, &job)
+            .expect_err("a dangling link at the output must still be refused up front");
+
+        assert!(
+            err.contains("never writes through") && err.contains("will NOT unblock"),
+            "the message must say plainly that a link cannot be written through and that confirming will \
+             not change that: {err}"
+        );
+        assert!(
+            !err.contains("re-plan with an explicit confirmation"),
+            "a link-only refusal must NOT carry the generic advice that confirming would help — that is \
+             the exact wording the UAT followed and found to be false for this cause: {err}"
+        );
     }
 
     /// **SEC-8 (executed by the audit, now a permanent regression test).** The stale `dir_scans` memo let
