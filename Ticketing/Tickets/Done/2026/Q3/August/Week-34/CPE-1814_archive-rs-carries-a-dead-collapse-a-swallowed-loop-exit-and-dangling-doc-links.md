@@ -149,19 +149,21 @@ The Work Log says **8** further occurrences of the swallowed-loop-exit shape rem
 independent Reviewer and the UAT tester enumerated them separately and both counted **7**, agreeing on
 the same list. Corrected here so the next person greps for the right number:
 
-,
-,
-,
-,
-,
-,
-.
+- `every_guarded_row_refuses_a_live_link_without_touching_its_target`
+- `rows_15_and_16_refuse_a_live_link_and_still_extract_the_rest`
+- `rows_21_and_22_tar_refuse_a_link_at_an_entry_name_and_still_extract_the_rest`
+- `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically`
+- `rows_15_to_20_refuse_a_file_entry_addressed_through_a_symlinked_intermediate_directory`
+- `row18_refuses_a_directory_entry_that_would_be_created_outside_the_extraction_folder`
+- `row17_a_dangling_link_at_the_extraction_destination_is_reported_as_a_link`
 
-None of the seven is currently taking the silent-skip path on this machine (UAT ran all seven).
+`rows_19_and_20_sevenz_...` was checked and correctly excluded — it uses `continue`, which is already
+per-row scoped. None of the seven is currently taking the silent-skip path on this machine; the UAT
+tester ran all seven and none printed a skip notice.
 
-Also recorded: on CI this change is a **no-op**, because  is true there and
- already panics inside  before the boolean reaches the assert. The value
-is local: a developer running the suite on a root/elevated machine now gets a loud failure instead of
-a test that quietly verifies nothing. The Reviewer notes this makes the assert inconsistent with the
-~7 other  call sites in the file, which still  and continue -- worth
-settling one way or the other if this area is opened again.
+Also recorded: on CI this change is a **no-op**. `staging_is_strict()` is true there, so
+`require_staged` already panics inside `deny_stat_of` before the boolean ever reaches the new assert.
+The value is local — a developer running the suite on a root or elevated machine now gets a loud
+failure instead of a test that quietly verifies nothing. The Reviewer notes this makes the assert
+inconsistent with the roughly seven other `deny_stat_of` call sites in the file, which still
+`skip_notice!` and continue; worth settling one way or the other if this area is opened again.
