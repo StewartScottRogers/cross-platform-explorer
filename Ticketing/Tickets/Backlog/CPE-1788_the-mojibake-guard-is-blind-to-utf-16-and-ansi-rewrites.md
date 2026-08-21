@@ -125,3 +125,54 @@ Gates: `npx vitest run src/lib/mojibakeGuard.test.ts` — 62/62 passed. Full `np
 files, 4233 tests, all passed. `npm run check` — 0 errors, 0 warnings.
 
 PR: see branch `cpe-1788-guard-utf16-ansi`.
+
+**2026-08-20 (addendum)** — The Reviewer correctly challenged the first Work Log entry's "per the
+Foreman's explicit override" as unverifiable: it cited an authority nobody else could see. Recording
+the override with its actual provenance, since being technically correct did not make that phrasing
+an acceptable record.
+
+**The override, quoted verbatim**, from the Foreman's dispatch instructions for this ticket:
+
+> "5. Tests must be able to FAIL. Stage genuinely corrupted fixture files (write the bytes explicitly
+> with python — do NOT try to produce them through PowerShell, which is the very tool that causes
+> this damage and has broken a release here) and assert the guard catches each."
+
+This instruction overrides the ticket's own Evidence Rule above ("red-proof both by writing a real
+file through PowerShell's `Out-File` and `Set-Content` defaults... not by constructing the bytes
+synthetically"). The Foreman's stated reason: the standing repo guardrail against PowerShell writing
+repo files (PowerShell has BOM'd files and blocked a release here before, commit `86888aed`) took
+precedence over the ticket's instruction to use the real tool, specifically to avoid producing
+corrupted files inside a worktree that might get committed. That is why the implementation fixtures
+were built with `simulatePowerShellAnsiRewrite`/`simulatePowerShellUtf16Rewrite` (explicit byte-level
+construction) rather than a real `powershell.exe Out-File`/`Set-Content` run.
+
+**Real-invocation evidence now exists from two independent sources**, closing the gap the simulators
+left open:
+
+- An independent UAT tester ran the real tool in a throwaway worktree (PowerShell permitted there
+  deliberately, since reproducing the actual damage was the point):
+  - `Set-Content` with no `-Encoding` on a real tracked file: a real em dash's UTF-8 bytes `E2 80 94`
+    collapsed to a single `0x97`; the guard caught it as `README.md:9 [not-utf8] -- invalid byte 0x97
+    at offset 395` (line and offset hand-verified).
+  - `Out-File -Encoding unicode`: produced `FF FE` + a UTF-16LE body; caught as `README.md:1 [utf16]`.
+  - Notable: that tool session sets `$PSDefaultParameterValues['Out-File:Encoding']='utf8'`, which
+    MASKS the real default. With that removed, PowerShell 5.1's genuine `>`/`Out-File` default is
+    UTF-16LE with a BOM — matching this guard's design assumption.
+  - Also honest: `(Get-Content f) | Set-Content f` round-trips byte-identically on that machine,
+    because the CP1252 best-fit table maps all 256 byte values back to themselves. There is nothing
+    for the guard to catch in that specific round-trip shape, and this PR does not claim otherwise.
+  - Both real-PowerShell test files (throwaway UAT worktree) never touched this branch or a commit.
+- The Reviewer independently ran `powershell.exe -NoProfile` for both shapes and confirmed they match
+  this PR's simulators byte-for-byte, and separately cross-checked the CP1252 fixture against
+  Python's `str.encode('cp1252')` — `0x97` at offset 20, exact match to the value reported in the PR
+  body.
+
+**Cost.** UAT's machine measured this file's test suite at 62 tests in 1.8-2.7s on this branch,
+against 42 tests in 1.9-3.0s on `main` — the Reviewer's own timings were too noisy to be conclusive,
+so UAT's numbers are the ones on record.
+
+**Correction to this PR's own framing**: the Reviewer verified that `findFirstInvalidUtf8Byte` scans
+the WHOLE file, not just the first 4 KB — `looksBinary`'s 4 KB window only gates whether the
+not-valid-UTF-8 check runs at all (a real binary is skipped before reaching it), but once a file is
+in scope, every byte to EOF is walked. So a "mostly ASCII with a few high bytes late in the file"
+corruption is caught, which is stronger than this PR's description implied.
