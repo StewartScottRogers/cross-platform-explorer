@@ -47,11 +47,19 @@ pub struct DirEntry {
 /// WebDAV, FTP) — see `FileSystemProvider::list_with_filtered_count`'s default, which delegates to
 /// `list` and reports `0`. Only a backend with its own keyspace rule (e.g. `cpe-s3`, whose `:`-bearing
 /// keys are legal but an embedded `/`/literal `..` genuinely is not) can ever produce a non-zero count.
+///
+/// `unreadable` (CPE-1780) is a DIFFERENT fact from `filtered` above and is never added to it: `filtered`
+/// means "a remote provider refused to show this name at all" (the name is never even seen); `unreadable`
+/// means "the local walk saw this row but could not stat it" (`crates/server/src/listing.rs`'s
+/// `DirWalkStats`) — always `0` for a remote listing, since that failure mode is local-walk-specific (out
+/// of scope here; see CPE-1780's ticket notes). Same non-spoofable, typed-field-not-a-synthetic-row
+/// convention as `filtered`.
 #[derive(Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ListDirResult {
     pub entries: Vec<DirEntry>,
     pub filtered: usize,
+    pub unreadable: usize,
 }
 
 /// Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not

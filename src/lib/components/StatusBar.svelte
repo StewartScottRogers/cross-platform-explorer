@@ -45,6 +45,15 @@
    *  line is data ABOUT the listing, never a fake ROW IN it — same convention as `hiddenShown` above,
    *  the closest existing precedent (a folder-scoped fact about what's/isn't currently shown). */
   export let filteredHidden = 0;
+  /** How many of the current listing's entries could NOT BE READ (CPE-1780) — a `metadata()`/`readdir`
+   *  failure the local walk hit mid-listing, always 0 for a remote listing. DELIBERATELY a separate prop
+   *  from `filteredHidden` above and never added to it: `filteredHidden` means "a name could not be
+   *  shown safely" (the row was never even seen — a REMOTE keyspace-rule refusal); this means "the row
+   *  was seen but the walk could not stat it" (a LOCAL read failure) — different facts needing different
+   *  words, so this renders its own note rather than folding into `filteredHidden`'s sentence. 0 for the
+   *  overwhelming majority of listings, in which case (same convention as `filteredHidden`) the status
+   *  bar renders nothing for it at all. */
+  export let unreadableCount = 0;
   // CPE-1798: `notice` is fed raw backend error strings from 35 `showNotice(String(e), true)` call
   // sites in `App.svelte` (plus one hand-built "Sync failed: " + e.message), and a Rust error routinely
   // embeds the offending filesystem path — so escaping on arrival, same leaf-escapes-what-it-renders
@@ -68,6 +77,14 @@
     ? "1 entry was hidden because its name could not be shown safely"
     : `${filteredHidden} entries were hidden because their names could not be shown safely`;
   $: filteredHiddenTitle = `${filteredHiddenText} — the folder itself loaded successfully.`;
+
+  // CPE-1780: the `unreadableCount` twin of the hoisting above — same "one sentence backs both the
+  // (possibly truncated) visible text and the title tooltip" reasoning, DIFFERENT wording from
+  // `filteredHiddenText` (see `unreadableCount`'s doc for why the two facts must never share a sentence).
+  $: unreadableText = unreadableCount === 1
+    ? "1 entry could not be read"
+    : `${unreadableCount} entries could not be read`;
+  $: unreadableTitle = `${unreadableText} — the rest of the folder loaded successfully.`;
 </script>
 
 <div class="statusbar">
@@ -96,6 +113,15 @@
          truncating the visible text (see `.filtered-hidden` below) never loses either. -->
     <span class="filtered-hidden" title={filteredHiddenTitle}>
       {filteredHiddenText}
+    </span>
+  {/if}
+
+  {#if unreadableCount > 0}
+    <!-- CPE-1780: a separate NOTE from `.filtered-hidden` above, worded for a different fact (a read
+         failure, not a name refused) — see `unreadableCount`'s doc. `--warn` (not `--accent`) because this
+         one IS a real read failure, not just an intentional/successful name filter. -->
+    <span class="unreadable" title={unreadableTitle}>
+      {unreadableText}
     </span>
   {/if}
 
@@ -148,6 +174,19 @@
      either the count or the reassurance, and the status bar's fixed height never grows for a long count. */
   .filtered-hidden {
     color: var(--accent);
+    max-width: 45%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
+  }
+
+  /* CPE-1780: same overflow/truncation strategy as `.filtered-hidden` above (same reasoning — a narrow
+     window must still show the count via `title`), but `--warn` instead of `--accent`: an unreadable row
+     is a genuine read FAILURE for that one row, distinct from a successful, intentional name filter. */
+  .unreadable {
+    color: var(--warn);
     max-width: 45%;
     min-width: 0;
     overflow: hidden;

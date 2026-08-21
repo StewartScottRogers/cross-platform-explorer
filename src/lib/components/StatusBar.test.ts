@@ -74,6 +74,44 @@ describe("StatusBar filtered-hidden note (CPE-1708)", () => {
   });
 });
 
+describe("StatusBar unreadable-entry note (CPE-1780)", () => {
+  it("shows nothing when nothing was unreadable — the overwhelming majority of listings", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 0 });
+    expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
+  it("says N entries could not be read, for a person, when the count is non-zero", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 3 });
+    expect(screen.getByText("3 entries could not be read")).toBeTruthy();
+  });
+
+  it("uses the singular for exactly one", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 1 });
+    expect(screen.getByText("1 entry could not be read")).toBeTruthy();
+  });
+
+  it("puts the full sentence — plus the rest-loaded-successfully reassurance — in the title tooltip", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 3 });
+    const note = screen.getByText("3 entries could not be read");
+    expect(note.getAttribute("title")).toContain("3 entries could not be read");
+    expect(note.getAttribute("title")).toContain("loaded successfully");
+  });
+
+  // CPE-1780 AC: "No count conflates 'name could not be shown safely' with 'could not be read'." Both
+  // notes can legitimately be non-zero at once (a remote listing could in principle refuse some names AND
+  // fail to stat others), so this proves they render as TWO independent, distinctly-worded notes rather
+  // than one merged into the other's count or sentence.
+  it("renders alongside filteredHidden as two DISTINCT notes, never merged into one count or sentence", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 2, unreadableCount: 3 });
+    expect(
+      screen.getByText("2 entries were hidden because their names could not be shown safely"),
+    ).toBeTruthy();
+    expect(screen.getByText("3 entries could not be read")).toBeTruthy();
+    // Neither note's wording is a superset of the other's fact.
+    expect(screen.queryByText(/5 entries|hidden.*could not be read|could not be read.*hidden/i)).toBeNull();
+  });
+});
+
 // CPE-1798: `notice` is fed backend error strings from 35 `showNotice(String(e), true)` call sites in
 // App.svelte, and a Rust error routinely embeds the offending filesystem path — so a bidi/format-control
 // character sitting in that path must not reach either render position raw. Reproduced with a real RLO

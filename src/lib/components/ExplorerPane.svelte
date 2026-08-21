@@ -102,6 +102,15 @@
    *  the previous folder. See `loadListing`'s body for why this must NOT be a synthetic row in
    *  `entries` (CPE-1704 round 2's rejected approach, documented on the backend's `ListDirResult`). */
   export let filteredHidden = 0;
+  /** How many entries the CURRENT listing left out because they could NOT BE READ (CPE-1780) — a
+   *  `metadata()`/`readdir` failure the walk hit mid-listing, always 0 for a remote listing (that
+   *  failure mode is local-walk-specific; see `ListDirResult::unreadable`'s doc in
+   *  `crates/server/src/model.rs`). Deliberately a SEPARATE count from `filteredHidden` above: that one
+   *  means "a name could not be shown safely" (the row was never even seen); this one means "the row was
+   *  seen but couldn't be stat'd". Same reset/refresh lifecycle as `filteredHidden` — 0 at the start of
+   *  every `loadListing`, set from whichever fetch actually completes, so it never shows a stale value
+   *  left over from the previous folder. */
+  export let unreadableCount = 0;
   export let cutPaths: string[] = [];
   export let renamingPath = "";
   export let renameValue = "";
@@ -330,8 +339,20 @@
         // CPE-1708: refresh the honest count too — a cache-served view starts at 0 (unknown) until this
         // background revalidation actually asks the provider, see `loadListing`'s cache branch below.
         filteredHidden = fresh.filtered;
+        unreadableCount = fresh.unreadable; // CPE-1780: same reasoning, the sibling count
       }
     } catch { /* keep the cached view */ }
+  }
+
+  /** Bump the generation token WITHOUT starting a new load (CPE-1780) — called by the caller (App)
+   *  whenever it moves the view away from this pane's plain folder listing without routing through
+   *  `loadListing`: to Home, into an archive, into a smart folder, or into a saved structured search.
+   *  Without this, a `revalidateDir`/stream scheduled for the folder just left can still fire afterward
+   *  and pass its `gen === loadGen` check, silently reassigning `entries` (and `filteredHidden`/
+   *  `unreadableCount`) for a view that is no longer showing that folder — the CPE-756 class of bug: the
+   *  generation token must cover every way you can LEAVE a listing, not just every way you enter one. */
+  export function invalidateListing(): void {
+    loadGen++;
   }
 
   /** Fetch + stream `path` into `entries`. Owns supersede + cache. Returns false if superseded (the caller
@@ -365,13 +386,16 @@
       // CPE-1708: the cache only stores `DirEntry[]`, not the paired filtered count, so a cache-served
       // paint can't know it yet — 0 (never a stale remembered value) until the stale-while-revalidate
       // pass below asks the provider again and `revalidateDir` sets the real number moments later.
+      // CPE-1780: `unreadableCount` follows the exact same reasoning (its own separate count).
       filteredHidden = 0;
+      unreadableCount = 0;
       loading = false;
       markPainted();
       await tick(); // let the reactive `visible` derive before the caller's post-load hooks read it
     } else {
       entries = [];
       filteredHidden = 0;
+      unreadableCount = 0;
       loading = true;
       try {
         // Coalesce stream batches (CPE-689): buffer and flush once per animation frame so `visible`
@@ -399,7 +423,10 @@
         // only after a later cache-hit revalidation. `?? 0` tolerates a bare-number legacy shape (there
         // is none in production, but a defensive default costs nothing and keeps this resilient to a
         // test double that doesn't model the full result shape).
-        if (gen === loadGen) filteredHidden = streamResult?.filtered ?? 0;
+        if (gen === loadGen) {
+          filteredHidden = streamResult?.filtered ?? 0;
+          unreadableCount = streamResult?.unreadable ?? 0; // CPE-1780: sibling count, same first-paint path
+        }
       } catch (e) {
         if (gen === loadGen) { entries = []; error = friendlyError(String(e)); }
       } finally {

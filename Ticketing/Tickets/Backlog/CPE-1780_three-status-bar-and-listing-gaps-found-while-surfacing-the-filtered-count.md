@@ -63,12 +63,12 @@ shown safely"; an unreadable entry is a different fact and needs different words
 
 ## Acceptance criteria
 
-- [ ] A `revalidateDir` in flight when the user navigates to Home / into an archive / into a smart folder
+- [x] A `revalidateDir` in flight when the user navigates to Home / into an archive / into a smart folder
       cannot mutate `entries`. Breaking the fix reds a distinct test.
-- [ ] Pane B's behaviour is either fixed or documented — not left implicit.
-- [ ] An unreadable local entry is either counted under its own name with its own wording, or the decision
+- [x] Pane B's behaviour is either fixed or documented — not left implicit.
+- [x] An unreadable local entry is either counted under its own name with its own wording, or the decision
       not to count it is recorded at the call site.
-- [ ] No count conflates "name could not be shown safely" with "could not be read". They are different
+- [x] No count conflates "name could not be shown safely" with "could not be read". They are different
       facts and the user needs different words for them.
 
 ## Notes
@@ -76,3 +76,35 @@ shown safely"; an unreadable entry is a different fact and needs different words
 Found by the Reviewer on **PR #933 / CPE-1708**, 2026-08-18, during the batched sprint; all three explicitly
 scoped out of that PR. Related: CPE-1708, CPE-756 (the generation-token class), CPE-1704 (the S3 name
 refusals being counted), and `CLAUDE.md`'s `list_dir` skip-on-error guardrail.
+
+## Work Log
+
+**2026-08-20** — All three gaps fixed:
+
+1. **Generation-token gap.** `ExplorerPane.svelte` gained an exported `invalidateListing()` that bumps
+   `loadGen` without starting a new load. `App.svelte` now calls it at every place that moves the pane's
+   view away from a plain folder listing without routing through `loadListing`: `loadPath`'s HOME
+   short-circuit, `navigateB`'s HOME short-circuit (pane B has the identical bug), `enterArchive`,
+   `openSmartFolder`, and `openStructuredSearch`. A `revalidateDir`/stream scheduled before one of these
+   fires can no longer pass its `gen === loadGen` check and reassign `entries` underneath the new view.
+   Proven by `src/lib/components/ExplorerPane.invalidateListing.test.ts` (a positive case + a "sanity"
+   case proving the race is real without the fix) — red-checked by disabling the `loadGen++` line.
+2. **Pane B's filtered/unreadable count.** Decided, not fixed: pane B has no listing-metadata plumbing
+   today (no archive/smart-folder/structured-search concepts either), so extending the single
+   `<StatusBar>` to cover it is out of scope here. Documented at the `<StatusBar>` call site in
+   `App.svelte` and in `docs/03-explorer.md`'s Dual-pane section: the status bar always describes the
+   left pane, even when the right pane is active.
+3. **Unreadable local entries now counted, separately from `filtered`.** `cpe_server::listing` gained
+   `DirWalkStats { total, unreadable }` (with `fold_walk_entry` pulled out so the counting rule is
+   deterministically unit-testable without racing a real OS metadata failure) and
+   `list_dir_with_unreadable`. `ListDirResult`/`StreamDirResult` both gained an `unreadable: usize` field,
+   always `0` for a remote listing. The frontend threads it through as `unreadableCount` (mirroring
+   `filteredHidden`'s lifecycle exactly) and `StatusBar.svelte` renders a distinctly-worded note ("N
+   entries could not be read", `--warn` toned) that can appear alongside the `filteredHidden` note without
+   either conflating the other's count.
+
+Gates: `npm run check` (0 errors), `npx vitest run` (320 files / 4224 tests, all green), `cargo clippy
+--all-targets -- -D warnings` + `cargo test` in both `src-tauri` feature modes (default: 200 tests;
+`--features sidecar-platform`: 255 tests), plus `cpe-server`/`cpe-net` clippy+test (2254 / 37 tests).
+`bindings.gen.ts` regenerated (`ListDirResult`/`StreamDirResult` gained `unreadable`). PR: see the branch
+`cpe-1780-listing-gaps`.

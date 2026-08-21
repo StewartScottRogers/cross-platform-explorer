@@ -631,15 +631,17 @@ async fn list_dir(path: String) -> Result<ListDirResult, String> {
 /// unaffected") is independently unit testable against the SAME code the real command calls, not a
 /// hand-duplicated copy of it that could silently drift from what `list_dir` actually runs.
 fn local_list_dir_result(path: &str) -> Result<ListDirResult, String> {
-    cpe_server::listing::list_dir(path).map(|entries| ListDirResult { entries, filtered: 0 })
+    cpe_server::listing::list_dir_with_unreadable(path)
+        .map(|(entries, unreadable)| ListDirResult { entries, filtered: 0, unreadable })
 }
 
 /// The `RemoteListing` → `ListDirResult` link of the CPE-1708 chain: a free function (not a `From` impl —
 /// neither type is local to this crate, so the orphan rule blocks that) so it's independently unit
 /// testable without needing a live provider pool. `entries`/`filtered` both carry straight across —
-/// nothing here can silently drop or zero the count.
+/// nothing here can silently drop or zero the count. `unreadable` (CPE-1780) is always `0` here — a
+/// remote-read failure isn't the local-walk-stat failure this field means (see `ListDirResult`'s doc).
 fn listing_to_result(listing: cpe_vfs::connect::RemoteListing) -> ListDirResult {
-    ListDirResult { entries: listing.entries, filtered: listing.filtered }
+    ListDirResult { entries: listing.entries, filtered: listing.filtered, unreadable: 0 }
 }
 
 /// Registry of in-flight `list_dir_stream` walks' cancel flags, keyed by the frontend-supplied stream id,
@@ -660,11 +662,14 @@ fn dir_stream_registry(
 /// many provider-supplied entries were left out because their name could not be shown safely — but via
 /// the streaming twin, which is the pane's actual first-paint path (`ExplorerPane.loadListing`; `list_dir`
 /// itself is only the collect-to-vec convenience path, STREAMING.md). Always `0` for a local walk.
+/// `unreadable` (CPE-1780) mirrors [`ListDirResult::unreadable`] — a local row the walk saw but couldn't
+/// stat, always `0` for a remote walk (see that field's doc for why it's never combined with `filtered`).
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct StreamDirResult {
     total: usize,
     filtered: usize,
+    unreadable: usize,
 }
 
 /// Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
@@ -688,8 +693,11 @@ async fn list_dir_stream(
     match cpe_server::fs_route::route(&path) {
         cpe_server::fs_route::Route::Local => {
             tauri::async_runtime::spawn_blocking(move || {
-                list_dir_stream_impl(path, stream_id, on_entry)
-                    .map(|total| StreamDirResult { total, filtered: 0 })
+                list_dir_stream_impl(path, stream_id, on_entry).map(|stats| StreamDirResult {
+                    total: stats.total,
+                    filtered: 0,
+                    unreadable: stats.unreadable,
+                })
             })
             .await
             .map_err(|e| e.to_string())?
@@ -708,7 +716,7 @@ fn list_dir_stream_impl(
     path: String,
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
-) -> Result<usize, String> {
+) -> Result<cpe_server::listing::DirWalkStats, String> {
     use std::sync::atomic::Ordering;
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     dir_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
@@ -8454,7 +8462,9 @@ fn remote_list_dir_stream_impl(
 /// drained into channel batches, so `total`/`filtered` can never end up reflecting a partially-cancelled
 /// walk.
 fn stream_result_for(listing: &cpe_vfs::connect::RemoteListing) -> StreamDirResult {
-    StreamDirResult { total: listing.entries.len(), filtered: listing.filtered }
+    // `unreadable` (CPE-1780) is always 0 here — see `ListDirResult::unreadable`'s doc for why a
+    // remote-read failure isn't the local-walk-stat failure this field means.
+    StreamDirResult { total: listing.entries.len(), filtered: listing.filtered, unreadable: 0 }
 }
 
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
@@ -13836,6 +13846,7 @@ mod tests {
         let result = stream_result_for(&listing);
         assert_eq!(result.total, 1, "one safe leaf streamed");
         assert_eq!(result.filtered, 2, "list_dir_stream's StreamDirResult must carry the real count through");
+        assert_eq!(result.unreadable, 0, "CPE-1780: a remote listing never reports unreadable — only filtered");
     }
 
     /// Link 3→4 (command → frontend): what actually crosses the Tauri IPC wire is `serde_json`, keyed by
@@ -13845,14 +13856,18 @@ mod tests {
     /// the class of drift CI's Typed-bindings guard also independently catches.
     #[test]
     fn list_dir_result_and_stream_dir_result_serialize_the_filtered_field_by_name() {
-        let ldr = ListDirResult { entries: vec![], filtered: 3 };
+        let ldr = ListDirResult { entries: vec![], filtered: 3, unreadable: 4 };
         let v = serde_json::to_value(&ldr).unwrap();
         assert_eq!(v["filtered"], 3, "ListDirResult must serialize `filtered` under that exact key");
+        // CPE-1780: `unreadable` is a DIFFERENT count from `filtered` and must serialize under its own
+        // key, not get folded into `filtered` (the whole point of keeping them separate fields).
+        assert_eq!(v["unreadable"], 4, "ListDirResult must serialize `unreadable` under that exact key");
         assert_eq!(v["entries"], serde_json::json!([]));
 
-        let sdr = StreamDirResult { total: 5, filtered: 2 };
+        let sdr = StreamDirResult { total: 5, filtered: 2, unreadable: 1 };
         let v = serde_json::to_value(&sdr).unwrap();
         assert_eq!(v["filtered"], 2, "StreamDirResult must serialize `filtered` under that exact key");
+        assert_eq!(v["unreadable"], 1, "StreamDirResult must serialize `unreadable` under that exact key");
         assert_eq!(v["total"], 5);
     }
 
@@ -13874,6 +13889,10 @@ mod tests {
         let result = local_list_dir_result(dir.to_str().unwrap()).expect("local listing succeeds");
         assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
         assert_eq!(result.entries.len(), 1);
+        // CPE-1780: an ordinary local listing (nothing unreadable in it) must report 0, wired through
+        // `list_dir_with_unreadable` — not left at whatever `Default`/leftover value a struct-literal typo
+        // would silently produce.
+        assert_eq!(result.unreadable, 0, "an ordinary local listing has nothing unreadable to report");
     }
 
     // ---- Safety-scan command smoke tests (CPE-1287, epic CPE-1002) ----------------------------------

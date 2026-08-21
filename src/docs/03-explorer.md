@@ -173,7 +173,11 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   root works, and its live refresh.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
-  rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
+  rename. Filesystem operations skip entries they can't read rather than failing the whole listing — and
+  the folder listing itself does too: if a row can't be read (a permissions/timing issue while the
+  listing was being taken), it's left out and the status bar says how many, worded distinctly from the
+  "hidden because the name couldn't be shown safely" note a filtered remote folder shows (see
+  [Network](31-network)) — a different fact, so it gets different words.
 - **Securely delete…** — right-click a file (or a multi-file selection, no folders) and choose
   **Securely delete…** to overwrite its bytes before removing it, instead of an ordinary delete. This is
   **permanent and non-recoverable** — unlike Delete, it never goes to the Recycle Bin/Trash, so there's no
@@ -304,6 +308,10 @@ Commander keys act on the active pane's selection:
 
 The same actions (plus **Mirror path to other pane**) are in the command palette under *View*. Copies and
 moves run through the transfer manager, so large operations show progress and can be cancelled.
+
+The status bar at the bottom always describes the **left pane**, even while the right pane is active —
+its item count, selection, and the read-failure/name-filtered notes above all stay pinned to the left
+pane's folder. There's no separate status line for the right pane yet.
 
 ## Shell integration — "Open in Cross-Platform Explorer"
 
