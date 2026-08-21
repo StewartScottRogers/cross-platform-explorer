@@ -204,11 +204,16 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      # CPE-1787: same ForceIPv4/retry/timeout hardening gui-smoke.yml carries for this exact apt-get
+      # site (CPE-1772) — a GitHub-hosted-runner IPv6-connectivity stall can hang `apt-get update` with
+      # zero output before it ever falls back to IPv4. `timeout-minutes` turns that into a fast, named
+      # failure instead of riding to the job's (unset, so 360-minute default) cap.
       - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -451,9 +456,14 @@ jobs:
       # (CPE-1049, tests/native_meta_os_interop.rs) to read an xattr back through the OS's own tool,
       # independent of native_meta::read. Without it the Linux leg would silently skip (ErrorKind::NotFound)
       # instead of genuinely asserting OS interop — install it so the assertion always runs on Linux.
+      # CPE-1787: ForceIPv4/retry/timeout hardening — see the `backend` job's copy of this comment
+      # (CPE-1772) for the IPv6-stall diagnosis this guards against.
       - name: Install attr (getfattr) for xattr interop test
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y attr
+        timeout-minutes: 5
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y attr
 
       # Native deps for the PDF (`pdf-thumb`, CPE-1256) + video (`video-thumb`, CPE-1257) thumbnail
       # extractors' real-render tests (ship-enablement CPE-1258, epic CPE-718). Both extractors already
@@ -467,10 +477,18 @@ jobs:
       # real-render tests SKIP (not fail) when their dep is unresolvable (crates/server/src/thumb_pdf.rs
       # / thumb_video.rs), so a flaky third-party download must never red the pipeline (CPE-1268). When
       # the install succeeds the real assertions run; when it hiccups they degrade to a skip.
+      # CPE-1787: ForceIPv4/retry/timeout hardening, PLUS a `timeout-minutes` this step previously
+      # lacked entirely — `continue-on-error: true` only helps once the step reaches a terminal state,
+      # and with no timeout a genuine hang here never reached one: this exact step hung with zero
+      # output for 1.5+ hours on PR #935's own `Server crates (ubuntu-latest)` job (see CPE-1772) and
+      # had to be cancelled and rerun manually. The cap below lets `continue-on-error` do its job.
       - name: Install ffmpeg (video-thumb real-render test, Linux)
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        timeout-minutes: 8
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y ffmpeg
 
       - name: Install ffmpeg (video-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
@@ -1230,11 +1248,15 @@ jobs:
           components: clippy
 
       # The Linux Secret Service keyring backend (CPE-322) links libdbus.
+      # CPE-1787: ForceIPv4/retry/timeout hardening — see the `backend` job's copy of this comment
+      # (CPE-1772) for the IPv6-stall diagnosis this guards against. This `apt-get update`'s cached
+      # lists are reused by the "host — real keychain round-trip" step's `gnome-keyring` install below.
       - name: Install Linux system dependencies (libdbus for the keyring)
         if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libdbus-1-dev pkg-config
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -1264,13 +1286,19 @@ jobs:
       # keychain; here we run it explicitly. Linux needs an unlocked gnome-keyring in a D-Bus session.
       # Best-effort (continue-on-error): a CI keychain quirk must never red the pipeline — a green run
       # is the signal.
+      # CPE-1787: `timeout-minutes` is new — same reasoning as the `ffmpeg` install in the `crates` job:
+      # `continue-on-error: true` only helps once the step reaches a terminal state, and this step's
+      # `gnome-keyring` install (site 5, sharing the apt-get update cache from the step above) had no
+      # cap at all. Sized generously above the ~45s apt normally costs here to leave room for the
+      # real keychain round-trip test that follows it.
       - name: host — real keychain round-trip (CPE-322)
         working-directory: sidecar/host
         continue-on-error: true
+        timeout-minutes: 10
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get install -y gnome-keyring
+            sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y gnome-keyring
             dbus-run-session -- bash -c '
               eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
               cargo test --test keyring_roundtrip -- --ignored --nocapture
