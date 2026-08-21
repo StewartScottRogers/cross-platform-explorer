@@ -3,11 +3,11 @@ id: CPE-1765
 title: The name-pick-to-write gap lets a copy land outside the folder the user chose (measured TOCTOU)
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: L
 created: 2026-08-17
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
