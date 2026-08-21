@@ -270,7 +270,7 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // **already sitting in `dest`** on that path, which is the other half.
 //
 // **The row count reconciles to the source.** `archive.rs` has 8 `create_dir_all` calls (re-counted
-// after CPE-1807, which removed two): 2 in row 1 (the shared root, and re-creating this session's own
+// after CPE-1807, which removed three — one off row 17, two off row 18): 2 in row 1 (the shared root, and re-creating this session's own
 // root if another instance's sweeper removed it — CPE-1786), 3 in row 17 (the extraction `dest` roots —
 // down from 4: [`extract_zip_encrypted`] no longer creates `dest` itself, since CPE-1807 made it call
 // row 16's loop, which already does), 2 in row 18 (per-entry, inside row 16's loop — down from 4 for the
@@ -2412,14 +2412,27 @@ pub fn compress_to_zip_encrypted(paths: &[String], dest: &str, password: &str) -
 /// - [`entry_name_is_safe`] (zip-slip / reserved-name refusal) and [`entry_dir_action`]/[`entry_sink_action`]
 ///   (leaf-link + per-component containment, rows 15/18 of the CPE-1733 table) were already applied
 ///   identically by the old loop, in the same order; unchanged by the merge.
-/// - **Newly gained: symlink-entry containment** ([`link_target_action`], reached via `entry.is_symlink()`
-///   in the shared loop). A zip entry's symlink flag and its declared link target live in central-directory
-///   metadata the `zip` crate does not encrypt — only the entry's *content* stream is AES-protected — so
-///   `is_symlink()` and reading the target read correctly before decryption. `extract_zip_encrypted_streamed`
-///   already routed through this loop, so the streamed encrypted path had this guard already; the one-shot
-///   path gains it now, the same capability move CPE-1759 made for the one-shot *plain* zip path.
-/// - **Newly gained: unix permission-bit restoration.** Same reasoning — `unix_mode()` is
-///   central-directory metadata, unaffected by AES encryption of the content stream.
+/// - **The merge changes what this path can DO, not what it previously failed to refuse.** The old loop
+///   pushed every entry — symlink-flagged or not — through `File::create` + `io::copy`, so a symlink
+///   entry landed as an ordinary file containing the target path as literal text: one of the three
+///   policies [`link_target_action`]'s own doc names as SAFE for CPE-1774. It could not create a real
+///   link at all, on any target, benign or escaping — there was no hole here to close. The merge makes
+///   this one-shot path able to create a real symlink for the first time ([`link_target_action`], reached
+///   via `entry.is_symlink()` in the shared loop, the same capability move CPE-1759 made for the one-shot
+///   *plain* zip path), and it is [`link_target_action`]'s containment check — not the previous inability
+///   to create a link — that keeps an escaping target from working post-merge. This reads correctly on an
+///   AES entry because a zip entry's symlink flag and declared target are central-directory metadata the
+///   `zip` crate does not encrypt (only the entry's *content* stream is AES-protected); the streamed
+///   encrypted extractor already proved the guard fires on real ciphertext, since it already routed
+///   through this loop.
+/// - **User-visible consequence of that widening — documented here, not fixed (filed as a separate
+///   ticket):** an entry the old loop always wrote as a readable text file — including one whose target
+///   escapes `dest` — can now instead vanish with no note when [`link_target_action`] refuses it, because
+///   this signature predates [`ArchiveReport`] and still has nowhere to put one. A successful-looking
+///   extraction quietly missing a file is exactly the hazard shape this module reports everywhere else it
+///   can; on this one-shot path it still cannot.
+/// - **Newly gained: unix permission-bit restoration.** Same metadata reasoning — `unix_mode()` is
+///   central-directory data, unaffected by AES encryption of the content stream.
 /// - **Nothing password-specific is lost.** `password` is threaded straight into the loop's own
 ///   `archive.by_index_decrypt(i, pw.as_bytes())` call (see [`extract_zip_archive_stream`]) — the
 ///   identical call this function used to make itself, at the identical point in the per-entry sequence —
@@ -7758,6 +7771,25 @@ mod tests {
         w.finish().unwrap().into_inner()
     }
 
+    /// AES-256-encrypted twin of [`craft_zip_with_symlink`], for CPE-1807: `extract_zip_encrypted` used
+    /// to be a fourth, unmerged loop with no symlink-entry handling at all, so this is what lets a test
+    /// tell "the guard fires on a real ciphertext entry" apart from "the guard fires on plaintext, and
+    /// nothing checks the encrypted path specifically".
+    fn craft_zip_with_symlink_encrypted(name: &str, target: &str, password: &str) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let link: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+            .unix_permissions(0o120_777)
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, password);
+        w.add_symlink(name, target, link).unwrap();
+        let plain: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, password);
+        w.start_file("ok.txt", plain).unwrap();
+        w.write_all(b"ORDINARY").unwrap();
+        w.finish().unwrap().into_inner()
+    }
+
     /// The six names CPE-1758 taught `entry_name_is_safe` to refuse, plus the payload that makes the
     /// first one visible. `x.` and `x ` and the device names are Windows-only shapes — `entry_name_is_safe`
     /// is the identity on other platforms for those — so the expectation is computed from the guard
@@ -8067,6 +8099,65 @@ mod tests {
                     );
                 }
             }
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1807's leg of the table above: `extract_zip_encrypted` gets the identical containment
+    /// guard, and this is what pins that rather than assuming it from the code shape.** Before CPE-1807
+    /// this function had no [`link_target_action`] check at all -- a symlink entry was never refused, it
+    /// was pushed through `File::create` + `io::copy` like any other entry, so the leaf ended up an
+    /// ordinary file holding the escaping TARGET STRING as its content. That content is neither a real
+    /// link nor the victim's bytes, so a weaker "no symlink" / "content != victim" pair of assertions
+    /// passes on that regressed behaviour too -- the actual discriminator, and the one this test uses, is
+    /// whether the leaf exists AT ALL: skipped (merged, correct) leaves nothing there; re-duplicated
+    /// (regressed) leaves a text file. This reds on a straight revert of the CPE-1807 merge -- verified by
+    /// restoring the deleted loop and re-running this test, which failed on all four target shapes before
+    /// this comment was written. Same four escaping-target shapes as the plain-zip table above, run
+    /// against a REAL AES-256 entry so the guard is proven to fire on ciphertext, not just on the
+    /// unencrypted stand-in the rest of this table uses.
+    #[test]
+    fn cpe1807_encrypted_zip_symlink_entry_whose_target_escapes_creates_no_link() {
+        let d = scratch("cpe1807_zip_encrypted");
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
+
+        for (label, target) in cpe1774_escaping_targets(&outside) {
+            let ap = d.join(format!("z_enc_{label}.zip"));
+            fs::write(&ap, craft_zip_with_symlink_encrypted("evil_link", &target, "hunter2")).unwrap();
+            let dest = outside.join(format!("dest_enc_{label}"));
+
+            let outcome = extract_zip_encrypted(&ap.to_string_lossy(), &dest.to_string_lossy(), "hunter2");
+
+            // ---- the harm, before the Result ----
+            let leaf = dest.join("evil_link");
+            assert!(
+                !leaf.exists(),
+                "{label} encrypted: a refused link entry must leave NOTHING at its name. A re-duplicated \
+                 loop instead writes an ordinary file here holding the escaping target string -- present, \
+                 not a symlink, and not equal to the victim's bytes, so this is the one assertion that \
+                 actually distinguishes a skip from that regression."
+            );
+            assert!(
+                !fs::symlink_metadata(&leaf).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "{label} encrypted: no LINK may exist at the entry's name either, belt-and-suspenders \
+                 alongside the existence check above"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.join("victim.txt")).unwrap(),
+                "SECRET",
+                "{label} encrypted: the victim itself must be untouched"
+            );
+            outcome.unwrap_or_else(|e| {
+                panic!("{label} encrypted: a refused link entry is a SKIP, never an abort: {e}")
+            });
+            assert_eq!(
+                fs::read(dest.join("ok.txt")).unwrap(),
+                b"ORDINARY".to_vec(),
+                "{label} encrypted: the rest of the archive still extracts -- ok.txt sits AFTER the \
+                 poisoned entry, so its absence is what an abort looks like"
+            );
         }
         let _ = fs::remove_dir_all(&d);
     }

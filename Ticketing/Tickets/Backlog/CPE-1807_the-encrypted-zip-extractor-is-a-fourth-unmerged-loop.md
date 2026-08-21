@@ -99,3 +99,48 @@ no warnings. `cargo test --manifest-path crates/server/Cargo.toml --lib` — `22
 ignored`.
 
 PR: see branch `cpe-1807-encrypted-zip-loop`.
+
+### 2026-08-20 — Reviewer's CHANGES REQUESTED on PR #975, addressed
+
+The Reviewer verified the code itself could not break the guard (metadata-reads-before-decryption claim
+confirmed against `zip-2.4.2` source AND measured on real AES-256 archives; nothing lost, diffed step by
+step; six escape attempts all refused) — but found three doc/test blockers, all in the record rather than
+the code:
+
+1. **Count paragraph's own subtraction was wrong.** Wrote "which removed two"; the breakdown beneath it
+   (row 17 -1, row 18 -2) sums to three, and `11 - 2 = 9 ≠ 8`. Fixed to "removed three — one off row 17,
+   two off row 18".
+2. **The security-delta bullet was framed backwards.** It read as "symlink containment newly gained" with
+   no context, which a reader takes as "the old path had a link-escape hole." It did not — the old loop
+   pushed a symlink entry through `File::create`/`io::copy` like any other entry, so it could not create a
+   real link AT ALL, benign or escaping (one of `link_target_action`'s own doc's three SAFE policies for
+   CPE-1774). Rewrote the bullet: the merge is what makes this path *able* to create a real symlink for
+   the first time, and `link_target_action` is what keeps that new ability from being escaped. Added a
+   line documenting the user-visible consequence, filed separately per the Foreman's instruction: an entry
+   that used to appear as a readable (if wrong-looking) text file can now vanish with no note on refusal,
+   since this signature still has nowhere to put one.
+3. **Nothing pinned the merge.** Added `cpe1807_encrypted_zip_symlink_entry_whose_target_escapes_creates_no_link`,
+   the encrypted leg the CPE-1774 zip table was missing, using a new `craft_zip_with_symlink_encrypted`
+   helper (real AES-256 entries, all four CPE-1774 escaping-target shapes). **First draft of this test was
+   itself too weak** — it asserted "not a symlink" + "content != victim bytes", which the OLD duplicated
+   loop's actual failure mode (writes the target STRING as an ordinary file's content) also satisfies, so
+   it passed green even with the deleted loop restored verbatim. Rewrote the primary assertion to
+   `!leaf.exists()`, the one thing that actually differs between skip (merged) and text-file (regressed).
+   Red-proofed by restoring the deleted loop into `extract_zip_encrypted` and re-running just this test:
+   failed on the first target shape (`plain-parent`) with the new assertion's message, confirming it
+   catches the regression; reverted, confirmed green again, then re-ran clippy and the full suite.
+
+**Follow-ups mentioned per the Foreman's instruction, not fixed here:**
+4. This round's doc rewrite adds a few more `public documentation for X links to private item` rustdoc
+   warnings (measured on this branch: 20 such warnings in `archive.rs` alone, of 487 total in the crate;
+   no exact prior baseline re-measured this round). No CI gate runs `cargo doc`, and the module already
+   carries this warning class throughout, so this is style-consistent noise, not a regression — but it is
+   real and not zero.
+5. On unix, the shared loop's deferred `set_permissions` pass can now turn a fully-written encrypted
+   extraction into an `Err` after every file has landed, which the old one-shot loop could not do (it had
+   no mode-restoration pass at all). Same shape as rows 16/23 already have, so not a regression relative to
+   its siblings, but new for this specific function.
+
+**Gates, re-run after all three blocker fixes:** `cargo clippy --manifest-path crates/server/Cargo.toml
+--all-targets -- -D warnings` — clean, no warnings. `cargo test --manifest-path crates/server/Cargo.toml
+--lib` — `2273 passed; 0 failed; 4 ignored` (2272 + the 1 new test).
