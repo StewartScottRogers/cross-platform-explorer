@@ -45,6 +45,25 @@
    *  has no per-item count to give, which is why the message below picks its wording from this rather
    *  than always claiming a number. */
   let skipped = 0;
+  /** CPE-1816: true once the current pass has fully resolved (summary received, or the invoke threw) —
+   *  false for the whole window between the first batch landing (which flips `loading` off, per
+   *  STREAMING.md) and that resolution. `degraded`/`skipped` ride on the summary, which by construction
+   *  arrives last, so during that window the app genuinely does not yet know whether this pass will turn
+   *  out degraded.
+   *
+   *  MUST be reset to `false` at the top of every `load()` call (CPE-1816 review round 2): without that
+   *  reset, a Refresh keeps the PREVIOUS pass's resolved `true` while the new stream is still in flight,
+   *  which reintroduces this ticket's exact bug on the second load — see the reset test.
+   *
+   *  Gates the title-bar count slot (in place of a number, mid-stream, since the real total isn't final)
+   *  and, together with `degraded`, the empty-pane note when `entries` drains to zero mid-stream (CPE-1816
+   *  review round 2: reachable via Restore/Empty draining the last visible row before the summary
+   *  resolves, not just via an untouched empty Trash) — so neither a growing count nor "Trash is empty"
+   *  can assert something this pass doesn't yet know. Does NOT gate the degraded-with-rows banner above
+   *  the list, which stays keyed on `degraded` alone (CPE-1816 review round 2 / Visual Critic: moving the
+   *  mid-stream caveat into the title bar instead of that banner avoids a ~55px row-jump on every clean
+   *  load and a one-frame flash on a fast trash — see `noticeMessage` below). */
+  let complete = false;
   let selected = new Set<string>();
   /** Which empty confirm is pending ("all" = whole Trash via the toolbar button with nothing selected
    *  or the explicit "Empty Trash" action; "selected" = just the checked rows), or null when the
@@ -69,6 +88,7 @@
     error = "";
     degraded = false;
     skipped = 0;
+    complete = false;
     loading = true;
     try {
       const channel = createChannel<TrashEntry[]>();
@@ -86,9 +106,18 @@
       if (gen === loadGen) {
         degraded = summary.degraded;
         skipped = summary.skipped;
+        complete = true; // CPE-1816: only now is the verdict in — safe to assert a count or its absence
       }
     } catch (e) {
-      if (gen === loadGen) error = e instanceof Error ? e.message : String(e);
+      if (gen === loadGen) {
+        error = e instanceof Error ? e.message : String(e);
+        // Defensive only, not currently test-observable: `error` already gates every rendered branch
+        // that would otherwise consult `complete` (the title-bar slot and the empty-pane note both check
+        // `!error` first), so nothing visibly changes if this line is deleted. Kept because a future
+        // change to those conditions should not silently reintroduce a stuck-incomplete state on a failed
+        // pass -- correctness-by-construction rather than a covered path. Reviewer review (round 2).
+        complete = true;
+      }
     } finally {
       if (gen === loadGen) loading = false;
     }
@@ -170,6 +199,20 @@
         ? $t("trash.skippedOne")
         : $t("trash.skippedMany", { count: skipped })
       : $t("trash.degraded");
+  /** CPE-1816: the one caveat shared by two very different unfinished-listing states — `degraded`
+   *  (resolved, known incomplete) and mid-stream (`!complete`, not yet resolved, not yet known either
+   *  way). `degraded` is authoritative once it's known (`complete` is true by the time it's ever true),
+   *  so it's checked first; otherwise the honest answer is "not sure yet", not "no problem so far".
+   *
+   *  Used in the title-bar count slot (mid-stream only — see the markup) and in the empty-pane note when
+   *  `entries` is empty AND either state applies. Deliberately NOT used for the rows-above-the-list
+   *  banner when rows are present and mid-stream: CPE-1816 review round 2 (Visual Critic) measured that
+   *  putting a *second* caveat location there caused a ~55px layout jump on every ordinary clean load (the
+   *  banner appearing then vanishing) and could flash for a single frame on a fast trash where the whole
+   *  pass resolves in one batch. The title bar's count slot is already empty in this state and toggling
+   *  its text moves nothing, so that's where the mid-stream caveat lives instead; the rows banner stays
+   *  keyed on `degraded` alone, exactly as CPE-1805 left it. */
+  $: noticeMessage = degraded ? degradedMessage : $t("trash.stillLoading");
   $: emptyConfirmMessage =
     confirmEmpty === "all"
       ? $t("trash.emptyConfirmMessageAll")
@@ -190,8 +233,43 @@
              CPE-1804 keeps that rule unchanged now that a degraded pass can also have rows: "5 items"
              would still be a claim about the Trash's contents that this pass can't back, since the
              skipped items are in the Trash and not in that number. The count the app DOES know — how
-             many it dropped — is in the notice instead. -->
-        {#if !loading && !error && !degraded}<span class="tv-count">{itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}</span>{/if}
+             many it dropped — is in the notice instead (the empty-pane note / rows banner below).
+             CPE-1816: `degraded`/`skipped` themselves don't exist yet until the stream's summary
+             resolves, so the same suppression now also applies for the whole window between the first
+             batch landing and that resolution — `complete` is what tracks that. Rather than leaving this
+             slot blank in that window (or duplicating a caveat into a rows banner that would then jump
+             the list around, per the round-2 Visual Critic review), it shows `trash.stillLoading` here —
+             the slot is already reserved and already empty in exactly this state, so swapping its text
+             costs no layout.
+             `role="status"` (round-2 a11y finding): this slot is the ONLY place the final item count is
+             ever announced, so it doubles as the live region for both halves of the problem this ticket
+             exists to fix — a screen reader hears "Still loading…" while the pass is in flight, then
+             hears the real count (or nothing, if degraded or the pane has drained to zero mid-stream,
+             since the empty-pane note / rows banner carries that message instead and would otherwise
+             double up with this slot — see the `entries.length > 0` guard below) once it resolves. Kept
+             as one persistent node — not toggled in and out of the DOM — since a `role="status"` region
+             only reliably announces content CHANGES within an already-mounted node.
+             CPE-1816 review round 2 (nit): the selection count rides alongside `trash.stillLoading` too,
+             same as it already does alongside the resolved item count — the app genuinely knows how many
+             rows are checked regardless of whether the pass itself has finished, so there's no reason for
+             a mid-stream selection to go unacknowledged here just because the total is still unknown.
+             CPE-1816 review round 3 (nit): `&nbsp;·` instead of a plain leading space before the
+             separator — Svelte trims leading whitespace immediately inside an `{#if}` block's static
+             text, so the naive `{#if selected.size > 0} · {selectedCountLabel}{/if}` silently lost its
+             leading space and read as "3 items· 1 selected" (audible to a screen reader, not just a
+             visual nit — pre-existing on the resolved-count branch, now also fixed here rather than
+             duplicated). `&nbsp;` is a literal entity, not collapsible ASCII whitespace, so it survives. -->
+        <span class="tv-count" role="status">
+          {#if !loading && !error}
+            {#if !degraded && complete}
+              {itemCountLabel}{#if selected.size > 0}&nbsp;· {selectedCountLabel}{/if}
+            {:else if !complete && entries.length > 0}
+              <span class="tv-count-loading">{$t("trash.stillLoading")}</span>{#if selected.size > 0}&nbsp;· {selectedCountLabel}{/if}
+            {:else if selected.size > 0}
+              {selectedCountLabel}
+            {/if}
+          {/if}
+        </span>
       </span>
       <div class="tv-tools">
         {#if entries.length > 0}
@@ -230,38 +308,101 @@
         <div class="tv-empty">{$t("trash.loading")}</div>
       {:else if error}
         <div class="tv-empty tv-edge error">{$t("trash.error", { error })}</div>
-      {:else if degraded && entries.length === 0}
+      {:else if (degraded || !complete) && entries.length === 0}
         <!-- CPE-1803: a degraded listing must never render as "trash.empty" — an unreadable trash is
              not the same claim as a genuinely empty one, and telling the user "empty" here would make
              them stop looking for files that are still sitting in the trash. It must also read as its
              OWN state rather than borrowing the hard-failure "error" treatment (CPE-1803 review):
-             restore still works, entries may still be there — this isn't a crash, it's a caution. -->
+             restore still works, entries may still be there — this isn't a crash, it's a caution.
+
+             CPE-1816 review round 2: `!complete` joins `degraded` here, not just `degraded` alone. This
+             branch is reachable with `!complete` — Restore or Empty can drain the last VISIBLE row to
+             zero while the stream is still in flight (the summary hasn't resolved, so more rows could
+             still be coming), and before this fix that drained state fell through to the plain "Trash is
+             empty" branch below. Safe for a genuinely empty Trash: `complete` and `loading` are set in
+             the same `finally` tick as each other, so the healthy empty-Trash case never observes
+             `!complete` here — `loading` is still true and the branch above already renders first.
+
+             CPE-1816 review round 3, BLOCKING 2 (a11y): `role="status"` on this span, not just the
+             title-bar slot. The title bar's own "Still loading…" only shows while `entries.length > 0`
+             (see its own guard), so when Restore/Empty drains the list to zero mid-stream, THIS is the
+             only place the caveat is visible at all — without a live region here, a screen reader that
+             heard "Still loading…" from the title bar a moment ago hears nothing when that text moves
+             here, and nothing again once it resolves either way. Net effect: best-effort announcement
+             instead of guaranteed silence — strictly better than before this fix, never worse.
+             CPE-1816 review round 4 (a11y correction, tracked as a follow-up rather than fixed here):
+             this node is freshly mounted WITH its text already present, which is the WEAKER of the two
+             live-region shapes, not the correct one — a node inserted already containing its content is
+             frequently not announced at all (WebView2 + Windows AT is a particularly weak combination
+             for it), unlike the title-bar slot's persistent-node shape (content changes IN PLACE inside
+             an already-mounted node across states), which IS the reliable pattern and is what CPE-1816's
+             actual scope — the mid-stream caveat — correctly uses. An earlier version of this comment
+             claimed the opposite (that fresh-mount was "the correct... shape for genuinely NEW
+             information"), inverting the accepted guidance and contradicting the reasoning applied
+             correctly to the title-bar slot above; that claim was wrong and is corrected here. The
+             mechanism (this `role="status"`) is left as-is regardless — still strictly better than no
+             live region at all — pending a proper fix in the follow-up ticket. -->
         <div class="tv-empty">
-          <span class="tv-degraded-note">{degradedMessage}</span>
+          <span class="tv-degraded-note" role="status">{noticeMessage}</span>
         </div>
       {:else if entries.length === 0}
         <div class="tv-empty">{$t("trash.empty")}</div>
       {:else}
-        {#if degraded}
-          <!-- CPE-1805: degraded-with-entries. Before CPE-1804 this branch was unreachable — the only
-               degradation route (a caught `list()` panic) wiped the pass to zero entries, so the
-               empty-only special case above was correct purely by accident, resting on an unstated
-               backend invariant. CPE-1804 makes per-item skips a second route, and that route leaves the
-               surviving entries in place: a partial list is now the ORDINARY shape of an incomplete
-               listing. Rendering it as a plain list would ship the same lie in a new place — the user
-               sees rows, assumes that's everything, and stops looking. The notice is therefore driven by
-               `degraded` ALONE; `entries.length` only chooses where it sits, never whether it appears. -->
-          <div class="tv-degraded-banner">
-            <span class="tv-degraded-note">{degradedMessage}</span>
+        <!-- CPE-1816 review round 2 (finding 3): the degraded banner and the head row below are both
+             meant to stay pinned to the top of the scrolling `.tv-body`. Giving them EACH their own
+             independent `position: sticky; top: 0` made them occupy the same sticky slot once the list
+             scrolled — the taller one (the banner) fully covered the header, including its Select-all
+             checkbox, and no `z-index` fixes that since they're competing for one slot rather than
+             stacked one above the other. Wrapping both in a single `.tv-sticky-stack` container makes
+             them lay out in normal flow INSIDE it, and only the container itself is sticky, so the pair
+             sticks as one unit and never overlaps — with no hard-coded pixel offset that would break the
+             moment either message's text reflows to a different height. -->
+        <div class="tv-sticky-stack">
+          {#if degraded}
+            <!-- CPE-1805: degraded-with-entries. Before CPE-1804 this branch was unreachable — the only
+                 degradation route (a caught `list()` panic) wiped the pass to zero entries, so the
+                 empty-only special case above was correct purely by accident, resting on an unstated
+                 backend invariant. CPE-1804 makes per-item skips a second route, and that route leaves
+                 the surviving entries in place: a partial list is now the ORDINARY shape of an
+                 incomplete listing. Rendering it as a plain list would ship the same lie in a new place
+                 — the user sees rows, assumes that's everything, and stops looking. The notice is
+                 therefore driven by `degraded` ALONE; `entries.length` only chooses where it sits, never
+                 whether it appears.
+
+                 CPE-1816 review round 2 (Visual Critic): deliberately NOT also keyed on `!complete` any
+                 more. An earlier version of this fix showed this same banner for the mid-stream case
+                 too, and measurement caught two real problems: on the ordinary clean path the banner's
+                 appear-then-vanish caused a ~55px jump in every row's position the instant the stream
+                 resolved (rows are click targets — the row under the pointer changes mid-reach), and on
+                 a fast local trash (one batch, near-instant summary) the banner's entire lifetime could
+                 be a single rendered frame — a flash worse than no notice. The mid-stream caveat now
+                 lives in the title bar's item-count slot instead (see the markup above), which is
+                 already empty in that state, so swapping its text moves nothing below it. This banner is
+                 reserved for `degraded`, a state that's rarer, already resolved by the time it shows,
+                 and worth the (smaller, one-time) layout cost of surfacing prominently.
+
+                 CPE-1816 review round 3, BLOCKING 2 (a11y): `role="status"` here closes the gap the
+                 Critic measured — the title-bar slot goes "Still loading…" -> "" the instant this
+                 branch's condition becomes true (no `degraded`-aware branch in that slot's `{#if}` chain
+                 shows anything once `complete && degraded`, other than a possible selection count), so
+                 without a live region on THIS element a screen reader hears the pass finish and then
+                 hears nothing — not a count, not "unreadable", nothing. Best-effort announcement instead
+                 of guaranteed silence — see the empty-pane note above for the same reasoning, INCLUDING
+                 the round-4 correction: this node mounts fresh already containing its text, which is the
+                 weaker, not-guaranteed live-region shape (unlike the title-bar slot's reliable
+                 persistent-node shape), tracked as a follow-up rather than fixed here. -->
+            <div class="tv-degraded-banner">
+              <span class="tv-degraded-note" role="status">{degradedMessage}</span>
+            </div>
+          {/if}
+          <div class="tv-head-row">
+            <span class="tv-cell tv-check">
+              <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} aria-label={$t("trash.selectAll")} />
+            </span>
+            <span class="tv-cell tv-name">{$t("trash.columnsName")}</span>
+            <span class="tv-cell tv-path">{$t("trash.columnsOriginalPath")}</span>
+            <span class="tv-cell tv-date">{$t("trash.columnsDeleted")}</span>
           </div>
-        {/if}
-        <div class="tv-head-row">
-          <span class="tv-cell tv-check">
-            <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} aria-label={$t("trash.selectAll")} />
-          </span>
-          <span class="tv-cell tv-name">{$t("trash.columnsName")}</span>
-          <span class="tv-cell tv-path">{$t("trash.columnsOriginalPath")}</span>
-          <span class="tv-cell tv-date">{$t("trash.columnsDeleted")}</span>
         </div>
         {#each entries as e (e.id)}
           <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
@@ -329,8 +470,59 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
-  .tv-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  /* CPE-1816 review round 2 (finding 5) / round 3 (BLOCKING 1) / round 4 (converging fix): a bare flex
+     child grows to its content width and can force the row to wrap / the toolbar to jump at a narrow
+     window width — that's what round 2's plain `min-width: 0` was for. Round 2 shipped it WITHOUT a
+     floor, and paired with `.tv-tools` never shrinking (no `min-width: 0` of its own, so its content
+     width was an effective hard minimum), 100% of every width deficit landed on `.tv-title`, collapsing
+     it — and the caveat inside it — to a few px at the app's permitted minimum window (600px). Round 3
+     tried to fix that with a reasoned `min-width: 34ch` floor on `.tv-title` plus `min-width: 0` on
+     `.tv-tools` (to make the toolbar share the shrink) — but `.tv-tools`'s BUTTONS kept their own default
+     `min-width: auto`, so the box shrank while its content stayed ~608px wide and spilled out under
+     `overflow: visible`, silently clipped by `.tv-panel`'s `overflow: hidden`. That pushed round 3's own
+     regression onto the toolbar instead: Refresh, Docs, and the Close button became unreachable in a
+     ~700-880px band that was fully fine before this ticket (and had no Escape-key fallback), which is a
+     worse defect than the one this ticket exists to fix.
+     Round 4 removes BOTH `min-width` overrides (`.tv-title`'s floor and `.tv-tools`'s `min-width: 0`)
+     rather than continuing to patch the toolbar side. No floor is needed at all: real-browser sweeps
+     across every width 520-1200px, all three listing states, and all 12 shipped locales confirm the
+     caveat is never clipped and never lost with `.tv-title` left to its own default sizing — instead,
+     text that doesn't fit wraps the titlebar onto a second line (this component's original, pre-CPE-1816
+     behaviour) rather than being cut off. `.tv-tools` reverts to its own default sizing too, restoring
+     its pre-this-ticket toolbar layout exactly, so the ~700-880px close-button regression is gone, not
+     relocated. The remaining cost — the titlebar wrapping (taller) at <=800px, worse with a row selected
+     — is CPE-1816's own round-2/3 changes making an ALREADY-KNOWN issue (finding 5, ranked lowest of five
+     visual findings, present before this ticket) marginally more visible; it needs a toolbar-density
+     decision (icon-only buttons under a breakpoint, an overflow menu, or accepting the wrap), not another
+     CSS-only patch here, so it is intentionally left as-is and tracked in a follow-up ticket rather than
+     addressed in this one.
+     `text-overflow: ellipsis` stays removed (round 3): it never worked here regardless of any floor.
+     Ellipsis truncates ONE block-level box's own text; `.tv-title` is the flex CONTAINER holding three
+     separate flex items (the icon, an anonymous text item for "Trash", and the `.tv-count` span), and a
+     flex container's `ellipsis` does not summarize its children's combined overflow — the round-2 comment
+     claiming otherwise was wrong, and the round-2 render showed a literal hard mid-word cut ("Tr"), never
+     a "…". Without a floor, this component now wraps rather than clips when it runs out of room, so
+     there's nothing left for an ellipsis to truncate in the first place. */
+  .tv-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    overflow: hidden;
+    white-space: nowrap;
+  }
   .tv-count { font-size: 12px; font-weight: 400; opacity: 0.7; }
+  /* CPE-1816: the mid-stream caveat, sharing the title bar's item-count slot rather than a separate
+     banner (round-2 Visual Critic decision — see `noticeMessage`'s doc comment). Italic distinguishes
+     "provisional status text" from the plain count/selection text this same slot shows once resolved,
+     without a second colour (the slot is already dim via `.tv-count`'s opacity). */
+  .tv-count-loading { font-style: italic; }
+  /* CPE-1816 review round 3 tried `min-width: 0` here so `.tv-tools` would share the shrink with
+     `.tv-title`, paired with that round's floor there. It backfired (see `.tv-title`'s comment above):
+     the buttons inside kept their own default sizing, so the BOX shrank while its CONTENT stayed the
+     same width and spilled out silently clipped by `.tv-panel`. Round 4 removes it — `.tv-tools` is back
+     to flexbox's default `min-width: auto` (its full button-row content width, same as this component's
+     original pre-CPE-1816 behaviour), which is what keeps every button, including Close, reachable. */
   .tv-tools { display: flex; align-items: center; gap: 8px; }
   .tv-btn {
     font: inherit;
@@ -395,17 +587,29 @@
   }
   /* CPE-1805: the same note, sitting ABOVE a partial list instead of centred in an empty pane. Only the
      placement differs — the note keeps its own `.tv-degraded-note` box so "incomplete" reads identically
-     whether or not any rows survived, and `sticky` keeps it visible while a long partial list scrolls,
-     since a caveat that scrolls away stops caveating. */
+     whether or not any rows survived. Visibility while scrolling is now handled by the `.tv-sticky-stack`
+     wrapper (below) rather than by this element being sticky itself — see that rule's comment. */
   .tv-degraded-banner {
     display: flex;
     justify-content: center;
     padding: 10px 14px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  /* CPE-1816 review round 2 (finding 3): `.tv-degraded-banner` and `.tv-head-row` previously each had
+     their own independent `position: sticky; top: 0`, which put them in the SAME sticky slot once the
+     list scrolled — the banner, being taller, fully covered the header (including its Select-all
+     checkbox) underneath it, and no `z-index` ordering fixes two elements competing for one slot. Both
+     are now plain, non-sticky children of THIS wrapper, which is the only sticky element; they stack in
+     normal document flow inside it (banner above head row, when the banner is present at all), so the
+     wrapper's total height already accounts for both and nothing overlaps. No hard-coded pixel offset —
+     it survives either message's text reflowing to a different height, or the banner being absent
+     entirely (a plain listing's head row is the wrapper's only child, at the same `top: 0`). */
+  .tv-sticky-stack {
     position: sticky;
     top: 0;
     z-index: 1;
     background: var(--surface);
-    border-bottom: 1px solid var(--border);
   }
 
   .tv-head-row,
@@ -422,8 +626,6 @@
     letter-spacing: 0.03em;
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
     background: var(--surface);
   }
   .tv-row { cursor: pointer; border-bottom: 1px solid var(--border); }

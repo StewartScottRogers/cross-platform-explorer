@@ -20,7 +20,13 @@ Trash with three columns:
 - **Original location** — the full path it was deleted from.
 - **Deleted** — when it was moved to the Trash.
 
-A large Trash paints progressively as it loads, so opening it never blocks on a big listing.
+A large Trash paints progressively as it loads, so opening it never blocks on a big listing. While
+rows are still arriving, the title bar shows **"Still loading…"** in place of the item count — the
+running total isn't final yet, so the app doesn't claim one. If everything currently shown gets
+restored or deleted before loading finishes (rare, but possible on a large Trash you act on quickly),
+that same "Still loading…" wording moves into the body instead, in place of "Trash is empty" — the
+pass hasn't finished, so more items could still turn up. Once loading finishes, "Still loading…" is
+replaced by either the real count or one of the two messages below, whichever applies.
 
 If the listing shows **"Trash couldn't be fully read — it may not be empty,"** the OS trash itself
 couldn't be read this time (for example, one malformed entry on disk) — it does not mean your Trash
@@ -34,8 +40,8 @@ represent — the count tells you exactly how many are missing. It appears **abo
 instead of it, so the items that could be read are still shown and still restorable; the Trash simply
 holds more than you can see here. If every item in the Trash is affected the list will be empty, but
 you will get this message rather than "Trash is empty" — an unreadable name never causes the app to
-report your Trash as empty when it isn't. The item count in the title bar is hidden whenever either
-message is showing, since the real total isn't known.
+report your Trash as empty when it isn't. The item count in the title bar is hidden whenever any of
+these messages is showing — or while the list is still loading — since the real total isn't known.
 
 ## Restoring items
 
