@@ -3,11 +3,11 @@ id: CPE-1849
 title: ffmpeg-pin-freshness pairs --retry with --max-time and has no --retry-max-time
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-21
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
