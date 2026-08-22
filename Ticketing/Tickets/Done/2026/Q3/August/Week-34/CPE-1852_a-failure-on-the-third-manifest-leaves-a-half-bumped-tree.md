@@ -3,11 +3,11 @@ id: CPE-1852
 title: a failure on the third manifest leaves a half-bumped tree while the message says "refusing to write"
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
