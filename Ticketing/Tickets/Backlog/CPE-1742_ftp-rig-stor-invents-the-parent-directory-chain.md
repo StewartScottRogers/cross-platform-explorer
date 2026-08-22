@@ -535,3 +535,14 @@ nothing in this repo enforces the declared MSRV (no `rust-toolchain.toml`, no MS
 `git diff --numstat` for round 4: `113  26  crates/server/src/fsutil.rs` — the only file touched
 (`crates/ftp/src/lib.rs` was mutated twice for red-proofs and reverted both times, leaving zero diff
 there).
+
+**CI verification for round 4, by SHA — all three OSes this time, not just two.** Run `32560271563`,
+head `b0015175351f02581c1a0c217b9f09bb1547282e`. `Server crates (ubuntu-latest)`, `Server crates
+(macos-latest)`, and `Server crates (windows-latest)` all `SUCCESS`; overall run conclusion `success`.
+Cross-checked against `gh pr view 985 --json headRefOid,statusCheckRollup` — `headRefOid` matches
+`b0015175351f02581c1a0c217b9f09bb1547282e` exactly, so this is the state actually graded, not a stale
+rollup from a moved branch. (An intervening `gh api rate_limit` check hit `0 remaining` mid-poll from
+this round's own repeated `gh run watch` calls — noted so a reader of the raw session doesn't mistake
+that for a CI problem; it was a local API-quota exhaustion, resolved by waiting for the hourly reset,
+and cost no real information since `gh run view`'s cheap single-shot calls and a `WebFetch` of the
+public Actions page kept confirming "still in progress, 0/3 crates jobs done, no failures" throughout.)
