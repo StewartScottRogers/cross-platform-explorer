@@ -173,7 +173,17 @@ fn stamp_nodes(
                 // CPE-1705: was `if file.exists()`. The function's own contract two doc-comments up is
                 // "non-destructive (refuses to overwrite an existing file)", and `Path::exists()` could
                 // not deliver it — an unreadable slot answered `false` and `fs::write` truncated it.
-                if let Some(e) = crate::fsutil::clobber_refusal(
+                //
+                // CPE-1770: `clobber_refusal` alone was still wrong here, for a DIFFERENT reason than a
+                // rename-destructive site — this is a CREATE site (`fs::write` right below), not a clobber
+                // site. `clobber_refusal` follows a symlink, so a **dangling** link at `file` reads as
+                // free and `fs::write` then creates the link's target — the exact write-through
+                // `create_slot_refusal` (CPE-1718) exists to close, checking the link question BEFORE
+                // occupancy (the opposite order from a rename-destructive site) because at a create site a
+                // **live** link is just as much a write-through hazard as a dangling one: `fs::write`
+                // follows it and the caller believes it wrote `file`, when it actually wrote through to
+                // wherever the link points.
+                if let Some(e) = crate::fsutil::create_slot_refusal(
                     &file,
                     &format!("refusing to overwrite existing file: {}", file.display()),
                 ) {
@@ -319,6 +329,12 @@ mod tests {
     ///
     /// `write`-destructive, so — as at `join_files` — the ACL that hides the file also refuses the write,
     /// and a bare `expect_err` would pass against the unfixed code. Asserts on **which** error.
+    ///
+    /// **CPE-1770 changed which half answers this.** `stamp` now calls `create_slot_refusal`, whose link
+    /// check runs FIRST (the opposite order from `clobber_refusal`/`rename_slot_refusal`), so a `symlink_metadata`
+    /// failure on this ACL-denied slot is caught by `classify_create_slot`'s own `Unknown` arm before
+    /// `clobber_refusal`'s ever runs — a different message than before ("could not check WHETHER … IS A
+    /// LINK" vs. the old "could not check what is AT …"), same fail-closed verdict.
     #[test]
     fn cpe_1705_stamp_refuses_a_file_slot_it_cannot_stat() {
         use std::io::Write;
@@ -365,7 +381,7 @@ mod tests {
             let err = stamp(&template, &d, &vars(&[]))
                 .expect_err("a file slot we cannot stat must refuse, not be written over");
             assert!(
-                err.contains("could not check what is at") && err.contains("nothing was written"),
+                err.contains("could not check whether") && err.contains("nothing was written"),
                 "must be the guard's refusal, not an incidental write failure: {err}"
             );
         }
@@ -392,6 +408,68 @@ mod tests {
 
         let _ = fs::remove_dir_all(&d);
         let _ = fs::remove_dir_all(&fresh);
+    }
+
+    /// **CPE-1770.** `stamp`'s own contract is "non-destructive"; `clobber_refusal` alone did not deliver
+    /// that for a **dangling** link at the file slot: `Path::try_exists` follows the link, sees nothing at
+    /// its (nonexistent) target, answers `Ok(false)`, and the pre-fix guard read that as free — so
+    /// `fs::write` below wrote the template's boilerplate contents straight THROUGH the link, landing them
+    /// wherever the link pointed (potentially outside the destination folder entirely) while `stamp`
+    /// reported success. `create_slot_refusal` (CPE-1718) is the correct member of the guard family for a
+    /// CREATE site — not `clobber_refusal` and not `clobber_refusal_link_aware` (that one is for a
+    /// REFUSAL-shaped site that does not itself write; here the write is `fs::write` two lines below the
+    /// guard, so the link question must be checked BEFORE occupancy, `create_slot_refusal`'s own order).
+    ///
+    /// Asserts the HARM — nothing landed at the link's phantom target, and the slot still holds the
+    /// link, not real bytes — **before** trusting the `Result`, per this family's own failure mode: it
+    /// fails by *succeeding*. Covers both the symlink and (unprivileged Windows) NTFS-junction leg via
+    /// `make_dangling_link`'s own fallback. `d`'s `ScratchDir` drop guard is armed at construction, before
+    /// any assertion runs.
+    #[test]
+    fn cpe_1770_stamp_refuses_a_dangling_link_at_the_file_slot_instead_of_writing_through_it() {
+        use std::io::Write;
+        let d = scratch("cpe1770-dangling-link");
+        let file_slot = d.join("README.md");
+        if !crate::fsutil::make_dangling_link(&file_slot) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1770] SKIPPED the stamp dangling-link leg: this machine could not stage a link or \
+                 junction at {} at all. NOTHING in this test covered CPE-1770 on this run.",
+                file_slot.display()
+            );
+            return;
+        }
+        let phantom_target = crate::fsutil::dangling_link_target(&file_slot);
+        assert!(!phantom_target.exists(), "sanity: the link really is dangling before stamp runs");
+
+        let template = Template {
+            name: "t".to_string(),
+            nodes: vec![Node::File { name: "README.md".to_string(), contents: "NEW".to_string() }],
+        };
+        let err = stamp(&template, &d, &vars(&[]))
+            .expect_err("a dangling link at the file slot must be refused, not written through");
+
+        // THE HARM, on the filesystem, before trusting the `Result`: nothing must have appeared at the
+        // link's phantom target (a write following the link would land exactly there), and the slot must
+        // still hold the untouched link, not the template's bytes written through it.
+        assert!(
+            !phantom_target.exists(),
+            "the write must not have followed the dangling link to its (nonexistent) target"
+        );
+        assert!(
+            fs::symlink_metadata(&file_slot).is_ok_and(|m| m.file_type().is_symlink()),
+            "the file slot must still hold the link, not real content written through it"
+        );
+        // `create_slot_refusal` checks the LINK question first (the opposite order from a
+        // rename-destructive site), so a dangling link gets its own honest wording — "writes THROUGH
+        // it" — rather than the site's occupied-slot wording, which would falsely imply a real file sits
+        // there.
+        assert!(
+            err.contains("is a link") && err.contains("writes THROUGH it"),
+            "the refusal must say what is actually in the way and what would have happened: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
