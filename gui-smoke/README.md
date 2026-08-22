@@ -113,7 +113,12 @@ npm test
 `npm test` runs `wdio run ./wdio.conf.ts`, which:
 - verifies the release binary exists (see above) and errors with setup instructions if not;
 - creates a temp dir seeded with `CPE-1045-marker.txt`;
-- spawns `tauri-driver`, launches the app with `--test-mode --x=-4000 --open=<tmpdir>` via the
+- spawns `tauri-driver` and waits (bounded, polling — never a fixed sleep, see `lib/waitForPort.ts`)
+  for BOTH of its ports to actually be accepting connections before the first session request: its own
+  intermediary port (4444) and the native WebDriver's port it proxies to (4445 — WebKitWebDriver on
+  Linux, msedgedriver on Windows). One port opening does not mean the other has (CPE-1772 closed the
+  first race; CPE-1832 closed the second — see `wdio.conf.ts`'s `beforeSession` for the full story);
+- launches the app with `--test-mode --x=-4000 --open=<tmpdir>` via the
   `'tauri:options': { application, args }` capability (note: **one** `--open=<dir>` token, not the
   two-token `--open <dir>` a human would type at a shell — see the comment in `wdio.conf.ts` for why:
   msedgedriver's own arg handling silently drops a bare positional token that isn't shaped like a
