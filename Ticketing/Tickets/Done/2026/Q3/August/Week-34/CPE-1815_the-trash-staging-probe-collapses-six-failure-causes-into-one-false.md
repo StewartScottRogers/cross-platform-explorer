@@ -3,11 +3,11 @@ id: CPE-1815
 title: the trash staging probe collapses six failure causes into one bare false, so a red says nothing about why
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
