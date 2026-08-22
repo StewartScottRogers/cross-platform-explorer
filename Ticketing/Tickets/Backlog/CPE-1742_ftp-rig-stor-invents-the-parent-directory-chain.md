@@ -387,10 +387,151 @@ report pointed at, not `crates/ftp`).
   commit). Checked both via `gh run view` and independently via `gh pr view 985 --json
   headRefOid,statusCheckRollup` (so the SHA the rollup reports is the one actually graded, not one a
   moved branch left behind): `Server crates (ubuntu-latest) — clippy + test` → `SUCCESS`; `Server crates
-  (macos-latest) — clippy + test` → `SUCCESS`. Both explicitly reconfirmed against `headRefOid ==
-  92583627ac800e8427fd12bab5f45b8028801891` before being reported here.
+  (macos-latest) — clippy + test` → `SUCCESS`. **Correction (round-4 review caught this):** `Server
+  crates (windows-latest) — clippy + test` on that SAME run was `CANCELLED`, not green — superseded by a
+  later push before it started. The two legs above ARE both explicitly reconfirmed against `headRefOid
+  == 92583627ac800e8427fd12bab5f45b8028801891`; the claim below is corrected to name only those two,
+  not "the 3-OS matrix".
 
-This red→green pair on the actual 3-OS CI matrix is the empirical confirmation for the `confined_to` fix
-that no local Windows run could provide — Windows never exhibited the bug (its own `NotFound` mapping
-happened to route around it), so a Windows-only pass before this round was never evidence the fix
-worked; the macOS leg is what verifies it.
+This red→green pair on the **ubuntu and macOS legs** (not the full 3-OS matrix — the Windows leg on this
+run was cancelled, not green, corrected above) is the empirical confirmation for the `confined_to` fix
+that no local Windows run could provide — Windows never exhibited the ORIGINAL bug (its own `NotFound`
+mapping happened to route around the plain-file-prefix shape), so a Windows-only pass before this round
+was never evidence the fix worked; the macOS leg is what verifies it.
+
+**2026-08-22, round 4 — a security-focused review of `confined_to` found a real containment REGRESSION
+in round 3's fix, before merge. Blocking, fixed on the same branch.**
+
+Because round 3's fix moved from the `cpe-ftp` test rig into `confined_to` — shared **production**
+containment code, not a test double — the coordinator routed it to a security-focused reviewer with a
+raised bar. It confirmed the diagnosis and every gate from round 3, then measured a case that flips from
+refused to admitted.
+
+**The regression, exactly as found.** `confined_to`'s walk-up now treated `NotADirectory` the same as
+`NotFound` (round 3's fix) — correct for a MISSING-parent shape, but round 3 did not account for a
+TRAILING SEPARATOR on an ESCAPING symlink: `<root>/link_out/` where `link_out` is a symlink to something
+outside `root` (a file, per the exact PoC: `link_out -> /etc/passwd`). The trailing slash forces BOTH
+`canonicalize` and `symlink_metadata` to try to follow the final component as if it must be a directory
+— which a FILE-typed symlink cannot be — so both fail `NotADirectory` identically, and the `Ok(md) if
+is_symlink` branch that would have resolved `link_out` to its outside target never fires. Control falls
+through to the "genuinely not there, drop the last component" arm, which drops `link_out` **itself** —
+the escaping link — without ever resolving it, and answers on `<root>`: `false` → `true`. The bare
+spelling `<root>/link_out` (no trailing separator) was, and remains, correctly refused; only the
+trailing separator defeated it.
+
+**Not POSIX-only.** Measured directly on Windows in THIS session (not merely inferred): `a.txt\`
+(trailing separator on a plain file) gets `ERROR_DIRECTORY` (raw 267) → `NotADirectory`, not `NotFound`
+— a second Windows counterexample to round 3's now-corrected claim that Windows folds this family
+uniformly into `NotFound`. This account holds `SeCreateSymbolicLinkPrivilege` (unlike the reviewer's),
+so the actual escaping-FILE-symlink-with-trailing-separator case was staged and measured, not inferred:
+`confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths` leg (d), using `make_file_link`
+against a file outside `root`, went from green (correctly refusing) to a measured, reproduced FAIL when
+the fix below was reverted, confirming the exact mechanism on Windows rather than only on the reviewer's
+POSIX corpus. A DIRECTORY-typed link (leg c, already in the suite) does **not** reproduce this — a
+directory reparse point is exactly what a trailing separator is valid syntax for, so `canonicalize`
+follows it through cleanly on every platform tested; only a FILE-typed link hits the bug.
+
+**Reachable at real call sites, not just a synthetic probe:** `crates/ftp/src/lib.rs`'s `joined_path` is
+`root.join(ftp_path.trim_start_matches('/'))`, so an FTP argument's trailing separator survives
+verbatim into the joined path (`STOR /x/` or a `CWD` ending in `/`); `archive.rs` joins tar/zip entry
+names, which end in `/` by convention for directory entries; `copilot.rs` passes model-authored path
+strings against a user's live folder. (`revert_engine::safe_target` is structurally immune —
+`safe_segments` rejects empty segments outright, so `"x/"` never reaches `confined_to` from that path.)
+**No write outside the root was demonstrated in this round** — every creation primitive on a
+trailing-separator path resolving to a non-directory still fails with `ENOTDIR`/`ERROR_DIRECTORY` at the
+primitive itself — so this was a wrong VERDICT from the crate's single containment answer, not a proven
+arbitrary write. It still blocked, given where the code now lives.
+
+**Contradicted the function's own doc in two places**, both now corrected: the "what it does" bullet 2
+(claimed only components proven-absent by `NotFound` are dropped; now states the same for
+`NotADirectory` and cross-references the trailing-separator regression), and the "Failure policy" bullet
+(claimed "every failure REFUSES"; now scoped to "every UNINSPECTABLE failure refuses", since `NotFound`
+*and* `NotADirectory` are both positively-explained "nothing is there" cases that continue the walk
+rather than refusing). It also put `confined_to` at odds with a sibling guard in the same crate,
+`transfer.rs`'s `classify_ancestor_probe`, which treats `NotADirectory` as `Uninspectable` — stop, do
+not step over. Both are now cross-referenced at both sites: the divergence is real and, after the fix
+below, is defensible — `classify_ancestor_probe` walks *existing* ancestors one at a time, where
+stepping over an uninspectable level really could hide an unverified symlink; `confined_to`, after
+normalising the probe, only ever hits `NotADirectory` at a point where the level ABOVE is confirmed to
+be a non-directory, so nothing CAN exist below it to be stepped over. Two different questions,
+deliberately different answers to the same `ErrorKind`, now documented as deliberate rather than left as
+an unexplained contradiction the next reader has to re-derive.
+
+**The fix**, `crates/server/src/fsutil.rs`'s `confined_to`: normalise `probe` through `Path::components()`
+before the walk-up loop starts, rather than using the raw `PathBuf` — this drops trailing separators and
+`.` components before either `canonicalize` or `symlink_metadata` ever sees them, so a spelling with a
+trailing slash is treated identically to the same path without one. Reviewer-verified across the same
+20-case corpus used to find the regression: the trailing-separator case returns to `false` and all
+nineteen others are unchanged. Reproduced independently in this session (see the leg (d) measurement
+above) rather than only trusted from the review.
+
+**Doc correction, same hunk:** the round-3 comment's central Windows claim — "`CreateFileW` on the same
+shape returns `ERROR_PATH_NOT_FOUND`, which Rust maps to the same `NotFound`" — was stated unqualified
+and is false as written: true for `a.txt\new.txt` (raw 3), false for `a.txt\` (raw 267,
+`ERROR_DIRECTORY` → `NotADirectory`). This unqualified claim is what let the regression through the
+first review — it made "Windows always collapses this into NotFound" read as a platform-wide rule
+instead of the one shape originally measured. Corrected in the guard's own inline comment, with both
+measurements stated and the file's own pre-existing junction/`NotADirectory` counterexample cited
+alongside it.
+
+**Test additions, `crates/server/src/fsutil.rs`'s `confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths`:**
+- Leg (d): the actual regression, a FILE symlink outside `root` (`make_file_link`) named with a trailing
+  separator, must still be refused. Pins on Linux/macOS unconditionally and on Windows accounts with
+  `SeCreateSymbolicLinkPrivilege` (this account has it — see above); a loud skip notice on Windows
+  accounts without it, matching this file's existing policy for every other file-symlink leg.
+- The existing plain-file-prefix assertion (round 3) got its message amended: it only pins on
+  Linux/macOS (Windows already returned `true` for that shape before this round, via its `NotFound`
+  mapping for `a.txt\new.txt`), so a Windows-only `cargo test` cannot catch a regression there — leg (d)
+  is the variant that pins everywhere.
+
+**Red-proofs, this round, both measured directly (not only cited from the review):**
+- Leg (d) reverted to red by mutating `let mut probe: PathBuf = path.components().collect();` back to
+  `path.to_path_buf()`:
+  ```
+  thread '...confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths' panicked at src\fsutil.rs:4284:13:
+  (d) a FILE symlink pointing outside the root, named with a TRAILING SEPARATOR, must still be refused — ...
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2290 filtered out; finished in 0.01s
+  ```
+  Reverted; green again.
+- MUT F (round-2 reviewer's mutation, re-run once more on this final state, per the coordinator's
+  request): `STOR`'s `let Some(path) = real_path(&root, &arg) else {...}` mutated to bypass confinement
+  entirely — both CPE-1730 filesystem-asserting STOR tests red, exactly matching the reviewer's own
+  reproduction:
+  ```
+  test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.02s
+  ```
+  Reverted; `cpe-ftp` 21/21 green again.
+
+**Non-blocking items, all taken:**
+1. The plain-file-prefix test's message now states it only pins on Linux/macOS (above); leg (d) is
+   noted as the variant that pins on all three OSes.
+2. `confined_to` and `transfer.rs`'s `classify_ancestor_probe` now cross-reference each other's opposite
+   stance on `NotADirectory`, with the one-sentence reasoning for why both are correct for the different
+   questions they answer (above).
+3. The 112-char line wrapped to fit this file's prevailing ≤108-char width (no rustfmt gate enforces
+   this, so nothing was failing, but it was cheap to fix).
+
+**Not mine — the coordinator is filing it separately, recorded here only for continuity:**
+`crates/server/Cargo.toml`'s declared `rust-version = "1.77.2"` is already violated by `transfer.rs`'s
+existing use of `ErrorKind::NotADirectory` under `#[cfg(test)]` (stable since 1.83.0), and this round's
+fix makes it a **library-build** MSRV violation for the first time (not just a `cargo test` one), since
+nothing in this repo enforces the declared MSRV (no `rust-toolchain.toml`, no MSRV CI job, CI pins
+`dtolnay/rust-toolchain@stable`). Not fixed here — filed as a separate ticket per the coordinator.
+
+**Two corrections to this ticket's own record, both from the round-4 review:**
+- The CI-evidence section above overstated "the actual 3-OS CI matrix" — `Server crates
+  (windows-latest)` on run `32555398563` was `CANCELLED` (superseded by a later push before it started),
+  not green. Corrected inline above to name only the ubuntu and macOS legs, which were genuinely
+  `SUCCESS` on that exact head.
+- Good news, also from the review: it merged PR #981's head (`7313cde0`) into this branch to check for a
+  duplicate-symbol trap of the kind this sprint has been bitten by before. Clean — PR #981 touches
+  `checkpoint_store`/`revert_engine`/`snapshot_capture`/`transfer` and does not touch `fsutil.rs`. Built
+  and tested the merged state: 2311 lib tests, 0 failed.
+
+**Gates, re-run on the final state:** `cargo test -p cpe-ftp` — 21/21 green. `cargo test` in
+`crates/server` — 2287/2287 lib tests, 0 failed, 4 pre-existing ignored, all integration binaries green.
+`cargo clippy --all-targets -- -D warnings` — clean on both `crates/ftp` and `crates/server`.
+
+`git diff --numstat` for round 4: `113  26  crates/server/src/fsutil.rs` — the only file touched
+(`crates/ftp/src/lib.rs` was mutated twice for red-proofs and reverted both times, leaving zero diff
+there).
