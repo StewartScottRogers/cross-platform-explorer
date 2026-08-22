@@ -3,11 +3,11 @@ id: CPE-1769
 title: Three more name-picking sites still read a dangling link as a free name
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17
-closed:
+closed: 2026-08-21
 ---
 
 ## Problem

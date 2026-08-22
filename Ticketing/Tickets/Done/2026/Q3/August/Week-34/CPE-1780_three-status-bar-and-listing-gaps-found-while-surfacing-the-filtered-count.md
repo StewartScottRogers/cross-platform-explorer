@@ -3,11 +3,11 @@ id: CPE-1780
 title: Three pre-existing listing gaps found while surfacing the filtered count
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-18
-closed:
+closed: 2026-08-21
 ---
 
 ## Problem
@@ -68,7 +68,7 @@ shown safely"; an unreadable entry is a different fact and needs different words
       Log): the Reviewer proved two regressions in the fix that shipped for this, and a third form of the
       same defect (a false "empty" statement) in the round-2 patch for those. The Foreman is filing a
       separate ticket for a proper design pass on this generation mechanism rather than a fourth patch
-      here — number to follow.** Not done in this PR.
+      here — CPE-1838.** Not done in this PR.
 - [x] Pane B's behaviour is either fixed or documented — not left implicit.
 - [x] An unreadable local entry is either counted under its own name with its own wording, or the decision
       not to count it is recorded at the call site.
@@ -264,7 +264,7 @@ functions — `exitSmartFolder`/`exitStructuredSearch`/`exitArchive` — actuall
 ripples beyond `invalidateListing()` into three more call sites: the condition for a stop-and-report.
 
 **Decision: split.** F1 (the generation-token/`invalidateListing()` work — AC item 1) is pulled out of this
-PR entirely for a proper design pass in a separate ticket (the Foreman is filing it; number to follow — AC
+PR entirely for a proper design pass in a separate ticket (the Foreman is filing it; CPE-1838 — AC
 item 1 above updated to note the split and left unchecked). F3 (unreadable-count, all of it) and F2
 (pane B documented-not-fixed) stay, along with all the status-bar CSS work, and ship in this PR.
 

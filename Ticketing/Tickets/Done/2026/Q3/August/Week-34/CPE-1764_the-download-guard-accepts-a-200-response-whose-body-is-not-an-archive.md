@@ -3,11 +3,11 @@ id: CPE-1764
 title: The release download guard accepts a 200 response whose body is not an archive, so a wrong body still reaches tar
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-17
-closed:
+closed: 2026-08-21
 ---
 
 ## Problem
