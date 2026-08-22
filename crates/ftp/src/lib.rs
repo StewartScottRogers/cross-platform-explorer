@@ -647,10 +647,17 @@ mod tests {
                     // `226 Transfer complete` anyway regardless — success reported for a write that never
                     // happened, the exact "silent success on a real refusal" shape this ticket family
                     // exists to close, one case over from the one CPE-1742 was filed for. Refused with
-                    // the same `553` line: unlike the missing-parent case above, this repo has no
-                    // first-party confirmation of vsftpd's exact text for *this* sub-case, but RFC 959
-                    // gives STOR no directory-creating licence here either, and refusing beats silently
-                    // discarding the client's upload while reporting success.
+                    // the same `553` line, and it is the SAME reply vsftpd sends here too, not merely a
+                    // reasonable guess: `postlogin.c`'s `handle_upload_common` opens the destination
+                    // (`sysutil.c`'s `vsf_sysutil_create_or_open_file`, `open(p_filename, O_CREAT |
+                    // O_WRONLY | O_NONBLOCK, mode)`) and has exactly ONE failure branch for it —
+                    // `if (vsf_sysutil_retval_is_error(new_file_fd)) { vsf_cmdio_write(p_sess,
+                    // FTP_UPLOADFAIL, "Could not create file."); return; }` — reached before
+                    // `get_remote_transfer_fd` (i.e. before any `150`). POSIX `open(2)` returns `ENOENT`
+                    // for a missing path prefix, `ENOTDIR` for a prefix component that is a plain file,
+                    // and `EISDIR` for `O_WRONLY` on a path that is itself a directory — vsftpd's single
+                    // undifferentiated branch treats all three identically, so this case has the same
+                    // wire text as the missing-parent one above, not weaker evidence for it.
                     if path.is_dir() {
                         send(&mut ctrl, "553 Could not create file.\r\n");
                         continue;
@@ -1028,8 +1035,9 @@ mod tests {
             .write("/madedir", b"should never land either")
             .expect_err("STOR onto an existing directory must be refused, not silently swallowed");
         assert!(
-            err.contains("553"),
-            "must be refused on the control channel, not silently accepted while doing nothing: {err}"
+            err.contains("553") && err.contains("Could not create file"),
+            "must be refused on the control channel with the same `553 Could not create file` line, \
+             not silently accepted while doing nothing: {err}"
         );
         assert!(
             root.path().join("madedir").is_dir(),

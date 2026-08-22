@@ -203,3 +203,65 @@ extend the one existing CPE-1742 test rather than adding new ones, so the count 
 1's 21). `cargo clippy --all-targets -- -D warnings` on `crates/ftp`: clean, no warnings, no errors.
 
 `git diff --numstat` for round 2: `114  34  crates/ftp/src/lib.rs` — the only file touched.
+
+**2026-08-21, round 3** — Round 2's reviewer returned APPROVE and reproduced all six mutations,
+including confirming the new "parent is a plain file" assertion reds under the exact `is_dir` →
+`exists` mutation it targets, and confirming the filesystem assertion (item 2 of round 2) is
+load-bearing rather than a passenger: the *wrong* probe is deleting the guard (the `expect_err` on the
+call itself fires first), the *right* probe is making the refusal branch also run `create_dir_all`
+(modelling the real historical bug — "refuse on the wire but invent the chain anyway") — and the
+filesystem assertion at what is now line 992 catches that. I did not re-run that probe myself this
+round; recording that the reviewer ran it and it worked as intended.
+
+More importantly, it **closed the provenance gap round 2 left open** — round 2's comment said this repo
+had "no first-party confirmation of vsftpd's exact text" for the existing-directory `STOR` case,
+treating it as weaker evidence than the missing-parent case. That hedge was wrong; the two cases share
+the same evidence. The derivation, reproduced here rather than only cited:
+
+- vsftpd's `postlogin.c` `handle_upload_common` opens the destination via
+  `vsf_sysutil_create_or_open_file`, and its failure branch is a SINGLE undifferentiated test:
+  `if (vsf_sysutil_retval_is_error(new_file_fd)) { vsf_cmdio_write(p_sess, FTP_UPLOADFAIL, "Could not
+  create file."); return; }` — reached BEFORE `get_remote_transfer_fd(...)`, i.e. before any `150`.
+- vsftpd's `sysutil.c`: `vsf_sysutil_create_or_open_file` is `open(p_filename, O_CREAT | O_WRONLY |
+  O_NONBLOCK, mode)`.
+- POSIX `open(2)` returns `ENOENT` for a missing path prefix, `ENOTDIR` for a prefix component that is a
+  plain file, and `EISDIR` when the named file is a directory and `oflag` includes `O_WRONLY`.
+
+All three are errors, all three hit the SAME branch, all three produce the identical wire reply
+`553 Could not create file.` — vsftpd does not discriminate on errno there. So the existing-directory
+case has exactly the same evidentiary weight as the missing-parent case; the round-1 citation already
+covered it, and the trailing period added in round 2 matches vsftpd's literal string.
+
+**Two limits on this evidence, carried verbatim rather than restated as certainty:**
+
+(a) No live FTP daemon was driven for this derivation — the conclusion rests on reading vsftpd's source
+plus POSIX `open(2)` semantics, which is derivation, not observation.
+
+(b) The vsftpd source was read via a third-party GitHub mirror (`dagwieers/vsftpd`), not the canonical
+signed tarball, because no fetchable plain-text URL for the official release was reachable in this
+session. The three files (`postlogin.c`, `sysutil.c`, `ftpcodes.h`) are mutually consistent, but a
+mirror is a mirror, not the release artifact itself.
+
+**Two edits, both in `crates/ftp/src/lib.rs`, both requested by the reviewer:**
+
+1. Replaced the "no first-party confirmation… for *this* sub-case" hedge on the existing-directory
+   `553` with the derivation above (condensed inline at the guard's own comment site), stated
+   explicitly as derivation-from-source rather than a live wire measurement.
+2. Tightened Refusal 3's assertion from `err.contains("553")` to `err.contains("553") &&
+   err.contains("Could not create file")`, matching Refusals 1 and 2's stricter form. Not a real gap —
+   no other `553` line is reachable through `STOR` — but free and consistent.
+
+**Explicitly NOT changed**, per the reviewer's instruction: the two `553` guards' order. The reviewer
+proved by mutation that they are mutually exclusive — a path that IS an existing directory necessarily
+has an existing-directory *parent*, so the parent guard's condition is false for it; and a path whose
+parent is not a directory cannot itself be an existing directory (it cannot exist at all: `open()`
+would fail on that prefix first) — so swapping them leaves 21/21 green and the order is immaterial. The
+reviewer also proved CPE-1730's confinement is structurally unmaskable by these new `553`s: `path` does
+not exist at all until `real_path` returns `Some`, so nothing reaches either new guard for a path
+`real_path` would refuse.
+
+**Gates, re-run:** `cargo test -p cpe-ftp` 21/21 green. `cargo clippy --all-targets -- -D warnings` on
+`crates/ftp`: clean, no warnings, no errors.
+
+`git diff --numstat` for round 3: `14  6  crates/ftp/src/lib.rs` — the only file touched, as expected
+for a two-edit round.
