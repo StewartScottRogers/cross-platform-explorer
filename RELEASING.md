@@ -38,6 +38,11 @@ nested tool version, or a version number inside a description or URL is left alo
 that no longer matches at all aborts the release loudly instead of being written back unchanged and
 reported as bumped (CPE-1841; guarded by `src/lib/releaseVersionBump.test.ts`).
 
+That abort is **all-or-nothing across the three manifests**: all of them are read and validated before
+any is written, so a `Cargo.toml` that fails the check leaves `package.json` and `tauri.conf.json`
+untouched rather than already bumped (CPE-1852). If the script does abort, the tree is clean and there
+is nothing to revert — the failure message says so, and it is true of the whole run.
+
 What happens next, automatically:
 
 1. GitHub Actions builds signed installers for Windows, macOS (universal), and

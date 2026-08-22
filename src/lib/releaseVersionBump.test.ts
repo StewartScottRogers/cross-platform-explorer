@@ -91,12 +91,18 @@ interface BumpOptions {
   /** Prefix each staged manifest's BYTES with a UTF-8 BOM (EF BB BF), to exercise release.ps1's
    *  BOM-preserving write path. */
   bom?: boolean;
+  /** Drop the `-BumpOnly` switch, i.e. drive the FULL release path. CPE-1852 uses this to prove the
+   *  abort-before-any-write property belongs to the shared writer rather than to the dry-run switch.
+   *  Only ever used with a fixture that must FAIL validation: validation aborts before the first `git`
+   *  call, so no repository is ever touched. (The scratch tree is an OS temp directory and not a git
+   *  repo at all, so a regression that reached `git add` would die there rather than commit anything.) */
+  bumpOnly?: boolean;
 }
 
 /** Stage `manifests` in a throwaway tree, run the real release.ps1 over it with `-BumpOnly`, and read
  *  back what it wrote. */
 function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}): BumpResult {
-  const { scriptText, bom = false } = opts;
+  const { scriptText, bom = false, bumpOnly = true } = opts;
   const stage = (text: string): Buffer => {
     const body = Buffer.from(crlf(text), "utf8");
     return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
@@ -117,9 +123,9 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
     writeFileSync(confPath, stage(manifests.conf));
     writeFileSync(cargoPath, stage(manifests.cargo));
 
-    const run = spawnSync(psHost, ["-NoProfile", "-File", scriptPath, "-Version", version, "-BumpOnly"], {
-      encoding: "utf8",
-    });
+    const args = ["-NoProfile", "-File", scriptPath, "-Version", version];
+    if (bumpOnly) args.push("-BumpOnly");
+    const run = spawnSync(psHost, args, { encoding: "utf8" });
     if (run.error) throw run.error;
 
     const bytes = {
@@ -437,6 +443,91 @@ describe("release.ps1 fails loudly rather than bumping nothing (CPE-1841)", () =
 });
 
 // ---------------------------------------------------------------------------------------------------
+// CPE-1852: the bump is ALL-OR-NOTHING across the manifest set.
+//
+// CPE-1841 gave each manifest a guard that throws before writing THAT file. But the writer ran per file,
+// in order, so a failure on the third manifest landed after the first two were already on disk:
+//
+//     package.json     -> 9.9.9   (written)
+//     tauri.conf.json  -> 9.9.9   (written)
+//     Cargo.toml       -> 0.1.0   (guard fired)
+//     exit 1, "... found 0. Refusing to write ..."
+//
+// The message is true of the file it names and reads as though nothing was written. Two of the five
+// version-synchronised files are then bumped, on disk, uncommitted -- the dirty-tree-reads-as-noise
+// hazard CLAUDE.md records by name, and how package-lock.json ended up three releases behind.
+//
+// The fix validates every manifest and computes every replacement BEFORE writing any of them, so the
+// operation is atomic in the way the message already claimed. These tests pin BOTH halves: the bytes on
+// disk, and the wording of the failure.
+// ---------------------------------------------------------------------------------------------------
+
+describe("release.ps1 leaves no half-bumped tree when a LATER manifest fails (CPE-1852)", () => {
+  const NO_VERSION_CARGO = `[package]\nname = "demo"\n\n[dependencies]\nserde = "1"\n`;
+  const NO_VERSION_CONF = `{\n  "productName": "Demo"\n}\n`;
+
+  // The THIRD manifest fails. package.json and tauri.conf.json are perfectly valid and would each be
+  // written by a per-file writer before the guard ever looked at Cargo.toml.
+  let third: BumpResult;
+  beforeAll(() => {
+    third = runBump({ ...ALL_DECOYS, cargo: NO_VERSION_CARGO }, NEW);
+  });
+
+  it("writes NOTHING when the third manifest fails: the first two are byte-identical on disk", () => {
+    expect(third.status, ctx(third)).not.toBe(0);
+    // Byte-level, not just "does not contain 9.9.9" -- the claim is that the files were never opened
+    // for writing at all, and a re-encoded but textually-equal file would still be a released change.
+    expect(third.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written despite the abort").toBe(true);
+    expect(third.bytes.conf.equals(Buffer.from(crlf(CONF_WITH_DECOYS), "utf8")), "tauri.conf.json was written despite the abort").toBe(true);
+    expect(third.bytes.cargo.equals(Buffer.from(crlf(NO_VERSION_CARGO), "utf8")), "Cargo.toml was written despite the abort").toBe(true);
+  });
+
+  it("does not print a per-file 'old -> new' line for a manifest it never wrote", () => {
+    // The old script disclosed the half-bump only through those lines. Now there is nothing to disclose,
+    // so there must be no line -- otherwise the output implies a write that did not happen, which is the
+    // same class of lie in the other direction.
+    expect(third.stdout, ctx(third)).not.toMatch(/package\.json: .* -> /);
+    expect(third.stdout, ctx(third)).not.toMatch(/tauri\.conf\.json: .* -> /);
+    expect(third.stdout, ctx(third)).not.toContain("Bumped version to");
+  });
+
+  it("says something TRUE OF THE WHOLE RUN, not 'refusing to write' about one file", () => {
+    const out = third.stderr + third.stdout;
+    expect(out).toMatch(/expected exactly one .*found 0/s);
+    expect(out).toMatch(/no manifest was written/i);
+  });
+
+  it("also leaves package.json alone when the SECOND manifest is the one that fails", () => {
+    // Same property, one position earlier: proves the first case is not passing because Cargo.toml
+    // happens to be validated first for some unrelated reason.
+    const second = runBump({ ...ALL_DECOYS, conf: NO_VERSION_CONF }, NEW);
+    expect(second.status, ctx(second)).not.toBe(0);
+    expect(second.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written despite the abort").toBe(true);
+    expect(second.bytes.conf.equals(Buffer.from(crlf(NO_VERSION_CONF), "utf8"))).toBe(true);
+  });
+
+  it("holds on the FULL release path too, not only under -BumpOnly (they share the writer)", () => {
+    // Without -BumpOnly the script would go on to git add/commit/tag/push. It never gets there: the
+    // validation pass aborts first, which is the point -- the atomicity is a property of the writer,
+    // not of the dry-run switch. Nothing git-shaped runs, and the scratch tree is not a repo anyway.
+    const full = runBump({ ...ALL_DECOYS, cargo: NO_VERSION_CARGO }, NEW, { bumpOnly: false });
+    expect(full.status, ctx(full)).not.toBe(0);
+    expect(full.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written despite the abort").toBe(true);
+    expect(full.bytes.conf.equals(Buffer.from(crlf(CONF_WITH_DECOYS), "utf8")), "tauri.conf.json was written despite the abort").toBe(true);
+    expect(full.stdout + full.stderr, ctx(full)).not.toMatch(/release v9\.9\.9|git .*failed with exit code/);
+  });
+
+  it("still writes all three together on the success path (the fix is not 'write nothing, ever')", () => {
+    // The companion arm: an atomicity fix that simply stopped writing would keep every case above green.
+    const ok = runBump(ALL_DECOYS, NEW);
+    expect(ok.status, ctx(ok)).toBe(0);
+    expect(ok.text.pkg).toContain(`"version": "${NEW}"`);
+    expect(ok.text.conf).toContain(`"version": "${NEW}"`);
+    expect(ok.text.cargo).toContain(`version = "${NEW}"`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
 // Red-proof. The tests above only mean something if the fixtures actually trip the bug -- a decoy the
 // broken code never touched would keep them green with the scoping reverted. So: re-run the EXACT pre-fix
 // replacements (copied verbatim from scripts/release.ps1 at origin/main before this ticket) over the same
@@ -452,7 +543,7 @@ describe("release.ps1 fails loudly rather than bumping nothing (CPE-1841)", () =
 // This mechanises the manual revert recorded in the ticket's Work Log: reverting the Cargo.toml locator
 // call alone -- i.e. putting
 //     $cargo = $cargo -replace '(?m)^(version\s*=\s*")[^"]+(")', "`${1}$Version`$2"
-// back in place of `Update-ManifestVersion -Path ... -Locator 'Find-TomlPackageVersionValue'` -- reds the
+// back in place of `New-ManifestVersionPlan -Path ... -Locator 'Find-TomlPackageVersionValue'` -- reds the
 // "leaves a long-form Cargo dependency pin alone" test above, and nothing else.
 // ---------------------------------------------------------------------------------------------------
 
