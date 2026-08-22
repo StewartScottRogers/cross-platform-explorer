@@ -4124,6 +4124,18 @@ mod tests {
     /// confused with "the child never ran the assertions".
     const CPE_1851_SENTINEL: &str = "CPE-1851-CHILD-COMPLETED-ALL-ASSERTIONS";
 
+    /// Depth belt, carried on **argv** rather than in the environment (PR #995 review).
+    ///
+    /// The marker variable above is what makes the child do the work instead of spawning again — so it
+    /// is also the only thing bounding the recursion. If anything ever stripped environment variables
+    /// between parent and child, the failure mode would be an unbounded fork bomb under `.output()`
+    /// rather than a red test: severe consequence, cheap belt. `libtest` accepts `--skip <value>` and
+    /// simply excludes tests matching it, so this token rides along harmlessly (no test name contains
+    /// it, and `--exact` makes the skip match exact anyway) while remaining visible to
+    /// `std::env::args()` — which no environment filter can touch. A process that sees the token but
+    /// not the marker refuses to spawn and fails loudly.
+    const CPE_1851_DEPTH_TOKEN: &str = "cpe-1851-child-depth-1";
+
     /// Where the panic hook parks the location it saw, for the `#[track_caller]` assertions.
     type Cpe1851Loc = std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>;
 
@@ -4324,10 +4336,19 @@ mod tests {
     ///
     /// # What it does NOT catch — measured, not guessed
     ///
-    /// - A reason that is *misattributed* rather than dropped — a `Fail` arm passing some other
-    ///   in-scope `&str` would still vary with nothing this test controls only if that string were
-    ///   constant; a mutation that forwarded, say, `mechanism` as the reason WOULD be caught (both
-    ///   messages would then be equal), but one that forwarded a different per-call value would not.
+    /// - **A `staged_fail_reason` that discriminates on the reason's CONTENT** (PR #995 review, which
+    ///   built it and measured it): an arm like `Err(r) if r.starts_with("cpe-1851-") => r, Err(_) =>
+    ///   "staging failed"` is clippy clean and leaves the whole suite green — 2314 passed, 0 failed —
+    ///   while collapsing all seven real trash reasons to one string. This test drives the function with
+    ///   synthetic nonces and never with a real `trash_roundtrip_available` reason, so a mutation keyed
+    ///   on the argument's *value* passes both nonces through untouched. That is the inherent limit of a
+    ///   synthetic-fixture unit test, and it is deliberate sabotage rather than a plausible regression;
+    ///   the producer-side pair in `src-tauri/src/lib.rs` is what pins the real reasons.
+    /// - A reason that is *misattributed* rather than dropped — though this caveat is **nearly moot in
+    ///   the direction it covers**: the only per-call values in scope inside the `Fail` arm are
+    ///   `mechanism` and `staged`, and a mutation forwarding `mechanism` IS caught, because both
+    ///   messages then become equal and the byte-for-byte liveness assertion reds. What survives is the
+    ///   content-discriminating shape above, not a plain substitution.
     /// - Anything about *which* of the seven real trash reasons a given probe step picks. That is the
     ///   producer end, and it lives in `src-tauri`'s two guard tests by design.
     /// - The `LegitimateSkip` path's caller-side reason plumbing (CPE-1815's `(cause: {})` skip notices
@@ -4339,9 +4360,26 @@ mod tests {
             return;
         }
 
+        // Depth belt (see `CPE_1851_DEPTH_TOKEN`). Reached only if this process was itself spawned as
+        // the child but arrived without its marker variable — i.e. the environment was stripped in
+        // between. Refuse to spawn: a red test, not a fork bomb.
+        assert!(
+            !std::env::args().any(|a| a == CPE_1851_DEPTH_TOKEN),
+            "CPE-1851: this process carries the child depth token on its argv but {CPE_1851_CHILD_MARKER} \
+             is not set, so the environment was stripped between parent and child. Refusing to spawn \
+             again — without this guard the spawn would recurse unboundedly under `.output()`."
+        );
+
         let exe = std::env::current_exe().expect("the running test binary must have a path");
         let out = std::process::Command::new(&exe)
-            .args([CPE_1851_CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .args([
+                CPE_1851_CHILD_TEST,
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                "--skip",
+                CPE_1851_DEPTH_TOKEN,
+            ])
             .env(CPE_1851_CHILD_MARKER, "1")
             .env("CPE_STAGING_STRICT", "1")
             .env_remove("CPE_STAGING_SABOTAGE")

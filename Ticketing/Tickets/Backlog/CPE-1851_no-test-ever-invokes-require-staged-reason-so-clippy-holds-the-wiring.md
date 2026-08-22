@@ -123,9 +123,12 @@ the test, not clippy, is now what catches the round-1 shape — under mutation 2
 
 ### `require_staged` — the sibling: **yes, it had the same hole, and it is now closed too**
 
-`require_staged` (~36 call sites) had no test invoking it either, and its hole is arguably worse: the
-round-1-style mutation on it is not even clippy-visible, because `staging_failure_message` is `pub` in a
-library crate and so is exempt from the dead-code lint that incidentally guarded `staged_fail_reason`.
+`require_staged` (~36 call sites) had no test invoking it either, and its hole is worse. The reason is
+**two facts, not one** (the second corrected in review — the first statement of this was over-narrow):
+`staging_failure_message` is `pub` in a library crate, so it is exempt from the dead-code lint; **and** it
+is over-determined anyway, because it already had a second caller — the pre-existing test at
+`fsutil.rs:4043` — so even as a private fn it would have stayed "used". `staged_fail_reason`, by contrast,
+is private **and** had exactly one caller, which is the whole reason clippy fired there and not here.
 Measured as mutation 4 above: replacing its panic body with an arbitrary string left clippy at 0 warnings.
 The new test therefore exercises `require_staged`'s `Fail` arm in the same child run — asserting the panic
 text equals `staging_failure_message(mechanism)` exactly, that it names the mechanism, that it does NOT
@@ -167,3 +170,41 @@ discriminates: removing the attribute moves the reported line from the call site
   messages would then be equal); which of the seven real trash reasons a given probe step picks (that is
   the producer end, pinned by `src-tauri`'s two guard tests); and the `LegitimateSkip` caller-side
   `(cause: {})` skip-notice plumbing, of which this only asserts the arm returns `false` without panicking.
+
+**2026-08-22 (round 2)** — Independent Reviewer APPROVED PR #995 (reproduced all five red-proofs including
+the clippy column; verified the sentinel by actually renaming the test — the child exits 0 having run 0
+tests and the parent reds with the intended diagnosis; attacked the child-process design with
+`SABOTAGE=1`, `STRICT=0`, `CI=true` and a pre-set marker in the parent, all of which fail loudly rather
+than green; confirmed `--exact` runs exactly one test — `2317 filtered out` — with no ctor/inventory
+initialiser in the crate that could reach another `require_staged` call site; and confirmed the test runs
+and passes on the ubuntu and macOS runners, three occurrences each, which retires the Windows-only
+caveat). Three follow-ups, all done.
+
+- **A survivor mutation the caveat did not name.** The reviewer built and measured a `staged_fail_reason`
+  that discriminates on the reason's **content** — `Err(r) if r.starts_with("cpe-1851-") => r, Err(_) =>
+  "staging failed"`. Clippy clean, whole suite green (2314 / 0), while collapsing all seven real trash
+  reasons to one string: this test drives the function with synthetic nonces and never with a real
+  `trash_roundtrip_available` reason, so a mutation keyed on the argument's *value* passes both nonces
+  through untouched. Deliberate sabotage rather than a plausible regression, and the inherent limit of any
+  synthetic-fixture unit test — the reviewer explicitly did not block on it — but the doc comment now
+  names it.
+- **…and the caveat it *did* carry is nearly moot in the direction it covers**, which the same review
+  pointed out: the only per-call values in scope inside the `Fail` arm are `mechanism` and `staged`, and
+  forwarding `mechanism` IS caught (both messages become equal and the byte-for-byte liveness assertion
+  reds). The test is tighter than its own caveat admitted; the doc comment now says so.
+- **Depth belt against a fork bomb.** The marker env var was the only thing bounding the recursion, so a
+  sandbox that stripped env vars from spawned children would turn the spawn into unbounded recursion under
+  `.output()` rather than a red test. Low likelihood (`Command::env` is not subject to CI env filtering)
+  but severe, and the belt is cheap: the parent now also passes `--skip cpe-1851-child-depth-1` on
+  **argv**, which `libtest` accepts and no environment filter can touch, and a process that sees the token
+  without the marker refuses to spawn and asserts loudly. Proved by temporarily swapping the parent's
+  `.env(MARKER, "1")` for `.env_remove(MARKER)`: exactly one extra process, a red test, and the intended
+  message — no recursion.
+- **Correction carried into the sibling section above**: `require_staged`'s clippy exemption is
+  over-determined, not just a `pub` visibility fact. It already had a second caller (the pre-existing test
+  at `fsutil.rs:4043`), so it would have stayed "used" even as a private fn, whereas `staged_fail_reason`
+  was private *and* single-caller. Two facts, not one — which makes the finding stronger, not weaker.
+- Gates re-run after the three changes (all in the `#[cfg(test)]` module; `require_staged_reason` and
+  `require_staged` themselves untouched): `crates/server` clippy clean, `cargo test` **2314** / 0 / 4 —
+  unchanged, no test added or removed. `src-tauri` clippy clean in both feature modes, `cargo test`
+  **214** / 0 (default) and **269** / 0 (`sidecar-platform`), unchanged.
