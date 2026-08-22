@@ -56,6 +56,11 @@ something to do, **Pull** (shown only when behind), **Push** (shown only when ah
 **Sync…**. This is a general explorer feature, not exclusive to repos cloned through this page — any
 folder with a `.git` gets the same status-bar controls.
 
+The indicator describes the folder the explorer is **in**, so it switches off the moment you're looking at
+something that isn't that folder: Home, an archive you've opened in place, an open smart folder, and an
+open saved search. The Pull/Push/Sync… buttons go with it — the actions never outlive the branch name they
+belong to, so there's nothing to click that would act on a repository the status bar has stopped naming.
+
 **Pull** and **Push** run a single safe step directly (a fast-forward-only pull, or a plain push — no
 force). **Sync…** opens a dialog that previews the full plan before doing anything: it shows how far
 ahead/behind you are, lets you set the **on-divergence policy** — **Merge** (default), **Rebase**, or

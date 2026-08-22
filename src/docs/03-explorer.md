@@ -172,6 +172,11 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   the sidebar. See [Saved Searches](explorer-saved-searches) for the full criteria list, how the captured
   root works, and its live refresh.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
+- **Free space and the git chip** — the far right of the status bar shows how much space is free on the
+  drive holding the current folder, and (when that folder is a git repository) a branch chip with its
+  Pull/Push/Sync… buttons. Both describe the folder the explorer is *in*, so both disappear in any view
+  that isn't a plain folder — Home, an archive opened in place, an open smart folder, and an open saved
+  search — rather than sitting there still reporting the last real folder you were in.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing — and
   the folder listing itself does too: if a row can't be read (a permissions/timing issue while the
