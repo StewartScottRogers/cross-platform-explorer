@@ -2946,12 +2946,25 @@ pub fn require_staged(mechanism: &str, supported_here: bool, staged: bool) -> bo
 
 /// Same gate as [`require_staged`], for a probe that can say **which** step failed rather than just
 /// that one did (CPE-1815). `trash_roundtrip_available`'s delete→list→restore→verify round-trip has
-/// six distinct ways to come back false, and a bare `bool` erases which one — on the one CI runner
+/// seven distinct ways to come back false, and a bare `bool` erases which one — on the one CI runner
 /// this crew cannot log into, that turns a red into a morning of adding instrumentation and re-pushing.
 /// `staged` carries the failing step's name as its `Err`; on [`StagingVerdict::Fail`] it is folded into
-/// the panic message so the CI log names the step, not just the mechanism. On
-/// [`StagingVerdict::LegitimateSkip`] the reason is dropped — same as a bare `bool` always was — the
-/// caller still prints its own leg-specific skip notice.
+/// the panic message (in the SAME first line as `CPE-1717`, not appended after — see
+/// [`staging_failure_message_with_reason`]'s doc comment) so the CI log names the step, not just the
+/// mechanism.
+///
+/// On [`StagingVerdict::LegitimateSkip`] this function itself still only returns `bool`, same as
+/// [`require_staged`] always did — but unlike a bare `bool` probe, `staged`'s `Err` is still sitting in
+/// the CALLER's hands (it was passed in, not consumed), so a caller CAN and, on the platform actually
+/// observed to hit this path (Windows — see `trash_roundtrip_available`'s doc comment: five `CPE-1268`
+/// notices per measured CI run, none on Linux), SHOULD fold it into its own leg-specific skip notice
+/// rather than letting the one platform that legitimately skips be the one platform with no diagnosis.
+///
+/// `reason`/`staged`'s `Err` is an arbitrary `&str`, not restricted to `'static` literals. Every caller
+/// today passes a `'static str` constant, so this is prevention rather than a live defect, but a future
+/// caller COULD interpolate a filesystem path or other runtime value into it — and that value would
+/// reach a public CI log verbatim via the panic path above. Keep reasons as fixed, non-sensitive step
+/// descriptions.
 #[track_caller]
 pub fn require_staged_reason(mechanism: &str, supported_here: bool, staged: Result<(), &str>) -> bool {
     let ok = staged.is_ok();
@@ -2982,9 +2995,27 @@ fn staged_fail_reason(staged: Result<(), &str>) -> &str {
 /// The message [`require_staged`] panics with, as a value rather than a `panic!` literal, so the CI
 /// guard step's `grep 'CPE-1717'` has something a unit test can assert on without catching an unwind.
 pub fn staging_failure_message(mechanism: &str) -> String {
+    staging_failure_message_impl(mechanism, None)
+}
+
+/// [`staging_failure_message`] with the specific step [`require_staged_reason`] was told failed woven
+/// into the SAME first line (CPE-1815, PR #986 review) rather than appended after the boilerplate: the
+/// CI guard step's `grep -m1 -A6 'CPE-1717'` (`.github/workflows/ci.yml:279,302,328`) excerpts only the
+/// matched line plus the six after it, and this message's "Likely causes"/"Re-run" paragraphs plus the
+/// panic hook's own "run with RUST_BACKTRACE=1" line already fill that window — a reason appended at the
+/// end would fall outside it and never reach the excerpt a human actually reads.
+pub fn staging_failure_message_with_reason(mechanism: &str, reason: &str) -> String {
+    staging_failure_message_impl(mechanism, Some(reason))
+}
+
+fn staging_failure_message_impl(mechanism: &str, reason: Option<&str>) -> String {
+    let reason_clause = match reason {
+        Some(r) => format!(" (failing step: {r})"),
+        None => String::new(),
+    };
     format!(
-        "[CPE-1717] `{mechanism}` could not stage its condition on {os}, a platform where this \
-         mechanism IS supposed to work. The leg that called this therefore verified NOTHING, and \
+        "[CPE-1717] `{mechanism}` could not stage its condition on {os}{reason_clause}, a platform where \
+         this mechanism IS supposed to work. The leg that called this therefore verified NOTHING, and \
          under CI a leg that verified nothing must be red rather than a notice inside a green log.\n\
          \n\
          Likely causes: the runner image changed (symlink privilege, Developer Mode, the junction \
@@ -2996,13 +3027,6 @@ pub fn staging_failure_message(mechanism: &str) -> String {
          leg's own notice — but treat that as a diagnosis step, not a fix.",
         os = std::env::consts::OS
     )
-}
-
-/// [`staging_failure_message`] plus the specific step [`require_staged_reason`] was told failed
-/// (CPE-1815), as a value rather than inlined into the `panic!` call so a unit test can assert on it
-/// the same way the plain message is asserted on above.
-pub fn staging_failure_message_with_reason(mechanism: &str, reason: &str) -> String {
-    format!("{}\n\nWhich step failed: {reason}", staging_failure_message(mechanism))
 }
 
 /// Owns a per-test scratch directory under `%TEMP%` and removes it (recursively, best-effort) when
@@ -3977,6 +4001,13 @@ mod tests {
     /// step name to fold in, no matter what `Err` a probe would have carried. Asserting the reason text
     /// actually appears distinguishes the fix from that unfixed shape; asserting only "message contains
     /// CPE-1717" would pass on the unfixed code too, since that part is unchanged.
+    ///
+    /// **Also asserts the reason lands on the SAME first line as `CPE-1717`** (PR #986 review,
+    /// non-blocking fold-in): the CI guard step excerpts with `grep -m1 -A6 'CPE-1717'`
+    /// (`.github/workflows/ci.yml:279,302,328`), which starts at the matched line — a reason placed
+    /// before that line, or far enough after it to be pushed out by the "Likely causes"/"Re-run"
+    /// paragraphs plus the panic hook's own backtrace note, would never reach a human reading that
+    /// excerpt even though `msg.contains(..)` above would still pass.
     #[test]
     fn cpe_1815_the_failure_message_with_reason_names_which_step_failed() {
         let msg = staging_failure_message_with_reason(
@@ -3989,26 +4020,25 @@ mod tests {
             msg.contains("trash::delete rejected the probe file"),
             "must name the SPECIFIC step that failed, not just that staging failed in general: {msg}"
         );
+        let first_line = msg.lines().next().expect("message must not be empty");
+        assert!(
+            first_line.contains("CPE-1717") && first_line.contains("trash::delete rejected the probe file"),
+            "the reason must be woven into the SAME first line as `CPE-1717`, not appended after the \
+             boilerplate, or CI's `grep -m1 -A6 'CPE-1717'` excerpt can push it out of view — first \
+             line was: {first_line:?}"
+        );
     }
 
-    /// CPE-1815: distinct `Err`s for distinct steps must produce distinct reasons — otherwise
-    /// `require_staged_reason` would be no more informative than the bare `bool` it replaces, just with
-    /// extra plumbing. Also covers the `Ok(())`-under-sabotage case, where the probe has no failing step
-    /// to report and the message must say so rather than fabricate one.
+    /// CPE-1815: `CPE_STAGING_SABOTAGE=1` can force `StagingVerdict::Fail` even though the probe itself
+    /// returned `Ok(())` (see `staging_verdict`) — the probe has no failing step to name in that case,
+    /// and `staged_fail_reason` must say so rather than silently claiming a step it doesn't have. The
+    /// pairwise-distinctness of the REAL probe reasons is asserted where they are actually declared and
+    /// used, in `src-tauri/src/lib.rs`'s `trash_roundtrip_reasons_are_pairwise_distinct` /
+    /// `trash_roundtrip_available_indexes_every_reason_exactly_once` — asserting distinctness of two
+    /// string literals fed directly to this function here proved nothing about those real reasons (PR
+    /// #986 review, blocker 1) and has been removed rather than kept as decoration.
     #[test]
-    fn cpe_1815_distinct_probe_steps_produce_distinct_reasons() {
-        let write_fail = staged_fail_reason(Err("could not write the probe file before trashing it"));
-        let list_fail = staged_fail_reason(Err(
-            "the deleted probe file is not listed back out of the trash (list() failed, or \
-             succeeded without the probe in it)",
-        ));
-        assert_ne!(
-            write_fail, list_fail,
-            "two different failing steps must not collapse into the same reason text"
-        );
-        assert!(write_fail.contains("write"));
-        assert!(list_fail.contains("listed"));
-
+    fn cpe_1815_staged_fail_reason_reports_the_sabotage_fallback_when_the_probe_actually_succeeded() {
         let sabotaged = staged_fail_reason(Ok(()));
         assert!(
             sabotaged.contains("SABOTAGE"),

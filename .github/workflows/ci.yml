@@ -253,9 +253,11 @@ jobs:
       # measurement that says why pinning it blinds the guard to the arm it needs to cover.
       #
       # CPE-1806 added the trash-roundtrip sub-blocks below, after PR #961's review found the routing
-      # this ticket added (7 `trash_roundtrip_available()` call sites in `lib.rs`, all through
-      # `cpe_server::fsutil::require_staged`) could be deleted from ANY of the 7 sites with this step
-      # never noticing — the exact silent-vacuity shape CPE-1806 itself exists to close, one level up.
+      # this ticket added (9 `trash_roundtrip_available()` call sites in `lib.rs` — CPE-1770 added an
+      # 8th and 9th after this comment first said 7 (PR #986 review) — all through
+      # `cpe_server::fsutil::require_staged_reason` since CPE-1815) could be deleted from ANY of the 9
+      # sites with this step never noticing — the exact silent-vacuity shape CPE-1806 itself exists to
+      # close, one level up.
       - name: skip-visibility guard (CPE-1717 / CPE-1806)
         working-directory: src-tauri
         shell: bash
@@ -280,14 +282,15 @@ jobs:
           fi
 
           # ── CPE-1806: the trash-roundtrip mechanism (`trash_roundtrip_available()` /
-          # `cpe_server::fsutil::require_staged("trash_roundtrip", ..)`, 7 call sites in `lib.rs`),
-          # asymmetric across all THREE legs of this same job's matrix rather than just two.
+          # `cpe_server::fsutil::require_staged_reason("trash_roundtrip", ..)` since CPE-1815, 9 call
+          # sites in `lib.rs`), asymmetric across all THREE legs of this same job's matrix rather than
+          # just two.
           # `supported_here = true` for the two Linux-only malformed-`.trashinfo` panic-boundary tests
           # (CPE-1791/CPE-1803); `supported_here = cfg!(target_os = "linux")` for the five
           # `cfg(any(target_os = "windows", target_os = "linux"))` round-trip tests — matching the
           # measured verdict now recorded on `trash_roundtrip_available`'s own doc comment (grepped whole
           # raw job logs of two real runs: zero `CPE-1268` notices on Linux, five on Windows, same runs).
-          # macOS has no `trash::os_limited` API at all, so none of the seven tests even compile there —
+          # macOS has no `trash::os_limited` API at all, so none of the nine tests even compile there —
           # a filter for any of their names would match ZERO tests on macOS, and `cargo test <filter>`
           # with zero matches exits 0, which would silently read as evidence of nothing rather than "not
           # applicable" (the same zero-match trap the fourth `link_status` block below guards against).

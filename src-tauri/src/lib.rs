@@ -14770,18 +14770,26 @@ mod tests {
     /// skip (not fail) when this returns `Err`. This is purely a test-environment probe: real desktops
     /// round-trip fine, and the product guarantee is unchanged.
     ///
-    /// **CPE-1815: returns *which* step failed, not just that one did.** Five sequential OS calls sit
-    /// between "probe file written" and "probe file back at its original path", each with a genuinely
-    /// different diagnosis (a full disk, a broken `trash` backend, a trash directory nothing lists back
-    /// out of, a restore the OS refuses). Collapsing all of them into one `bool` was fine while the
-    /// caller only ever printed a generic skip notice either way — but CPE-1806 routes this through
-    /// `require_staged`, which on a strict/CI run panics *before* the caller sees a `bool` at all, and
-    /// the panic is the one place a human actually reads the outcome. `Err` names the step so that
-    /// panic — not a fresh round of instrumentation on a runner nobody can log into — is the diagnosis.
-    /// A failed `list()` call and a successful one that just doesn't contain the probe are merged into
-    /// one `Err` below: both mean "the delete did not land somewhere `list()` can see", distinguishing
-    /// them would need a second probe this function doesn't otherwise need, and CPE-1815 explicitly
-    /// does not want the probe doing more work to produce detail.
+    /// **CPE-1815: returns *which* step failed, not just that one did.** Six fallible operations sit
+    /// between "probe file written" and "probe file back at its original path" — tempdir creation, the
+    /// probe write, `trash::delete`, `trash::os_limited::list()`, finding the probe inside that listing,
+    /// and `restore_all` — plus the final "is it actually back" check, for **seven** distinct reasons
+    /// this can come back `Err` (named in [`TRASH_ROUNDTRIP_REASONS`] below). Collapsing them into one
+    /// `bool` was fine while the caller only ever printed a generic skip notice either way — but
+    /// CPE-1806 routes this through `require_staged_reason`, which on a strict/CI run panics *before*
+    /// the caller sees anything at all, and the panic is the one place a human actually reads the
+    /// outcome. `Err` names the step so that panic — not a fresh round of instrumentation on a runner
+    /// nobody can log into — is the diagnosis.
+    ///
+    /// **The `list()`-errored and "not found in the listing" causes are kept SEPARATE** (PR #986 review,
+    /// blocker 2) even though an earlier pass here merged them as "not worth a second probe". It was a
+    /// false economy: the split costs nothing beyond the `?`/`.ok_or` already needed on the one `list()`
+    /// call this function makes, and the two are the most different diagnoses in the whole set —
+    /// `list()` erroring outright means the trash backend itself is broken, while `list()` succeeding
+    /// without the probe in it is the signature of `lock_real_trash`'s `XDG_DATA_HOME` redirect
+    /// (CPE-1785) *half*-applying: `delete` lands in one trash directory and `list` reads another. A
+    /// redirect bug and a broken backend have different owners and different fixes; naming them the same
+    /// thing would have been exactly the collapse CPE-1815 exists to undo.
     ///
     /// **Measured per-platform verdict (CPE-1806), not assumed** — the PR #961 review grepped whole raw
     /// CI job logs (`gh api .../actions/jobs/<id>/logs`, not a region of one) for the `CPE-1268`
@@ -14808,19 +14816,39 @@ mod tests {
     /// documented in prose, but so the guard must already have been constructed (and therefore the real
     /// OS trash locked, and on Linux redirected) before this function's own real delete→list→restore
     /// probe can run against the same shared OS trash the guarded tests use (CPE-1785).
+    ///
+    /// The seven reasons below are compared for pairwise distinctness by
+    /// `trash_roundtrip_reasons_are_pairwise_distinct`, and `trash_roundtrip_available`'s body is
+    /// source-scanned by `trash_roundtrip_available_indexes_every_reason_exactly_once` to prove every
+    /// slot is actually wired to its call site — not just declared distinct and then ignored (PR #986
+    /// review, blocker 1: the first version's reasons were inline string literals with zero coverage,
+    /// and a mutation collapsing two of them to the same text left every gate green).
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    const TRASH_ROUNDTRIP_REASONS: [&str; 7] = [
+        "could not create a scratch tempdir to hold the probe file",
+        "could not write the probe file before trashing it",
+        "trash::delete rejected the probe file",
+        "trash::os_limited::list() failed outright",
+        "list() succeeded but the probe file is not in it",
+        "restore_all rejected the listed trash item",
+        "restore_all reported success but the probe file is not back at its original path",
+    ];
+
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn trash_roundtrip_available(guard: &TrashTestGuard) -> Result<(), &'static str> {
-        let dir = tempfile::tempdir()
-            .map_err(|_| "could not create a scratch tempdir to hold the probe file")?;
+        let dir = tempfile::tempdir().map_err(|_| TRASH_ROUNDTRIP_REASONS[0])?;
         let probe = dir.path().join("cpe-trash-roundtrip-probe.tmp");
-        fs::write(&probe, b"probe").map_err(|_| "could not write the probe file before trashing it")?;
-        trash::delete(&probe).map_err(|_| "trash::delete rejected the probe file")?;
-        // It must be listable back out of the trash by its original path...
-        let item = trash::os_limited::list()
-            .ok()
-            .and_then(|items| items.into_iter().find(|i| i.original_parent.join(&i.name) == probe))
-            .ok_or("the deleted probe file is not listed back out of the trash (list() failed, or \
-                    succeeded without the probe in it)")?;
+        fs::write(&probe, b"probe").map_err(|_| TRASH_ROUNDTRIP_REASONS[1])?;
+        trash::delete(&probe).map_err(|_| TRASH_ROUNDTRIP_REASONS[2])?;
+        // It must be listable back out of the trash by its original path. `list()` erroring outright
+        // and `list()` succeeding without the probe in it are kept as SEPARATE reasons (see the doc
+        // comment above) — a broken trash backend vs. a half-applied XDG_DATA_HOME redirect, different
+        // owners, different fixes.
+        let items = trash::os_limited::list().map_err(|_| TRASH_ROUNDTRIP_REASONS[3])?;
+        let item = items
+            .into_iter()
+            .find(|i| i.original_parent.join(&i.name) == probe)
+            .ok_or(TRASH_ROUNDTRIP_REASONS[4])?;
         // CPE-1785 (PR #940 review, blocker 2): prove the Linux redirect actually took effect, rather
         // than trusting `home_trash()`'s uncached `var_os` read on faith. The redirect's correctness
         // rests on an unstated invariant — `scratch_dir`'s root and `tempfile::tempdir()`'s root share a
@@ -14845,13 +14873,68 @@ mod tests {
             );
         }
         // ...and restorable to that path.
-        trash::os_limited::restore_all([item]).map_err(|_| "restore_all rejected the listed trash item")?;
+        trash::os_limited::restore_all([item]).map_err(|_| TRASH_ROUNDTRIP_REASONS[5])?;
         let restored = probe.exists();
         let _ = fs::remove_file(&probe);
         if restored {
             Ok(())
         } else {
-            Err("restore_all reported success but the probe file is not back at its original path")
+            Err(TRASH_ROUNDTRIP_REASONS[6])
+        }
+    }
+
+    /// CPE-1815 (PR #986 review, blocker 1): the pairwise-distinctness half of the fix. Catches a
+    /// mutation that replaces two or more `TRASH_ROUNDTRIP_REASONS` entries with the same text — e.g.
+    /// the "TOTAL COLLAPSE" the review demonstrated, restoring the pre-fix "one bare fact" in substance
+    /// while `trash_roundtrip_available` still compiles and every existing gate stays green.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    // Pairwise comparison over both indices — `needless_range_loop`'s `.iter().enumerate()` rewrite
+    // doesn't fit a loop that indexes with two different, dependent counters.
+    #[allow(clippy::needless_range_loop)]
+    fn trash_roundtrip_reasons_are_pairwise_distinct() {
+        for i in 0..TRASH_ROUNDTRIP_REASONS.len() {
+            for j in (i + 1)..TRASH_ROUNDTRIP_REASONS.len() {
+                assert_ne!(
+                    TRASH_ROUNDTRIP_REASONS[i],
+                    TRASH_ROUNDTRIP_REASONS[j],
+                    "reasons at indices {i} and {j} must name genuinely different failure causes, not the same text twice — a collapsed pair here is CPE-1815's bug back in substance even though trash_roundtrip_available still type-checks",
+                );
+            }
+        }
+    }
+
+    /// CPE-1815 (PR #986 review, blocker 1): the "actually wired up" half of the fix, which
+    /// `trash_roundtrip_reasons_are_pairwise_distinct` above cannot see on its own — that test only
+    /// looks at the `TRASH_ROUNDTRIP_REASONS` array itself, so a mutation that leaves the array alone
+    /// but points two `trash_roundtrip_available` call sites at the SAME index (the "PARTIAL COLLAPSE"
+    /// the review demonstrated: the write-probe step silently reporting the tempdir step's reason)
+    /// sails through it unnoticed. This test source-scans `trash_roundtrip_available`'s own body
+    /// (`include_str!` of this file, sliced between its `fn` line and the next item) and asserts every
+    /// slot `TRASH_ROUNDTRIP_REASONS[0]` through `[6]` is referenced there EXACTLY once — a guard in the
+    /// same family as `half_applied_rename_guards_are_rejected` / `src/lib/epicsQueueLayout.test.ts`.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn trash_roundtrip_available_indexes_every_reason_exactly_once() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find("fn trash_roundtrip_available(guard: &TrashTestGuard)")
+            .expect("trash_roundtrip_available must still exist under this name — this test's source scan depends on it");
+        // Bounded by the next item's `fn` signature rather than a hand-written closing-brace marker,
+        // so a doc-comment edit above it can't silently widen or shrink the scanned body.
+        let end = start
+            + src[start..]
+                .find("fn trash_roundtrip_reasons_are_pairwise_distinct")
+                .expect("could not find the end of trash_roundtrip_available's body — did the next test's name change? update the marker above to match");
+        let body = &src[start..end];
+
+        for (i, reason) in TRASH_ROUNDTRIP_REASONS.iter().enumerate() {
+            let needle = format!("TRASH_ROUNDTRIP_REASONS[{i}]");
+            let count = body.matches(&needle).count();
+            assert_eq!(
+                count, 1,
+                "slot {i} (\"{reason}\") must be indexed exactly once inside trash_roundtrip_available's body, found {count} reference(s) — a missing or duplicated index silently erases or duplicates a failure cause with no other test catching it",
+            );
         }
     }
 
@@ -14871,16 +14954,15 @@ mod tests {
         // matches the measured verdict right above (Linux's round-trip works; a headless Windows
         // Server CI session may not), so a Linux runner that stops staging goes RED instead of
         // silently voiding this test, while Windows keeps the legitimate loud skip. CPE-1815: the panic
-        // now names which of the six round-trip steps failed.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        // (Linux) and this skip notice (Windows — the platform actually observed to hit this path) both
+        // now name which of the seven round-trip steps failed.
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping trash round-trip test: this environment cannot delete→list→restore via the \
                  OS trash (e.g. a headless CI Windows Server session with no working Recycle Bin) — \
-                 CPE-1268"
+                 CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15432,15 +15514,13 @@ mod tests {
         // forcing this call to (true, false) and confirming a CI=true run panics with the CPE-1717
         // message naming "trash_roundtrip", then reverting; the CI `skip-visibility guard (CPE-1717 /
         // CPE-1806)` step below (`.github/workflows/ci.yml`) re-proves the same panic on every run.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping list_trash/restore_trash_items round-trip test: this environment cannot \
                  delete→list→restore via the OS trash (e.g. a headless CI Windows Server session with no \
-                 working Recycle Bin) — CPE-1268"
+                 working Recycle Bin) — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15487,14 +15567,12 @@ mod tests {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
         // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
         // doc comment for the measured per-platform verdict this mirrors.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping restore_trash_items collision test: this environment cannot delete→list→restore \
-                 via the OS trash — CPE-1268"
+                 via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15566,14 +15644,12 @@ mod tests {
     fn cpe_1770_restore_trash_items_refuses_when_a_dangling_link_occupies_the_original_path() {
         use std::io::Write;
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping restore_trash_items dangling-link test: this environment cannot delete→list→\
-                 restore via the OS trash — CPE-1268"
+                 restore via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15648,14 +15724,12 @@ mod tests {
     fn cpe_1770_restore_from_trash_refuses_when_a_dangling_link_occupies_the_original_path() {
         use std::io::Write;
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping restore_from_trash dangling-link test: this environment cannot delete→list→\
-                 restore via the OS trash — CPE-1268"
+                 restore via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15719,14 +15793,12 @@ mod tests {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
         // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
         // doc comment for the measured per-platform verdict this mirrors.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping empty_trash selective-purge test: this environment cannot delete→list→restore \
-                 via the OS trash — CPE-1268"
+                 via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15767,14 +15839,12 @@ mod tests {
         let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
         // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
         // doc comment for the measured per-platform verdict this mirrors.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            cfg!(target_os = "linux"),
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
             cpe_server::skip_notice!(
                 "skipping list_trash_stream test: this environment cannot delete→list→restore via the OS \
-                 trash — CPE-1268"
+                 trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15837,14 +15907,12 @@ mod tests {
         // `trash_roundtrip_available`'s doc comment) so a runner that stopped staging goes RED under
         // CI instead of silently voiding the CPE-1803 `degraded` assertions below, which this
         // Linux-only panic-boundary test is the *only* execution any of that Linux behaviour ever gets.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            true,
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", true, trash_staged) {
             cpe_server::skip_notice!(
                 "skipping malformed-trashinfo resilience test: this environment cannot delete→list→restore \
-                 via the OS trash — CPE-1268"
+                 via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
@@ -15924,14 +15992,12 @@ mod tests {
         // `#[cfg(target_os = "linux")]`, and the round-trip is measured to work there; see
         // `trash_roundtrip_available`'s doc comment) so a runner that stopped staging goes RED under
         // CI rather than silently voiding this Linux-only panic-boundary coverage.
-        if !cpe_server::fsutil::require_staged_reason(
-            "trash_roundtrip",
-            true,
-            trash_roundtrip_available(&trash_guard),
-        ) {
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", true, trash_staged) {
             cpe_server::skip_notice!(
                 "skipping restore/empty panic-honesty test: this environment cannot delete→list→restore \
-                 via the OS trash — CPE-1268"
+                 via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
             );
             return;
         }
