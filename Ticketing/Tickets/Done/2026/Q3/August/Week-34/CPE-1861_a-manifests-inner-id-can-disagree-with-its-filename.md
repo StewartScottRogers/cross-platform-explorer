@@ -3,11 +3,11 @@ id: CPE-1861
 title: a manifest's inner id can disagree with its filename, and the obvious fix destroys blobs
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-22
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
