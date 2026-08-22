@@ -20,13 +20,13 @@
 // CI (windows-latest, no interactive user) is the intended place to run it.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { assignShardSpecs, parseShardId, shardResultFilePrefix } from "./lib/shard.js";
 import { listSpecFiles, specRunPath } from "./lib/specFiles.js";
+import { waitForPort } from "./lib/waitForPort.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +95,17 @@ const TAURI_DRIVER_BIN = path.resolve(
   "bin",
   process.platform === "win32" ? "tauri-driver.exe" : "tauri-driver",
 );
+
+// CPE-1832: tauri-driver is a two-port intermediary, not a single listener, and both ports are named
+// here explicitly (passed to `spawn` below as `--port`/`--native-port`) rather than left to its
+// internal defaults — see `beforeSession`'s comment for why that distinction is the actual fix.
+// TAURI_DRIVER_PORT is tauri-driver's OWN front door (matches `config.port` below, and tauri-driver
+// 2.0.6's own `--port` default — `cli.rs`). NATIVE_DRIVER_PORT is the port tauri-driver spawns the
+// REAL platform WebDriver (WebKitWebDriver on Linux, msedgedriver on Windows) on and proxies every
+// request to (`cli.rs`'s `--native-port` default, also 4445 — verified by reading the vendored
+// tauri-driver-2.0.6 source in the local cargo registry cache, `src/{main,cli,server}.rs`).
+const TAURI_DRIVER_PORT = 4444;
+const NATIVE_DRIVER_PORT = 4445;
 
 // The temp dir + marker file (read by specs/open-dir.smoke.ts) are seeded once, in the main
 // process, before any worker/session starts — and handed off via a small state file rather than
@@ -965,37 +976,10 @@ function killTauriDriver() {
   tauriDriver?.kill();
 }
 
-// CPE-1772: polls `host:port` with a real TCP connect attempt (not an HTTP request — tauri-driver
-// doesn't need to answer anything yet, just accept the socket) every 200ms until one succeeds or
-// `budgetMs` elapses. Used by `beforeSession` below to close the spawn-then-immediately-POST race —
-// see that hook's comment for the failure mode this closes. Resolves on success; on timeout it
-// throws rather than silently letting the caller proceed to a doomed first request, since a
-// tauri-driver that never opens its port is a real, nameable failure, not something to paper over.
-function waitForPort(host: string, port: number, budgetMs: number): Promise<void> {
-  const deadline = Date.now() + budgetMs;
-  return new Promise((resolve, reject) => {
-    const attempt = () => {
-      const socket = net.connect({ host, port }, () => {
-        socket.end();
-        resolve();
-      });
-      socket.on("error", () => {
-        socket.destroy();
-        if (Date.now() >= deadline) {
-          reject(new Error(`[gui-smoke] tauri-driver never accepted a connection on ${host}:${port} within ${budgetMs}ms`));
-        } else {
-          setTimeout(attempt, 200);
-        }
-      });
-    };
-    attempt();
-  });
-}
-
 export const config: WebdriverIO.Config = {
   runner: "local",
   hostname: "127.0.0.1",
-  port: 4444,
+  port: TAURI_DRIVER_PORT,
   path: "/",
   // CPE-1753: this shard's assigned subset, or the whole flat `specs/` directory when unsharded. The
   // list is enumerated (via `lib/specFiles.ts`) rather than left as a `./specs/**/*.smoke.ts` glob so
@@ -1271,15 +1255,41 @@ export const config: WebdriverIO.Config = {
   // that first request can land before the port is open, which is an immediate `ECONNREFUSED` —
   // nothing `connectionRetryTimeout` covers, since that only bounds a slow RESPONSE, not a refused
   // CONNECT. The default `connectionRetryCount` of 3 used to paper over this by accident; now that
-  // it's capped at 0 (see that config option's own comment for why), this poll is what actually covers
-  // the window instead. Bounded at ~10s — generous for a process spawn+bind, small next to the
-  // multi-minute failures this ticket is about, and if it's never actually ready this just surfaces as
-  // a clear "tauri-driver never started listening" error instead of a silent hang inherited by the
-  // first real WebDriver command.
+  // it's capped at 0 (see that config option's own comment for why), the FIRST `waitForPort` call below
+  // is what actually covers that window instead.
+  //
+  // CPE-1832: that single wait was not the whole race. Real CI evidence AFTER the CPE-1772 fix had
+  // already landed (PR #972, run 32434348500, shard 2 — only the first spec failed, every later one in
+  // the same job connected fine, and the one configured retry landed inside the same window and failed
+  // the same way) showed a DIFFERENT error than a refused connect to tauri-driver's own port: a log line
+  // FROM tauri-driver itself, "Error serving connection: hyper::Error(User(Service), client error
+  // (Connect) ... Connection refused (os error 111))". Root-caused by reading tauri-driver 2.0.6's own
+  // vendored source (local cargo registry cache, `tauri-driver-2.0.6/src/{main,server,cli}.rs`, not
+  // guessed): `main.rs` spawns the REAL native driver (WebKitWebDriver / msedgedriver) as a child
+  // process and, WITHOUT waiting for it to finish binding its own port, immediately calls
+  // `server::run(...)`, which opens tauri-driver's OWN port (`TAURI_DRIVER_PORT`, 4444) and starts
+  // accepting connections right away. So tauri-driver's front door can be open — passing the CPE-1772
+  // wait — while its back door isn't: `server.rs`'s `forward_to_native_driver` proxies every request to
+  // `http://127.0.0.1:${NATIVE_DRIVER_PORT}` (4445 by default, `cli.rs`'s `--native-port` default,
+  // which we now pass explicitly below instead of relying on it staying 4445 across a future
+  // tauri-driver version), and a request landing before THAT port is open gets exactly the "Connection
+  // refused (os error 111)" from the evidence — tauri-driver's own log, not WDIO's, which is why it read
+  // differently from the CPE-1772 failure even though both are startup races. The two ports are not
+  // simultaneous: 4444 is a bare TCP bind (near-instant); 4445 needs a whole other binary (WebKitWebDriver
+  // under Xvfb, or msedgedriver) to actually start and bind, which is measurably slower — so waiting for
+  // only the first port closes exactly the race CPE-1772 named and leaves this second one wide open.
+  //
+  // Fix: wait for BOTH ports, in order, before returning — so WDIO's first `POST /session` (and any
+  // retry, which reuses this same beforeSession-spawned process) never reaches tauri-driver until the
+  // WHOLE proxy chain, not just its front door, is actually ready. Each wait is a real, bounded TCP
+  // poll (see `waitForPort`'s own comment) with a labelled, distinguishing error on timeout — a genuine
+  // tauri-driver crash still fails loud and fast, it just no longer gets misread as a slow start.
   beforeSession: async () => {
-    tauriDriver = spawn(TAURI_DRIVER_BIN, [], {
-      stdio: [null, process.stdout, process.stderr],
-    });
+    tauriDriver = spawn(
+      TAURI_DRIVER_BIN,
+      ["--port", String(TAURI_DRIVER_PORT), "--native-port", String(NATIVE_DRIVER_PORT)],
+      { stdio: [null, process.stdout, process.stderr] },
+    );
     tauriDriver.on("error", (error) => {
       console.error("[gui-smoke] tauri-driver error:", error);
       process.exit(1);
@@ -1290,7 +1300,16 @@ export const config: WebdriverIO.Config = {
         process.exit(1);
       }
     });
-    await waitForPort("127.0.0.1", 4444, 10_000);
+    // Front door first (fast: a bare TCP bind) — see the CPE-1772 half of the comment above.
+    await waitForPort("127.0.0.1", TAURI_DRIVER_PORT, 10_000, "tauri-driver");
+    // Back door second (slower: a whole other driver binary has to start) — see the CPE-1832 half of
+    // the comment above. This is the actual fix for the observed "Connection refused" evidence.
+    await waitForPort(
+      "127.0.0.1",
+      NATIVE_DRIVER_PORT,
+      20_000,
+      "the native WebDriver (WebKitWebDriver/msedgedriver, spawned by tauri-driver)",
+    );
   },
 
   // Note: afterSession might not run if the session fails to start, so onComplete (below) also
