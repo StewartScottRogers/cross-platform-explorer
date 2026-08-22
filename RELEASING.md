@@ -23,7 +23,14 @@ want to read the diff before anything leaves the machine (CPE-1841):
 ```powershell
 ./scripts/release.ps1 -Version 0.2.0 -BumpOnly
 git diff --numstat   # expect exactly `1  1` for each of the three manifests
+
+# then put them back -- a dry run must not leave the tree dirty
+git checkout -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
 ```
+
+That last line is not optional housekeeping. Three modified manifests left behind read as exactly the
+"unrelated noise" this file's own five-files-in-sync section warns about — the kind that gets committed
+by accident or discarded along with real work.
 
 The script bumps only each manifest's own version — `package.json`'s and `tauri.conf.json`'s
 **top-level** `"version"`, and `Cargo.toml`'s `version` inside **`[package]`**. A dependency pin, a

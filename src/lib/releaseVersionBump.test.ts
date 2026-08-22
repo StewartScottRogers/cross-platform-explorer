@@ -20,11 +20,18 @@
 //
 // Each decoy gets its OWN test. A single combined "leaves everything alone" case would go red as a unit
 // and hide which of the three shapes actually regressed.
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// Every case here spawns a real PowerShell process, which idles at roughly 0.4-0.6s on this repo's
+// Windows dev machines and is slower again under a loaded parallel run of the full 321-file suite.
+// vitest's default per-test timeout is 5000ms and vite.config.ts does not override it, so one slow spawn
+// is enough to red a test that is working perfectly. Raise it explicitly for this file rather than
+// leaving a process-spawning suite on a default sized for pure-module tests.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 120_000 });
 
 const ROOT = process.cwd();
 const RELEASE_PS1 = join(ROOT, "scripts", "release.ps1");
@@ -77,10 +84,23 @@ interface BumpResult {
   text: { pkg: string; conf: string; cargo: string };
 }
 
+interface BumpOptions {
+  /** Written as the script instead of copying the real one -- used only by the red-proof block below,
+   *  which re-runs the verbatim pre-fix regexes. */
+  scriptText?: string;
+  /** Prefix each staged manifest's BYTES with a UTF-8 BOM (EF BB BF), to exercise release.ps1's
+   *  BOM-preserving write path. */
+  bom?: boolean;
+}
+
 /** Stage `manifests` in a throwaway tree, run the real release.ps1 over it with `-BumpOnly`, and read
- *  back what it wrote. `scriptText`, when given, is written as the script instead of copying the real
- *  one -- used only by the red-proof block below, which re-runs the pre-fix regexes. */
-function runBump(manifests: Manifests, version: string, scriptText?: string): BumpResult {
+ *  back what it wrote. */
+function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}): BumpResult {
+  const { scriptText, bom = false } = opts;
+  const stage = (text: string): Buffer => {
+    const body = Buffer.from(crlf(text), "utf8");
+    return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
+  };
   const dir = mkdtempSync(join(tmpdir(), "cpe-1841-release-bump-"));
   try {
     mkdirSync(join(dir, "scripts"));
@@ -93,9 +113,9 @@ function runBump(manifests: Manifests, version: string, scriptText?: string): Bu
     const pkgPath = join(dir, "package.json");
     const confPath = join(dir, "src-tauri", "tauri.conf.json");
     const cargoPath = join(dir, "src-tauri", "Cargo.toml");
-    writeFileSync(pkgPath, Buffer.from(crlf(manifests.pkg), "utf8"));
-    writeFileSync(confPath, Buffer.from(crlf(manifests.conf), "utf8"));
-    writeFileSync(cargoPath, Buffer.from(crlf(manifests.cargo), "utf8"));
+    writeFileSync(pkgPath, stage(manifests.pkg));
+    writeFileSync(confPath, stage(manifests.conf));
+    writeFileSync(cargoPath, stage(manifests.cargo));
 
     const run = spawnSync(psHost, ["-NoProfile", "-File", scriptPath, "-Version", version, "-BumpOnly"], {
       encoding: "utf8",
@@ -181,8 +201,17 @@ serde = "1"
 const ALL_DECOYS: Manifests = { pkg: PKG_WITH_DECOYS, conf: CONF_WITH_DECOYS, cargo: CARGO_WITH_DECOYS };
 
 describe("release.ps1 bumps the version it means (CPE-1841)", () => {
+  // ONE bump of the shared decoy fixture, reused by every assertion in this block. These nine cases each
+  // ran the identical `runBump(ALL_DECOYS, NEW)` before -- nine identical PowerShell spawns producing
+  // nine byte-identical results, for no added coverage, and nine more chances for one slow spawn to red
+  // a working test. Hoisting it keeps each decoy on its own named test (so a regression still names
+  // itself) while spawning once.
+  let r: BumpResult;
+  beforeAll(() => {
+    r = runBump(ALL_DECOYS, NEW);
+  });
+
   it("rewrites the top-level version in all three manifests", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.stderr, r.stderr).toBe("");
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.pkg).toContain(`"version": "${NEW}"`);
@@ -191,7 +220,6 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
   });
 
   it("leaves a long-form Cargo dependency pin alone ([dependencies.somepkg] / version = \"1.2.3\")", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.cargo).toContain('[dependencies.somepkg]\r\nversion = "1.2.3"');
     // The [package] version DID move, so this isn't a vacuous pass on an untouched file.
@@ -199,21 +227,18 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
   });
 
   it('leaves a nested tool version alone in package.json ("someTool": { "version": "3.2.1" })', () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.pkg).toContain('"someTool": { "version": "3.2.1" }');
     expect(r.text.pkg).toContain(`"version": "${NEW}"`);
   });
 
   it('leaves a nested tool version alone in tauri.conf.json ("wix": { "version": "3.11.2" })', () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.conf).toContain('"wix": { "version": "3.11.2" }');
     expect(r.text.conf).toContain(`"version": "${NEW}"`);
   });
 
   it("leaves a version-shaped string inside a description alone, in every manifest", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.pkg).toContain('"description": "needs at least 4.5.6 of the thing"');
     expect(r.text.conf).toContain('"shortDescription": "requires 6.5.4 at runtime"');
@@ -221,7 +246,6 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
   });
 
   it("leaves a version-shaped string inside a URL alone, in every manifest", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.pkg).toContain("https://example.com/downloads/7.8.9/index.html");
     expect(r.text.conf).toContain("https://example.com/downloads/7.8.9/index.html");
@@ -229,13 +253,11 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
   });
 
   it("leaves Cargo's rust-version alone (a version-shaped value on a DIFFERENT key inside [package])", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     expect(r.text.cargo).toContain('rust-version = "1.77.2"');
   });
 
   it("changes exactly ONE line per manifest, byte-for-byte identical everywhere else", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     const before: Record<string, string> = { pkg: crlf(PKG_WITH_DECOYS), conf: crlf(CONF_WITH_DECOYS), cargo: crlf(CARGO_WITH_DECOYS) };
     for (const key of ["pkg", "conf", "cargo"] as const) {
@@ -249,7 +271,6 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
   });
 
   it("preserves CRLF, the trailing newline, and the absence of a BOM", () => {
-    const r = runBump(ALL_DECOYS, NEW);
     expect(r.status, ctx(r)).toBe(0);
     for (const key of ["pkg", "conf", "cargo"] as const) {
       const buf = r.bytes[key];
@@ -261,6 +282,100 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
       // in the repo tree that src/lib/mojibakeGuard.test.ts then has to reason about.
       expect([...buf.subarray(0, 3)], `${key}: a BOM was added`).not.toEqual([0xef, 0xbb, 0xbf]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The BOM-preserving write path (release.ps1's `$hadBom` branch).
+//
+// `[System.IO.File]::ReadAllText($path, $encoding)` does NOT honour its encoding argument for BOM
+// purposes: the underlying StreamReader auto-detects and STRIPS a leading BOM even when an explicit
+// BOM-less UTF8Encoding is passed. So a naive read-modify-write silently DELETES a BOM the file had --
+// a second changed line in a supposedly one-line version bump, and an encoding change nobody asked a
+// release script to make. release.ps1 sniffs the raw bytes and writes back with UTF8Encoding($true) when
+// the source had one.
+//
+// Not a live case (no manifest carries a BOM today), but it is on the release path, so it gets a guard
+// rather than only a comment. The non-ASCII payload below is the CPE-1834 half of the same story: a
+// BOM'd file must come back with its multi-byte characters intact too, not merely its BOM -- those are
+// separate failure modes (BOM handling vs. the ANSI/CP1252 round trip) that a BOM-only assertion would
+// not tell apart.
+// ---------------------------------------------------------------------------------------------------
+
+/** Characters chosen to span the encodings that break differently: 2-byte accented Latin, the CP1252
+ *  symbol block (em dash -- the exact character CPE-1834 measured collapsing to a single 0x97 byte), a
+ *  3-byte CJK pair CP1252 cannot represent at all, and a 4-byte astral emoji. Written as escapes rather
+ *  than literal glyphs so this file stays plain ASCII on disk and never has to be reasoned about by
+ *  src/lib/mojibakeGuard.test.ts. */
+const NON_ASCII = "caf\u00e9 \u2014 \u4e2d\u6587 \ud83c\udf89";
+
+const BOM_PKG = `{
+  "name": "demo",
+  "version": "${OLD}",
+  "description": "${NON_ASCII}",
+  "devDependencies": {
+    "someTool": { "version": "3.2.1" }
+  }
+}
+`;
+
+describe("release.ps1 preserves a manifest's existing BOM (CPE-1841 / CPE-1834)", () => {
+  let r: BumpResult;
+  beforeAll(() => {
+    r = runBump({ ...ALL_DECOYS, pkg: BOM_PKG }, NEW, { bom: true });
+  });
+
+  it("still bumps the top-level version in a BOM'd manifest", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    expect(r.text.pkg).toContain(`"version": "${NEW}"`);
+  });
+
+  it("leaves the BOM bytes (EF BB BF) at offset 0 instead of silently stripping them", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    for (const key of ["pkg", "conf", "cargo"] as const) {
+      expect([...r.bytes[key].subarray(0, 3)], `${key}: the source BOM was dropped`).toEqual([0xef, 0xbb, 0xbf]);
+    }
+  });
+
+  it("adds exactly ONE BOM, not a second one in front of the first", () => {
+    // UTF8Encoding($true) emits a preamble of its own; if the string handed to it still carried the
+    // U+FEFF the reader had stripped, the file would come back with EF BB BF EF BB BF.
+    expect([...r.bytes.pkg.subarray(3, 6)], "a second BOM was prepended").not.toEqual([0xef, 0xbb, 0xbf]);
+    expect(r.bytes.pkg.subarray(3, 4).toString("latin1"), "content should resume at '{' right after the BOM").toBe("{");
+  });
+
+  it("carries the non-ASCII payload through byte-exact (no CP1252 round trip, no mojibake)", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    expect(r.text.pkg).toContain(`"description": "${NON_ASCII}"`);
+    // And at byte level: the em dash must still be its 3-byte UTF-8 sequence, not CPE-1834's lone 0x97.
+    expect(r.bytes.pkg.includes(Buffer.from([0xe2, 0x80, 0x94])), "em dash lost its UTF-8 encoding").toBe(true);
+    expect(r.bytes.pkg.includes(0x97), "an em dash was re-encoded as the CP1252 byte 0x97").toBe(false);
+  });
+
+  it("still changes exactly one line, with CRLF and the trailing newline intact", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    // The BOM is staged at the BYTE level, so the decoded text opens with U+FEFF while the fixture
+    // string does not. Assert that difference explicitly and account for it, rather than letting it
+    // count as a second changed line and quietly weakening the one-line claim to "at most two".
+    const FEFF = String.fromCharCode(0xfeff);
+    expect(r.text.pkg.startsWith(FEFF), "decoded text should open with exactly one U+FEFF").toBe(true);
+    expect(r.text.pkg.slice(1).startsWith(FEFF), "a second U+FEFF followed the first").toBe(false);
+    const a = crlf(BOM_PKG).split("\r\n");
+    const b = r.text.pkg.slice(1).split("\r\n");
+    expect(b.length).toBe(a.length);
+    const changed = a.map((line, i) => (line === b[i] ? -1 : i)).filter((i) => i >= 0);
+    expect(changed.length, `expected exactly one changed line, got ${changed.length}`).toBe(1);
+    expect(b[changed[0]]).toContain(NEW);
+    expect(r.bytes.pkg.subarray(r.bytes.pkg.length - 2).toString("latin1")).toBe("\r\n");
+  });
+
+  it("does NOT add a BOM to a manifest that never had one (the branch is conditional, not unconditional)", () => {
+    // The companion to the cases above: identical fixture, `bom: false`. Without it, a `$hadBom` stuck
+    // at $true -- or an unconditional UTF8Encoding($true) write -- would keep every test above green.
+    const clean = runBump({ ...ALL_DECOYS, pkg: BOM_PKG }, NEW, { bom: false });
+    expect(clean.status, ctx(clean)).toBe(0);
+    expect([...clean.bytes.pkg.subarray(0, 3)]).not.toEqual([0xef, 0xbb, 0xbf]);
+    expect(clean.text.pkg).toContain(`"description": "${NON_ASCII}"`);
   });
 });
 
@@ -327,6 +442,13 @@ describe("release.ps1 fails loudly rather than bumping nothing (CPE-1841)", () =
 // replacements (copied verbatim from scripts/release.ps1 at origin/main before this ticket) over the same
 // fixtures, and assert every decoy IS clobbered.
 //
+// What this block DOES guard: that each decoy is a shape the old code genuinely ate, so the "leaves X
+// alone" tests above cannot be vacuously green against a fixture nothing would have touched anyway.
+// What it does NOT guard: any future regression. PRE_FIX_SCRIPT is a frozen transcription of one
+// historical script, so a differently-broken future release.ps1 leaves this block green while breaking
+// the real thing. The other tests in this file -- which drive the ACTUAL scripts/release.ps1 -- are what
+// carry that load. Do not read a green here as "the current script is correct".
+//
 // This mechanises the manual revert recorded in the ticket's Work Log: reverting the Cargo.toml locator
 // call alone -- i.e. putting
 //     $cargo = $cargo -replace '(?m)^(version\s*=\s*")[^"]+(")', "`${1}$Version`$2"
@@ -362,22 +484,25 @@ Write-Host "Bumped version to $Version in package.json, tauri.conf.json, Cargo.t
 `;
 
 describe("CPE-1841 red-proof: the pre-fix replacements really do clobber these fixtures", () => {
+  // Same one-spawn-many-assertions treatment as the block above.
+  let r: BumpResult;
+  beforeAll(() => {
+    r = runBump(ALL_DECOYS, NEW, { scriptText: PRE_FIX_SCRIPT });
+  });
+
   it("the un-scoped regexes rewrite the nested package.json tool version to the app version", () => {
-    const r = runBump(ALL_DECOYS, NEW, PRE_FIX_SCRIPT);
     expect(r.status, r.stderr).toBe(0);
     expect(r.text.pkg).toContain(`"someTool": { "version": "${NEW}" }`);
     expect(r.text.pkg).not.toContain('"3.2.1"');
   });
 
   it("the un-scoped regexes rewrite the nested tauri.conf.json wix version to the app version", () => {
-    const r = runBump(ALL_DECOYS, NEW, PRE_FIX_SCRIPT);
     expect(r.status, r.stderr).toBe(0);
     expect(r.text.conf).toContain(`"wix": { "version": "${NEW}" }`);
     expect(r.text.conf).not.toContain('"3.11.2"');
   });
 
   it("the un-scoped regex rewrites the long-form Cargo dependency pin to the app version", () => {
-    const r = runBump(ALL_DECOYS, NEW, PRE_FIX_SCRIPT);
     expect(r.status, r.stderr).toBe(0);
     expect(r.text.cargo).toContain(`[dependencies.somepkg]\r\nversion = "${NEW}"`);
     expect(r.text.cargo).not.toContain('"1.2.3"');
@@ -385,7 +510,7 @@ describe("CPE-1841 red-proof: the pre-fix replacements really do clobber these f
 
   it("the un-scoped replacements report success having bumped NOTHING when nothing matches", () => {
     const untouchable = { pkg: `{\n  "name": "demo"\n}\n`, conf: `{\n  "productName": "Demo"\n}\n`, cargo: `[package]\nname = "demo"\n` };
-    const r = runBump(untouchable, NEW, PRE_FIX_SCRIPT);
+    const r = runBump(untouchable, NEW, { scriptText: PRE_FIX_SCRIPT });
     expect(r.status, ctx(r)).toBe(0); // the bug: exit 0
     expect(r.stdout).toContain("Bumped version to");
     expect(r.text.pkg).toBe(crlf(untouchable.pkg)); // ... having changed nothing at all
