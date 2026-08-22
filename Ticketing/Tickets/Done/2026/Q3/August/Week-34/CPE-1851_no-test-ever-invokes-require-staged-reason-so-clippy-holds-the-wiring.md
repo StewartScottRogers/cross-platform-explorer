@@ -3,11 +3,11 @@ id: CPE-1851
 title: no test ever invokes require_staged_reason, so dead-code analysis is holding the wiring
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-21
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
