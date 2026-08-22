@@ -93,15 +93,26 @@ jobs:
           $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $sec
           Remove-Item $pfx -Force
           # Patch bundle.windows in tauri.conf.json (runner-only; never committed) so tauri-action signs.
+          # Read AND write through an explicit BOM-less UTF-8 encoder (CPE-1842; same fix and same
+          # reasoning as CPE-1834 in scripts/release.ps1). tauri.conf.json is BOM-less UTF-8 and
+          # carries non-ASCII (an em dash in plugins.cli.description), so a codec that depends on the
+          # host's defaults is a live hazard: bare `Get-Content -Raw` misdecodes it as the system ANSI
+          # code page and `Set-Content -Encoding utf8` prepends a BOM on Windows PowerShell 5.1 — the
+          # exact shape the repo's mojibake guard exists to catch. pwsh 7 happens to default to
+          # BOM-less UTF-8 on both ends, which is why this has survived so far; that is a default, not
+          # a guarantee, and it flips the moment this step runs under `shell: powershell`, an older
+          # image, or a different locale. Being explicit costs nothing and holds on every host.
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           $conf = 'src-tauri/tauri.conf.json'
-          $j = Get-Content $conf -Raw | ConvertFrom-Json
+          $confPath = (Resolve-Path $conf).Path
+          $j = [System.IO.File]::ReadAllText($confPath, $utf8NoBom) | ConvertFrom-Json
           if ($null -eq $j.bundle.windows) {
             $j.bundle | Add-Member -NotePropertyName windows -NotePropertyValue ([pscustomobject]@{}) -Force
           }
           $j.bundle.windows | Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $cert.Thumbprint -Force
           $j.bundle.windows | Add-Member -NotePropertyName digestAlgorithm      -NotePropertyValue 'sha256' -Force
           $j.bundle.windows | Add-Member -NotePropertyName timestampUrl         -NotePropertyValue 'http://timestamp.digicert.com' -Force
-          ($j | ConvertTo-Json -Depth 40) | Set-Content $conf -Encoding utf8
+          [System.IO.File]::WriteAllText($confPath, ($j | ConvertTo-Json -Depth 40), $utf8NoBom)
           Write-Host "Windows self-signed signing enabled (thumbprint $($cert.Thumbprint))."
 
       - name: Build and publish release
