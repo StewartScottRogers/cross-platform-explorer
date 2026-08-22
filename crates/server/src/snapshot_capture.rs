@@ -590,15 +590,134 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     fs::remove_file(&mpath).map_err(|e| format!("{}: {e}", mpath.display()))?; // point of no return
 
     let mut store = load_store(store_path)?;
-    let freed = release(&mut store, &hashes);
+
+    // CPE-1861 — **one manifest, one refcount: a release must not drop a blob another manifest still
+    // names.** That invariant is what the rest of this module assumes and what `index.json` alone
+    // cannot enforce, because a refcount is a *counter bumped at capture time*, not a count of the
+    // manifests on disk. Every way the two can disagree is a way for this function to delete content a
+    // surviving manifest still points at:
+    //
+    // - a manifest **file** copied in by something other than a capture (Explorer copy/paste, a
+    //   cloud-sync conflict copy, a backup script, a partial restore-from-backup) adds a namer without
+    //   ever bumping a ref — measured: two manifest files, `refs: 1`;
+    // - a manifest file removed by hand drops a namer without dropping a ref (the harmless direction);
+    // - `prune`'s own documented leak-over-corruption retry window can leave a ref behind.
+    //
+    // So the index is asked only for the *cheap* question — which of this manifest's hashes are even in
+    // danger of hitting zero — and the authoritative question ("does anything still name it?") is
+    // answered by **recomputing from the manifests actually on disk**, the shape CPE-1823 kept landing
+    // on. The index lookup is the cheap gate: a hash whose `refs` is 2 or more cannot reach zero here,
+    // so it costs one map lookup and nothing more.
+    //
+    // **That gate does not usually spare the scan, and it should not be read as if it did.** The
+    // ordinary scheduled prune removes a snapshot holding unique blobs nothing else references, so at
+    // least one hash is at risk and `manifests/` is walked on essentially every pass — which is what
+    // the 6.2 ms → 6.8 ms figure in `manifests_naming`'s cost note actually measures. The scan is the
+    // normal cost of a prune, not an exceptional one.
+    let at_risk: BTreeSet<String> = hashes
+        .iter()
+        // `map_or(true, ..)`: a hash the index doesn't know about is at risk too — the delete loop
+        // below keys off `!store.contains(hash)`, so an absent entry is exactly the case that removes a
+        // blob file with no refcount ever having said it was free.
+        .filter(|h| store.get(h).map_or(true, |m| m.refs <= 1))
+        .cloned()
+        .collect();
+    // The pruned manifest's own file is already gone (the point of no return above), so this scan sees
+    // precisely the survivors.
+    let still_named = manifests_naming(store_path, &at_risk);
+
+    // Skip the decrement rather than decrement-and-restore: the survivor's hold is what the count
+    // *should* have been all along, so leaving it at its current value is the repair. As a rule about
+    // this function it is self-correcting — prune the last namer and nothing protects the blob any
+    // more, so it is freed then — and the honest two-captures-share-a-blob case is untouched (its
+    // `refs` is 2, so it is never even at risk).
+    //
+    // **"Prune the last namer" is not reachable through retention, though, and an earlier version of
+    // this comment claimed "no permanent leak" on the strength of it.** That was wrong, because the two
+    // halves of CPE-1861 interact and neither one says so on its own: `list_manifests` refuses to list
+    // a manifest file that does not describe itself, so the very file protecting this blob is one
+    // retention can never name. Measured, driving the real `snapshot_prune::apply`:
+    //
+    // ```text
+    // 3 captures (m1 oldest, unique 12-byte blob) + an Explorer copy "<m1> - Copy.json"; hourly=2
+    //   pass 1       pruned=[m1]  kept=[m3, m2]  bytes_freed=0
+    //                m1's unique blob still on disk after its owner was pruned: true   (index refs: 1)
+    //   passes 2-4   pruned=[]    freed=0        every time
+    //   final        blob present; manifests/ = ["<m1> - Copy.json", "<m2>.json", "<m3>.json"]
+    //   prune("<m1> - Copy") by id  ->  freed=12, blob gone
+    // ```
+    //
+    // So a copy pins the whole pruned snapshot's unique content for as long as it sits in the store,
+    // and a *recurring* copier (a sync client leaving one per cycle) grows it without bound — measured
+    // at `list_manifests`, where the size of the residue is stated in full. Reclaiming it needs the file
+    // removed by hand, or `prune` called with that id directly — the last line above, which is exactly
+    // what `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` exercises.
+    let to_release: BTreeSet<String> = hashes.difference(&still_named).cloned().collect();
+    let freed = release(&mut store, &to_release);
     let blobs_dir_path = blobs_dir(store_path);
     for hash in &hashes {
-        if !store.contains(hash) {
+        if !store.contains(hash) && !still_named.contains(hash) {
             let _ = fs::remove_file(blobs_dir_path.join(hash)); // best-effort; index is the source of truth
         }
     }
     save_store(store_path, &store)?;
     Ok(freed)
+}
+
+/// Which of `wanted` are still named by a manifest file on disk under `store_dir` — the recomputed
+/// witness behind [`prune`]'s CPE-1861 invariant. Empty `wanted` never touches the disk.
+///
+/// **Deliberately more permissive than [`list_manifests`], and the difference is the whole point.**
+/// `list_manifests` answers "may this file *steer* a destructive decision?" and so demands a
+/// self-consistent record. This answers "would deleting these bytes destroy something that still points
+/// at them?", where any parseable manifest file counts — including the duplicate copy, the id-liar, and
+/// the crafted filename that `list_manifests` refuses to list. Applying the strict rule here would
+/// re-open exactly the hole this closes.
+///
+/// Failure is conservative in the same direction: an unreadable `manifests/` directory answers "all of
+/// them are still named", so the blobs are kept and the residue is a space leak — never a delete of
+/// content nothing could prove was free. Same leak-over-corruption tradeoff [`prune`] itself documents.
+/// A single manifest file that can't be read or parsed *is* skipped, matching [`list_manifests`]: its
+/// own capture already put a ref in the index, so it is protected by the refcount rather than by this.
+///
+/// **Cost, measured rather than assumed** (release build, CPE-1861). The scheduled shape —
+/// [`crate::snapshot_schedule::snapshot_run_due`] pruning the one capture that just aged out — pays
+/// 6.2 → 6.8 ms on a 50-manifest store and 9.6 → 18.3 ms on a 200-manifest × 50-file one. The worst
+/// case, a single pass thinning 197 of 200 manifests, is 1.08 s → 1.81 s: `prune` rescans the survivors
+/// per call, so a bulk thin is quadratic in manifest count.
+///
+/// The round-3 security audit fitted the delta and the model is worth keeping, because it says when to
+/// care: `3.2 µs · n(n−1)/2 + 2.9 ms · n`, within about 1% at n = 50/100/200. The quadratic term is
+/// real but the **linear** one dominates until n ≈ 1800, and the shipped default `RetentionPolicy`
+/// (24/7/4/12) caps a store at roughly 47 manifests — so the worst case is not reachable under
+/// defaults. It *is* reachable on the **first pass after this fix un-wedges a long-stalled store**,
+/// which is exactly the situation this ticket creates: ~1.6 s, inside `spawn_blocking`, unattended.
+/// That is a considered deferral rather than a hope. If a store ever does get big enough for it to
+/// bite, the fix is to hoist the scan out of the per-manifest call — not to weaken it.
+fn manifests_naming(store_dir: &Path, wanted: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    if wanted.is_empty() {
+        return found;
+    }
+    let dir = manifests_dir(store_dir);
+    let Ok(entries) = fs::read_dir(&dir) else { return wanted.clone() };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(data) = fs::read_to_string(&path) else { continue };
+        let Ok(m) = serde_json::from_str::<PersistedManifest>(&data) else { continue };
+        for f in m.files.values() {
+            if wanted.contains(&f.hash) {
+                found.insert(f.hash.clone());
+            }
+        }
+        if found.len() == wanted.len() {
+            break; // every candidate already accounted for
+        }
+    }
+    found
 }
 
 /// Load the checkpoint [`Snapshot`] (`path → FileState`) recorded in manifest `manifest_id` from the
@@ -626,11 +745,25 @@ pub struct ManifestSummary {
     pub created_ms: u64,
 }
 
-/// Every manifest currently on disk under `store_dir`'s `manifests/` directory, unordered (callers sort as
-/// needed — [`crate::snapshot_retention::thin`] sorts internally). A missing `manifests/` dir (a store that
-/// has never captured) yields an empty list, not an error. A file that fails to parse as a manifest (torn
-/// write, hand-edit) is skipped rather than failing the whole enumeration — mirrors this module's other
-/// skip-on-error guardrails.
+/// Every manifest currently on disk under `store_dir`'s `manifests/` directory **that is fit to steer a
+/// retention decision**, unordered (callers sort as needed — [`crate::snapshot_retention::thin`] sorts
+/// internally). A missing `manifests/` dir (a store that has never captured) yields an empty list, not an
+/// error. A file that fails to parse as a manifest (torn write, hand-edit) is skipped rather than failing
+/// the whole enumeration — mirrors this module's other skip-on-error guardrails, and CPE-1861 extends
+/// that same skip to three further ways a file can fail to describe itself (see the body).
+///
+/// **The invariant this function now carries (CPE-1861): every id it hands out is one
+/// [`load_manifest`] will accept, and one [`prune`] can carry past its point of no return.** Its only
+/// caller, [`crate::snapshot_prune::apply`], feeds these ids straight to [`prune`] and propagates any
+/// error with `?` — so an id [`prune`] refuses does not fail *one* manifest, it kills the whole
+/// retention pass and every pass after it, until someone deletes the file by hand.
+///
+/// That makes this function's condition list a **mirror of [`prune`]'s fail-closed gates**, and the two
+/// must be kept in lockstep: [`validate_manifest_id`], [`load_manifest`]'s parse, [`load_manifest`]'s
+/// `file_count` cross-check, and CPE-1823's [`validate_blob_name`] on every entry's hash. The fourth was
+/// missing until the round-3 security audit found a hand-edited hash still stalling the pass — if you
+/// add a refusal to [`prune`] ahead of its `remove_file`, add its predicate here too, or you have
+/// re-opened the permanent stall.
 pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
     let dir = manifests_dir(Path::new(store_dir));
     let entries = match fs::read_dir(&dir) {
@@ -645,32 +778,123 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
         }
         let Ok(data) = fs::read_to_string(&path) else { continue };
         let Ok(m) = serde_json::from_str::<PersistedManifest>(&data) else { continue };
-        // **CPE-1847 walked this line and CPE-1861 owns it — do not "fix" it in passing.** Reporting
-        // `m.id`, the manifest's own account of itself, lets a hand-edited inner `id` steer a retention
-        // decision onto a different manifest (measured: pointed at a sibling nothing is pruned at all;
-        // pointed at nothing the whole pass `Err`s and no checkpoint is ever thinned again). The obvious
-        // fix — derive the id from the filename, which is where `save_manifest` puts it by construction
-        // — was written, measured, reviewed, and **reverted**, because it converts a leak into silent
-        // data loss:
+        // ---- CPE-1861: three skips, one rule ------------------------------------------------------
+        //
+        // **A file may take part in a decision to delete a checkpoint only if it is a record
+        // `save_manifest` could actually have written at this name, and one `load_manifest` will
+        // accept.** Everything below is that sentence, checked.
+        //
+        // Before this, the summary reported `m.id` — the manifest's own account of itself — while every
+        // other entry point in the module (`load_manifest`, `restore`, `prune`, `manifest_snapshot`)
+        // resolves by **filename**. A hand-edited inner `id` therefore steered a destructive decision
+        // onto a different file, measured through `snapshot_prune::apply`:
         //
         // ```text
-        // cp <id>.json <id>-backup.json          (Explorer copy/paste, a cloud-sync conflict copy,
-        //                                         a backup script, a partial restore-from-backup)
-        //   with m.id      : preview keep=[id, id]  prune=[]              restore(id)=Ok, tree=["a.txt"]
-        //   with file_stem : preview keep=[id]      prune=[id-backup]     restore(id)=Err(blob missing)
-        //                    apply -> kept: [id], pruned: [id-backup], bytes_freed: 2; blobs=[]; tree=[]
+        // inner id -> a sibling's id     Ok(kept: [m3, m2, m3], pruned: [])   nothing thinned, ever
+        // inner id -> "no-such-manifest" Err(".../no-such-manifest.json: cannot find the file")
         // ```
         //
-        // The two copies get two distinct ids, retention prunes one, `release` drops the **shared** blob
-        // refcounts to zero, the blobs are deleted, and the manifest it **kept** can no longer restore
-        // anything — reported as complete success. `snapshot_schedule::snapshot_run_due` prunes after
-        // every scheduled capture, so it fires unattended. That is the same failure grammar CPE-1847
-        // exists to remove. A crafted filename relocates the wedge rather than removing it, too:
-        // `a..b.json` makes every pass `Err("a..b: not a valid manifest id")`, forever.
+        // The second kills the pass permanently: `snapshot_prune::apply` propagates `prune`'s error with
+        // `?`, so no checkpoint in that store is ever thinned again.
         //
-        // The duplicate-id collapse is therefore load-bearing by accident, and replacing it needs the
-        // whole decision (skip `m.id != id` and leak, versus fixing `prune` not to release refs a
-        // surviving manifest still holds) — CPE-1861, not a one-line tidy-up here.
+        // **Why this is a skip and not the obvious fix.** CPE-1847 fixed it by deriving the id from the
+        // filename and had to revert: the filename is chosen by whoever put the file there, so trusting
+        // it *invents a checkpoint* out of a stray file. Measured, both regressions:
+        //
+        // ```text
+        // cp <id>.json <id>-backup.json   (Explorer copy/paste, a cloud-sync conflict copy, a backup
+        //                                  script, a partial restore-from-backup)
+        //   file_stem: apply pruned=[id-backup]  blobs=[]  restore(id)=Err(blob missing)  tree=[]
+        // plant a..b.json
+        //   file_stem: apply Err("a..b: not a valid manifest id")   -- the original wedge, relocated
+        // ```
+        //
+        // Requiring the two to **agree** keeps the filename authoritative (it is what everything else
+        // resolves by) without ever letting a name invent an identity: a copy, a liar and a crafted
+        // name are all simply not checkpoints. Retention then thins the rest of the store normally,
+        // which the duplicate-id collapse used to prevent — it stopped the whole pass, not just the
+        // liar.
+        //
+        // **The cost, stated plainly — and corrected in review, because the first version of it was
+        // wrong in the flattering direction.** A file that fails these checks is never reclaimed, and
+        // *neither is any blob it names*. That is a leak, and it is the failure direction this module
+        // chooses everywhere else (`prune`'s "leak over corruption", `capture`'s skip-on-error) — but
+        // it is **not** "one small JSON file", which is what this comment used to say.
+        //
+        // The two halves of CPE-1861 interact to make it larger than either half implies. `prune`
+        // refuses to free a blob any manifest file still names — *including a file this function
+        // declines to list* — and because this function declines to list it, retention can never prune
+        // it and so can never reach the "last namer" case that would free those blobs. Measured
+        // through the real `snapshot_prune::apply`:
+        //
+        // ```text
+        // 3 captures (m1 oldest, unique 12-byte blob) + an Explorer copy "<m1> - Copy.json"; hourly=2
+        //   pass 1      pruned=[m1] kept=[m3, m2] bytes_freed=0; m1's unique blob present, index refs 1
+        //   passes 2-4  pruned=[] freed=0, every time
+        //   final       manifests/ = ["<m1> - Copy.json", "<m2>.json", "<m3>.json"], blob still present
+        // ```
+        //
+        // So the residue is **that snapshot's stored content**, pinned for as long as the file sits in
+        // the store, not a few hundred bytes. Reclaiming it needs the file removed by hand, or `prune`
+        // driven by that id directly.
+        //
+        // **And for a recurring copier there is no bound at all** — the round-3 security audit measured
+        // the case with no attacker in it, a sync client leaving one `<id> - Copy.json` per cycle:
+        //
+        // ```text
+        // cycle  1: listed=1  manifest files= 2  blob files= 1
+        // cycle  6: listed=1  manifest files= 7  blob files= 6
+        // cycle 12: listed=1  manifest files=13  blob files=12    apply Ok, bytes_freed=0 every pass
+        // ```
+        //
+        // Linear, unbounded, and **nothing surfaces it**: no `src/` code consumes
+        // `RetentionApplyResult`, and `snapshot_schedule::snapshot_run_due` runs headless. So this is
+        // "bounded per file, unbounded per copier", and calling it bounded full stop was the error.
+        //
+        // Traded knowingly and in that direction anyway, and the honest comparison is what settles it:
+        // on `main` the *same* fixture gives a permanent `Err` wedge plus 23 phantom checkpoints. This
+        // converts a loud wedge into a silent leak — better on every axis except discoverability, and a
+        // leak is recoverable by deleting files where a store that can never be thinned is not. But
+        // whoever reconsiders this should meet the real number rather than the reassuring one; that is
+        // the whole value of pinning the decision here, and the first version of this comment defeated
+        // it by being wrong.
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        if m.id != stem
+            // The name must also be one this module could hand out and resolve. Without this, a file
+            // crafted to be self-*consistent* — `a..b.json` whose inner id is also `"a..b"` — would pass
+            // the agreement check and then wedge the pass at `validate_manifest_id` inside `prune`,
+            // which is the original harm with an extra step.
+            || validate_manifest_id(stem).is_err()
+            // CPE-1847 left this one open and recorded it: a manifest whose `file_count` contradicts its
+            // `files` map is refused by `load_manifest`, and that refusal wedged the retention pass
+            // exactly as a missing file did. Same predicate, applied here as a skip, so the pass never
+            // names it. Shared with `load_manifest` so the two cannot drift.
+            || file_count_disagreement(&m).is_some()
+            // **The fourth gate, found by the round-3 security audit and missed by my own enumeration.**
+            // `prune` has FOUR fail-closed refusals before its point of no return —
+            // `validate_manifest_id`, `load_manifest`'s parse, `load_manifest`'s `file_count`, and
+            // CPE-1823's `validate_blob_name` on every hash — and the three conditions above mirrored
+            // only the first three. So one hand-edited `hash` in an otherwise *perfectly*
+            // self-describing manifest still stalled the pass permanently, at the same tamper cost as
+            // the shapes this ticket exists to remove:
+            //
+            // ```text
+            // "hash": "not-a-hex-hash"   (inner id agrees with the stem, stem valid, file_count correct)
+            //   pass 1 -> Err("…: refusing this manifest entry — its content hash \"not-a-hex-hash\" is
+            //                  not a plain hex blob name")
+            //   pass 2 -> Err(same)      the refusal fires BEFORE the manifest is deleted, so it recurs
+            //                            on every scheduled pass, forever
+            // ```
+            //
+            // Identical on `main`, so it was never a regression — but it is the same grammar, and my
+            // enumeration wrote off `restore`/`prune`/`manifest_snapshot` as "unchanged" and never
+            // walked `prune`'s own gate list. Mirrored here in the same shape as the other three, which
+            // is cheaper than caveating the invariant this function's doc states. The hashes are already
+            // deserialized by this point, so it is a map walk and no extra I/O.
+            || m.files.values().any(|f| validate_blob_name(&f.hash).is_err())
+        {
+            continue;
+        }
         out.push(ManifestSummary { id: m.id, created_ms: m.created_ms });
     }
     Ok(out)
@@ -967,24 +1191,37 @@ fn load_manifest(store_dir: &Path, manifest_id: &str) -> Result<PersistedManifes
     // the file was edited after it was written, and a store whose records contradict themselves is not
     // a store to quietly act on. The refusal names both numbers so the user can see what changed.
     //
-    // **Recorded, not fixed:** this makes a tampered manifest unprunable — `snapshot_prune::apply`
-    // propagates `prune`'s error with `?`, so one such manifest wedges the whole retention pass until it
-    // is removed by hand. The same is already true of a manifest whose JSON is malformed, so this
-    // widens an existing shape rather than introducing one; the alternative — pruning a manifest whose
-    // file list we know is wrong — releases the wrong blob refs and is worse.
-    if let Some(declared) = manifest.file_count {
-        if declared != manifest.files.len() {
-            return Err(format!(
-                "{}: this manifest says it holds {declared} file{} but its file list has {} — it has \
-                 been edited since it was written, and a checkpoint that contradicts itself cannot be \
-                 used to decide what to restore or delete",
-                path.display(),
-                if declared == 1 { "" } else { "s" },
-                manifest.files.len()
-            ));
-        }
+    // **CPE-1847 recorded this as an unfixed wedge; CPE-1861 closed it from the other end.** The refusal
+    // here made a tampered manifest unprunable, and `snapshot_prune::apply` propagates `prune`'s error
+    // with `?`, so one such file stopped the whole retention pass for good. Pruning a manifest whose
+    // file list is known wrong is worse (it releases the wrong blob refs), so the refusal stays — what
+    // changed is that `list_manifests` now applies the **same** predicate as a *skip*, so retention
+    // never names such a manifest in the first place and never reaches this line with it.
+    if let Some((declared, actual)) = file_count_disagreement(&manifest) {
+        return Err(format!(
+            "{}: this manifest says it holds {declared} file{} but its file list has {actual} — it has \
+             been edited since it was written, and a checkpoint that contradicts itself cannot be \
+             used to decide what to restore or delete",
+            path.display(),
+            if declared == 1 { "" } else { "s" },
+        ));
     }
     Ok(manifest)
+}
+
+/// Whether `manifest`'s declared `file_count` contradicts the map it describes — the one falsifiable
+/// claim a manifest makes about itself (see [`PersistedManifest::file_count`]). `Some((declared,
+/// actual))` on a disagreement.
+///
+/// Factored out so [`load_manifest`] (which **refuses**) and [`list_manifests`] (which **skips**) can
+/// never drift apart. That pairing is what makes CPE-1861's invariant hold by construction: *every id
+/// [`list_manifests`] hands out is one [`load_manifest`] will accept*, so a retention pass can no longer
+/// be handed an id that then errors — the shape that wedged it permanently.
+fn file_count_disagreement(manifest: &PersistedManifest) -> Option<(usize, usize)> {
+    match manifest.file_count {
+        Some(declared) if declared != manifest.files.len() => Some((declared, manifest.files.len())),
+        _ => None,
+    }
 }
 
 /// Reject a caller-supplied `manifest_id` that isn't a single safe path segment, so
@@ -2463,5 +2700,142 @@ mod tests {
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// CPE-1861, the `prune` half, driven directly rather than through retention: **one manifest, one
+    /// refcount — a release must not drop a blob another manifest still names.**
+    ///
+    /// The refcount alone cannot enforce that, and this test measures why before it measures anything
+    /// else: a manifest file that arrives by *copy* rather than by capture adds a namer without ever
+    /// bumping a ref, so `index.json` reads `refs: 1` while two files on disk name the blob. Pruning
+    /// either one therefore used to take the count to zero and delete content the other still needed.
+    #[test]
+    fn cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names() {
+        let src = scratch("shared-src");
+        let store = scratch("shared-store");
+        fs::write(src.join("a.txt"), b"irreplaceable").unwrap();
+        let first =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        let id = first.manifest_id.clone();
+
+        let mdir = manifests_dir(&store);
+        fs::copy(mdir.join(format!("{id}.json")), mdir.join(format!("{id}-backup.json"))).unwrap();
+
+        // FIXTURE LIVENESS — the copy is a real second namer of the same blob, and the index disagrees
+        // with the manifest set. If either of these stopped being true this test would be measuring
+        // nothing.
+        let hash = load_manifest(&store, &format!("{id}-backup")).unwrap().files["a.txt"].hash.clone();
+        assert!(blobs_dir(&store).join(&hash).exists(), "LIVE: the shared blob is missing");
+        assert_eq!(
+            load_store(&store).unwrap().get(&hash).unwrap().refs,
+            1,
+            "LIVE: the refcount/namer drift this guard exists for is absent from the fixture"
+        );
+        assert_eq!(files_under(&mdir).len(), 2, "LIVE: the copy is not in manifests/");
+
+        // Prune the copy. The original still names the blob, so the blob must survive.
+        prune(&store.to_string_lossy(), &format!("{id}-backup")).unwrap();
+        assert!(
+            blobs_dir(&store).join(&hash).exists(),
+            "HARM: pruning one of two manifest files naming a blob deleted the blob"
+        );
+        assert!(load_store(&store).unwrap().contains(&hash), "the index still holds the blob");
+        let dest = scratch("shared-dest");
+        restore(&store.to_string_lossy(), &id, &dest.to_string_lossy())
+            .unwrap_or_else(|e| panic!("HARM: the surviving checkpoint can no longer restore: {e}"));
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"irreplaceable");
+
+        // Self-correcting, not a permanent leak: prune the last namer and the blob is freed as usual.
+        let freed = prune(&store.to_string_lossy(), &id).unwrap();
+        assert!(freed > 0, "the last namer's prune still frees the blob");
+        assert!(!blobs_dir(&store).join(&hash).exists(), "the blob file is gone once nothing names it");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// CPE-1861's invariant, as a property over a store carrying every tamper shape at once: **every id
+    /// `list_manifests` hands out is one `load_manifest` accepts.** Its only caller feeds those ids
+    /// straight to `prune` and propagates the error with `?`, so an id that cannot be loaded does not
+    /// fail one manifest — it stops the retention pass for that store permanently.
+    #[test]
+    fn cpe_1861_every_id_list_manifests_hands_out_can_still_be_loaded() {
+        let src = scratch("inv-src");
+        let store = scratch("inv-store");
+        fs::write(src.join("a.txt"), b"v1").unwrap();
+        fs::write(src.join("b.txt"), b"b").unwrap();
+        let good1 =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap()
+                .manifest_id;
+        fs::write(src.join("a.txt"), b"v2").unwrap();
+        let good2 =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap()
+                .manifest_id;
+
+        let mdir = manifests_dir(&store);
+        let edit = |name: &str, f: &dyn Fn(&mut serde_json::Value)| {
+            let p = mdir.join(format!("{name}.json"));
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+            f(&mut doc);
+            fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        };
+        let copy = |from: &str, to: &str| {
+            fs::copy(mdir.join(format!("{from}.json")), mdir.join(format!("{to}.json"))).unwrap();
+        };
+
+        copy(&good1, &format!("{good1}-backup")); // a plain duplicate
+        copy(&good1, "liar"); // filename/id disagreement
+        copy(&good1, "a..b"); // crafted filename, inner id still the original's
+        // A crafted name that AGREES with its own inner id — the shape the agreement rule alone would
+        // let through and `validate_manifest_id` catches.
+        copy(&good1, "a..c");
+        edit("a..c", &|d| d["id"] = serde_json::json!("a..c"));
+        copy(&good1, "countliar");
+        edit("countliar", &|d| {
+            d["id"] = serde_json::json!("countliar");
+            d["files"].as_object_mut().unwrap().remove("b.txt");
+        });
+        fs::write(mdir.join("garbage.json"), b"{ not json").unwrap();
+
+        // FIXTURE LIVENESS — every planted file is on disk, and each one is genuinely a way to break the
+        // invariant: fed to `load_manifest` by name, each planted id fails.
+        let planted = files_under(&mdir);
+        assert_eq!(planted.len(), 8, "LIVE: planted files missing: {planted:?}");
+        // The wedge shapes: unloadable at their own name, so listing one kills the pass outright.
+        for bad in ["a..b", "a..c", "countliar", "garbage"] {
+            assert!(
+                load_manifest(&store, bad).is_err(),
+                "LIVE: {bad} was supposed to be unloadable, so listing it would wedge the pass"
+            );
+        }
+        // The steering shapes: perfectly loadable at their own name, but each reports a *foreign* id, so
+        // listing one puts a second, phantom entry for `good1` in front of the retention policy.
+        for steerer in ["liar", &format!("{good1}-backup")] {
+            let doc: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(mdir.join(format!("{steerer}.json"))).unwrap())
+                    .unwrap();
+            assert_eq!(
+                doc["id"].as_str().unwrap(),
+                good1,
+                "LIVE: {steerer} does not actually claim another manifest's id"
+            );
+        }
+
+        let listed: BTreeSet<String> =
+            list_manifests(&store.to_string_lossy()).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(
+            listed,
+            [good1.clone(), good2.clone()].into_iter().collect::<BTreeSet<_>>(),
+            "only self-describing manifests may steer a retention decision"
+        );
+        for id in &listed {
+            load_manifest(&store, id)
+                .unwrap_or_else(|e| panic!("INVARIANT BROKEN: list_manifests handed out {id}: {e}"));
+        }
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
     }
 }
