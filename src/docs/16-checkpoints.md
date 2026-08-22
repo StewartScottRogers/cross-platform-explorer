@@ -121,6 +121,12 @@ deletes stored content that any record in the store still refers to, and it neve
 can't make sense of. An ignored file therefore holds on to its snapshot's stored content — which can be
 as much space as that whole snapshot, not the size of the file itself — until you delete the file.
 
+If something keeps *making* these files — a sync client that leaves a conflict copy every time it runs,
+say — the store will keep growing, because each copy holds on to another snapshot's content and cleanup
+never removes any of them. Nothing warns you about this: the cleanup reports success each time, because
+from its point of view it did exactly what it was asked to. If a snapshot folder is larger than you
+expect, look inside it for duplicated or renamed record files and delete them.
+
 Two consequences worth knowing:
 
 - One odd file can no longer stop the cleanup. Pruning keeps thinning everything else around it, instead

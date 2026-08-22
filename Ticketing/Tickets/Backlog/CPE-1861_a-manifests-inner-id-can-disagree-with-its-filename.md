@@ -256,7 +256,7 @@ enumeration result, and it is what makes the skip safe (nothing else shows these
 |---|---|---|---|
 | 1 | `save_manifest` | writes `manifests/<manifest.id>.json` — field and filename agree **by construction** at write time | The reason "require agreement" costs nothing legitimate |
 | 2 | `load_manifest(id)` | filename; ignores the inner field entirely | Unchanged. Now also the *shared* home of the `file_count` predicate |
-| 3 | `restore` / `prune` / `manifest_snapshot` | filename, via `load_manifest` | Unchanged; `prune` gains the blob-witness rule |
+| 3 | `restore` / `prune` / `manifest_snapshot` | filename, via `load_manifest` | `prune` gains the blob-witness rule. **This row said "Unchanged" and that is how I missed S1** — see below: I walked the *identity* sinks and never walked `prune`'s own list of fail-closed gates, one of which (`validate_blob_name`) half 1 did not mirror |
 | 4 | `list_manifests` | **read the inner field** — the bug | **Fixed.** Requires agreement + a resolvable name + a self-consistent count |
 | 5 | `snapshot_prune::preview` / `apply` | ids from #4, fed straight to `prune` with `?` | The only production caller. Fixed by #4; nothing else needed |
 | 6 | `checkpoint_store::checkpoints.json` (`Checkpoint.manifest_id`) | its own append-only index, written from `CaptureOutcome.manifest_id`, read by `checkpoint_list` and the preview's ts lookup | **Not a sink for this bug** — never consults a manifest's inner field. Carries a separate pre-existing wart: retention prunes manifests without touching these rows, so the UI can list a checkpoint whose manifest is gone (it errors on use). Recorded, not fixed — it is a reporting gap, not a destructive one. **Now filed as CPE-1862.** (First written here as "belongs with CPE-1845"; that was the wrong home — CPE-1845 is about `OpResult` lacking a structural discriminant, a result-*shape* defect, whereas this is an append-only index nobody reconciles, and CPE-1845's own file carried no record of it, so the note would have been lost) |
@@ -288,6 +288,103 @@ reading the tests.
 | the whole round-1 "obvious fix" (realistic re-introduction) | re-added `out.push(ManifestSummary { id: stem.to_string(), … })` for every skipped file | **5 of 8 red**: the crafted-filename and file_count stalls, the invariant test, and the two id fixtures red on `LIVE: the tamper never reached the planner` (the tamper genuinely goes inert under filename-derivation — the liveness check catches it rather than passing quietly). **The two duplicate-manifest gate tests stay green**, which is the measured proof that half 2 removes regression 1 at its cause |
 | over-tightening into a permanent leak (pin) | `manifests_naming` → `return wanted.clone()` unconditionally | **3 red**, including the pre-existing `prune_gcs_blobs_no_longer_referenced_and_keeps_shared_ones` (`only-in-first.txt's blob, held only by the pruned manifest, is freed`), `apply_keeps_gfs_survivors…` (`bytes_freed > 0`), and this branch's own `the last namer's prune still frees the blob` |
 
+### Round 3 — S1, the fourth gate, and the enumeration mistake that hid it
+
+The independent Security Auditor returned **MERGE** ("on every input I found where the PR behaves badly,
+`main` behaves worse") with one finding, and it is the same class as the Reviewer's blocker: **a rustdoc
+of mine stating a security invariant that was false.**
+
+`prune` has **four** fail-closed refusals before its point of no return — `validate_manifest_id`,
+`load_manifest`'s parse, `load_manifest`'s `file_count` cross-check, and CPE-1823's `validate_blob_name`
+on every entry hash. Half 1 mirrored **three**. So one hand-edited `hash` in an otherwise *perfectly*
+self-describing manifest — inner id agrees with the stem, stem valid, `file_count` honest — still
+stalled the pass permanently. Re-measured here rather than accepted:
+
+```text
+"hash": "not-a-hex-hash"
+  planner view = 3 entries, contains m1: true
+  pass 1 -> Err("…: refusing this manifest entry — its content hash \"not-a-hex-hash\" is not a plain
+                 hex blob name")
+  pass 2 -> Err(same)
+  manifests still on disk: all three
+```
+
+Identical on `700ae998`, so **not a regression** — but the same permanent-stall grammar this ticket
+exists to remove, at the same tamper cost, and my `list_manifests` rustdoc claimed "every id it hands
+out is one `load_manifest` will accept, **and one `prune` can resolve**". The second clause was simply
+untrue.
+
+**How I missed it, stated plainly, because the mechanism matters more than the miss.** My enumeration
+walked every *sink for a manifest id or a blob refcount* — which was the right axis for the reported bug
+and found five things the ticket did not name. It never walked the axis the invariant actually rests on:
+**`prune`'s own list of gates ahead of its `remove_file`**. Row 3 of that table says
+"restore / prune / manifest_snapshot — Unchanged", and a sink I had written off as unchanged is one I
+never opened. The claim was stated in terms of `prune` and verified against `load_manifest`.
+
+**Fixed as a fourth mirrored condition, not as a caveat** — `|| m.files.values().any(|f|
+validate_blob_name(&f.hash).is_err())`. Cheaper than narrowing the invariant, and it makes the stated
+one true instead of nearly true. The hashes are already deserialized at that point, so it costs a map
+walk and no extra I/O. The rustdoc is rewritten to say what it now structurally is: **this function's
+condition list is a mirror of `prune`'s fail-closed gates, and adding a refusal to one without the other
+re-opens the stall.** That is the durable form of the lesson — the previous wording invited exactly this
+mistake by naming an outcome rather than a correspondence.
+
+New test `cpe_1861_a_hand_edited_entry_hash_no_longer_wedges_the_pass`, with the liveness this ticket
+demands in both directions: the tamper is read back, **and** the fixture asserts the manifest is still
+flawless on the other three conditions (inner id == stem, count honest) so the harm can only be the
+fourth, **and** it asserts `prune(m1)` genuinely errors with `not a plain hex blob name` — so a fixture
+that stopped being a wedge could not pass quietly. Red-proofed:
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| `validate_blob_name` mirror | `\|\| m.files.values().any(…)` → `\|\| (false && …)` | `HARM: one hand-edited entry hash killed the whole retention pass: 1787421133938: refusing this manifest entry — its content hash "not-a-hex-hash" is not a plain hex blob name` |
+
+### Round 3 — the "bounded" correction is worse than the Reviewer measured
+
+The Auditor independently confirmed the blocker and then ran the **recurring** case, with no attacker in
+it at all: a sync client leaving one `<id> - Copy.json` per cycle.
+
+```text
+cycle  1: listed=1  manifest files= 2  blob files= 1
+cycle  6: listed=1  manifest files= 7  blob files= 6
+cycle 12: listed=1  manifest files=13  blob files=12    apply=Ok, bytes_freed=0 every pass
+```
+
+Linear and **unbounded**, complete success reported, and nothing surfaces it — no `src/` code consumes
+`RetentionApplyResult`, and `snapshot_run_due` runs headless. So the honest statement is "bounded per
+file, unbounded per copier", and the correction now says that in all four places rather than only the
+single-copy figure.
+
+The comparison that settles the trade, and it belongs next to the admission: on `main` the same fixture
+gives a permanent `Err` wedge **plus 23 phantom checkpoints**. This PR converts a loud wedge into a
+silent leak — better on every axis except discoverability, and a leak is recoverable by deleting files
+where a store that can never be thinned is not.
+
+### Round 3 — what survived attack, recorded because it bounds the claim
+
+- **Nine exotic stems planted self-consistently** — trailing dot, dot inside the stem, NFC vs NFD, mixed
+  case, 180 characters, a space, a bare hyphen, an RTL override — **all listed, all pruned**, `apply`
+  Ok twice, no wedge and no blob loss. There is **no fourth stem-shaped condition**; the real miss was
+  hash-shaped, which is why looking harder at names would not have found it.
+- **The tests cannot pass against a dead tamper.** The Auditor made all five tampers silently inert and
+  got **0 passed / 8 failed**, every one on a `LIVE` assertion — the property six inert tests in
+  CPE-1823 lacked.
+- The both-halves separation reproduced to the exact split (3 passed / 5 failed, the gate tests green),
+  and the refcount analysis was confirmed correct with half 2 judged not over-built.
+- The acceptance gate holds through the registered commands: `checkpoint_create` →
+  `checkpoint_prune_apply` → `checkpoint_revert` → `applied: 1, skipped: []`, `a.txt` reads `"original"`.
+
+### Round 3 — two findings deliberately NOT fixed here (filed separately, scope held)
+
+- `apply`'s byte-cap loop mis-accounts when a prune frees nothing: `total = total.saturating_sub(freed)`
+  with `freed == 0` never sees the cap met, so it runs to the `kept.len() <= 1` floor — five checkpoints
+  destroyed, zero bytes reclaimed. **Byte-identical on `main`**, and unreachable from the app because
+  `snapshot_run_due` passes `None`.
+- `manifests_naming` compares hashes exactly while `validate_blob_name` accepts uppercase hex, and
+  Windows/macOS open both cases as one file — so an upper-cased survivor is invisible to the witness and
+  loses its content. One-line hardening (`to_ascii_lowercase()`), but it is its own shape and its own
+  test.
+
 ### Cost, measured
 
 Release build, this machine. The scheduled shape — `snapshot_run_due` pruning the one capture that just
@@ -301,18 +398,30 @@ aged out — is what actually runs:
                                                               `prune` rescans survivors per call)
 ```
 
-Recorded next to the function: if a store ever grows enough for the bulk case to bite, the fix is to
-hoist the scan out of the per-manifest call, not to weaken it.
+The Auditor fitted the delta and gave the note better numbers than I had: **`3.2 µs · n(n−1)/2 +
+2.9 ms · n`, within ~1% at n = 50/100/200.** The quadratic term is real, but the **linear** one dominates
+until n ≈ 1800, and the shipped default `RetentionPolicy` (24/7/4/12) caps a store at roughly **47**
+manifests — so the worst case is **not reachable under defaults**. It *is* reachable on the first pass
+after this fix un-wedges a long-stalled store, which is precisely the scenario this ticket creates:
+~1.6 s, inside `spawn_blocking`, unattended.
+
+Recorded next to the function, and that model is what makes it a considered deferral rather than a hope:
+if a store ever does grow enough for the bulk case to bite, the fix is to hoist the scan out of the
+per-manifest call, not to weaken it.
 
 ### Gates
 
 `crates/server`: `cargo clippy --all-targets -- -D warnings` → **exit 0**. `cargo test` (every target) →
-**2327 lib** passed (4 ignored) + `ticket_mcp` 0 + `archive_panic_safety` 21 +
+**2328 lib** passed (4 ignored) + `ticket_mcp` 0 + `archive_panic_safety` 21 +
 `binary_data_preview_panic_safety` 22 + `checkpoint_roundtrip` 2 + `finder_tags_os_interop` 1 +
 `native_meta_os_interop` 1 + `parser_panic_safety` 45 + `sample_fixtures` 16 + `thumb_svg_panic_safety`
-32 — **0 failed**. The lib delta is **+8**, accounted for rather than asserted: `cargo test --lib --
---list` counts **2323** on the stashed tree and **2331** with the branch applied, and the branch adds
-exactly 8 tests (5 in `snapshot_prune`, 2 in `snapshot_capture`, 1 in `checkpoint_store`).
+32 — **0 failed**. The lib delta is **+9**, accounted for rather than asserted: `cargo test --lib --
+--list` counts **2323** on the stashed tree and **2332** with the branch applied, and the branch adds
+exactly 9 tests (6 in `snapshot_prune`, 2 in `snapshot_capture`, 1 in `checkpoint_store`). It was +8
+through review round 2; round 3's S1 fix adds the ninth.
+
+Docs guards, re-run after each round's markdown edit: `vitest run src/lib/docs.test.ts
+src/lib/sectionDocs.test.ts` → **11 passed** (9 + 2).
 
 `src-tauri`, both feature modes: clippy default → **0**, `--features sidecar-platform` → **0**;
 `cargo test` → **214**, `--features sidecar-platform` → **269** — unchanged from CPE-1847, as expected:

@@ -583,6 +583,74 @@ mod tests {
         let _ = fs::remove_dir_all(&store);
     }
 
+    /// The fourth gate, found by the round-3 security audit after the first three had shipped in
+    /// review: `prune` refuses a manifest whose entry hash is not a plain hex blob name (CPE-1823's
+    /// `validate_blob_name`), and that refusal fires **before** the manifest is deleted, so it recurs
+    /// on every scheduled pass forever. One hand-edited `hash` in an otherwise *perfectly*
+    /// self-describing manifest — inner id agrees with the stem, stem valid, `file_count` correct —
+    /// therefore stalled the pass exactly as a missing file did:
+    ///
+    /// ```text
+    /// pass 1 -> Err("…: refusing this manifest entry — its content hash \"not-a-hex-hash\" is not a
+    ///                plain hex blob name")
+    /// pass 2 -> Err(same); all three manifests still listed
+    /// ```
+    ///
+    /// Identical on `main`, so never a regression — but the same grammar at the same tamper cost, and
+    /// my enumeration missed it by writing off `prune` as "unchanged" instead of walking its gate list.
+    #[test]
+    fn cpe_1861_a_hand_edited_entry_hash_no_longer_wedges_the_pass() {
+        let src = scratch("hash-src");
+        let store = scratch("hash-store");
+        let mut ids = Vec::new();
+        for (n, body) in [(1u64, "v1"), (2, "v2"), (3, "v3")] {
+            fs::write(src.join("a.txt"), body).unwrap();
+            ids.push(capture_at(&src, &store, n * 3600));
+        }
+        let (m1, m2) = (ids[0].clone(), ids[1].clone());
+
+        let before = planner_view(&store);
+        assert_eq!(before.len(), 3, "fixture: {before:?}");
+
+        let path = store.join("manifests").join(format!("{m1}.json"));
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        doc["files"]["a.txt"]["hash"] = serde_json::json!("not-a-hex-hash");
+        fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        // FIXTURE LIVENESS 1 — the tamper landed, and the manifest is otherwise flawless: the three
+        // conditions that shipped in review all pass it, so this can only be caught by the fourth.
+        let back: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["files"]["a.txt"]["hash"].as_str().unwrap(), "not-a-hex-hash", "LIVE: no tamper");
+        assert_eq!(back["id"].as_str().unwrap(), m1, "LIVE: the inner id must still agree with the stem");
+        assert_eq!(
+            back["file_count"].as_u64(),
+            Some(back["files"].as_object().unwrap().len() as u64),
+            "LIVE: the count must still be honest, or a different guard would be doing the work"
+        );
+
+        // FIXTURE LIVENESS 2 — this really is a manifest `prune` refuses, so a listed id would stall.
+        assert!(
+            snapshot_capture::prune(&store.to_string_lossy(), &m1)
+                .unwrap_err()
+                .contains("not a plain hex blob name"),
+            "LIVE: the tampered hash does not actually make this manifest unprunable"
+        );
+
+        let result = apply(&store.to_string_lossy(), &all_pol(), None).unwrap_or_else(|e| {
+            panic!("HARM: one hand-edited entry hash killed the whole retention pass: {e}")
+        });
+        assert!(result.kept.contains(&m2));
+        assert_kept_ids_all_restore(&store, &result.kept, "hash");
+        // Not a one-shot recovery — the stall recurred on every pass, so the next one must be Ok too.
+        assert!(apply(&store.to_string_lossy(), &all_pol(), None).is_ok(), "the pass stays alive");
+        assert!(!planner_view(&store).contains(&m1), "a manifest prune would refuse is not a checkpoint");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
     /// **The acceptance gate.** A second copy of a manifest file — Explorer copy/paste, a cloud-sync
     /// conflict copy, a backup script, a partial restore-from-backup — must never cost the surviving
     /// checkpoint its content. CPE-1847's reverted fix turned this ordinary event into silent

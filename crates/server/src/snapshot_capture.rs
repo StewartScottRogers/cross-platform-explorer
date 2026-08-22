@@ -647,11 +647,11 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     //   prune("<m1> - Copy") by id  ->  freed=12, blob gone
     // ```
     //
-    // So a copy pins the whole pruned snapshot's unique content for as long as it sits in the store.
-    // Reclaiming it needs the file removed by hand, or `prune` called with that id directly — the last
-    // line above, which is exactly what
-    // `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` exercises. The same
-    // correction is stated from the other side at `list_manifests`, where the size of the residue is.
+    // So a copy pins the whole pruned snapshot's unique content for as long as it sits in the store,
+    // and a *recurring* copier (a sync client leaving one per cycle) grows it without bound — measured
+    // at `list_manifests`, where the size of the residue is stated in full. Reclaiming it needs the file
+    // removed by hand, or `prune` called with that id directly — the last line above, which is exactly
+    // what `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` exercises.
     let to_release: BTreeSet<String> = hashes.difference(&still_named).cloned().collect();
     let freed = release(&mut store, &to_release);
     let blobs_dir_path = blobs_dir(store_path);
@@ -684,9 +684,16 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
 /// [`crate::snapshot_schedule::snapshot_run_due`] pruning the one capture that just aged out — pays
 /// 6.2 → 6.8 ms on a 50-manifest store and 9.6 → 18.3 ms on a 200-manifest × 50-file one. The worst
 /// case, a single pass thinning 197 of 200 manifests, is 1.08 s → 1.81 s: `prune` rescans the survivors
-/// per call, so a bulk thin is quadratic in manifest count. Acceptable at these sizes and in exchange
-/// for the guarantee; if a store ever gets big enough for that to bite, the fix is to hoist the scan out
-/// of the per-manifest call rather than to weaken it.
+/// per call, so a bulk thin is quadratic in manifest count.
+///
+/// The round-3 security audit fitted the delta and the model is worth keeping, because it says when to
+/// care: `3.2 µs · n(n−1)/2 + 2.9 ms · n`, within about 1% at n = 50/100/200. The quadratic term is
+/// real but the **linear** one dominates until n ≈ 1800, and the shipped default `RetentionPolicy`
+/// (24/7/4/12) caps a store at roughly 47 manifests — so the worst case is not reachable under
+/// defaults. It *is* reachable on the **first pass after this fix un-wedges a long-stalled store**,
+/// which is exactly the situation this ticket creates: ~1.6 s, inside `spawn_blocking`, unattended.
+/// That is a considered deferral rather than a hope. If a store ever does get big enough for it to
+/// bite, the fix is to hoist the scan out of the per-manifest call — not to weaken it.
 fn manifests_naming(store_dir: &Path, wanted: &BTreeSet<String>) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     if wanted.is_empty() {
@@ -746,11 +753,17 @@ pub struct ManifestSummary {
 /// that same skip to three further ways a file can fail to describe itself (see the body).
 ///
 /// **The invariant this function now carries (CPE-1861): every id it hands out is one
-/// [`load_manifest`] will accept, and one [`prune`] can resolve.** Its only caller,
-/// [`crate::snapshot_prune::apply`], feeds these ids straight to [`prune`] and propagates any error
-/// with `?` — so an id that cannot be loaded does not fail *one* manifest, it kills the whole retention
-/// pass and every pass after it, until someone deletes the file by hand. Keep the two in lockstep if
-/// you add a rule to either.
+/// [`load_manifest`] will accept, and one [`prune`] can carry past its point of no return.** Its only
+/// caller, [`crate::snapshot_prune::apply`], feeds these ids straight to [`prune`] and propagates any
+/// error with `?` — so an id [`prune`] refuses does not fail *one* manifest, it kills the whole
+/// retention pass and every pass after it, until someone deletes the file by hand.
+///
+/// That makes this function's condition list a **mirror of [`prune`]'s fail-closed gates**, and the two
+/// must be kept in lockstep: [`validate_manifest_id`], [`load_manifest`]'s parse, [`load_manifest`]'s
+/// `file_count` cross-check, and CPE-1823's [`validate_blob_name`] on every entry's hash. The fourth was
+/// missing until the round-3 security audit found a hand-edited hash still stalling the pass — if you
+/// add a refusal to [`prune`] ahead of its `remove_file`, add its predicate here too, or you have
+/// re-opened the permanent stall.
 pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
     let dir = manifests_dir(Path::new(store_dir));
     let entries = match fs::read_dir(&dir) {
@@ -822,14 +835,29 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
         // ```
         //
         // So the residue is **that snapshot's stored content**, pinned for as long as the file sits in
-        // the store — bounded by the snapshot's blob set, not by a few hundred bytes, and reached by the
-        // ordinary unattended cloud-sync/copy-paste trigger this ticket is written around. Reclaiming it
-        // needs the file removed by hand, or `prune` driven by that id directly.
+        // the store, not a few hundred bytes. Reclaiming it needs the file removed by hand, or `prune`
+        // driven by that id directly.
         //
-        // Traded knowingly and in that direction anyway: a leak of one snapshot's blobs is recoverable
-        // by deleting one file, and the alternative is a stray file steering a delete, which is not. But
-        // whoever reconsiders this should meet the real number rather than the reassuring one — that is
-        // the whole value of pinning the decision here.
+        // **And for a recurring copier there is no bound at all** — the round-3 security audit measured
+        // the case with no attacker in it, a sync client leaving one `<id> - Copy.json` per cycle:
+        //
+        // ```text
+        // cycle  1: listed=1  manifest files= 2  blob files= 1
+        // cycle  6: listed=1  manifest files= 7  blob files= 6
+        // cycle 12: listed=1  manifest files=13  blob files=12    apply Ok, bytes_freed=0 every pass
+        // ```
+        //
+        // Linear, unbounded, and **nothing surfaces it**: no `src/` code consumes
+        // `RetentionApplyResult`, and `snapshot_schedule::snapshot_run_due` runs headless. So this is
+        // "bounded per file, unbounded per copier", and calling it bounded full stop was the error.
+        //
+        // Traded knowingly and in that direction anyway, and the honest comparison is what settles it:
+        // on `main` the *same* fixture gives a permanent `Err` wedge plus 23 phantom checkpoints. This
+        // converts a loud wedge into a silent leak — better on every axis except discoverability, and a
+        // leak is recoverable by deleting files where a store that can never be thinned is not. But
+        // whoever reconsiders this should meet the real number rather than the reassuring one; that is
+        // the whole value of pinning the decision here, and the first version of this comment defeated
+        // it by being wrong.
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
         if m.id != stem
             // The name must also be one this module could hand out and resolve. Without this, a file
@@ -842,6 +870,28 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
             // exactly as a missing file did. Same predicate, applied here as a skip, so the pass never
             // names it. Shared with `load_manifest` so the two cannot drift.
             || file_count_disagreement(&m).is_some()
+            // **The fourth gate, found by the round-3 security audit and missed by my own enumeration.**
+            // `prune` has FOUR fail-closed refusals before its point of no return —
+            // `validate_manifest_id`, `load_manifest`'s parse, `load_manifest`'s `file_count`, and
+            // CPE-1823's `validate_blob_name` on every hash — and the three conditions above mirrored
+            // only the first three. So one hand-edited `hash` in an otherwise *perfectly*
+            // self-describing manifest still stalled the pass permanently, at the same tamper cost as
+            // the shapes this ticket exists to remove:
+            //
+            // ```text
+            // "hash": "not-a-hex-hash"   (inner id agrees with the stem, stem valid, file_count correct)
+            //   pass 1 -> Err("…: refusing this manifest entry — its content hash \"not-a-hex-hash\" is
+            //                  not a plain hex blob name")
+            //   pass 2 -> Err(same)      the refusal fires BEFORE the manifest is deleted, so it recurs
+            //                            on every scheduled pass, forever
+            // ```
+            //
+            // Identical on `main`, so it was never a regression — but it is the same grammar, and my
+            // enumeration wrote off `restore`/`prune`/`manifest_snapshot` as "unchanged" and never
+            // walked `prune`'s own gate list. Mirrored here in the same shape as the other three, which
+            // is cheaper than caveating the invariant this function's doc states. The hashes are already
+            // deserialized by this point, so it is a map walk and no extra I/O.
+            || m.files.values().any(|f| validate_blob_name(&f.hash).is_err())
         {
             continue;
         }
