@@ -539,6 +539,15 @@ fn apply_write(
     // the first writes, the second then finds its target occupied and is refused with a reason, rather
     // than silently overwriting a sibling entry and counting two.
     //
+    // **The one non-aliasing way to reach this, recorded so it does not read later as a false positive.**
+    // `scan_dir` honours the crate-wide skip-unreadable guardrail, so a file it could not hash is absent
+    // from `current` and its checkpoint entry is planned as a `Create` even though the file is right
+    // there. This now refuses it instead of overwriting it. That is the correct direction — a file we
+    // could not read is a file we cannot say is safe to clobber — and it is reported per path with this
+    // reason, not dropped. The same applies to a path a symlink has since taken over: `DirEntry::metadata`
+    // does not traverse, so the scan does not see it as a file, and following the link to overwrite
+    // whatever it points at is not what a revert of that path means.
+    //
     // **Placed here, immediately before the copy, not in a pre-pass** — round 4's lesson, paid for once
     // already: a verdict reached before `create_dir_all` and `blob_source` is a verdict the destination
     // can invalidate before the write it is protecting. Nothing may sit between this and `fs::copy`.
