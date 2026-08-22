@@ -265,6 +265,14 @@ pub fn execute_restore(
         // tree per leg, because this record has already paid once for repeating a number instead of
         // running it.)
         //
+        // Three bypasses, none needing a number rewritten: **delete** the field, **null** it
+        // (`"file_count": null` is `None` for an `Option`, measured `applied: 4`), or **replace** entries
+        // rather than removing them so the count stays honest — removing `f2..f5` and adding `z1..z4`
+        // pointing at `f1`'s blob, count untouched, measured `applied: 8, skipped: []` with four user
+        // files destroyed and four attacker-named ones created. The field is also size-shaped, not
+        // content-shaped: substituting one entry's `hash` for another's is count-neutral and gave
+        // `applied: 1` with `f1.txt`'s content replaced by `f2`'s.
+        //
         // So `file_count` stops only an attacker who does not know the field exists, and the
         // partial-tamper residual is **cheaper than the first version of this record said**. Stated here
         // rather than softened, on this ticket's own standard — see `snapshot_prune`'s

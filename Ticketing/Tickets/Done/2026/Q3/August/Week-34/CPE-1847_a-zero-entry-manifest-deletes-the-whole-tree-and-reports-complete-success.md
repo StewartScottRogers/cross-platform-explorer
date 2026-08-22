@@ -170,6 +170,22 @@ The whole-tree figure is **4**, not the 3 first reported in review — a 3 is wh
 once the cherry-revert leg has already taken `f3`. Measured rather than copied, since this record has
 already paid once for repeating a number instead of running it.
 
+**Round 3 adds two more bypasses**, both found by the independent Security Auditor and both re-measured
+here rather than accepted. None needs a number rewritten:
+
+```text
+4 of 5 entries removed + "file_count": null      -> Ok(applied: 4, skipped: [])   survivors ["f1.txt"]
+replacement edit, "file_count": 5 UNTOUCHED      -> Ok(applied: 8, skipped: [])
+  (remove f2..f5, add z1..z4 pointing at f1's blob)  survivors ["f1.txt","z1..z4.txt"]
+```
+
+`null` deserializes to `None` for an `Option`, so it is exactly as good as deleting the line. The
+replacement edit is the sharper one: it keeps the count **honest**, so the check passes while the map
+describes an entirely different tree — four user files deleted and four attacker-named files created.
+
+So there are **three** ways past it: delete the field, null the field, or replace entries rather than
+removing them.
+
 So plainly: **`file_count` raises no cost against an attacker who knows the field exists.** It stops one
 who does not, and it catches a tamper that removes entries and leaves the count behind. It is a
 consistency check on a record that may have been edited — not a cost-raiser, not a bar, not a boundary.
@@ -219,23 +235,92 @@ Walked `PersistedManifest`'s aggregate properties rather than trusting the ticke
 |---|---|---|---|
 | 1 | `files` **emptied** | whole-tree delete, `applied=5/1 skipped=0`, both routes | **Fixed** — stand-down (harm impossible); cheap form also refused at load |
 | 2 | `files` **partially** emptied | `applied=4, survivors=["f1.txt"]` — evades any zero-entry rule, strictly wider | **NOT fixed — open, and cheaper than round 1 claimed.** `file_count` only *detects* a tamper that leaves the count behind; deleting the `"file_count"` line bypasses it for free (measured). Recorded as the standing residual, unclosable without a per-machine key |
-| 3 | `id` field **≠ filename** | retention decided about a different manifest: pointed at a sibling → `pruned: []`, `kept: [m3, m2, m3]`, tampered manifest immortal; pointed at nothing → the **whole pass** `Err`s and no checkpoint is ever thinned again | **Fixed** — `list_manifests` now derives the id from the filename (`save_manifest` writes it there by construction). Store growth + dead retention, not data loss — see the correction below |
+| 3 | `id` field **≠ filename** | retention decided about a different manifest: pointed at a sibling → `pruned: []`, `kept: [m3, m2, m3]`, tampered manifest immortal; pointed at nothing → the **whole pass** `Err`s and no checkpoint is ever thinned again | **FOUND AND FILED — CPE-1861. Not fixed here.** A fix was written (derive the id from the filename), measured, reviewed, and **reverted in round 3** because it introduced two regressions worse than the bug — see below |
 | 4 | `created_ms` moved | steers `snapshot_retention::thin`; can prune checkpoints the user wanted kept | **Recorded** — no recomputation available (file mtime is equally forgeable and legitimately differs). Same class as CPE-1844 |
 | 5 | `skipped` emptied | **inert today** — nothing reads `PersistedManifest.skipped` after capture | Recorded |
 | 6 | a path the capture **skipped** is deleted on revert | absent from `files`, so `plan_restore` emits `Delete` — no attacker needed | **Recorded, not reachable today**: `checkpoint_create` captures with `CaptureBudget::UNLIMITED`, so nothing is ever skipped through a registered command. Reachable only via `scan_dir`'s unreadable-file skip (unreadable at capture, readable at revert). Deliberately not guarded — CPE-1823's own repeated mistake was landing guards on paths with no callers. Needs its own ticket if a budget is ever wired to the UI |
 | 7 | every `hash` bogus/missing | writes fail → `report.skipped` non-empty → CPE-1823's stand-down arms | Already covered — verified |
 | 8 | `size` inflated | diff cap is measured on the blob, never on the claim | Already covered (CPE-1823 inventory #7) |
 | 9 | manifest captured from a **different root** | store dirs are keyed by `root_key(root)`, so a manifest is only reachable for the root whose store holds it; a store directory copied wholesale is the residual | **Recorded** — closing it needs the root recorded in the manifest, a format change beyond this ticket |
+| 10 | **hash substitution between entries** (round 3, from the Auditor's extension of this walk) | pointing `f1.txt`'s `hash`/`size` at `f2.txt`'s blob gave `Ok(RevertOutcome { applied: 1, skipped: [] })` with `f1.txt`'s content on disk becoming `f2`'s — re-measured here | **Recorded** — count-neutral, per-entry-guard-neutral, and inside the manifest's trust model (the bytes still come from this store's own blobs, so CPE-1823's containment holds). Its value is what it proves about the count: `file_count` is **size-shaped, not content-shaped**, and gives zero protection against content substitution |
 
 **A claim of mine that was measured false and is corrected rather than deleted.** The first version of
 shape 3's test asserted retention would *delete a newer checkpoint the policy chose to keep*. It does
 not: `thin` computes `prune` as the ids it did not keep, so an id that also appears in `keep` is never
 pruned. The two reachable outcomes are the ones in the table — unbounded store growth and a dead
 retention policy. Recorded at its real severity, because a false claim in a security record is worse than
-an honest smaller one. The fix landed anyway: it removes the steering channel entirely and turns an
-`Err`-ing pass back into a correct one. A self-consistency check in `load_manifest` was considered and
-**rejected** — it would refuse the tampered manifest at `prune` time and wedge the pass, which is the
-outcome being removed.
+an honest smaller one.
+
+### Round 3 — what the independent security audit could NOT break
+
+Recorded because it is the part that decides whether the Critical subject is actually closed. The Auditor
+attacked the zero-entry stand-down directly and found no way through: every zero-entry variant held on
+**both** routes, with and without `file_count`, and it could not construct a shape where the two guards
+disagree. It also attacked the *tests* rather than only the code — three separate sabotages making a
+tamper silently not take effect, all three red on the fixture-liveness assertions rather than passing
+quietly, which is the property six inert tests in CPE-1823 lacked. Cost is nil: 23.0 ms against 21.2 ms
+on a 10,000-entry manifest, with the cherry-revert spread inside machine noise.
+
+### Round 3 — shape 3's fix is REVERTED, and this is the important lesson of the ticket
+
+The fix (derive the id from the filename) shipped in round 1 and was **removed in round 3** after the
+independent Security Auditor found it introduces a new silent, unattended data-loss regression. Both
+reproduced here before reverting, and both re-run after, so the revert is verified rather than assumed.
+
+**Regression 1 — a duplicated manifest file destroys the checkpoint that was KEPT.** Trigger: any second
+file in `manifests/` that parses as a manifest — Explorer copy/paste (`X - Copy.json`), a cloud-sync
+conflict copy, a backup script, a partial restore-from-backup. That is CPE-1823's own threat premise
+("a store synced by a cloud client"), not an exotic case.
+
+```text
+cp <id>.json <id>-backup.json
+  with m.id (reverted to)  preview keep=[id, id]  prune=[]
+                           apply  Ok(kept: [id, id], pruned: [], bytes_freed: 0)
+                           blobs=[3bfc…]   restore(id)=Ok(())   tree=["a.txt"]
+  with file_stem (round 1) preview keep=[id]      prune=[id-backup]
+                           apply  Ok(kept: [id], pruned: [id-backup], bytes_freed: 2)
+                           blobs=[]        restore(id)=Err("…/blobs/3bfc…: cannot find the file")  tree=[]
+```
+
+The two copies get two distinct ids, retention prunes one, `release` drops the **shared** blob refcounts
+to zero, the blobs are deleted, and the manifest it reports as `kept` can no longer restore anything.
+`snapshot_schedule::snapshot_run_due` retention-prunes after every scheduled capture, so this fires
+**unattended**, with no UI and no user action. Pre-PR the identical fixture was inert. It is the same
+failure grammar this ticket exists to remove: content destroyed, complete success reported.
+
+**Regression 2 — a crafted filename wedges the whole retention pass.** `a..b.json` (a copy of any
+manifest) → `validate_manifest_id` refuses the `..`:
+
+```text
+  with m.id (reverted to)  apply -> Ok(RetentionApplyResult { kept: [id, id], pruned: [], bytes_freed: 0 })
+  with file_stem (round 1) apply -> Err("a..b: not a valid manifest id")     # every pass, forever
+```
+
+That is precisely the harm the fix was written to remove — "pointed at nothing, the whole pass errors and
+nothing is ever thinned again" — **relocated** from the inner field to the filename, not removed. `..` in
+a stem suffices on any platform; on Unix `:` or `\` does it too.
+
+**The lesson, stated plainly because it is the one worth carrying forward.** I closed an under-pruning
+*leak* by converting it into *data loss*, and I did it in a bonus fix outside the ticket's Critical
+subject, on an enumeration find, with a passing test that asserted exactly the behaviour that caused the
+regression. The duplicate-id collapse I called a bug was **load-bearing by accident**: two files claiming
+one id is what stopped retention from pruning one and freeing the other's blobs. My round-2 note that a
+`load_manifest` self-consistency check was "rejected because it would wedge the pass" was right about that
+check and blind to the fact that my own alternative wedged it differently.
+
+**Left for CPE-1861, with the design choice recorded rather than pre-empted.** The Auditor measured a
+candidate that is *not* a drop-in: `if m.id != id { continue; }` in `list_manifests` — a **skip**,
+matching that function's own documented skip-the-unparseable guardrail, rather than the `load_manifest`
+refusal correctly rejected above. It restores the duplicate case (`pruned: []`, `restore = Ok(())`, tree
+restored), restores `a..b.json` to `Ok`, and leaves an inner-id lie able to neither steer nor wedge. But
+it costs this branch's prune test, which asserted the liar **is** pruned. So it is a genuine design
+choice — skip-and-leak versus prune-the-liar — and the Auditor notes the alternative correct fix lives in
+`prune` instead: **do not release refs a surviving manifest still holds**. That reasoning belongs in
+CPE-1861, not here.
+
+What remains in this branch on shape 3 is a comment at the `list_manifests` line recording the walk, both
+regressions, and the ticket — so the next person to notice the inner-`id` smell finds out why it is still
+there before "fixing" it again.
 
 **A pre-existing test whose fixture was the attack.** `revert_engine::deletes_apply_deepest_first` built
 its checkpoint with `Snapshot::new()` — a zero-entry checkpoint — to exercise delete ordering, and so
@@ -248,6 +333,18 @@ never observes ordering, and shallowest-first would pass it identically. The add
 improvement: it restores the test's ability to run at all, and it now exercises the round-5 case-alias
 resolution pass, which was inert on a zero-entry checkpoint (`checkpoint_lands_on` was built from no
 keys). Making it actually assert ordering is a separate, unrelated ticket.
+
+The Auditor also confirmed in round 3 that this was the **only** test in the tree with that shape: every
+other `Snapshot::new()` is immediately followed by an `insert`, and the two `execute_restore` call sites
+outside this module build their checkpoint from a real `scan_dir`. So the new rule cost exactly one
+fixture, and nothing else was silently disarmed by it.
+
+**Recorded for CPE-1845, no code here: the hold-back reason is repeated verbatim per path.** 500 held-back
+deletes emit 500 copies of the same ~370-character paragraph — roughly 185 KB in one `RevertOutcome`. The
+two sibling `hold` branches in the same function name up to `NAMED_CAUSES` causes and then fall back to a
+count; the zero-entry branch does not summarise at all, because its reason is about the checkpoint rather
+than about any particular blocking entry. Harmless today at realistic sizes and squarely inside the
+reporting rework CPE-1845 owns, so it is written down rather than patched around here.
 
 **Recorded, not fixed:** a manifest whose count disagrees with its list is now unprunable, so one such
 manifest wedges the retention pass until it is removed by hand (`snapshot_prune::apply` propagates
@@ -269,14 +366,16 @@ exist" would have passed on an inert fixture.
 | `file_count` cross-check | `if declared != manifest.files.len() {` → `if false && declared != …` | `HARM: entries deleted from a manifest's `files` map turned a revert into a delete of f3.txt … Ok(RevertOutcome { applied: 1, skipped: [] })` — the partial tamper through cherry-revert — plus the unit refusal leg |
 | legacy exemption (over-tightening pin) | `if let Some(declared) = manifest.file_count {` → `… .or(Some(0)) {` | red: `a legacy manifest must still load: "…legacy.json: this manifest says it holds 0 files but its file list has 1"` |
 | naive refusal of `files: {}` (over-tightening pin) | inserted `if manifest.files.is_empty() { return Err(…) }` in `load_manifest` | **all five** tests red, including `a genuine empty capture must still preview` and the `capture`→`restore` round trip — the fix the ticket says is wrong, pinned from four directions |
-| id-steers-retention | this one red **before** the fix, which is the same evidence inverted | `HARM: retention left behind the manifest its policy chose to prune, because that manifest calls itself "no-such-manifest" … Result was Err("…/manifests/no-such-manifest.json: The system cannot find the file specified.")` |
+| ~~id-steers-retention~~ | **withdrawn in round 3 along with its fix** — both the test and the `list_manifests` change are reverted. The evidence itself was sound (it red before the fix with `HARM: retention left behind the manifest its policy chose to prune …`); what it did not cover was the duplicate-manifest and crafted-filename cases the fix broke, which is exactly why the fix is gone | n/a — shape 3 is CPE-1861 |
 
 ### Gates
 
-`crates/server`: `cargo clippy --all-targets -- -D warnings` → **exit 0**. `cargo test` (every target) →
-**2319 lib** (4 ignored) + `ticket_mcp` 0 + `archive_panic_safety` 21 + `binary_data_preview_panic_safety`
-22 + `checkpoint_roundtrip` 2 + `finder_tags_os_interop` 1 + `native_meta_os_interop` 1 +
-`parser_panic_safety` 45 + `sample_fixtures` 16 + `thumb_svg_panic_safety` 32 — **0 failed**.
+Re-run after the round-3 revert. `crates/server`: `cargo clippy --all-targets -- -D warnings` → **exit 0**.
+`cargo test` (every target) → **2318 lib** (4 ignored) + `ticket_mcp` 0 + `archive_panic_safety` 21 +
+`binary_data_preview_panic_safety` 22 + `checkpoint_roundtrip` 2 + `finder_tags_os_interop` 1 +
+`native_meta_os_interop` 1 + `parser_panic_safety` 45 + `sample_fixtures` 16 + `thumb_svg_panic_safety` 32
+— **0 failed**. (**2318**, not round 1's 2319: the reverted shape-3 prune test went with its fix, so the
+branch adds **five** tests, not six.)
 
 `src-tauri`, both feature modes: clippy default → **0**, `--features sidecar-platform` → **0**;
 `cargo test` → **214**, `--features sidecar-platform` → **269**.

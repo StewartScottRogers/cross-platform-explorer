@@ -645,22 +645,33 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
         }
         let Ok(data) = fs::read_to_string(&path) else { continue };
         let Ok(m) = serde_json::from_str::<PersistedManifest>(&data) else { continue };
-        // CPE-1847 — **the id is where the file is, not what the file says it is.** This used to report
-        // `m.id`, the manifest's own account of itself, while `prune` resolves an id back to a file by
-        // name (`manifests/<id>.json`). One edited string therefore made a retention pass decide about a
-        // manifest other than the one it was looking at: pointed at a sibling, the tampered manifest's
-        // id landed in `keep` and nothing was pruned at all; pointed at nothing, `prune` was asked for a
-        // file that does not exist and the **whole pass** returned `Err`, so no checkpoint was ever
-        // thinned again. Either way the offending manifest is immortal and the store grows without
-        // bound. `save_manifest` writes every manifest at `manifests/<id>.json` by construction, so the
-        // filename is the authority and the inner field now steers nothing.
+        // **CPE-1847 walked this line and CPE-1861 owns it — do not "fix" it in passing.** Reporting
+        // `m.id`, the manifest's own account of itself, lets a hand-edited inner `id` steer a retention
+        // decision onto a different manifest (measured: pointed at a sibling nothing is pruned at all;
+        // pointed at nothing the whole pass `Err`s and no checkpoint is ever thinned again). The obvious
+        // fix — derive the id from the filename, which is where `save_manifest` puts it by construction
+        // — was written, measured, reviewed, and **reverted**, because it converts a leak into silent
+        // data loss:
         //
-        // Deliberately recomputation rather than a self-consistency check in `load_manifest`: refusing
-        // the mismatched manifest there would wedge the retention pass at `prune` time, which is the
-        // outcome this removes. Same shape as CPE-1847's zero-entry rule — prefer the mechanism that
-        // makes the wrong decision unreachable over the one that makes the file look valid.
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-        out.push(ManifestSummary { id: id.to_string(), created_ms: m.created_ms });
+        // ```text
+        // cp <id>.json <id>-backup.json          (Explorer copy/paste, a cloud-sync conflict copy,
+        //                                         a backup script, a partial restore-from-backup)
+        //   with m.id      : preview keep=[id, id]  prune=[]              restore(id)=Ok, tree=["a.txt"]
+        //   with file_stem : preview keep=[id]      prune=[id-backup]     restore(id)=Err(blob missing)
+        //                    apply -> kept: [id], pruned: [id-backup], bytes_freed: 2; blobs=[]; tree=[]
+        // ```
+        //
+        // The two copies get two distinct ids, retention prunes one, `release` drops the **shared** blob
+        // refcounts to zero, the blobs are deleted, and the manifest it **kept** can no longer restore
+        // anything — reported as complete success. `snapshot_schedule::snapshot_run_due` prunes after
+        // every scheduled capture, so it fires unattended. That is the same failure grammar CPE-1847
+        // exists to remove. A crafted filename relocates the wedge rather than removing it, too:
+        // `a..b.json` makes every pass `Err("a..b: not a valid manifest id")`, forever.
+        //
+        // The duplicate-id collapse is therefore load-bearing by accident, and replacing it needs the
+        // whole decision (skip `m.id != id` and leak, versus fixing `prune` not to release refs a
+        // surviving manifest still holds) — CPE-1861, not a one-line tidy-up here.
+        out.push(ManifestSummary { id: m.id, created_ms: m.created_ms });
     }
     Ok(out)
 }
@@ -738,6 +749,23 @@ struct PersistedManifest {
     ///   checkpoint_revert_one(f3) -> Ok(RevertOutcome { applied: 1, skipped: [] })  survivors f1,f2,f4,f5
     ///   checkpoint_revert         -> Ok(RevertOutcome { applied: 4, skipped: [] })  survivors ["f1.txt"]
     /// ```
+    ///
+    /// **Three bypasses, all measured here, none of them requiring a number to be rewritten:**
+    ///
+    /// 1. **Delete the field** — as above. `#[serde(default)]` makes it `None` and the check is skipped.
+    /// 2. **Null the field** — `"file_count": null` deserializes to `None` for an `Option`, so it is
+    ///    exactly as good as deleting the line: `applied: 4, skipped: []`, four files destroyed.
+    /// 3. **Replace entries instead of removing them** — the count stays *honest* and the check passes
+    ///    while the map describes a different tree. Removing `f2..f5` and adding `z1..z4` all pointing at
+    ///    `f1`'s blob, with `file_count: 5` untouched, measured
+    ///    `Ok(RevertOutcome { applied: 8, skipped: [] })` — four user files deleted and four attacker-named
+    ///    files created, survivors `["f1.txt", "z1.txt", "z2.txt", "z3.txt", "z4.txt"]`.
+    ///
+    /// And it is **size-shaped, not content-shaped**: substituting one entry's `hash` for another's is
+    /// count-neutral and per-entry-guard-neutral. Pointing `f1.txt` at `f2.txt`'s blob measured
+    /// `Ok(RevertOutcome { applied: 1, skipped: [] })` with `f1.txt`'s content on disk replaced by
+    /// `f2`'s. That is within the manifest's trust model, but it shows the field gives **zero**
+    /// protection against content substitution — only against a change in the number of entries.
     ///
     /// So this raises **no** cost against an attacker who knows the field exists; it catches a tamper
     /// that removes entries and leaves the count behind, and nothing else. It is a **consistency check
