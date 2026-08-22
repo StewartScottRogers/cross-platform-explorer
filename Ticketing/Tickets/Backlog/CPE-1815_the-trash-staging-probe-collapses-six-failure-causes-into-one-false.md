@@ -171,3 +171,54 @@ Related: **CPE-1806** (the strictness that makes this reachable), **CPE-1717** (
   clippy clean in both feature modes. `src-tauri cargo test`: 214 passed / 0 failed (default, +2 for the
   two new guard tests), 269 passed / 0 failed (`sidecar-platform`, +2). See PR body for the exact
   mutation-red transcripts.
+
+**2026-08-21 (round 3)** — Independent Reviewer APPROVED round 2 (re-ran all three mutations, confirmed
+the `list()` split is zero-syscall, confirmed the `2289` net-unchanged accounting is real via `#[test]`
+count in `fsutil.rs`: 89 before, 89 after). Three follow-ups requested before merge, all done.
+
+- **The PR body still carried the round-1 falsehood** — "distinguishing them would need a second probe
+  this function doesn't otherwise need" for the `list()` merge — plus stale "six" reasons, the
+  superseded 212/267 gate numbers, and a Red-proofs section citing the deleted
+  `cpe_1815_distinct_probe_steps_produce_distinct_reasons` test, while this Work Log twice pointed at
+  "the PR body" for mutation transcripts that were never actually there. Rewrote the PR body in full
+  (`gh pr edit 986 --body-file`, written with the Write tool — not a shell heredoc, to avoid the
+  backslash/backtick-eating bug this session hit twice earlier in Bash heredocs): seven reasons, the
+  corrected `list()` justification stated as a correction ("that justification was false, caught in
+  review"), current gate numbers, and all four real mutation-red transcripts (partial collapse, total
+  collapse, wrong index, and the reason-placement regression) captured live from this run, not
+  reconstructed from memory.
+- **Added the caveat paragraph** `half_applied_rename_guards_are_rejected` already carries, to
+  `trash_roundtrip_available_indexes_every_reason_exactly_once`'s doc comment: a "# What it does NOT
+  catch — measured, not guessed" section naming the three shapes the Reviewer demonstrated fool the
+  textual scan while measuring green — a comment decoy (index text inside `/* */`), an index swap
+  (misattribution rather than collapse, invisible to both guard tests), and a `format!` decoy (the array
+  genuinely read, but not the value actually returned). Also documented that the scanned slice includes
+  the *next* test's own doc comment (a stray `TRASH_ROUNDTRIP_REASONS[N]` written in prose there would
+  false-red the scan) and that `include_str!` embeds ~1.03 MB of source into the `#[cfg(test)]` binary.
+- **Finished the `ci.yml` staleness sweep.** Round 2 fixed the block-level comments (`:258`, `:285`,
+  `:293`) but missed the `::error::` strings *inside* those same two blocks (`:303`, `:309`, `:322`,
+  `:334`), which still said "check that `require_staged` is still on this path" / "not with the
+  `require_staged` panic" — the exact function this ticket renamed on those two paths. Updated all four
+  to `require_staged_reason`. Left the unrelated `cpe_1710_rename_entry` block (`:273`, `:276`) and the
+  separate CPE-1717 traversal-deny job (`:610`–`:682`) unchanged — neither was touched by this ticket,
+  so bare `require_staged` is still the accurate name there.
+- **Retired a caveat.** The Reviewer produced a genuine `require_staged_reason` panic on real hardware
+  and applied CI's literal `grep -m1 -A6 'CPE-1717'` to the actual `cargo test` log: the reason lands on
+  the MATCHED line itself, so `grep -m1` prints it unconditionally regardless of the `-A6` window — the
+  outcome is platform-independent, with `std::env::consts::OS` as the only platform-specific text
+  (`linux` vs `windows`). Round 2's earlier "could not verify real Linux CI panic output" caveat no
+  longer applies to the reason-visibility question — it mattered only when the reason sat ~14 lines down
+  and survival depended on how many lines the runner's panic hook emitted before it, which is exactly
+  what the first-line move (this same round 2) fixed. Confirmed the fix mattered by re-testing: reverting
+  `staging_failure_message_impl` to append the reason as a trailing paragraph (round 1's shape) reds
+  `cpe_1815_the_failure_message_with_reason_names_which_step_failed`'s new positional assertion — see
+  mutation 4 in the PR body.
+- Not mine to fix, filed separately by the coordinator: the Reviewer found `require_staged_reason`
+  itself is currently untested end-to-end — no test in the tree invokes it directly, so a mutation that
+  erases the seven-way distinction at the point it's actually consumed (replacing the `Fail` arm's call
+  with a hardcoded `staged_fail_reason(Err("staging failed"))`) measures 2289 passed / 0 failed with
+  clippy clean. A `catch_unwind` test under `CPE_STAGING_STRICT=1` would close it; out of this ticket's
+  scope.
+- Gates re-run after all of the above (doc-comment-only change to `lib.rs`, no logic touched):
+  `crates/server` clippy clean, `cargo test` unchanged at 2289/0/4. `src-tauri` clippy clean in both
+  feature modes, `cargo test` unchanged at 214/0 (default) and 269/0 (`sidecar-platform`).

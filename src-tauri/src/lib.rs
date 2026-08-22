@@ -14913,6 +14913,38 @@ mod tests {
     /// (`include_str!` of this file, sliced between its `fn` line and the next item) and asserts every
     /// slot `TRASH_ROUNDTRIP_REASONS[0]` through `[6]` is referenced there EXACTLY once — a guard in the
     /// same family as `half_applied_rename_guards_are_rejected` / `src/lib/epicsQueueLayout.test.ts`.
+    ///
+    /// # What it does NOT catch — measured, not guessed (PR #986 round 2)
+    ///
+    /// This is a textual scan (`body.matches("TRASH_ROUNDTRIP_REASONS[N]").count()`), not a semantic
+    /// one, and the review demonstrated three shapes that fool it while measuring GREEN:
+    ///
+    /// - **A comment decoy.** `.map_err(|_| "staging failed" /* TRASH_ROUNDTRIP_REASONS[3] */)` — the
+    ///   index text inside a `//` or `/* */` comment counts as a reference just as much as a real one.
+    /// - **An index swap.** Two call sites exchange indices (`[0]` used where `[1]` belongs and vice
+    ///   versa) — each slot is still referenced exactly once, so the count check passes, even though
+    ///   both reasons are now wrong. This is misattribution, not collapse or omission, and neither this
+    ///   test nor the pairwise-distinctness test above can see it.
+    /// - **A `format!` decoy.** `let _u = format!("{}", TRASH_ROUNDTRIP_REASONS[3]); "staging failed"`
+    ///   — the array is genuinely read, so the reference is real, but the VALUE the `?`/`.ok_or` actually
+    ///   returns is not.
+    ///
+    /// None of these three is a plausible accidental regression — each requires writing new code
+    /// specifically shaped to defeat the scan. The plausible ones (a reason collapsed to another's text,
+    /// or a slot left unindexed/double-indexed after a step is added or reordered) ARE caught; that
+    /// asymmetry is why this guard exists at all despite the gap. **Absence of a failure here is not
+    /// evidence the pairing holds** — same caveat this scan's precedent (`half_applied_rename_guards_are_rejected`,
+    /// above) carries for its own blind spots.
+    ///
+    /// Two more things worth knowing before touching this: the scanned slice runs from
+    /// `trash_roundtrip_available`'s `fn` line up to the literal text `fn
+    /// trash_roundtrip_reasons_are_pairwise_distinct`, which means it INCLUDES that next test's own doc
+    /// comment (immediately above, starting "CPE-1815 (PR #986 review, blocker 1): the pairwise-
+    /// distinctness half of the fix") — writing a literal `TRASH_ROUNDTRIP_REASONS[2]` in prose there
+    /// would false-red this scan by making some other slot's count come out as 2. And `include_str!`
+    /// below embeds this entire ~1.03 MB source file into the test binary; it is behind `#[cfg(test)]`
+    /// so no production artifact is affected, but that is worth knowing rather than discovering by
+    /// surprise in a binary-size review.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn trash_roundtrip_available_indexes_every_reason_exactly_once() {

@@ -300,13 +300,13 @@ jobs:
           if [ "$RUNNER_OS" != "Linux" ]; then
             echo "OK: skipped on $RUNNER_OS — this test is #[cfg(target_os = \"linux\")], so it doesn't compile here at all; a filtered run would prove nothing."
           elif cargo test trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file > "$log" 2>&1; then
-            echo "::error::CPE-1806 regression: 'trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on, and the only execution CPE-1803's degraded-flag assertions ever get. A leg that staged nothing reported green; check require_staged is still on this path."
+            echo "::error::CPE-1806 regression: 'trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on, and the only execution CPE-1803's degraded-flag assertions ever get. A leg that staged nothing reported green; check require_staged_reason is still on this path."
             fail=1
           elif grep -q 'CPE-1717' "$log"; then
             echo "OK: went red, and for the right reason:"
             grep -m1 -A6 'CPE-1717' "$log"
           else
-            echo "::error::CPE-1806: red, but not with the require_staged panic — so this step is no longer evidence about skip visibility. Full log:"
+            echo "::error::CPE-1806: red, but not with the require_staged_reason panic — so this step is no longer evidence about skip visibility. Full log:"
             cat "$log"
             fail=1
           fi
@@ -319,7 +319,7 @@ jobs:
               echo "OK: on Windows this mechanism may legitimately not stage (a headless CI session can lack a working Recycle Bin), so it stayed a passing skip — no false red:"
               grep -m1 'CPE-1268' "$log" || true
             else
-              echo "::error::CPE-1806: on $RUNNER_OS the trash round-trip IS supposed to work, so a sabotaged run must be red. It passed, which means supported_here is wrong for this site or require_staged is no longer on the path."
+              echo "::error::CPE-1806: on $RUNNER_OS the trash round-trip IS supposed to work, so a sabotaged run must be red. It passed, which means supported_here is wrong for this site or require_staged_reason is no longer on the path."
               fail=1
             fi
           else
@@ -331,7 +331,7 @@ jobs:
               echo "OK: on $RUNNER_OS it went red, and for the right reason:"
               grep -m1 -A6 'CPE-1717' "$log"
             else
-              echo "::error::CPE-1806: red, but not with the require_staged panic. Full log:"
+              echo "::error::CPE-1806: red, but not with the require_staged_reason panic. Full log:"
               cat "$log"
               fail=1
             fi
