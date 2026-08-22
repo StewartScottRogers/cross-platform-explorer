@@ -3,11 +3,11 @@ id: CPE-1824
 title: the release pipeline carries the same unhardened package fetches CPE-1787 just fixed in CI
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
