@@ -3,11 +3,11 @@ id: CPE-1770
 title: Trash restore and folder-template creation use a refusal guard that misses a dangling link
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17
-closed:
+closed: 2026-08-21
 ---
 
 ## Problem
