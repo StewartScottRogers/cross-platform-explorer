@@ -3,11 +3,11 @@ id: CPE-1843
 title: a dropped await in beforeSession would leave the whole gui-smoke suite green
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-21
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
