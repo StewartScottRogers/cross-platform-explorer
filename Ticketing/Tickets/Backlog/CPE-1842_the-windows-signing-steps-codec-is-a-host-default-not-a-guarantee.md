@@ -1,8 +1,8 @@
 ---
 id: CPE-1842
-title: the Windows signing step misdecodes and BOMs tauri.conf.json on every real release build
+title: the Windows signing step's codec is a host default, not a guarantee
 type: bug
-priority: High
+priority: Medium
 status: Backlog
 tags: ready
 estimate: S
@@ -37,11 +37,36 @@ real non-ASCII em dash:
 
 So this runs, on that character, on **every real Windows release build**, today.
 
+> **Corrected 2026-08-21 — the paragraph above is disproven; read it as the original hypothesis, not
+> as fact.** Measured on both hosts (full four-way byte table in the Work Log, independently
+> reproduced byte-for-byte by UAT and by the Reviewer): GitHub Actions `shell: pwsh` is **PowerShell
+> 7**, which defaults to BOM-less UTF-8 on both the read and the write, so the em dash round-trips
+> intact and **no BOM is written**. Nothing mangled has ever shipped. The corruption is real only
+> under **Windows PowerShell 5.1**, which is not the host CI uses. This is a **latent portability
+> defect** — the pipeline survives on an unstated runtime default rather than on anything the
+> workflow states — not a shipped corruption. The title, priority and the "Why it matters" section
+> below were revised to match; the filename slug was `git mv`d for the same reason.
+
 ## Why it matters
 
 This is the code-signing step of the release pipeline — the least-watched code in the repo, executing
 against a file that is one of the five that must stay version-synchronised. A mangled or BOM-prefixed
 `tauri.conf.json` either fails the build confusingly or ships a subtly wrong manifest.
+
+> **Corrected 2026-08-21 — the defensible stake is release AVAILABILITY, not user-visible text.** The
+> UAT traced the em dash end to end. It is the **only** non-ASCII byte in the file and it sits in
+> `plugins.cli.description`, not in bundle metadata. The `bundle` keys actually present are
+> `active` / `targets` / `icon` / `resources` / `createUpdaterArtifacts` — there is no `publisher`,
+> `shortDescription`, `longDescription` or `copyright` — so installer UI, Add/Remove Programs and
+> VERSIONINFO all fall back to `productName` (ASCII) and `Cargo.toml`'s `description` (ASCII). The
+> updater manifest's notes come from the release body, not from this file. And
+> `tauri-plugin-cli-2.4.1/src/parser.rs:87-96` feeds `description` into clap's `.about()`, which the
+> plugin stuffs into `matches.args["help"]` and **never prints**; the app reads only `open` and
+> `test-mode`, and `main.rs:2` is `windows_subsystem = "windows"`, so a release build has no console
+> to print to anyway. **Net: the mangled string is parsed into a clap field and discarded — zero
+> user-visible surface.** What is genuinely at stake is that a 5.1 host **breaks the build, loudly**,
+> and costs an hour to diagnose. That is a Medium. Do not lean on "the exact shape the mojibake guard
+> exists to catch" as though text were reaching a user; it never was.
 
 Note the round-trip coincidence that saves `scripts/release.ps1` does **not** apply here: that one read
 and wrote with the same lossy codec, so the bytes survived by accident. This step reads with the lossy
@@ -92,11 +117,12 @@ require.
 ### Measurement — what actually ships today
 
 The ticket's severity claim needs one correction, and it is the most important finding here.
-**GitHub Actions `shell: pwsh` is PowerShell 7, not Windows PowerShell 5.1**, and PowerShell 6+
-changed both defaults this bug depends on: the default input/output encoding became BOM-less UTF-8,
-and `-Encoding utf8` became an alias for `utf8NoBOM`. PowerShell 7 was not installed on this machine,
-so it was installed as a `dotnet tool` (7.6.5) purely to measure the real runner behaviour, then
-removed again.
+**GitHub Actions `shell: pwsh` is PowerShell 7, not Windows PowerShell 5.1**, and PowerShell **v6 and
+higher** (per Microsoft's `about_Character_Encoding`) changed both defaults this bug depends on: the
+default input/output encoding became BOM-less UTF-8, and `-Encoding utf8` became an alias for
+`utf8NoBOM`. PowerShell 7 was not installed on this machine, so it was installed as a `dotnet tool`
+(**7.6.5 — the identical version the runner images ship**) purely to measure the real runner
+behaviour, then removed again.
 
 Ran the **verbatim current step body** (only the `Import-PfxCertificate` call replaced by a literal
 thumbprint) against a scratch copy of the real `src-tauri/tauri.conf.json` — the tracked file was
@@ -135,24 +161,62 @@ Both sites now do, matching CPE-1834's landed precedent exactly:
     ...
     [System.IO.File]::WriteAllText($confPath, ($j | ConvertTo-Json -Depth 40), $utf8NoBom)
 
-`Resolve-Path` is required, not cosmetic: `[System.IO.File]` resolves relative paths against the .NET
-process working directory, which is not guaranteed to track PowerShell's own location. Verified
-byte-for-byte on both hosts (table above), not trusted from the flag name. Each workflow's edit is
-13 added / 2 removed lines — a targeted diff, confirmed with `git diff --numstat`, not a whole-file
-rewrite.
+`Resolve-Path` is load-bearing, not cosmetic, and this is now **measured rather than argued**: the
+Reviewer demonstrated that after a `Set-Location`, `(Get-Location).Path` and
+`[System.IO.Directory]::GetCurrentDirectory()` diverge, at which point the relative-path `ReadAllText`
+**throws** and the `Resolve-Path` form succeeds. It is also not a new failure mode: GitHub Actions
+prepends `$ErrorActionPreference = 'stop'` to `pwsh` steps, and the old code already handed the same
+bare relative `$conf` to `Get-Content`, so `Resolve-Path` succeeds exactly when the old code did and
+fails exactly when it did.
+
+The fix itself is verified byte-for-byte on both hosts (table above), not trusted from the flag name.
+Each workflow's edit is 13 added / 2 removed lines — a targeted diff, confirmed with
+`git diff --numstat`, not a whole-file rewrite.
+
+### The two halves fail in OPPOSITE directions — why the guard must assert both
+
+This is the finding that most justifies the guard's shape, and the first pass missed it. The UAT built
+a probe replicating exactly what Tauri does with this file (`tauri-utils-2.9.3/src/config/parse.rs:282`
+and `:352` — `fs::read_to_string` then `serde_json::from_str`, with **no BOM strip anywhere in that
+file**) and ran the **half-fixed** variants under 5.1:
+
+| variant | output | Tauri's verdict |
+|---|---|---|
+| read **OLD** / write **NEW** | 7216 B, no BOM, em dash = `C3 A2 E2 82 AC E2 80 9D` | **parses clean** and ships the mojibake — **FAIL-SILENT** |
+| read **NEW** / write **OLD** | 7216 B, BOM `EF BB BF`, em dash intact | build **breaks** at config parse — **FAIL-LOUD** |
+
+On 5.1 the two halves always fire together, so **the BOM masks the mojibake**: you get a red release
+rather than a corrupt one. Which means **a half-fix would be strictly worse than no fix at all** —
+fixing only the write half strips the loud failure and leaves the silent one, which is precisely the
+double-encoding shape CPE-1834 measured and warned about. That is the real, previously unstated reason
+the guard's last test insists on `$utf8NoBom` at **both** the `ReadAllText` and the `WriteAllText`
+call: it reads as hygiene and is actually load-bearing. Now recorded in the test file's own header
+comment as well, so the next reader does not have to re-derive it.
+
+For completeness the UAT also measured `>` redirection, which nobody had tested: 5.1 writes UTF-16LE
+(`FF FE`) and Tauri reports "stream did not contain valid UTF-8". Also fail-loud.
 
 ### `ConvertTo-Json -Depth 40` reformats the whole file — reported, scoped out
 
 Confirmed and quantified. Under PowerShell 7 the rewrite is **semantically inert**: a full structural
 comparison of the original against the rewritten manifest shows the only key-level difference is the
-intended `bundle.windows` addition, **key order is preserved throughout**, and **no character is
-escaped that was not escaped before** (zero `\uXXXX` escapes in either). What changes is whitespace
-only — `ConvertTo-Json` re-indents at 2 spaces and explodes every inline array/object onto its own
-line, so the 3169-byte manifest becomes 3846 bytes: `"scope": ["**"]` becomes three lines, and each of
-the eleven single-line CLI `args` entries becomes a five-line block.
+intended `bundle.windows` addition, and **key order is preserved throughout**. What changes is
+whitespace only — `ConvertTo-Json` re-indents at 2 spaces and explodes every inline array/object onto
+its own line, so the 3169-byte manifest becomes 3846 bytes: `"scope": ["**"]` becomes three lines, and
+each of the eleven single-line CLI `args` entries becomes a five-line block.
 
-(Under 5.1 the reformat is worse — 7409 bytes, `"version":  "0.57.68"` double-spaced, and 22 gratuitous
-`'`/`>` escapes — but that host is out of the shipped path.)
+The UAT proved the inertness more strongly than the structural walk above did: it **parsed** each
+output and compared it against `orig + expected-patch`, and **OLD/pwsh7, NEW/pwsh7 and NEW/5.1 all
+compare EQUAL**, with identical top-level key order. Only OLD/5.1 differs — and it differs because of
+the corruption, not the reformat.
+
+> **Correction to an earlier claim in this log.** The first pass attributed the 22 `\uXXXX` escapes in
+> the 5.1 output to the old code, as though the fix removed them. It does not. They are `'` ×20 (the
+> CSP's `'self'`) and `>` ×2 (the `>` in `longDescription`), they are a **Windows PowerShell 5.1
+> `ConvertTo-Json` behaviour**, and they appear under the **fixed** code on 5.1 too. The fix neither
+> causes nor removes them, and they are semantically free — `'` and `>` are just JSON
+> spellings of the same two ASCII characters. (The other 5.1-only cosmetic, `"version":  "0.57.68"`
+> double-spaced, is likewise a 5.1 formatter artifact, not an old-code artifact.)
 
 **Scoped out, deliberately.** The rewritten file is runner-only: it is patched inside the checkout on
 an ephemeral runner, consumed immediately by `tauri-action`, and never committed or uploaded. Nothing
@@ -232,7 +296,19 @@ Windows runner). Complete list of hits:
 | `.github/workflows/release.yml:104` (pre-fix) | `($j \| ConvertTo-Json -Depth 40) \| Set-Content $conf -Encoding utf8` | **fixed** → `WriteAllText` + `$utf8NoBom` |
 | `.github/workflows/release-sidecar.yml:465` (pre-fix) | `$j = Get-Content $conf -Raw \| ConvertFrom-Json` | **fixed** → `ReadAllText` + `$utf8NoBom` |
 | `.github/workflows/release-sidecar.yml:472` (pre-fix) | `($j \| ConvertTo-Json -Depth 40) \| Set-Content $conf -Encoding utf8` | **fixed** → `WriteAllText` + `$utf8NoBom` |
-| `.github/workflows/gui-smoke.yml:191` | `$PWD.Path \| Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append` | **justified, left alone** — writes the runner-managed `GITHUB_PATH` handoff file, not a file in the checkout; payload is an ASCII filesystem path; the runner parses it and nothing in the repo reads it back. Recorded in the new test's `ALLOWED_LINES` with that reason, and covered by test 4 so the exemption cannot go stale. |
+| `.github/workflows/gui-smoke.yml:191` | `$PWD.Path \| Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append` | **justified, left alone** — **ASCII-only payload to a runner-managed file, so no encoding can alter its content.** Recorded in the new test's `ALLOWED_LINES` with that reason, and covered by test 4 so the exemption cannot go stale. |
+
+> **Correction to this exemption's rationale.** The first pass justified it partly by claiming "the
+> Actions runner parses `GITHUB_PATH` itself and tolerates the BOM." That claim is **unverified and
+> has been removed** — it was also the wrong *shape* of argument to make inside a guard whose thesis
+> is "do not rely on unstated defaults." Nor is it true that no BOM can appear: the Reviewer measured
+> `Out-File -Encoding utf8 -Append` on both hosts and found that appending to a **non-empty** file
+> writes no BOM on either, but appending to an **empty** file — which is exactly what the runner hands
+> this step — writes `EF BB BF` on 5.1 and none on 7.6.5. So a BOM genuinely *can* be produced there,
+> and what makes it safe today is the very same unstated pwsh-7 default this ticket exists to stop
+> depending on (that step carries no `shell:` key, and `gui-smoke.yml:114` is
+> `runs-on: windows-latest`, whose default shell is pwsh). The exemption now rests solely on the
+> payload being ASCII, which is self-sufficient and true regardless of host.
 
 No other hit exists in any of the six workflows. Also checked, and clear:
 
@@ -250,6 +326,32 @@ No other hit exists in any of the six workflows. Also checked, and clear:
   (`release-sidecar.yml:234`) steps are both `shell: bash` and move/copy **binaries** (`cp`, `mv`,
   `unzip`) into the untracked `native-deps/` and `target/` trees. No text re-encoding.
 
+### Independent mutation-testing of the guard (Reviewer + UAT)
+
+Both reviews attacked the guard rather than reading it, and it survived mutations beyond the two
+red-proofs above:
+
+- **Swapping the write half to `Set-Content -Encoding utf8NoBOM`** — correct on pwsh 7, a *parameter
+  error* on 5.1 — still **reds**, because the scan bans the cmdlet family outright rather than
+  inspecting the `-Encoding` argument. That coarseness is a feature here.
+- **A third `pwsh` step added to `ci.yml`** — a workflow the guard has no special knowledge of — was
+  flagged on both risky lines. The scan really is generic across `.github/workflows/`, not hard-wired
+  to the two release files.
+- **Comment-stripping is anchored correctly**: an injected *executable* line carrying a `#` inside a
+  double-quoted string, alongside a risky write, still fired. Anchoring to the first non-space
+  character is the only correct place to strip.
+
+Known gaps, recorded rather than bodged (all now in the test file's header comment too):
+
+- `>` / `>>` redirection is not matched. Real gap — UTF-16LE-with-BOM on 5.1 — but **fail-loud** (Tauri
+  reports "stream did not contain valid UTF-8"), and no `pwsh` step uses it today; every `>>` in these
+  workflows is inside a `shell: bash` step.
+- `gc` / `sc` aliases are not matched. **The only silent gap.** Adding `sc` to the regex would collide
+  with `sc.exe`, so the coordinator is filing it separately; scope deliberately not widened here.
+- `shell: pwsh` → `shell: powershell` with the code left fixed goes **green**, and that is correct
+  rather than a miss: the post-fix code measured fully correct under 5.1 as well (NEW/5.1 row above),
+  so it is host-independent. Guarding the code rather than the host is the right axis.
+
 ### Gates
 
 - `npx vitest run src/lib/workflowPwshFileEncoding.test.ts` — **5/5 passed** (and 2/5 → red on each of
@@ -266,17 +368,25 @@ No other hit exists in any of the six workflows. Also checked, and clear:
 
 ### Not verified
 
-- **The fix has not been observed on a real GitHub Actions Windows runner.** The measurement above used
-  a locally installed PowerShell 7.6.5, which is the same major/minor family the runner image ships but
-  not the identical build, and the step was exercised with a literal thumbprint rather than a real
-  imported certificate. The signing step only runs when `WINDOWS_CERT_PFX_BASE64` is set on a
-  `windows-latest` runner and a version tag is pushed, so CI on this PR will not execute it.
-- `Resolve-Path` behaviour under `tauri-action`'s working directory was reasoned about, not observed on
-  a runner. It is strictly safer than the bare relative path the old code passed to `Get-Content`
-  (which resolved against PowerShell's location), so this is not a regression risk either way.
+- **The fix has not been observed executing on a real GitHub Actions Windows runner.** The signing step
+  only runs when `WINDOWS_CERT_PFX_BASE64` is set on a `windows-latest` runner and a version tag is
+  pushed, so CI on this PR will not execute it, and the step was exercised locally with a literal
+  thumbprint rather than a real imported certificate.
+
+  **The PowerShell-version half of this caveat is retired** — it was over-cautious. The first pass
+  hedged that the locally installed pwsh was "the same family, not the identical build." It is the
+  **identical version**: `actions/runner-images` `Windows2025-Readme.md` (image 20260818.232.1) lists
+  PowerShell **7.6.5**, exactly what was installed, and `Windows2022-Readme.md` lists 7.6.5 too, so it
+  is label-independent. Microsoft documents the .NET-global-tool install as one of five peer
+  installation methods for the same product, differing only in deployment. There is no version gap to
+  reason about.
 - The em dash is the only non-ASCII character currently in `tauri.conf.json`; behaviour was measured on
   that character, not on a wider corpus. CPE-1834 already measured the euro sign through the same code
   shape.
+
+(`Resolve-Path` was previously listed here. It has been **promoted to measured** — see "The fix" above:
+the Reviewer demonstrated the divergence and the throw empirically, and established that it introduces
+no new failure mode.)
 
 Everything written during measurement went to a `.scratch-cpe1842/` directory inside this worktree
 (untracked, so `mojibakeGuard`'s `git ls-files` walk could never see it) and was deleted before commit;

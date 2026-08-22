@@ -3,9 +3,14 @@
 // `shell: pwsh`. Both halves of that pair depend on the host's default text codec:
 //
 //   - bare `Get-Content -Raw` decodes with the process default encoding, which is CP1252 on Windows
-//     PowerShell 5.1 and BOM-less UTF-8 only from PowerShell 6 onward;
+//     PowerShell 5.1 and BOM-less UTF-8 only from PowerShell 6 and higher;
 //   - `Set-Content -Encoding utf8` writes a UTF-8 BOM on Windows PowerShell 5.1 (`utf8` means
-//     `utf8NoBOM` only from PowerShell 6.2 onward) -- the flag name does not mean "no BOM".
+//     `utf8NoBOM` only from PowerShell 6 and higher) -- the flag name does not mean "no BOM".
+//
+// (Per Microsoft's about_Character_Encoding: "PowerShell (v6 and higher)" defaults to BOM-less UTF-8.
+// Note this is the `Set-Content` default specifically -- on 5.1 `Out-File` and `>` default to
+// UTF-16LE instead, a different corruption shape that `mojibakeGuard.ts` documents and detects
+// separately. The two are not interchangeable and neither is "just ANSI".)
 //
 // `tauri.conf.json` is BOM-less UTF-8 and carries a real em dash (U+2014) in
 // `plugins.cli.description`, so this is not hypothetical content. Measured on 2026-08-21 against a
@@ -17,6 +22,39 @@
 // So the shipped pipeline (GitHub Actions `shell: pwsh` = PowerShell 7) has been surviving on a
 // default, not on a guarantee. Switching the step to `shell: powershell`, an older runner image, or
 // simply copying the idiom into a new step is enough to turn it into the 5.1 row.
+//
+// WHY THE "BOTH HALVES" ASSERTION BELOW IS LOAD-BEARING, NOT HYGIENE
+// -----------------------------------------------------------------
+// The two halves fail in OPPOSITE DIRECTIONS, and a half-fix is strictly worse than no fix at all.
+// Measured by the independent UAT on this ticket, running the half-fixed variants under 5.1 against a
+// probe replicating what Tauri itself does with this file (tauri-utils-2.9.3 src/config/parse.rs:282
+// and :352 -- `fs::read_to_string` then `serde_json::from_str`, with NO BOM strip anywhere in that
+// file):
+//
+//   read OLD / write NEW  ->  no BOM, em dash = C3 A2 E2 82 AC E2 80 9D
+//                             -> PARSES CLEAN, and ships the mojibake.            FAIL-SILENT
+//   read NEW / write OLD  ->  BOM EF BB BF, em dash intact
+//                             -> the build BREAKS at config parse.                FAIL-LOUD
+//
+// On 5.1 the two always fire together, so the BOM masks the mojibake: you get a red release instead
+// of a corrupt one. Fix only the write half and you strip the loud failure while leaving the silent
+// one -- which is exactly the double-encoding shape CPE-1834 measured and warned about. That is why
+// the last test below insists BOTH the `ReadAllText` and the `WriteAllText` call are handed
+// `$utf8NoBom`: it is guarding against a well-intentioned partial edit, not tidying style.
+//
+// The same UAT measured `>` redirection for completeness: 5.1 writes UTF-16LE (`FF FE`), and Tauri
+// reports "stream did not contain valid UTF-8". Also fail-loud.
+//
+// KNOWN GAPS IN THIS SCAN, stated so nobody has to rediscover them
+// ----------------------------------------------------------------
+//   - `>` / `>>` redirection is NOT matched by `RISKY_CMDLETS`. On 5.1 that is UTF-16LE-with-BOM, so
+//     it is a real gap -- but a fail-loud one (Tauri rejects the file outright), and no pwsh step
+//     uses it today (every `>>` in these workflows is inside a `shell: bash` step).
+//   - `gc` / `sc` aliases are not matched either. This is the only SILENT gap. Adding `sc` to the
+//     regex would collide with `sc.exe`, so it is tracked as its own ticket rather than bodged here.
+//   - Changing a step from `shell: pwsh` to `shell: powershell` with the code left fixed goes GREEN,
+//     and that is correct, not a miss: the post-fix code was measured fully correct under 5.1 too, so
+//     it is host-independent. This file deliberately guards the CODE, not the host it runs on.
 //
 // The repo's mojibake guard (src/lib/mojibakeGuard.ts) cannot catch this one: the signing step
 // patches the manifest on the runner only and never commits it, so the corrupted bytes never reach
@@ -119,10 +157,20 @@ const ALLOWED_LINES: { file: string; line: string; reason: string }[] = [
   {
     file: "gui-smoke.yml",
     line: "$PWD.Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
+    // NOTE the exemption rests on the PAYLOAD, deliberately -- not on any claim about what the
+    // runner tolerates. An earlier draft of this reason said the runner "parses GITHUB_PATH itself
+    // and tolerates the BOM", which is unverified and was the wrong shape of argument to make inside
+    // a guard whose whole thesis is "do not rely on unstated defaults". It is also not true that no
+    // BOM can appear: the Reviewer on CPE-1842 measured `Out-File -Encoding utf8 -Append` on both
+    // hosts and found that appending to a NON-empty file writes no BOM on either, but appending to
+    // an EMPTY file -- which is what the runner hands this step -- writes `EF BB BF` on 5.1 and none
+    // on 7.6.5. So a BOM genuinely can be produced here, and what makes it safe today is the very
+    // same unstated pwsh-7 default this ticket exists to stop depending on (the step carries no
+    // `shell:` key, and gui-smoke.yml's `runs-on: windows-latest` defaults it to pwsh).
     reason:
-      "Writes the runner-managed GITHUB_PATH handoff file, not a file in the repo checkout, and " +
-      "the payload is an ASCII filesystem path. The Actions runner parses GITHUB_PATH itself and " +
-      "tolerates the BOM; nothing in the repo is read back from it.",
+      "ASCII-only payload to a runner-managed file, so no encoding can alter its content. It " +
+      "writes the GITHUB_PATH handoff file, not a file in the repo checkout, and the payload is a " +
+      "filesystem path with no non-ASCII character in it.",
   },
 ];
 
@@ -182,7 +230,11 @@ describe("workflow PowerShell file encoding (CPE-1842)", () => {
       expect(step.run, where).toContain("New-Object System.Text.UTF8Encoding($false)");
       expect(step.run, where).toContain("[System.IO.File]::ReadAllText(");
       expect(step.run, where).toContain("[System.IO.File]::WriteAllText(");
-      // Both .NET calls must be handed the BOM-less encoder, not left to a default overload.
+      // Both .NET calls must be handed the BOM-less encoder, not left to a default overload. This is
+      // the load-bearing assertion, for the reason spelled out in this file's header: the read half
+      // fails SILENTLY (mojibake that parses clean and ships) and the write half fails LOUDLY (a BOM
+      // Tauri's config parser rejects). They mask each other on 5.1, so fixing only the write half
+      // would remove the loud failure and leave the silent one -- strictly worse than no fix.
       for (const call of ["ReadAllText", "WriteAllText"]) {
         const line = step.run
           .split(/\r?\n/)
