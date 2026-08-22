@@ -458,18 +458,29 @@ cannot answer for a device name (`sub/NUL` resolves to `\\?\NUL`, which no check
 with), and the blanket rule cannot see an alias that is spelled legally. Removing either would reopen
 something.
 
-**Which destructive shape is widest — the Reviewer and the Auditor disagreed, so it is settled here.**
-The Reviewer calls the emptied `"files": {}` manifest the widest (confirmed by measurement: an empty
-checkpoint against a five-file tree gives `applied: 5, skipped: []`, no survivors). The Auditor says the
-case alias is wider. **The Auditor is right, and the code now says so in one place only.** Width is
-reach, not count: the empty-manifest shape needs the user to confirm a whole-tree revert whose preview
-reads "delete 5, restore 0", and an empty checkpoint is a legal capture of an empty folder, so it cannot
-be refused without refusing a real one. The alias needed **one** planted key, no confirmation of a mass
-delete, reached through cherry-revert where the preview shows a single file, and destroyed a file the
-attacker names. The comment at `revert_engine.rs:112` asserted the opposite ranking *and* claimed the
-alias case was not the shape in question; both halves were wrong and it is corrected in place with the
-correction visible rather than quietly swapped. The empty-`files` shape stays recorded, as its own
-ticket.
+**Which destructive shape is widest — settled, then re-settled when my own settlement turned out to
+contain a false claim.** The Reviewer said the emptied `"files": {}` manifest; the Auditor said the case
+alias. I ruled for the Auditor on *reach*, arguing the empty-manifest shape is narrower because it needs
+the user to confirm a whole-tree revert whose `checkpoint_preview_revert` reads "delete 5, restore 0".
+**That argument is measured false**, and it sat in the one section of this log whose stated purpose is
+correcting false claims:
+
+```text
+C1 CMD revert[empty manifest]:     applied=5 skipped=0   survivors = []
+C2 CMD revert_one[empty manifest]: applied=1 skipped=0   survivors = [f1, f2, f4, f5]
+```
+
+C2 destroys files **one at a time** through `checkpoint_revert_one`, behind a per-file confirm that says
+nothing about a mass delete and never consults `checkpoint_preview_revert` at all. So the empty-manifest
+shape is not merely wider than I ranked it — it is wider than *either* checker first said, and the
+Auditor has withdrawn its own round-4 position on the strength of C2.
+
+**The ranking has also gone moot in the direction that matters.** The alias was the widest shape while it
+was open; round 5 closes it. What that leaves standing is the emptied manifest, so both ranking sites —
+`revert_engine.rs:128-151` and this paragraph, the only two in the tree — now read: **the emptied
+`"files": {}` manifest (CPE-1847) is the widest REMAINING shape**, with C2 recorded next to it and the
+whole-tree-confirm argument deleted rather than softened. It is still not closed by refusing it: an empty
+checkpoint is a legal capture of an empty folder, so a rule that refuses it refuses a real one.
 
 **Recorded-as-fact errors corrected** (a false verified-fact is worse than an honest assumption):
 
@@ -480,7 +491,8 @@ ticket.
    not irreducible** — this crate already ships the pattern (`batch_media`'s never-follow-a-link-at-the-
    final-component open, `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`, no libc, already used by
    `batch_execute`); adopting it changes `fs::copy`'s attribute-preserving behaviour on Windows, so it is
-   its own ticket and the comment now names what would close it rather than implying nothing can.
+   **CPE-1846**, and the comment now cites that ID rather than saying "its own ticket" and leaving the
+   reader to find it.
 3. The `safe_target` canonicalise-cost note said "a 10k-file revert is 10k+ canonicalise walks". Wrong
    since round 4: `restore` resolves every entry **twice**, so it is 20k+, plus round 5's `landing`
    resolutions (one per checkpoint key and one per delete, only when the plan contains a delete). Also

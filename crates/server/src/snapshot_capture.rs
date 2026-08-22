@@ -390,7 +390,7 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, hard-coded per target with no libc dependency, pinned
     // by a runtime test and already used by `batch_execute`). Adopting it means opening the target and
     // writing through the handle instead of `fs::copy`, which changes `fs::copy`'s attribute-preserving
-    // behaviour on Windows — so it is its own ticket, deliberately not folded in here, and this comment
+    // behaviour on Windows — so it is CPE-1846, deliberately not folded in here, and this comment
     // must not read as "nothing more can be done".
     let mut written: HashSet<PathBuf> = HashSet::new();
     for (rel, file) in &manifest.files {

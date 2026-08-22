@@ -115,7 +115,7 @@ pub fn execute_restore(
     //   500-delete revert with one locked file holds back all 500, and re-running after fixing it does
     //   perform them. `RevertOutcome::from_report` carries each path and reason, so the UI has what it
     //   needs — but it can only tell a deliberate hold-back from a failure by string-matching
-    //   `"not deleted:"`, which is a structural gap in `OpResult` and its own ticket.
+    //   `"not deleted:"`, which is a structural gap in `OpResult` and is CPE-1845.
     // - **Finer granularity is not available *from the spelling*, which is why round 5 stopped asking
     //   the spelling.** Pairing each delete with the write that would have covered it is precisely what
     //   the aliasing case makes invisible — `a.txt ` and `a.txt` look like different paths, which is the
@@ -125,20 +125,30 @@ pub fn execute_restore(
     //   to `\\?\NUL`, which is not a file any checkpoint entry can collide with — so the two are
     //   complementary, not redundant.
     //
-    // **One other destructive shape a planted manifest still has, and it is NOT the widest.** An emptied
-    // `"files": {}` turns a whole-tree revert into "delete every file", with no writes to stand down and
-    // no error; measured, an empty checkpoint against a five-file tree gives `applied: 5, skipped: []`
-    // and no survivors. Bigger blast radius than anything else here — but the widest shape is measured by
-    // *reach*, not by count, and on reach this one is the narrower of the two: it needs the user to
-    // confirm a whole-tree revert whose `checkpoint_preview_revert` says "delete 5 files, restore 0", and
-    // an empty checkpoint is a legal capture of an empty folder, so refusing it would refuse a real one.
+    // **The WIDEST destructive shape a planted manifest still has is an emptied `"files": {}`
+    // (CPE-1847).** It turns a revert into "delete every file", with no writes to stand down and no
+    // error. Both routes measured:
     //
-    // The wider shape was the **resolution collision** below: one planted key, one live file, no reliance
-    // on the user confirming a mass delete, reachable through *cherry*-revert where the preview shows a
-    // single file — and it destroys a file the attacker names. It is closed in this function as of round
-    // 5. (Round 4's comment here asserted the opposite ranking, which was wrong on both halves: the
-    // alias case is not "not this one", and it was not then closed. Recorded so the correction is
-    // visible rather than quietly swapped.) The empty-`files` shape is its own ticket.
+    // ```text
+    // C1 CMD revert[empty manifest]:     applied=5 skipped=0   survivors = []
+    // C2 CMD revert_one[empty manifest]: applied=1 skipped=0   survivors = [f1, f2, f4, f5]
+    // ```
+    //
+    // C2 is the row that settles the ranking, and it is why this is wider than either checker first
+    // said. The same emptied manifest destroys files **one at a time** through `checkpoint_revert_one`,
+    // behind a per-file confirm that says nothing about a mass delete and never consults
+    // `checkpoint_preview_revert` at all. An earlier draft of this comment ranked it narrower *because*
+    // of that preview — measured false, and stated here rather than quietly dropped, since this passage
+    // exists to correct false claims and had become one.
+    //
+    // Not closed here, and not by refusing it: an empty checkpoint is a legal capture of an empty
+    // folder, so a rule that refuses it refuses a real one. That is CPE-1847's problem to solve.
+    //
+    // The **resolution collision** below — one planted key, one live file, reachable through
+    // cherry-revert, destroying a file the attacker names — was the widest shape while it was open, and
+    // rounds 3 and 4 both mis-ranked it (round 4's comment here said the empty-`files` shape was "not
+    // this one", and that the alias was out of scope; both wrong). It is closed in this function as of
+    // round 5, which is what leaves CPE-1847 standing as the widest **remaining** shape.
     //
     // The condition is a property of the **checkpoint**, not of this plan. Round 3 keyed it on
     // `report.skipped`, which reads "some write failed" — and a *cherry-revert* plan contains no write
@@ -557,7 +567,7 @@ fn apply_write(
     // (`batch_media`'s "never follow a link at the final component" open, `O_NOFOLLOW` on Unix and
     // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, with no libc dependency, already used by
     // `batch_execute`). Adopting it means opening the target and writing through the handle instead of
-    // `fs::copy`, which changes attribute-preserving behaviour on Windows — its own ticket, deliberately
+    // `fs::copy`, which changes attribute-preserving behaviour on Windows — CPE-1846, deliberately
     // not folded in here.
     if action.op == RestoreOp::Create && fs::symlink_metadata(&target).is_ok() {
         return Err(format!(
