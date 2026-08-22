@@ -2166,7 +2166,15 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
         // stat failure answered `false`, so an unreadable original location was handed to `restore_all`
         // as free. What the OS trash then does to whatever is really there is out of our hands, which is
         // exactly why this check has to be the one that is sure.
-        if let Some(e) = cpe_server::fsutil::clobber_refusal(
+        //
+        // CPE-1770: `clobber_refusal` alone was still wrong for one shape — a **dangling** link (or NTFS
+        // junction) at the original path. `Path::try_exists` follows the link, sees nothing at its
+        // (nonexistent) target, and answers `Ok(false)`, so the pre-fix guard read that as free too and
+        // handed the item to `restore_all` below. What that OS call then does to the link is not this
+        // crate's to promise — see `clobber_refusal_link_aware`'s doc comment for why this refuses rather
+        // than narrating a specific outcome — so it is refused here, the same as a real occupied path,
+        // rather than left to land on whatever `restore_all` does with it.
+        if let Some(e) = cpe_server::fsutil::clobber_refusal_link_aware(
             target,
             "Something already exists at the original location",
         ) {
@@ -2692,7 +2700,10 @@ fn restore_trash_items_impl(ids: Vec<String>) -> Vec<OpResult> {
 
             // Never clobber: if something now occupies the original path, refuse rather than
             // overwrite it — same rule as `restore_from_trash_impl`, and the same CPE-1705 collapse.
-            if let Some(e) = cpe_server::fsutil::clobber_refusal(
+            //
+            // CPE-1770: see `restore_from_trash_impl`'s twin comment — a dangling link (or NTFS
+            // junction) at `target` used to read as free here too, for the identical reason.
+            if let Some(e) = cpe_server::fsutil::clobber_refusal_link_aware(
                 &target,
                 "Something already exists at the original location",
             ) {
@@ -15531,6 +15542,168 @@ mod tests {
         });
         let _ = fs::remove_file(&colliding);
         let _ = fs::remove_file(&clean);
+    }
+
+    /// **CPE-1770.** The dangling-link sibling of the collision test above, at `restore_trash_items_impl`
+    /// (item 2 of the ticket): `clobber_refusal` alone answered "free" for a **dangling** link at the
+    /// original path — `Path::try_exists` follows it, sees nothing at its (nonexistent) target, and
+    /// `Ok(false)` reads as free — so the item was handed to `trash::os_limited::restore_all` instead of
+    /// being refused up front, exactly the write-through-a-link route this ticket family exists to close.
+    ///
+    /// Asserts the HARM before trusting the `Result` (this family fails by succeeding): nothing must have
+    /// appeared at the link's phantom target, and the original path must still hold the untouched link —
+    /// not real bytes restored through it. Covers both the symlink and (unprivileged Windows) NTFS-junction
+    /// leg via `make_dangling_link`'s own fallback.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn cpe_1770_restore_trash_items_refuses_when_a_dangling_link_occupies_the_original_path() {
+        use std::io::Write;
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
+            cpe_server::skip_notice!(
+                "skipping restore_trash_items dangling-link test: this environment cannot delete→list→\
+                 restore via the OS trash — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("cpe-1770-dangling-link-probe.tmp");
+        fs::write(&probe, b"probe").unwrap();
+        trash::delete(&probe).unwrap();
+
+        // A dangling link now occupies the probe's original path — planted by whoever/whatever is at
+        // that path next, the exact shape this ticket exists to close.
+        if !cpe_server::fsutil::make_dangling_link(&probe) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1770] SKIPPED the restore_trash_items dangling-link leg: this machine could not \
+                 stage a link or junction at {} at all. NOTHING in this test covered CPE-1770 on this \
+                 run.",
+                probe.display()
+            );
+            // Best-effort cleanup of the trashed probe so it doesn't linger.
+            let _ = trash::os_limited::list().map(|items| {
+                let ours: Vec<_> =
+                    items.into_iter().filter(|i| i.original_parent.join(&i.name) == probe).collect();
+                let _ = trash::os_limited::purge_all(ours);
+            });
+            return;
+        }
+        let phantom_target = cpe_server::fsutil::dangling_link_target(&probe);
+        assert!(!phantom_target.exists(), "sanity: the link really is dangling before restore runs");
+
+        let listed = list_trash_impl().unwrap();
+        let probe_path = probe.to_string_lossy().to_string();
+        let entry = listed
+            .entries.iter().find(|e| e.original_path == probe_path)
+            .expect("the probe should still be listed in the trash").clone();
+
+        let results = restore_trash_items_impl(vec![entry.id.clone()]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ok, "restoring onto a dangling link must be refused, not silently succeed");
+        assert!(
+            results[0].error.contains("Something already exists at the original location"),
+            "must be THIS guard's refusal, not an incidental trash-crate error: {}",
+            results[0].error
+        );
+
+        // THE HARM, on the filesystem, before trusting anything above: nothing must have appeared at the
+        // link's phantom target (a restore following the link would land exactly there), and the original
+        // path must still hold the untouched link, not the probe's bytes restored through it.
+        assert!(
+            !phantom_target.exists(),
+            "the restore must not have followed the dangling link to its (nonexistent) target"
+        );
+        assert!(
+            fs::symlink_metadata(&probe).is_ok_and(|m| m.file_type().is_symlink()),
+            "the original path must still hold the link, not bytes restored through it"
+        );
+
+        // Best-effort cleanup: the probe is still safely in the trash (never restored) — purge it — and
+        // remove the link this test staged.
+        let _ = trash::os_limited::list().map(|items| {
+            let ours: Vec<_> = items.into_iter().filter(|i| i.id.to_string_lossy() == entry.id).collect();
+            let _ = trash::os_limited::purge_all(ours);
+        });
+        let _ = fs::remove_file(&probe);
+    }
+
+    /// **CPE-1770.** Same defect and same assertions as the test above, at the OTHER trash-restore site
+    /// (item 1 of the ticket): `restore_from_trash_impl`, which takes original paths directly rather than
+    /// trash-item ids and has its own, separate `clobber_refusal` call.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn cpe_1770_restore_from_trash_refuses_when_a_dangling_link_occupies_the_original_path() {
+        use std::io::Write;
+        let trash_guard = lock_real_trash(); // CPE-1785: see the doc comment on `lock_real_trash`
+        if !cpe_server::fsutil::require_staged(
+            "trash_roundtrip",
+            cfg!(target_os = "linux"),
+            trash_roundtrip_available(&trash_guard),
+        ) {
+            cpe_server::skip_notice!(
+                "skipping restore_from_trash dangling-link test: this environment cannot delete→list→\
+                 restore via the OS trash — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("cpe-1770-restore-from-trash-probe.tmp");
+        fs::write(&probe, b"probe").unwrap();
+        trash::delete(&probe).unwrap();
+
+        if !cpe_server::fsutil::make_dangling_link(&probe) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1770] SKIPPED the restore_from_trash dangling-link leg: this machine could not \
+                 stage a link or junction at {} at all. NOTHING in this test covered CPE-1770 on this \
+                 run.",
+                probe.display()
+            );
+            let _ = trash::os_limited::list().map(|items| {
+                let ours: Vec<_> =
+                    items.into_iter().filter(|i| i.original_parent.join(&i.name) == probe).collect();
+                let _ = trash::os_limited::purge_all(ours);
+            });
+            return;
+        }
+        let phantom_target = cpe_server::fsutil::dangling_link_target(&probe);
+        assert!(!phantom_target.exists(), "sanity: the link really is dangling before restore runs");
+
+        let probe_path = probe.to_string_lossy().to_string();
+        let results = restore_from_trash_impl(vec![probe_path.clone()]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ok, "restoring onto a dangling link must be refused, not silently succeed");
+        assert!(
+            results[0].error.contains("Something already exists at the original location"),
+            "must be THIS guard's refusal, not an incidental trash-crate error: {}",
+            results[0].error
+        );
+
+        // THE HARM, on the filesystem, before trusting anything above.
+        assert!(
+            !phantom_target.exists(),
+            "the restore must not have followed the dangling link to its (nonexistent) target"
+        );
+        assert!(
+            fs::symlink_metadata(&probe).is_ok_and(|m| m.file_type().is_symlink()),
+            "the original path must still hold the link, not bytes restored through it"
+        );
+
+        // Best-effort cleanup: the probe is still safely in the trash (never restored) — purge it — and
+        // remove the link this test staged.
+        let _ = trash::os_limited::list().map(|items| {
+            let ours: Vec<_> =
+                items.into_iter().filter(|i| i.original_parent.join(&i.name) == probe).collect();
+            let _ = trash::os_limited::purge_all(ours);
+        });
+        let _ = fs::remove_file(&probe);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

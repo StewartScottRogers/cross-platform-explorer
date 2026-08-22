@@ -135,6 +135,39 @@ pub fn clobber_refusal(target: &Path, occupied: &str) -> Option<String> {
     }
 }
 
+/// **[`clobber_refusal`], but link-aware** (CPE-1770) — for a REFUSAL-shaped site that must treat a
+/// **dangling** link (or NTFS junction) at `target` as occupied, the same way it already treats a real
+/// file or a live link.
+///
+/// `clobber_refusal`'s own doc comment names this exact gap under "What this does NOT cover" and says
+/// plainly that it does not close it: [`Path::try_exists`] follows symlinks, so a dangling link reads
+/// `Ok(false)` — correctly, to the question it was asked — and a caller that stops there reads that as
+/// "free". This is the identical decision with the identical wording contract, differing only in the
+/// probe fed to it: [`name_pick_slot_probe`] (built by CPE-1715, reused by CPE-1769 for the three
+/// name-*picking* siblings) in place of a bare `target.try_exists()`. Reusing that probe rather than
+/// hand-rolling a parallel stat expression means "is a link occupying this name" has exactly one
+/// implementation shared by both the picking shape and this refusal shape — see
+/// [`name_pick_slot_probe`]'s own doc comment for why it is deliberately broader than "is it a link"
+/// (a TOCTOU race or a non-symlink reparse point also lands here, and both are the same "cannot prove
+/// free" answer this function must not read as `Free`).
+///
+/// **Not [`rename_slot_refusal`].** That combinator answers a DIFFERENT question — "is this about to be
+/// `fs::rename`d onto" — and its link half ([`symlink_slot_refusal`]) is worded around what a rename
+/// specifically does to a link (destroys it). A trash restore does not call `fs::rename` in this crate at
+/// all (the write happens behind the `trash` crate's own boundary, on a mechanism this code does not
+/// control and cannot narrate accurately) — see the source-scan widening below for why that boundary
+/// otherwise made this class invisible to review. So this function keeps the SITE's own wording for a
+/// link exactly as it already does for a real file, rather than asserting what will happen to the link,
+/// which is not this crate's to promise.
+pub fn clobber_refusal_link_aware(target: &Path, occupied: &str) -> Option<String> {
+    let stat = name_pick_slot_probe(target);
+    match classify_target_slot(&stat) {
+        TargetSlot::Free => None,
+        TargetSlot::Occupied => Some(occupied.to_string()),
+        TargetSlot::Unknown => Some(unknown_slot_message(target, &stat)),
+    }
+}
+
 /// The wording for [`TargetSlot::Unknown`], split out so the sites that cannot use [`clobber_refusal`]
 /// wholesale (because they probe a slot they will then *advance past* rather than refuse at) still phrase
 /// the unknown identically.
@@ -4264,6 +4297,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// **CPE-1770.** [`clobber_refusal_link_aware`] must refuse with the SITE's own wording on a
+    /// **dangling** link — the exact case [`clobber_refusal`] alone reads as free (proven as the premise
+    /// below, mirroring `rename_slot_refusal_covers_the_dangling_link_its_first_half_cannot_see`) — while
+    /// still behaving identically to `clobber_refusal` on the two ordinary verdicts. Covers both the
+    /// symlink and (unprivileged Windows) NTFS-junction leg via `make_dangling_link`'s own fallback.
+    #[test]
+    fn clobber_refusal_link_aware_covers_the_dangling_link_clobber_refusal_alone_cannot_see() {
+        use std::io::Write;
+        let d = scratch("clobber-link-aware");
+
+        let absent = d.join("nothing-here.txt");
+        assert_eq!(
+            clobber_refusal_link_aware(&absent, "taken"),
+            None,
+            "a genuinely absent target must proceed, exactly like `clobber_refusal`"
+        );
+
+        let present = d.join("there.txt");
+        std::fs::write(&present, b"x").unwrap();
+        assert_eq!(
+            clobber_refusal_link_aware(&present, "\"there.txt\" already exists").as_deref(),
+            Some("\"there.txt\" already exists"),
+            "an ordinary occupied target must still refuse with the CALLER's wording"
+        );
+
+        let link = d.join("dangling.txt");
+        if !make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1770] SKIPPED the dangling-link leg of clobber_refusal_link_aware: this machine \
+                 could not create a link at {} (Windows without Developer Mode / admin, and no junction \
+                 either). NOTHING in this test covered the dangling-link route on this run.",
+                link.display()
+            );
+        } else {
+            // The premise: the bare probe genuinely sees nothing here. If this ever stops holding, the
+            // assertion below would pass for the wrong reason.
+            assert_eq!(
+                clobber_refusal(&link, "occupied"),
+                None,
+                "premise: `clobber_refusal` follows the link, finds nothing, and reads the slot as FREE — \
+                 that is the exact gap this helper exists to close"
+            );
+            assert_eq!(
+                clobber_refusal_link_aware(&link, "occupied").as_deref(),
+                Some("occupied"),
+                "a dangling link occupying the slot must refuse with the SITE's own wording, same as a \
+                 real occupied file — this function does not narrate what will happen to the link"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The combined guard (CPE-1710), driven against a real filesystem for all three verdicts a
     /// `rename`-destructive slot can have. The third — a **dangling** link — is the one
     /// [`clobber_refusal`] alone answers "free" for, and it is the bug this ticket closes.
@@ -5381,6 +5467,20 @@ mod tests {
     /// rejects a direct [`symlink_slot_refusal`] call outside this module, unless the site says
     /// `LINK-ONLY: <reason>` in the comment above it.
     ///
+    /// **CPE-1770 widened the marker list, not just the sites.** The two trash-restore sites this ticket
+    /// fixed used a bare `clobber_refusal` immediately above `trash::os_limited::restore_all(...)` — the
+    /// identical half-applied shape, just with the destructive write sitting behind the `trash` crate's
+    /// boundary instead of a literal `fs::rename(`. That boundary is exactly why neither this scan (before
+    /// this ticket) nor the CPE-1710 clippy ban ever saw it: `disallowed-methods` resolves `std::fs::rename`
+    /// specifically, and this scan matched only that literal text. A fix that repaired the two sites and
+    /// left the scan looking for one marker would leave a fourth trash-crate call invisible the same way, so
+    /// the scan now also treats a bare `clobber_refusal` immediately above `restore_all(` as the same
+    /// offence, and a corrected site calls [`clobber_refusal_link_aware`] instead — counted below the same
+    /// way `rename_slot_refusal`/`rename_into_slot` calls are. This does **not** claim to find every
+    /// crate-boundary write the way `disallowed-methods` structurally finds every `fs::rename`; it is one
+    /// more named marker in a scan whose limits are stated below, not a general answer to "what if a write
+    /// hides behind some other crate".
+    ///
     /// # What it does NOT catch — measured, not guessed
     ///
     /// The UAT drove each of these through and the scan stayed green, so none of them is theoretical:
@@ -5414,26 +5514,29 @@ mod tests {
     /// re-measured one incomplete setup four times.
     #[test]
     fn half_applied_rename_guards_are_rejected() {
-        let (files, offences, combined_calls) = scan_for_half_applied_guards();
+        let (files, offences, combined_calls, trash_boundary_calls) = scan_for_half_applied_guards();
         assert!(
             files > 60,
             "the scan read only {files} files — it is not looking where it thinks it is"
         );
         assert!(
             offences.is_empty(),
-            "half-applied rename guards:\n{}\n\n\
+            "half-applied rename/trash-restore guards:\n{}\n\n\
              ---\n\
              What this check does NOT cover, so that a green run is not mistaken for a proof:\n\
-             - an `fs::rename` with NO guard at all, or the pre-CPE-1705 `if dst.exists()` shape;\n\
-             - a guard more than {SCAN_WINDOW} lines from its rename;\n\
-             - a rename reached through an alias (`use std::fs::rename as move_entry`) or one call deep\n\
-               inside a helper;\n\
+             - an `fs::rename`/`restore_all` with NO guard at all, or the pre-CPE-1705 `if dst.exists()` \
+               shape;\n\
+             - a guard more than {SCAN_WINDOW} lines from its rename/restore;\n\
+             - a rename/restore reached through an alias or one call deep inside a helper;\n\
              - anything in a different function from the guard (the window stops at a function boundary\n\
                on purpose, to avoid reporting unrelated code);\n\
              - anything outside `crates/*/src`, `src-tauri/src` and `sidecar/*/src`, and anything inside a\n\
-               `mod tests`.\n\
+               `mod tests`;\n\
+             - a destructive write behind any crate boundary OTHER than `fs::rename` or the `trash`\n\
+               crate's `restore_all` — CPE-1770 widened the marker list to the one crate boundary this\n\
+               ticket found blind, not to every crate boundary that could exist.\n\
              `clippy.toml`'s `disallowed-methods` on `std::fs::rename` is what covers the unguarded and\n\
-             aliased cases; this is a lint for one recognised-wrong shape.\n\
+             aliased `fs::rename` cases; this is a lint for two recognised-wrong shapes.\n\
              **Absence of a failure here is not evidence the pairing holds.**",
             offences.join("\n")
         );
@@ -5441,6 +5544,12 @@ mod tests {
             combined_calls >= 6,
             "only {combined_calls} call(s) to `rename_into_slot`/`rename_slot_refusal` found — CPE-1710 \
              converted six sites, so the scan is matching nothing and would not catch a regression either"
+        );
+        assert!(
+            trash_boundary_calls >= 2,
+            "only {trash_boundary_calls} call(s) to `clobber_refusal_link_aware` found — CPE-1770 \
+             converted two trash-restore sites, so the scan is matching nothing and would not catch a \
+             regression either"
         );
     }
 
@@ -5492,15 +5601,49 @@ mod tests {
         );
     }
 
-    /// How far below a guard the scan will look for an `fs::rename`. Every real guard-to-rename distance
-    /// in this repo is ≤ 8 lines; the window also stops dead at the next `fn`, so it cannot reach into a
-    /// neighbouring function (the UAT tripped the first version that way — a guard 8 lines above a rename
-    /// *in a different function*).
+    /// **CPE-1770.** The same function-boundary-respecting window, now proven against the SECOND marker
+    /// the scan widened to cover: `restore_all(` (the trash-crate write the two trash-restore sites hide
+    /// behind). Mirrors `the_scan_window_stops_at_a_function_boundary` above rather than duplicating its
+    /// four legs wholesale — this only needs to prove the new marker is wired into the same mechanism,
+    /// since the mechanism itself (same-function-only, `SCAN_WINDOW`-bounded) is already proven there.
+    #[test]
+    fn the_scan_also_finds_a_bare_guard_above_a_trash_restore_write() {
+        let same_fn = [
+            "if let Some(e) = clobber_refusal(target, \"occupied\") {",
+            "return;",
+            "}",
+            "restore_all(to_restore)?;",
+        ];
+        assert!(
+            write_within_window(&same_fn, 0, "restore_all("),
+            "a `restore_all` call below the guard in the SAME function is the shape CPE-1770 added"
+        );
+
+        let next_fn = [
+            "if let Some(e) = clobber_refusal(target, \"occupied\") {",
+            "return;",
+            "}",
+            "}",
+            "fn something_else() {",
+            "restore_all(items)",
+        ];
+        assert!(
+            !write_within_window(&next_fn, 0, "restore_all("),
+            "a `restore_all` in the NEXT function has nothing to do with this guard, same as the \
+             `fs::rename` case"
+        );
+    }
+
+    /// How far below a guard the scan will look for the destructive write it is meant to pair with.
+    /// Every real guard-to-write distance in this repo is ≤ 8 lines; the window also stops dead at the
+    /// next `fn`, so it cannot reach into a neighbouring function (the UAT tripped the first version that
+    /// way — a guard 8 lines above a rename *in a different function*).
     const SCAN_WINDOW: usize = 25;
 
     /// The scan itself, split out so the test above reads as assertions and this reads as the mechanism.
-    /// Returns `(files scanned, offences, rename_slot_refusal call count)`.
-    fn scan_for_half_applied_guards() -> (usize, Vec<String>, usize) {
+    /// Returns `(files scanned, offences, rename_slot_refusal/rename_into_slot call count,
+    /// clobber_refusal_link_aware call count)`.
+    fn scan_for_half_applied_guards() -> (usize, Vec<String>, usize, usize) {
         // `crates/server` → repo root.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let mut files = Vec::new();
@@ -5518,6 +5661,7 @@ mod tests {
         let exempt = root.join("crates").join("server").join("src").join("fsutil.rs");
 
         let mut combined_calls = 0usize;
+        let mut trash_boundary_calls = 0usize;
         let mut offences = Vec::new();
         for file in &files {
             if *file == exempt {
@@ -5537,6 +5681,9 @@ mod tests {
                 if code.contains("rename_slot_refusal(") || code.contains("rename_into_slot(") {
                     combined_calls += 1;
                 }
+                if code.contains("clobber_refusal_link_aware(") {
+                    trash_boundary_calls += 1;
+                }
                 // A site whose occupancy rule is genuinely its own (an existing EMPTY directory is
                 // legitimate at `vault_crypto::promote`, for instance) may take the link half alone — but
                 // it has to say so at the site, in the same spirit as the `#[allow]` reasons. The marker
@@ -5551,6 +5698,9 @@ mod tests {
                         i + 1
                     ));
                 }
+                // Note: `code.contains("clobber_refusal(")` does NOT match `clobber_refusal_link_aware(`
+                // — the literal text right after `clobber_refusal` there is `_`, not `(` — so a site
+                // already carrying the CPE-1770 fix is never flagged by either arm below.
                 if code.contains("clobber_refusal(") && renames_within_window(lines, i) {
                     offences.push(format!(
                         "{}:{}: `clobber_refusal` guards an `fs::rename` — that is half the guard. It \
@@ -5560,16 +5710,39 @@ mod tests {
                         i + 1
                     ));
                 }
+                // **CPE-1770.** The trash-crate sibling of the check immediately above: a bare
+                // `clobber_refusal` guarding `trash::os_limited::restore_all(...)` is the same
+                // half-applied shape, just behind a crate boundary instead of a literal `fs::rename(`.
+                if code.contains("clobber_refusal(") && write_within_window(lines, i, "restore_all(") {
+                    offences.push(format!(
+                        "{}:{}: `clobber_refusal` guards a `trash`-crate `restore_all` write — that is \
+                         half the guard, same shape as the `fs::rename` case above (CPE-1770). It follows \
+                         links, so a DANGLING link at the original path reads as free. Use \
+                         `clobber_refusal_link_aware`.",
+                        file.display(),
+                        i + 1
+                    ));
+                }
             }
         }
-        (files.len(), offences, combined_calls)
+        (files.len(), offences, combined_calls, trash_boundary_calls)
     }
 
     /// Is there an `fs::rename(` within [`SCAN_WINDOW`] lines below `from`, **without crossing into
     /// another function**? The function boundary is what stops the false positive: a guard near the end of
     /// one function and a rename near the start of the next are unrelated, and the first version of this
-    /// scan reported them as a violation.
+    /// scan reported them as a violation. A thin wrapper over [`write_within_window`], kept as its own
+    /// named function because it is what the pre-CPE-1770 tests already assert against directly.
     fn renames_within_window(lines: &[&str], from: usize) -> bool {
+        write_within_window(lines, from, "fs::rename(")
+    }
+
+    /// **CPE-1770.** [`renames_within_window`] generalised to any destructive-write marker within
+    /// [`SCAN_WINDOW`] lines below `from` — same function-boundary-stopping mechanism, parameterised on
+    /// the literal text that marks the write, so a second marker (`restore_all(`, the trash-crate
+    /// boundary this ticket's two sites hid behind) reuses the identical window logic rather than a
+    /// hand-rolled second copy of it.
+    fn write_within_window(lines: &[&str], from: usize, marker: &str) -> bool {
         let end = (from + SCAN_WINDOW).min(lines.len());
         for line in &lines[from + 1..end] {
             let code = line.trim_start();
@@ -5581,7 +5754,7 @@ mod tests {
             if code.starts_with("#[") || (code.contains("fn ") && code.ends_with('{')) {
                 return false;
             }
-            if code.contains("fs::rename(") {
+            if code.contains(marker) {
                 return true;
             }
         }
