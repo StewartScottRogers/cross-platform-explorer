@@ -69,19 +69,43 @@ function crlf(text: string): string {
   return text.replace(/\r?\n/g, "\r\n");
 }
 
+/** The five files CLAUDE.md requires to carry the same version, keyed the way this file refers to them.
+ *  `lock` and `cargoLock` (CPE-1853) default to the decoy fixtures below, so every pre-existing case
+ *  keeps staging a complete, valid file set without restating them. */
 interface Manifests {
   pkg: string;
   conf: string;
   cargo: string;
+  lock?: string;
+  cargoLock?: string;
 }
+
+/** One key per version-synchronised file. Everything that loops over "all of them" loops over THIS, so
+ *  a sixth file is added in one place rather than in a dozen array literals. */
+const FILE_KEYS = ["pkg", "conf", "cargo", "lock", "cargoLock"] as const;
+type FileKey = (typeof FILE_KEYS)[number];
+
+/** Repo-relative path of each, matching the paths release.ps1 and CLAUDE.md name. */
+const FILE_PATHS: Record<FileKey, string> = {
+  pkg: "package.json",
+  conf: "src-tauri/tauri.conf.json",
+  cargo: "src-tauri/Cargo.toml",
+  lock: "package-lock.json",
+  cargoLock: "src-tauri/Cargo.lock",
+};
+
+/** How many places in each file hold the app's own version. package-lock.json is the odd one: the root
+ *  object's "version" AND packages[""]'s. Bumping one and not the other is the specific way that file
+ *  goes stale, so the count is asserted rather than assumed. */
+const VERSION_PLACES: Record<FileKey, number> = { pkg: 1, conf: 1, cargo: 1, lock: 2, cargoLock: 1 };
 
 interface BumpResult {
   status: number | null;
   stdout: string;
   stderr: string;
   /** Raw bytes as written back, so BOM / CRLF / trailing-newline claims are checked at the byte level. */
-  bytes: { pkg: Buffer; conf: Buffer; cargo: Buffer };
-  text: { pkg: string; conf: string; cargo: string };
+  bytes: Record<FileKey, Buffer>;
+  text: Record<FileKey, string>;
 }
 
 interface BumpOptions {
@@ -101,15 +125,20 @@ interface BumpOptions {
    *  WRITE phase fails on it. The only way to reach release.ps1's post-validation write failure --
    *  the one path where a partial bump is genuinely possible and all the script can do is report it
    *  truthfully. Restored to 0666 in the `finally` before rmSync, or cleanup fails on Windows. */
-  readOnly?: "pkg" | "conf" | "cargo";
+  readOnly?: FileKey;
+  /** Stage this one file with LF line endings instead of CRLF. Not hypothetical: `src-tauri/Cargo.lock`
+   *  and `package.json` are CRLF in a fresh checkout (core.autocrlf=true) and LF the moment `cargo build`
+   *  or `npm install` rewrites them, so the bump has to be endings-agnostic rather than CRLF-assuming
+   *  (CPE-1853). */
+  lf?: FileKey;
 }
 
 /** Stage `manifests` in a throwaway tree, run the real release.ps1 over it with `-BumpOnly`, and read
  *  back what it wrote. */
 function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}): BumpResult {
-  const { scriptText, bom = false, bumpOnly = true, readOnly } = opts;
-  const stage = (text: string): Buffer => {
-    const body = Buffer.from(crlf(text), "utf8");
+  const { scriptText, bom = false, bumpOnly = true, readOnly, lf } = opts;
+  const stage = (text: string, key: FileKey): Buffer => {
+    const body = Buffer.from(key === lf ? text.replace(/\r\n/g, "\n") : crlf(text), "utf8");
     return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
   };
   const dir = mkdtempSync(join(tmpdir(), "cpe-1841-release-bump-"));
@@ -122,15 +151,24 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
     if (scriptText === undefined) copyFileSync(RELEASE_PS1, scriptPath);
     else writeFileSync(scriptPath, Buffer.from(scriptText, "utf8"));
 
-    const pkgPath = join(dir, "package.json");
-    const confPath = join(dir, "src-tauri", "tauri.conf.json");
-    const cargoPath = join(dir, "src-tauri", "Cargo.toml");
-    writeFileSync(pkgPath, stage(manifests.pkg));
-    writeFileSync(confPath, stage(manifests.conf));
-    writeFileSync(cargoPath, stage(manifests.cargo));
+    // CPE-1853: all FIVE version-synchronised files are staged, not three. release.ps1 now plans every
+    // one of them before writing any, so a missing package-lock.json or Cargo.lock would abort the run
+    // in the plan phase and red every unrelated case in this file with a "does not exist" message.
+    const source: Record<FileKey, string> = {
+      pkg: manifests.pkg,
+      conf: manifests.conf,
+      cargo: manifests.cargo,
+      lock: manifests.lock ?? LOCK_WITH_DECOYS,
+      cargoLock: manifests.cargoLock ?? CARGO_LOCK_WITH_DECOYS,
+    };
+    const paths = {} as Record<FileKey, string>;
+    for (const key of FILE_KEYS) {
+      paths[key] = join(dir, ...FILE_PATHS[key].split("/"));
+      writeFileSync(paths[key], stage(source[key], key));
+    }
 
     if (readOnly) {
-      lockedPath = { pkg: pkgPath, conf: confPath, cargo: cargoPath }[readOnly];
+      lockedPath = paths[readOnly];
       chmodSync(lockedPath, 0o444);
     }
 
@@ -139,22 +177,13 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
     const run = spawnSync(psHost, args, { encoding: "utf8" });
     if (run.error) throw run.error;
 
-    const bytes = {
-      pkg: readFileSync(pkgPath),
-      conf: readFileSync(confPath),
-      cargo: readFileSync(cargoPath),
-    };
-    return {
-      status: run.status,
-      stdout: run.stdout ?? "",
-      stderr: run.stderr ?? "",
-      bytes,
-      text: {
-        pkg: bytes.pkg.toString("utf8"),
-        conf: bytes.conf.toString("utf8"),
-        cargo: bytes.cargo.toString("utf8"),
-      },
-    };
+    const bytes = {} as Record<FileKey, Buffer>;
+    const text = {} as Record<FileKey, string>;
+    for (const key of FILE_KEYS) {
+      bytes[key] = readFileSync(paths[key]);
+      text[key] = bytes[key].toString("utf8");
+    }
+    return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "", bytes, text };
   } finally {
     // Undo the chmod BEFORE rmSync: on Windows a read-only file survives a recursive delete and the
     // cleanup throws, turning a passing test into a confusing red in whatever runs next.
@@ -254,7 +283,99 @@ features = ["a"]
 serde = "1"
 `;
 
-const ALL_DECOYS: Manifests = { pkg: PKG_WITH_DECOYS, conf: CONF_WITH_DECOYS, cargo: CARGO_WITH_DECOYS };
+// ---------------------------------------------------------------------------------------------------
+// CPE-1853's two fixtures: the lockfiles the script did not touch until this ticket.
+//
+// Both are shaped after the real files, and both carry a decoy whose version is EXACTLY the app's own
+// (`OLD`). That is the case that matters: a locator scoped by "looks like the app version" rather than
+// by identity would rewrite a dependency pin and leave no evidence, and in a LOCK file the pin is what
+// actually gets resolved and built.
+// ---------------------------------------------------------------------------------------------------
+
+/** lockfileVersion 3, the shape npm 9+ writes and the shape the real package-lock.json has.
+ *
+ *  The app version lives in TWO places: the root object's "version" and `packages[""]`'s. The decoys:
+ *   - `node_modules/decoy` sits at the SAME depth as `packages[""]`'s version and holds the SAME value,
+ *     so nothing but the empty-string key distinguishes them;
+ *   - `node_modules/other` holds a different pin plus a version-shaped string inside a funding URL;
+ *   - `"deprecated"` carries `{`, `}` and an escaped `"` INSIDE a string, so a walker that tracks
+ *     nesting without consuming string tokens miscounts depth from that point on and every later
+ *     decision is wrong;
+ *   - `"lockfileVersion": 3` is an unquoted number on a version-shaped key at the ROOT. */
+const LOCK_WITH_DECOYS = `{
+  "name": "demo",
+  "version": "${OLD}",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "demo",
+      "version": "${OLD}",
+      "dependencies": { "decoy": "^0.1.0" },
+      "engines": { "node": ">=18" }
+    },
+    "node_modules/decoy": {
+      "version": "${OLD}",
+      "resolved": "https://registry.npmjs.org/decoy/-/decoy-0.1.0.tgz",
+      "deprecated": "use {legacy} instead -- see \\"docs\\"",
+      "license": "MIT"
+    },
+    "node_modules/other": {
+      "version": "3.2.1",
+      "funding": [{ "type": "opencollective", "url": "https://opencollective.com/other/7.8.9" }]
+    }
+  }
+}
+`;
+
+/** Cargo.lock's real shape: a `version = 3` format marker before any table, then `[[package]]` blocks.
+ *
+ *  The decoys, each of which a less-scoped locator would eat:
+ *   - `decoy-crate`, a `[[package]]` at EXACTLY the app's version -- the case the ticket names;
+ *   - `serde`, an ordinary pin;
+ *   - `[[patch.unused]]` carrying the app's OWN NAME and version -- name-matching without checking the
+ *     table type rewrites it, and it is not the package entry;
+ *   - the top-of-file `version = 3`, which is not a package version at all;
+ *   - `[metadata]`, whose keys embed version-shaped text. */
+const CARGO_LOCK_WITH_DECOYS = `# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 3
+
+[[package]]
+name = "decoy-crate"
+version = "${OLD}"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaa"
+
+[[package]]
+name = "cross-platform-explorer"
+version = "${OLD}"
+dependencies = [
+ "decoy-crate",
+ "serde",
+]
+
+[[package]]
+name = "serde"
+version = "1.0.219"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[patch.unused]]
+name = "cross-platform-explorer"
+version = "${OLD}"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[metadata]
+"checksum decoy-crate 0.1.0" = "aaaa"
+`;
+
+const ALL_DECOYS: Manifests = {
+  pkg: PKG_WITH_DECOYS,
+  conf: CONF_WITH_DECOYS,
+  cargo: CARGO_WITH_DECOYS,
+  lock: LOCK_WITH_DECOYS,
+  cargoLock: CARGO_LOCK_WITH_DECOYS,
+};
 
 describe("release.ps1 bumps the version it means (CPE-1841)", () => {
   // ONE bump of the shared decoy fixture, reused by every assertion in this block. These nine cases each
@@ -328,7 +449,10 @@ describe("release.ps1 bumps the version it means (CPE-1841)", () => {
 
   it("preserves CRLF, the trailing newline, and the absence of a BOM", () => {
     expect(r.status, ctx(r)).toBe(0);
-    for (const key of ["pkg", "conf", "cargo"] as const) {
+    // All FIVE (CPE-1853), not just the three manifests: the lockfiles go through the same writer and
+    // a re-encoded lockfile is exactly the kind of "unrelated noise" in a release diff this whole
+    // sequence of tickets exists to prevent.
+    for (const key of FILE_KEYS) {
       const buf = r.bytes[key];
       const lf = buf.filter((b) => b === 0x0a).length;
       const crlfCount = [...buf].filter((b, i) => b === 0x0a && i > 0 && buf[i - 1] === 0x0d).length;
@@ -388,7 +512,7 @@ describe("release.ps1 preserves a manifest's existing BOM (CPE-1841 / CPE-1834)"
 
   it("leaves the BOM bytes (EF BB BF) at offset 0 instead of silently stripping them", () => {
     expect(r.status, ctx(r)).toBe(0);
-    for (const key of ["pkg", "conf", "cargo"] as const) {
+    for (const key of FILE_KEYS) {
       expect([...r.bytes[key].subarray(0, 3)], `${key}: the source BOM was dropped`).toEqual([0xef, 0xbb, 0xbf]);
     }
   });
@@ -624,6 +748,292 @@ describe("release.ps1 leaves no half-bumped tree when a LATER manifest fails (CP
 });
 
 // ---------------------------------------------------------------------------------------------------
+// CPE-1853: the two LOCKFILES, which release.ps1 did not touch until this ticket.
+//
+// CLAUDE.md requires five files to carry the same version. The script bumped three; `package-lock.json`
+// (TWO places -- the root object's "version" and `packages[""]`'s) and `src-tauri/Cargo.lock` (the
+// `cross-platform-explorer` package entry) stayed manual. They are the two that get missed, and
+// CLAUDE.md already says why: NOTHING FAILS WHEN THEY DRIFT. Neither build passes `--locked`, so both
+// lockfiles are silently rewritten at build time and the stale version never surfaces as an error -- it
+// surfaces as a dirty working tree, which reads as unrelated noise and gets committed by accident or
+// discarded with real work. It has happened: package-lock.json sat three releases behind (0.57.64 vs
+// 0.57.67) as of 2026-08-20.
+//
+// Cargo.lock is the highest-stakes locator in the script: ~1000 `[[package]]` blocks, of which exactly
+// one is the app and every other version is a dependency pin. Rewriting one is the defect CPE-1841
+// existed to fix, in the file with the most of them -- and worse here than in Cargo.toml, because a bad
+// pin in a LOCK file is what actually gets resolved and built.
+// ---------------------------------------------------------------------------------------------------
+
+/** The `version` of a named `[[package]]` block in a Cargo.lock, read independently of the script's own
+ *  locator (a shared implementation would agree with the script about a shared mistake). */
+function cargoLockPackageVersion(text: string, name: string, table = "package"): string | undefined {
+  const header = table === "package" ? "\\[\\[package\\]\\]" : "\\[\\[patch\\.unused\\]\\]";
+  const m = new RegExp(`${header}\\r?\\nname = "${name}"\\r?\\nversion = "([^"]+)"`).exec(text);
+  return m?.[1];
+}
+
+/** Every place in a file that is supposed to hold the APP's version, read back after a bump. Keyed by
+ *  FILE_KEYS so the all-five guard below cannot silently stop covering a file. */
+const VERSION_READERS: Record<FileKey, (text: string) => (string | undefined)[]> = {
+  pkg: (t) => [JSON.parse(t).version],
+  conf: (t) => [JSON.parse(t).version],
+  cargo: (t) => [/^\[package\][\s\S]*?^version = "([^"]+)"/m.exec(t)?.[1]],
+  lock: (t) => {
+    const j = JSON.parse(t);
+    return [j.version, j.packages[""].version];
+  },
+  cargoLock: (t) => [cargoLockPackageVersion(t, "cross-platform-explorer")],
+};
+
+describe("release.ps1 bumps package-lock.json's BOTH version fields (CPE-1853)", () => {
+  let r: BumpResult;
+  beforeAll(() => {
+    r = runBump(ALL_DECOYS, NEW);
+  });
+
+  it("bumps the ROOT version AND packages[\"\"] -- failing if only one of the two lands", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const j = JSON.parse(r.text.lock);
+    // Asserted separately and named separately: half-landed is the specific way this file goes stale,
+    // so a red must say WHICH half, not "the lockfile is wrong somewhere".
+    expect(j.version, 'package-lock.json root "version" was not bumped').toBe(NEW);
+    expect(j.packages[""].version, 'package-lock.json packages[""].version was not bumped').toBe(NEW);
+  });
+
+  it("bumps exactly TWO values -- no third place picked up along the way", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const occurrences = r.text.lock.split(`"${NEW}"`).length - 1;
+    expect(occurrences, `expected exactly 2 occurrences of "${NEW}" in package-lock.json`).toBe(2);
+  });
+
+  it("leaves a dependency pin at the SAME depth and the SAME version alone (node_modules/decoy)", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const j = JSON.parse(r.text.lock);
+    // The decoy's version is OLD -- byte-identical to what the app's was. Only the empty-string key
+    // distinguishes the root package's entry from this one.
+    expect(j.packages["node_modules/decoy"].version, "a dependency pin was rewritten to the app version").toBe(OLD);
+    expect(j.packages["node_modules/other"].version).toBe("3.2.1");
+  });
+
+  it("is not fooled by braces or escaped quotes INSIDE a string value", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const j = JSON.parse(r.text.lock);
+    expect(j.packages["node_modules/decoy"].deprecated).toBe('use {legacy} instead -- see "docs"');
+    // If the walker had miscounted depth on those braces, the decoy's own version (which follows the
+    // structure it corrupts in file order... it precedes it here, so assert the file-order successor)
+    // would have moved. `node_modules/other` sits after the adversarial string.
+    expect(j.packages["node_modules/other"].version).toBe("3.2.1");
+  });
+
+  it("leaves lockfileVersion and version-shaped URL text alone", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const j = JSON.parse(r.text.lock);
+    expect(j.lockfileVersion, "the unquoted lockfileVersion number was touched").toBe(3);
+    expect(r.text.lock).toContain("https://opencollective.com/other/7.8.9");
+    expect(r.text.lock).toContain("https://registry.npmjs.org/decoy/-/decoy-0.1.0.tgz");
+  });
+
+  it("changes exactly TWO lines in package-lock.json and ONE in Cargo.lock, bytes identical elsewhere", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    for (const key of ["lock", "cargoLock"] as const) {
+      const before = crlf(key === "lock" ? LOCK_WITH_DECOYS : CARGO_LOCK_WITH_DECOYS).split("\r\n");
+      const after = r.text[key].split("\r\n");
+      expect(after.length, `${key}: line count changed`).toBe(before.length);
+      const changed = before.map((line, i) => (line === after[i] ? -1 : i)).filter((i) => i >= 0);
+      expect(changed.length, `${key}: expected ${VERSION_PLACES[key]} changed lines, got ${changed.length}`).toBe(
+        VERSION_PLACES[key],
+      );
+      for (const i of changed) expect(after[i]).toContain(NEW);
+    }
+  });
+});
+
+describe("release.ps1 scopes Cargo.lock to the app's own [[package]] entry (CPE-1853)", () => {
+  let r: BumpResult;
+  beforeAll(() => {
+    r = runBump(ALL_DECOYS, NEW);
+  });
+
+  it("bumps the cross-platform-explorer [[package]] entry", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    expect(cargoLockPackageVersion(r.text.cargoLock, "cross-platform-explorer")).toBe(NEW);
+  });
+
+  it("leaves a decoy [[package]] whose version EXACTLY matches the app's alone (decoy-crate)", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    expect(cargoLockPackageVersion(r.text.cargoLock, "decoy-crate"), "a dependency pin was rewritten").toBe(OLD);
+  });
+
+  it("leaves ordinary dependency pins alone (serde)", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    expect(cargoLockPackageVersion(r.text.cargoLock, "serde")).toBe("1.0.219");
+  });
+
+  it("leaves a [[patch.unused]] entry carrying the app's OWN NAME alone", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    // Scoping by name alone would rewrite this. It is not the package entry, so it must not move.
+    expect(cargoLockPackageVersion(r.text.cargoLock, "cross-platform-explorer", "patch.unused")).toBe(OLD);
+  });
+
+  it("leaves the top-of-file `version = 3` lockfile-format marker alone", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    expect(r.text.cargoLock).toContain("version = 3\r\n");
+    expect(r.text.cargoLock.startsWith("# This file is automatically @generated by Cargo.")).toBe(true);
+  });
+
+  it("rewrites exactly ONE version-shaped value in the whole lockfile", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const occurrences = r.text.cargoLock.split(`"${NEW}"`).length - 1;
+    expect(occurrences, "more than the app's own entry was rewritten").toBe(1);
+  });
+
+  it("preserves LF endings on a Cargo.lock that cargo itself last wrote", () => {
+    // Not hypothetical: Cargo.lock is CRLF in a fresh checkout here (core.autocrlf=true) and LF the
+    // moment `cargo build` rewrites it. Measured on this machine's main worktree, 2026-08-22:
+    // Cargo.lock had 10802 lone LFs while package-lock.json had 0. The bump must not convert either way.
+    const lfRun = runBump(ALL_DECOYS, NEW, { lf: "cargoLock" });
+    expect(lfRun.status, ctx(lfRun)).toBe(0);
+    expect(cargoLockPackageVersion(lfRun.text.cargoLock, "cross-platform-explorer")).toBe(NEW);
+    expect(lfRun.bytes.cargoLock.includes(0x0d), "an LF Cargo.lock came back with CR bytes").toBe(false);
+    expect(lfRun.bytes.cargoLock.subarray(-1).toString("latin1")).toBe("\n");
+    // ... and the CRLF file staged alongside it in the same run is still CRLF.
+    const lockBytes = lfRun.bytes.lock;
+    expect([...lockBytes].filter((b, i) => b === 0x0a && lockBytes[i - 1] !== 0x0d).length).toBe(0);
+  });
+});
+
+describe("release.ps1 fails loudly on a lockfile it cannot locate (CPE-1853)", () => {
+  it("exits non-zero when package-lock.json carries the version in only ONE place", () => {
+    // The realistic decay: someone hand-edits the root version, or a tool writes a lock without the
+    // packages[""] entry. One place is not this file's shape, and half a bump is how it goes stale.
+    const halfLock = `{\n  "name": "demo",\n  "version": "${OLD}",\n  "lockfileVersion": 3,\n  "packages": {\n    "node_modules/decoy": { "version": "${OLD}" }\n  }\n}\n`;
+    const r = runBump({ ...ALL_DECOYS, lock: halfLock }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    const out = flat(r.stderr + r.stdout);
+    expect(out, out).toMatch(/expected exactly two .*found 1/s);
+    expect(r.text.lock, "package-lock.json was written despite the abort").toBe(crlf(halfLock));
+  });
+
+  it("exits non-zero when package-lock.json has no app version at all", () => {
+    const noVersion = `{\n  "name": "demo",\n  "lockfileVersion": 3,\n  "packages": {\n    "": { "name": "demo" }\n  }\n}\n`;
+    const r = runBump({ ...ALL_DECOYS, lock: noVersion }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    expect(flat(r.stderr + r.stdout)).toMatch(/expected exactly two .*found 0/s);
+    expect(r.text.lock).toBe(crlf(noVersion));
+  });
+
+  it("exits non-zero when Cargo.lock has no cross-platform-explorer [[package]] entry", () => {
+    // A crate rename, or a Cargo.lock regenerated for a different workspace root. Aborting loudly is
+    // the intended outcome: a release script that cannot find the app in its own lockfile must not
+    // report a bump. Note the fixture DOES contain the name -- under [[patch.unused]] -- so this also
+    // proves the table type is part of the match.
+    const renamed = CARGO_LOCK_WITH_DECOYS.replace(
+      `[[package]]\nname = "cross-platform-explorer"`,
+      `[[package]]\nname = "cross-platform-explorer-renamed"`,
+    );
+    const r = runBump({ ...ALL_DECOYS, cargoLock: renamed }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    expect(flat(r.stderr + r.stdout)).toMatch(/expected exactly one .*found 0/s);
+    expect(r.text.cargoLock).toBe(crlf(renamed));
+  });
+
+  it("exits non-zero on an AMBIGUOUS Cargo.lock (the app's block carrying two version lines)", () => {
+    const ambiguous = CARGO_LOCK_WITH_DECOYS.replace(
+      `name = "cross-platform-explorer"\nversion = "${OLD}"\ndependencies`,
+      `name = "cross-platform-explorer"\nversion = "${OLD}"\nversion = "${OLD}"\ndependencies`,
+    );
+    const r = runBump({ ...ALL_DECOYS, cargoLock: ambiguous }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    expect(flat(r.stderr + r.stdout)).toMatch(/expected exactly one .*found 2/s);
+    expect(r.text.cargoLock).toBe(crlf(ambiguous));
+  });
+
+  it("writes NOTHING when the FOURTH file (package-lock.json) fails -- the first three are untouched", () => {
+    // CPE-1852's atomicity, extended to the files this ticket adds. The three manifests are valid and
+    // a per-file writer would have all three at the new version by the time it reached the lockfile.
+    const noVersion = `{\n  "name": "demo",\n  "lockfileVersion": 3,\n  "packages": { "": { "name": "demo" } }\n}\n`;
+    const r = runBump({ ...ALL_DECOYS, lock: noVersion }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    expect(r.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written").toBe(true);
+    expect(r.bytes.conf.equals(Buffer.from(crlf(CONF_WITH_DECOYS), "utf8")), "tauri.conf.json was written").toBe(true);
+    expect(r.bytes.cargo.equals(Buffer.from(crlf(CARGO_WITH_DECOYS), "utf8")), "Cargo.toml was written").toBe(true);
+    expect(flat(r.stderr + r.stdout)).toMatch(/no manifest was written/i);
+    expect(r.stdout).not.toContain("Bumped version to");
+  });
+
+  it("writes NOTHING when the FIFTH file (Cargo.lock) fails -- the first four are untouched", () => {
+    const renamed = CARGO_LOCK_WITH_DECOYS.replace(`name = "cross-platform-explorer"\nversion`, `name = "other"\nversion`);
+    const r = runBump({ ...ALL_DECOYS, cargoLock: renamed }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    for (const key of ["pkg", "conf", "cargo", "lock"] as const) {
+      const staged = { pkg: PKG_WITH_DECOYS, conf: CONF_WITH_DECOYS, cargo: CARGO_WITH_DECOYS, lock: LOCK_WITH_DECOYS }[key];
+      expect(r.bytes[key].equals(Buffer.from(crlf(staged), "utf8")), `${FILE_PATHS[key]} was written despite the abort`).toBe(true);
+    }
+    expect(flat(r.stderr + r.stdout)).toMatch(/no manifest was written/i);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The single guard that makes "five files in sync" a checked property rather than a documented wish.
+//
+// The point is NOT to re-assert what the blocks above already assert file by file. It is that the LIST
+// itself is checked: CLAUDE.md's list, release.ps1's plan set, its `git add` set, and this file's
+// FILE_KEYS must all name the same files. Add a sixth file to CLAUDE.md and forget the script, or add
+// it to the script and forget the commit, and this reds -- which is precisely how files 4 and 5 came to
+// be missed for three releases.
+// ---------------------------------------------------------------------------------------------------
+describe("all five version-synchronised files stay in sync (CPE-1853)", () => {
+  let r: BumpResult;
+  beforeAll(() => {
+    r = runBump(ALL_DECOYS, NEW);
+  });
+
+  it("every one of the five reads back at the new version after a single bump", () => {
+    expect(r.status, ctx(r)).toBe(0);
+    const found: Record<string, (string | undefined)[]> = {};
+    for (const key of FILE_KEYS) found[FILE_PATHS[key]] = VERSION_READERS[key](r.text[key]);
+    // Reported as one object so a red shows every file's version at once -- which of the five drifted
+    // is the whole question, and five separate reds would each answer a fifth of it.
+    expect(found).toEqual({
+      "package.json": [NEW],
+      "src-tauri/tauri.conf.json": [NEW],
+      "src-tauri/Cargo.toml": [NEW],
+      "package-lock.json": [NEW, NEW],
+      "src-tauri/Cargo.lock": [NEW],
+    });
+    // ... and the expectation above is itself checked against the declared place counts, so a future
+    // edit cannot quietly drop package-lock.json's second field from the literal.
+    for (const key of FILE_KEYS) expect(found[FILE_PATHS[key]].length, FILE_PATHS[key]).toBe(VERSION_PLACES[key]);
+  });
+
+  it("release.ps1 plans exactly the files CLAUDE.md's five-files-in-sync list names", () => {
+    const claudeMd = readFileSync(join(ROOT, "CLAUDE.md"), "utf8");
+    const section = /^## Versioning[^\n]*\n([\s\S]*?)\n## /m.exec(claudeMd);
+    expect(section, "CLAUDE.md no longer has a '## Versioning' section for this test to read").not.toBeNull();
+    const listed = [...section![1].matchAll(/^\d+\.\s+`([^`]+)`/gm)].map((m) => m[1]);
+
+    const script = readFileSync(RELEASE_PS1, "utf8");
+    const planned = [...script.matchAll(/New-ManifestVersionPlan -Path \(Join-Path \$repo "([^"]+)"\)/g)].map((m) => m[1]);
+
+    const expected = [...Object.values(FILE_PATHS)].sort();
+    expect([...listed].sort(), "CLAUDE.md's list and this test's FILE_PATHS disagree").toEqual(expected);
+    expect([...planned].sort(), "release.ps1 does not bump every file CLAUDE.md requires in sync").toEqual(expected);
+  });
+
+  it("release.ps1 stages all five in the release commit, not just the ones it used to bump", () => {
+    // Bumping a file and not committing it is the same drift one step later: the tag would ship with
+    // the lockfiles left behind in the working tree.
+    const script = readFileSync(RELEASE_PS1, "utf8");
+    const addLine = /^Invoke-Git add (.+)$/m.exec(script);
+    expect(addLine, "release.ps1 no longer has an `Invoke-Git add` line").not.toBeNull();
+    for (const path of Object.values(FILE_PATHS)) {
+      expect(addLine![1], `${path} is bumped but never staged for the release commit`).toContain(path);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
 // Red-proof. The tests above only mean something if the fixtures actually trip the bug -- a decoy the
 // broken code never touched would keep them green with the scoping reverted. So: re-run the EXACT pre-fix
 // replacements (copied verbatim from scripts/release.ps1 at origin/main before this ticket) over the same
@@ -701,5 +1111,92 @@ describe("CPE-1841 red-proof: the pre-fix replacements really do clobber these f
     expect(r.status, ctx(r)).toBe(0); // the bug: exit 0
     expect(r.stdout).toContain("Bumped version to");
     expect(r.text.pkg).toBe(crlf(untouchable.pkg)); // ... having changed nothing at all
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// CPE-1853 red-proof: the two obvious WRONG ways to extend the script to the lockfiles.
+//
+// Unlike PRE_FIX_SCRIPT above, these are not transcriptions of anything that ever shipped -- there was
+// no lockfile code to transcribe, which is the whole point of the ticket. They are the two mistakes a
+// minimal extension actually makes, run against the same fixtures, to prove those fixtures are traps
+// rather than decoration:
+//
+//   1. NAIVE_LOCKFILE_SCRIPT -- reuse the un-scoped `-replace` shapes. PowerShell's `-replace` rewrites
+//      EVERY match, so this clobbers ~1000 dependency pins in the real Cargo.lock and every package
+//      entry in the real package-lock.json.
+//   2. TOP_LEVEL_ONLY_SCRIPT -- do the scoped, careful thing... once. package-lock.json's root version
+//      moves and `packages[""]` stays behind. This is the specific stale shape the ticket names, and it
+//      is the one a reviewer would most easily wave through.
+//
+// As with the block above: a green here does NOT mean the shipped script is correct. The suites that
+// drive scripts/release.ps1 itself carry that.
+// ---------------------------------------------------------------------------------------------------
+
+const NAIVE_LOCKFILE_SCRIPT = `param(
+  [Parameter(Mandatory = $true)][string]$Version,
+  [switch]$BumpOnly
+)
+$ErrorActionPreference = "Stop"
+$repo = Split-Path -Parent $PSScriptRoot
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+$lockPath = Join-Path $repo "package-lock.json"
+$lock = [System.IO.File]::ReadAllText($lockPath, $utf8NoBom)
+$lock = $lock -replace '("version"\\s*:\\s*")[^"]+(")', "\`\${1}$Version\`$2"
+[System.IO.File]::WriteAllText($lockPath, $lock, $utf8NoBom)
+
+$cargoLockPath = Join-Path $repo "src-tauri/Cargo.lock"
+$cargoLock = [System.IO.File]::ReadAllText($cargoLockPath, $utf8NoBom)
+$cargoLock = $cargoLock -replace '(?m)^(version\\s*=\\s*")[^"]+(")', "\`\${1}$Version\`$2"
+[System.IO.File]::WriteAllText($cargoLockPath, $cargoLock, $utf8NoBom)
+
+Write-Host "Bumped version to $Version"
+`;
+
+/** Scoped and careful -- and applied to the FIRST match only, so packages[""] is left behind. */
+const TOP_LEVEL_ONLY_SCRIPT = `param(
+  [Parameter(Mandatory = $true)][string]$Version,
+  [switch]$BumpOnly
+)
+$ErrorActionPreference = "Stop"
+$repo = Split-Path -Parent $PSScriptRoot
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+$lockPath = Join-Path $repo "package-lock.json"
+$lock = [System.IO.File]::ReadAllText($lockPath, $utf8NoBom)
+$re = [regex]'("version"\\s*:\\s*")[^"]+(")'
+$lock = $re.Replace($lock, "\`\${1}$Version\`$2", 1)
+[System.IO.File]::WriteAllText($lockPath, $lock, $utf8NoBom)
+
+Write-Host "Bumped version to $Version"
+`;
+
+describe("CPE-1853 red-proof: the naive lockfile bumps really do clobber these fixtures", () => {
+  let naive: BumpResult;
+  beforeAll(() => {
+    naive = runBump(ALL_DECOYS, NEW, { scriptText: NAIVE_LOCKFILE_SCRIPT });
+  });
+
+  it("an un-scoped package-lock.json replace rewrites every dependency pin to the app version", () => {
+    expect(naive.status, ctx(naive)).toBe(0);
+    const j = JSON.parse(naive.text.lock);
+    expect(j.packages["node_modules/decoy"].version, "the fixture's decoy pin is not actually a trap").toBe(NEW);
+    expect(j.packages["node_modules/other"].version).toBe(NEW);
+  });
+
+  it("an un-scoped Cargo.lock replace rewrites decoy-crate, serde AND the [[patch.unused]] entry", () => {
+    expect(naive.status, ctx(naive)).toBe(0);
+    expect(cargoLockPackageVersion(naive.text.cargoLock, "decoy-crate"), "the decoy crate is not a trap").toBe(NEW);
+    expect(cargoLockPackageVersion(naive.text.cargoLock, "serde")).toBe(NEW);
+    expect(cargoLockPackageVersion(naive.text.cargoLock, "cross-platform-explorer", "patch.unused")).toBe(NEW);
+  });
+
+  it("a top-level-only package-lock.json bump leaves packages[\"\"] stale -- exactly how this file drifts", () => {
+    const half = runBump(ALL_DECOYS, NEW, { scriptText: TOP_LEVEL_ONLY_SCRIPT });
+    expect(half.status, ctx(half)).toBe(0);
+    const j = JSON.parse(half.text.lock);
+    expect(j.version, "the fixture would not detect a half bump").toBe(NEW);
+    expect(j.packages[""].version, "the fixture would not detect a half bump").toBe(OLD);
   });
 });
