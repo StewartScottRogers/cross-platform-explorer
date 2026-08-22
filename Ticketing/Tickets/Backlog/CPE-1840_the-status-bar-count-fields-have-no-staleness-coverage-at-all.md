@@ -64,3 +64,52 @@ existing one.
 
 Related: CPE-1833 (those same two notes are never announced to a screen reader), CPE-1836 (the row's
 layout at the 600px floor), CPE-1838 (the in-flight-listing mechanism these counts ride on).
+
+## Work Log
+
+### 2026-08-21 — tests only, no production change
+
+Added `src/App.statusBarCountStaleness.test.ts` (8 tests, App-level integration against the mocked-Tauri
+harness). All three staleness paths are now pinned for BOTH fields:
+
+- **cache-served reset** (2 tests) — Home -> `C:\d` -> `C:\d\photos` (counted) -> Back to `C:\d` (a cache
+  hit, `goBack` passes `useCache=true`). `C:\d`'s `list_dir` is HELD (never resolves), so "the note is
+  gone" can only be satisfied by the cache branch's own reset, never by a revalidation racing in behind it.
+- **`revalidateDir` update** (2 tests) — the stream's count and `list_dir`'s count are deliberately
+  different (0 cached, 4/6 fresh), so a refreshed count is distinguishable from a remembered one.
+- **`<StatusBar>` gate, per arm** (4 tests: Home, archive, smart folder, structured search) — each entered
+  from a folder carrying 2 filtered + 3 unreadable, and none of `enterArchive`/`openSmartFolder`/
+  `openStructuredSearch` calls `loadPath`, so the counts are still live in App state and the gate is the
+  only thing that can clear them. Each arm asserts BOTH notes.
+
+Red-proof (every mutation applied, suite run, reverted; `git status` clean after each):
+
+| Mutation | Reds |
+|---|---|
+| delete `ExplorerPane.svelte:379` (`filteredHidden = 0`, cache branch) | cache-served reset / filteredHidden (1 failed, 7 passed) |
+| delete `ExplorerPane.svelte:380` (`unreadableCount = 0`, cache branch) | cache-served reset / unreadableCount |
+| delete `ExplorerPane.svelte:341` (`filteredHidden = fresh.filtered`) | revalidation / filteredHidden |
+| delete `ExplorerPane.svelte:342` (`unreadableCount = fresh.unreadable`) | revalidation / unreadableCount |
+| `App.svelte:6917` gate -> `isHome ? 0 : filteredHidden` | archive + smart folder + structured search (3 failed) |
+| `App.svelte:6918` gate -> `isHome ? 0 : unreadableCount` | archive + smart folder + structured search (3 failed) |
+| `App.svelte:6917` gate -> drop the `isHome` arm | Home arm |
+| `App.svelte:6918` gate -> drop the `isHome` arm | Home arm |
+
+Gates: `npx vitest run` 321 files / 4266 tests passed; `npm run check` 0 errors, 0 warnings.
+
+**Enumeration of the other listing-derived status-bar props** (the AC's fourth box):
+
+- `itemCount` / `totalCount` — genuinely listing-derived and they carry their own view gate
+  (`(isHome && !smartFolder && !structuredSearch)`, plus `|| archive` for `totalCount`), but they are
+  **structurally immune** to all three staleness paths: they derive from `visible`/`shown`, which
+  `<ExplorerPane>` recomputes from `entries` / `smartOverride` / `archiveOverride`. The cache branch
+  replaces `entries` in the same statement block as the count reset, `revalidateDir` replaces `entries`
+  alongside the counts, and each virtual view supplies its own override list. No hole; nothing to fix.
+- `selectedCount` / `selectedSize` — selection-derived (reset on navigation), not listing-derived.
+- `hiddenShown` — a persisted setting. `notice` / `noticeIsError` — transient toast state.
+- `diskFree` / `diskTotal` (`updateDiskSpace`) and `git` (`refreshGitStatus`) — **path**-derived, not
+  listing-derived, and their guards name Home + archive but NOT smart folder / structured search. Same
+  *shape* of partial gate, but not the same class of defect: both describe `currentPath`, which is still a
+  real folder while a virtual view is open, so neither makes a false statement about the listing on
+  screen. Recorded here as an observation; out of scope for this ticket and not fixed.
+
