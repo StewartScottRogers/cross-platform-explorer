@@ -3,11 +3,11 @@ id: CPE-1841
 title: the release version regex is unscoped, so it would rewrite a dependency pin to the app version
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-21
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
