@@ -15,20 +15,21 @@ closed:
 The GUI smoke suite runs across four parallel shards. Shard 2 consistently takes roughly **twice** as
 long as the others, so the job's wall-clock is set by one shard while three sit idle.
 
-Two independent sightings, on runs where nothing plausibly causal changed:
+Three consecutive sightings, on runs where nothing plausibly causal changed:
 
 | run | shard 1 | shard 2 | shard 3 | shard 4 |
 |-----|---------|---------|---------|---------|
 | CPE-1832's fix | ~7 min | **~14 min** | ~6 min | ~7 min |
-| CPE-1843 (`32555323418`) | 7m06s | **14m21s** | 7m10s | 6m28s |
+| CPE-1843 round 1 (`32555323418`) | 7m06s | **14m21s** | 7m10s | 6m28s |
+| CPE-1843 round 2 (`32561465109`) | ~7 min | **~14 min** | ~6 min | ~6 min |
 
 All green both times. CPE-1843's only functional change was a `cargo install` version pin, which cannot
 affect spec runtime — which is what makes this look like a stable property of the shard assignment rather
 than noise.
 
 The first sighting was recorded during CPE-1832's review and explicitly not chased, on the reasoning that
-a single observation could be runner variance. Two sightings, both with no causal change in the diff,
-make "shard 2 owns the heaviest specs" the strong reading.
+a single observation could be runner variance. Three sightings, none with a causal change in the diff,
+make "shard 2 owns the heaviest specs" the settled reading rather than a hypothesis.
 
 ## Why Low
 
