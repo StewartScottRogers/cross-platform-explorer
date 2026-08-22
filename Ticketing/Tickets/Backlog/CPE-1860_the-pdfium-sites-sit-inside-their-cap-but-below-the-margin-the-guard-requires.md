@@ -48,6 +48,13 @@ yet.
       permanently out.
 - [ ] Check whether any other guarded site is close to the threshold; a margin that only one site fails is
       worth knowing about before it becomes two.
+- [ ] `MIN_MARGIN_FRACTION` is a pure fraction with **no absolute floor**. At the 300s and 360s caps in play
+      today 10% is tens of seconds, but on a site with a small cap it could be a few seconds. Decide whether
+      a floor is needed, and say so either way.
+- [ ] `.github/workflows/ci.yml:550` and `:553-555` still carry the **superseded** figure — "curl's real
+      worst case is 150 + 180 = 330s" and "leaving ~30s". With the corrected formula it is 333s and 27s.
+      CPE-1849 fixed this at the guard but the source comment is where a reader of `ci.yml` looks. If
+      CPE-1849 lands the two-line edit first, drop this criterion rather than doing it twice.
 
 ## Notes
 
