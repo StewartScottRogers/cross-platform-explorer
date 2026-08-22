@@ -1228,23 +1228,32 @@
   let conflictDialogPath: string | null = null;
 
   /** Refresh the git sync status when the folder changes (read-only, best-effort). The dry-run
-      preview honours this repo's saved on-diverge policy so the status bar and the Sync dialog agree. */
-  async function refreshGitStatus(path: string) {
-    if (!path || isHome || archive) { gitStatus = null; return; }
+      preview honours this repo's saved on-diverge policy so the status bar and the Sync dialog agree.
+      CPE-1854: the suppression decision is NOT read off reactive state inside this body any more — it
+      arrives as `suppressed`, so the reactive statement below actually lists it and the guard fires on
+      ENTERING a view rather than on the next path change. See `pathReadoutsSuppressed`. */
+  async function refreshGitStatus(path: string, suppressed: boolean) {
+    if (!path || suppressed) { gitStatus = null; return; }
     try {
       const s = (await commands.forgeRepoStatus(path, loadSyncPolicy(path))) as unknown as typeof gitStatus;
+      // CPE-1854: a LATE result must not repaint a chip the guard has already blanked. Opening a smart
+      // folder or a structured search does not change `currentPath`, so the `currentPath === path` test
+      // `updateDiskSpace` uses is not enough on its own — re-read the live suppression flag too (both are
+      // read HERE, at resolve time, deliberately: the argument `suppressed` is the value from when the
+      // request was ISSUED, which is by definition the stale one).
+      if (currentPath !== path || pathReadoutsSuppressed) return;
       gitStatus = s && (s as { is_repo?: boolean }).is_repo ? s : null;
     } catch {
       gitStatus = null; // plain build (command absent) or git unavailable
     }
   }
-  $: refreshGitStatus(currentPath);
+  $: refreshGitStatus(currentPath, pathReadoutsSuppressed);
 
   /** Run a safe sync step (Pull = ff-only, Push = no-force) via the host, then re-list (CPE-462). */
   async function doSync(action: "pull" | "push") {
     try {
       unwrap(await commands.forgeSync(currentPath, action));
-      await refreshGitStatus(currentPath);
+      await refreshGitStatus(currentPath, pathReadoutsSuppressed);
       refresh();
     } catch (e) {
       notice = "Sync failed: " + (e instanceof Error ? e.message : String(e));
@@ -1264,7 +1273,10 @@
       in the background, and nothing is ever force-pushed (`forge_sync` has no force action). */
   async function maybeAutoSync() {
     const path = currentPath;
-    if (autoSyncRunning || !path || isHome || archive) return;
+    // CPE-1854: the same suppression the status-bar readouts use — a background sync must not run
+    // against a folder the user has navigated out of view. Belt-and-braces rather than the only gate:
+    // `gitStatus` is now null in every one of those views, so the next line already refuses.
+    if (autoSyncRunning || !path || pathReadoutsSuppressed) return;
     if (!gitStatus?.is_repo) return;
     const cfg = loadAutoMirror(path);
     if (!cfg.enabled) return;
@@ -1284,7 +1296,7 @@
         unwrap(await commands.forgeSync(path, action));
       }
       lastAutoSync.set(path, Date.now());
-      if (currentPath === path) { await refreshGitStatus(path); refresh(); }
+      if (currentPath === path) { await refreshGitStatus(path, pathReadoutsSuppressed); refresh(); }
       showNotice($t("notice.autoSynced", { time: new Date().toLocaleTimeString() }), false);
     } catch (e) {
       // A failed background sync must never nag repeatedly: back off by marking it "done" for this
@@ -1650,12 +1662,15 @@
       /* a refresh failure is cosmetic — the toast already told the user the real outcome */
     }
   }
-  $: updateDiskSpace(currentPath, isHome, !!archive);
-  async function updateDiskSpace(path: string, home: boolean, inArchive: boolean) {
-    if (home || inArchive || !path) { diskFree = null; diskTotal = null; return; }
+  $: updateDiskSpace(currentPath, pathReadoutsSuppressed);
+  async function updateDiskSpace(path: string, suppressed: boolean) {
+    if (suppressed || !path) { diskFree = null; diskTotal = null; return; }
     try {
       const d = unwrap(await commands.diskSpace(path));
-      if (currentPath === path) { diskFree = d.free; diskTotal = d.total; }
+      // CPE-1854: `currentPath === path` alone let a LATE result repaint the figures after the guard had
+      // blanked them — entering a smart folder / structured search leaves `currentPath` untouched, so the
+      // path test passes and the in-flight response lands anyway. Re-read the live flag at resolve time.
+      if (currentPath === path && !pathReadoutsSuppressed) { diskFree = d.free; diskTotal = d.total; }
     } catch { if (currentPath === path) { diskFree = null; diskTotal = null; } }
   }
 
@@ -2052,6 +2067,26 @@
   $: activeTab = tabs.find((t) => t.id === activeId) as Tab;
   $: currentPath = current(activeTab.history) ?? HOME;
   $: isHome = currentPath === HOME;
+
+  /** CPE-1854: is `currentPath` the thing the user is actually looking at? Whenever it is NOT, the two
+   *  status-bar readouts DERIVED FROM IT — the git branch chip (`refreshGitStatus`) and the free/total
+   *  disk figures (`updateDiskSpace`) — must be blanked rather than left describing a folder that is no
+   *  longer on screen. Four views qualify, and the breadcrumb (`$: crumbs` below) is the evidence for
+   *  each: Home renders just `Home`, a smart folder renders `Home / <name>`, a structured search renders
+   *  `Home / <name>` — in NONE of those three does `currentPath` appear anywhere on screen. An archive
+   *  DOES still show `...splitPath(currentPath)...` in its crumbs, but its LISTING is the archive's inner
+   *  entries, so a repo/drive fact about the containing folder still describes something other than what
+   *  is displayed; it was already in the (broken) git guard and in the disk guard, and stays here.
+   *
+   *  Hoisted into ONE derived boolean, rather than repeated inline in each guard body, for the reason
+   *  this ticket exists: Svelte tracks only the identifiers that appear IN a reactive statement, so
+   *  `$: refreshGitStatus(currentPath)` reading `isHome`/`archive` inside the FUNCTION BODY had neither
+   *  as a dependency — the guard could only ever fire on the next path change, never on entering a view.
+   *  (`$: updateDiskSpace(currentPath, isHome, !!archive)` listed its identifiers, which is exactly why
+   *  disk cleared on entering an archive and git did not.) Passing this one value into both keeps the
+   *  dependency list and the guard body impossible to drift apart: remove it from a call and the guard
+   *  stops compiling rather than silently stopping firing. */
+  $: pathReadoutsSuppressed = isHome || !!archive || !!smartFolder || !!structuredSearch;
 
   // ---- Smart-folder live-refresh on filesystem change (CPE-1230, epic CPE-978) ----
   // `smartPaths`/`loadStructuredSearchEntries` (declared above) already recompute reactively when the
@@ -6930,7 +6965,7 @@
 {#if syncDialogPath}
   <SyncDialog
     path={syncDialogPath}
-    on:done={() => { refreshGitStatus(currentPath); refresh(); }}
+    on:done={() => { refreshGitStatus(currentPath, pathReadoutsSuppressed); refresh(); }}
     on:resolve={() => { syncDialogPath = null; conflictDialogPath = currentPath; }}
     on:close={() => (syncDialogPath = null)}
   />
@@ -6939,7 +6974,7 @@
 {#if conflictDialogPath}
   <ConflictDialog
     path={conflictDialogPath}
-    on:done={() => { refreshGitStatus(currentPath); refresh(); }}
+    on:done={() => { refreshGitStatus(currentPath, pathReadoutsSuppressed); refresh(); }}
     on:close={() => (conflictDialogPath = null)}
   />
 {/if}
