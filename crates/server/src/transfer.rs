@@ -295,7 +295,11 @@ pub fn windows_safe_segment(name: &str) -> Cow<'_, str> {
 }
 
 /// Whether `name`'s stem (up to the first `.`) is a reserved DOS device name, case-insensitively.
-fn is_windows_device_name(name: &str) -> bool {
+///
+/// `pub(crate)` since CPE-1823: [`crate::snapshot_capture::restore`] needs exactly this question about a
+/// manifest-supplied path component (a `sub/NUL` entry "restored" into the null device and left nothing
+/// on disk while returning `Ok`). One predicate, two callers — not a second list of device names.
+pub(crate) fn is_windows_device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or("");
     WINDOWS_DEVICE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(stem))
 }

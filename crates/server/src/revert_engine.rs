@@ -107,7 +107,24 @@ pub(crate) fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
         }
         // A segment containing a drive letter (`C:`) or a backslash would, on Windows, be
         // reinterpreted as rooting/escaping once joined — reject it the same way.
-        if seg.contains(':') || seg.contains('\\') {
+        //
+        // **`cfg!(windows)`-gated (CPE-1823 round 2), and the gate is load-bearing.** On Linux and macOS
+        // neither character roots anything: `:` and `\` are ordinary filename bytes, `a\b` is one real
+        // directory entry, and `2026-08-21 10:30 notes.txt` is a name users type on purpose. macOS makes
+        // it routine rather than exotic — a Finder name containing `/` is stored on disk as `:`, so any
+        // "Q1/Q2 report" becomes a colon on the volume.
+        //
+        // Refusing those everywhere was survivable while this rule only served `apply_write`, which
+        // *skips one file and continues* with the reason in its report. `snapshot_capture::restore` now
+        // shares the rule and **aborts the whole manifest** at the first refusal, so an unqualified
+        // colon check would turn one ordinary Unix filename into a half-restored tree — a file that
+        // restored fine before CPE-1823 touched anything. Same reasoning, and the same `cfg!(windows)`
+        // shape, as `crate::backup`'s `refuses_unstable_names` and `fsutil::win32_name_is_unstable`'s
+        // doc: apply the Windows rule where Windows is, and nowhere else.
+        //
+        // Containment on Unix is unaffected — it never rested on this line. `..`, `.`, empty segments and
+        // absolute paths are all rejected above, and every surviving segment is pushed as one component.
+        if cfg!(windows) && (seg.contains(':') || seg.contains('\\')) {
             return Err("escapes dest_root: drive-rooted or backslash segment".to_string());
         }
         segments.push(seg);
@@ -146,7 +163,16 @@ fn apply_write(
     let Some(state) = checkpoint.get(&action.path) else {
         return Err("no checkpoint entry for this path".to_string());
     };
-    let blob = blobs_dir.join(&state.hash);
+    // CPE-1823: `state` comes from `snapshot_capture::manifest_snapshot` — the same planted JSON — and
+    // `hash` was joined onto `blobs_dir` with nothing checking it, so `../../<anywhere>/secret` copied
+    // any readable file into the reverted tree and the report counted it **applied**. This is the sink
+    // the app actually ships: `checkpoint_revert` / `checkpoint_revert_one` reach it from registered
+    // Tauri commands, where `snapshot_capture::restore` has no production caller at all.
+    //
+    // One shared validator (`snapshot_capture::blob_source`), never a second spelling of the hex rule.
+    // The refusal lands in this action's `Err`, which `apply_restore` records as a per-file
+    // skip-with-reason in the report — this engine's existing loud channel, not a silent drop.
+    let blob = crate::snapshot_capture::blob_source(blobs_dir, &state.hash)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -285,6 +311,92 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1823 round 2 — the sink the shipped app actually reaches.** `snapshot_capture::restore` has
+    /// no production caller; *this* function does, via `checkpoint_revert` / `checkpoint_revert_one`.
+    /// `state` comes from `manifest_snapshot` — the same hand-editable JSON — and its `hash` was joined
+    /// onto `blobs/` unvalidated, so a climbing path pulled any readable file into the reverted tree and
+    /// the report counted it **applied**.
+    ///
+    /// The harm assertion is on the file's *content*: the target path is one the plan legitimately names,
+    /// so its existence proves nothing — only whether it holds the victim's bytes does.
+    #[test]
+    fn cpe_1823_an_escaping_hash_never_reads_a_file_outside_the_blob_store() {
+        const SECRET: &[u8] = b"THE VICTIM PRIVATE KEY FROM OUTSIDE THE STORE";
+        const LIVE: &[u8] = b"the user's real current content";
+        let root = scratch("cpe1823-hash-root");
+        let store = scratch("cpe1823-hash-store");
+        let secrets = scratch("cpe1823-hash-secrets");
+        fs::write(secrets.join("id_rsa"), SECRET).unwrap();
+        fs::create_dir_all(store.join("blobs")).unwrap();
+
+        // `blobs/` is `<store>/blobs`, so `../../<sibling>/id_rsa` climbs store → temp and back down.
+        let hash = format!("../../{}/id_rsa", secrets.file_name().unwrap().to_string_lossy());
+        let mut checkpoint = Snapshot::new();
+        checkpoint
+            .insert("a.txt".to_string(), crate::restore_plan::FileState::new(hash.as_str(), SECRET.len() as u64));
+
+        fs::write(root.join("a.txt"), LIVE).unwrap();
+        let current = scan_dir(&root.to_string_lossy()).unwrap();
+        let plan = plan_restore(&checkpoint, &current);
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        let landed = fs::read(root.join("a.txt")).unwrap();
+        assert_ne!(
+            landed, SECRET,
+            "HARM: the revert pulled {} bytes from outside the blob store into the user's tree",
+            SECRET.len()
+        );
+        assert_eq!(landed, LIVE, "a refused entry must leave the live file exactly as it was");
+        assert_eq!(report.applied, 0, "a refused entry must never be counted applied");
+        assert_eq!(report.skipped.len(), 1, "and it must be reported, not dropped: {report:?}");
+        assert_eq!(report.skipped[0].0, "a.txt");
+        assert!(
+            report.skipped[0].1.contains("hex"),
+            "the skip reason must say what was wrong, got: {}",
+            report.skipped[0].1
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1823 round 2.** `safe_segments` refused `:` and `\` on every platform. That was survivable
+    /// while this engine was the only caller — it skips one file and continues — but
+    /// `snapshot_capture::restore` now shares the rule and aborts the whole manifest, so an ordinary
+    /// Unix filename would have turned into a half-restored tree. On macOS this is routine, not exotic:
+    /// a Finder name containing `/` is stored on disk as `:`.
+    ///
+    /// Nothing covered this before, which is why the ubuntu CI leg was green while the regression was
+    /// live. Containment on Unix never rested on the colon rule — `..`, `.`, empty and absolute segments
+    /// are all still refused above it, and `an_escaping_plan_path_is_refused_and_writes_nothing_outside_dest_root`
+    /// still proves that on the same platform.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1823_a_colon_or_backslash_is_an_ordinary_unix_filename_and_still_reverts() {
+        for name in ["2026-08-21 10:30 notes.txt", r"Q1\Q2 report.txt"] {
+            let root = scratch("cpe1823-unix-name-root");
+            let store = scratch("cpe1823-unix-name-store");
+
+            fs::write(root.join(name), b"checkpoint content").unwrap();
+            let checkpoint = scan_dir(&root.to_string_lossy()).unwrap();
+            assert!(checkpoint.contains_key(name), "the scan must key it verbatim: {checkpoint:?}");
+            write_blobs(&store, &checkpoint, &[(name, b"checkpoint content")]);
+
+            fs::write(root.join(name), b"edited since the checkpoint").unwrap();
+            let current = scan_dir(&root.to_string_lossy()).unwrap();
+            let plan = plan_restore(&checkpoint, &current);
+            let report =
+                execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+            assert!(report.skipped.is_empty(), "{name:?} is a legal Unix filename: {:?}", report.skipped);
+            assert_eq!(report.applied, 1);
+            assert_eq!(fs::read(root.join(name)).unwrap(), b"checkpoint content");
+
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(&store);
+        }
     }
 
     #[test]

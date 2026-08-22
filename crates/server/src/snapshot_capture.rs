@@ -268,24 +268,29 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
 /// The refusal is loud, per-entry, and names the offending path. Skipping it and returning `Ok` would
 /// hand the user a restore that reports success while a file they asked for is missing, which is the
 /// worse failure: a restore is *believed*, and a silently absent file is discovered later, if ever.
-/// Nothing legitimate produces such an entry — [`capture`] only ever writes plain relative paths and
-/// 64-hex hashes — so a manifest containing one is corrupt or planted, and neither is a thing to partly
-/// apply.
+///
+/// Aborting the whole manifest — rather than skipping the entry and continuing, which is what
+/// [`crate::revert_engine`] does with its per-file report — is sound **only** because nothing legitimate
+/// can produce a refused entry: [`capture`] writes plain relative path components and lowercase hex
+/// hashes, and every rule applied here refuses only shapes it cannot write. That claim used to be false
+/// in this very file: `safe_segments` refused `:` and `\` on every platform, so an ordinary Linux or
+/// macOS filename (`2026-08-21 10:30 notes.txt`, or any Finder name containing `/`, which macOS stores
+/// as `:`) aborted the entire restore of a manifest that captured perfectly well. That is fixed at the
+/// source — the rule is now `cfg!(windows)`-gated in `safe_segments` itself, so restore and revert move
+/// together — rather than by weakening the abort. **If a future rule here can refuse something capture
+/// can store, this abort becomes the wrong shape and must be revisited with it.**
 ///
 /// Entries are applied in `BTreeMap` order, so a refusal may leave earlier entries already written. That
 /// is the same partial state any mid-restore I/O error leaves, and it is reported rather than hidden.
 ///
-/// # The one inherited over-refusal, recorded rather than forked
+/// # Windows-only rules stay on Windows
 ///
-/// [`crate::revert_engine::safe_segments`] rejects `:` and `\` in a segment on **every** platform, because
-/// on Windows either can re-root or re-stream a path. On Linux and macOS both are ordinary filename
-/// bytes, so a file the user genuinely owns — `2026-08-21 10:30 notes.txt` — captures fine and then
-/// cannot be restored on the machine it came from. That is a real gap and it is **pre-existing**:
-/// `revert_engine` has always refused such an entry (as a per-file skip-with-reason) for manifests from
-/// this same store. It is inherited here on purpose rather than fixed by forking a second, more lenient
-/// copy of the rule: two containment predicates disagreeing about the same manifest is how the next hole
-/// gets found. The fix belongs in `safe_segments`, gating the refusal on `cfg!(windows)` the way
-/// [`crate::fsutil::win32_name_is_unstable`]'s callers already must, so restore and revert move together.
+/// Two rules here apply on Windows and nowhere else, both `cfg!(windows)`-gated at their source:
+/// `safe_segments`' refusal of `:` and `\`, and [`win32_addresses_a_different_path`]'s refusal of a
+/// reserved device name or a trailing dot/space. On Linux and macOS every one of those is an ordinary
+/// byte in an ordinary filename that [`capture`] will happily store, and refusing them there would break
+/// a working round trip to defend against a hazard that exists only on the third platform — the mistake
+/// [`crate::fsutil::win32_name_is_unstable`]'s doc records being made and reverted once already.
 pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), String> {
     let store_path = Path::new(store_dir);
     let dest_path = Path::new(dest);
@@ -294,6 +299,9 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     let blobs_dir_path = blobs_dir(store_path);
     for (rel, file) in &manifest.files {
         let target = crate::revert_engine::safe_target(dest_path, rel).map_err(|why| refusal(rel, &why))?;
+        if let Some(why) = win32_addresses_a_different_path(rel) {
+            return Err(refusal(rel, &why));
+        }
         if !crate::fsutil::confined_to(&target, dest_path) {
             return Err(refusal(
                 rel,
@@ -313,8 +321,53 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
 /// of them name the manifest path that was rejected. The path is what the user has to act on: it is the
 /// only thing tying the refusal back to a line in the JSON, and it is also the evidence that the manifest
 /// was tampered with rather than merely unlucky.
-fn refusal(rel: &str, why: &str) -> String {
-    format!("{rel}: refusing this manifest entry — {why}")
+/// An empty `rel` is named explicitly rather than producing the headless `": refusing …"` the first cut
+/// emitted — a message whose subject is invisible is barely a message.
+pub(crate) fn refusal(rel: &str, why: &str) -> String {
+    let named = if rel.is_empty() { "(a manifest entry with an empty path)" } else { rel };
+    format!("{named}: refusing this manifest entry — {why}")
+}
+
+/// Names that Win32 resolves to **something other than what they spell**, so a restore of them is
+/// neither a refusal nor the file the user asked for (CPE-1823 round 2). Two shapes, both observed
+/// returning `Ok(())`:
+///
+/// - a **reserved DOS device name** (`sub/NUL`, `CON.txt`) — `create_dir_all` makes `sub`, `fs::copy`
+///   "succeeds" into the null device, and nothing is on disk afterwards. A restore that reports success
+///   with the file absent is the exact CPE-1803/1804/1805/1816 defect this module's own doc invokes;
+/// - a **trailing dot or space** (`evil.txt `) — Win32 strips it on any non-verbatim path, so the entry
+///   lands as `evil.txt`. Worse than losing it: three entries `a.txt`, `a.txt ` and `a.txt.` collapse
+///   onto one file holding whichever content was copied last, so two files vanish and the survivor holds
+///   content the user never asked for **at that name**.
+///
+/// **`cfg!(windows)`-gated, and that is the whole point of the predicate living in `fsutil`.** On Linux
+/// and macOS `NUL` and `notes. ` are ordinary distinct filenames that [`capture`] stores and this must
+/// restore. Refusing them everywhere is the mistake [`crate::fsutil::win32_name_is_unstable`]'s own doc
+/// records being made and reverted once already (a macOS user's `My Documents ` folder), and which
+/// [`crate::backup`]'s `refuses_unstable_names` gate exists to avoid repeating.
+///
+/// Reuses the crate's two existing predicates — `win32_name_is_unstable` and
+/// [`crate::transfer::is_windows_device_name`] — rather than a third spelling of either.
+fn win32_addresses_a_different_path(rel: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    for seg in rel.split('/') {
+        if crate::fsutil::win32_name_is_unstable(seg) {
+            return Some(format!(
+                "the component {seg:?} ends in a dot or space, which Windows strips — it would be written \
+                 to a different name than it spells, silently colliding with whatever already answers to \
+                 the stripped one"
+            ));
+        }
+        if crate::transfer::is_windows_device_name(seg) {
+            return Some(format!(
+                "the component {seg:?} is a reserved DOS device name — the write would succeed into the \
+                 device and leave nothing on disk, reporting a restore that did not happen"
+            ));
+        }
+    }
+    None
 }
 
 /// Resolve a manifest entry's `hash` to the blob file it names, or refuse (CPE-1823).
@@ -333,15 +386,41 @@ fn refusal(rel: &str, why: &str) -> String {
 ///   deliberately leaves such a slot alone (it reads as `Occupied` and is skipped, never written
 ///   through), so a planted link can still be sitting there at restore time.
 ///
+/// **`pub(crate)` because this is the whole crate's rule for that field, not this module's.** The same
+/// manifest `hash` is joined onto `blobs/` at three other sinks the shipped app actually reaches —
+/// [`crate::revert_engine`]'s `apply_write`, [`crate::checkpoint_store::checkpoint_diff_file`], and
+/// [`prune`] — and the first version of this fix hardened only [`restore`], which has no production
+/// caller at all. All four now call this.
+///
+/// # What containment does NOT catch here, stated because an earlier draft of this doc overclaimed
+///
+/// - A **hard link** planted at `blobs/<hash>`. It needs no privilege on Windows, and `canonicalize`
+///   resolves it to *itself* — a hard link is not a redirection the filesystem can report — so both this
+///   check and [`crate::fsutil::confined_to`] see an ordinary file inside the store and pass it. The
+///   earlier sentence "a link planted at a blob's name cannot substitute another file's bytes" was true
+///   only of symlinks and junctions, which *are* both refused. Rated follow-up rather than blocker
+///   because a hard link does not survive the copy or sync step in this threat model — a planted store
+///   arrives as ordinary files — but the limit is real and is recorded rather than papered over.
+/// - Replacing **`blobs/` itself** with a directory link. `confined_to` canonicalises the root too, so a
+///   relocated store is self-consistently "contained" in its new location. Guarding it means pinning the
+///   store root at open time, which is a different ticket's shape.
+///
 /// The length bound is a sanity cap, not the security property: it keeps a 4 MB "hash" out of a path
 /// buffer without hard-coding sha256's 64 characters into a format that has already been described as
 /// swappable in this module's own header.
-fn blob_source(blobs_dir: &Path, hash: &str) -> Result<PathBuf, String> {
+pub(crate) fn blob_source(blobs_dir: &Path, hash: &str) -> Result<PathBuf, String> {
     validate_blob_name(hash)?;
+    // Distinguished from the containment failure below on purpose: an absent `blobs/` is an incomplete
+    // or half-deleted store, and reporting that as "does not resolve inside the blob store" reads as
+    // tampering and sends the user hunting for an attack that isn't there. `confined_to` fails closed on
+    // an unresolvable root (correctly), so without this the two causes are indistinguishable.
+    if let Err(e) = std::fs::metadata(blobs_dir) {
+        return Err(format!("the blob store {} could not be opened: {e}", blobs_dir.display()));
+    }
     let blob = blobs_dir.join(hash);
     if !crate::fsutil::confined_to(&blob, blobs_dir) {
         return Err(format!(
-            "its blob {hash:?} does not resolve inside the blob store {}",
+            "blob {hash:?} does not resolve inside the blob store {}",
             blobs_dir.display()
         ));
     }
@@ -350,7 +429,7 @@ fn blob_source(blobs_dir: &Path, hash: &str) -> Result<PathBuf, String> {
 
 /// The name half of [`blob_source`]'s rule, split out because [`prune`] needs exactly this and not the
 /// containment half (see its call site). A blob file is named by a content address and nothing else.
-fn validate_blob_name(hash: &str) -> Result<(), String> {
+pub(crate) fn validate_blob_name(hash: &str) -> Result<(), String> {
     if hash.is_empty() || hash.len() > MAX_BLOB_NAME_LEN || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("its content hash {hash:?} is not a plain hex blob name"));
     }
@@ -1379,8 +1458,15 @@ mod tests {
         let outside = scratch("cpe1823-dotdot-outside");
         assert_eq!(dest.parent(), outside.parent(), "the escape below assumes the two are siblings");
 
-        let rel = format!("../{}/pwned.txt", dir_name(&outside));
-        let escape = outside.join("pwned.txt");
+        // The entry carries a **directory** component on purpose: `create_dir_all(parent)` is the other
+        // thing a manifest entry makes the process do, and it is attacker-chosen directory creation
+        // anywhere on the volume. `files_under` enumerates files only, so it structurally cannot see a
+        // stray directory — without the `planted-dir` assertion below, moving the three guards to *after*
+        // `create_dir_all` passes every other test in this file while creating that directory outside the
+        // restore folder.
+        let rel = format!("../{}/planted-dir/pwned.txt", dir_name(&outside));
+        let escape = outside.join("planted-dir").join("pwned.txt");
+        let escape_dir = outside.join("planted-dir");
         plant_blob(&store, GOOD_HASH);
         plant_manifest(&store, "planted", &[(rel.as_str(), GOOD_HASH)]);
 
@@ -1390,6 +1476,12 @@ mod tests {
             !escape.exists(),
             "HARM: a `..` manifest path wrote {} — arbitrary file write from a hand-edited manifest",
             escape.display()
+        );
+        assert!(
+            !escape_dir.exists(),
+            "HARM: a `..` manifest path created the directory {} — every guard must run BEFORE the \
+             entry's create_dir_all, not after it",
+            escape_dir.display()
         );
         assert!(files_under(&dest).is_empty(), "a refused entry must write nothing at all");
         let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
@@ -1576,6 +1668,79 @@ mod tests {
         );
         let err = r.expect_err("a manifest naming a path outside the store must be refused loudly");
         assert!(err.contains("planted"), "the refusal must name the manifest, got: {err}");
+    }
+
+    /// **The pairing of guard 1 and guard 2 is not held together by platform luck.** Breaking guard 1
+    /// alone reds nothing on Windows (guard 2 catches every shape the other tests stage there), so
+    /// without this a Windows-only developer could delete `safe_target` and see local green. These two
+    /// entries are refusable by guard 1 and by nothing else on any platform: `confined_to(dest, dest)`
+    /// answers *true* for the empty path — the root is contained in itself, by design — and `a//b`
+    /// resolves to the perfectly-contained `dest/a/b`, so the filesystem has no objection to either.
+    /// What is wrong with them is structural, and only the textual guard can say so.
+    #[test]
+    fn cpe_1823_only_the_textual_guard_can_refuse_an_empty_or_doubled_separator_path() {
+        for rel in ["", "a//b"] {
+            let store = scratch("cpe1823-textual-store");
+            let dest = scratch("cpe1823-textual-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(&store, "planted", &[(rel, GOOD_HASH)]);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            assert!(files_under(&dest).is_empty(), "a refused entry must write nothing at all");
+            let err = r.unwrap_err();
+            // An empty path has no name to print, so the message must still identify what it refused —
+            // the first cut emitted a headless `": refusing this manifest entry — empty path"`.
+            assert!(
+                !err.starts_with(':'),
+                "the refusal must name its subject even when the path is empty, got: {err:?}"
+            );
+        }
+    }
+
+    /// **Blocker 3 — an entry that is neither refused nor written, returning `Ok(())`.** Both shapes were
+    /// observed doing exactly that. They are Windows-only *hazards* (and the guard is `cfg!(windows)`),
+    /// but the aliasing one is the more serious: three distinct entries collapse onto one file, so two
+    /// vanish and the survivor holds content the user never asked for at that name — a restore that
+    /// reports success and hands back a tree that is wrong in a way nothing announces.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_win32_aliasing_or_device_name_entry_is_refused_not_silently_swallowed() {
+        // A reserved device name: `fs::copy` "succeeds" into the null device and nothing lands on disk.
+        {
+            let store = scratch("cpe1823-nul-store");
+            let dest = scratch("cpe1823-nul-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(&store, "planted", &[("sub/NUL", GOOD_HASH)]);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            let err = r.expect_err(
+                "a device-name entry writes nothing to disk, so returning Ok reports a restore that did \
+                 not happen",
+            );
+            assert!(err.contains("sub/NUL"), "the refusal must name the entry, got: {err}");
+            assert!(!dest.join("sub").exists(), "and it must refuse before creating the parent");
+        }
+        // Trailing-space aliasing: three entries, one surviving file, content from whichever won.
+        {
+            let store = scratch("cpe1823-alias-store");
+            let dest = scratch("cpe1823-alias-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(
+                &store,
+                "planted",
+                &[("a.txt", GOOD_HASH), ("a.txt ", GOOD_HASH), ("a.txt.", GOOD_HASH)],
+            );
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            let err = r.expect_err("entries that Win32 collapses onto one name must be refused");
+            assert!(
+                err.contains("a.txt ") || err.contains("a.txt."),
+                "the refusal must name the aliasing entry, got: {err}"
+            );
+        }
     }
 
     /// The counterweight, and it is not decoration: the *other* helper CPE-1823 considered —

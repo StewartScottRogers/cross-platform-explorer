@@ -103,25 +103,110 @@ join with exactly one caller — `capture`'s blob loop, whose `rel` came from `s
 `DirEntry` seconds earlier and is used to *read*. Routing that through `safe_target` would abort whole
 captures on Linux/macOS over a legal filename like `2026-08-21 10:30 notes.txt`.
 
-**Recorded, not fixed:** `safe_segments` refuses `:` and `\` on *every* platform, so such a Unix filename
-captures fine and then cannot be restored on the machine it came from. Pre-existing (revert has always
-refused it) and inherited on purpose — forking a second, more lenient predicate is how the next hole gets
-found. The fix belongs in `safe_segments`, `cfg!(windows)`-gating the refusal so restore and revert move
-together. Written up in `restore`'s doc.
+**Recorded, not fixed** *(superseded — see round 2, where this was fixed and the "pre-existing" framing
+was wrong)*: `safe_segments` refuses `:` and `\` on *every* platform, so such a Unix filename captures
+fine and then cannot be restored on the machine it came from.
 
 **Gates.** `cargo clippy --all-targets -- -D warnings` → exit 0. `cargo test --lib` → **2291 passed, 0
-failed**. src-tauri untouched (nothing outside `crates/server` references `snapshot_capture`), no
-`specta::Type` touched, so no bindings regen. One **pre-existing, unrelated** failure in the separate
-`--test archive_panic_safety` binary (`sevenz_signature_header_offset_overflow_is_caught_and_returns_err`)
-— reproduced identically with this change stashed, and it passes when run alone, so it is a flaky 7z leg,
-not this work.
+failed**. (Round 1 also reported a failure in the separate `--test archive_panic_safety` binary. **That
+claim is withdrawn**: the independent Reviewer got 21 passed / 0 failed, and a re-run here now gives the
+same. It was environmental on that run — an unreproducible failure has no business sitting in the record.)
 
 **Red-proof, per guard** (each observed red, then reverted):
 
 | Test | Line broken | Observed |
 |---|---|---|
-| `..` traversal / absolute component / drive-relative | `safe_target(…)` → `scan_source_path(dest_path, rel)` **and** `if !confined_to(…)` → `if false` | all three red, naming the escaped file. One line alone does **not** red them — the two guards overlap by design, so the proof is against the genuine pre-fix pair |
+| `..` traversal / absolute component / drive-relative | `safe_target(…)` → `scan_source_path(dest_path, rel)` **and** `if !confined_to(…)` → `if false` | all three red, naming the escaped file. Breaking guard 1 alone reds nothing **on Windows** (round 1 said "does not red them", unqualified — wrong: on Unix the absolute shape does red via `files_under`). Round 2 adds a test only guard 1 can satisfy, on every platform |
 | interior link | `if !crate::fsutil::confined_to(&target, dest_path) {` → `if false {` | red **alone**: wrote through the junction into the sibling directory, and nothing else red — it uniquely covers guard 2 |
 | escaping `hash` (read) | `blob_source(…)?` → `blobs_dir_path.join(&file.hash)` | red alone: "pulled 33 bytes from outside the blob store into the restored tree" |
 | escaping `hash` (delete, `prune`) | `validate_blob_name(hash)…?` → `let _ = hash;` | red alone: deleted the victim file outside the store |
 | `..evil` still restores | inserted `if !rel.split('/').all(transfer::is_safe_name) { return Err(…) }` | red: the over-tightening this test exists to catch |
+
+### 2026-08-21 — round 2: the fix was in the wrong function
+
+**The headline, and it is the important part.** `snapshot_capture::restore` has **no production caller** —
+nothing in `src-tauri/` or `sidecar/` references `snapshot_capture` at all. Round 1 hardened the path only
+the tests exercise, and then claimed in the PR body and in `restore`'s own doc that arbitrary read was
+closed. With the two live sinks below still open, that claim was **false**. Both the independent Security
+Auditor and the independent Reviewer found the same two, separately.
+
+**The fourth sink — `revert_engine::apply_write`** (`revert_engine.rs:149`). `blobs_dir.join(&state.hash)`
+where `state` came from `manifest_snapshot` — the same planted JSON. Observed:
+`RestoreReport { applied: 1, skipped: [] }`, 45 bytes from outside the store landed in the user's tree,
+and the report **counted it applied**. Shipping: `checkpoint_revert` / `checkpoint_revert_one`, registered
+at `src-tauri/src/lib.rs:5357`/`5373`.
+
+**The fifth sink, higher impact — `checkpoint_store::checkpoint_diff_file`** (`:554`). Same join, then
+`fs::read` into `FileDiff.before`, which is **displayed**. The command is registered at
+`src-tauri/src/lib.rs:5433` and called from the frontend via `bindings.gen.ts:2067`. Folded in
+follow-up 5 while there: the `DIFF_MAX_BYTES` gate measured `state.size` — the manifest's *claim* — and
+the `fs::read` under it was unbounded, so `size: 1` unlocked an unlimited read of an attacker-chosen file.
+The cap is now measured on the blob itself, matching what the live half has always done.
+
+Both call the same `blob_source` / `validate_blob_name`, now `pub(crate)` — no third validator. The
+Auditor confirmed the hex check is fully anchored (it defeated `abc/../../../etc/passwd`, `abcd\0`,
+`beef:stream`, `deadbeef.`, and a 4096-character name).
+
+**Blocker 3 — an entry that was neither refused nor written, returning `Ok(())`.** `restore("sub/NUL")`
+→ `Ok`, nothing on disk (the copy "succeeds" into the null device). `restore("evil.txt ")` → `Ok`, landed
+as `evil.txt`. Three entries `a.txt`, `a.txt `, `a.txt.` → **one** file holding the second one's content.
+That is precisely the class this module's own doc invokes as its reason never to skip silently, sitting
+inside the function that says it. Fixed with the crate's existing predicates —
+`fsutil::win32_name_is_unstable` and `transfer::is_windows_device_name` (made `pub(crate)`) — `cfg!(windows)`-gated,
+because `NUL` and `notes. ` are ordinary distinct filenames on Linux and macOS.
+
+**New blocker — round 1 broke a legally-named Unix file, and called it pre-existing.** `safe_segments`
+refused `:` and `\` on every platform. For *revert* that is a per-file skip that continues; for `restore`
+it **aborts the whole manifest**, so `2026-08-21 10:30 notes.txt` — or any macOS Finder name containing
+`/`, which the volume stores as `:` — went from restoring fine to a half-restored tree. Different outcome,
+and new. Fixed at the source: the rule is `cfg!(windows)`-gated in `safe_segments` itself, so restore and
+revert move together. Nothing pinned the cross-platform refusal (the two path-safety tests there catch
+their fixtures via `is_absolute`), and a `#[cfg(unix)]` round-trip test now covers it. This also resolves a
+contradiction the Reviewer found between two paragraphs of my own doc.
+
+**Two pins the Reviewer proved were missing by breaking the code and watching all 7 tests stay green:**
+- Moving the three guards *below* `create_dir_all` — a plausible tidy-up refactor — kept every test green
+  while creating an attacker-named directory outside the restore folder. `files_under` enumerates files
+  only, so it structurally could not see it. The `..` test now carries a directory component and asserts
+  the directory itself never appears.
+- Breaking guard 1 alone reds nothing on Windows. There is now an input only the textual guard can refuse
+  on any platform (`""` and `a//b`): `confined_to(dest, dest)` answers *true* for the empty path by
+  design, and `a//b` resolves to a perfectly contained `dest/a/b`.
+
+**Doc corrections, not left standing.** "A link planted at a blob's name cannot substitute another file's
+bytes" was true of symlinks and junctions (both verified refused) and **false for hard links**, which need
+no privilege on Windows and which `canonicalize` resolves to themselves. Also recorded: replacing `blobs/`
+*itself* with a directory link relocates the whole store, because `confined_to` canonicalises the root too.
+Both are now written down as limits rather than implied not to exist. The headless `": refusing …"`
+message for an empty path now names its subject, and an absent `blobs/` is reported as an unopenable store
+rather than as tampering.
+
+**A test of mine passed for the wrong reason and was rewritten.** The follow-up-5 size test left the
+oversize file on disk, so with the guard sabotaged the function still returned `Err` — from the *live*
+half's cap, which has always measured the real file — and the byte-count assertion matched that message
+just as happily. It passed under sabotage. With the live side shrunk to nine bytes, only the checkpoint
+half can cap, and the sabotage now reds with `HARM: 5242881 bytes were read and returned past the 5242880
+cap`. This is the third instance of the copied-sibling-assertion trap in this ticket's own tests; the two
+in round 1 were caught by reasoning, this one only by running the sabotage.
+
+**Round-2 gates.** `crates/server`: clippy `--all-targets -- -D warnings` → **exit 0** (two real
+`err().expect()` findings fixed); `cargo test --lib` → **2296 passed, 0 failed, 4 ignored**;
+`--test archive_panic_safety` → **21 passed, 0 failed**. `src-tauri`, **both** feature modes, which now
+applies because the fix is in shipping code: clippy default → 0, clippy `--features sidecar-platform` → 0,
+`cargo test` → **210 passed**, `cargo test --features sidecar-platform` → **265 passed**. No `specta::Type`
+struct or command signature changed, so `bindings.gen.ts` is unaffected.
+
+**Round-2 red-proofs** (each observed red, then reverted):
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| revert sink | `blob_source(blobs_dir, &state.hash)?` → `blobs_dir.join(&state.hash)` | `HARM: the revert pulled 45 bytes from outside the blob store into the user's tree` |
+| diff sink | `blob_source(&store_dir.join("blobs"), …)?` → `store_dir.join("blobs").join(&state.hash)` | red — the victim's file appeared in `FileDiff.before` |
+| diff size cap | `fs::metadata(&blob_path)…len()` → `state.size` | `HARM: 5242881 bytes were read and returned past the 5242880 cap, on the strength of a manifest claiming size: 1` |
+| Win32 aliasing / device names | deleted the `win32_addresses_a_different_path` block | red: `sub/NUL` restored `Ok` with nothing on disk |
+| guards-before-mkdir (PIN 1) | moved all three guards below `create_dir_all(parent)` | `HARM: a ".." manifest path created the directory …/planted-dir` |
+| textual guard alone (PIN 2) | `safe_target(…)` → `scan_source_path(…)` | red **on Windows** on the `""` / `a//b` entry — the gap the Reviewer demonstrated |
+
+**Not verified locally:** the `#[cfg(unix)]` colon/backslash round-trip test cannot run on this Windows
+machine (`Q1\Q2 report.txt` is not a creatable name here) — it is covered only by CI's ubuntu and macOS
+legs.

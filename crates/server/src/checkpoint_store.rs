@@ -545,13 +545,24 @@ pub fn checkpoint_diff_file(
         .get(rel_path)
         .ok_or_else(|| format!("{rel_path}: not present in checkpoint {manifest_id}"))?;
 
-    if state.size > DIFF_MAX_BYTES {
+    // CPE-1823, and this is the higher-impact of the two live sinks: `state.hash` is a manifest field,
+    // and `blobs/`.join(it) then `fs::read` **displayed** the bytes to the user through `FileDiff.before`
+    // — the command is registered and called from the frontend. `../../…/id_rsa` read any file the app
+    // could read. Same shared validator as every other blob join in the crate.
+    let blob_path = snapshot_capture::blob_source(&store_dir.join("blobs"), &state.hash)
+        .map_err(|why| format!("{rel_path}: {why}"))?;
+    // The cap is measured on the FILE, never on `state.size` (CPE-1823 follow-up 5). `size` is the
+    // manifest's *claim* about the content, from the same hand-editable JSON as the hash: an entry
+    // claiming `size: 1` sailed past this check and the `fs::read` below was then unbounded. Paired with
+    // the sink above, that made the read both arbitrary in target and unlimited in length. The live half
+    // below has always done it this way — this makes the checkpoint half match its sibling.
+    let blob_meta = fs::metadata(&blob_path).map_err(|e| format!("{}: {e}", blob_path.display()))?;
+    if blob_meta.len() > DIFF_MAX_BYTES {
         return Err(format!(
             "{rel_path}: checkpoint content too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
-            state.size
+            blob_meta.len()
         ));
     }
-    let blob_path = store_dir.join("blobs").join(&state.hash);
     let before_bytes = fs::read(&blob_path).map_err(|e| format!("{}: {e}", blob_path.display()))?;
     let before = String::from_utf8(before_bytes).map_err(|_| {
         format!("{rel_path}: checkpoint content is not valid UTF-8 text (binary diff isn't supported).")
@@ -922,6 +933,111 @@ mod tests {
         let diff = checkpoint_diff_file(&ctx, &root_s, &created.checkpoint.manifest_id, "a.txt").unwrap();
         assert_eq!(diff.before, "original content");
         assert_eq!(diff.after, "changed content");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// Rewrite one entry of a checkpoint's manifest on disk, exactly as someone editing the JSON would
+    /// (CPE-1823). The manifest is an ordinary unsigned file in the app's data directory; nothing signs
+    /// it and nothing checks it was written by us.
+    fn tamper(store: &Path, id: &str, key: &str, hash: Option<&str>, size: Option<u64>) {
+        let p = store.join("manifests").join(format!("{id}.json"));
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        if let Some(h) = hash {
+            v["files"][key]["hash"] = serde_json::Value::String(h.to_string());
+        }
+        if let Some(s) = size {
+            v["files"][key]["size"] = serde_json::json!(s);
+        }
+        fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
+    /// **CPE-1823 round 2 — the higher-impact live sink.** `checkpoint_diff_file` is a registered command
+    /// the frontend calls, and it joined the manifest's `hash` onto `blobs/` and `fs::read` it straight
+    /// into `FileDiff.before`, which is **displayed**. A climbing hash exfiltrated any file the app could
+    /// read to the screen.
+    ///
+    /// The harm assertion is on the returned content, not on the `Result`: the unfixed code returns
+    /// `Ok(FileDiff { .. })` and looks entirely normal — the secret simply appears in the diff pane.
+    #[test]
+    fn cpe_1823_diff_file_never_reads_a_blob_from_outside_the_store() {
+        const SECRET: &str = "THE VICTIM PRIVATE KEY FROM OUTSIDE THE STORE";
+        let app = scratch("cpe1823-diff-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1823-diff-root");
+        let secrets = scratch("cpe1823-diff-secrets");
+        fs::write(secrets.join("id_rsa"), SECRET).unwrap();
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"original").unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store = store_dir_for(&ctx, &root_s).unwrap();
+        // `blobs/` is `<store>/blobs`, so `../../<sibling>/id_rsa` climbs out of the store entirely.
+        let hash = format!("../../{}/id_rsa", secrets.file_name().unwrap().to_string_lossy());
+        tamper(&store, &id, "a.txt", Some(&hash), None);
+        fs::write(root.join("a.txt"), b"changed").unwrap();
+
+        let got = checkpoint_diff_file(&ctx, &root_s, &id, "a.txt");
+
+        let shown = got.as_ref().map(|d| d.before.clone()).unwrap_or_default();
+        assert!(
+            !shown.contains(SECRET),
+            "HARM: a planted hash put a file from outside the store on screen: {shown:?}"
+        );
+        let err = got.expect_err("a manifest naming a blob outside the store must be refused");
+        assert!(err.contains("a.txt"), "the refusal must name the entry, got: {err}");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// **CPE-1823 follow-up 5.** The cap was applied to `state.size` — the manifest's *claim* about the
+    /// content — and the `fs::read` beneath it was then unbounded. An entry claiming `size: 1` sailed
+    /// through and read the whole file. Paired with the sink above, that made the read both arbitrary in
+    /// target and unlimited in length; alone it is still an unbounded read into memory from a file the
+    /// user never asked to diff.
+    ///
+    /// **The live file is shrunk to a few bytes after the capture, and that is the whole reason this test
+    /// says anything.** The first cut left the oversize file on disk, so with the guard sabotaged the
+    /// function still returned `Err` — from the *live* half's cap, which has always measured the real
+    /// file — and the assertion on the byte count matched that message just as happily. It passed under
+    /// sabotage: a test proving the sibling check works while claiming to prove this one. With the live
+    /// side small, only the checkpoint half can trip a cap, and the message is asserted to be that half's.
+    #[test]
+    fn cpe_1823_the_diff_cap_is_measured_on_the_blob_not_on_the_manifests_claim() {
+        let app = scratch("cpe1823-size-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1823-size-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("huge.txt"), vec![b'x'; (DIFF_MAX_BYTES + 1) as usize]).unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store = store_dir_for(&ctx, &root_s).unwrap();
+        // The blob on disk is unchanged and over the cap; only the manifest's claim about it shrinks.
+        tamper(&store, &id, "huge.txt", None, Some(1));
+        fs::write(root.join("huge.txt"), b"small now").unwrap(); // so only the checkpoint half can cap
+
+        let got = checkpoint_diff_file(&ctx, &root_s, &id, "huge.txt");
+
+        let served = got.as_ref().map(|d| d.before.len()).unwrap_or(0) as u64;
+        assert!(
+            served <= DIFF_MAX_BYTES,
+            "HARM: {served} bytes were read and returned past the {DIFF_MAX_BYTES} cap, on the strength \
+             of a manifest claiming size: 1"
+        );
+        let err = got.expect_err("a lie about the size must not unlock an unbounded read of the blob");
+        assert!(
+            err.contains("checkpoint content too large"),
+            "the refusal must come from the CHECKPOINT half, not the live one: {err}"
+        );
+        assert!(
+            err.contains(&(DIFF_MAX_BYTES + 1).to_string()),
+            "and it must report the real {} bytes, not the claimed 1: {err}",
+            DIFF_MAX_BYTES + 1
+        );
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
