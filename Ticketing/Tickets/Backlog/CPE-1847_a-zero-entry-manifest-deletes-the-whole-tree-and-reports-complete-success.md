@@ -2,7 +2,7 @@
 id: CPE-1847
 title: a planted zero-entry manifest deletes the whole tree and reports complete success
 type: bug
-priority: High
+priority: Critical
 status: Backlog
 tags: ready
 estimate: M
@@ -29,16 +29,29 @@ CPE-1823's stand-down cannot help here. It arms on a checkpoint entry that canno
 platform; a zero-entry checkpoint has no entries at all, so there is nothing to stand down on. The guard
 is structurally blind to this shape.
 
-## Why High
+## Why Critical
 
 Every other manifest attack CPE-1823 closed required a crafted key that survived a guard. This one
 requires **deleting text**. It is the cheapest possible tamper — truncate the map to `{}` — and its blast
 radius is the entire tree rather than one named file.
 
-Mitigation, which is real but partial: the UI previews before reverting (`AgentTimeline.svelte:483`,
-`CheckpointDialog.svelte:138`), so an attentive user sees five deletes and no creates before confirming.
-But `checkpoint_revert` is callable without the preview, and "the UI happens to ask first" is not a
-guard — it is a habit.
+### It also reaches through cherry-revert, which removes the mitigation entirely
+
+Measured by the independent Security Auditor during CPE-1823's round-5 audit:
+
+```
+CMD revert[empty manifest]:     applied=5 skipped=0   survivors = []
+CMD revert_one[empty manifest]: applied=1 skipped=0   survivors = [f1,f2,f4,f5]
+```
+
+The same emptied manifest destroys files **one at a time through `checkpoint_revert_one`**, behind a
+per-file confirm that says nothing about a mass delete and **never consults `checkpoint_preview_revert`**.
+So the mitigation everyone assumed — that the UI previews first (`AgentTimeline.svelte:483`,
+`CheckpointDialog.svelte:138`), and an attentive user would see five deletes and no creates — does not
+apply on that route at all.
+
+On the whole-tree route the preview is still real but partial: `checkpoint_revert` is callable without it,
+and "the UI happens to ask first" is not a guard, it is a habit.
 
 ## The judgement call this ticket must settle
 
@@ -76,10 +89,11 @@ Prefer whichever makes the harm impossible over whichever makes the manifest loo
 Filed from CPE-1823's round-4 Reviewer findings. That review made the case for a ticket rather than a
 comment: *"'recorded, not fixed' in a code comment is where round 1's colon regression also lived."*
 
-Note a disagreement between CPE-1823's two checkers, which the round-5 Work Log is settling: the Reviewer
-called this the widest destructive shape a planted manifest has left; the Security Auditor argued the
-case-alias is wider, having a strictly narrower precondition and needing no whole-tree-wipe confirmation.
-Both are open, both are worth closing, and the ranking does not change the work here.
+**The disagreement between CPE-1823's two checkers is settled, and this shape won.** The Reviewer called it
+the widest destructive shape a planted manifest has left; the Security Auditor argued at round 4 that the
+case alias was wider. Round 5 closed the alias, and the Auditor withdrew its own position: this is the
+widest remaining — and **wider than either party said**, because of the `revert_one` route above.
+Raised from High to Critical on that basis (2026-08-22).
 
 Related: CPE-1823 (the guards this evades), CPE-1844 (`index.json` steering prune, the same
 hand-editable-file-steers-a-destructive-decision shape), CPE-1845 (the reporting discriminant).
