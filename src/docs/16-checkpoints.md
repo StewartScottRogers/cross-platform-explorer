@@ -49,6 +49,33 @@ so both arm a confirmation panel first, restating what will happen. Nothing reve
 After a revert, the dialog reports how many changes were applied and how many were skipped (e.g. a locked
 or missing file); a skip never fails the rest of the revert.
 
+### When a revert holds its deletions back
+
+A revert deletes a file on one basis only: *that file is not in the checkpoint*. Where the app cannot be
+sure it read the checkpoint correctly, it applies everything it can restore and then **holds the
+deletions back** rather than performing them. Nothing is destroyed on a doubt.
+
+The revert result counts these alongside genuine failures, as **skipped**: a revert that reports changes
+applied and some number skipped, with your files still in place, has held its deletions back rather than
+failed. The specific reason is recorded per file but is not shown in the dialog yet — a future update
+will list it. Until then, the cases below are the ones to check against.
+
+The cases you may meet:
+
+- **A checkpoint that records no files at all.** Capturing an empty folder produces one legitimately, and
+  so does a checkpoint file that has been edited or corrupted — on disk the two are identical. Such a
+  checkpoint has nothing to restore, so it is never allowed to authorise deleting anything. Reverting an
+  empty folder that is still empty works exactly as before; if the folder has since been filled, those
+  files are counted as skipped, left where they are, and you can delete them yourself.
+- **A checkpoint holding a name this computer cannot write** (for example one captured on Linux or macOS
+  with a name Windows reserves). Everything restorable still restores; deletions wait, because a name
+  spelled differently here might be the very file about to be removed.
+- **A file that could not be restored this time** (locked, or its stored content is missing). Re-run the
+  revert once that is fixed and the held-back cleanups apply.
+
+A checkpoint whose stored file list contradicts its own recorded file count is refused outright, on every
+route — preview, compare and both revert commands — rather than quietly acted on as a smaller tree.
+
 ## When a pre-write checkpoint fails
 
 Several tools — Batch Media (overwriting originals in place), Metadata Studio, Declutter, and Similar

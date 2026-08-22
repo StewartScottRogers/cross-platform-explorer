@@ -1217,6 +1217,316 @@ mod tests {
         }
     }
 
+    /// Rewrite manifest `id`'s on-disk JSON through `edit` — a hand-edit, a store synced from another
+    /// machine, or anything running as the user — and hand back what is actually on disk afterwards, so
+    /// a test can assert its **fixture is live** before it asserts any harm. Reading it back rather than
+    /// returning the edited value in memory is the point: it proves the write landed.
+    fn tamper_manifest(
+        ctx: &HeadlessCtx,
+        root_s: &str,
+        id: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> serde_json::Value {
+        let p = store_dir_for(ctx, root_s).unwrap().join("manifests").join(format!("{id}.json"));
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        edit(&mut v);
+        fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap()
+    }
+
+    /// **CPE-1847, through both registered commands.** A manifest whose `files` map is empty describes a
+    /// tree with nothing in it, so `plan_restore` reads every live file as "added since the checkpoint"
+    /// and plans a `Delete` for all of them. Measured on this branch before the fix, reproducing the
+    /// ticket's figures exactly:
+    ///
+    /// ```text
+    /// CMD revert[empty manifest]:     applied=5 skipped=0   survivors = []
+    /// CMD revert_one[empty manifest]: applied=1 skipped=0   survivors = [f1, f2, f4, f5]
+    /// ```
+    ///
+    /// Complete success reported, whole tree gone, from deleting three characters. Every CPE-1823 guard
+    /// is structurally blind to it: there is no write to fail, no key to judge, and no entry to resolve.
+    ///
+    /// `revert_one` is not a courtesy leg. It is the route that **evades the mitigation everyone
+    /// assumed** — it never consults `checkpoint_preview_revert`, so its per-file confirm says nothing
+    /// about a mass delete, and CPE-1823 needed four rounds largely because guards kept landing on a
+    /// path with no callers while the shipping path went unguarded.
+    ///
+    /// The tamper here restates `file_count` as well, so this exercises the **stand-down** rather than
+    /// `load_manifest`'s cross-check — the cheap one-field version is the next test. Two edited fields
+    /// is the most this ever costs an attacker, which is exactly why the fix cannot rest on the count.
+    #[test]
+    fn cpe_1847_neither_revert_command_deletes_a_populated_tree_on_a_zero_entry_checkpoint() {
+        const CAPTURED: &[u8] = b"what the checkpoint captured";
+        const LIVE: &[u8] = b"the user's work since the checkpoint, which no revert here may touch";
+        // Cherry-revert first, deliberately: it is the route with no preview in front of it, and the
+        // one four rounds of CPE-1823 kept leaving for last.
+        for whole_tree in [false, true] {
+            let app = scratch("cpe1847-zero-app");
+            let ctx = HeadlessCtx::new(app.to_path_buf());
+            let root = scratch("cpe1847-zero-root");
+            let root_s = root.to_string_lossy().to_string();
+            for i in 1..=5 {
+                fs::write(root.join(format!("f{i}.txt")), CAPTURED).unwrap();
+            }
+
+            let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+            let id = created.checkpoint.manifest_id.clone();
+
+            // f1 is made to diverge from the checkpoint AFTER the capture, on purpose: it is what makes
+            // a **dead tamper** red instead of passing quietly. If the edit below failed to land, the
+            // checkpoint still holds all five entries and the plan is a legitimate single `Overwrite` of
+            // f1.txt — a different real change, which the `LIVE` assertion below then catches, because
+            // f1 would be back to `CAPTURED`. A test that only asserted "all five files exist" would
+            // pass on an inert fixture here, which is the trap CPE-1823 fell into six times.
+            fs::write(root.join("f1.txt"), LIVE).unwrap();
+
+            let after = tamper_manifest(&ctx, &root_s, &id, |v| {
+                v["files"] = serde_json::json!({});
+                v["file_count"] = serde_json::json!(0);
+            });
+            assert_eq!(
+                after["files"].as_object().map(|o| o.len()),
+                Some(0),
+                "fixture is inert: the manifest's `files` map must actually be empty on disk, or this \
+                 test certifies nothing"
+            );
+
+            // …and it must have reached the PLANNER as a whole-tree delete, not merely sat in the file.
+            // This also pins that a zero-entry checkpoint still previews: refusing to load it would
+            // refuse a genuine capture of an empty folder.
+            let preview = checkpoint_preview_revert(&ctx, &root_s, &id, None)
+                .expect("a zero-entry checkpoint must still load and preview");
+            assert_eq!(
+                (preview.creates, preview.overwrites, preview.deletes),
+                (0, 0, 5),
+                "fixture is inert: the emptied manifest must plan five deletes and no writes, or this \
+                 test certifies nothing. preview = {preview:?}"
+            );
+
+            let outcome = if whole_tree {
+                checkpoint_revert(&ctx, &root_s, &id).unwrap()
+            } else {
+                checkpoint_revert_one(&ctx, &root_s, &id, "f3.txt").unwrap()
+            };
+
+            // THE HARM, asserted before the `Result` is looked at at all.
+            for i in 1..=5 {
+                assert!(
+                    root.join(format!("f{i}.txt")).exists(),
+                    "HARM: {} deleted f{i}.txt on a checkpoint that records no files — an emptied \
+                     `files` map turns a revert into a whole-tree delete reported as complete success. \
+                     Outcome was {outcome:?}",
+                    if whole_tree { "checkpoint_revert" } else { "checkpoint_revert_one" }
+                );
+            }
+            assert_eq!(
+                fs::read(root.join("f1.txt")).ok().as_deref(),
+                Some(LIVE),
+                "fixture is inert: f1.txt was reverted to its captured bytes, so the manifest still \
+                 held its entry and the tamper never took — this certifies nothing about empty \
+                 manifests"
+            );
+
+            assert_eq!(outcome.applied, 0, "nothing may be counted applied: {outcome:?}");
+            let expected_held = if whole_tree { 5 } else { 1 };
+            assert_eq!(
+                outcome.skipped.len(),
+                expected_held,
+                "every delete must be held back and named, never silently dropped: {outcome:?}"
+            );
+            for op in &outcome.skipped {
+                assert!(
+                    op.error.starts_with("not deleted:"),
+                    "a held-back delete must use the one hold-back channel the UI can match on \
+                     (CPE-1845 owns making that structural): {op:?}"
+                );
+                assert!(
+                    op.error.contains(&format!("{expected_held} file")),
+                    "the reason must carry the count of what would have been deleted: {op:?}"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(&app);
+        }
+    }
+
+    /// **CPE-1847, the cheapest tamper and its wider sibling.** Deleting entries from `files` and
+    /// touching nothing else is the whole attack: the removed paths become `Delete`s. Emptying the map
+    /// entirely is the ticket's shape; removing *four of five* is strictly wider, because it evades any
+    /// zero-entry rule while destroying almost as much — measured on this branch before the fix at
+    /// `applied: 4, survivors: ["f1.txt"]`.
+    ///
+    /// Both are refused at `load_manifest`, by the count the capture wrote, so **every** route refuses
+    /// together — preview, diff, and both revert commands. That placement matters for exactly the reason
+    /// this ticket exists: `checkpoint_revert_one` never consults the preview, so a check that guarded
+    /// only the preview would guard the one route nobody is attacked through.
+    ///
+    /// **What this test does NOT show, spelled out because an earlier version of this doc claimed the
+    /// opposite.** It called the count a "cost-raiser". It is not one: `file_count` is
+    /// `#[serde(default)] Option<usize>` and the check is gated on `Some`, so an attacker who also
+    /// **deletes the `"file_count"` line** — no number rewritten, just more text removed — bypasses it
+    /// entirely, and the removed entries become `Delete`s again:
+    ///
+    /// ```text
+    /// 4 of 5 entries removed + "file_count" key deleted, each leg on a FRESH five-file tree
+    ///   checkpoint_revert_one(f3) -> Ok(RevertOutcome { applied: 1, skipped: [] })  survivors f1,f2,f4,f5
+    ///   checkpoint_revert         -> Ok(RevertOutcome { applied: 4, skipped: [] })  survivors ["f1.txt"]
+    /// ```
+    ///
+    /// So the scope of this test is exactly the scope of the check: a tamper that removes entries and
+    /// **leaves the count behind**. That is a consistency check on a possibly-edited record, not a bar
+    /// an attacker has to clear. The Critical shape stays closed anyway, by the stand-down — which does
+    /// not consult the count, so `files: {}` with the count deleted is still held back — and that is the
+    /// previous test's job, not this one's.
+    #[test]
+    fn cpe_1847_a_files_map_edited_out_from_under_its_own_count_is_refused_on_every_route() {
+        const CAPTURED: &[u8] = b"the user's five files";
+        const LIVE: &[u8] = b"work done since the checkpoint";
+        // Partial first, and cherry-revert first: the wider shape and the unprevewed route lead, so a
+        // regression surfaces on the leg that matters most rather than on the easiest one.
+        for empty_it_entirely in [false, true] {
+            for whole_tree in [false, true] {
+                let app = scratch("cpe1847-count-app");
+                let ctx = HeadlessCtx::new(app.to_path_buf());
+                let root = scratch("cpe1847-count-root");
+                let root_s = root.to_string_lossy().to_string();
+                for i in 1..=5 {
+                    fs::write(root.join(format!("f{i}.txt")), CAPTURED).unwrap();
+                }
+                let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+                let id = created.checkpoint.manifest_id.clone();
+                // Same dead-tamper insurance as the previous test: if the edit fails to land, the plan
+                // becomes a real `Overwrite` of f1.txt and the `LIVE` assertion catches it.
+                fs::write(root.join("f1.txt"), LIVE).unwrap();
+
+                let after = tamper_manifest(&ctx, &root_s, &id, |v| {
+                    if empty_it_entirely {
+                        v["files"] = serde_json::json!({});
+                    } else {
+                        let obj = v["files"].as_object_mut().unwrap();
+                        for i in 2..=5 {
+                            obj.remove(&format!("f{i}.txt"));
+                        }
+                    }
+                });
+                assert_eq!(
+                    after["files"].as_object().map(|o| o.len()),
+                    Some(if empty_it_entirely { 0 } else { 1 }),
+                    "fixture is inert: the entries must actually be gone from the file on disk"
+                );
+                assert_eq!(
+                    after["file_count"],
+                    serde_json::json!(5),
+                    "fixture is inert: the count must be left at its captured value — restating it is \
+                     the OTHER test's tamper, and this one certifies nothing if the count moved too"
+                );
+
+                let outcome = if whole_tree {
+                    checkpoint_revert(&ctx, &root_s, &id)
+                } else {
+                    checkpoint_revert_one(&ctx, &root_s, &id, "f3.txt")
+                };
+
+                // THE HARM, before the `Result`.
+                for i in 1..=5 {
+                    assert!(
+                        root.join(format!("f{i}.txt")).exists(),
+                        "HARM: entries deleted from a manifest's `files` map turned a revert into a \
+                         delete of f{i}.txt — the removal is invisible to every per-entry guard, \
+                         because an absence cannot be told from an entry that was never written. \
+                         Outcome was {outcome:?}"
+                    );
+                }
+                assert_eq!(
+                    fs::read(root.join("f1.txt")).ok().as_deref(),
+                    Some(LIVE),
+                    "fixture is inert: f1.txt was reverted to its captured bytes, so the entries were \
+                     still in the manifest and the tamper never took"
+                );
+
+                let err = outcome.expect_err("a file list that contradicts its own count must refuse");
+                assert!(err.contains(" 5 file"), "the refusal must name the count claimed: {err}");
+                assert!(
+                    err.contains(if empty_it_entirely { "has 0" } else { "has 1" }),
+                    "the refusal must name what the list actually holds: {err}"
+                );
+                // The same refusal, on the read-only routes, so a user is told the store is wrong
+                // rather than shown a smaller tree and left to wonder.
+                assert!(checkpoint_preview_revert(&ctx, &root_s, &id, None).is_err(), "preview too");
+                assert!(checkpoint_diff_file(&ctx, &root_s, &id, "f1.txt").is_err(), "diff too");
+
+                let _ = fs::remove_dir_all(&root);
+                let _ = fs::remove_dir_all(&app);
+            }
+        }
+    }
+
+    /// **CPE-1847's binding constraint: a genuine capture of an empty directory is a real manifest, and
+    /// it is byte-identical to an emptied one.** This is what makes a naive "refuse `files: {}`" fix
+    /// wrong, so it is pinned rather than argued about.
+    ///
+    /// The second half pins the deliberate **cost** of the stand-down — the one legitimate flow it
+    /// changes — so nobody restores the old behaviour as a "bug fix" without meeting this test and the
+    /// reasoning attached to it. Before the fix that flow measured `applied: 3` with the folder emptied;
+    /// now the deletes are held back and named. That is a lost convenience against unrecoverable,
+    /// silently-reported loss of a whole tree, and the checkpoint was never restoring anything in that
+    /// flow — only authorising deletion.
+    #[test]
+    fn cpe_1847_a_genuine_capture_of_an_empty_directory_still_round_trips() {
+        let app = scratch("cpe1847-genuine-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1847-genuine-root");
+        let root_s = root.to_string_lossy().to_string();
+
+        let created = checkpoint_create(&ctx, &root_s, "an empty folder").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        assert_eq!(created.new_blobs, 0, "fixture is inert: an empty capture must store no blobs");
+        assert!(created.skipped.is_empty(), "fixture is inert: nothing may have been skipped here");
+
+        let p = store_dir_for(&ctx, &root_s).unwrap().join("manifests").join(format!("{id}.json"));
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(
+            v["files"].as_object().map(|o| o.len()),
+            Some(0),
+            "fixture is inert: a capture of an empty folder must produce the very shape the attack \
+             produces, or this test is not pinning the constraint it claims to"
+        );
+        assert_eq!(
+            v["file_count"],
+            serde_json::json!(0),
+            "a genuine empty capture asserts zero rather than omitting the count"
+        );
+
+        // It loads, it previews, and reverting the UNCHANGED empty tree succeeds with nothing held
+        // back. Any of these erroring would be the naive refusal this test exists to forbid.
+        let preview = checkpoint_preview_revert(&ctx, &root_s, &id, None)
+            .expect("a genuine empty capture must still preview");
+        assert_eq!(preview.total, 0, "nothing to do: {preview:?}");
+        let outcome = checkpoint_revert(&ctx, &root_s, &id)
+            .expect("a genuine empty capture must still revert");
+        assert_eq!((outcome.applied, outcome.skipped.len()), (0, 0), "{outcome:?}");
+
+        // The recorded cost, pinned.
+        for i in 1..=3 {
+            fs::write(root.join(format!("g{i}.txt")), b"added after the checkpoint").unwrap();
+        }
+        let outcome = checkpoint_revert(&ctx, &root_s, &id).expect("still not an error");
+        for i in 1..=3 {
+            assert!(
+                root.join(format!("g{i}.txt")).exists(),
+                "a zero-entry checkpoint may not delete, even a genuine one — it holds nothing to \
+                 restore in exchange, and it is indistinguishable from an emptied map: {outcome:?}"
+            );
+        }
+        assert_eq!(outcome.applied, 0, "{outcome:?}");
+        assert_eq!(outcome.skipped.len(), 3, "each held-back delete is reported: {outcome:?}");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
     #[test]
     fn diff_file_errors_cleanly_on_binary_content_and_oversize_and_unknown_path() {
         let app = scratch("app-data-diff-err");
