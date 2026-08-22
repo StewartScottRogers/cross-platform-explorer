@@ -370,3 +370,27 @@ binaries green; `cargo clippy --all-targets -- -D warnings` clean on both `crate
 `git diff --numstat` for this fix: `28  1  crates/server/src/fsutil.rs` — the only file touched (the two
 comment edits above already landed in the round-3 commit; this fix is the file the coordinator's CI
 report pointed at, not `crates/ftp`).
+
+**CI verification, by SHA, checked directly rather than trusted from a watch echo:**
+
+- **Red, before the fix** — run `32553733801`, head `09b724433df92ee0a1eb117f3ba4610e9175fcca` (the
+  round-2 commit). `Server crates (macos-latest) — clippy + test` (job `96984579696`): `conclusion:
+  failure`. The job log's exact panic, pulled from `gh run view --job 96984579696 --log`:
+  ```
+  thread 'tests::stor_refuses_a_missing_parent_and_still_works_for_one_that_exists' (62217) panicked at src/lib.rs:1014:9:
+  must be refused with the same `553 Could not create file` line: /at-root.txt/child.txt: Invalid response: [550] 550 Path escapes the served root
+  test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+  ```
+  Confirms the diagnosis exactly: the reply was CPE-1730's confinement refusal, not the `STOR` guard's
+  own `553`.
+- **Green, after the fix** — run `32555398563`, head `92583627ac800e8427fd12bab5f45b8028801891` (this
+  commit). Checked both via `gh run view` and independently via `gh pr view 985 --json
+  headRefOid,statusCheckRollup` (so the SHA the rollup reports is the one actually graded, not one a
+  moved branch left behind): `Server crates (ubuntu-latest) — clippy + test` → `SUCCESS`; `Server crates
+  (macos-latest) — clippy + test` → `SUCCESS`. Both explicitly reconfirmed against `headRefOid ==
+  92583627ac800e8427fd12bab5f45b8028801891` before being reported here.
+
+This red→green pair on the actual 3-OS CI matrix is the empirical confirmation for the `confined_to` fix
+that no local Windows run could provide — Windows never exhibited the bug (its own `NotFound` mapping
+happened to route around it), so a Windows-only pass before this round was never evidence the fix
+worked; the macOS leg is what verifies it.
