@@ -385,3 +385,141 @@ into the code next to the mechanism.
 |---|---|---|
 | checkpoint-keyed stand-down | `checkpoint.keys().filter(…)` → `Vec::new()` (the round-3 shape) | `HARM: cherry-revert deleted the user's only copy … RevertOutcome { applied: 1, skipped: [] }` — the UAT's figures exactly |
 | pass-2 re-validation | pass 2 iterates pass 1's `(target, blob)` pairs | `HARM: a component swapped after pass 1 blessed it took the write outside the restore folder — restore returned Ok(())` |
+
+### 2026-08-21 — round 5: every rule so far asked the SPELLING; the hazard is the RESOLVED PATH
+
+Round 4's two blockers stay shut (audited independently: pre-pass TOCTOU 0/5, cherry-revert covered for
+both trailing spellings through both commands). This round is about the axis all four previous rounds
+were on the wrong side of.
+
+**The blocker.** The round-4 stand-down arms via `checkpoint.keys().filter(|k| safe_segments(k).is_err())`.
+`A.txt` and `a.txt` both *pass* `safe_segments` — neither is a device name, neither ends in a dot or
+space — so the filter is empty and nothing arms. On a case-folding volume they are one file. Reproduced
+here through the registered commands before touching anything, matching the auditor's figures exactly:
+
+```text
+CMD revert[case-alias]     -> RestoreReport { applied: 2, skipped: [] }; a.txt = Err(NotFound)
+CMD revert_one[case-alias] -> RestoreReport { applied: 1, skipped: [] }; a.txt = Err(NotFound)
+R4-OVERWRITE (lone Create) -> RestoreReport { applied: 1, skipped: [] }; payroll.csv = "ATTACKER CHOSEN BYTES"
+```
+
+Byte-for-byte the round-3 harm with `A.txt` substituted for `a.txt `. The third shape is worse and
+structurally outside the stand-down's reach: `RestoreOp` has three variants and the stand-down guarded
+one, so a **destructive non-delete** — a single `Create` — rewrote a live file with nothing skipped.
+
+**A fourth shape, found here rather than reported: this is not a Windows bug.** A directory link inside
+the reverted tree gives one file two perfectly legal spellings on Linux and macOS as well —
+`sub/f.txt` and `alias/f.txt` — and `confined_to` admits both, *correctly*, because both resolve inside
+the tree. Cherry-reverting the aliased spelling deleted the checkpoint's own file: `applied: 1,
+skipped: []`. That settles the design question on its own — a Windows-gated name rule could never have
+closed this — and it is the leg that runs on the ubuntu and macOS CI legs.
+
+**The design, and where I departed from the recommendation.** Adopted the principle in full —
+`fsutil::confined_to`'s own "assert on the resolved path, never on the spelling that produced it" — as a
+new `revert_engine::landing(root, rel)`: canonicalise and answer *which file does this address*, `None`
+if nothing answers yet. Deliberately not a safety check and deliberately not `safe_target`: it resolves
+even the spellings `safe_target` refuses (it has to — `a.txt ` must resolve to `a.txt` for the collision
+to be visible) and declines only the shapes that are escape questions rather than identity questions
+(`..`, `.`, empty, absolute), which stay `safe_target`'s. `None` is always the safe direction: no
+collision, and the action then faces `safe_target` exactly as before.
+
+Three rules, one helper:
+
+1. **`apply_write`: a `Create` whose target already exists is refused** — checked immediately before the
+   copy. This is the premise, not the name: `plan_restore` emits `Create` only for a path in the
+   checkpoint and absent from the scan, so if something already answers to it, the plan's reading of the
+   tree and the filesystem's resolution disagree — which *is* the aliasing signal. `Overwrite` is
+   untouched, so no legitimate overwrite is refused.
+2. **`execute_restore`: a delete whose resolved target is also addressed by a checkpoint entry stands
+   down** — per delete, naming the colliding key. A delete's whole justification is "this path is not in
+   the checkpoint"; asked of the spelling that can be true while it is false of the file.
+3. **`snapshot_capture::restore`: two entries that resolve onto one file are refused** — in pass 1 where
+   the target already exists (total abort, nothing written) and in pass 2 by observed identity where the
+   destination is fresh and the collision is invisible until the first entry lands.
+
+This subsumes trailing space and dot, case folding, 8.3 short names, Unicode-folding volumes and
+in-tree links without enumerating any of them; it fixes cherry-revert for free, because the collision is
+visible in `checkpoint` versus `current` with no write in the plan; and it refuses **nothing** by name,
+so the objection that (correctly) killed the round-4 upstream name-refusal — a legitimate Linux capture
+becoming an unusable checkpoint on Windows — does not bite.
+
+**Where I did not take the recommendation.** It proposed resolving *every* write target in a plan-level
+pre-pass and refusing write/write collisions there. I did not, for two reasons. First, round 4's own
+lesson: a pre-pass verdict is stale by the time the write happens, and this ticket has already paid for
+that once (5/5 escapes). Rule 1 checked immediately before each copy covers the same ground — the first
+`Create` writes, the second then finds its target occupied — with the verdict fresh. Second, in
+`execute_restore` a write/write collision is close to unreachable independently of rule 1: two
+`Overwrite`s onto one file would require the *same* `scan_dir` to have returned both spellings. The
+whole-manifest collision check does exist where it is genuinely needed — `restore`, where every entry is
+a write and there is no `Create`/`Overwrite` distinction to lean on.
+
+**The blanket checkpoint-keyed stand-down is kept, not replaced.** The two are complementary: resolution
+cannot answer for a device name (`sub/NUL` resolves to `\\?\NUL`, which no checkpoint entry collides
+with), and the blanket rule cannot see an alias that is spelled legally. Removing either would reopen
+something.
+
+**Which destructive shape is widest — the Reviewer and the Auditor disagreed, so it is settled here.**
+The Reviewer calls the emptied `"files": {}` manifest the widest (confirmed by measurement: an empty
+checkpoint against a five-file tree gives `applied: 5, skipped: []`, no survivors). The Auditor says the
+case alias is wider. **The Auditor is right, and the code now says so in one place only.** Width is
+reach, not count: the empty-manifest shape needs the user to confirm a whole-tree revert whose preview
+reads "delete 5, restore 0", and an empty checkpoint is a legal capture of an empty folder, so it cannot
+be refused without refusing a real one. The alias needed **one** planted key, no confirmation of a mass
+delete, reached through cherry-revert where the preview shows a single file, and destroyed a file the
+attacker names. The comment at `revert_engine.rs:112` asserted the opposite ranking *and* claimed the
+alias case was not the shape in question; both halves were wrong and it is corrected in place with the
+correction visible rather than quietly swapped. The empty-`files` shape stays recorded, as its own
+ticket.
+
+**Recorded-as-fact errors corrected** (a false verified-fact is worse than an honest assumption):
+
+1. `revert_engine.rs:112` — "the widest destructive shape … is **not** this one". Rewritten as above.
+2. The final-component residual read as "the final component is unprotected". It is not: `confined_to`
+   canonicalises the final component too, and an independent audit planted **17,488** symlinks at it for
+   **zero** writes through. The true residual is "checked, but not atomically". And it is **reducible,
+   not irreducible** — this crate already ships the pattern (`batch_media`'s never-follow-a-link-at-the-
+   final-component open, `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`, no libc, already used by
+   `batch_execute`); adopting it changes `fs::copy`'s attribute-preserving behaviour on Windows, so it is
+   its own ticket and the comment now names what would close it rather than implying nothing can.
+3. The `safe_target` canonicalise-cost note said "a 10k-file revert is 10k+ canonicalise walks". Wrong
+   since round 4: `restore` resolves every entry **twice**, so it is 20k+, plus round 5's `landing`
+   resolutions (one per checkpoint key and one per delete, only when the plan contains a delete). Also
+   recorded: `safe_segments` over 20,000 keys measures ~32 ms in a debug build and is dwarfed by the
+   walks, so there is nothing to cache on the textual side — no caching added.
+4. `snapshot_capture.rs:359` — the pass-2 error was a literal multi-line format string carrying ~18 stray
+   spaces (`"…changed during the                  restore…"`), reaching the user verbatim. Fixed.
+5. The denial-of-revert follow-up got **cheaper** in round 4, and is now recorded at its real cost: one
+   checkpoint key with a trailing space — no blob, no write attempted, no I/O at all — holds back every
+   delete of that checkpoint. Also corrected: on that branch the hold is **permanent**, not transient
+   (measured by the Reviewer at scale: one unrestorable key, 200 files added since, one restorable entry
+   → `applied: 1, skipped: 201`, 200 survivors, restorable half correct), which is why that branch's
+   message deliberately omits "re-run once resolved" while the `report.skipped` branch keeps it.
+
+**Also fixed, a real docs defect:** `const NAMED_CAUSES` had been dropped between
+`win32_addresses_a_different_path`'s 38-line doc block and its signature, so rustdoc rendered four rounds
+of argument on a `usize` and left the function undocumented. Moved below the function, with a note saying
+what it did. In this ticket the docs are the artifact, so this is not cosmetic.
+
+**Round-5 gates.** `crates/server`: clippy `--all-targets -- -D warnings` → **0**; `cargo test` →
+**2308 lib** (4 ignored) + `archive_panic_safety` 21 + `binary_data_preview_panic_safety` 22 +
+`checkpoint_roundtrip` 2 + `finder_tags_os_interop` 1 + `native_meta_os_interop` 1 +
+`parser_panic_safety` 45 + `sample_fixtures` 16 + `thumb_svg_panic_safety` 32 + `ticket_mcp` 0,
+**0 failed**. `src-tauri` both feature modes: clippy default → **0**, `--features sidecar-platform` →
+**0**; `cargo test` → **210**, `--features sidecar-platform` → **265**. No `specta::Type` struct or
+command signature changed, so `bindings.gen.ts` is unaffected.
+
+**Round-5 red-proofs.** Every new test asserts the harm did not happen *before* it looks at the `Result`,
+and carries the round-4 fixture-liveness assertion ("fixture is inert: … or this test certifies
+nothing") — six inert tests have been caught in this ticket and in all six the fixture never reached the
+harm. Each proof is one line, observed red, then reverted:
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| `Create` premise (`apply_write`) | `if action.op == RestoreOp::Create && …` → `if false && action.op == …` | three tests red on their harm axis: `HARM: the revert destroyed the user's file via a case alias` (`applied: 1`, with the delete correctly held back — so the two guards are independently load-bearing), `HARM: a lone Create rewrote the user's file under an aliased spelling — RestoreReport { applied: 1, skipped: [] }`, and `HARM: checkpoint_revert destroyed the user's file through a case alias` |
+| delete resolution stand-down | `.and_then(\|at\| checkpoint_lands_on.get(&at).copied())` → `.and_then(\|_at\| None::<&String>)` | `HARM: the revert deleted a file the checkpoint holds, reached under its other spelling — RestoreReport { applied: 1, skipped: [] }` (the cross-platform link leg) and `HARM: checkpoint_revert_one destroyed the user's file through a case alias — RevertOutcome { applied: 1, skipped: [] }` |
+| pass-1 collision (`restore`) | `if let Some(first) = lands_on.insert(at, rel) {` → `… .filter(\|_\| false) {` | `HARM: a manifest refused for a collision still overwrote the destination — the abort must be total when pass 1 can see the collision` (pass 2 still caught it, but only after the write — which is exactly the totality property pass 1 exists for) |
+| pass-2 collision (`restore`) | `if written.contains(&at) {` → `if false && written.contains(&at) {` | `HARM: a manifest with two entries restored as ["A.txt"] and returned Ok(()) — one captured file silently never arrived` |
+
+**Still not verified locally, and it is the merge gate:** every `#[cfg(unix)]` leg, plus the new
+cross-platform link-alias delete test, can only run on ubuntu and macOS. Server crates must be green on
+both on this head before merge.

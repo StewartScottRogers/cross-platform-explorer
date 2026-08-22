@@ -36,7 +36,7 @@
 //! - CoW/reflink/hardlink store optimisation is **out of scope for v1** — blobs are plain-copied in and
 //!   out; a later ticket can swap the copy primitive without touching this module's public API.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -276,6 +276,11 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
 /// — the same "the refusal costs nothing" property [`prune`] gets by validating before its point of no
 /// return — and one message names every offending entry instead of surfacing them one re-run at a time.
 ///
+/// Two refusals are necessarily *not* total, and both say so in their own message: the pass-2
+/// re-validation (a component swapped mid-restore) and the pass-2 collision check (two entries that
+/// resolve onto one file, which in a fresh destination is invisible until the first of them exists).
+/// Both are still `Err` — the alternative is a tree that looks complete and is not.
+///
 /// This replaced a refuse-as-you-go loop justified by the claim that "nothing legitimate can produce a
 /// refused entry". That claim was **false twice over**, which is why the structure changed instead of the
 /// wording. First within a platform: `safe_segments` refused `:` and `\` everywhere, so an ordinary Linux
@@ -317,9 +322,31 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
 
     // ---- pass 1: the ABORT DECISION only. Judges every entry, touches nothing. ---------------------
     let mut refusals: Vec<String> = Vec::new();
+    // **CPE-1823 round 5 — two entries that ADDRESS ONE FILE.** Every rule before this one judges an
+    // entry on its own, and this hazard has no single offending entry: `A.txt` and `a.txt` are both
+    // perfectly legal names on every platform, so no per-entry rule may refuse either, and on a
+    // case-folding volume they are one file. Restoring both wrote one file holding whichever content
+    // was copied last, lost the other, and returned `Ok(())` — a restore is *believed*, so a manifest
+    // entry that silently never arrived is exactly the failure this module's own doc exists to forbid.
+    //
+    // Asked of the resolved path rather than of the spelling, per [`crate::fsutil::confined_to`]'s
+    // principle, so it covers trailing spaces and dots, 8.3 short names, Unicode-folding volumes and a
+    // link inside `dest` without naming any of them.
+    let mut lands_on: HashMap<PathBuf, &String> = HashMap::new();
     for (rel, file) in &manifest.files {
         if let Err(why) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash) {
             refusals.push(why);
+        }
+        if let Some(at) = crate::revert_engine::landing(dest_path, rel) {
+            if let Some(first) = lands_on.insert(at, rel) {
+                refusals.push(refusal(
+                    rel,
+                    &format!(
+                        "it addresses the same file as the entry {first:?} — two manifest entries, one \
+                         surviving file, and whichever is copied last silently wins"
+                    ),
+                ));
+            }
         }
     }
     if !refusals.is_empty() {
@@ -351,19 +378,55 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // by the caller**, not picked, and `create_new` refuses a name that already exists: restoring a
     // snapshot over a tree that still holds files, and `revert_engine`'s first-class `Overwrite` op,
     // both depend on writing onto an existing file. Claiming the slot would turn those into refusals.
-    // The residual is therefore the final-component TOCTOU `confined_to`'s own doc records, narrowed to
-    // the gap between this check and this copy — recorded, not papered over.
+    //
+    // **The residual, stated accurately — an earlier draft overstated it.** It is *not* that the final
+    // component is unprotected: `confined_to` canonicalises the final component too, and an independent
+    // audit planted 17,488 symlinks at it and got **zero** writes through. What remains is that the
+    // check and the copy are two syscalls — checked, but not atomically — so a link swapped into the
+    // final component in the gap between them is the one shape left.
+    //
+    // And that is **reducible, not irreducible**: this crate already ships the pattern that closes it —
+    // `batch_media`'s "never follow a link at the final component" open (`O_NOFOLLOW` on Unix,
+    // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, hard-coded per target with no libc dependency, pinned
+    // by a runtime test and already used by `batch_execute`). Adopting it means opening the target and
+    // writing through the handle instead of `fs::copy`, which changes `fs::copy`'s attribute-preserving
+    // behaviour on Windows — so it is its own ticket, deliberately not folded in here, and this comment
+    // must not read as "nothing more can be done".
+    let mut written: HashSet<PathBuf> = HashSet::new();
     for (rel, file) in &manifest.files {
         let (target, blob) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash).map_err(|why| {
             format!(
-                "{why}
-(detected immediately before writing it — the destination changed during the                  restore, so entries written before this one may already be on disk)"
+                "{why} (detected immediately before writing it — the destination changed during the \
+                 restore, so entries written before this one may already be on disk)"
             )
         })?;
+        // Pass 1's collision check can only see entries that already resolve to something, so in a
+        // *fresh* destination it sees neither `A.txt` nor `a.txt` until one of them exists. This closes
+        // that half by observation instead of prediction: after each copy the file's real identity goes
+        // in `written`, and a later entry that resolves onto one of them is refused **before** its copy
+        // rather than silently overwriting a sibling entry's content.
+        //
+        // Unlike a pass-1 refusal this one is not total — earlier entries are already on disk — but the
+        // alternative is not a clean tree, it is a clean-looking tree with a file missing and `Ok(())`
+        // returned. Deliberately checked here and not carried from pass 1, for round 4's reason: the
+        // only verdict a write may rely on is the one taken immediately before it.
+        if let Some(at) = crate::revert_engine::landing(dest_path, rel) {
+            if written.contains(&at) {
+                return Err(refusal(
+                    rel,
+                    "it resolves onto a file this same restore has already written — two manifest \
+                     entries address one file, so one of them would silently vanish (entries written \
+                     before this one are already on disk)",
+                ));
+            }
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
+        if let Ok(at) = fs::canonicalize(&target) {
+            written.insert(at);
+        }
     }
     Ok(())
 }
@@ -1812,6 +1875,82 @@ mod tests {
                 err.contains("a.txt ") || err.contains("a.txt."),
                 "the refusal must name the aliasing entry, got: {err}"
             );
+        }
+    }
+
+
+    /// **CPE-1823 round 5 — two entries, one file, and it returned `Ok`.** `A.txt` and `a.txt` are legal
+    /// names on every platform, so no per-entry rule may refuse either; on a case-folding volume they are
+    /// one file. Restoring a manifest holding both wrote one file with whichever content was copied last,
+    /// lost the other entry entirely, and reported success. A restore is *believed*, so a manifest entry
+    /// that silently never arrived is the exact failure this module's doc forbids.
+    ///
+    /// Both legs are staged because they are caught by different halves of the fix: a destination that
+    /// **already holds** the file is visible to pass 1 (total abort, nothing written at all), while a
+    /// **fresh** destination is invisible until the first entry exists and is caught in pass 2, before
+    /// the second copy rather than after it.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_two_manifest_entries_that_resolve_to_one_file_are_refused() {
+        const OTHER_HASH: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+        // Leg 1 — fresh destination. Nothing resolves until the first entry lands.
+        {
+            let store = scratch("cpe1823-collapse-store");
+            let dest = scratch("cpe1823-collapse-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_blob(&store, OTHER_HASH);
+            plant_manifest(&store, "planted", &[("A.txt", GOOD_HASH), ("a.txt", OTHER_HASH)]);
+
+            // Fixture is inert on a case-SENSITIVE volume: there the two entries really are two files
+            // and there is nothing to collapse, so this leg would certify nothing.
+            let probe = scratch("cpe1823-collapse-probe");
+            fs::write(probe.join("A.txt"), b"probe").unwrap();
+            assert_eq!(
+                fs::read(probe.join("a.txt")).ok().as_deref(),
+                Some(&b"probe"[..]),
+                "fixture is inert: this volume must fold case, or the two entries are two files and \
+                 this test certifies nothing"
+            );
+            let _ = fs::remove_dir_all(&probe);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            // Harm before `Result`, this file's convention: the point is not that an entry errors, it is
+            // that TWO entries became ONE file and the caller was told everything arrived.
+            let landed = files_under(&dest);
+            assert!(
+                !(r.is_ok() && landed.len() < 2),
+                "HARM: a manifest with two entries restored as {landed:?} and returned {r:?} — one \
+                 captured file silently never arrived"
+            );
+            let err = r.expect_err("two entries addressing one file cannot be reported as a full restore");
+            assert!(
+                err.contains("A.txt") || err.contains("a.txt"),
+                "the refusal must name the colliding entry, got: {err}"
+            );
+        }
+
+        // Leg 2 — a destination that already holds the file, which pass 1 can see: the abort is total.
+        {
+            const LIVE: &[u8] = b"already in the destination";
+            let store = scratch("cpe1823-collapse2-store");
+            let dest = scratch("cpe1823-collapse2-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_blob(&store, OTHER_HASH);
+            plant_manifest(&store, "planted", &[("A.txt", GOOD_HASH), ("a.txt", OTHER_HASH)]);
+            fs::write(dest.join("a.txt"), LIVE).unwrap();
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            assert_eq!(
+                fs::read(dest.join("a.txt")).ok().as_deref(),
+                Some(LIVE),
+                "HARM: a manifest refused for a collision still overwrote the destination — the abort \
+                 must be total when pass 1 can see the collision. Result was {r:?}"
+            );
+            let err = r.expect_err("a collision pass 1 can see must abort before anything is written");
+            assert!(err.contains("nothing was written"), "and it must say so, got: {err}");
         }
     }
 

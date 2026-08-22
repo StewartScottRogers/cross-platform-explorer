@@ -1147,6 +1147,76 @@ mod tests {
         let _ = fs::remove_dir_all(&app);
     }
 
+
+    /// **CPE-1823 round 5, through the registered commands, both of them.** Round 4's stand-down keys on
+    /// SPELLING — `checkpoint.keys().filter(|k| safe_segments(k).is_err())` — and `A.txt` passes
+    /// `safe_segments` just as `a.txt` does, so on a case-alias the filter is empty and nothing arms.
+    /// Measured before this fix:
+    ///
+    /// ```text
+    /// CMD revert[case-alias]     -> applied=2 skipped=0; a.txt = Err(NotFound)
+    /// CMD revert_one[case-alias] -> applied=1 skipped=0; a.txt = Err(NotFound)
+    /// ```
+    ///
+    /// Byte-for-byte the round-3 harm with `A.txt` substituted for `a.txt `, and it needs no name a
+    /// platform disallows: both spellings are legal everywhere, which is why the fix had to move to the
+    /// resolved path. Driven through `checkpoint_revert` **and** `checkpoint_revert_one` because this
+    /// ticket has three times fixed one of a pair and left the other reachable.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_neither_revert_command_destroys_a_file_reached_under_a_case_alias() {
+        const CAPTURED: &[u8] = b"what the checkpoint captured";
+        const LIVE: &[u8] = b"the user's current work, which this revert must not silently destroy";
+        for whole_tree in [true, false] {
+            let app = scratch("cpe1823-casecmd-app");
+            let ctx = HeadlessCtx::new(app.to_path_buf());
+            let root = scratch("cpe1823-casecmd-root");
+            let root_s = root.to_string_lossy().to_string();
+            fs::write(root.join("a.txt"), CAPTURED).unwrap();
+            // Fixture is inert on a case-sensitive volume: there `A.txt` is a different file, the plan is
+            // legitimate, and this leg certifies nothing.
+            assert_eq!(
+                fs::read(root.join("A.txt")).ok().as_deref(),
+                Some(CAPTURED),
+                "fixture is inert: `A.txt` must already address the user's `a.txt` on this volume"
+            );
+
+            // A capture made where `A.txt` and `a.txt` are distinct — reproduced by renaming the key in
+            // the manifest, which is what a store carried from a case-sensitive machine contains, and
+            // what a hand-edited one contains regardless.
+            let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+            let id = created.checkpoint.manifest_id.clone();
+            let store = store_dir_for(&ctx, &root_s).unwrap();
+            let p = store.join("manifests").join(format!("{id}.json"));
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+            let entry = v["files"].as_object_mut().unwrap().remove("a.txt").unwrap();
+            v["files"]["A.txt"] = entry;
+            fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+            // The user's current work, distinct from the captured bytes on purpose: it makes the write
+            // half destructive too, so the `Create` guard and the delete guard are each independently
+            // load-bearing here rather than covering for one another.
+            fs::write(root.join("a.txt"), LIVE).unwrap();
+
+            let outcome = if whole_tree {
+                checkpoint_revert(&ctx, &root_s, &id).unwrap()
+            } else {
+                checkpoint_revert_one(&ctx, &root_s, &id, "a.txt").unwrap()
+            };
+
+            assert_eq!(
+                fs::read(root.join("a.txt")).ok().as_deref(),
+                Some(LIVE),
+                "HARM: {} destroyed the user's file through a case alias — the aliased manifest names \
+                 `A.txt`, so nothing here may be applied to `a.txt` at all. Outcome was {outcome:?}",
+                if whole_tree { "checkpoint_revert" } else { "checkpoint_revert_one" }
+            );
+            assert_eq!(outcome.applied, 0, "nothing may be counted applied: {outcome:?}");
+
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(&app);
+        }
+    }
+
     #[test]
     fn diff_file_errors_cleanly_on_binary_content_and_oversize_and_unknown_path() {
         let app = scratch("app-data-diff-err");

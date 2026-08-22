@@ -23,6 +23,7 @@
 //! - **No recursion.** The plan is iterated; deletes are sorted once up front.
 
 use std::fs;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::restore_plan::{RestoreAction, RestoreOp, Snapshot};
@@ -97,22 +98,48 @@ pub fn execute_restore(
     //
     // Three consequences, recorded rather than fixed, so none of them reads later as an engine bug:
     //
-    // - **It is attacker-triggerable as denial-of-revert.** One entry guaranteed to be refused holds
-    //   back every legitimate delete, so a file the revert exists to remove survives. Accepted: it is
-    //   the conservative direction, every held-back path is reported with its reason, and the
-    //   restorable half still applies.
-    // - **It is blunt in a way users will feel.** A 500-delete revert with **one locked file** — routine
-    //   on Windows — holds back all 500 and cleans up nothing. `RevertOutcome::from_report` carries each
-    //   path and reason, so the UI has what it needs, but that surface should read "held back, re-run
-    //   after fixing" rather than presenting 501 failures.
-    // - **Finer granularity is not available here.** Pairing each delete with the write that would have
-    //   covered it is precisely what the aliasing case makes invisible — `a.txt ` and `a.txt` look like
-    //   different paths, which is the bug. A rule that could tell them apart would already have fixed it.
+    // - **It is attacker-triggerable as denial-of-revert, and round 4 made it CHEAPER, not dearer.** The
+    //   round-3 shape needed a write that actually failed. This one needs **one checkpoint key with a
+    //   trailing space** — no blob, no write attempted, no I/O at all, judged textually — and every
+    //   delete in every revert of that checkpoint is held back from then on. Accepted anyway: the
+    //   direction is fail-safe, the reason names the offending key so the cause is discoverable rather
+    //   than mysterious, and the restorable half still applies. Recorded at its real cost, not its old
+    //   one.
+    // - **It is blunt in a way users will feel, and on this branch the hold is PERMANENT, not
+    //   transient.** Measured at scale: a checkpoint with one unrestorable key, 200 files added since,
+    //   and one restorable entry gives `applied: 1, skipped: 201` with all 200 survivors intact and the
+    //   restorable half correct. Re-running changes nothing, because nothing about the checkpoint's
+    //   spelling will change on this platform — which is why this branch's message deliberately does
+    //   **not** say "re-run once that is resolved" the way the `report.skipped` branch below does. The
+    //   `report.skipped` branch is the transient one (a locked file, a missing blob): there a
+    //   500-delete revert with one locked file holds back all 500, and re-running after fixing it does
+    //   perform them. `RevertOutcome::from_report` carries each path and reason, so the UI has what it
+    //   needs — but it can only tell a deliberate hold-back from a failure by string-matching
+    //   `"not deleted:"`, which is a structural gap in `OpResult` and its own ticket.
+    // - **Finer granularity is not available *from the spelling*, which is why round 5 stopped asking
+    //   the spelling.** Pairing each delete with the write that would have covered it is precisely what
+    //   the aliasing case makes invisible — `a.txt ` and `a.txt` look like different paths, which is the
+    //   bug. The rule that *can* tell them apart is the per-delete resolution check further down: it
+    //   asks the filesystem which file a delete addresses and holds back only that one. This blanket
+    //   rule stays as the coarse backstop for shapes resolution cannot answer — a device name resolves
+    //   to `\\?\NUL`, which is not a file any checkpoint entry can collide with — so the two are
+    //   complementary, not redundant.
     //
-    // The widest destructive shape a planted manifest still has is **not** this one: an emptied
+    // **One other destructive shape a planted manifest still has, and it is NOT the widest.** An emptied
     // `"files": {}` turns a whole-tree revert into "delete every file", with no writes to stand down and
-    // no error. Pre-existing and semantically defensible — an empty checkpoint is a legal capture of an
-    // empty folder — and `checkpoint_preview_revert` shows the delete count before the user confirms.
+    // no error; measured, an empty checkpoint against a five-file tree gives `applied: 5, skipped: []`
+    // and no survivors. Bigger blast radius than anything else here — but the widest shape is measured by
+    // *reach*, not by count, and on reach this one is the narrower of the two: it needs the user to
+    // confirm a whole-tree revert whose `checkpoint_preview_revert` says "delete 5 files, restore 0", and
+    // an empty checkpoint is a legal capture of an empty folder, so refusing it would refuse a real one.
+    //
+    // The wider shape was the **resolution collision** below: one planted key, one live file, no reliance
+    // on the user confirming a mass delete, reachable through *cherry*-revert where the preview shows a
+    // single file — and it destroys a file the attacker names. It is closed in this function as of round
+    // 5. (Round 4's comment here asserted the opposite ranking, which was wrong on both halves: the
+    // alias case is not "not this one", and it was not then closed. Recorded so the correction is
+    // visible rather than quietly swapped.) The empty-`files` shape is its own ticket.
+    //
     // The condition is a property of the **checkpoint**, not of this plan. Round 3 keyed it on
     // `report.skipped`, which reads "some write failed" — and a *cherry-revert* plan contains no write
     // at all, so nothing could be skipped and the stand-down never armed:
@@ -177,7 +204,73 @@ pub fn execute_restore(
 
     match hold {
         None => {
+            // **CPE-1823 round 5 — ask the premise of the FILE, not of the spelling.**
+            //
+            // Every rule above this line keys on how an entry is *spelled*, and the hazard is not a
+            // spelling. `A.txt` and `a.txt` both pass [`safe_segments`] — neither is a device name,
+            // neither ends in a dot or space — so the blanket stand-down's filter is empty and nothing
+            // arms, while on a case-folding volume the two are one file. Measured through the registered
+            // commands before this check existed:
+            //
+            // ```text
+            // CMD revert[case-alias]     -> applied=2 skipped=0; a.txt = Err(NotFound)
+            // CMD revert_one[case-alias] -> applied=1 skipped=0; a.txt = Err(NotFound)
+            // ```
+            //
+            // Byte-for-byte the round-3 harm with `A.txt` substituted for `a.txt `. **No name-based rule
+            // can see it**: both spellings are legal on every platform, so refusing either would break a
+            // legitimate capture on the platform it came from — the objection that (correctly) killed the
+            // upstream name-refusal in round 4. The problem is not the name.
+            //
+            // So this asks [`crate::fsutil::confined_to`]'s own principle, applied one level up: *assert
+            // on the resolved path, never on the spelling that produced it.* A delete's whole
+            // justification is "this path is not in the checkpoint". Asked of the spelling that can be
+            // true while the *file* it addresses is one the checkpoint holds under a different spelling —
+            // and then the revert destroys the very content it exists to protect. Resolve both sides and
+            // the question answers itself.
+            //
+            // **What this subsumes without enumerating any of it:** trailing space, trailing dot, case
+            // folding, 8.3 short names, Unicode-folding volumes, and — the leg that is nothing to do with
+            // Windows — a directory link inside the tree giving one file two legal spellings on Linux and
+            // macOS too (`sub/f.txt` and `alias/f.txt`, both of which `confined_to` admits, correctly,
+            // because both resolve inside the tree). Whatever produces the next one is covered as well,
+            // because the check never looks at how the path is written.
+            //
+            // **It fixes cherry-revert for free**, which is the shape round 4 had to key on the whole
+            // checkpoint to reach: the collision is visible in `checkpoint` versus this one delete, with
+            // no write anywhere in the plan for a plan-outcome rule to notice.
+            //
+            // **And it refuses nothing by name**, so a legitimate Linux capture stays as usable here as
+            // it was: only a delete whose resolved target *is* a checkpoint entry is held back, and only
+            // that one.
+            //
+            // Cost, measured and accepted rather than optimised: one `canonicalize` per checkpoint key
+            // plus one per delete, computed only when the plan actually contains a delete. On the
+            // measured numbers the textual pass over 20,000 keys is ~32 ms in a debug build and is
+            // dwarfed by these walks — so the honest statement is that a large revert pays a resolution
+            // walk per entry, on a destructive operation, on local disk. Unmeasured against a network
+            // share, same caveat as [`safe_target`]'s.
+            let checkpoint_lands_on: HashMap<PathBuf, &String> = if deletes.is_empty() {
+                HashMap::new()
+            } else {
+                checkpoint.keys().filter_map(|key| landing(dest_root_path, key).map(|at| (at, key))).collect()
+            };
             for action in &deletes {
+                let collides = landing(dest_root_path, &action.path)
+                    .and_then(|at| checkpoint_lands_on.get(&at).copied())
+                    .filter(|key| key.as_str() != action.path.as_str());
+                if let Some(key) = collides {
+                    report.skipped.push((
+                        action.path.clone(),
+                        format!(
+                            "not deleted: this path resolves to the same file as the checkpoint entry \
+                             {key:?}, so \"this file is not in the checkpoint\" is true of the spelling \
+                             but false of the file — deleting it would destroy content the checkpoint \
+                             holds"
+                        ),
+                    ));
+                    continue;
+                }
                 match apply_delete(action, dest_root_path) {
                     Ok(()) => report.applied += 1,
                     Err(reason) => report.skipped.push((action.path.clone(), reason)),
@@ -275,18 +368,20 @@ pub(crate) fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
 /// is — but it does mean the same manifest is legal on one machine and not another: the round-trip
 /// asymmetry is *reduced* by these gates, not eliminated.
 ///
-/// **The member of this class that is still open, so nobody reads the above as "the class is shut":**
-/// a case-sensitive capture holding both `A.txt` and `a.txt` still collapses onto one file when restored
-/// to a case-insensitive volume — two distinct manifest entries, one surviving file, no error. Same
-/// shape as the trailing-space case and not closed here: it is not a *name* this predicate can look at,
-/// since either name alone is perfectly legal and only the pair is a problem, so catching it means a
-/// collision check across the whole manifest rather than a per-segment rule. Pre-existing, out of scope
-/// for CPE-1823, and written down rather than left for the next reader to rediscover.
-/// How many blocking entries a held-back-delete reason names before falling back to a count. Enough to
-/// identify the cause without turning one skipped path's reason into a wall of text when a whole
-/// checkpoint is unrestorable.
-const NAMED_CAUSES: usize = 3;
-
+/// **Where this predicate stops, so nobody reads it as "the class is shut".** Rounds 2–4 recorded a
+/// remaining member here — a capture holding both `A.txt` and `a.txt` collapsing onto one file on a
+/// case-folding volume — as "pre-existing, out of scope". That framing was **wrong twice** and is
+/// corrected rather than deleted, because getting it wrong is what cost round 5. It was not one case
+/// class but two, and the second is strictly worse: a **single** planted key — `A.txt` against a live
+/// `a.txt` — needs no second capture entry, destroys a specific named file the checkpoint does hold,
+/// and reaches through cherry-revert where nothing else in this engine can see it.
+///
+/// Both are now closed, and **not here**: no name-based predicate can close them, because `A.txt` and
+/// `a.txt` are legal on every platform and refusing either would break a legitimate capture on the
+/// machine it came from. They are closed at the *resolution* level instead — [`landing`] and its two
+/// callers in [`execute_restore`] and [`apply_write`]. This predicate keeps only what resolution cannot
+/// answer: a device name resolves to `\\?\NUL`, which no checkpoint entry can collide with, and a
+/// trailing-dot name may address a file no entry names either.
 fn win32_addresses_a_different_path(seg: &str) -> Option<String> {
     if !cfg!(windows) {
         return None;
@@ -305,6 +400,15 @@ fn win32_addresses_a_different_path(seg: &str) -> Option<String> {
     }
     None
 }
+
+/// How many blocking entries a held-back-delete reason names before falling back to a count. Enough to
+/// identify the cause without turning one skipped path's reason into a wall of text when a whole
+/// checkpoint is unrestorable.
+///
+/// (Sits below the function on purpose: dropped in between `win32_addresses_a_different_path`'s doc
+/// block and its signature, it silently *stole* that doc — rustdoc rendered four rounds of argument on a
+/// `usize` and left the function undocumented.)
+const NAMED_CAUSES: usize = 3;
 
 /// Rebuild the real, validated target path under `root` from `rel`'s `/`-segments via [`Path::join`]
 /// (portable — never string concatenation), or an error if `rel` escapes `root`. `pub(crate)` so sibling
@@ -333,15 +437,55 @@ pub(crate) fn safe_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
     // walking up to the nearest ancestor that does — which is why `restore` can still be handed a
     // destination it is about to create, provided the destination itself exists by the time this runs.
     //
-    // **Cost, recorded so it is a known trade rather than a surprise:** this makes every `safe_target`
-    // call canonicalise, so a 10k-file revert is 10k+ canonicalise walks, plus an ancestor walk for each
-    // name that does not exist yet. The right trade for a destructive operation on local disk, but it is
-    // unmeasured against a network share — worth one run against SMB or the QNAP before someone meets it
-    // on a slow mount.
+    // **Cost, recorded so it is a known trade rather than a surprise, and counted honestly.** Every
+    // `safe_target` call canonicalises, plus an ancestor walk for each name that does not exist yet.
+    // The per-entry multiplier is no longer 1: `snapshot_capture::restore` resolves each entry **twice**
+    // (pass 1 for the abort decision, pass 2 immediately before its own write — round 4), so a
+    // 10k-entry restore is 20k+ walks, not 10k+; and `execute_restore` adds [`landing`] resolutions on
+    // top — one per checkpoint key and one per delete, but only when the plan contains a delete
+    // (round 5). The textual rules are not the cost: `safe_segments` over 20,000 keys measured ~32 ms
+    // in an unoptimised debug build, which these walks dwarf, so there is nothing to cache there.
+    // The right trade for a destructive operation on local disk, but still unmeasured against a network
+    // share — worth one run against SMB or the QNAP before someone meets it on a slow mount.
     if !crate::fsutil::confined_to(&p, root) {
         return Err(format!("escapes dest_root: {rel:?} resolves outside {}", root.display()));
     }
     Ok(p)
+}
+
+/// Where `rel` **lands** under `root`: the file it addresses as the filesystem resolves it, rather than
+/// the spelling that produced it (CPE-1823 round 5). `None` when nothing answers to it yet.
+///
+/// This is the identity half of the same principle [`crate::fsutil::confined_to`]'s doc states for
+/// containment — *assert on the resolved path, never on the spelling* — and it exists because the
+/// spelling is structurally unable to answer the question `execute_restore` needs. `A.txt` and `a.txt`
+/// are both perfectly legal names on **every** platform, so no per-name rule may refuse either; on a
+/// case-folding volume they are nonetheless one file. Trailing spaces, trailing dots, 8.3 short names,
+/// Unicode-folding volumes and a directory link inside the tree are all the same shape, and the next one
+/// will be too. Resolving both sides and comparing costs nothing in enumeration and covers all of them.
+///
+/// **Deliberately not a safety check and deliberately not [`safe_target`].** It answers "which file is
+/// this?", not "may we touch it?" — the escape question is `safe_target`'s and stays there. So the
+/// spellings `safe_target` refuses are *still resolved* here (that is the whole point: `a.txt ` has to
+/// resolve to `a.txt` for the collision to be visible), and only the shapes that are not identity
+/// questions at all are declined: an absolute path, an empty segment, `.` and `..`. Those are escapes,
+/// answered by `safe_target`, and canonicalising them here would put this helper in the containment
+/// business by accident.
+///
+/// Returning `None` is always the safe direction for its callers: an unresolvable path yields no
+/// collision, and the action then faces `safe_target`'s judgement exactly as before.
+pub(crate) fn landing(root: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() || Path::new(rel).is_absolute() {
+        return None;
+    }
+    let mut p = root.to_path_buf();
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return None;
+        }
+        p.push(seg);
+    }
+    fs::canonicalize(&p).ok()
 }
 
 /// Number of `/`-separated segments in `rel` — used only to order deletes deepest-first. A malformed
@@ -373,6 +517,46 @@ fn apply_write(
     let blob = crate::snapshot_capture::blob_source(blobs_dir, &state.hash)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    // **CPE-1823 round 5 — a destructive NON-delete, structurally outside the delete stand-down.**
+    // [`RestoreOp`] has three variants and every rule before this one guarded the third. A single
+    // `Create` for `PAYROLL.CSV` against a live `payroll.csv` rewrote the user's file and reported
+    // complete success — one action, nothing skipped, no delete anywhere to stand down:
+    //
+    // ```text
+    // R4-OVERWRITE report = RestoreReport { applied: 1, skipped: [] }
+    //              payroll.csv = "ATTACKER CHOSEN BYTES"
+    // ```
+    //
+    // The rule is about the op's **premise**, not about the name — which is what lets it be strict
+    // without refusing any spelling. `plan_restore` emits `Create` only for a path present in the
+    // checkpoint and absent from the scan of the live tree. If something already answers to that name,
+    // the plan's reading of the tree and the filesystem's resolution disagree, and that disagreement is
+    // the aliasing signal itself. `Overwrite` is untouched: it means "this file is there and its content
+    // differs", so writing onto an existing file is exactly what it is for.
+    //
+    // Also the reason two `Create`s that collapse onto one file cannot be applied as "complete success":
+    // the first writes, the second then finds its target occupied and is refused with a reason, rather
+    // than silently overwriting a sibling entry and counting two.
+    //
+    // **Placed here, immediately before the copy, not in a pre-pass** — round 4's lesson, paid for once
+    // already: a verdict reached before `create_dir_all` and `blob_source` is a verdict the destination
+    // can invalidate before the write it is protecting. Nothing may sit between this and `fs::copy`.
+    //
+    // What remains is the final-component link swap in the gap between this check and the copy —
+    // narrow, and **reducible**, not irreducible: this crate already ships the pattern that closes it
+    // (`batch_media`'s "never follow a link at the final component" open, `O_NOFOLLOW` on Unix and
+    // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, with no libc dependency, already used by
+    // `batch_execute`). Adopting it means opening the target and writing through the handle instead of
+    // `fs::copy`, which changes attribute-preserving behaviour on Windows — its own ticket, deliberately
+    // not folded in here.
+    if action.op == RestoreOp::Create && fs::symlink_metadata(&target).is_ok() {
+        return Err(format!(
+            "this entry restores a file the plan read as absent, but {} already answers to that name — \
+             the spelling resolves to a file the scan did not see under it, and writing would overwrite \
+             content nothing in this plan accounted for",
+            target.display()
+        ));
     }
     fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
     Ok(())
@@ -775,6 +959,175 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+
+    /// **CPE-1823 round 5 — the stand-down keyed on SPELLING; the hazard is RESOLUTION.** `A.txt` and
+    /// `a.txt` both pass `safe_segments` — neither is a device name, neither ends in a dot or space — so
+    /// round 4's `checkpoint.keys().filter(…is_err())` filter is **empty** and nothing arms. On a
+    /// case-insensitive volume the two are one file, so `plan_restore` emits Create `A.txt` +
+    /// Delete `a.txt`, the Create lands *on* the user's file and the Delete removes it. Measured through
+    /// the registered command before this fix:
+    ///
+    /// ```text
+    /// CMD revert[case-alias] -> applied=2 skipped=0; a.txt = Err(NotFound)
+    /// ```
+    ///
+    /// Byte-for-byte the round-3 harm with `A.txt` substituted for `a.txt `. No name-based rule can see
+    /// it: both spellings are legal on **every** platform, so the problem is not the name.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_case_aliased_entry_never_destroys_the_file_it_resolves_onto() {
+        const LIVE: &[u8] = b"the user's only copy of their real content";
+        let root = scratch("cpe1823-case-root");
+        let store = scratch("cpe1823-case-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("deadbeef"), b"attacker bytes").unwrap();
+
+        fs::write(root.join("a.txt"), LIVE).unwrap();
+        // Fixture is inert unless this volume really folds case: on a case-SENSITIVE mount `A.txt` is a
+        // different file, the Create is legitimate, and this test certifies nothing.
+        assert_eq!(
+            fs::read(root.join("A.txt")).ok().as_deref(),
+            Some(LIVE),
+            "fixture is inert: `A.txt` must already address the user's `a.txt` on this volume, or this \
+             test certifies nothing"
+        );
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("A.txt".to_string(), crate::restore_plan::FileState::new("deadbeef", 14));
+        let current = scan_dir(&root.to_string_lossy()).unwrap();
+        let plan = plan_restore(&checkpoint, &current);
+        assert_eq!(plan.len(), 2, "the premise: a Create for `A.txt` and a Delete for `a.txt`");
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert_eq!(
+            fs::read(root.join("a.txt")).ok().as_deref(),
+            Some(LIVE),
+            "HARM: the revert destroyed the user's file via a case alias — report was {report:?}"
+        );
+        assert!(
+            report.skipped.iter().any(|(p, _)| p == "A.txt"),
+            "the aliasing write must be reported as skipped, not applied: {report:?}"
+        );
+        assert!(
+            report.skipped.iter().any(|(p, why)| p == "a.txt" && why.contains("not deleted")),
+            "and the paired delete must be held back and said so: {report:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1823 round 5 — a destructive NON-delete, structurally outside the delete stand-down.** A
+    /// single `Create` for `PAYROLL.CSV` silently rewrites the user's `payroll.csv`. This is the shape
+    /// `checkpoint_revert_one` produces for a checkpoint key the current scan does not hold under that
+    /// spelling: a one-action plan, no delete to stand down, and `RestoreOp` has three variants where the
+    /// round-4 stand-down guarded one. Measured before the fix:
+    ///
+    /// ```text
+    /// R4-OVERWRITE report = RestoreReport { applied: 1, skipped: [] }
+    ///              payroll.csv = "ATTACKER CHOSEN BYTES"
+    /// ```
+    ///
+    /// The rule that catches it is about the *premise*, not the name: a `Create` means the plan read this
+    /// path as absent. If something already answers to it, the plan's reading of the tree and the
+    /// filesystem's resolution disagree — which is the aliasing signal itself.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_lone_create_never_silently_overwrites_the_file_it_resolves_onto() {
+        const LIVE: &[u8] = b"the user's real payroll";
+        let root = scratch("cpe1823-overwrite-root");
+        let store = scratch("cpe1823-overwrite-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("deadbeef"), b"ATTACKER CHOSEN BYTES").unwrap();
+
+        fs::write(root.join("payroll.csv"), LIVE).unwrap();
+        assert_eq!(
+            fs::read(root.join("PAYROLL.CSV")).ok().as_deref(),
+            Some(LIVE),
+            "fixture is inert: `PAYROLL.CSV` must already address the user's file on this volume, or \
+             this test certifies nothing"
+        );
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("PAYROLL.CSV".to_string(), crate::restore_plan::FileState::new("deadbeef", 21));
+        let plan = vec![RestoreAction { path: "PAYROLL.CSV".to_string(), op: RestoreOp::Create }];
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert_eq!(
+            fs::read(root.join("payroll.csv")).ok().as_deref(),
+            Some(LIVE),
+            "HARM: a lone Create rewrote the user's file under an aliased spelling — report was {report:?}"
+        );
+        assert_eq!(report.applied, 0, "nothing may be counted applied: {report:?}");
+        assert_eq!(report.skipped.len(), 1, "and it must be reported: {report:?}");
+        assert_eq!(report.skipped[0].0, "PAYROLL.CSV");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1823 round 5, and the reason the fix is at the RESOLUTION level rather than the spelling
+    /// level: this leg has nothing to do with Windows.** A directory link inside the reverted tree gives
+    /// one file two perfectly legal spellings on *every* platform — `sub/f.txt` and `alias/f.txt` — and
+    /// `confined_to` admits both, correctly, because both resolve inside the tree.
+    ///
+    /// A delete's whole justification is "this path is not in the checkpoint". Asked of the *spelling*
+    /// that is true; asked of the *file* it is false, and the checkpoint's own copy is deleted. This is
+    /// the cherry-revert shape (`checkpoint_revert_one`), so there is no write in the plan to skip and
+    /// nothing for a plan-outcome rule to notice.
+    #[test]
+    fn cpe_1823_a_delete_that_resolves_onto_a_checkpoint_entry_is_held_back() {
+        const LIVE: &[u8] = b"a file the checkpoint holds under its other spelling";
+        let root = scratch("cpe1823-aliasdel-root");
+        let store = scratch("cpe1823-aliasdel-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub").join("f.txt"), LIVE).unwrap();
+
+        let link = root.join("alias");
+        if !crate::fsutil::make_dir_link(&root.join("sub"), &link) {
+            crate::skip_notice!(
+                "[CPE-1823] SKIPPED the resolution-alias delete leg: this machine could not create a \
+                 directory link at {} (no symlink privilege and no junction). NOTHING on this run \
+                 covered a delete whose RESOLVED target is a file the checkpoint holds.",
+                link.display()
+            );
+            return;
+        }
+        // Fixture is inert unless the two spellings really are one file.
+        assert_eq!(
+            fs::read(root.join("alias").join("f.txt")).ok().as_deref(),
+            Some(LIVE),
+            "fixture is inert: `alias/f.txt` must address the same file as `sub/f.txt`, or this test \
+             certifies nothing"
+        );
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("sub/f.txt".to_string(), crate::restore_plan::FileState::new("deadbeef", 14));
+        // Exactly what `restore_plan::revert_one("alias/f.txt", …)` yields: the checkpoint has no key of
+        // that spelling, so the file reads as "added since the checkpoint" and is planned for deletion.
+        let plan = vec![RestoreAction { path: "alias/f.txt".to_string(), op: RestoreOp::Delete }];
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert_eq!(
+            fs::read(root.join("sub").join("f.txt")).ok().as_deref(),
+            Some(LIVE),
+            "HARM: the revert deleted a file the checkpoint holds, reached under its other spelling — \
+             report was {report:?}"
+        );
+        assert_eq!(report.applied, 0, "nothing may be counted applied: {report:?}");
+        assert!(
+            report.skipped.iter().any(|(p, why)| p == "alias/f.txt" && why.contains("not deleted")),
+            "and the held-back delete must be reported with its reason: {report:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
     }
 
     #[test]
