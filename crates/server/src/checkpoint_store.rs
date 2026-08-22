@@ -1363,9 +1363,23 @@ mod tests {
     /// this ticket exists: `checkpoint_revert_one` never consults the preview, so a check that guarded
     /// only the preview would guard the one route nobody is attacked through.
     ///
-    /// This is a cost-raiser, not a boundary, and the test says so by scope: it pins the one-field
-    /// tamper only. The two-field tamper is the previous test's job, and it is the stand-down — not this
-    /// count — that makes that one harmless.
+    /// **What this test does NOT show, spelled out because an earlier version of this doc claimed the
+    /// opposite.** It called the count a "cost-raiser". It is not one: `file_count` is
+    /// `#[serde(default)] Option<usize>` and the check is gated on `Some`, so an attacker who also
+    /// **deletes the `"file_count"` line** — no number rewritten, just more text removed — bypasses it
+    /// entirely, and the removed entries become `Delete`s again:
+    ///
+    /// ```text
+    /// 4 of 5 entries removed + "file_count" key deleted, each leg on a FRESH five-file tree
+    ///   checkpoint_revert_one(f3) -> Ok(RevertOutcome { applied: 1, skipped: [] })  survivors f1,f2,f4,f5
+    ///   checkpoint_revert         -> Ok(RevertOutcome { applied: 4, skipped: [] })  survivors ["f1.txt"]
+    /// ```
+    ///
+    /// So the scope of this test is exactly the scope of the check: a tamper that removes entries and
+    /// **leaves the count behind**. That is a consistency check on a possibly-edited record, not a bar
+    /// an attacker has to clear. The Critical shape stays closed anyway, by the stand-down — which does
+    /// not consult the count, so `files: {}` with the count deleted is still held back — and that is the
+    /// previous test's job, not this one's.
     #[test]
     fn cpe_1847_a_files_map_edited_out_from_under_its_own_count_is_refused_on_every_route() {
         const CAPTURED: &[u8] = b"the user's five files";

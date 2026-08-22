@@ -724,16 +724,48 @@ struct PersistedManifest {
     /// tamper — deleting text and nothing else — is refused at load on every route rather than silently
     /// re-read as a smaller tree.
     ///
-    /// **What it is NOT.** It lives in the same hand-editable JSON as the map it describes, so an
-    /// attacker who edits both is not stopped, and it is therefore never allowed to *authorise*
-    /// anything: [`crate::revert_engine::execute_restore`]'s zero-entry stand-down does not consult it,
-    /// and a manifest asserting `file_count: 0` unlocks no deletes. Only a keyed signature would be a
-    /// boundary, and this store has no key. Recorded as a cost-raiser, deliberately not as a guard.
+    /// **What it is NOT, stated at full strength because the first version of this record overstated
+    /// it.** It lives in the same hand-editable JSON as the map it describes, so an attacker who edits
+    /// both is not stopped — and, worse than that framing suggested, **editing both is not even
+    /// required**. The field is `Option` with `#[serde(default)]` and the cross-check in
+    /// [`load_manifest`] is gated on `Some`, because manifests written before this field existed must
+    /// keep loading. Deleting the `"file_count"` line is therefore exactly as cheap as deleting entries
+    /// from `files`, and the check simply does not run. Measured through the registered commands, with
+    /// no number rewritten anywhere:
+    ///
+    /// ```text
+    /// 4 of 5 entries removed + "file_count" key deleted, each leg on a FRESH five-file tree
+    ///   checkpoint_revert_one(f3) -> Ok(RevertOutcome { applied: 1, skipped: [] })  survivors f1,f2,f4,f5
+    ///   checkpoint_revert         -> Ok(RevertOutcome { applied: 4, skipped: [] })  survivors ["f1.txt"]
+    /// ```
+    ///
+    /// So this raises **no** cost against an attacker who knows the field exists; it catches a tamper
+    /// that removes entries and leaves the count behind, and nothing else. It is a **consistency check
+    /// on a record that may have been edited**, not a cost-raiser and not a guard — an earlier draft
+    /// called it the former in three places, which was false and is corrected rather than softened.
+    ///
+    /// It is correspondingly never allowed to *authorise* anything:
+    /// [`crate::revert_engine::execute_restore`]'s zero-entry stand-down does not consult it, and a
+    /// manifest asserting `file_count: 0` unlocks no deletes. That is what keeps the Critical shape
+    /// closed regardless of the above — `files: {}` with the `file_count` line deleted is still held
+    /// back, because emptiness is read from the map itself.
+    ///
+    /// **On the keyed-signature ceiling, precisely.** The repo does hold signing keys — the updater
+    /// pubkey in `src-tauri/tauri.conf.json` and `TAURI_SIGNING_PRIVATE_KEY` plus a catalog key in
+    /// `.github/workflows/release.yml` — but every one of them is a **publisher** key held in CI
+    /// secrets, signing centrally-produced artifacts. A checkpoint manifest is written on the user's own
+    /// machine at capture time, so no publisher key can ever sign it. The honest ceiling is therefore
+    /// "no key that helps against a **same-user** attacker", not "no key at all". Note the one vector
+    /// where a key *would* be a real boundary and is not ruled out by that argument: for the
+    /// store-synced-or-copied-from-another-machine case this module's own threat premise names, a
+    /// **per-machine key in the OS keychain** would make a manifest from elsewhere detectable. Not
+    /// attempted here; recorded so the ceiling is not read as lower than it is.
     ///
     /// `Option`, `#[serde(default)]`: manifests written before this field existed are absent-not-zero
     /// and must keep loading — refusing them would destroy access to every checkpoint already on disk,
-    /// which is the over-tightening this ticket's sibling spent four rounds learning to avoid. Every
-    /// manifest written from now on carries it.
+    /// which is the over-tightening this ticket's sibling spent four rounds learning to avoid. That
+    /// exemption is exactly what costs the check its teeth, above; the trade was made knowingly and in
+    /// that direction. Every manifest written from now on carries the field.
     #[serde(default)]
     file_count: Option<usize>,
 }

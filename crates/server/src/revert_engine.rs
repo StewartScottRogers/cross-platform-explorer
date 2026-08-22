@@ -242,12 +242,51 @@ pub fn execute_restore(
         // A **partially** emptied map evades this branch entirely and is strictly wider: removing 4 of 5
         // entries measured `applied: 4, survivors: ["f1.txt"]`. No rule in this engine can close it —
         // the surviving entry makes the checkpoint look ordinary, and the plan it produces is exactly
-        // what a real revert of a real checkpoint looks like. It is met one layer up, at the only place
-        // the tamper is visible: `load_manifest`'s `file_count` cross-check, which refuses a `files` map
-        // whose size disagrees with the count the capture wrote. That raises the cost from "delete text"
-        // to "delete text and rewrite a number", which is a real bar for the cheapest tamper and
-        // explicitly not a security boundary — a keyed signature is the only thing that would be, and
-        // that is not something this store has.
+        // what a real revert of a real checkpoint looks like. It is *detected* one layer up, at the only
+        // place the tamper is visible: `load_manifest`'s `file_count` cross-check, which refuses a
+        // `files` map whose size disagrees with the count the capture wrote.
+        //
+        // **That check raises no cost, and an earlier draft of this comment claimed it did.** The claim
+        // was "delete text becomes delete text and rewrite a number". It is false, because the field is
+        // `#[serde(default)] Option<usize>` and the cross-check is gated on `Some` — manifests written
+        // before the field existed must keep loading, so an absent count is exempt by design. The
+        // attacker's cheapest partial tamper is therefore **delete text and delete more text**: remove
+        // entries from `files`, remove the `"file_count"` line, and the check never runs. Measured
+        // through the registered commands with no number rewritten anywhere:
+        //
+        // ```text
+        // 4 of 5 entries removed + "file_count" key deleted, each leg on a FRESH five-file tree
+        //   checkpoint_revert_one(f3) -> Ok(RevertOutcome { applied: 1, skipped: [] })  survivors f1,f2,f4,f5
+        //   checkpoint_revert         -> Ok(RevertOutcome { applied: 4, skipped: [] })  survivors ["f1.txt"]
+        // ```
+        //
+        // (The whole-tree figure is **4**, not the 3 first reported in review: a 3 is what a shared
+        // fixture yields when the cherry-revert leg has already taken `f3` out. Re-measured on a fresh
+        // tree per leg, because this record has already paid once for repeating a number instead of
+        // running it.)
+        //
+        // So `file_count` stops only an attacker who does not know the field exists, and the
+        // partial-tamper residual is **cheaper than the first version of this record said**. Stated here
+        // rather than softened, on this ticket's own standard — see `snapshot_prune`'s
+        // `cpe_1847_retention_prunes_by_where_a_manifest_is_not_by_what_it_calls_itself`, where a false
+        // claim of mine was corrected for exactly this reason: a false claim in a security record is
+        // worse than an honest smaller one.
+        //
+        // **The security posture is unchanged by that correction, and that was measured too, not
+        // assumed.** The Critical shape this ticket exists to close — a zero-entry checkpoint — is
+        // closed by the branch above, which does not consult `file_count` at all. With the map emptied
+        // *and* the `"file_count"` line deleted, both routes still stand down completely:
+        //
+        // ```text
+        // files: {} + "file_count" key deleted
+        //   checkpoint_revert_one(f3) -> applied: 0, skipped: 1   all five survive
+        //   checkpoint_revert         -> applied: 0, skipped: 5   all five survive
+        // ```
+        //
+        // Emptiness is read from the map itself, so nothing the attacker does to the count reaches it.
+        // What is left standing is the partial tamper, and no rule available here closes it — a keyed
+        // signature would, and see the field's own doc for why none of the repo's existing keys is that
+        // key.
         //
         // # Reporting
         //

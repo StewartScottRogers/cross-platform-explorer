@@ -148,17 +148,64 @@ precisely because cherry-revert never consults the preview, so a check placed on
 the one route nobody is attacked through. `Option` + `#[serde(default)]`: absent is not zero, so every
 manifest already on disk keeps working.
 
-Its real job is the **partial** tamper, where no absolute rule exists: it turns "delete text" into
-"delete text and rewrite a number". The zero-entry stand-down does **not** consult it, and a manifest
-asserting `file_count: 0` unlocks nothing — layering it the other way would have handed the two-field
-tamper the win.
+Its scope is the **partial** tamper, where no absolute rule exists. The zero-entry stand-down does **not**
+consult it, and a manifest asserting `file_count: 0` unlocks nothing — layering it the other way would
+have handed the two-field tamper the win.
+
+**Correction (round 2, and it is my claim being corrected, not the reviewer's).** I described this in
+three places as raising the cost "from delete text to delete text and rewrite a number". **That is false.**
+The field is `#[serde(default)] Option<usize>` and the check is gated on `Some`, because manifests written
+before the field existed must keep loading. So the cheapest partial tamper is not "delete text and rewrite
+a number" — it is **delete text and delete more text**: remove entries from `files`, remove the
+`"file_count"` line, and the check never runs. Re-measured here through the registered commands, each leg
+on a fresh five-file tree, with no number rewritten anywhere:
+
+```text
+4 of 5 entries removed + "file_count" key deleted
+  checkpoint_revert_one(f3) -> Ok(RevertOutcome { applied: 1, skipped: [] })   survivors f1,f2,f4,f5
+  checkpoint_revert         -> Ok(RevertOutcome { applied: 4, skipped: [] })   survivors ["f1.txt"]
+```
+
+The whole-tree figure is **4**, not the 3 first reported in review — a 3 is what a shared fixture gives
+once the cherry-revert leg has already taken `f3`. Measured rather than copied, since this record has
+already paid once for repeating a number instead of running it.
+
+So plainly: **`file_count` raises no cost against an attacker who knows the field exists.** It stops one
+who does not, and it catches a tamper that removes entries and leaves the count behind. It is a
+consistency check on a record that may have been edited — not a cost-raiser, not a bar, not a boundary.
+The partial-tamper residual is **cheaper than the first version of this Work Log and the PR body said**.
+Corrected in all four places (`revert_engine.rs`, the `file_count` field doc, the `checkpoint_store` test
+doc, and here) rather than softened, on this ticket's own standard: a false claim in a security record is
+worse than an honest smaller one — which is exactly why the retention claim above was corrected too. My
+own field doc already said "an attacker who edits both is not stopped", so the record had been
+contradicting itself.
+
+**The security posture is unchanged, and that was measured too rather than asserted.** The Critical shape
+is closed by the stand-down, which does not consult the count at all:
+
+```text
+files: {} + "file_count" key deleted
+  checkpoint_revert_one(f3) -> applied: 0, skipped: 1   all five survive
+  checkpoint_revert         -> applied: 0, skipped: 5   all five survive
+```
+
+**The keyed-signature ceiling, restated precisely.** "This store has no key" was wrong as written. The
+repo does hold signing keys — `src-tauri/tauri.conf.json`'s updater pubkey, and
+`TAURI_SIGNING_PRIVATE_KEY` plus a catalog key in `.github/workflows/release.yml`. Every one is a
+**publisher** key in CI secrets signing centrally-produced artifacts, and a checkpoint manifest is written
+on the user's own machine at capture time, so no publisher key can sign it — the conclusion holds, but the
+honest statement is "no key that helps against a **same-user** attacker". And one vector that argument
+does not dispose of: for the store-synced-or-copied-from-another-machine case this ticket's own threat
+premise names, a **per-machine key in the OS keychain would be a real boundary**. Not attempted here;
+recorded so the ceiling is not read as lower than it is.
 
 **Rejected, with reasons, so they are not re-proposed:** refusing `files: {}` at load (refuses a real
 capture — red-proofed, four tests); an all-deletes-no-writes *threshold* (an attacker just needs a
 smaller tree; thresholds are not boundaries); corroborating the entry set against `index.json`'s blob
 refcounts (a real independent witness, but equally hand-editable — CPE-1844's subject — expensive, and
 blind whenever a manifest's blobs are shared, with false positives on any pre-existing refcount drift);
-a keyed signature (the only actual boundary, and this store has no key — recorded as the honest ceiling).
+a keyed signature (the only actual boundary — see the round-2 correction below for the precise ceiling,
+which is "no key that helps against a same-user attacker", not "no key at all").
 
 **Structural surfacing left to CPE-1845 as instructed.** No field was added to `OpResult`/`RevertOutcome`.
 The coordination is deliberate reuse: every hold-back here goes on the existing `"not deleted:"` prefix
@@ -171,7 +218,7 @@ Walked `PersistedManifest`'s aggregate properties rather than trusting the ticke
 | # | Shape | Measured effect | Disposition |
 |---|---|---|---|
 | 1 | `files` **emptied** | whole-tree delete, `applied=5/1 skipped=0`, both routes | **Fixed** — stand-down (harm impossible); cheap form also refused at load |
-| 2 | `files` **partially** emptied | `applied=4, survivors=["f1.txt"]` — evades any zero-entry rule, strictly wider | **Cheap form fixed** (`file_count`); two-field tamper is the residual, recorded — unclosable without a key |
+| 2 | `files` **partially** emptied | `applied=4, survivors=["f1.txt"]` — evades any zero-entry rule, strictly wider | **NOT fixed — open, and cheaper than round 1 claimed.** `file_count` only *detects* a tamper that leaves the count behind; deleting the `"file_count"` line bypasses it for free (measured). Recorded as the standing residual, unclosable without a per-machine key |
 | 3 | `id` field **≠ filename** | retention decided about a different manifest: pointed at a sibling → `pruned: []`, `kept: [m3, m2, m3]`, tampered manifest immortal; pointed at nothing → the **whole pass** `Err`s and no checkpoint is ever thinned again | **Fixed** — `list_manifests` now derives the id from the filename (`save_manifest` writes it there by construction). Store growth + dead retention, not data loss — see the correction below |
 | 4 | `created_ms` moved | steers `snapshot_retention::thin`; can prune checkpoints the user wanted kept | **Recorded** — no recomputation available (file mtime is equally forgeable and legitimately differs). Same class as CPE-1844 |
 | 5 | `skipped` emptied | **inert today** — nothing reads `PersistedManifest.skipped` after capture | Recorded |
@@ -194,6 +241,13 @@ outcome being removed.
 its checkpoint with `Snapshot::new()` — a zero-entry checkpoint — to exercise delete ordering, and so
 went red against the new rule. Given a real (unchanged) checkpoint entry instead, with a comment saying
 why: leaving it on the attack shape would have made it a test of the bug rather than of ordering.
+
+Noted in review and worth recording, though it needs no action here: that test **never tested its own
+name**, before this change or after. It asserts only `applied == 2` and that both files are gone — it
+never observes ordering, and shallowest-first would pass it identically. The added entry is still a strict
+improvement: it restores the test's ability to run at all, and it now exercises the round-5 case-alias
+resolution pass, which was inert on a zero-entry checkpoint (`checkpoint_lands_on` was built from no
+keys). Making it actually assert ordering is a separate, unrelated ticket.
 
 **Recorded, not fixed:** a manifest whose count disagrees with its list is now unprunable, so one such
 manifest wedges the retention pass until it is removed by hand (`snapshot_prune::apply` propagates
@@ -233,6 +287,16 @@ struct; `ManifestSummary` is not a specta type), so `bindings.gen.ts` is unaffec
 In-app docs: `src/docs/16-checkpoints.md` gains a "When a revert holds its deletions back" subsection
 covering all three hold-back causes and the self-contradicting-manifest refusal. No new `Section`, so
 `sectionDocs.ts` is unchanged.
+
+**Docs corrected in round 2 — they promised something no screen shows.** The first version opened with
+"you are told exactly which cleanups did not happen **and why**". The reasons exist on the wire but **no
+UI renders them**: `CheckpointDialog.svelte` (`:311`, `:172`, `:127`), `AgentTimeline.svelte:813` and
+`CopilotDialog.svelte:299` each show only `skipped {n}`, and the `error` strings are dropped. That is
+CPE-1845's fix, but until it lands the doc was pointing users at a list they cannot find, which makes the
+CPE-1845 gap worse rather than neutral. Softened to what the screen actually shows — a count, plus an
+explicit note that the per-file reason is recorded and a future update will list it — and the same
+overstatement removed from the empty-checkpoint bullet ("listed as held back" → "counted as skipped, left
+where they are"). The rest of the section is genuinely actionable and stands.
 
 **Not verifiable on this machine:** nothing in this ticket is `#[cfg(unix)]`, but CPE-1823's `#[cfg(unix)]`
 legs sit beside this code and the new zero-entry rule runs ahead of them in the same function, so
