@@ -243,3 +243,124 @@ reusable form.
 - `npm run check`: **0 errors, 0 warnings**.
 - Test file after every edit: `loneLF=0` (CRLF intact), `rawESC=0`, no BOM, trailing `\r\n` intact.
 - `scripts/release.ps1` unchanged since round 1 — rounds 2 and 3 touched only the test file.
+
+---
+
+## Work Log — round 4 (Reviewer APPROVED; one defect fixed, three comments corrected)
+
+The independent Reviewer approved PR #991 and recommended merge — reproducing the md5 table to the
+digit, attacking atomicity from four angles I did not try (first fails / second fails / two at once /
+success), and checking CPE-1841's BOM guarantee **positively** by prefixing `EF BB BF` onto all three
+manifests rather than only asserting none is added. It found one defect, which is fixed here.
+
+### The defect: my own ticket's defect, inverted
+
+Make the **first** write fail (read-only `package.json`). Nothing lands, the tree is clean — and the
+message said:
+
+```
+PARTIAL BUMP. Already written at v9.9.9: none. Revert those files before retrying
+```
+
+"Already written: none" plus "revert those files" is a **run-untrue message telling an operator to undo
+nothing** — exactly the class this ticket exists to delete, merely pointing the other way. Benign today,
+which is why it did not block, and wrong for precisely the reason the ticket was filed.
+
+Fixed at the write loop's `catch`: branch on `$written.Count -eq 0` and say
+
+```
+release.ps1: failed writing <path>: <exception> -- No manifest was written; the working tree is
+unchanged and there is nothing to revert. No commit, tag or push happened.
+```
+
+The `PARTIAL BUMP` wording now only appears when a partial bump actually happened.
+
+### The partial-bump path is tested now, not "correct by construction"
+
+I had recorded it as untested. The Reviewer tested it in three lines, so there was no excuse. `runBump`
+gained `readOnly?: "pkg" | "conf" | "cargo"`: chmod `0444` **after** staging, so the plan phase still
+reads the file and the write phase fails on it. The `finally` chmods **back to 0666 before `rmSync`** —
+on Windows a read-only file survives a recursive delete and cleanup throws, which would red whatever ran
+next rather than this test.
+
+Both branches covered:
+
+- **third write fails** (`readOnly: "cargo"`) — `PARTIAL BUMP`, names `package.json` and
+  `tauri.conf.json`, and the report is verified TRUE: those two are at the new version, Cargo.toml is
+  byte-identical.
+- **first write fails** (`readOnly: "pkg"`) — says `No manifest was written`, and asserts the absence of
+  `PARTIAL BUMP`, of `Revert those files`, and of `Already written ... none`; all three manifests
+  byte-identical.
+
+Both assert with a message naming the root case, since `chmod 0444` does not block a write when running
+as root.
+
+**Red-proof by actual reversion:** put the old `$landed = if (...) { "none" } ...` single-message form
+back and re-ran — **exactly 1 test failed**, "does NOT say 'revert those files' when the FIRST write
+fails and nothing landed", and nothing else. Restored and md5-verified byte-exact
+(`99982cb7967496f1ff3ce77ca7ff9435`).
+
+### Three comment corrections — all were inaccurate, none of the code was
+
+1. **The hashtable comment was wrong, though the choice is right.** It claimed the hashtable is used "so
+   PowerShell emits it as ONE object here and the caller's array subexpression sees one element per
+   manifest". Measured under 5.1: `@( pscustomobject; pscustomobject; pscustomobject )` gives `Count=3`
+   too — identical. The hashtable is load-bearing for a different reason: `Write-ManifestVersionPlan`'s
+   parameter is typed `[hashtable]$Plan`, and a `[pscustomobject]` fails argument transformation there.
+   The comment now names **that**. A maintainer who checked the stated claim, found it false, and
+   "corrected" it could have removed the real constraint. The Reviewer's edge cases are recorded with it:
+   `@( $null; ht; ht )` → `Count=3` with `element[0]` null (a null plan does not collapse the array);
+   `@( ht )` → `Count=1` (a future single-manifest variant is safe); and the stray-output hazard **is**
+   real — a function emitting two objects gives `Count=4` and shifts every plan — with the audit result
+   noted, that every expression in the plan function is assigned or inside an `if()`.
+2. **`flat()` does destroy meaning in one case**, and round 2's Work Log offered it as "the reusable
+   form". `/^[ \t]*\|[ \t]?/gm` eats any *legitimate* line-leading `|`: a markdown table
+   `"| package.json | 1d81 |\n| conf | 65cb |"` comes back as `" package.json | 1d81 | conf | 65cb |"`,
+   row boundary silently gone. Nothing asserted in this file depends on a leading `|`, so it is safe
+   here. Now said in the code, so the next reuse is not surprised. **It is not a general-purpose
+   normaliser.**
+3. **The `catch` comment said "everything validated, so this is I/O".** It also wraps **parameter
+   binding** — the Reviewer proved it by swapping in a `pscustomobject` and getting `Cannot process
+   argument transformation on parameter 'Plan'` reported through this catch. Reworded to report the
+   exception rather than assert the disk was at fault. Also added, in the plan-phase header: a
+   **directory** in place of `Cargo.toml` is caught in the **plan** phase (`ReadAllBytes` throws), so
+   atomicity holds and the tree stays pristine — but that throw is a raw .NET exception, with no
+   `release.ps1:` prefix and no statement about tree state. The guarantee is real there; only the wording
+   is not ours.
+
+### A hazard recorded, not fixed
+
+`pwsh` echoes the offending source line, and `release.ps1`'s throw literally contains the phrase
+`No manifest was written -- every `. **If that echo were ever complete, the `/no manifest was written/i`
+assertion would pass off the SCRIPT'S OWN SOURCE TEXT rather than the rendered message.** In the CI
+capture the echo truncates with an ellipsis before the phrase, and 5.1 truncates too, so the assertion is
+honest on both hosts today — but it is one console width or one string reflow away from being
+self-satisfying. Said so in the code, next to the assertion: **the byte-level assertions in that block
+are what carry the real weight; the wording match is corroboration, not proof.**
+
+### What the Reviewer verified that stood up
+
+- **The companion arm works.** It built the fix that arm exists to catch — patched
+  `Write-ManifestVersionPlan` to write nothing at all — and got all five atomicity tests **green** with
+  the companion arm **red** (plus 7 CPE-1841 tests red). A "write nothing, ever" fix genuinely would
+  satisfy every atomicity assertion, and that arm genuinely stops it.
+- **The CI diagnosis, confirmed from the primary log**, not taken on trust: the literal bytes
+  `... found 0. No | manifest was written -- every manifest is validated before any is | written, so ...`,
+  and the same message captured locally under 5.1 wrapping with **no gutter**. Both halves of "5.1 could
+  never reproduce it" directly confirmed. It also ran `flat()` against `[package]`,
+  `[dependencies.somepkg]`, `[lib]` and `[profile.release]` and confirmed the naive pattern destroys all
+  four while the `\x1b` anchor does not.
+- **Host provenance re-checked independently:** no `pwsh`; `~/.dotnet/tools/` holds only `dotnet-dump`
+  and `dotnet-ildasm`; `powershell` is 5.1.26100.9168.
+- **Shipped byte scan:** `release.ps1` `rawESC=0`, no BOM, `loneLF=0`; the test file `rawESC=0` and
+  **zero** non-ASCII bytes; `release.ps1`'s 6 non-ASCII bytes are two pre-existing em dashes, unchanged.
+
+### Round-4 gates (local, Windows PowerShell 5.1 — still no `pwsh` on this machine)
+
+- `npx vitest run` (full): **324 files / 4319 tests passed**, 0 failed (was 4317; +2 partial-bump tests).
+- `npm run check`: **0 errors, 0 warnings**.
+- `src/lib/releaseVersionBump.test.ts` alone: **33 passed** (was 31).
+- Real manifests re-measured after the script edit, on throwaway copies in a scratch repo inside the
+  worktree: `1  1` for each of the three, `loneLF=0`, no BOM, trailing CRLF intact.
+- Both edited files after every edit: `loneLF=0`, `rawESC=0`, no BOM, trailing `\r\n` intact; the test
+  file carries zero non-ASCII bytes.

@@ -163,6 +163,11 @@ function Find-TomlPackageVersionValue {
 # Phase 1 of the bump: read, validate and compute -- never write. Returns a plan (a hashtable of
 # Path / Old / New / Text / Encoding) that the caller hands to Write-ManifestVersionPlan once EVERY
 # manifest has produced one. Any failure throws here, with nothing on disk touched by any manifest.
+#
+# Note the shape of a NON-manifest failure in this phase -- a directory where src-tauri/Cargo.toml
+# should be, say. ReadAllBytes below throws a raw .NET exception: atomicity still holds (we are in
+# the plan phase, so the tree stays pristine), but the message is the CLR's, with no 'release.ps1:'
+# prefix and no statement about tree state. The guarantee is real there; only the wording is not ours.
 function New-ManifestVersionPlan {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -214,9 +219,22 @@ function New-ManifestVersionPlan {
     throw "release.ps1: splice check failed for $Path -- the $What did not read back as $NewVersion. No manifest was written."
   }
 
-  # A hashtable, not a PSCustomObject, so PowerShell emits it as ONE object here and the caller's
-  # array subexpression sees one element per manifest. (Nothing else in this function writes to the
-  # output stream; a stray uncaptured expression would land in the plan array and corrupt it.)
+  # A hashtable, not a PSCustomObject, because Write-ManifestVersionPlan's parameter is typed
+  # [hashtable]$Plan -- a [pscustomobject] fails argument transformation there ('Cannot process
+  # argument transformation on parameter Plan') instead of being written. THAT is what makes the
+  # choice load-bearing.
+  #
+  # It is NOT about array flattening, which an earlier version of this comment claimed. Measured
+  # under Windows PowerShell 5.1: `@( pscustomobject; pscustomobject; pscustomobject )` gives
+  # Count=3 exactly as the hashtable case does; `@( $null; ht; ht )` gives Count=3 with element[0]
+  # simply $null (a null plan does not collapse the array); `@( ht )` gives Count=1, so a future
+  # single-manifest variant is safe. A maintainer who checks a false claim and 'corrects' it could
+  # remove the real constraint, so the real one is named here.
+  #
+  # The stray-output hazard IS real: a function emitting two objects makes the caller's array
+  # Count=4 and shifts every plan after it. Audited -- every expression in this function is either
+  # assigned to a variable or sits inside an if(), so nothing but this return reaches the output
+  # stream. Keep it that way.
   return @{ Path = $Path; Old = $old; New = $NewVersion; Text = $updated; Encoding = $writeEncoding }
 }
 
@@ -248,12 +266,24 @@ foreach ($plan in $plans) {
     Write-ManifestVersionPlan -Plan $plan
   }
   catch {
-    # Everything validated, so this is I/O -- a read-only file, a lock, a full disk. Nothing can make
-    # that atomic, but the report must still be true of the run: name what DID land, so the operator
-    # knows exactly which files to revert rather than reading "refusing to write" over a dirty tree.
-    $landed = if ($written.Count -eq 0) { "none" } else { $written -join ", " }
+    # Everything validated, so the usual cause is I/O -- a read-only file, a lock, a full disk. It is
+    # not the ONLY cause: PARAMETER BINDING lands here too (hand Write-ManifestVersionPlan a
+    # [pscustomobject] and "Cannot process argument transformation on parameter 'Plan'" arrives
+    # through this catch). Only reachable via a future edit, but it is in scope, so the message
+    # reports the exception rather than asserting the disk was at fault.
+    #
+    # Nothing makes three WriteAllText calls atomic, so this is the one path where a partial bump is
+    # possible -- and the report has to be true of the run, which is the whole point of CPE-1852.
+    if ($written.Count -eq 0) {
+      # The FIRST write failed: nothing landed and the tree is clean. Saying "Already written: none.
+      # Revert those files" would tell an operator to undo nothing -- the same run-untrue message
+      # class this ticket exists to delete, merely inverted. So say what actually happened.
+      throw ("release.ps1: failed writing {0}: {1} -- No manifest was written; the working tree is " -f
+        $plan.Path, $_.Exception.Message) +
+        "unchanged and there is nothing to revert. No commit, tag or push happened."
+    }
     throw ("release.ps1: failed writing {0}: {1} -- PARTIAL BUMP. Already written at v{2}: {3}. " -f
-      $plan.Path, $_.Exception.Message, $Version, $landed) +
+      $plan.Path, $_.Exception.Message, $Version, ($written -join ", ")) +
       "Revert those files before retrying (git checkout -- <paths>); no commit, tag or push happened."
   }
   $written += $plan.Path
