@@ -62,6 +62,16 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 # written, or the script throws before anything reaches disk. The old code could not fail this way:
 # a manifest that stopped matching was written back unchanged and reported as bumped. A release
 # that reports success having bumped nothing is the failure shape this repo keeps closing.
+#
+# CPE-1852: and that check now runs for ALL manifests before ANY of them is written. It used to fire
+# per file, mid-loop, so a Cargo.toml that failed the guard aborted with "Refusing to write" after
+# package.json and tauri.conf.json were already at the new version on disk -- a message true of the
+# file it named and false of the run, leaving two of CLAUDE.md's five version-synchronised files
+# bumped and uncommitted. A dirty tree after a release operation reads as unrelated noise and gets
+# committed by accident or discarded along with real work; that is how package-lock.json ended up
+# three releases behind. So the bump is split in two: New-ManifestVersionPlan reads, validates and
+# computes the replacement text WITHOUT touching disk, and only once every plan exists does the write
+# loop run. Nothing is written unless everything can be.
 
 # Offsets (Start/Length) of the ROOT object's "version" value, exclusive of its quotes. Returns
 # every match found, so the caller can insist on exactly one rather than silently taking the first.
@@ -150,7 +160,15 @@ function Find-TomlPackageVersionValue {
   return $hits
 }
 
-function Update-ManifestVersion {
+# Phase 1 of the bump: read, validate and compute -- never write. Returns a plan (a hashtable of
+# Path / Old / New / Text / Encoding) that the caller hands to Write-ManifestVersionPlan once EVERY
+# manifest has produced one. Any failure throws here, with nothing on disk touched by any manifest.
+#
+# Note the shape of a NON-manifest failure in this phase -- a directory where src-tauri/Cargo.toml
+# should be, say. ReadAllBytes below throws a raw .NET exception: atomicity still holds (we are in
+# the plan phase, so the tree stays pristine), but the message is the CLR's, with no 'release.ps1:'
+# prefix and no statement about tree state. The guarantee is real there; only the wording is not ours.
+function New-ManifestVersionPlan {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$NewVersion,
@@ -184,8 +202,9 @@ function Update-ManifestVersion {
 
   $hits = @(& $Locator $text)
   if ($hits.Count -ne 1) {
-    throw ("release.ps1: expected exactly one {0} in {1}, found {2}. Refusing to write -- a manifest that " -f $What, $Path, $hits.Count) +
-      "no longer matches must fail the release loudly, not be written back unchanged and reported as bumped."
+    throw ("release.ps1: expected exactly one {0} in {1}, found {2}. No manifest was written -- every " -f $What, $Path, $hits.Count) +
+      "manifest is validated before any is written, so the working tree is exactly as it was. A manifest " +
+      "that no longer matches must fail the release loudly, not be written back unchanged and reported as bumped."
   }
 
   $hit = $hits[0]
@@ -197,19 +216,78 @@ function Update-ManifestVersion {
   # locator change that stops agreeing with itself.
   $check = @(& $Locator $updated)
   if ($check.Count -ne 1 -or $updated.Substring($check[0].Start, $check[0].Length) -ne $NewVersion) {
-    throw "release.ps1: post-write check failed for $Path -- the $What did not read back as $NewVersion. Nothing was written."
+    throw "release.ps1: splice check failed for $Path -- the $What did not read back as $NewVersion. No manifest was written."
   }
 
-  [System.IO.File]::WriteAllText($Path, $updated, $writeEncoding)
-  Write-Host ("  {0}: {1} -> {2}" -f $Path, $old, $NewVersion)
+  # A hashtable, not a PSCustomObject, because Write-ManifestVersionPlan's parameter is typed
+  # [hashtable]$Plan -- a [pscustomobject] fails argument transformation there ('Cannot process
+  # argument transformation on parameter Plan') instead of being written. THAT is what makes the
+  # choice load-bearing.
+  #
+  # It is NOT about array flattening, which an earlier version of this comment claimed. Measured
+  # under Windows PowerShell 5.1: `@( pscustomobject; pscustomobject; pscustomobject )` gives
+  # Count=3 exactly as the hashtable case does; `@( $null; ht; ht )` gives Count=3 with element[0]
+  # simply $null (a null plan does not collapse the array); `@( ht )` gives Count=1, so a future
+  # single-manifest variant is safe. A maintainer who checks a false claim and 'corrects' it could
+  # remove the real constraint, so the real one is named here.
+  #
+  # The stray-output hazard IS real: a function emitting two objects makes the caller's array
+  # Count=4 and shifts every plan after it. Audited -- every expression in this function is either
+  # assigned to a variable or sits inside an if(), so nothing but this return reaches the output
+  # stream. Keep it that way.
+  return @{ Path = $Path; Old = $old; New = $NewVersion; Text = $updated; Encoding = $writeEncoding }
+}
+
+# Phase 2: write one already-validated plan. Nothing is decided here -- by the time this runs, every
+# manifest in the set has produced a plan, so the only remaining failure is I/O.
+function Write-ManifestVersionPlan {
+  param([Parameter(Mandatory = $true)][hashtable]$Plan)
+
+  [System.IO.File]::WriteAllText($Plan.Path, $Plan.Text, $Plan.Encoding)
+  Write-Host ("  {0}: {1} -> {2}" -f $Plan.Path, $Plan.Old, $Plan.New)
 }
 
 # 1. package.json             -- the ROOT object's "version"
 # 2. src-tauri/tauri.conf.json -- the ROOT object's "version"
 # 3. src-tauri/Cargo.toml     -- `version` inside [package]
-Update-ManifestVersion -Path (Join-Path $repo "package.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
-Update-ManifestVersion -Path (Join-Path $repo "src-tauri/tauri.conf.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
-Update-ManifestVersion -Path (Join-Path $repo "src-tauri/Cargo.toml") -NewVersion $Version -Locator 'Find-TomlPackageVersionValue' -What 'version key inside [package]'
+#
+# CPE-1852: plan all three, THEN write all three. A throw from any New-ManifestVersionPlan call
+# happens with the disk untouched, so a failure on the third manifest can no longer leave the first
+# two bumped. Do not collapse this back into a per-file update loop.
+$plans = @(
+  New-ManifestVersionPlan -Path (Join-Path $repo "package.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
+  New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/tauri.conf.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
+  New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/Cargo.toml") -NewVersion $Version -Locator 'Find-TomlPackageVersionValue' -What 'version key inside [package]'
+)
+
+$written = @()
+foreach ($plan in $plans) {
+  try {
+    Write-ManifestVersionPlan -Plan $plan
+  }
+  catch {
+    # Everything validated, so the usual cause is I/O -- a read-only file, a lock, a full disk. It is
+    # not the ONLY cause: PARAMETER BINDING lands here too (hand Write-ManifestVersionPlan a
+    # [pscustomobject] and "Cannot process argument transformation on parameter 'Plan'" arrives
+    # through this catch). Only reachable via a future edit, but it is in scope, so the message
+    # reports the exception rather than asserting the disk was at fault.
+    #
+    # Nothing makes three WriteAllText calls atomic, so this is the one path where a partial bump is
+    # possible -- and the report has to be true of the run, which is the whole point of CPE-1852.
+    if ($written.Count -eq 0) {
+      # The FIRST write failed: nothing landed and the tree is clean. Saying "Already written: none.
+      # Revert those files" would tell an operator to undo nothing -- the same run-untrue message
+      # class this ticket exists to delete, merely inverted. So say what actually happened.
+      throw ("release.ps1: failed writing {0}: {1} -- No manifest was written; the working tree is " -f
+        $plan.Path, $_.Exception.Message) +
+        "unchanged and there is nothing to revert. No commit, tag or push happened."
+    }
+    throw ("release.ps1: failed writing {0}: {1} -- PARTIAL BUMP. Already written at v{2}: {3}. " -f
+      $plan.Path, $_.Exception.Message, $Version, ($written -join ", ")) +
+      "Revert those files before retrying (git checkout -- <paths>); no commit, tag or push happened."
+  }
+  $written += $plan.Path
+}
 
 Write-Host "Bumped version to $Version in package.json, tauri.conf.json, Cargo.toml" -ForegroundColor Green
 

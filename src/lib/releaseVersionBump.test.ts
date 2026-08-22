@@ -22,7 +22,7 @@
 // and hide which of the three shapes actually regressed.
 import { describe, it, expect, beforeAll, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -91,17 +91,29 @@ interface BumpOptions {
   /** Prefix each staged manifest's BYTES with a UTF-8 BOM (EF BB BF), to exercise release.ps1's
    *  BOM-preserving write path. */
   bom?: boolean;
+  /** Drop the `-BumpOnly` switch, i.e. drive the FULL release path. CPE-1852 uses this to prove the
+   *  abort-before-any-write property belongs to the shared writer rather than to the dry-run switch.
+   *  Only ever used with a fixture that must FAIL validation: validation aborts before the first `git`
+   *  call, so no repository is ever touched. (The scratch tree is an OS temp directory and not a git
+   *  repo at all, so a regression that reached `git add` would die there rather than commit anything.) */
+  bumpOnly?: boolean;
+  /** chmod one staged manifest to 0444 AFTER staging it, so the PLAN phase can still read it and the
+   *  WRITE phase fails on it. The only way to reach release.ps1's post-validation write failure --
+   *  the one path where a partial bump is genuinely possible and all the script can do is report it
+   *  truthfully. Restored to 0666 in the `finally` before rmSync, or cleanup fails on Windows. */
+  readOnly?: "pkg" | "conf" | "cargo";
 }
 
 /** Stage `manifests` in a throwaway tree, run the real release.ps1 over it with `-BumpOnly`, and read
  *  back what it wrote. */
 function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}): BumpResult {
-  const { scriptText, bom = false } = opts;
+  const { scriptText, bom = false, bumpOnly = true, readOnly } = opts;
   const stage = (text: string): Buffer => {
     const body = Buffer.from(crlf(text), "utf8");
     return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
   };
   const dir = mkdtempSync(join(tmpdir(), "cpe-1841-release-bump-"));
+  let lockedPath: string | undefined;
   try {
     mkdirSync(join(dir, "scripts"));
     mkdirSync(join(dir, "src-tauri"));
@@ -117,9 +129,14 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
     writeFileSync(confPath, stage(manifests.conf));
     writeFileSync(cargoPath, stage(manifests.cargo));
 
-    const run = spawnSync(psHost, ["-NoProfile", "-File", scriptPath, "-Version", version, "-BumpOnly"], {
-      encoding: "utf8",
-    });
+    if (readOnly) {
+      lockedPath = { pkg: pkgPath, conf: confPath, cargo: cargoPath }[readOnly];
+      chmodSync(lockedPath, 0o444);
+    }
+
+    const args = ["-NoProfile", "-File", scriptPath, "-Version", version];
+    if (bumpOnly) args.push("-BumpOnly");
+    const run = spawnSync(psHost, args, { encoding: "utf8" });
     if (run.error) throw run.error;
 
     const bytes = {
@@ -139,8 +156,47 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
       },
     };
   } finally {
+    // Undo the chmod BEFORE rmSync: on Windows a read-only file survives a recursive delete and the
+    // cleanup throws, turning a passing test into a confusing red in whatever runs next.
+    if (lockedPath) {
+      try {
+        chmodSync(lockedPath, 0o666);
+      } catch {
+        /* best effort -- rmSync's force flag is the backstop */
+      }
+    }
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** PowerShell renders an uncaught `throw` through its own error formatter, which HARD-WRAPS the message
+ *  to the host's console width -- and PowerShell 7 additionally interleaves ANSI colour escapes at the
+ *  wrap points. So a phrase in the message can arrive split across lines, with escape sequences sitting
+ *  in the gap, and the split lands in a different place on Windows PowerShell 5.1 than on `pwsh`. Any
+ *  assertion about WORDING must therefore normalise first: strip the escapes, collapse whitespace runs.
+ *
+ *  Learned the hard way on CPE-1852 -- `/no manifest was written/` passed locally under 5.1 and reded on
+ *  CI's ubuntu (`pwsh`) leg purely because the wrap fell between "No" and "manifest" there. */
+function flat(text: string): string {
+  // The ESC is written as the escape sequence \x1b, never as a raw control byte in this file, and
+  // matched explicitly: a bare /\[[0-9;]*[A-Za-z]/ would eat the literal "[p" out of "[package]",
+  // which is a phrase these very assertions check for.
+  return (
+    text
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+      // PowerShell 7's ConciseView prefixes every CONTINUATION line of a wrapped error with a "|"
+      // gutter, so the wrap does not merely insert whitespace -- it inserts "| " mid-phrase. Windows
+      // PowerShell 5.1 does not. Strip the gutter before collapsing whitespace, or the wording match
+      // still misses, on "No | manifest was written".
+      //
+      // CAVEAT for anyone reusing flat(): this DOES destroy meaning when a line-leading "|" is
+      // legitimate. A markdown table -- "| package.json | 1d81 |\n| conf | 65cb |" -- comes back as
+      // " package.json | 1d81 | conf | 65cb |", row boundary silently gone. Nothing asserted in this
+      // file depends on a leading "|", so it is safe HERE. It is not a general-purpose normaliser.
+      .replace(/^[ \t]*\|[ \t]?/gm, " ")
+      .replace(/\s+/g, " ")
+  );
 }
 
 /** Everything a failed exit-status assertion needs to be diagnosable at a glance -- without it a red
@@ -437,6 +493,137 @@ describe("release.ps1 fails loudly rather than bumping nothing (CPE-1841)", () =
 });
 
 // ---------------------------------------------------------------------------------------------------
+// CPE-1852: the bump is ALL-OR-NOTHING across the manifest set.
+//
+// CPE-1841 gave each manifest a guard that throws before writing THAT file. But the writer ran per file,
+// in order, so a failure on the third manifest landed after the first two were already on disk:
+//
+//     package.json     -> 9.9.9   (written)
+//     tauri.conf.json  -> 9.9.9   (written)
+//     Cargo.toml       -> 0.1.0   (guard fired)
+//     exit 1, "... found 0. Refusing to write ..."
+//
+// The message is true of the file it names and reads as though nothing was written. Two of the five
+// version-synchronised files are then bumped, on disk, uncommitted -- the dirty-tree-reads-as-noise
+// hazard CLAUDE.md records by name, and how package-lock.json ended up three releases behind.
+//
+// The fix validates every manifest and computes every replacement BEFORE writing any of them, so the
+// operation is atomic in the way the message already claimed. These tests pin BOTH halves: the bytes on
+// disk, and the wording of the failure.
+// ---------------------------------------------------------------------------------------------------
+
+describe("release.ps1 leaves no half-bumped tree when a LATER manifest fails (CPE-1852)", () => {
+  const NO_VERSION_CARGO = `[package]\nname = "demo"\n\n[dependencies]\nserde = "1"\n`;
+  const NO_VERSION_CONF = `{\n  "productName": "Demo"\n}\n`;
+
+  // The THIRD manifest fails. package.json and tauri.conf.json are perfectly valid and would each be
+  // written by a per-file writer before the guard ever looked at Cargo.toml.
+  let third: BumpResult;
+  beforeAll(() => {
+    third = runBump({ ...ALL_DECOYS, cargo: NO_VERSION_CARGO }, NEW);
+  });
+
+  it("writes NOTHING when the third manifest fails: the first two are byte-identical on disk", () => {
+    expect(third.status, ctx(third)).not.toBe(0);
+    // Byte-level, not just "does not contain 9.9.9" -- the claim is that the files were never opened
+    // for writing at all, and a re-encoded but textually-equal file would still be a released change.
+    expect(third.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written despite the abort").toBe(true);
+    expect(third.bytes.conf.equals(Buffer.from(crlf(CONF_WITH_DECOYS), "utf8")), "tauri.conf.json was written despite the abort").toBe(true);
+    expect(third.bytes.cargo.equals(Buffer.from(crlf(NO_VERSION_CARGO), "utf8")), "Cargo.toml was written despite the abort").toBe(true);
+  });
+
+  it("does not print a per-file 'old -> new' line for a manifest it never wrote", () => {
+    // The old script disclosed the half-bump only through those lines. Now there is nothing to disclose,
+    // so there must be no line -- otherwise the output implies a write that did not happen, which is the
+    // same class of lie in the other direction.
+    expect(third.stdout, ctx(third)).not.toMatch(/package\.json: .* -> /);
+    expect(third.stdout, ctx(third)).not.toMatch(/tauri\.conf\.json: .* -> /);
+    expect(third.stdout, ctx(third)).not.toContain("Bumped version to");
+  });
+
+  it("says something TRUE OF THE WHOLE RUN, not 'refusing to write' about one file", () => {
+    // flat(): PowerShell hard-wraps its error rendering to the console width, and the wrap falls in a
+    // DIFFERENT place under pwsh than under Windows PowerShell 5.1 -- /no manifest was written/ passed
+    // locally and reded on CI purely because pwsh split it after "No". Normalise before matching wording.
+    const out = flat(third.stderr + third.stdout);
+    expect(out, out).toMatch(/expected exactly one .*found 0/s);
+    expect(out, out).toMatch(/no manifest was written/i);
+    // ... and the old, run-untrue wording is gone.
+    expect(out, out).not.toMatch(/refusing to write/i);
+    // HAZARD, recorded rather than fixed: PowerShell echoes the OFFENDING SOURCE LINE above the
+    // rendered message, and release.ps1's throw literally contains the phrase
+    // `No manifest was written -- every `. If that echo were ever complete, this assertion would
+    // pass off the script's own source text rather than off the message the operator sees. Both
+    // hosts truncate the echo with an ellipsis before the phrase today (checked in the CI capture
+    // and locally under 5.1), so it is honest -- but it is one console width or one string reflow
+    // away from being self-satisfying. The BYTE-LEVEL assertions in this block are what carry the
+    // real weight; treat this one as corroboration, not proof.
+  });
+
+  it("also leaves package.json alone when the SECOND manifest is the one that fails", () => {
+    // Same property, one position earlier: proves the first case is not passing because Cargo.toml
+    // happens to be validated first for some unrelated reason.
+    const second = runBump({ ...ALL_DECOYS, conf: NO_VERSION_CONF }, NEW);
+    expect(second.status, ctx(second)).not.toBe(0);
+    expect(second.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written despite the abort").toBe(true);
+    expect(second.bytes.conf.equals(Buffer.from(crlf(NO_VERSION_CONF), "utf8"))).toBe(true);
+  });
+
+  it("holds on the FULL release path too, not only under -BumpOnly (they share the writer)", () => {
+    // Without -BumpOnly the script would go on to git add/commit/tag/push. It never gets there: the
+    // validation pass aborts first, which is the point -- the atomicity is a property of the writer,
+    // not of the dry-run switch. Nothing git-shaped runs, and the scratch tree is not a repo anyway.
+    const full = runBump({ ...ALL_DECOYS, cargo: NO_VERSION_CARGO }, NEW, { bumpOnly: false });
+    expect(full.status, ctx(full)).not.toBe(0);
+    expect(full.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json was written despite the abort").toBe(true);
+    expect(full.bytes.conf.equals(Buffer.from(crlf(CONF_WITH_DECOYS), "utf8")), "tauri.conf.json was written despite the abort").toBe(true);
+    expect(full.stdout + full.stderr, ctx(full)).not.toMatch(/release v9\.9\.9|git .*failed with exit code/);
+  });
+
+  // The one case that CANNOT be made atomic: every manifest validated, then a WRITE fails. No
+  // PowerShell scheme makes three WriteAllText calls transactional, so all the script can do is
+  // report truthfully -- which is the entire subject of this ticket, so it gets tested rather than
+  // asserted-by-construction. A 0444 manifest is readable (the plan phase succeeds) and unwritable.
+  it("a write that fails AFTER validation names the files that DID land", () => {
+    const r = runBump(ALL_DECOYS, NEW, { readOnly: "cargo" });
+    expect(r.status, "expected the 0444 write to fail; as root it would not\n" + ctx(r)).not.toBe(0);
+    const out = flat(r.stderr + r.stdout);
+    expect(out, out).toMatch(/PARTIAL BUMP/);
+    expect(out, out).toMatch(/Already written at v9\.9\.9: .*package\.json.*tauri\.conf\.json/s);
+    expect(out, out).toMatch(/Revert those files/i);
+    // ... and the report is TRUE: exactly those two are at the new version, the third is untouched.
+    expect(r.text.pkg).toContain(`"version": "${NEW}"`);
+    expect(r.text.conf).toContain(`"version": "${NEW}"`);
+    expect(r.bytes.cargo.equals(Buffer.from(crlf(CARGO_WITH_DECOYS), "utf8")), "the unwritable manifest changed").toBe(true);
+  });
+
+  it("does NOT say 'revert those files' when the FIRST write fails and nothing landed", () => {
+    // CPE-1852's own defect, inverted: "Already written: none. Revert those files" tells an operator
+    // to undo nothing. Same run-untrue class as the "Refusing to write" this ticket deleted.
+    const r = runBump(ALL_DECOYS, NEW, { readOnly: "pkg" });
+    expect(r.status, "expected the 0444 write to fail; as root it would not\n" + ctx(r)).not.toBe(0);
+    const out = flat(r.stderr + r.stdout);
+    expect(out, out).toMatch(/no manifest was written/i);
+    expect(out, out).not.toMatch(/PARTIAL BUMP/);
+    expect(out, out).not.toMatch(/Revert those files/i);
+    expect(out, out).not.toMatch(/Already written at .{0,20}none/i);
+    // ... and the claim is TRUE: all three byte-identical, so there really is nothing to revert.
+    expect(r.bytes.pkg.equals(Buffer.from(crlf(PKG_WITH_DECOYS), "utf8")), "package.json changed").toBe(true);
+    expect(r.bytes.conf.equals(Buffer.from(crlf(CONF_WITH_DECOYS), "utf8")), "tauri.conf.json changed").toBe(true);
+    expect(r.bytes.cargo.equals(Buffer.from(crlf(CARGO_WITH_DECOYS), "utf8")), "Cargo.toml changed").toBe(true);
+  });
+
+  it("still writes all three together on the success path (the fix is not 'write nothing, ever')", () => {
+    // The companion arm: an atomicity fix that simply stopped writing would keep every case above green.
+    const ok = runBump(ALL_DECOYS, NEW);
+    expect(ok.status, ctx(ok)).toBe(0);
+    expect(ok.text.pkg).toContain(`"version": "${NEW}"`);
+    expect(ok.text.conf).toContain(`"version": "${NEW}"`);
+    expect(ok.text.cargo).toContain(`version = "${NEW}"`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
 // Red-proof. The tests above only mean something if the fixtures actually trip the bug -- a decoy the
 // broken code never touched would keep them green with the scoping reverted. So: re-run the EXACT pre-fix
 // replacements (copied verbatim from scripts/release.ps1 at origin/main before this ticket) over the same
@@ -452,7 +639,7 @@ describe("release.ps1 fails loudly rather than bumping nothing (CPE-1841)", () =
 // This mechanises the manual revert recorded in the ticket's Work Log: reverting the Cargo.toml locator
 // call alone -- i.e. putting
 //     $cargo = $cargo -replace '(?m)^(version\s*=\s*")[^"]+(")', "`${1}$Version`$2"
-// back in place of `Update-ManifestVersion -Path ... -Locator 'Find-TomlPackageVersionValue'` -- reds the
+// back in place of `New-ManifestVersionPlan -Path ... -Locator 'Find-TomlPackageVersionValue'` -- reds the
 // "leaves a long-form Cargo dependency pin alone" test above, and nothing else.
 // ---------------------------------------------------------------------------------------------------
 
