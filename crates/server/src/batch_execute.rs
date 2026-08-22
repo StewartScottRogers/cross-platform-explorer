@@ -173,9 +173,9 @@ impl<'a> LazyInputKeys<'a> {
     }
 }
 
-/// What currently occupies a planned output path, as far as a `stat` can tell (CPE-1696). Three states,
-/// not two: the whole point is that "I could not find out" is **not** the same answer as "nothing is
-/// there", and only the second one is safe to treat as a free path.
+/// What currently occupies a planned output path, as far as a `stat` can tell (CPE-1696/CPE-1769). Four
+/// states, not two: the whole point is that "I could not find out" is **not** the same answer as "nothing
+/// is there", and only the second one is safe to treat as a free path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputOccupancy {
     /// The path genuinely does not exist, or exists as something other than a regular file (a directory —
@@ -184,6 +184,23 @@ enum OutputOccupancy {
     Free,
     /// A real regular file occupies the path.
     File,
+    /// **CPE-1769.** A symlink or NTFS junction — dangling or live — occupies the path. [`Path::try_exists`]
+    /// FOLLOWS the final component, so a **dangling** link answers `Ok(false)` — "nothing resolves here" —
+    /// the exact shape [`crate::fsutil::name_pick_slot_probe`] closes for a name-*picking* loop. This site
+    /// is not a picker, it is an overwrite-decision classifier, so it gets its own state rather than
+    /// silently folding into `Free` (the bug) or `File` (which a link, dangling or not, never is — a live
+    /// file link IS a real occupant too, but `metadata()` already reports that case as `File` by following
+    /// it, so `Link` here is reached only for the case `metadata()` cannot resolve).
+    ///
+    /// **Read this severity claim precisely.** A dangling link at a batch output was already refused
+    /// *at write time*, before this fix, by `batch_media::open_output_verified` — it opens with the
+    /// no-follow flag and re-verifies via `symlink_metadata`, so no byte was ever written through it.
+    /// The pre-fix bug was that the refusal happened silently *per item*, landing in `report.skipped`
+    /// inside an otherwise-`Ok`, "the batch succeeded" report. What `Link` restores is the **up-front,
+    /// whole-batch** confirmation gate `is_foreign_overwrite` already gives a real occupied file — not
+    /// a byte-escape hole. Do not read the diff as closing one; do not "simplify" this state away on the
+    /// theory that the write-time guard already covers it — it covers the bytes, not the confirmation.
+    Link,
     /// The `stat` failed for a reason other than the path being absent — permission denied along the
     /// resolved path, a dead network mount, an I/O error. We do **not** know whether bytes are there.
     Unknown,
@@ -197,32 +214,61 @@ enum OutputOccupancy {
 ///
 /// `exists` is the outcome of [`Path::try_exists`] (which, unlike [`Path::exists`], returns
 /// `io::Result<bool>` instead of folding every failure into `false`); `metadata` is called only when
-/// `exists` says the path is there, to distinguish a regular file from a directory.
+/// `exists` says the path is there, to distinguish a regular file from a directory. `link_present` is
+/// [`crate::fsutil::classify_link_presence`]'s own input shape — a [`std::fs::symlink_metadata`] stat
+/// reduced to "did something resolve here at all" — and is only consulted when `exists`/`metadata` could
+/// not otherwise prove the path free, so the common (genuinely-free, or genuinely-a-file) path pays for
+/// no extra syscall.
+///
+/// **CPE-1769.** `exists = Ok(false)` used to be an unconditional `OutputOccupancy::Free` — the bug this
+/// ticket closes: a dangling link answers exactly that from `try_exists`, so `is_foreign_overwrite` read
+/// "nothing occupied yet" and the write-through went unconfirmed. Now that arm additionally asks
+/// `link_present` — via the same [`crate::fsutil::classify_link_presence`] taxonomy
+/// [`crate::fsutil::name_pick_slot_probe`] uses for the sibling name-picking sites — before agreeing the
+/// slot is free.
 fn classify_output_occupancy(
     exists: std::io::Result<bool>,
     metadata: impl FnOnce() -> std::io::Result<std::fs::Metadata>,
+    link_present: impl FnOnce() -> std::io::Result<bool>,
 ) -> OutputOccupancy {
     match exists {
-        Ok(false) => OutputOccupancy::Free,
+        Ok(false) => match crate::fsutil::classify_link_presence(link_present()) {
+            Ok(true) => OutputOccupancy::Link,
+            Ok(false) => OutputOccupancy::Free,
+            Err(_) => OutputOccupancy::Unknown,
+        },
         Ok(true) => match metadata() {
             Ok(m) if m.is_file() => OutputOccupancy::File,
             // Exists but isn't a regular file (a directory): identical to what the old `!is_file()` gate
             // concluded, and a write onto it fails on its own.
             Ok(_) => OutputOccupancy::Free,
-            // A TOCTOU vanish between the two calls is a genuine absence.
+            // `try_exists` already said something is HERE, so unlike the `Ok(false)` arm above this
+            // cannot be the dangling-link shape (that shape is defined by `try_exists` answering false).
+            // A NotFound from `metadata()` after `try_exists` said true is a genuine TOCTOU vanish —
+            // something real was there and is now truly gone — so `Free` remains the right answer.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => OutputOccupancy::Free,
             Err(_) => OutputOccupancy::Unknown,
         },
         // `Path::try_exists` already folds a genuine `NotFound` into `Ok(false)`, but be explicit: only an
-        // absence is an absence.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OutputOccupancy::Free,
+        // absence is an absence — and, per CPE-1769, only once the link check agrees nothing is there.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match crate::fsutil::classify_link_presence(link_present()) {
+                Ok(true) => OutputOccupancy::Link,
+                Ok(false) => OutputOccupancy::Free,
+                Err(_) => OutputOccupancy::Unknown,
+            }
+        }
         Err(_) => OutputOccupancy::Unknown,
     }
 }
 
 /// Stat `output` and classify what sits there, via [`classify_output_occupancy`].
 fn output_occupancy(output: &Path) -> OutputOccupancy {
-    classify_output_occupancy(output.try_exists(), || std::fs::metadata(output))
+    classify_output_occupancy(
+        output.try_exists(),
+        || std::fs::metadata(output),
+        || std::fs::symlink_metadata(output).map(|_| true),
+    )
 }
 
 /// True when `item`'s planned write would replace bytes belonging to a file that was never submitted as
@@ -257,7 +303,19 @@ fn is_foreign_overwrite(item: &PlannedItem, input_keys: &std::collections::HashS
     // is unconfirmed data loss.
     match output_occupancy(Path::new(&item.output)) {
         OutputOccupancy::Free => return false, // genuinely nothing there — not an overwrite of anything
-        OutputOccupancy::Unknown => return true, // we cannot prove it's empty; refuse without consent
+        // **CPE-1769 — the third fail-open route, same family.** A dangling (or live) link occupying the
+        // output is not one of this batch's own tracked inputs and is not provably safe to write through
+        // — fail CLOSED exactly like `Unknown`, for the identical reason: the only cost of being wrong
+        // this way is a confirmation prompt, the only cost of being wrong the other way is a write that
+        // lands outside the folder the user chose.
+        //
+        // This refusal is a confirmation gate, not the last line of defence — `open_output_verified`'s
+        // write-time no-follow check refuses any link regardless of what this function decides. Before
+        // this fix, a `Link` here fell into the `Free` arm, so the batch ran without asking, that check
+        // caught it at write time anyway, and the file was quietly skip-listed inside a report the caller
+        // reads as a success. This arm is what makes the batch refuse UP FRONT, the way it already does
+        // for a real occupied file — closing a silent, unconfirmed skip, not a byte-escape hole.
+        OutputOccupancy::Unknown | OutputOccupancy::Link => return true, // refuse without consent
         OutputOccupancy::File => {}
     }
     // A real file already occupies the output path. It's only a refusable overwrite if it's not one of
@@ -376,15 +434,57 @@ pub fn execute_plan_walk(
     let input_keys = LazyInputKeys::new(items);
 
     if !job.confirmed_overwrite {
-        let count = items.iter().filter(|it| is_foreign_overwrite(it, input_keys.get())).count();
-        if count > 0 {
-            return Err(format!(
-                "refusing to run: this plan would overwrite {count} file{} not explicitly part of this \
-                 batch (either the same file as its own input, or an existing file this batch never \
-                 selected), and `confirmed_overwrite` was not set on the batch job — re-plan with an \
-                 explicit confirmation or change the job so every output stays clear of existing files",
-                if count == 1 { "" } else { "s" }
-            ));
+        // **CPE-1769 UAT finding.** `is_foreign_overwrite` says only THAT an output is foreign, not WHY —
+        // and the generic "re-plan with an explicit confirmation" wording below is actively wrong for one
+        // of its causes. A `Link`-occupied output is refused unconditionally at write time by
+        // `batch_media::open_output_verified` (its no-follow open plus a `symlink_metadata` re-check),
+        // regardless of `confirmed_overwrite` — an independently-run UAT followed this message's own
+        // advice, re-ran with `confirmed_overwrite: true`, and the batch still did not write through the
+        // link; it silently fell back to a per-item skip inside an otherwise-`Ok` report, which is the
+        // exact silent-skip failure this ticket exists to eliminate. So a `Link` cause gets its own,
+        // truthful wording — "confirming will not help, remove the link or rename the output" — while
+        // every other cause keeps the original message, since confirming genuinely does unblock those.
+        let input_keys_ref = input_keys.get();
+        let (link_outputs, other_overwrites): (Vec<_>, Vec<_>) = items
+            .iter()
+            .filter(|it| is_foreign_overwrite(it, input_keys_ref))
+            .partition(|it| output_occupancy(Path::new(&it.output)) == OutputOccupancy::Link);
+        if !link_outputs.is_empty() || !other_overwrites.is_empty() {
+            let mut reasons = Vec::new();
+            if !other_overwrites.is_empty() {
+                let count = other_overwrites.len();
+                reasons.push(format!(
+                    "this plan would overwrite {count} file{} not explicitly part of this batch (either \
+                     the same file as its own input, or an existing file this batch never selected) — \
+                     re-plan with an explicit confirmation or change the job so every output stays clear \
+                     of existing files",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            if !link_outputs.is_empty() {
+                let count = link_outputs.len();
+                reasons.push(format!(
+                    "{count} planned output{} {} occupied by a symlink or NTFS junction, which a batch \
+                     never writes through no matter what — setting `confirmed_overwrite` will NOT unblock \
+                     {}; remove the link, or change the job so this output uses a different name",
+                    if count == 1 { "" } else { "s" },
+                    if count == 1 { "is" } else { "are" },
+                    if count == 1 { "it" } else { "them" }
+                ));
+            }
+            // **Reviewer finding.** The trailing "`confirmed_overwrite` was not set" clause is true of
+            // every refusal here (it is the outer `if` guard) but is only INFORMATIVE when confirming
+            // could actually change the outcome. Tacked onto a link-only refusal it directly contradicts
+            // the sentence right before it ("setting `confirmed_overwrite` will NOT unblock it... and
+            // `confirmed_overwrite` was not set") — the same defect the UAT found in the message wording
+            // itself, in miniature. Suppressed on a link-only refusal; kept for the mixed and non-link
+            // cases, where it is genuinely the next thing to try.
+            let confirm_note = if other_overwrites.is_empty() {
+                String::new()
+            } else {
+                ", and `confirmed_overwrite` was not set on the batch job".to_string()
+            };
+            return Err(format!("refusing to run: {}{confirm_note}", reasons.join("; and ")));
         }
     }
 
@@ -1925,9 +2025,10 @@ mod tests {
     /// `Unknown`, never `Free`.
     #[test]
     fn cpe_1696_only_a_genuine_absence_reads_as_a_free_output_path() {
-        let never_called = || panic!("metadata must not be consulted when try_exists already answered");
+        let never_meta = || panic!("metadata must not be consulted when try_exists already answered");
+        let no_link = || Ok(false); // "nothing else resolves here either" — the ordinary free case
         assert_eq!(
-            classify_output_occupancy(Ok(false), never_called),
+            classify_output_occupancy(Ok(false), never_meta, no_link),
             OutputOccupancy::Free,
             "a genuinely absent output path is free"
         );
@@ -1937,30 +2038,40 @@ mod tests {
             std::io::ErrorKind::TimedOut,
         ] {
             assert_eq!(
-                classify_output_occupancy(Err(std::io::Error::new(kind, "Access is denied.")), never_called),
+                classify_output_occupancy(
+                    Err(std::io::Error::new(kind, "Access is denied.")),
+                    never_meta,
+                    || panic!("link presence must not be consulted when the existence probe already failed")
+                ),
                 OutputOccupancy::Unknown,
                 "{kind:?} on the existence probe must never read as a free path — that is the fail-open"
             );
             // The same must hold when it's the *second* call that fails: try_exists said the path is
             // there, so we already know it is NOT free, and the type probe failing cannot make it free.
             assert_eq!(
-                classify_output_occupancy(Ok(true), || Err(std::io::Error::new(kind, "Access is denied."))),
+                classify_output_occupancy(
+                    Ok(true),
+                    || Err(std::io::Error::new(kind, "Access is denied.")),
+                    || panic!("link presence must not be consulted when try_exists already said true")
+                ),
                 OutputOccupancy::Unknown,
                 "{kind:?} on the type probe must never read as a free path either"
             );
         }
         assert_eq!(
-            classify_output_occupancy(
-                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-                never_called
-            ),
+            classify_output_occupancy(Err(std::io::Error::from(std::io::ErrorKind::NotFound)), never_meta, no_link),
             OutputOccupancy::Free,
             "an explicit NotFound is a genuine absence"
         );
         assert_eq!(
-            classify_output_occupancy(Ok(true), || Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            classify_output_occupancy(
+                Ok(true),
+                || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                || panic!("link presence must not be consulted when try_exists already said true")
+            ),
             OutputOccupancy::Free,
-            "a TOCTOU vanish between the two calls is a genuine absence"
+            "a TOCTOU vanish AFTER try_exists said something is there is a genuine absence — that shape \
+             cannot be a dangling link, which try_exists never resolves to true in the first place"
         );
         // Real-filesystem legs for the two `Ok` arms, so the classifier's meaning is pinned against actual
         // syscalls and not only against synthesised results.
@@ -2164,6 +2275,231 @@ mod tests {
             .expect("a genuinely free output path must not be refused as a possible overwrite");
         assert_eq!(report.written, 1, "and the write must actually happen: {report:?}");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1769: a dangling link at the output read as Free, same family as CPE-1696 --------------
+    //
+    // `classify_output_occupancy`'s `Ok(false)` arm used to be an unconditional `OutputOccupancy::Free`.
+    // `Path::try_exists` FOLLOWS the final component, so a dangling link answers exactly `Ok(false)` —
+    // "nothing resolves here" — and `is_foreign_overwrite` read that as "nothing occupied yet", so a batch
+    // write proceeded through the link with no confirmation.
+
+    /// The deterministic half: the `Link` taxonomy the wiring below depends on, pinned without touching
+    /// disk (mirrors `cpe_1696_only_a_genuine_absence_reads_as_a_free_output_path`'s own structure).
+    #[test]
+    fn cpe_1769_a_resolvable_link_probe_reads_as_occupied_not_free() {
+        let never_meta = || panic!("metadata must not be consulted when try_exists already said false");
+        assert_eq!(
+            classify_output_occupancy(Ok(false), never_meta, || Ok(true)),
+            OutputOccupancy::Link,
+            "try_exists=false plus a resolvable symlink_metadata is the dangling-link shape — occupied"
+        );
+        assert_eq!(
+            classify_output_occupancy(
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                never_meta,
+                || Ok(true)
+            ),
+            OutputOccupancy::Link,
+            "an explicit NotFound from try_exists is the same shape as Ok(false) for this arm"
+        );
+        assert_eq!(
+            classify_output_occupancy(Ok(false), never_meta, || {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"))
+            }),
+            OutputOccupancy::Unknown,
+            "a link-presence probe that itself fails cannot prove the slot free — fail closed, not Free"
+        );
+    }
+
+    /// The real-filesystem half, at the `output_occupancy`/`is_foreign_overwrite` layer directly — proves
+    /// the taxonomy change actually flips the overwrite decision, before the end-to-end test below drives
+    /// it through the real entry point. Covers both the symlink and the (Windows, unprivileged) junction
+    /// leg via `make_dangling_link`'s own fallback.
+    #[test]
+    fn cpe_1769_a_dangling_link_at_the_output_is_occupied_and_refused_as_a_foreign_overwrite() {
+        let d = scratch("cpe1769-occupancy-link");
+        let link = d.join("out.png");
+        if !crate::fsutil::make_dangling_link(&link) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1769] SKIPPED the dangling-link occupancy leg: this machine could not stage a link \
+                 or junction at all. NOTHING in this test covered CPE-1769 on this run."
+            );
+            return;
+        }
+
+        assert_eq!(
+            output_occupancy(&link),
+            OutputOccupancy::Link,
+            "a dangling link occupying the output path must classify as Link, not Free"
+        );
+
+        let input = d.join("in.png");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link.to_string_lossy().to_string(),
+            summary: "an output occupied by a dangling link".into(),
+        }];
+        assert!(
+            is_foreign_overwrite(&items[0], &input_path_keys(&items)),
+            "a dangling link at the output is not one of this batch's own tracked inputs — it must be \
+             refused without consent, exactly like the CPE-1696 Unknown case"
+        );
+    }
+
+    /// The end-to-end half, at the real [`execute_plan`] entry point (mirrors
+    /// `cpe_1696_a_genuinely_free_output_path_still_runs_without_confirmation`'s honest-case structure,
+    /// inverted): a dangling link at the output must refuse the batch and leave the link exactly as it
+    /// was, not write through it. Runs on every OS with no privilege needed — `make_dangling_link` falls
+    /// back to a junction on an unprivileged Windows runner, covering that leg too.
+    ///
+    /// **Why the link's own phantom target sits INSIDE the scratch folder.** `make_dangling_link` derives
+    /// it there (`dangling_link_target`), which means CPE-1642's separate containment guard already reads
+    /// this shape as `Containment::Inside` — nothing about it *escapes* the folder, so containment does
+    /// not refuse it on its own. That isolates this test to the CPE-1769 occupancy gate specifically:
+    /// reverting only that fix (not containment) is what must red this test.
+    ///
+    /// Drop guard (`d`'s own [`crate::fsutil::ScratchDir`]) is armed at construction, before any
+    /// assertion runs — no trailing `remove_dir_all`.
+    #[test]
+    fn cpe_1769_execute_plan_refuses_a_dangling_link_output_instead_of_writing_through_it() {
+        let d = scratch("cpe1769-execute-dangling-link");
+        let input = d.join("in.png");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let output = d.join("out.png");
+        if !crate::fsutil::make_dangling_link(&output) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1769] SKIPPED the execute_plan dangling-link leg: this machine could not stage a \
+                 link or junction at all. NOTHING in this test covered CPE-1769 on this run."
+            );
+            return;
+        }
+        let phantom_target = crate::fsutil::dangling_link_target(&output);
+        assert!(!phantom_target.exists(), "sanity: the link really is dangling before the write is tried");
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: output.to_string_lossy().to_string(),
+            summary: "an output occupied by a dangling link".into(),
+        }];
+        let job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        assert!(!job.confirmed_overwrite, "sanity: no confirmation was given");
+
+        let err = execute_plan(&items, &job).expect_err(
+            "a dangling link at the output must be refused, not written through as an empty slot",
+        );
+
+        // THE HARM, on the filesystem, before trusting the `Result`: nothing must have appeared at the
+        // link's phantom target (a write following the link would land exactly there), and the link
+        // itself must still be exactly the untouched link it was.
+        assert!(
+            !phantom_target.exists(),
+            "the write must not have followed the dangling link to its (nonexistent) target"
+        );
+        assert!(
+            std::fs::symlink_metadata(&output).is_ok_and(|m| m.file_type().is_symlink()),
+            "the output slot must still hold the link, not a real file written through it"
+        );
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+    }
+
+    /// **CPE-1769 UAT finding.** The generic refusal wording ("re-plan with an explicit confirmation")
+    /// is actively wrong when the cause is a `Link`: an independently-run UAT followed that advice,
+    /// re-ran with `confirmed_overwrite: true`, and the batch STILL did not write through the link — it
+    /// silently fell back to a per-item skip inside an `Ok` report, the exact silent-skip failure this
+    /// ticket exists to close. So the message for a link-only refusal must say the true thing instead:
+    /// that confirming will not help, and the fix is to remove the link or rename the output.
+    ///
+    /// Pins the message text directly, on a single-item batch so the whole error is the link-specific
+    /// wording with nothing else mixed in — a looser "contains some link text somewhere" assertion could
+    /// pass even if the misleading "re-plan with an explicit confirmation" sentence were still present
+    /// alongside it.
+    ///
+    /// **Second Reviewer finding, same test.** The trailing "`confirmed_overwrite` was not set on the
+    /// batch job" clause is true of every refusal here (it's the outer `if` guard) but only INFORMATIVE
+    /// when confirming could change the outcome. Tacked onto a link-only refusal it directly contradicts
+    /// the sentence right before it — "will NOT unblock it... AND `confirmed_overwrite` was not set" reads
+    /// as self-contradictory and invites exactly the wrong next action, the same defect in miniature. So
+    /// this test pins its **absence** on the link-only leg below, and its **presence** on a companion
+    /// non-link leg (a real pre-existing foreign file — genuinely fixable by confirming), so a fix that
+    /// suppressed the clause unconditionally would fail the second half just as surely as leaving it in
+    /// unconditionally fails the first.
+    #[test]
+    fn cpe_1769_the_refusal_message_for_a_link_output_does_not_claim_confirming_would_help() {
+        let d = scratch("cpe1769-link-message");
+        let input = d.join("in.png");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let output = d.join("out.png");
+        if !crate::fsutil::make_dangling_link(&output) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1769] SKIPPED the link-refusal-message leg: this machine could not stage a link or \
+                 junction at all. NOTHING in this test covered CPE-1769 on this run."
+            );
+            return;
+        }
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: output.to_string_lossy().to_string(),
+            summary: "an output occupied by a dangling link".into(),
+        }];
+        let job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        assert!(!job.confirmed_overwrite, "sanity: no confirmation was given");
+
+        let err = execute_plan(&items, &job)
+            .expect_err("a dangling link at the output must still be refused up front");
+
+        assert!(
+            err.contains("never writes through") && err.contains("will NOT unblock"),
+            "the message must say plainly that a link cannot be written through and that confirming will \
+             not change that: {err}"
+        );
+        assert!(
+            !err.contains("re-plan with an explicit confirmation"),
+            "a link-only refusal must NOT carry the generic advice that confirming would help — that is \
+             the exact wording the UAT followed and found to be false for this cause: {err}"
+        );
+        assert!(
+            !err.contains("was not set on the batch job"),
+            "a link-only refusal must not ALSO say confirmed_overwrite was not set — right after saying \
+             confirming will not help, that clause reads as self-contradictory: {err}"
+        );
+
+        // Companion leg: a real pre-existing foreign file, no link involved. Confirming genuinely does
+        // fix this one, so the trailing clause must still be present here — it is the correct next step.
+        let foreign_input = d.join("photo.png");
+        fs::write(&foreign_input, png_bytes(10, 10)).unwrap();
+        let foreign_output = d.join("vacation.png");
+        let foreign_original = png_bytes(4, 4);
+        fs::write(&foreign_output, &foreign_original).unwrap();
+        let mut foreign_job = BatchJob::new(vec![MediaOp::Rename { template: "vacation".into() }]);
+        foreign_job.non_destructive = false;
+        let foreign_items = plan(&foreign_job, &[foreign_input.to_string_lossy().to_string()]).unwrap();
+        assert_eq!(
+            foreign_items[0].output,
+            foreign_output.to_string_lossy(),
+            "sanity: the rename lands exactly on the foreign file, not a link"
+        );
+
+        let foreign_err = execute_plan(&foreign_items, &foreign_job)
+            .expect_err("an unconfirmed overwrite of a real foreign file must still be refused");
+        assert!(
+            foreign_err.contains("was not set on the batch job"),
+            "a non-link refusal is genuinely fixable by confirming, so the clause naming that must stay: \
+             {foreign_err}"
+        );
+        assert_eq!(
+            fs::read(&foreign_output).unwrap(),
+            foreign_original,
+            "sanity: the foreign file itself must be untouched by either refused plan"
+        );
     }
 
     /// **SEC-8 (executed by the audit, now a permanent regression test).** The stale `dir_scans` memo let

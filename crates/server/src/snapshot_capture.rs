@@ -162,8 +162,22 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
         // invariant of the *caller*, not of this line. `Unknown` re-copies rather than skipping: writing
         // the same bytes again is harmless and strictly safer than assuming a blob we cannot see is
         // intact, since the manifest saved below will reference it.
-        if crate::fsutil::classify_target_slot(&dest.try_exists()) == crate::fsutil::TargetSlot::Occupied {
-            continue; // already on disk (e.g. left over from a prior capture of the same content)
+        //
+        // CPE-1769: `dest.try_exists()` FOLLOWS the final component, so an attacker who plants a dangling
+        // link at a blob's hashed name has it read as `Free` here — `Occupied` is skipped, the `if` falls
+        // through, and `fs::copy` below writes the blob's bytes straight through the link to wherever it
+        // points, outside the content-addressed store. Low harm in the sense the ticket recorded (the
+        // store is content-addressed, so nothing sensitive is chosen by an attacker here — only which
+        // pre-existing file's bytes get clobbered by *this capture's* blob content), but the shape is
+        // identical to the dangerous sites, so it gets the same shared probe: `name_pick_slot_probe`
+        // folds a dangling link (or an NTFS junction) into `Occupied`, same as a real blob file already on
+        // disk, so this site's existing "treat occupied as already-there, skip" policy now also covers it
+        // — the copy is skipped and the link is left exactly as it was, never written through.
+        if crate::fsutil::classify_target_slot(&crate::fsutil::name_pick_slot_probe(&dest))
+            == crate::fsutil::TargetSlot::Occupied
+        {
+            continue; // already on disk (e.g. left over from a prior capture of the same content), or a
+                      // link occupies the name — either way, nothing is written through it
         }
         let Some(rel) = source_for_hash.get(blob.hash.as_str()) else {
             return Err(format!("internal: no source path recorded for new blob {}", blob.hash));
@@ -657,6 +671,57 @@ mod tests {
         )
         .expect("a free id must save");
         assert_eq!(load_manifest(store, "42").unwrap().created_ms, 7);
+    }
+
+    /// **CPE-1769.** `capture`'s blob-write loop used a bare `dest.try_exists()`: FOLLOWS the final
+    /// component, so a dangling link planted at a blob's hashed destination name reads as `Free`, the
+    /// `Occupied => continue` skip above never fires, and `fs::copy` writes the blob's bytes straight
+    /// through the link to wherever it points — outside the content-addressed store. Staged with
+    /// [`crate::fsutil::make_dangling_link`], which falls back to an NTFS junction on an unprivileged
+    /// Windows runner, so this test covers both legs via its own fallback rather than branching here.
+    ///
+    /// Drop guards (`src`/`store`, both [`crate::fsutil::ScratchDir`]) are armed at construction, before
+    /// any assertion runs — no trailing `remove_dir_all`.
+    #[test]
+    fn cpe_1769_capture_does_not_write_a_blobs_bytes_through_a_dangling_link_at_its_hashed_name() {
+        let src = scratch("cpe1769-src");
+        let store = scratch("cpe1769-store");
+        let file = src.join("payload.txt");
+        fs::write(&file, b"CONTENT").unwrap();
+        let hash = crate::checksum::hash_file(&file.to_string_lossy()).expect("hashing the source must succeed");
+
+        fs::create_dir_all(blobs_dir(&store)).unwrap();
+        let blob_dest = blobs_dir(&store).join(&hash);
+        if !crate::fsutil::make_dangling_link(&blob_dest) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1769] SKIPPED the capture dangling-link blob leg: this machine could not stage a \
+                 link or junction at all. NOTHING in this test covered CPE-1769 on this run."
+            );
+            return;
+        }
+        let phantom_target = crate::fsutil::dangling_link_target(&blob_dest);
+        assert!(!phantom_target.exists(), "sanity: the link really is dangling before capture runs");
+
+        let out = capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::default());
+
+        // THE HARM, on the filesystem, before trusting whatever `capture` returned: nothing must have
+        // appeared at the link's phantom target (a copy following the link lands exactly there), and the
+        // blob's hashed name must still hold the link, not bytes written through it.
+        assert!(
+            !phantom_target.exists(),
+            "the blob copy must not have followed the dangling link to its (nonexistent) target"
+        );
+        assert!(
+            std::fs::symlink_metadata(&blob_dest).is_ok_and(|m| m.file_type().is_symlink()),
+            "the blob's hashed name must still hold the link, not the file's bytes written through it"
+        );
+        // This site's established policy (CPE-1705's own doc comment above the call site) is that a
+        // provably-occupied slot is a benign skip, not a refusal — re-copying identical content is
+        // harmless, so the fix folds a link into that same bucket rather than inventing a new refusal
+        // here. The capture as a whole is therefore still allowed to succeed.
+        assert!(out.is_ok(), "an occupied (link) blob slot must be skipped, not turned into a hard failure: {out:?}");
     }
 
     /// Create a symlink at `link` pointing at `target`; returns false when creation isn't permitted (e.g.

@@ -2105,11 +2105,20 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
                     let slot = if used.contains(&out_key) {
                         Slot::Taken // already claimed by this batch
                     } else {
-                        match crate::fsutil::classify_target_slot(
-                            &std::path::Path::new(&output).try_exists(),
-                        ) {
+                        // CPE-1769: was a bare `Path::try_exists()`, which FOLLOWS the final component —
+                        // a dangling link at the candidate output resolves to "nothing there" and this
+                        // loop, exactly like the `unique_target`/`resolve_conflict` siblings CPE-1715
+                        // fixed, read that as Free and stopped advancing. `name_pick_slot_probe` is the
+                        // shared fsutil helper built for precisely this shape: a name-picking loop that
+                        // must *advance past* an occupied candidate, not refuse at it. A link (dangling
+                        // or live) now folds into `Occupied` here, same as a real file, so the loop tries
+                        // the next candidate instead of handing the executor a name a later
+                        // `fs::copy`/`fs::write` would follow straight through.
+                        match crate::fsutil::classify_target_slot(&crate::fsutil::name_pick_slot_probe(
+                            std::path::Path::new(&output),
+                        )) {
                             crate::fsutil::TargetSlot::Free => Slot::Free,
-                            crate::fsutil::TargetSlot::Occupied => Slot::Taken, // a real file on disk
+                            crate::fsutil::TargetSlot::Occupied => Slot::Taken, // a real file, or a link, on disk
                             crate::fsutil::TargetSlot::Unknown => Slot::Unknown,
                         }
                     };
@@ -2585,6 +2594,57 @@ mod tests {
         let out = plan(&job, &v(&[&input.to_string_lossy()])).unwrap();
         assert_eq!(std::path::Path::new(&out[0].output), d.path().join("cat-800-2.jpg"));
         assert_eq!(std::fs::read(d.path().join("cat-800.jpg")).unwrap(), b"KEEP ME".to_vec());
+    }
+
+    /// **CPE-1769.** This loop's own comment says it "Mirrors `unique_target`" — and it copied that
+    /// helper's logic by hand instead of calling it, so it copied the pre-CPE-1715 bug too: a bare
+    /// `Path::try_exists()` FOLLOWS the final path component, so a **dangling** link at the first
+    /// candidate name resolves to "nothing there" and the loop stopped advancing, handing the executor
+    /// the link's own name as the output. A later `fs::copy`/`fs::write` at that name does not follow the
+    /// final component, so it writes through the link — potentially outside the destination folder.
+    ///
+    /// Staged with [`crate::fsutil::make_dangling_link`], which falls back to an NTFS junction on an
+    /// unprivileged Windows runner (no `SeCreateSymbolicLinkPrivilege`), so this test covers both the
+    /// symlink and junction legs without branching. Cleanup is `d`'s own `TempDir` drop, armed before any
+    /// assertion runs — no trailing `remove_dir_all`.
+    #[test]
+    fn cpe_1769_plan_steps_past_a_dangling_link_at_the_candidate_output_instead_of_reusing_it() {
+        let d = scratch("cpe1769-plan-dangling-link");
+        let input = d.path().join("cat.jpg");
+        std::fs::write(&input, b"input").unwrap();
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 800 }]);
+
+        let first_candidate = d.path().join("cat-800.jpg");
+        if !crate::fsutil::make_dangling_link(&first_candidate) {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"[CPE-1769] SKIPPED plan()'s dangling-link leg: this machine could not stage a link \
+                  or junction at all (no privilege and junction creation also failed).\n",
+            );
+            return;
+        }
+
+        let out = plan(&job, &v(&[&input.to_string_lossy()])).unwrap();
+
+        // THE HARM, on the filesystem, before trusting the planned `output` string: the link at the
+        // first candidate must still be exactly the untouched link it was — `plan()` never writes bytes
+        // itself, but if it had handed this name back as the chosen output, the executor's later write
+        // would have destroyed or written through it.
+        assert!(
+            std::fs::symlink_metadata(&first_candidate).is_ok_and(|m| m.file_type().is_symlink()),
+            "the dangling link at the first candidate name must survive planning completely untouched"
+        );
+        assert_ne!(
+            std::path::Path::new(&out[0].output),
+            first_candidate.as_path(),
+            "plan() must not hand back a name occupied by a dangling link as though it were free — that \
+             is the write-through this ticket exists to close"
+        );
+        assert_eq!(
+            std::path::Path::new(&out[0].output),
+            d.path().join("cat-800-2.jpg"),
+            "the loop must advance to the next candidate exactly as it does for a real occupied file"
+        );
     }
 
     #[test]
