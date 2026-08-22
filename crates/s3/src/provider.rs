@@ -2882,6 +2882,15 @@ mod tests {
             .collect()
     }
 
+    /// Escape the three bytes XML text content cannot carry literally (`&`, `<`, `>`) so a key
+    /// containing them can be interpolated into `<Key>`/`<Prefix>` and still parse (CPE-1736 item 2).
+    /// `&` must be escaped first, or escaping `<`/`>` afterwards would double-escape the `&` those two
+    /// substitutions just introduced. `roxmltree`'s `.text()` reverses this on the way back in, so a
+    /// round trip through [`parse_list_bucket_result`] yields the original byte, not the escape.
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
     /// Build one `ListObjectsV2` XML page by reading `root`'s real directory content at `prefix`,
     /// honouring `max_keys` and a `start_at` row offset — genuine server-side pagination over a real
     /// directory, not a hand-typed canned string, so a test that shrinks `max_keys` below the row count
@@ -2907,7 +2916,7 @@ mod tests {
         if has_marker {
             rows.push((
                 prefix.to_string(),
-                format!("<Contents><Key>{prefix}</Key><Size>0</Size></Contents>"),
+                format!("<Contents><Key>{}</Key><Size>0</Size></Contents>", xml_escape(prefix)),
             ));
         }
         // A sentinel file `.s3unsafe` makes the page additionally emit a `<Contents>` whose leaf is a
@@ -2917,9 +2926,10 @@ mod tests {
         // object that `list` filters out. That is the shape the UAT found `delete` reporting success on.
         // It sorts immediately after the marker, matching S3's lexicographic order for this key.
         if dir.join(".s3unsafe").is_file() {
+            let unsafe_key = format!("{prefix}holiday\\2024.jpg");
             rows.push((
-                format!("{prefix}holiday\\2024.jpg"),
-                format!("<Contents><Key>{prefix}holiday\\2024.jpg</Key><Size>7</Size></Contents>"),
+                unsafe_key.clone(),
+                format!("<Contents><Key>{}</Key><Size>7</Size></Contents>", xml_escape(&unsafe_key)),
             ));
         }
         let mut names: Vec<(String, bool, u64)> = Vec::new();
@@ -2938,14 +2948,18 @@ mod tests {
         for (name, is_dir, size) in &names {
             let key = format!("{prefix}{name}");
             if *is_dir {
+                let prefix_key = format!("{key}/");
                 rows.push((
-                    format!("{key}/"),
-                    format!("<CommonPrefixes><Prefix>{key}/</Prefix></CommonPrefixes>"),
+                    prefix_key.clone(),
+                    format!(
+                        "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+                        xml_escape(&prefix_key)
+                    ),
                 ));
             } else {
                 rows.push((
                     key.clone(),
-                    format!("<Contents><Key>{key}</Key><Size>{size}</Size></Contents>"),
+                    format!("<Contents><Key>{}</Key><Size>{size}</Size></Contents>", xml_escape(&key)),
                 ));
             }
         }
@@ -2988,18 +3002,16 @@ mod tests {
     /// that line is ever removed; `tests::the_fixture_rejects_a_listobjectsv2_request_missing_delimiter`
     /// proves the enforcement fires by calling the fixture directly, bypassing `S3Provider`.
     ///
-    /// # Two limits of this harness, named by the PR #903 UAT rather than left to be rediscovered
+    /// # Object paths ARE percent-decoded here (CPE-1736)
     ///
-    /// Both are **pre-existing** and neither is a defect in what it does test; they bound what any test
-    /// built on it can claim. Filed as CPE-1736.
-    ///
-    /// - **Object paths are never percent-decoded here.** `real` is built from the raw request path, so a
-    ///   key needing encoding (`my photos/x`, `café/x`, `100%pure`) is served under its *encoded* spelling
-    ///   and never round-trips as itself. No test in this crate therefore exercises an encodable object key
-    ///   through this fixture — the encoding is covered separately, at the `sigv4`/`RequestTarget` level.
-    /// - **[`list_page_xml`] interpolates key text into XML unescaped**, so a key containing `&` or `<`
-    ///   produces a document `roxmltree` rejects. That makes those two bytes unreachable end-to-end
-    ///   through the listing path, which is why no delete/belt test uses them.
+    /// `path` is run through [`percent_decode`] before it becomes `real`, so a key needing encoding
+    /// (`my photos/x`, `café/x`) is stored and served under its **decoded** spelling and round-trips as
+    /// itself through `write` → `list` → `stat` → `delete`. [`list_page_xml`] escapes `&`/`<`/`>` in the
+    /// XML it builds for the same reason, so a key containing those bytes lists without a parse error.
+    /// Two limits used to be recorded here — the fixture never decoded the path, and the listing path
+    /// could not carry `&`/`<` — both closed by CPE-1736; see
+    /// `tests::handle_percent_decodes_the_object_path_so_a_key_with_a_space_round_trips_end_to_end` and its
+    /// siblings for the end-to-end coverage that was impossible before.
     ///
     /// `page_cap`, if set, overrides whatever `max-keys` the client asked for with something smaller —
     /// modelling a real gateway's right to truncate a response below the requested `max-keys` at its own
@@ -3011,7 +3023,12 @@ mod tests {
         let method = req.method().to_string().to_uppercase();
         let full = req.url().to_string();
         let (raw_path, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
-        let path = raw_path.strip_prefix(&format!("/{TEST_BUCKET}")).unwrap_or(raw_path);
+        let raw_path = raw_path.strip_prefix(&format!("/{TEST_BUCKET}")).unwrap_or(raw_path);
+        // CPE-1736: the client percent-encodes the object key building the request (`sigv4::encode_path`),
+        // so the wire path must be decoded back before it addresses anything on `std::fs` — otherwise a
+        // key needing encoding is stored and served under its *encoded* spelling and never round-trips as
+        // itself. Reuses the same `percent_decode` the query values already went through.
+        let path = percent_decode(raw_path);
         let params = parse_query(raw_query);
         let param = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
 
@@ -5238,6 +5255,143 @@ mod tests {
         let names: Vec<String> =
             provider.list("/docs").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(names, vec!["b.txt".to_string()], "the listing must reflect the delete");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1736: the fixture can now serve an encodable key and an XML-special one, so the shapes
+    // `handle`'s doc used to record as unreachable are exercised end to end for the first time.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn handle_percent_decodes_the_object_path_so_a_key_with_a_space_round_trips_end_to_end() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        let body = b"beach party photo".to_vec();
+        provider.write("/my photos/beach party.jpg", &body).expect("write must succeed");
+
+        // The distinguishing assertion: unfixed `handle` builds `real` from the raw, still-encoded
+        // request path, so the object lands on disk under `my%20photos/beach%20party.jpg` — the encoded
+        // spelling — never under the decoded one. If `path` stopped being percent-decoded, this exact
+        // assertion is what goes red; the encoded path existing instead would prove it.
+        let stored = std::fs::read(root.join("my photos/beach party.jpg")).expect(
+            "write returned Ok but the object is not on the server under its DECODED name — the fixture \
+             must be storing it under the encoded request path instead",
+        );
+        assert_bytes_eq(&stored, &body, "the object the PUT actually stored");
+        assert!(
+            !root.join("my%20photos").exists(),
+            "no encoded-spelling directory should exist once the path is decoded before use"
+        );
+
+        let entries = provider.list("/my photos").expect("list must find the directory just written to");
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["beach party.jpg"],
+            "the listing must show the key's decoded leaf, not an encoded one: {entries:?}"
+        );
+
+        let entry = provider
+            .stat("/my photos/beach party.jpg")
+            .expect("stat must find the object under its decoded key");
+        assert!(!entry.is_dir);
+        assert_eq!(entry.size, body.len() as u64);
+
+        provider.delete("/my photos/beach party.jpg").expect("delete must succeed");
+        assert!(
+            !root.join("my photos/beach party.jpg").exists(),
+            "delete must remove the object stored under its decoded name"
+        );
+    }
+
+    #[test]
+    fn handle_percent_decodes_the_object_path_so_a_non_ascii_key_round_trips_end_to_end() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        let body = b"caviar and umlauts".to_vec();
+        provider.write("/caf\u{e9}/m\u{fc}nchen.txt", &body).expect("write must succeed");
+
+        // Same distinguishing shape as the space test: unfixed `handle` would store this under the UTF-8
+        // bytes' percent-encoded spelling (`caf%C3%A9/m%C3%BCnchen.txt`), never under the literal
+        // non-ASCII name a real S3 server stores it under.
+        let stored = std::fs::read(root.join("caf\u{e9}/m\u{fc}nchen.txt")).expect(
+            "write returned Ok but the object is not on the server under its DECODED non-ASCII name",
+        );
+        assert_bytes_eq(&stored, &body, "the object the PUT actually stored");
+
+        let entries = provider.list("/caf\u{e9}").expect("list must find the directory just written to");
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["m\u{fc}nchen.txt"],
+            "the listing must show the key's decoded non-ASCII leaf: {entries:?}"
+        );
+
+        let entry = provider
+            .stat("/caf\u{e9}/m\u{fc}nchen.txt")
+            .expect("stat must find the object under its decoded non-ASCII key");
+        assert!(!entry.is_dir);
+        assert_eq!(entry.size, body.len() as u64);
+
+        provider.delete("/caf\u{e9}/m\u{fc}nchen.txt").expect("delete must succeed");
+        assert!(
+            !root.join("caf\u{e9}/m\u{fc}nchen.txt").exists(),
+            "delete must remove the object stored under its decoded non-ASCII name"
+        );
+    }
+
+    #[test]
+    fn list_page_xml_escapes_an_ampersand_so_a_key_containing_one_lists_without_a_parse_error() {
+        let (mut provider, _root, _requests) = s3_fixture_provider();
+        provider.write("/AT&T/report.txt", b"quarterly").expect("write must succeed");
+
+        // Unfixed `list_page_xml` interpolates the key text unescaped, so the response document reads
+        // `<Prefix>AT&T/</Prefix>` — a bare `&` not starting a legal XML entity — which `roxmltree`
+        // refuses to parse. `list` surfaces that as an `Err`, so `.expect` panicking on this exact call is
+        // the distinguishing failure if the escape is ever removed.
+        let entries = provider
+            .list("/AT&T")
+            .expect("a key containing '&' must list without the XML failing to parse");
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["report.txt"],
+            "the ampersand must survive the XML round trip intact: {entries:?}"
+        );
+    }
+
+    /// `<` and `>` cannot reach [`list_page_xml`] end to end through the `std::fs`-backed fixture the way
+    /// `&` does two tests up: both are reserved characters `std::fs::create_dir_all`/`write` refuse in a
+    /// filename on Windows NTFS — the identical reason `a_key_containing_a_colon_reaches_the_caller_
+    /// end_to_end` above builds its own hand-rolled server instead of using this fixture for `:`. This
+    /// does the same thing here, driving [`xml_escape`] — the real function `list_page_xml` calls, not a
+    /// re-typed copy of its logic — to build the response, so a regression there still reds this test.
+    #[test]
+    fn xml_escape_lets_a_key_containing_angle_brackets_or_an_ampersand_list_without_a_parse_error() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let key = "<script>a&b>c.txt";
+                let xml = format!(
+                    "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>false</IsTruncated>\
+                     <Contents><Key>{}</Key><Size>3</Size></Contents></ListBucketResult>",
+                    xml_escape(key)
+                );
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        // Distinguishing assertion: without escaping, `xml_escape` is the identity function, so the
+        // document above reads `<Key><script>a&b>c.txt</Key>` — `<script>` opens an unknown child element
+        // roxmltree does not recognise as text, and the bare `&`/`>` are not legal XML on their own either.
+        // `list` surfaces the parse failure as `Err`, so this `.expect` is what goes red.
+        let entries = provider
+            .list("/")
+            .expect("a key containing '<', '&' and '>' must list without the XML failing to parse");
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["<script>a&b>c.txt"],
+            "all three XML-special bytes must survive the escape/decode round trip intact: {entries:?}"
+        );
     }
 
     // ---------------------------------------------------------------------------------------------
