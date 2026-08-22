@@ -15,10 +15,16 @@
  *   2. MISSING ARMS. Neither `smartFolder` nor `structuredSearch` appeared in either guard, so both
  *      readouts survived into both virtual views regardless of reactivity.
  *   3. LATE RESULTS (found while fixing 1+2, not in the ticket). Both fetches are async and neither
- *      re-checked suppression at RESOLVE time. `updateDiskSpace` re-checked `currentPath === path`,
+ *      re-checked its assumptions at RESOLVE time. `updateDiskSpace` re-checked `currentPath === path`,
  *      which is not enough: opening a smart folder or a structured search leaves `currentPath` alone, so
- *      an in-flight response landed and repainted a readout the guard had already blanked. Two extra
- *      tests at the bottom.
+ *      an in-flight response landed and repainted a readout the guard had already blanked.
+ *   4. And `refreshGitStatus` had NO stale-response check AT ALL — which breaks the ORDINARY
+ *      FOLDER-TO-FOLDER case, no virtual view required, and is the most user-visible defect fixed here.
+ *      Navigate away from a slow repository (a large one, or one on a network share) before its
+ *      `forge_repo_status` returns and the FIRST folder's branch painted over the second folder's, live
+ *      Pull and Push buttons included. Found by the independent UAT, which measured it on a throwaway
+ *      probe rather than reasoning about it. Four resolve-time tests at the bottom cover 3 and 4; the
+ *      last of them is a regression guard for the check `updateDiskSpace` already had and nothing pinned.
  *
  * Why this matters more than a stale number: the git chip carries live **Pull / Push** buttons, so a
  * stale branch chip is a false statement sitting next to two actions. Every git case below therefore
@@ -28,7 +34,10 @@
  *
  * Every test is a BEFORE/AFTER pair inside one render: it first asserts the readout IS on screen in a
  * real folder (so the absence assertion can never pass vacuously — a broken harness that renders no
- * status bar at all fails at the first assertion), then enters the view and asserts it is gone.
+ * status bar at all fails at the first assertion), then enters the view and asserts it is gone. The two
+ * folder-to-folder cases are stronger than absence: `expectGitChipPresent(branch)` asserts the OTHER
+ * folder's branch is absent as well, so "the right chip" and "a chip" cannot be confused, and the two
+ * folders carry deliberately different branch names and different free-space figures.
  *
  * Mutation-tested, one mutation at a time against the fixed code:
  *
@@ -43,9 +52,14 @@
  *   M4  drop the archive arm: `$: pathReadoutsSuppressed = isHome || !!smartFolder ||
  *       !!structuredSearch;`  →  exactly the two archive tests red.
  *   M5  delete `|| pathReadoutsSuppressed` from `refreshGitStatus`'s resolve-time re-check  →  the git
- *       late-result test red.
+ *       smart-folder late-result test red.
  *   M6  delete `&& !pathReadoutsSuppressed` from `updateDiskSpace`'s resolve-time re-check  →  the disk
- *       late-result test red.
+ *       smart-folder late-result test red.
+ *   M7  delete `currentPath !== path ||` from `refreshGitStatus`'s resolve-time re-check — i.e. the
+ *       pre-ticket state of that line, which had no path check at all  →  the git folder-to-folder test
+ *       red, with C:\d's branch on screen while the user is in C:\d\photos.
+ *   M8  delete `currentPath === path &&` from `updateDiskSpace`'s resolve-time re-check  →  the disk
+ *       folder-to-folder test red.
  *
  * LIMIT, stated rather than worked around: jsdom does not apply component CSS under this project's
  * vitest config, so `getComputedStyle` reports nothing useful here and NOTHING in this file can check
@@ -94,8 +108,15 @@ const DISK: Record<string, { free: number; total: number }> = {
 const DRIVE_DISK = "7.0 GB free of 100.0 GB";
 const PHOTOS_DISK = "3.0 GB free of 50.0 GB";
 
-/** A branch name that appears nowhere else in the UI, so `queryByText` for it is unambiguous. */
-const BRANCH = "release/ledger-9";
+/** Per-folder branch names, both unique in the UI so `queryByText` for either is unambiguous — and
+ *  DIFFERENT from each other, so a folder-to-folder test can say WHICH repo the chip is describing
+ *  rather than only that some chip is present. */
+const BRANCH_DRIVE = "hotfix/drive-root-7"; //  C:\d
+const BRANCH_PHOTOS = "release/ledger-9"; //  C:\d\photos
+const BRANCH_BY_PATH: Record<string, string> = {
+  "C:\\d": BRANCH_DRIVE,
+  "C:\\d\\photos": BRANCH_PHOTOS,
+};
 
 const { invoke, Channel } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -111,18 +132,27 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
-/** Gates that make `forge_repo_status` / `disk_space` hang until released — the only way to stage a
- *  response that is STILL IN FLIGHT when the user opens a virtual view (tests 7 and 8). */
-let gitGate: Promise<void> | null = null;
-let releaseGit: () => void = () => {};
-let diskGate: Promise<void> | null = null;
-let releaseDisk: () => void = () => {};
+/** PER-PATH gates that make one folder's `forge_repo_status` / `disk_space` hang until released — the
+ *  only way to stage a response that is STILL IN FLIGHT when the user has moved on. Per-path rather than
+ *  global specifically so the folder-to-folder tests at the bottom can hold folder A's fetch while
+ *  folder B's resolves normally, which is the ordering the real bug needs and a single shared gate
+ *  cannot express. */
+let gitHeld = new Set<string>();
+let diskHeld = new Set<string>();
+const gitReleases = new Map<string, () => void>();
+const diskReleases = new Map<string, () => void>();
 
-function holdGit(): void {
-  gitGate = new Promise<void>((r) => (releaseGit = r));
+const holdGit = (path: string): void => void gitHeld.add(path);
+const holdDisk = (path: string): void => void diskHeld.add(path);
+function releaseGit(path: string): void {
+  gitHeld.delete(path);
+  gitReleases.get(path)?.();
+  gitReleases.delete(path);
 }
-function holdDisk(): void {
-  diskGate = new Promise<void>((r) => (releaseDisk = r));
+function releaseDisk(path: string): void {
+  diskHeld.delete(path);
+  diskReleases.get(path)?.();
+  diskReleases.delete(path);
 }
 
 beforeEach(() => {
@@ -130,10 +160,10 @@ beforeEach(() => {
   resetSettings();
   savedSearches.set([]);
   smartFolders.set([]);
-  gitGate = null;
-  diskGate = null;
-  releaseGit = () => {};
-  releaseDisk = () => {};
+  gitHeld = new Set();
+  diskHeld = new Set();
+  gitReleases.clear();
+  diskReleases.clear();
   Element.prototype.scrollIntoView = vi.fn();
 
   invoke.mockReset();
@@ -169,30 +199,38 @@ beforeEach(() => {
       // Every real folder in this harness is a repo, BOTH ahead and behind, so the chip renders its
       // branch name AND both Pull and Push buttons — the pair the acceptance criterion is about.
       case "forge_repo_status": {
-        if (gitGate) await gitGate;
+        const path = args.path as string;
+        if (gitHeld.has(path)) await new Promise<void>((r) => gitReleases.set(path, r));
+        const branch = BRANCH_BY_PATH[path] ?? BRANCH_PHOTOS;
         return {
-          is_repo: true, branch: BRANCH, upstream: `origin/${BRANCH}`, ahead: 2, behind: 1,
+          is_repo: true, branch, upstream: `origin/${branch}`, ahead: 2, behind: 1,
           dirty: false, actions: ["pull-ff", "push"], up_to_date: false, conflicts_possible: false,
           blocked: null, warnings: [], conflicted: false,
         };
       }
       case "disk_space": {
-        if (diskGate) await diskGate;
-        return DISK[args.path as string] ?? { free: 0, total: 0 };
+        const path = args.path as string;
+        if (diskHeld.has(path)) await new Promise<void>((r) => diskReleases.set(path, r));
+        return DISK[path] ?? { free: 0, total: 0 };
       }
       default: return null;
     }
   });
 });
 
-/** The whole `{#if git && git.is_repo}` block: the branch name and the two live actions next to it. */
-function expectGitChipPresent(): void {
-  expect(screen.getByText(new RegExp(BRANCH))).toBeTruthy();
+/** The whole `{#if git && git.is_repo}` block, naming WHICH repo it is describing: the branch and the
+ *  two live actions next to it, plus the other folder's branch explicitly absent — so "the right chip"
+ *  and "a chip" can never be confused for one another. */
+function expectGitChipPresent(branch: string): void {
+  expect(screen.getByText(new RegExp(branch))).toBeTruthy();
+  const other = branch === BRANCH_DRIVE ? BRANCH_PHOTOS : BRANCH_DRIVE;
+  expect(screen.queryByText(new RegExp(other))).toBeNull();
   expect(screen.getByText("Pull")).toBeTruthy();
   expect(screen.getByText("Push")).toBeTruthy();
 }
 function expectGitChipAbsent(): void {
-  expect(screen.queryByText(new RegExp(BRANCH))).toBeNull();
+  expect(screen.queryByText(new RegExp(BRANCH_DRIVE))).toBeNull();
+  expect(screen.queryByText(new RegExp(BRANCH_PHOTOS))).toBeNull();
   // AC: the actions must go with the statement they act on — a Pull/Push button surviving a suppressed
   // chip would operate on `currentPath`'s repo with nothing on screen naming it.
   expect(screen.queryByText("Pull")).toBeNull();
@@ -236,7 +274,7 @@ async function enterStructuredSearch(): Promise<void> {
 describe("the git branch chip never describes a folder that is not on screen (CPE-1854)", () => {
   it("archive: the chip and its Pull/Push actions go on entering the archive, not on the next navigation", async () => {
     await intoPhotos();
-    await waitFor(() => expectGitChipPresent());
+    await waitFor(() => expectGitChipPresent(BRANCH_PHOTOS));
 
     await enterArchive();
 
@@ -247,7 +285,7 @@ describe("the git branch chip never describes a folder that is not on screen (CP
 
   it("smart folder: the chip and its Pull/Push actions go on opening the smart folder", async () => {
     await intoPhotos();
-    await waitFor(() => expectGitChipPresent());
+    await waitFor(() => expectGitChipPresent(BRANCH_PHOTOS));
 
     await enterSmartFolder();
 
@@ -257,7 +295,7 @@ describe("the git branch chip never describes a folder that is not on screen (CP
   it("structured search: the chip and its Pull/Push actions go on opening the saved search", async () => {
     addSavedSearch("Markdown docs", [{ kind: "ext", exts: ["md"] }], "all", "C:\\d");
     await intoPhotos();
-    await waitFor(() => expectGitChipPresent());
+    await waitFor(() => expectGitChipPresent(BRANCH_PHOTOS));
 
     await enterStructuredSearch();
 
@@ -298,50 +336,113 @@ describe("the free-space readout never describes a drive that is not on screen (
   });
 });
 
+const DRIVE = "C:\\d";
+const PHOTOS = "C:\\d\\photos";
+
+/** Home -> C:\d only, without descending — the starting point for the resolve-time cases below. */
+async function intoDrive(): Promise<void> {
+  render(App);
+  const driveButtons = await screen.findAllByText("Local Disk (C:)");
+  await fireEvent.click(driveButtons[0]);
+  await waitFor(() => expect(screen.getByText("photos")).toBeTruthy());
+}
+
+/** C:\d -> C:\d\photos. Separate from `intoPhotos` because these tests must assert things BETWEEN the
+ *  two navigations. */
+async function descendToPhotos(): Promise<void> {
+  await fireEvent.dblClick(screen.getByText("photos"));
+  await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
+}
+
 /**
- * The resolve-time half. Both fetches are async, and opening a smart folder or a structured search does
- * NOT change `currentPath` — so the `currentPath === path` re-check `updateDiskSpace` already had could
- * not tell "this response is for the folder I am still in" from "this response is for the folder I am
- * still in but am no longer LOOKING at". Staged by holding the backend response across the view change.
+ * The resolve-time half. Both fetches are async, and neither re-checked its assumptions when the
+ * response finally came back.
+ *
+ * The FIRST TWO cases are the virtual-view ones: opening a smart folder or a structured search does NOT
+ * change `currentPath`, so the `currentPath === path` re-check `updateDiskSpace` already had could not
+ * tell "this response is for the folder I am still in" from "this response is for the folder I am still
+ * in but am no longer LOOKING at".
+ *
+ * The LAST TWO are the ordinary-folder ones, and they are the most user-visible thing in this change —
+ * they need no virtual view at all. `refreshGitStatus` had NO stale-response check whatsoever before
+ * this ticket: navigate from a slow repository (a big one, or one on a network share) to another folder
+ * before its `forge_repo_status` returns, and the FIRST folder's branch painted over the second one's,
+ * with live Pull and Push buttons beside it. Plain folder-to-folder navigation, no archive, no smart
+ * folder. Its disk twin is a REGRESSION GUARD rather than a fix: `updateDiskSpace`'s `currentPath ===
+ * path` check already handled that case correctly, but nothing tested it, so nothing stopped it being
+ * deleted — and the git side is the proof of what happens when that check is missing.
+ *
+ * All four are staged by holding one specific path's backend response (`gitHeld`/`diskHeld`) across the
+ * navigation, then releasing it and letting the promise land.
  */
 describe("an in-flight response cannot repaint a readout the guard already blanked (CPE-1854)", () => {
   it("git: a response that lands after the smart folder opens is dropped", async () => {
-    render(App);
-    const driveButtons = await screen.findAllByText("Local Disk (C:)");
-    await fireEvent.click(driveButtons[0]);
-    await waitFor(() => expect(screen.getByText("photos")).toBeTruthy());
-    await waitFor(() => expectGitChipPresent()); // C:\d resolved normally: the chip is really there
+    await intoDrive();
+    await waitFor(() => expectGitChipPresent(BRANCH_DRIVE)); // C:\d resolved normally: really there
 
-    holdGit(); // C:\d\photos' status request will now hang
-    await fireEvent.dblClick(screen.getByText("photos"));
-    await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
+    holdGit(PHOTOS); // C:\d\photos' status request will now hang
+    await descendToPhotos();
 
     await enterSmartFolder();
     await waitFor(() => expectGitChipAbsent());
 
-    releaseGit(); // the held request for C:\d\photos comes back NOW, inside the smart folder
+    releaseGit(PHOTOS); // the held request for C:\d\photos comes back NOW, inside the smart folder
     await new Promise((r) => setTimeout(r, 50));
     expectGitChipAbsent(); // red under M5: the chip reappears over the smart folder
   });
 
   it("disk: a response that lands after the smart folder opens is dropped", async () => {
-    render(App);
-    const driveButtons = await screen.findAllByText("Local Disk (C:)");
-    await fireEvent.click(driveButtons[0]);
-    await waitFor(() => expect(screen.getByText("photos")).toBeTruthy());
+    await intoDrive();
     await waitFor(() => expect(screen.getByText(DRIVE_DISK)).toBeTruthy());
 
-    holdDisk();
-    await fireEvent.dblClick(screen.getByText("photos"));
-    await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
+    holdDisk(PHOTOS);
+    await descendToPhotos();
 
     await enterSmartFolder();
     await waitFor(() => expect(screen.queryByText(DRIVE_DISK)).toBeNull());
 
-    releaseDisk();
+    releaseDisk(PHOTOS);
     await new Promise((r) => setTimeout(r, 50));
     // Red under M6: C:\d\photos' figures land and paint over the smart folder, which describes no drive.
     expect(screen.queryByText(PHOTOS_DISK)).toBeNull();
+    expect(screen.queryByText(DRIVE_DISK)).toBeNull();
+  });
+
+  // No virtual view anywhere in this one. C:\d is a slow repo; the user does not wait for it and moves
+  // into C:\d\photos, whose own status returns immediately. When C:\d's response finally lands it must be
+  // DROPPED — the chip is describing C:\d\photos now. Before this ticket `refreshGitStatus` had no such
+  // check at all and `hotfix/drive-root-7` repainted over `release/ledger-9`, Pull and Push included.
+  it("git: a slow folder's branch never repaints over the folder the user moved to", async () => {
+    holdGit(DRIVE); // C:\d is the slow repository — hold it from the very first fetch
+    await intoDrive();
+    expectGitChipAbsent(); // nothing has resolved yet, so there is no chip to be right or wrong about
+
+    await descendToPhotos();
+    await waitFor(() => expectGitChipPresent(BRANCH_PHOTOS)); // the folder we are actually in
+
+    releaseGit(DRIVE); // C:\d's status comes back now — for a folder we have left
+    await new Promise((r) => setTimeout(r, 50));
+
+    // `expectGitChipPresent` asserts the OTHER branch is absent, so this is the whole claim in one call:
+    // the chip still names C:\d\photos and has not been overwritten by C:\d's late answer.
+    expectGitChipPresent(BRANCH_PHOTOS);
+  });
+
+  // The disk twin of the case above. This one is a regression guard, not a fix: `updateDiskSpace` has
+  // always re-checked `currentPath === path`. Nothing pinned it until now, which is exactly how the git
+  // side ended up shipping without the equivalent line.
+  it("disk: a slow folder's free-space figures never repaint over the folder the user moved to", async () => {
+    holdDisk(DRIVE);
+    await intoDrive();
+    expect(screen.queryByText(DRIVE_DISK)).toBeNull();
+
+    await descendToPhotos();
+    await waitFor(() => expect(screen.getByText(PHOTOS_DISK)).toBeTruthy());
+
+    releaseDisk(DRIVE);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(screen.getByText(PHOTOS_DISK)).toBeTruthy();
     expect(screen.queryByText(DRIVE_DISK)).toBeNull();
   });
 });
