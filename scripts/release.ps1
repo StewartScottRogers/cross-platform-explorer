@@ -16,23 +16,36 @@ Set-Location $repo
 
 Write-Host "Releasing v$Version..." -ForegroundColor Cyan
 
+# Bare Get-Content/Set-Content (no -Encoding) reads and writes the system ANSI
+# code page on Windows PowerShell 5.1 (CP1252 here), which is lossy for any
+# non-ASCII character in either direction: `Get-Content -Raw` on a BOM-less
+# UTF-8 file (all three manifests are BOM-less UTF-8) misdecodes multi-byte
+# sequences into mojibake before we ever touch the string, and a bare
+# `Set-Content` re-corrupts whatever survived on the way out. `-Encoding utf8`
+# fixes the write but adds a UTF-8 BOM instead (its own corruption shape — see
+# the mojibake guard's `bom` check). [System.IO.File]::ReadAllText /
+# WriteAllText with an explicit BOM-less UTF8Encoding sidesteps every trap on
+# both ends and behaves identically on Windows PowerShell 5.1 and PowerShell 7+.
+# See CPE-1834.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
 # 1. package.json
 $pkgPath = Join-Path $repo "package.json"
-$pkg = Get-Content $pkgPath -Raw
+$pkg = [System.IO.File]::ReadAllText($pkgPath, $utf8NoBom)
 $pkg = $pkg -replace '("version"\s*:\s*")[^"]+(")', "`${1}$Version`$2"
-Set-Content $pkgPath $pkg -NoNewline
+[System.IO.File]::WriteAllText($pkgPath, $pkg, $utf8NoBom)
 
 # 2. src-tauri/tauri.conf.json
 $confPath = Join-Path $repo "src-tauri/tauri.conf.json"
-$conf = Get-Content $confPath -Raw
+$conf = [System.IO.File]::ReadAllText($confPath, $utf8NoBom)
 $conf = $conf -replace '("version"\s*:\s*")[^"]+(")', "`${1}$Version`$2"
-Set-Content $confPath $conf -NoNewline
+[System.IO.File]::WriteAllText($confPath, $conf, $utf8NoBom)
 
 # 3. src-tauri/Cargo.toml  (only the first [package] version line)
 $cargoPath = Join-Path $repo "src-tauri/Cargo.toml"
-$cargo = Get-Content $cargoPath -Raw
+$cargo = [System.IO.File]::ReadAllText($cargoPath, $utf8NoBom)
 $cargo = $cargo -replace '(?m)^(version\s*=\s*")[^"]+(")', "`${1}$Version`$2"
-Set-Content $cargoPath $cargo -NoNewline
+[System.IO.File]::WriteAllText($cargoPath, $cargo, $utf8NoBom)
 
 Write-Host "Bumped version to $Version in package.json, tauri.conf.json, Cargo.toml" -ForegroundColor Green
 
