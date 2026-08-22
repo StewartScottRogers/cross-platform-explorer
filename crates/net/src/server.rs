@@ -224,7 +224,10 @@ impl ServerRuntime {
                 }
                 std::ops::ControlFlow::Continue(())
             })
-            .map(|total| serde_json::json!({ "total": total }))
+            // `stats.unreadable` (CPE-1780) isn't threaded into the wire contract here — out of scope for
+            // this ticket, whose acceptance criteria are the in-process app's status bar, not the cpe-net
+            // sidecar contract.
+            .map(|stats| serde_json::json!({ "total": stats.total }))
             .map_err(|e| ContractError::new(ErrorCode::Internal, e, false))
         })
         .with_stream_handler("name_search_stream", |_ctx, params, emit| {

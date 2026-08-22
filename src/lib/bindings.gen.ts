@@ -5053,8 +5053,15 @@ broken: boolean }
  * WebDAV, FTP) — see `FileSystemProvider::list_with_filtered_count`'s default, which delegates to
  * `list` and reports `0`. Only a backend with its own keyspace rule (e.g. `cpe-s3`, whose `:`-bearing
  * keys are legal but an embedded `/`/literal `..` genuinely is not) can ever produce a non-zero count.
+ * 
+ * `unreadable` (CPE-1780) is a DIFFERENT fact from `filtered` above and is never added to it: `filtered`
+ * means "a remote provider refused to show this name at all" (the name is never even seen); `unreadable`
+ * means "the local walk saw this row but could not stat it" (`crates/server/src/listing.rs`'s
+ * `DirWalkStats`) — always `0` for a remote listing, since that failure mode is local-walk-specific (out
+ * of scope here; see CPE-1780's ticket notes). Same non-spoofable, typed-field-not-a-synthetic-row
+ * convention as `filtered`.
  */
-export type ListDirResult = { entries: DirEntry[]; filtered: number }
+export type ListDirResult = { entries: DirEntry[]; filtered: number; unreadable: number }
 /**
  * A failed [`VaultRegistry::lock`]: a machine-readable [`LockFailureCode`] plus the human explanation.
  */
@@ -5947,8 +5954,10 @@ export type SpotSection = { kind: ResultKind; results: SpotResult[] }
  * many provider-supplied entries were left out because their name could not be shown safely — but via
  * the streaming twin, which is the pane's actual first-paint path (`ExplorerPane.loadListing`; `list_dir`
  * itself is only the collect-to-vec convenience path, STREAMING.md). Always `0` for a local walk.
+ * `unreadable` (CPE-1780) mirrors [`ListDirResult::unreadable`] — a local row the walk saw but couldn't
+ * stat, always `0` for a remote walk (see that field's doc for why it's never combined with `filtered`).
  */
-export type StreamDirResult = { total: number; filtered: number }
+export type StreamDirResult = { total: number; filtered: number; unreadable: number }
 /**
  * One symbol in the outline.
  */

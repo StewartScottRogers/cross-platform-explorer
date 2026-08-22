@@ -273,6 +273,11 @@
    *  to hand to `<StatusBar>`. 0 for the overwhelming majority of listings (local, or an unfiltered
    *  remote backend), in which case the status bar renders nothing for it at all. */
   let filteredHidden = 0;
+  /** How many of pane A's current entries could NOT BE READ (CPE-1780) — owned + kept current by
+   *  `<ExplorerPane>`'s own fetch pipeline, same lifecycle as `filteredHidden` above, but a DIFFERENT
+   *  fact: "the row was seen but couldn't be stat'd" rather than "the name couldn't be shown safely". 0
+   *  for the overwhelming majority of listings and always 0 for a remote listing (local-walk-specific). */
+  let unreadableCount = 0;
   // Monotonic token identifying the current folder load (CPE-664). A new load bumps it; batches from a
   // superseded stream carry a stale token and are dropped, so navigating away mid-load can't bleed rows.
   // Directory-listing fetch + LRU cache moved into <ExplorerPane> (CPE-676 domino 3b) — the pane owns
@@ -6654,6 +6659,7 @@
       replayOverlay={replayOverlayEntries}
       bind:entries
       bind:filteredHidden
+      bind:unreadableCount
       smartOverride={smartFolder ? smartEntries : structuredSearch ? structuredSearchEntries : null}
       archiveOverride={archive ? archiveChildren(archive) : null}
       archivePath={archive ? archive.zipPath : null}
@@ -6889,7 +6895,19 @@
      structured-search never call loadPath at all — so a stale count left over from the last real
      folder must never leak into one of them (it would be a false statement in the status bar,
      exactly what this ticket exists to remove). Gated HERE, at the single point of consumption,
-     rather than reset in each early-return, so a future early-return can't forget it. -->
+     rather than reset in each early-return, so a future early-return can't forget it. Same gate
+     applies to `unreadableCount` below (CPE-1780): the identical stale-value risk, the identical fix.
+
+     CPE-1780 (F2): this single <StatusBar> — itemCount/totalCount/filteredHidden/unreadableCount, all of
+     them — is PANE-A-SCOPED ALWAYS, including in dual-pane mode with pane B active. There is no
+     equivalent status line for pane B; clicking into pane B (or pressing Tab to make it active) does not
+     change what this bar reports. Decided rather than fixed: pane B is read-only/no-listing-metadata
+     territory today (no `filteredHidden`/`unreadableCount` plumbing exists for it, and it has no archive/
+     smart-folder/structured-search concepts either — see `paneBPath`'s "pane B is always a plain real
+     folder" comment above), so mirroring this whole gate for pane B was judged out of scope for this
+     ticket; extending it is a separate, larger ticket if a filtered/unreadable pane-B folder turns out to
+     matter in practice. Documented here (and in docs/03-explorer.md's Dual-pane section) rather than left
+     implicit, per this ticket's AC. -->
 <StatusBar
   {itemCount}
   {totalCount}
@@ -6897,6 +6915,7 @@
   {selectedSize}
   hiddenShown={showHidden}
   filteredHidden={isHome || archive || smartFolder || structuredSearch ? 0 : filteredHidden}
+  unreadableCount={isHome || archive || smartFolder || structuredSearch ? 0 : unreadableCount}
   {notice}
   {noticeIsError}
   {diskFree}

@@ -623,20 +623,31 @@ async fn list_dir(path: String) -> Result<ListDirResult, String> {
     }
 }
 
+/// The `(Vec<DirEntry>, unreadable)` → `ListDirResult` link for the LOCAL arm (CPE-1780 Reviewer round
+/// 2) — pulled out of `local_list_dir_result` below so it's independently unit testable with a NON-ZERO
+/// count, mirroring `listing_to_result`/`stream_result_for` (the remote/streaming twins) already in this
+/// file. `filtered` is always `0` (a local listing has no name-guard filtering to report); `unreadable`
+/// carries straight across — nothing here can silently zero it.
+fn local_list_dir_result_from(entries: Vec<DirEntry>, unreadable: usize) -> ListDirResult {
+    ListDirResult { entries, filtered: 0, unreadable }
+}
+
 /// `list_dir`'s LOCAL arm (CPE-1708): a free function so the "a local listing always reports
 /// `filtered: 0`" AC line ("Confirm every other provider (SFTP, WebDAV, FTP, local) reports zero and is
 /// unaffected") is independently unit testable against the SAME code the real command calls, not a
 /// hand-duplicated copy of it that could silently drift from what `list_dir` actually runs.
 fn local_list_dir_result(path: &str) -> Result<ListDirResult, String> {
-    cpe_server::listing::list_dir(path).map(|entries| ListDirResult { entries, filtered: 0 })
+    cpe_server::listing::list_dir_with_unreadable(path)
+        .map(|(entries, unreadable)| local_list_dir_result_from(entries, unreadable))
 }
 
 /// The `RemoteListing` → `ListDirResult` link of the CPE-1708 chain: a free function (not a `From` impl —
 /// neither type is local to this crate, so the orphan rule blocks that) so it's independently unit
 /// testable without needing a live provider pool. `entries`/`filtered` both carry straight across —
-/// nothing here can silently drop or zero the count.
+/// nothing here can silently drop or zero the count. `unreadable` (CPE-1780) is always `0` here — a
+/// remote-read failure isn't the local-walk-stat failure this field means (see `ListDirResult`'s doc).
 fn listing_to_result(listing: cpe_vfs::connect::RemoteListing) -> ListDirResult {
-    ListDirResult { entries: listing.entries, filtered: listing.filtered }
+    ListDirResult { entries: listing.entries, filtered: listing.filtered, unreadable: 0 }
 }
 
 /// Registry of in-flight `list_dir_stream` walks' cancel flags, keyed by the frontend-supplied stream id,
@@ -657,11 +668,14 @@ fn dir_stream_registry(
 /// many provider-supplied entries were left out because their name could not be shown safely — but via
 /// the streaming twin, which is the pane's actual first-paint path (`ExplorerPane.loadListing`; `list_dir`
 /// itself is only the collect-to-vec convenience path, STREAMING.md). Always `0` for a local walk.
+/// `unreadable` (CPE-1780) mirrors [`ListDirResult::unreadable`] — a local row the walk saw but couldn't
+/// stat, always `0` for a remote walk (see that field's doc for why it's never combined with `filtered`).
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
 struct StreamDirResult {
     total: usize,
     filtered: usize,
+    unreadable: usize,
 }
 
 /// Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
@@ -685,8 +699,7 @@ async fn list_dir_stream(
     match cpe_server::fs_route::route(&path) {
         cpe_server::fs_route::Route::Local => {
             tauri::async_runtime::spawn_blocking(move || {
-                list_dir_stream_impl(path, stream_id, on_entry)
-                    .map(|total| StreamDirResult { total, filtered: 0 })
+                list_dir_stream_impl(path, stream_id, on_entry).map(local_stream_result_for)
             })
             .await
             .map_err(|e| e.to_string())?
@@ -705,7 +718,7 @@ fn list_dir_stream_impl(
     path: String,
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
-) -> Result<usize, String> {
+) -> Result<cpe_server::listing::DirWalkStats, String> {
     use std::sync::atomic::Ordering;
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     dir_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
@@ -719,6 +732,17 @@ fn list_dir_stream_impl(
     });
     dir_stream_registry().lock().unwrap().remove(&stream_id);
     result
+}
+
+/// The `DirWalkStats` → `StreamDirResult` link for a LOCAL walk (CPE-1780 Reviewer round 2) — pulled out
+/// of `list_dir_stream`'s local arm above so it's independently unit testable with a NON-ZERO count,
+/// mirroring `stream_result_for` (the remote twin) and `local_list_dir_result_from` above. `filtered` is
+/// always `0` (a local listing has no name-guard filtering to report); `unreadable` carries straight
+/// across — nothing here can silently zero it (the exact mutation the Reviewer's review proved possible
+/// before this existed: `unreadable: stats.unreadable` mutated to `unreadable: 0` left the whole Rust
+/// suite green).
+fn local_stream_result_for(stats: cpe_server::listing::DirWalkStats) -> StreamDirResult {
+    StreamDirResult { total: stats.total, filtered: 0, unreadable: stats.unreadable }
 }
 
 /// Signal an in-flight `list_dir_stream` to stop at the next batch boundary (CPE-665). A no-op if the
@@ -8615,7 +8639,9 @@ fn remote_list_dir_stream_impl(
 /// drained into channel batches, so `total`/`filtered` can never end up reflecting a partially-cancelled
 /// walk.
 fn stream_result_for(listing: &cpe_vfs::connect::RemoteListing) -> StreamDirResult {
-    StreamDirResult { total: listing.entries.len(), filtered: listing.filtered }
+    // `unreadable` (CPE-1780) is always 0 here — see `ListDirResult::unreadable`'s doc for why a
+    // remote-read failure isn't the local-walk-stat failure this field means.
+    StreamDirResult { total: listing.entries.len(), filtered: listing.filtered, unreadable: 0 }
 }
 
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
@@ -13997,6 +14023,7 @@ mod tests {
         let result = stream_result_for(&listing);
         assert_eq!(result.total, 1, "one safe leaf streamed");
         assert_eq!(result.filtered, 2, "list_dir_stream's StreamDirResult must carry the real count through");
+        assert_eq!(result.unreadable, 0, "CPE-1780: a remote listing never reports unreadable — only filtered");
     }
 
     /// Link 3→4 (command → frontend): what actually crosses the Tauri IPC wire is `serde_json`, keyed by
@@ -14006,14 +14033,18 @@ mod tests {
     /// the class of drift CI's Typed-bindings guard also independently catches.
     #[test]
     fn list_dir_result_and_stream_dir_result_serialize_the_filtered_field_by_name() {
-        let ldr = ListDirResult { entries: vec![], filtered: 3 };
+        let ldr = ListDirResult { entries: vec![], filtered: 3, unreadable: 4 };
         let v = serde_json::to_value(&ldr).unwrap();
         assert_eq!(v["filtered"], 3, "ListDirResult must serialize `filtered` under that exact key");
+        // CPE-1780: `unreadable` is a DIFFERENT count from `filtered` and must serialize under its own
+        // key, not get folded into `filtered` (the whole point of keeping them separate fields).
+        assert_eq!(v["unreadable"], 4, "ListDirResult must serialize `unreadable` under that exact key");
         assert_eq!(v["entries"], serde_json::json!([]));
 
-        let sdr = StreamDirResult { total: 5, filtered: 2 };
+        let sdr = StreamDirResult { total: 5, filtered: 2, unreadable: 1 };
         let v = serde_json::to_value(&sdr).unwrap();
         assert_eq!(v["filtered"], 2, "StreamDirResult must serialize `filtered` under that exact key");
+        assert_eq!(v["unreadable"], 1, "StreamDirResult must serialize `unreadable` under that exact key");
         assert_eq!(v["total"], 5);
     }
 
@@ -14035,6 +14066,34 @@ mod tests {
         let result = local_list_dir_result(dir.to_str().unwrap()).expect("local listing succeeds");
         assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
         assert_eq!(result.entries.len(), 1);
+        // CPE-1780: an ordinary local listing (nothing unreadable in it) must report 0, wired through
+        // `list_dir_with_unreadable` — not left at whatever `Default`/leftover value a struct-literal typo
+        // would silently produce.
+        assert_eq!(result.unreadable, 0, "an ordinary local listing has nothing unreadable to report");
+    }
+
+    /// Reviewer round 2: the test above only ever exercises an ORDINARY directory, whose real
+    /// `unreadable` is 0 regardless of whether the wiring is correct — so it cannot catch
+    /// `local_list_dir_result_from`'s `unreadable` argument being dropped/hardcoded to `0`. This feeds a
+    /// non-zero count directly, without touching the filesystem at all.
+    #[test]
+    fn local_list_dir_result_from_carries_the_real_unreadable_count_through() {
+        let result = local_list_dir_result_from(vec![], 5);
+        assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
+        assert_eq!(result.unreadable, 5, "list_dir's local arm must carry the real unreadable count through, not 0");
+    }
+
+    /// Reviewer round 2's other proven mutation: `list_dir_stream`'s local arm (`unreadable:
+    /// stats.unreadable`) could be silently changed to `unreadable: 0` with the ENTIRE Rust suite staying
+    /// green, because every other assertion on the streaming local arm also only ever exercised an
+    /// ordinary (zero-unreadable) directory. This feeds a non-zero `DirWalkStats` directly.
+    #[test]
+    fn local_stream_result_for_carries_the_real_unreadable_count_through() {
+        let stats = cpe_server::listing::DirWalkStats { total: 3, unreadable: 2 };
+        let result = local_stream_result_for(stats);
+        assert_eq!(result.total, 3);
+        assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
+        assert_eq!(result.unreadable, 2, "list_dir_stream's local arm must carry the real unreadable count through, not 0");
     }
 
     // ---- Safety-scan command smoke tests (CPE-1287, epic CPE-1002) ----------------------------------
