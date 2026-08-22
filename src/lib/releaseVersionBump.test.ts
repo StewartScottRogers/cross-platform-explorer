@@ -149,6 +149,22 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
   }
 }
 
+/** PowerShell renders an uncaught `throw` through its own error formatter, which HARD-WRAPS the message
+ *  to the host's console width -- and PowerShell 7 additionally interleaves ANSI colour escapes at the
+ *  wrap points. So a phrase in the message can arrive split across lines, with escape sequences sitting
+ *  in the gap, and the split lands in a different place on Windows PowerShell 5.1 than on `pwsh`. Any
+ *  assertion about WORDING must therefore normalise first: strip the escapes, collapse whitespace runs.
+ *
+ *  Learned the hard way on CPE-1852 -- `/no manifest was written/` passed locally under 5.1 and reded on
+ *  CI's ubuntu (`pwsh`) leg purely because the wrap fell between "No" and "manifest" there. */
+function flat(text: string): string {
+  // The ESC is written as the escape sequence \x1b, never as a raw control byte in this file, and
+  // matched explicitly: a bare /\[[0-9;]*[A-Za-z]/ would eat the literal "[p" out of "[package]",
+  // which is a phrase these very assertions check for.
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\s+/g, " ");
+}
+
 /** Everything a failed exit-status assertion needs to be diagnosable at a glance -- without it a red
  *  reads only as "expected 0, got 1" and says nothing about which manifest the script objected to. */
 function ctx(r: BumpResult): string {
@@ -492,9 +508,14 @@ describe("release.ps1 leaves no half-bumped tree when a LATER manifest fails (CP
   });
 
   it("says something TRUE OF THE WHOLE RUN, not 'refusing to write' about one file", () => {
-    const out = third.stderr + third.stdout;
-    expect(out).toMatch(/expected exactly one .*found 0/s);
-    expect(out).toMatch(/no manifest was written/i);
+    // flat(): PowerShell hard-wraps its error rendering to the console width, and the wrap falls in a
+    // DIFFERENT place under pwsh than under Windows PowerShell 5.1 -- /no manifest was written/ passed
+    // locally and reded on CI purely because pwsh split it after "No". Normalise before matching wording.
+    const out = flat(third.stderr + third.stdout);
+    expect(out, out).toMatch(/expected exactly one .*found 0/s);
+    expect(out, out).toMatch(/no manifest was written/i);
+    // ... and the old, run-untrue wording is gone.
+    expect(out, out).not.toMatch(/refusing to write/i);
   });
 
   it("also leaves package.json alone when the SECOND manifest is the one that fails", () => {
