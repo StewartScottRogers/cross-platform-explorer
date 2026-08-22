@@ -532,6 +532,27 @@ pub struct FileDiff {
 /// — when: `rel_path` isn't in the checkpoint, `rel_path` escapes `root` (path-safety guard, reusing
 /// [`revert_engine::safe_target`]), either side is over [`DIFF_MAX_BYTES`], or either side isn't valid
 /// UTF-8 text (a binary file has no meaningful line diff here — mirrors `read_file_text`'s behaviour).
+/// Read at most `cap` bytes from `path` in **one** open: `Ok(None)` means the file is longer than `cap`,
+/// `Ok(Some(bytes))` that it fitted (CPE-1823 follow-up).
+///
+/// The point is that the limit is structural. A `metadata().len()` check followed by a `read` is two
+/// opens with an unbounded window between them, and a file that grows in that window is read in full —
+/// measured at 3× the cap. Reading `cap + 1` through a `Take` cannot exceed the cap no matter what the
+/// file does, so nothing has to be true about timing for the bound to hold.
+///
+/// Recorded, deliberately not handled: a *directory* in the blob slot has `len() == 0` on some platforms,
+/// so it would pass any size check — it then fails loudly at the read, which is the right outcome and
+/// needs no special case here.
+fn read_capped(path: &Path, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    fs::File::open(path)?.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
 pub fn checkpoint_diff_file(
     ctx: &dyn ServerCtx,
     root: &str,
@@ -551,32 +572,33 @@ pub fn checkpoint_diff_file(
     // could read. Same shared validator as every other blob join in the crate.
     let blob_path = snapshot_capture::blob_source(&store_dir.join("blobs"), &state.hash)
         .map_err(|why| format!("{rel_path}: {why}"))?;
-    // The cap is measured on the FILE, never on `state.size` (CPE-1823 follow-up 5). `size` is the
+    // The cap is enforced on the READ, never on `state.size` (CPE-1823 follow-up 5). `size` is the
     // manifest's *claim* about the content, from the same hand-editable JSON as the hash: an entry
-    // claiming `size: 1` sailed past this check and the `fs::read` below was then unbounded. Paired with
-    // the sink above, that made the read both arbitrary in target and unlimited in length. The live half
-    // below has always done it this way — this makes the checkpoint half match its sibling.
-    let blob_meta = fs::metadata(&blob_path).map_err(|e| format!("{}: {e}", blob_path.display()))?;
-    if blob_meta.len() > DIFF_MAX_BYTES {
-        return Err(format!(
-            "{rel_path}: checkpoint content too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
-            blob_meta.len()
-        ));
-    }
-    let before_bytes = fs::read(&blob_path).map_err(|e| format!("{}: {e}", blob_path.display()))?;
+    // claiming `size: 1` sailed past the old check and the `fs::read` under it was then unbounded.
+    // Paired with the sink above, that made the read both arbitrary in target and unlimited in length.
+    //
+    // **One open, bounded by construction — not stat-then-read.** The first fix measured
+    // `fs::metadata().len()` and then `fs::read`, which is two separate opens with nothing holding the
+    // file: measured, a concurrent appender got `15728645` bytes past a `5242880` cap, because the real
+    // bound was whatever the file reached before the second open finished. `take(DIFF_MAX_BYTES + 1)`
+    // cannot be raced — the window is gone rather than narrowed — and it drops a redundant traversal.
+    // The `+ 1` is what distinguishes "exactly at the cap" from "over it".
+    let before_bytes = read_capped(&blob_path, DIFF_MAX_BYTES)
+        .map_err(|e| format!("{}: {e}", blob_path.display()))?
+        .ok_or_else(|| format!("{rel_path}: checkpoint content too large to diff (over the {DIFF_MAX_BYTES} byte limit)."))?;
     let before = String::from_utf8(before_bytes).map_err(|_| {
         format!("{rel_path}: checkpoint content is not valid UTF-8 text (binary diff isn't supported).")
     })?;
 
     let live_path = safe_target(Path::new(root), rel_path)?;
-    let meta = fs::metadata(&live_path).map_err(|e| format!("{}: {e}", live_path.display()))?;
-    if meta.len() > DIFF_MAX_BYTES {
-        return Err(format!(
-            "{rel_path}: live file too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
-            meta.len()
-        ));
-    }
-    let after_bytes = fs::read(&live_path).map_err(|e| format!("{}: {e}", live_path.display()))?;
+    // Same one-open bound as the checkpoint half above. The live file is the one an attacker does NOT
+    // need to plant a manifest to grow — it is a file in the user's own tree that any process may be
+    // appending to right now — so leaving this half as stat-then-read would have kept the measured
+    // 3×-the-cap read available through the very command the other half just closed it in. Fixing one
+    // half of a symmetric pair is this ticket's own recurring mistake.
+    let after_bytes = read_capped(&live_path, DIFF_MAX_BYTES)
+        .map_err(|e| format!("{}: {e}", live_path.display()))?
+        .ok_or_else(|| format!("{rel_path}: live file too large to diff (over the {DIFF_MAX_BYTES} byte limit)."))?;
     let after = String::from_utf8(after_bytes).map_err(|_| {
         format!("{rel_path}: live file is not valid UTF-8 text (binary diff isn't supported).")
     })?;
@@ -966,28 +988,56 @@ mod tests {
         let app = scratch("cpe1823-diff-app");
         let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("cpe1823-diff-root");
-        let secrets = scratch("cpe1823-diff-secrets");
-        fs::write(secrets.join("id_rsa"), SECRET).unwrap();
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("a.txt"), b"original").unwrap();
 
         let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
         let id = created.checkpoint.manifest_id.clone();
         let store = store_dir_for(&ctx, &root_s).unwrap();
-        // `blobs/` is `<store>/blobs`, so `../../<sibling>/id_rsa` climbs out of the store entirely.
-        let hash = format!("../../{}/id_rsa", secrets.file_name().unwrap().to_string_lossy());
-        tamper(&store, &id, "a.txt", Some(&hash), None);
-        fs::write(root.join("a.txt"), b"changed").unwrap();
 
-        let got = checkpoint_diff_file(&ctx, &root_s, &id, "a.txt");
+        // The victim is planted as a SIBLING OF THE REAL STORE, and the climb is derived from that —
+        // never guessed. The first version of this test aimed `../../<a temp sibling>/id_rsa` at a
+        // scratch directory while `blobs/` actually sits at `<app>/data/checkpoints/<64-hex>/blobs`, so
+        // the real climb is five, not two. At the wrong depth the target simply does not exist, the raw
+        // join returns NotFound, and `!shown.contains(SECRET)` could not fail before OR after the fix —
+        // the test certified nothing while appearing to pass. (It did red under sabotage, but only on
+        // the error-message assertion, which any differently-worded error would have satisfied too.)
+        let secret_file = store.parent().unwrap().join("cpe1823-victim-id_rsa");
+        fs::write(&secret_file, SECRET).unwrap();
 
-        let shown = got.as_ref().map(|d| d.before.clone()).unwrap_or_default();
-        assert!(
-            !shown.contains(SECRET),
-            "HARM: a planted hash put a file from outside the store on screen: {shown:?}"
-        );
-        let err = got.expect_err("a manifest naming a blob outside the store must be refused");
-        assert!(err.contains("a.txt"), "the refusal must name the entry, got: {err}");
+        // Both escaping shapes, and the absolute one is the belt to the climb's braces — it reaches the
+        // victim regardless of how deep the store turns out to be, which is precisely what went wrong.
+        for hash in ["../../cpe1823-victim-id_rsa".to_string(), secret_file.to_string_lossy().into_owned()] {
+            // **The fixture is asserted LIVE before the guard is asked about it.** Without this the test
+            // could not fail on its harm axis at all: at the wrong depth the raw join is `NotFound`, so
+            // `!shown.contains(SECRET)` is true before and after the fix, and the whole certification is
+            // inert while looking green.
+            assert_eq!(
+                fs::read(store.join("blobs").join(&hash)).unwrap(),
+                SECRET.as_bytes(),
+                "fixture is inert: {hash:?} must actually reach the victim through a raw join, or this \
+                 test certifies nothing"
+            );
+            tamper(&store, &id, "a.txt", Some(&hash), None);
+            fs::write(root.join("a.txt"), b"changed").unwrap();
+
+            let got = checkpoint_diff_file(&ctx, &root_s, &id, "a.txt");
+
+            let shown = got.as_ref().map(|d| d.before.clone()).unwrap_or_default();
+            assert!(
+                !shown.contains(SECRET),
+                "HARM: hash {hash:?} put a file from outside the store on screen: {shown:?}"
+            );
+            let err = got.expect_err("a manifest naming a blob outside the store must be refused");
+            // Naming the entry is not enough to pin this: prefixing the raw io error with `rel_path` —
+            // something this crate does routinely — would satisfy `err.contains("a.txt")` with the sink
+            // wide open. The assertion is on the *rule* that refused it.
+            assert!(
+                err.contains("plain hex blob name"),
+                "the refusal must come from the blob-name rule, not from an incidental I/O error that \
+                 happens to mention the path: {err}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
@@ -1034,9 +1084,8 @@ mod tests {
             "the refusal must come from the CHECKPOINT half, not the live one: {err}"
         );
         assert!(
-            err.contains(&(DIFF_MAX_BYTES + 1).to_string()),
-            "and it must report the real {} bytes, not the claimed 1: {err}",
-            DIFF_MAX_BYTES + 1
+            err.contains(&DIFF_MAX_BYTES.to_string()),
+            "and it must name the limit that was exceeded: {err}"
         );
 
         let _ = fs::remove_dir_all(&root);

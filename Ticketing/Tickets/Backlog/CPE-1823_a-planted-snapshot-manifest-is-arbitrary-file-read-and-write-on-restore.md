@@ -201,7 +201,7 @@ struct or command signature changed, so `bindings.gen.ts` is unaffected.
 | Guard | Line broken | Observed |
 |---|---|---|
 | revert sink | `blob_source(blobs_dir, &state.hash)?` → `blobs_dir.join(&state.hash)` | `HARM: the revert pulled 45 bytes from outside the blob store into the user's tree` |
-| diff sink | `blob_source(&store_dir.join("blobs"), …)?` → `store_dir.join("blobs").join(&state.hash)` | red — the victim's file appeared in `FileDiff.before` |
+| diff sink | `blob_source(&store_dir.join("blobs"), …)?` → `store_dir.join("blobs").join(&state.hash)` | **this row was inaccurate as written** — the victim's file did *not* appear, because the fixture aimed two levels up when the store is five deep, so the raw join was `NotFound`. It red only on the error-message assertion. Corrected in round 3; it now reds with `HARM: … put a file from outside the store on screen: "THE VICTIM PRIVATE KEY FROM OUTSIDE THE STORE"` |
 | diff size cap | `fs::metadata(&blob_path)…len()` → `state.size` | `HARM: 5242881 bytes were read and returned past the 5242880 cap, on the strength of a manifest claiming size: 1` |
 | Win32 aliasing / device names | deleted the `win32_addresses_a_different_path` block | red: `sub/NUL` restored `Ok` with nothing on disk |
 | guards-before-mkdir (PIN 1) | moved all three guards below `create_dir_all(parent)` | `HARM: a ".." manifest path created the directory …/planted-dir` |
@@ -210,3 +210,107 @@ struct or command signature changed, so `bindings.gen.ts` is unaffected.
 **Not verified locally:** the `#[cfg(unix)]` colon/backslash round-trip test cannot run on this Windows
 machine (`Q1\Q2 report.txt` is not a creatable name here) — it is covered only by CI's ubuntu and macOS
 legs.
+
+### 2026-08-21 — round 3: the guard was on the wrong function again, and this time it cost a file
+
+**Same asymmetry, third instance.** Round 2 put `win32_addresses_a_different_path` in
+`snapshot_capture::restore` — which still has no production caller — and not in `revert_engine`'s
+`apply_write`/`apply_delete`, which `checkpoint_revert`/`checkpoint_revert_one` reach from registered
+commands. Measured on the shipping path:
+
+```text
+device name:  report = RestoreReport { applied: 1, skipped: [] }; tree = []
+alias:        plan   = [("a.txt", "Delete"), ("a.txt ", "Create")]
+              report = RestoreReport { applied: 2, skipped: [] }; tree = []; a.txt = Err(NotFound)
+```
+
+The second is **destructive**. `plan_restore` reads `a.txt ` and `a.txt` as two keys; writes run first so
+the Create lands *on* `a.txt`, then the Delete removes it. The user's only copy is gone and the command
+reports complete success.
+
+**Fixed by hoisting, not by patching two call sites.** The predicate now lives in `safe_segments`, so all
+four `safe_target` callers inherit it and a fifth cannot forget it.
+
+**Refusing the write was not enough — the paired Delete still destroyed the file.** With the guard in
+place the report became `applied: 1, skipped: 1` and `a.txt` was *still gone*: `plan_restore` had emitted
+`Delete a.txt` on its own reading. So `execute_restore` now **stands the destructive half down whenever
+any write was skipped**: a delete's whole justification is "this path is not in the checkpoint", which
+requires having read and applied the checkpoint correctly. Held-back deletes are reported per path with
+the reason, never silent. Deliberately about the class, not that one alias — it also covers the
+case-insensitive `A.txt`/`a.txt` collapse now recorded as open.
+
+**A fourth instance, found by the inventory walk rather than by review.** Walking every manifest-derived
+value to its sink turned up resolved containment (`confined_to`) on `restore` and **nowhere else**. A
+junction at an interior component of the user's tree redirected the shipping revert both ways —
+`applied: 2, skipped: []`, a file written outside the tree and a file outside the tree *deleted*.
+`confined_to` moved into `safe_target` alongside the textual rules, so restore, both revert sinks and the
+live-file diff all inherit it.
+
+**The inventory, walked and recorded** — every manifest-derived value that reaches the filesystem:
+
+| # | Value | Sink | Guards |
+|---|---|---|---|
+| 1 | `files` key → write target | `restore` pass 2 | `safe_target` (textual + Win32 + `confined_to`) |
+| 2 | `files` key → write target | `revert_engine::apply_write` **(shipping)** | same, inherited |
+| 3 | `files` key → delete target | `revert_engine::apply_delete` **(shipping)** | same, inherited, **+ delete stand-down** |
+| 4 | `files` key → live-file read | `checkpoint_diff_file` **(shipping)** | same, inherited |
+| 5 | `hash` → blob read | `restore`, `apply_write`, `checkpoint_diff_file` | `blob_source` (hex + `confined_to`) |
+| 6 | `hash` → blob delete | `prune` **(shipping, via retention)** | `validate_blob_name` before the point of no return; containment deliberately omitted — a `remove_file` on a link removes the link |
+| 7 | `size` → diff cap | `checkpoint_diff_file` | **not trusted at all** — the cap is enforced on the read |
+
+Also checked and clear: `manifest_id` (caller-supplied) is guarded by `validate_manifest_id` in the single
+`load_manifest` chokepoint; the manifest's own `id` field is never used to build a read path; `skipped[]`
+is surfaced to the UI and never joined; `capture`'s blob-name join uses a hash it computed from disk, not
+one it was handed.
+
+**Folded in — the size cap was a TOCTOU pair.** `metadata()` then `read()` is two opens; measured, a
+concurrent appender got `15728645` bytes past a `5242880` cap. Replaced with one `File::open` +
+`.take(cap + 1)`, bounded by construction rather than narrowed. Applied to **both** halves of the diff —
+fixing only the checkpoint half would have left the same read available through the same command, which
+is this ticket's own recurring mistake.
+
+**The abort premise was still false, so the structure changed instead of the wording.** `restore` now
+validates every entry in a pre-pass and only then writes: the abort is total (nothing written, the
+property `prune` already had) and one message names every offending entry. The old refuse-as-you-go loop
+was justified by "nothing legitimate can produce a refused entry", which the round-2 gates falsified
+across platforms — `NUL`, `notes. `, `a\b` are all names a Linux capture stores and a Windows restore must
+refuse, and stores moved between machines is this ticket's own threat premise.
+
+**Test-quality fixes, all four found by review rather than by me:**
+- The B2 diff test **could not fail on its harm axis**: it aimed `../../` at a store that is five levels
+  deep, so the raw join was `NotFound` and the secret never appeared either way. The idiom was copied
+  from `snapshot_capture`'s read-side test, whose store is shallower — the copied-fixture trap, fourth
+  instance in this ticket. Now the victim is planted as a sibling of the real `store_dir`, both the climb
+  and an absolute path are staged, and **the fixture is asserted live** before the guard is asked about
+  it. The error assertion moved off the path (which a `rel_path`-prefixed io error would satisfy) onto the
+  rule that must refuse it.
+- The textual test's **empty-path leg passed under its own sabotage** — all the power was in `a//b`. It
+  now asserts the refusal is the textual guard's, and pins `refusal()`'s empty-name handling, which
+  nothing covered.
+- The aliasing leg asserted only the `Err`, never the collapse. It now asserts `files_under` first, and
+  reds under sabotage with `three distinct manifest entries collapsed onto ["a.txt"]`.
+- The colon regression was reported in `restore` but only covered through `execute_restore`. The names
+  are now in the `#[cfg(unix)]` capture→restore round trip too, `NUL` and `notes. ` alongside them.
+
+**Round-3 gates.** `crates/server`: clippy → **0**; `cargo test` (all targets) → **2301 lib + 21 + 22 + 45
++ 32 + 16 + 2 + 1 + 1, 0 failed**. `src-tauri` both modes: clippy default → **0**, sidecar → **0**;
+`cargo test` → **210**, `--features sidecar-platform` → **265**. No `specta::Type` or command signature
+touched.
+
+**Round-3 red-proofs** (each observed red, then reverted):
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| Win32 rule hoisted into `safe_segments` | deleted the `win32_addresses_a_different_path` call | `applied: 1, skipped: []` (device) and `applied: 2, skipped: []` (alias) — the reported figures exactly, plus the `restore` test, from one line |
+| delete stand-down | `if report.skipped.is_empty()` → `if true` | the alias destroyed the file with the refusal sitting visibly beside it; the cross-platform stand-down test red too |
+| `confined_to` in `safe_target` | deleted the containment block | `HARM: the revert wrote through the planted link` **and** deleted the victim outside the tree — `applied: 2, skipped: []` |
+| pre-pass totality | replaced with the refuse-as-you-go loop | `HARM: entries sorting before the refused one were already written: ["aaa-good.txt"]` |
+| diff sink, corrected fixture | `blob_source(…)?` → raw join | now reds on harm: `put a file from outside the store on screen: "THE VICTIM PRIVATE KEY FROM OUTSIDE THE STORE"` |
+
+**Recorded, not fixed:** a case-sensitive capture holding both `A.txt` and `a.txt` still collapses onto
+one file on a case-insensitive volume — same class, not a per-segment rule (either name alone is legal;
+only the pair is a problem), so it needs a whole-manifest collision check. Pre-existing, documented on
+`win32_addresses_a_different_path`. The delete stand-down limits the damage.
+
+**Still not verified locally:** the `#[cfg(unix)]` legs cannot run on this Windows machine — CI's ubuntu
+and macOS Server-crates legs are their only verification, and must be green before merge.

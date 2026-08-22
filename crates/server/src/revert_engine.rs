@@ -74,10 +74,44 @@ pub fn execute_restore(
             Err(reason) => report.skipped.push((action.path.clone(), reason)),
         }
     }
-    for action in &deletes {
-        match apply_delete(action, dest_root_path) {
-            Ok(()) => report.applied += 1,
-            Err(reason) => report.skipped.push((action.path.clone(), reason)),
+
+    // **A delete is only safe once the checkpoint state has actually been established (CPE-1823 round 3).**
+    //
+    // Refusing the write alone did not save the user's file. The reported shape: a planted entry
+    // `a.txt ` against a live `a.txt`. Refusing the Create is right — but `plan_restore` had also
+    // emitted `Delete a.txt`, because on its reading `a.txt` is a file added since the checkpoint. So
+    // the guard skipped the write, the delete ran, and the file was gone anyway; the report just said
+    // `applied: 1, skipped: 1` instead of `applied: 2, skipped: []`. A visible refusal next to the same
+    // destroyed file is not a fix.
+    //
+    // The rule is deliberately about the *class*, not that one alias. A delete's whole justification is
+    // "this path is not in the checkpoint" — a judgement that depends on having read the checkpoint
+    // correctly and applied it. Any skipped write means we did not, so no delete's premise can be
+    // trusted, and the destructive half of the revert stands down. That also covers aliasing shapes this
+    // engine cannot see coming (the case-insensitive `A.txt`/`a.txt` collapse recorded on
+    // `win32_addresses_a_different_path`, for one).
+    //
+    // Conservative in the safe direction and reported per path, never silent: the user is told exactly
+    // which cleanups were held back and why, and re-running after fixing the manifest performs them.
+    if report.skipped.is_empty() {
+        for action in &deletes {
+            match apply_delete(action, dest_root_path) {
+                Ok(()) => report.applied += 1,
+                Err(reason) => report.skipped.push((action.path.clone(), reason)),
+            }
+        }
+    } else {
+        let held = report.skipped.len();
+        for action in &deletes {
+            report.skipped.push((
+                action.path.clone(),
+                format!(
+                    "not deleted: {held} checkpoint entr{} could not be restored, so \"this file is not \
+                     in the checkpoint\" cannot be trusted — deleting it might destroy a file the \
+                     checkpoint actually holds under a name this platform spells differently",
+                    if held == 1 { "y" } else { "ies" }
+                ),
+            ));
         }
     }
 
@@ -105,6 +139,9 @@ pub(crate) fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
         if seg == "." || seg == ".." {
             return Err("escapes dest_root: `.`/`..` segment".to_string());
         }
+        if let Some(why) = win32_addresses_a_different_path(seg) {
+            return Err(why);
+        }
         // A segment containing a drive letter (`C:`) or a backslash would, on Windows, be
         // reinterpreted as rooting/escaping once joined — reject it the same way.
         //
@@ -127,9 +164,65 @@ pub(crate) fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
         if cfg!(windows) && (seg.contains(':') || seg.contains('\\')) {
             return Err("escapes dest_root: drive-rooted or backslash segment".to_string());
         }
+        // CPE-1823 round 2: a segment Win32 resolves to something OTHER than what it spells.
+        // Lives HERE, not at a call site, so every `safe_target` caller inherits it — see below.
         segments.push(seg);
     }
     Ok(segments)
+}
+
+/// Names that Win32 resolves to **something other than what they spell**, so acting on one neither
+/// refuses nor does what it says (CPE-1823 round 2). Two shapes, both measured:
+///
+/// - a **reserved DOS device name** (`sub/NUL`, `CON.txt`) — the write "succeeds" into the device and
+///   leaves nothing on disk, so a revert reported `applied: 1, skipped: []` against an empty tree;
+/// - a **trailing dot or space** (`evil.txt `) — Win32 strips it on any non-verbatim path, so the entry
+///   addresses `evil.txt`. In this engine that is **destructive**, not merely wrong: `plan_restore` sees
+///   `a.txt ` and `a.txt` as two distinct keys and plans Create `a.txt ` + Delete `a.txt`. Writes run
+///   first, so the Create lands *on* `a.txt`; the Delete then removes it. The user's real file is gone,
+///   the tree is empty, and the report says `applied: 2, skipped: []` — complete success, from a planted
+///   manifest, through a registered command.
+///
+/// **Why it lives in [`safe_segments`] rather than at a call site.** CPE-1823 twice put a guard on
+/// `snapshot_capture::restore` — which has no production caller — while `apply_write` and `apply_delete`,
+/// reached from `checkpoint_revert`/`checkpoint_revert_one`, went unguarded. All four `safe_target`
+/// callers now inherit this by construction, and a fifth cannot forget it.
+///
+/// **`cfg!(windows)`-gated**, like the `:`/`\` rule above it and for the same reason: on Linux and macOS
+/// `NUL` and `notes. ` are ordinary distinct filenames that a capture will store and a revert must
+/// restore. Reuses [`crate::fsutil::win32_name_is_unstable`] and
+/// [`crate::transfer::is_windows_device_name`] — the crate's existing predicates, not a third spelling.
+///
+/// **A host property, not a manifest property — recorded rather than assumed away.** The gate asks about
+/// the machine doing the restoring, so a manifest captured on Linux carrying `a\b` or `notes. ` restores
+/// as a literal name there and is refused here. That is the correct direction — refuse where the hazard
+/// is — but it does mean the same manifest is legal on one machine and not another: the round-trip
+/// asymmetry is *reduced* by these gates, not eliminated.
+///
+/// **The member of this class that is still open, so nobody reads the above as "the class is shut":**
+/// a case-sensitive capture holding both `A.txt` and `a.txt` still collapses onto one file when restored
+/// to a case-insensitive volume — two distinct manifest entries, one surviving file, no error. Same
+/// shape as the trailing-space case and not closed here: it is not a *name* this predicate can look at,
+/// since either name alone is perfectly legal and only the pair is a problem, so catching it means a
+/// collision check across the whole manifest rather than a per-segment rule. Pre-existing, out of scope
+/// for CPE-1823, and written down rather than left for the next reader to rediscover.
+fn win32_addresses_a_different_path(seg: &str) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    if crate::fsutil::win32_name_is_unstable(seg) {
+        return Some(format!(
+            "the component {seg:?} ends in a dot or space, which Windows strips — it would address a \
+             different path than it names, silently colliding with whatever answers to the stripped one"
+        ));
+    }
+    if crate::transfer::is_windows_device_name(seg) {
+        return Some(format!(
+            "the component {seg:?} is a reserved DOS device name — the write would succeed into the \
+             device and leave nothing on disk, reporting work that did not happen"
+        ));
+    }
+    None
 }
 
 /// Rebuild the real, validated target path under `root` from `rel`'s `/`-segments via [`Path::join`]
@@ -142,6 +235,24 @@ pub(crate) fn safe_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let mut p = root.to_path_buf();
     for seg in segments {
         p.push(seg);
+    }
+    // **Resolved containment, for every caller (CPE-1823 round 3).** [`safe_segments`] is textual, and a
+    // textual check cannot see a symlink or junction planted at an *interior* component: `sub/x.txt` is
+    // four innocent characters and a slash, and if `root/sub` leads out of the tree then the write, or
+    // the `remove_file`, lands outside it. Nothing about the spelling gives that away.
+    //
+    // This was closed in `snapshot_capture::restore` — which has no production caller — and left open in
+    // `apply_write` and `apply_delete`, which the registered `checkpoint_revert` commands reach. That is
+    // the third time in this ticket a guard landed on the function with no callers, and it was found by
+    // walking every manifest-derived value to its sink rather than by another review. Putting it here
+    // rather than at the call sites is the same conclusion as the Win32 rule above: the callers cannot
+    // drift if they do not each own a copy.
+    //
+    // `confined_to` canonicalises and fails closed, and it handles a target that does not exist yet by
+    // walking up to the nearest ancestor that does — which is why `restore` can still be handed a
+    // destination it is about to create, provided the destination itself exists by the time this runs.
+    if !crate::fsutil::confined_to(&p, root) {
+        return Err(format!("escapes dest_root: {rel:?} resolves outside {}", root.display()));
     }
     Ok(p)
 }
@@ -397,6 +508,186 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             let _ = fs::remove_dir_all(&store);
         }
+    }
+
+    /// **CPE-1823 round 3 — the destructive one, and the reason this guard is not in `restore`.** A
+    /// manifest entry `a.txt ` (one trailing space) against a live `a.txt` holding the user's real
+    /// content. `plan_restore` sees two distinct keys, so it plans Create `a.txt ` + Delete `a.txt`.
+    /// Writes run before deletes, Win32 strips the space so the Create lands **on** `a.txt`, and the
+    /// Delete then removes it. Measured before the fix:
+    ///
+    /// ```text
+    /// report = RestoreReport { applied: 2, skipped: [] }
+    /// tree after revert = []
+    /// a.txt = Err(NotFound)
+    /// ```
+    ///
+    /// The user's file is gone and the command reports complete success. The harm assertion is that the
+    /// file still holds its bytes — asserting on the report alone would pass on the unfixed code, which
+    /// reports success precisely while destroying the file.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_trailing_space_entry_never_destroys_the_file_it_aliases() {
+        const LIVE: &[u8] = b"the user's only copy of their real content";
+        let root = scratch("cpe1823-alias-root");
+        let store = scratch("cpe1823-alias-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("deadbeef"), b"attacker bytes").unwrap();
+
+        fs::write(root.join("a.txt"), LIVE).unwrap();
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("a.txt ".to_string(), crate::restore_plan::FileState::new("deadbeef", 14));
+
+        let current = scan_dir(&root.to_string_lossy()).unwrap();
+        let plan = plan_restore(&checkpoint, &current);
+        assert_eq!(plan.len(), 2, "the premise: a Create for `a.txt ` and a Delete for `a.txt`");
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert_eq!(
+            fs::read(root.join("a.txt")).ok().as_deref(),
+            Some(LIVE),
+            "HARM: the revert destroyed the user's file via a trailing-space alias — report was {report:?}"
+        );
+        assert!(
+            report.skipped.iter().any(|(p, _)| p == "a.txt "),
+            "the aliasing entry must be reported as skipped, not applied: {report:?}"
+        );
+        // Refusing the write alone did NOT save the file — the paired Delete finished the job. The
+        // stand-down has to be visible in the report too, or the next reader will "simplify" it away.
+        assert!(
+            report.skipped.iter().any(|(p, why)| p == "a.txt" && why.contains("not deleted")),
+            "the paired delete must be held back and said so: {report:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1823 round 3.** A reserved device name through the *shipping* path. Before the fix:
+    /// `RestoreReport { applied: 1, skipped: [] }` with `tree=[]` — the copy "succeeded" into the null
+    /// device, so the engine reported restoring a file that is not on disk. `restore()` refused the same
+    /// entry, which is exactly the asymmetry: the guard was on the function with no callers.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_device_name_entry_is_never_reported_applied_with_nothing_on_disk() {
+        let root = scratch("cpe1823-dev-root");
+        let store = scratch("cpe1823-dev-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("deadbeef"), b"evil").unwrap();
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("sub/NUL".to_string(), crate::restore_plan::FileState::new("deadbeef", 4));
+        let plan = vec![RestoreAction { path: "sub/NUL".to_string(), op: RestoreOp::Create }];
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert_eq!(
+            report.applied, 0,
+            "a write into the null device leaves nothing on disk, so counting it applied reports work \
+             that did not happen: {report:?}"
+        );
+        assert_eq!(report.skipped.len(), 1, "and it must be reported: {report:?}");
+        assert_eq!(report.skipped[0].0, "sub/NUL");
+        assert!(!root.join("sub").exists(), "and it must refuse before creating the parent directory");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// The stand-down rule itself, on **every** platform — the Windows aliasing leg above is the reason
+    /// it exists, but the rule is not about aliasing and must not be pinned only where the alias is.
+    /// A delete's justification is "this path is not in the checkpoint"; a skipped write means the
+    /// checkpoint was not established, so that justification is unavailable for every delete in the plan.
+    ///
+    /// Uses a missing blob as the portable stand-in for a skipped write (the same device
+    /// `a_missing_blob_is_skipped_while_the_rest_of_the_plan_applies` uses), so this runs on all three
+    /// CI legs rather than only where a device name or trailing space means something.
+    #[test]
+    fn cpe_1823_a_skipped_write_holds_back_every_delete_in_the_plan() {
+        const KEEP: &[u8] = b"a file the user added after the checkpoint";
+        let root = scratch("cpe1823-standdown-root");
+        let store = scratch("cpe1823-standdown-store");
+
+        fs::write(root.join("restored.txt"), b"checkpoint content").unwrap();
+        let checkpoint = scan_dir(&root.to_string_lossy()).unwrap();
+        fs::create_dir_all(store.join("blobs")).unwrap(); // …but never write the blob: the write will skip
+
+        fs::write(root.join("restored.txt"), b"edited since").unwrap();
+        fs::write(root.join("added.txt"), KEEP).unwrap();
+        let current = scan_dir(&root.to_string_lossy()).unwrap();
+        let plan = plan_restore(&checkpoint, &current);
+        assert_eq!(plan.len(), 2, "the premise: one Overwrite that will skip, and one Delete");
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert_eq!(
+            fs::read(root.join("added.txt")).ok().as_deref(),
+            Some(KEEP),
+            "a delete must not run while any checkpoint entry could not be restored: {report:?}"
+        );
+        assert_eq!(report.applied, 0, "nothing was applied: {report:?}");
+        assert!(
+            report.skipped.iter().any(|(p, why)| p == "added.txt" && why.contains("not deleted")),
+            "and the held-back delete must be reported with its reason, never silently dropped: {report:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1823 round 3 — found by walking every manifest-derived value to its sink, not by review.**
+    /// `safe_segments` is textual, and `sub/x.txt` is textually spotless; if `root/sub` is a junction
+    /// leading out of the tree then both the write and the delete land outside it. `restore` had the
+    /// resolved-containment check and these two — the ones the registered `checkpoint_revert` commands
+    /// actually reach — did not. Third instance of the same asymmetry in this ticket.
+    ///
+    /// Both directions are staged, because `apply_delete` is the one that destroys something that was
+    /// never ours: a `remove_file` through the link deletes the victim's file outright.
+    #[test]
+    fn cpe_1823_a_link_at_an_interior_component_never_redirects_a_revert_out_of_the_tree() {
+        const VICTIM: &[u8] = b"a file that has nothing to do with this checkpoint";
+        let root = scratch("cpe1823-revlink-root");
+        let store = scratch("cpe1823-revlink-store");
+        let outside = scratch("cpe1823-revlink-outside");
+        fs::write(outside.join("victim.txt"), VICTIM).unwrap();
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("deadbeef"), b"attacker bytes").unwrap();
+
+        let link = root.join("sub");
+        if !crate::fsutil::make_dir_link(&outside, &link) {
+            crate::skip_notice!(
+                "[CPE-1823] SKIPPED the revert interior-link leg: this machine could not create a \
+                 directory link at {} (no symlink privilege and no junction). NOTHING on this run \
+                 covered a revert reaching THROUGH a link out of the reverted tree.",
+                link.display()
+            );
+            return;
+        }
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("sub/planted.txt".to_string(), crate::restore_plan::FileState::new("deadbeef", 14));
+        let plan = vec![
+            RestoreAction { path: "sub/planted.txt".to_string(), op: RestoreOp::Create },
+            RestoreAction { path: "sub/victim.txt".to_string(), op: RestoreOp::Delete },
+        ];
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "HARM: the revert wrote through the planted link, outside the reverted tree: {report:?}"
+        );
+        assert_eq!(
+            fs::read(outside.join("victim.txt")).ok().as_deref(),
+            Some(VICTIM),
+            "HARM: the revert DELETED a file outside the reverted tree through the planted link: {report:?}"
+        );
+        assert_eq!(report.applied, 0, "neither action may be counted applied: {report:?}");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
