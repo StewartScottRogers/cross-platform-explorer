@@ -2632,10 +2632,17 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 ///    and the answer is exact. This is what closes the **symlinked-intermediate-directory** escape
 ///    (`root/link/x` where `link` points outside), which needs neither `..` nor an absolute path and is
 ///    invisible to any purely textual check.
-/// 2. On `NotFound`, drop the last component and try again. The components dropped this way provably
-///    **do not exist**, so none of them can be a symlink, so nothing about them can redirect the path
-///    elsewhere — which is why appending them back to a contained ancestor is sound without further
-///    checks.
+/// 2. On `NotFound` — **or `NotADirectory`, CPE-1742 round 4: a component below a plain file cannot
+///    exist either, so the same reasoning applies** (see the guard's own inline comment for why this is
+///    a deliberately different stance from `transfer.rs`'s `classify_ancestor_probe`, which treats the
+///    same `ErrorKind` as "stop, do not step over") — drop the last component and try again. The
+///    components dropped this way provably **do not exist**, so none of them can be a symlink, so
+///    nothing about them can redirect the path elsewhere — which is why appending them back to a
+///    contained ancestor is sound without further checks. The probe is normalised through
+///    `Path::components()` before this walk starts, so a caller-supplied trailing separator or `.`
+///    cannot make an EXISTING symlinked component look like one of these "provably absent" tail
+///    components — see the inline comment on `probe`'s construction for the regression that shape
+///    caused before the normalisation was added.
 /// 3. A `..` that survives into that non-existent tail is **refused, not popped** (it arrives here as
 ///    `file_name() == None`). Refusing is safe on both platform classes and for different reasons:
 ///    on POSIX such a path has no resolution at all, so the caller's primitive would `ENOENT`; on
@@ -2651,15 +2658,17 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 ///    root, and a blanket refusal would have quietly turned that leg into a no-op instead of leaving it
 ///    proving what it was written to prove.
 ///
-/// # Failure policy — every failure REFUSES
+/// # Failure policy — every UNINSPECTABLE failure REFUSES
 ///
 /// Unlike [`contained_under`], which fails open on an unresolvable target because a path that does not
 /// exist cannot be *destroyed*, every unresolved case here fails **closed**: an unresolvable `root`, any
-/// `canonicalize` error other than `NotFound` (`EACCES`, `ELOOP`, `ENAMETOOLONG`, a Windows sharing
-/// violation), a path that exists but will not canonicalise and is not a symlink, a `..` in the
-/// non-existent tail, and exhaustion of [`CONFINEMENT_STEP_BUDGET`]. The asymmetry is the precondition:
-/// this validates a path about to be **created or written**, so "I could not tell" must not mean "go
-/// ahead".
+/// `canonicalize` error other than `NotFound` **or `NotADirectory`** (`EACCES`, `ELOOP`,
+/// `ENAMETOOLONG`, a Windows sharing violation), a path that exists but will not canonicalise and is not
+/// a symlink, a `..` in the non-existent tail, and exhaustion of [`CONFINEMENT_STEP_BUDGET`]. `NotFound`
+/// and `NotADirectory` are the two kinds this function can *positively* explain — "nothing is there" and
+/// "the parent isn't a directory, so nothing below it can be there either" — so both continue the walk
+/// rather than refusing outright; every OTHER kind means "I could not tell" and that must not mean "go
+/// ahead". The asymmetry is the precondition: this validates a path about to be **created or written**.
 ///
 /// # Measured, not reasoned — Windows and Linux
 ///
@@ -2706,13 +2715,65 @@ pub fn confined_to(path: &Path, root: &Path) -> bool {
     let Ok(real_root) = std::fs::canonicalize(root) else {
         return false; // an unresolvable root confines nothing
     };
-    let mut probe = path.to_path_buf();
+    // CPE-1742 review round 4 (containment regression, caught before merge): `path.to_path_buf()`
+    // preserved a TRAILING SEPARATOR (`<root>/link_out/`) and a literal `.` verbatim. For an escaping
+    // symlink specifically, that is not cosmetic: `canonicalize("<root>/link_out/")` fails
+    // `NotADirectory` (the trailing slash forces the resolver to follow the final component as if it
+    // must be a directory), and — the actual defect — `symlink_metadata("<root>/link_out/")` FOLLOWS
+    // the link for the same reason and fails `NotADirectory` too, so the `Ok(md) if is_symlink` branch
+    // below never fires. Control fell through to the "genuinely not there, drop the last component"
+    // arm, which dropped `link_out` — the escaping symlink itself — WITHOUT EVER RESOLVING IT, and
+    // answered on `<root>`: `false` (refused) flipped to `true` (admitted) with the escape never
+    // inspected. Measured on both POSIX and Windows (`root\a.txt\` also gets `NotADirectory`/
+    // `ERROR_DIRECTORY`, not `NotFound` — see the corrected platform note below). `Path::components()`
+    // normalises both the trailing separator and any `.` away before the loop ever runs, so every
+    // canonicalize/symlink_metadata call below sees the same component sequence a spelling without
+    // the trailing slash would have — verified against a 20-case corpus (escaping symlinks, dangling
+    // links, `..`, absolute replacement, ordinary paths) with this one changed and none of the other
+    // nineteen shifting. The escaping-FILE-symlink-with-trailing-separator case (the actual regression,
+    // not just its file-prefix cousin below) has been directly MEASURED red-then-green on Windows too
+    // (`confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths` leg (d), this account
+    // holds `SeCreateSymbolicLinkPrivilege`) — upgrading what was initially an inference from an
+    // identical branch to a same-platform measurement.
+    let mut probe: PathBuf = path.components().collect();
     for _ in 0..CONFINEMENT_STEP_BUDGET {
         match std::fs::canonicalize(&probe) {
             // `starts_with` is component-wise, so `<root>2` does not start with `<root>`, and it is
             // true for `real_root` itself — the root is contained in itself, by design (see above).
             Ok(real) => return real.starts_with(&real_root),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // CPE-1742 review, cross-OS gate: `NotFound` alone is not the whole "nothing here yet,
+            // keep walking up" class. A path whose PREFIX component exists but is a plain FILE, not a
+            // directory (`<root>/a.txt/new.txt`), also cannot canonicalize — but POSIX `realpath(3)`
+            // reports that as `ENOTDIR` (Rust: `ErrorKind::NotADirectory`, stable since 1.83), a
+            // DIFFERENT kind from `ENOENT`'s `NotFound`.
+            //
+            // **Windows does NOT uniformly collapse this into `NotFound` — corrected after the round-4
+            // review measured both shapes.** `a.txt\new.txt` (no trailing separator on the file
+            // component) DOES get `ERROR_PATH_NOT_FOUND` → `NotFound` (raw 3), which is what let the
+            // walk-up already run for that shape before this fix landed. But `a.txt\` (a trailing
+            // separator on the file component, same family as the symlink defect above) gets
+            // `ERROR_DIRECTORY` (raw 267) → `NotADirectory` — the SAME kind POSIX uses, not `NotFound`.
+            // A second Windows counterexample already lives in this file's own notes: a junction
+            // reports `is_symlink() == true` but fails `canonicalize` with `NotADirectory` too (see
+            // this crate's dangling/junction handling elsewhere). So "Windows collapses the ENOTDIR
+            // family into NotFound" was never a platform-wide rule — it happened to hold for the one
+            // shape originally measured, and an unqualified claim here is what let this regression
+            // through review the first time. Treating `NotADirectory` explicitly (this arm) rather than
+            // leaning on Windows's inconsistent mapping is what makes the walk-up correct on all three
+            // OSes instead of correct-by-accident on one.
+            //
+            // **This is the opposite stance from `transfer.rs`'s `classify_ancestor_probe`**, which
+            // treats `NotADirectory` as `Uninspectable` — stop the walk, refuse — on the grounds that
+            // stepping over an uninspectable level can leave an unverified symlink at it. That is still
+            // true in general and is the right call for a walk that inspects *existing* ancestors one
+            // by one. It does not apply here: after the `Path::components()` normalisation above, a
+            // `NotADirectory` at `probe` means the component ABOVE `probe` is confirmed to exist and be
+            // a plain file (or already-inspected non-directory) — nothing can exist *below* a
+            // non-directory, so there is no unverified level being stepped over, only the certain
+            // knowledge that this particular tail is not there yet. Two guards, two different questions,
+            // deliberately different answers to the same `ErrorKind`.
+            Err(e)
+                if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
             Err(_) => return false, // EACCES / ELOOP / … — cannot tell, so refuse
         }
         // `NotFound` is two different situations. A dangling symlink is one of them, and it is the
@@ -4271,6 +4332,20 @@ mod tests {
              and it is exactly where `contained_under` fails open"
         );
         assert!(confined_to(&root.join("sub/deep/new.txt"), &root), "…including under missing parents");
+        assert!(
+            confined_to(&root.join("a.txt/new.txt"), &root),
+            "a prefix component that exists but is a PLAIN FILE, not a directory (`a.txt` is a real \
+             file above), must still be admitted — it is lexically inside the root, not an escape. \
+             POSIX `canonicalize` fails with `NotADirectory` here (not `NotFound`), a distinct error \
+             kind the walk-up must also treat as \"nothing here yet, keep going\" or this reads as an \
+             escape and answers the wrong refusal — the CPE-1742-review regression, caught by CI's \
+             macOS leg on a `cpe-ftp` test that exercised this indirectly. Whether the write itself is \
+             valid is a different question for the caller, not this function. NOTE: this assertion only \
+             PINS on Linux/macOS — on Windows this exact shape already returned `true` before this fix \
+             (its `NotFound` mapping for `a.txt\\new.txt` happened to let the old walk-up run), so a \
+             Windows-only `cargo test` cannot catch a regression here; leg (d) below is the trailing- \
+             separator escape variant, which DOES pin on all three OSes."
+        );
 
         // (a) `..`-shaped.
         assert!(!confined_to(&root.join("../sibling/victim.txt"), &root), "(a) `..` to a sibling");
@@ -4300,6 +4375,45 @@ mod tests {
                 std::io::stderr(),
                 "SKIP: leg (c) — this platform/account cannot create a directory link at {}",
                 link.display()
+            );
+        }
+
+        // (d) CPE-1742 round 4: a FILE symlink (`make_file_link`, the exact shape the security review
+        // measured — `<root>/filelink -> <a file OUTSIDE root>`), spelled with a TRAILING SEPARATOR
+        // (`<root>/filelink/`, nothing appended after it). This is the actual containment REGRESSION
+        // the round-4 fix closes, not a hypothetical: before `Path::components()` normalised `probe` at
+        // entry, the trailing slash forced BOTH `canonicalize` and `symlink_metadata` to try to follow
+        // the final component *as a directory* — which a FILE-typed reparse point/symlink cannot be —
+        // and both failed `NotADirectory` identically, so the `is_symlink` branch that would have
+        // resolved `filelink` to `victim.txt` (outside `root`) never ran. Control fell through to the
+        // "not there yet, drop the last component" arm, which dropped `filelink` itself — the escaping
+        // link — WITHOUT EVER RESOLVING IT, and answered on `root`: admitted. A DIRECTORY link (leg c,
+        // above) does NOT reproduce this: a directory-typed reparse point is exactly what a trailing
+        // separator is valid syntax for, so `canonicalize` follows it through cleanly on every platform
+        // and the bug never triggers for that shape — measured locally: leg (c)'s own link with a
+        // trailing separator canonicalises fine on this Windows account. Reachable at real call sites
+        // without any deliberate crafting: `crates/ftp/src/lib.rs`'s `joined_path` preserves a trailing
+        // separator from an FTP argument verbatim (`STOR /filelink/` or a `CWD` with a trailing slash),
+        // and tar/zip directory-entry names end in `/` by convention (`crates/server/src/archive.rs`).
+        // `make_file_link` is `!cfg!(windows)`-gated for whether a Windows failure is a loud skip or a
+        // red — the same policy as every other file-symlink leg in this suite — so this pins
+        // unconditionally on Linux/macOS and on whichever Windows accounts hold
+        // `SeCreateSymbolicLinkPrivilege`, and announces rather than silently passing on the rest.
+        let file_link = root.join("filelink");
+        let victim_file = sibling.join("victim.txt");
+        if make_file_link(&victim_file, &file_link) {
+            let trailing = PathBuf::from(format!("{}{}", file_link.display(), std::path::MAIN_SEPARATOR));
+            assert!(
+                !confined_to(&trailing, &root),
+                "(d) a FILE symlink pointing outside the root, named with a TRAILING SEPARATOR, must \
+                 still be refused — the escape must not become invisible just because nothing was \
+                 appended after the link name and nothing but a `/` follows it"
+            );
+        } else {
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIP: leg (d) — this platform/account cannot create a file link at {}",
+                file_link.display()
             );
         }
         let _ = std::fs::remove_dir_all(&d);

@@ -384,11 +384,18 @@ mod tests {
 
     /// The rig's refusal line for a request path that resolves **outside** the served root (CPE-1730).
     ///
-    /// `550` rather than `553`, and the choice is load-bearing rather than cosmetic. `553` belongs to
-    /// CPE-1731's root-destination guard, whose test asserts only the reply *prefix*
-    /// (`reply.starts_with("553")`) — so a second guard also answering `553` would satisfy those rows
-    /// with CPE-1731's own comparison deleted, masking exactly the guard they exist to prove. A
-    /// different code keeps them reddening for the right reason.
+    /// `550` rather than `553`, and the choice is load-bearing rather than cosmetic. `553` is
+    /// **verb-scoped, not exclusive to this rig's confinement guards** — CPE-1731's root-destination
+    /// guard uses it (`"553 Rename destination is the served root\r\n"` below), and CPE-1742's `STOR`
+    /// missing-parent guard uses it too (RFC 959 §5.4 puts `553` in `STOR`'s own reply set, `550` in
+    /// none of it). CPE-1731's tests assert only the reply *prefix* (`reply.starts_with("553")`), which
+    /// would be a masking risk if some *other* `553` reply could reach those same assertions — but it
+    /// cannot: those rows are driven exclusively through `rnfr_rnto`/`raw_commands`, which send only
+    /// `RNFR`/`RNTO` and never open a data connection, so a `STOR`-only `553` line is unreachable from
+    /// them. Verified rather than assumed: `crates/ftp/src/lib.rs`'s `STOR` arm cannot run inside a
+    /// connection that never sends `STOR`. A *different* code here is still worth keeping, though — it
+    /// keeps CPE-1730's own rows reddening on `550` specifically, not merely on "some 553 arrived from
+    /// somewhere," which is the tighter assertion CPE-1731's argument below wants anyway.
     ///
     /// **It is still a refusal no errno can spell**, which is the property `553` had by construction and
     /// the reason it was chosen there. This rig's other `550` replies (`Rename failed`, `Delete failed`,
@@ -589,12 +596,72 @@ mod tests {
                         continue;
                     }
                     // CPE-1730: resolved before the listener is taken, so an escaping upload never opens
-                    // a data connection and — the point of the ticket — never reaches `create_dir_all`
-                    // or `fs::write` on a path outside the served root.
+                    // a data connection and — the point of the ticket — never reaches `fs::write` on a
+                    // path outside the served root.
                     let Some(path) = real_path(&root, &arg) else {
                         send(&mut ctrl, CPE_1730_ESCAPED_ROOT_REFUSAL);
                         continue;
                     };
+                    // CPE-1742: `STOR` has no directory-creating semantics — RFC 959 §5.4's reply
+                    // sequence for STOR is `125`/`150` → `226`/`250`, or a negative completion of
+                    // `532`/`450`/`452`/`553`. **`550` is not among them** (that code belongs to
+                    // `DELE`/`RMD`/`MKD`/`PWD`/`CWD`/`CDUP`/`SMNT` — the acceptance criteria's `550` was
+                    // an unverified guess, corrected here by the spec text plus a real daemon). A real
+                    // server checks the destination *before* ever opening the data connection: measured
+                    // against the actual vsftpd this repo's own CI runs STOR through (`fauria/vsftpd`,
+                    // see `.github/workflows/ci.yml` / CPE-1659) — the PR-985 review independently
+                    // confirmed this against vsftpd's own source (`ftpcodes.h`'s `FTP_UPLOADFAIL = 553`,
+                    // sent from `postlogin.c` ~40 lines before the data connection would open) — it
+                    // answers exactly `553 Could not create file.` for a STOR whose parent directory does
+                    // not exist, and never sends `150` first. So the check runs here, before the PASV
+                    // listener is taken — the same shape as the CPE-1730 comment above: a refused upload
+                    // must not open a data connection either. The `create_dir_all` this rig used to run
+                    // inside the data-connection block below is gone: it invented a parent chain no real
+                    // daemon creates. `cpe_server::transfer::upload_tree` (CPE-1741) does not depend on
+                    // it — it already creates the chain itself via explicit `MKD`s before any `STOR` runs.
+                    //
+                    // `Path::is_dir()`, not `Path::exists()`: the former is `false` both when the parent
+                    // is missing AND when it exists but is a **file** (`STOR /at-root.txt/child.txt`
+                    // where `at-root.txt` is an ordinary file) — a real daemon refuses that shape too,
+                    // for the same reason (no directory to create the entry in), and the latter would
+                    // silently let it through to the `fs::write` below, which fails but — before this
+                    // guard existed — had its error swallowed and still answered `226`. Covered by
+                    // `stor_refuses_a_missing_parent_and_still_works_for_one_that_exists` below, which
+                    // exercises both shapes.
+                    //
+                    // No `parent.as_os_str().is_empty()` guard: `real_path` → `joined_path` (below)
+                    // always yields `root` itself or `root.join(rel)`, both absolute, so `.parent()` here
+                    // is never `Some` of an empty path — an earlier draft carried that check as if it
+                    // were load-bearing; it was dead weight and reads as more defensive than the code
+                    // actually is, so it is gone.
+                    if let Some(parent) = path.parent() {
+                        if !parent.is_dir() {
+                            send(&mut ctrl, "553 Could not create file.\r\n");
+                            continue;
+                        }
+                    }
+                    // Adjacent to CPE-1742 but a distinct condition, found in the same review pass: STOR
+                    // onto a path that is ITSELF an existing directory. `fs::write` on a directory fails
+                    // (`EISDIR`/`ERROR_ACCESS_DENIED` depending on OS) and, before this check existed,
+                    // that failure was swallowed by the `let _ = std::fs::write(...)` below and answered
+                    // `226 Transfer complete` anyway regardless — success reported for a write that never
+                    // happened, the exact "silent success on a real refusal" shape this ticket family
+                    // exists to close, one case over from the one CPE-1742 was filed for. Refused with
+                    // the same `553` line, and it is the SAME reply vsftpd sends here too, not merely a
+                    // reasonable guess: `postlogin.c`'s `handle_upload_common` opens the destination
+                    // (`sysutil.c`'s `vsf_sysutil_create_or_open_file`, `open(p_filename, O_CREAT |
+                    // O_WRONLY | O_NONBLOCK, mode)`) and has exactly ONE failure branch for it —
+                    // `if (vsf_sysutil_retval_is_error(new_file_fd)) { vsf_cmdio_write(p_sess,
+                    // FTP_UPLOADFAIL, "Could not create file."); return; }` — reached before
+                    // `get_remote_transfer_fd` (i.e. before any `150`). POSIX `open(2)` returns `ENOENT`
+                    // for a missing path prefix, `ENOTDIR` for a prefix component that is a plain file,
+                    // and `EISDIR` for `O_WRONLY` on a path that is itself a directory — vsftpd's single
+                    // undifferentiated branch treats all three identically, so this case has the same
+                    // wire text as the missing-parent one above, not weaker evidence for it.
+                    if path.is_dir() {
+                        send(&mut ctrl, "553 Could not create file.\r\n");
+                        continue;
+                    }
                     let Some(listener) = pasv.take() else {
                         send(&mut ctrl, "425 Use PASV first\r\n");
                         continue;
@@ -603,16 +670,6 @@ mod tests {
                     if let Ok((mut d, _)) = listener.accept() {
                         let mut buf = Vec::new();
                         let _ = d.read_to_end(&mut buf);
-                        // **CPE-1742 — this invents the parent chain, and RFC 959 gives `STOR` no
-                        // licence to.** A real daemon answers `550` when the parent is missing, so a
-                        // client can upload to `/a/b/c.txt` against this rig with no `MKD` at all and
-                        // pass. Same family as the `RMD`/`MKD` fixes below, one verb over; left in
-                        // place because removing it changes what a *client* must do before uploading
-                        // (it interacts with CPE-1741). The full reasoning — including a first draft
-                        // of it that measurement falsified — is in the `MKD` arm below.
-                        if let Some(p) = path.parent() {
-                            let _ = std::fs::create_dir_all(p);
-                        }
                         // CPE-1726, the sibling primitive (CPE-1719's failure shape, checked here rather
                         // than only `rename`): `fs::write` **follows** a link at the final component and
                         // writes *through* it, so a STOR onto a symlink clobbers the link's target rather
@@ -664,22 +721,25 @@ mod tests {
                 // than silently updated to today's, since the point they make is about what the suite
                 // looked like *before* the change.)
                 //
-                // **The `create_dir_all` in `STOR` above is deliberately left alone (CPE-1741), and the
-                // first draft of this note gave a reason that measurement falsified.** It claimed
-                // `upload_tree`'s round-trip needed it; removing the call leaves this crate green, and
-                // `cpe-ftp` has no `upload_tree` test at all — the reason was invented, which is the
-                // exact substitution this ticket family exists to stop, so it is recorded rather than
-                // quietly swapped for a better one. **Re-measured at the current suite size** after the
-                // reviewer pointed out the first figure (13/13) had gone stale: still **14/14 green**
-                // with the call removed, so the "nothing here depends on it" claim is this round's
-                // measurement and not an inherited one.
+                // **The `create_dir_all` in `STOR` above was deliberately left alone for a while
+                // (CPE-1741), and the first draft of this note gave a reason that measurement
+                // falsified.** It claimed `upload_tree`'s round-trip needed it; removing the call left
+                // this crate green, and `cpe-ftp` had no `upload_tree` test at all — the reason was
+                // invented, which is the exact substitution this ticket family exists to stop, so it was
+                // recorded rather than quietly swapped for a better one. **Re-measured at the time**
+                // after the reviewer pointed out the first figure (13/13) had gone stale: still
+                // **14/14 green** with the call removed, so the "nothing here depends on it" claim was
+                // that round's measurement and not an inherited one.
                 //
-                // The real reason is shape, not cost. It is a **different** defect: `STOR` has no
-                // directory-creating semantics to model at all — a real daemon fails outright when the
-                // parent is missing — so fixing it is not "make the primitive match the verb" but
-                // "remove a capability the wire never had", which changes what a *client* must do
-                // before uploading and needs its own client-side change and tests. Filed as CPE-1742
-                // (and it interacts with CPE-1741, `upload_tree`'s unconditional `mkdir(&base)`).
+                // The real reason was shape, not cost: `STOR` has no directory-creating semantics to
+                // model at all — a real daemon fails outright when the parent is missing — so fixing it
+                // was not "make the primitive match the verb" but "remove a capability the wire never
+                // had", which changes what a *client* must do before uploading and needed its own
+                // client-side change and tests. **CPE-1742 has now done exactly that** — see the `STOR`
+                // arm above, which refuses a missing parent with `553` (not `550`; see that arm's comment
+                // for why) before ever opening the data connection. `upload_tree` (CPE-1741) was already
+                // unaffected: it creates the parent chain itself via explicit `MKD`s, never relying on
+                // `STOR` to invent anything, so nothing on the production side changed.
                 "MKD" => match real_path(&root, &arg) {
                     None => send(&mut ctrl, CPE_1730_ESCAPED_ROOT_REFUSAL),
                     Some(p) => match std::fs::create_dir(p) {
@@ -894,6 +954,102 @@ mod tests {
         assert!(provider.stat("/newdir").is_err(), "dir should be gone");
     }
 
+    /// CPE-1742's acceptance criteria, plus the two shapes the PR-985 review found missing: `STOR` to a
+    /// missing parent must be refused **and must not create anything**; `STOR` to a parent that exists
+    /// but is a **file, not a directory**, must be refused too (`Path::is_dir()` catches both — see the
+    /// guard's own comment for why `Path::exists()` would not); `STOR` onto a path that is **itself an
+    /// existing directory** must be refused; and `STOR` to a genuinely existing parent must still work.
+    ///
+    /// # The refusal side is checked against the FILESYSTEM, not the client
+    ///
+    /// **Two different reads, deliberately.** The wire-text assertions read `FtpProvider::write`'s own
+    /// error, which is fine for pinning the reply line. But whether the directory actually got created
+    /// is asserted against `root.path()` — the rig's own real temp directory, read independently with
+    /// plain `std::fs`, per this repo's own convention (`crates/vfs/tests/real_server_conformance.rs`'s
+    /// "read it back with something other than the client under test", cited there at its
+    /// `assert_mkdir_rename_delete_verified_from_host_disk`). `FtpProvider::stat` is *not* that
+    /// independent read: it is `list(parent)` + `parse_list_line`, which deliberately **skips**
+    /// unparsable rows (`crates/ftp/src/lib.rs`'s `list`, filtering through `parse_list_line`) — so a
+    /// garbled `LIST` line would make `stat` report "not found" even if the directory genuinely exists,
+    /// letting this assertion pass for the wrong reason. An earlier draft of this test used
+    /// `provider.stat(..).is_err()` for exactly that; PR-985 review caught it.
+    ///
+    /// # The positive-control side
+    ///
+    /// Without it, a rig whose `STOR` refuses *everything* (a resolver stub returning `None`, say) would
+    /// also pass every refusal row above — the same "vacuous guard" trap CPE-1730's tests document.
+    #[test]
+    fn stor_refuses_a_missing_parent_and_still_works_for_one_that_exists() {
+        let (port, root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        // ── Refusal 1: `/nosuchdir` was never created by MKD, so `nosuchdir/file.txt`'s parent is
+        // missing. Before CPE-1742 this rig invented `/nosuchdir` via `create_dir_all` and the write
+        // silently succeeded — no real FTP daemon does that.
+        let err = provider
+            .write("/nosuchdir/file.txt", b"should never land")
+            .expect_err("STOR into a missing parent must be refused, not silently succeed");
+        assert!(
+            err.contains("553") && err.contains("Could not create file"),
+            "the refusal must be STOR's own `553` line (RFC 959 §5.4), not a `550` borrowed from \
+             DELE/RMD/MKD or a generic errno message: {err}"
+        );
+        assert!(
+            !root.path().join("nosuchdir").exists(),
+            "the parent chain must NOT be invented — `/nosuchdir` must not exist on the rig's own \
+             filesystem after the refusal (checked independently of the client under test)"
+        );
+
+        // ── The positive control: an existing parent (the root itself, and a directory made via MKD)
+        // must still accept a STOR, bytes and all — no over-rejection.
+        provider.write("/at-root.txt", b"root parent exists").expect("STOR to the root must still work");
+        assert_eq!(provider.read("/at-root.txt").unwrap(), b"root parent exists");
+
+        provider.mkdir("/madedir").expect("seed an existing parent via MKD");
+        provider
+            .write("/madedir/inside.txt", b"nested parent exists")
+            .expect("STOR into an MKD'd directory must still work");
+        assert_eq!(provider.read("/madedir/inside.txt").unwrap(), b"nested parent exists");
+
+        // ── Refusal 2: the parent EXISTS, but as a plain file (`/at-root.txt`, written above) — the
+        // shape a `Path::exists()` guard would miss but `Path::is_dir()` catches. No real daemon can
+        // create an entry inside a file.
+        let err = provider
+            .write("/at-root.txt/child.txt", b"should never land either")
+            .expect_err("STOR whose parent exists but is a plain file must be refused");
+        assert!(
+            err.contains("553") && err.contains("Could not create file"),
+            "must be refused with the same `553 Could not create file` line: {err}"
+        );
+        assert!(
+            !root.path().join("at-root.txt").is_dir(),
+            "`/at-root.txt` must remain the plain file it was — refusing must not turn it into (or \
+             replace it with) a directory"
+        );
+
+        // ── Refusal 3: the target path is ITSELF an existing directory (`/madedir`, made above via
+        // MKD). Before this review round, `fs::write` on a directory failed silently and the rig still
+        // answered `226 Transfer complete` — success reported for a write that never happened.
+        let err = provider
+            .write("/madedir", b"should never land either")
+            .expect_err("STOR onto an existing directory must be refused, not silently swallowed");
+        assert!(
+            err.contains("553") && err.contains("Could not create file"),
+            "must be refused on the control channel with the same `553 Could not create file` line, \
+             not silently accepted while doing nothing: {err}"
+        );
+        assert!(
+            root.path().join("madedir").is_dir(),
+            "`/madedir` must remain a directory — the refused STOR must not have damaged it"
+        );
+        assert_eq!(
+            provider.read("/madedir/inside.txt").unwrap(),
+            b"nested parent exists",
+            "and its contents from the positive control above must be untouched"
+        );
+    }
+
     // ---------------------------------------------------------------------------------------------
     // CPE-1741 — `cpe_server::transfer::upload_tree` against a remote base/parent/nested-dir that
     // already exists, over the real FTP wire (this rig's honest, non-idempotent `create_dir` MKD arm,
@@ -933,9 +1089,10 @@ mod tests {
 
         let src = scratch_dir("cpe-ftp-up-multilevel"); // armed before any assertion
         std::fs::write(src.join("z.txt"), b"zed").unwrap();
-        // Only a successful MKD chain can produce a directory with no file inside it — this rig's STOR
-        // does `create_dir_all(parent)` (CPE-1742), which would invent a non-empty directory's parents
-        // without ever exercising MKD, so an empty directory is the one thing that proves MKD ran.
+        // Only a successful MKD chain can produce a directory with no file inside it. Before CPE-1742,
+        // this rig's STOR ran `create_dir_all(parent)`, which would have invented a non-empty
+        // directory's parents without ever exercising MKD — so an empty directory is what proves MKD
+        // ran rather than STOR's now-removed invention.
         std::fs::create_dir(src.join("empty")).unwrap();
 
         // Neither "/new" nor "/new/deep" exists on the served root yet — a bare (non-recursive) MKD
