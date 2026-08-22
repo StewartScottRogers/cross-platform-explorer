@@ -314,3 +314,74 @@ only the pair is a problem), so it needs a whole-manifest collision check. Pre-e
 
 **Still not verified locally:** the `#[cfg(unix)]` legs cannot run on this Windows machine — CI's ubuntu
 and macOS Server-crates legs are their only verification, and must be green before merge.
+**Update:** round 3's CI settled at **18 passing**, the only non-pass being `GUI smoke (windows-latest)`
+reporting `skipping` (conditional, not a failure). Server crates went green on ubuntu **and** macOS, so
+the `#[cfg(unix)]` legs and the cross-platform stand-down have run on both Unix platforms.
+
+### 2026-08-21 — round 4: a delete that needed no attacker, and the window I opened myself
+
+Ordered as instructed: the shipping data-loss bug first, then the one in the function nothing calls.
+
+**B2 (done first) — `checkpoint_revert_one` destroyed the user's file, and not only under attack.** A
+macOS or Linux capture holding `a.txt ` — a name those platforms store happily — cherry-reverted on
+Windows deleted the user's `a.txt`. `revert_one` asks `checkpoint.get("a.txt")`, gets `None` because the
+checkpoint spells it with a trailing space, and plans a lone `Delete`; on Windows the two are the same
+file, so the checkpoint *does* hold it. Round 3's stand-down could not fire, because a one-action plan
+contains no write to skip:
+
+```text
+plan   = [("a.txt", "Delete")]
+report = RestoreReport { applied: 1, skipped: [] }; a.txt = Err(NotFound)
+```
+
+Fixed the Reviewer's way, not the Auditor's: the stand-down is now a property of the **checkpoint** —
+every `checkpoint.keys()` through `safe_segments` — rather than of the plan's outcome. Whole-tree and
+cherry-revert are covered by one rule, and a legitimate Linux checkpoint containing `a.txt ` stays
+*partially* usable on Windows (preview, diff, and every restorable entry still work). Refusing the
+checkpoint upstream at `manifest_snapshot` would have closed the same class by converting a data-loss bug
+into a total-refusal bug for a real user with a real capture. It also makes my own round-3 comment
+literally true: a delete's justification presupposes having read the checkpoint correctly, so key it on
+the checkpoint.
+
+**B1 — the pre-pass TOCTOU, which is mine.** Splitting `restore` into validate-all-then-write-all made
+entry #1's `confined_to` verdict stale by the whole of pass 1 plus every preceding copy. The attacker
+does not race blindly: the first byte on disk *is* the signal the verdicts are stale. Deterministic
+wait-then-swap escaped **5/5** with `Ok(())` returned. Pass 2 now re-resolves each entry immediately
+before its own copy; pass 1 is kept for the abort decision only, so both properties hold — nothing
+written if any entry is refused, and the check a write relies on is the last thing before it.
+Contained to the function with no production caller (the shipped `execute_restore` was never pre-pass and
+the Auditor could not break it: 0/5 deterministic, 20,000+ blind swaps, zero escapes), but fixed anyway.
+
+**`copy_file_into_claimed_slot` — asked, answered no.** CPE-1765's claim-the-name primitive is right
+where the name is *picked*; this name is **chosen by the caller**, and `create_new` refuses a name that
+already exists. Restoring a snapshot over a tree that still holds files, and `revert_engine`'s
+first-class `Overwrite` op, both depend on writing onto an existing file — claiming the slot would turn
+those into refusals. The residual final-component TOCTOU is recorded in the code instead.
+
+**UX fix folded in:** held-back-delete reasons now name the blocking entries (up to three, then a count)
+instead of only saying how many. A user looking at one held-back file no longer has to scan the rest of
+the list to find the cause.
+
+**A test of mine failed for the wrong reason and was caught by running it.** The cherry-revert fixture
+used `serde_json`'s `take()` to move the manifest key, which leaves the old key behind holding `null`;
+that fails to deserialize, so the command errored before planning anything and the test panicked at its
+`unwrap` having proved nothing about deletes. Switched to `remove`. Fifth instance in this ticket of a
+test that looked like it was testing something and was not.
+
+**Recorded, not fixed** (all three confirmed acceptable in review): the stand-down is attacker-triggerable
+as denial-of-revert; it is blunt — 500 deletes plus one locked file holds back all 500, so the UI copy
+should read "held back, re-run after fixing" rather than 501 failures; and `safe_target` now
+canonicalises on every call, unmeasured against a network share. Also recorded: an emptied `"files": {}`
+turns a whole-tree revert into "delete every file" with nothing to stand down — pre-existing, semantically
+defensible, and surfaced by `checkpoint_preview_revert` before the user confirms. All four are written
+into the code next to the mechanism.
+
+**Round-4 gates.** `crates/server`: clippy → **0**; `cargo test` → **2303 lib** + 21 + 22 + 45 + 32 + 16 +
+2 + 1 + 1, **0 failed**. `src-tauri` both modes: clippy **0** / **0**; tests **210** / **265**.
+
+**Round-4 red-proofs:**
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| checkpoint-keyed stand-down | `checkpoint.keys().filter(…)` → `Vec::new()` (the round-3 shape) | `HARM: cherry-revert deleted the user's only copy … RevertOutcome { applied: 1, skipped: [] }` — the UAT's figures exactly |
+| pass-2 re-validation | pass 2 iterates pass 1's `(target, blob)` pairs | `HARM: a component swapped after pass 1 blessed it took the write outside the restore folder — restore returned Ok(())` |

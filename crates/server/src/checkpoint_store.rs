@@ -1092,6 +1092,61 @@ mod tests {
         let _ = fs::remove_dir_all(&app);
     }
 
+    /// **CPE-1823 round 4, and this one needs no attacker at all.** A macOS or Linux capture holding
+    /// `a.txt ` — a name those platforms store happily — cherry-reverted on Windows destroyed the user's
+    /// `a.txt`. `revert_one` asks `checkpoint.get("a.txt")`, gets `None` because the checkpoint spells it
+    /// with a trailing space, and plans a lone `Delete`; on Windows the two are the same file, so the
+    /// checkpoint *does* hold it. Measured before the fix:
+    ///
+    /// ```text
+    /// plan   = [("a.txt", "Delete")]
+    /// report = RestoreReport { applied: 1, skipped: [] }; a.txt = Err(NotFound)
+    /// ```
+    ///
+    /// Round 3's stand-down could not catch it: a one-action cherry-revert plan contains **no write**, so
+    /// nothing could be skipped and the condition never armed. Keying it on the checkpoint's keys instead
+    /// of on the plan's outcome is what closes it.
+    ///
+    /// Driven through the registered command rather than through `execute_restore`, because the whole
+    /// defect is that this *path* through the code produces a plan the guards never see.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_cherry_reverting_never_deletes_a_file_the_checkpoint_holds_under_an_aliased_name() {
+        const LIVE: &[u8] = b"the user's only copy";
+        let app = scratch("cpe1823-revone-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1823-revone-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), LIVE).unwrap();
+        fs::write(root.join("other.txt"), b"untouched").unwrap();
+
+        // A capture made where `a.txt ` is a legal, distinct filename — reproduced here by renaming the
+        // key in the manifest, which is exactly what a store carried over from macOS or Linux contains.
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store = store_dir_for(&ctx, &root_s).unwrap();
+        let p = store.join("manifests").join(format!("{id}.json"));
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        // `remove`, not `take` — `take` leaves the key behind holding `null`, which fails to deserialize
+        // into `PersistedFileState`, so the command errors before it ever plans anything and the test
+        // panics at this `unwrap` having proved nothing about deletes.
+        let entry = v["files"].as_object_mut().unwrap().remove("a.txt").unwrap();
+        v["files"]["a.txt "] = entry;
+        fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let outcome = checkpoint_revert_one(&ctx, &root_s, &id, "a.txt").unwrap();
+
+        assert_eq!(
+            fs::read(root.join("a.txt")).ok().as_deref(),
+            Some(LIVE),
+            "HARM: cherry-revert deleted the user's only copy of a file the checkpoint holds under an \
+             aliased name — outcome was {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
     #[test]
     fn diff_file_errors_cleanly_on_binary_content_and_oversize_and_unknown_path() {
         let app = scratch("app-data-diff-err");

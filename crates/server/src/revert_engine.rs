@@ -75,7 +75,8 @@ pub fn execute_restore(
         }
     }
 
-    // **A delete is only safe once the checkpoint state has actually been established (CPE-1823 round 3).**
+    // **A delete is only safe once the checkpoint state has actually been established (CPE-1823 round 3,
+    // keyed on the CHECKPOINT rather than on the plan in round 4).**
     //
     // Refusing the write alone did not save the user's file. The reported shape: a planted entry
     // `a.txt ` against a live `a.txt`. Refusing the Create is right — but `plan_restore` had also
@@ -93,25 +94,100 @@ pub fn execute_restore(
     //
     // Conservative in the safe direction and reported per path, never silent: the user is told exactly
     // which cleanups were held back and why, and re-running after fixing the manifest performs them.
-    if report.skipped.is_empty() {
-        for action in &deletes {
-            match apply_delete(action, dest_root_path) {
-                Ok(()) => report.applied += 1,
-                Err(reason) => report.skipped.push((action.path.clone(), reason)),
+    //
+    // Three consequences, recorded rather than fixed, so none of them reads later as an engine bug:
+    //
+    // - **It is attacker-triggerable as denial-of-revert.** One entry guaranteed to be refused holds
+    //   back every legitimate delete, so a file the revert exists to remove survives. Accepted: it is
+    //   the conservative direction, every held-back path is reported with its reason, and the
+    //   restorable half still applies.
+    // - **It is blunt in a way users will feel.** A 500-delete revert with **one locked file** — routine
+    //   on Windows — holds back all 500 and cleans up nothing. `RevertOutcome::from_report` carries each
+    //   path and reason, so the UI has what it needs, but that surface should read "held back, re-run
+    //   after fixing" rather than presenting 501 failures.
+    // - **Finer granularity is not available here.** Pairing each delete with the write that would have
+    //   covered it is precisely what the aliasing case makes invisible — `a.txt ` and `a.txt` look like
+    //   different paths, which is the bug. A rule that could tell them apart would already have fixed it.
+    //
+    // The widest destructive shape a planted manifest still has is **not** this one: an emptied
+    // `"files": {}` turns a whole-tree revert into "delete every file", with no writes to stand down and
+    // no error. Pre-existing and semantically defensible — an empty checkpoint is a legal capture of an
+    // empty folder — and `checkpoint_preview_revert` shows the delete count before the user confirms.
+    // The condition is a property of the **checkpoint**, not of this plan. Round 3 keyed it on
+    // `report.skipped`, which reads "some write failed" — and a *cherry-revert* plan contains no write
+    // at all, so nothing could be skipped and the stand-down never armed:
+    //
+    // ```text
+    // REVERT_ONE[trailing space] plan   = [("a.txt", "Delete")]
+    //                            report = RestoreReport { applied: 1, skipped: [] }; a.txt = NotFound
+    // ```
+    //
+    // The user cherry-reverts `a.txt`; `revert_one` asks `checkpoint.get("a.txt")`, gets `None` because
+    // the checkpoint spells it `a.txt `, and plans a lone Delete. On Windows those are the same file, so
+    // the checkpoint *does* hold it — and their only copy is deleted, reported as complete success.
+    //
+    // **This needs no attacker.** A macOS or Linux capture holding `a.txt ` — a name those systems store
+    // happily — does it to a Windows user with an ordinary cross-platform checkpoint. That is what makes
+    // it a data-loss bug rather than only a planted-manifest hazard.
+    //
+    // Asking `safe_segments` about every checkpoint key covers both shapes with one rule, and makes the
+    // sentence above literally true: the justification for a delete is "this path is not in the
+    // checkpoint", which presupposes having read the checkpoint correctly. If any key is one this
+    // platform cannot restore, we have not, so no delete's premise holds. Textual and I/O-free, so it
+    // costs nothing on the common path.
+    //
+    // **Deliberately NOT fixed by refusing the checkpoint upstream** (the other candidate): rejecting a
+    // manifest containing such a key at `manifest_snapshot` would close the same class, but it would
+    // make a *legitimate* Linux checkpoint containing `a.txt ` entirely unusable on Windows — no
+    // preview, no diff, no partial revert — trading a data-loss bug for a total-refusal bug against a
+    // real user with a real capture. This keeps the restorable half working.
+    let unrestorable: Vec<&String> =
+        checkpoint.keys().filter(|key| safe_segments(key).is_err()).collect();
+    let hold = if !unrestorable.is_empty() {
+        let named: Vec<String> =
+            unrestorable.iter().take(NAMED_CAUSES).map(|k| format!("{k:?}")).collect();
+        let more = unrestorable.len().saturating_sub(named.len());
+        Some(format!(
+            "not deleted: {} of this checkpoint's entries cannot be restored on this platform ({}{}), \
+             so \"this file is not in the checkpoint\" cannot be trusted — deleting it may destroy a \
+             file the checkpoint does hold, under a name spelled differently here",
+            unrestorable.len(),
+            named.join(", "),
+            if more > 0 { format!(", and {more} more") } else { String::new() }
+        ))
+    } else if !report.skipped.is_empty() {
+        // Name the entries, not just the count. Both lines land in the same `skipped` list so a UI that
+        // renders all of it makes the cause discoverable — but a user looking at one held-back file
+        // should not have to scan the rest of the list to find out what blocked it.
+        let held = report.skipped.len();
+        let named: Vec<&str> =
+            report.skipped.iter().take(NAMED_CAUSES).map(|(path, _)| path.as_str()).collect();
+        let more = held.saturating_sub(named.len());
+        Some(format!(
+            "not deleted: {held} checkpoint entr{} could not be restored ({}{}), so \"this file is not \
+             in the checkpoint\" cannot be trusted — re-run once that is resolved and this cleanup will \
+             apply",
+            if held == 1 { "y" } else { "ies" },
+            named.join(", "),
+            if more > 0 { format!(", and {more} more") } else { String::new() }
+        ))
+    } else {
+        None
+    };
+
+    match hold {
+        None => {
+            for action in &deletes {
+                match apply_delete(action, dest_root_path) {
+                    Ok(()) => report.applied += 1,
+                    Err(reason) => report.skipped.push((action.path.clone(), reason)),
+                }
             }
         }
-    } else {
-        let held = report.skipped.len();
-        for action in &deletes {
-            report.skipped.push((
-                action.path.clone(),
-                format!(
-                    "not deleted: {held} checkpoint entr{} could not be restored, so \"this file is not \
-                     in the checkpoint\" cannot be trusted — deleting it might destroy a file the \
-                     checkpoint actually holds under a name this platform spells differently",
-                    if held == 1 { "y" } else { "ies" }
-                ),
-            ));
+        Some(reason) => {
+            for action in &deletes {
+                report.skipped.push((action.path.clone(), reason.clone()));
+            }
         }
     }
 
@@ -206,6 +282,11 @@ pub(crate) fn safe_segments(rel: &str) -> Result<Vec<&str>, String> {
 /// since either name alone is perfectly legal and only the pair is a problem, so catching it means a
 /// collision check across the whole manifest rather than a per-segment rule. Pre-existing, out of scope
 /// for CPE-1823, and written down rather than left for the next reader to rediscover.
+/// How many blocking entries a held-back-delete reason names before falling back to a count. Enough to
+/// identify the cause without turning one skipped path's reason into a wall of text when a whole
+/// checkpoint is unrestorable.
+const NAMED_CAUSES: usize = 3;
+
 fn win32_addresses_a_different_path(seg: &str) -> Option<String> {
     if !cfg!(windows) {
         return None;
@@ -251,6 +332,12 @@ pub(crate) fn safe_target(root: &Path, rel: &str) -> Result<PathBuf, String> {
     // `confined_to` canonicalises and fails closed, and it handles a target that does not exist yet by
     // walking up to the nearest ancestor that does — which is why `restore` can still be handed a
     // destination it is about to create, provided the destination itself exists by the time this runs.
+    //
+    // **Cost, recorded so it is a known trade rather than a surprise:** this makes every `safe_target`
+    // call canonicalise, so a 10k-file revert is 10k+ canonicalise walks, plus an ancestor walk for each
+    // name that does not exist yet. The right trade for a destructive operation on local disk, but it is
+    // unmeasured against a network share — worth one run against SMB or the QNAP before someone meets it
+    // on a slow mount.
     if !crate::fsutil::confined_to(&p, root) {
         return Err(format!("escapes dest_root: {rel:?} resolves outside {}", root.display()));
     }

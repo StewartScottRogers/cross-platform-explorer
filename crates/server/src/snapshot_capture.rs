@@ -315,25 +315,55 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // manifest-controlled: it is the empty directory the caller named in the call.
     fs::create_dir_all(dest_path).map_err(|e| format!("{}: {e}", dest_path.display()))?;
 
-    // ---- pass 1: judge every entry, touch nothing -------------------------------------------------
-    let mut writes: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(manifest.files.len());
+    // ---- pass 1: the ABORT DECISION only. Judges every entry, touches nothing. ---------------------
     let mut refusals: Vec<String> = Vec::new();
     for (rel, file) in &manifest.files {
-        match resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash) {
-            Ok(pair) => writes.push(pair),
-            Err(why) => refusals.push(why),
+        if let Err(why) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash) {
+            refusals.push(why);
         }
     }
     if !refusals.is_empty() {
         return Err(refusal_summary(&refusals));
     }
 
-    // ---- pass 2: nothing here can be refused, so a partial tree is only ever an I/O failure --------
-    for (target, blob) in &writes {
+    // ---- pass 2: re-judge each entry IMMEDIATELY before its own write ------------------------------
+    //
+    // **Pass 1's verdicts are deliberately not carried here, and that is the whole point (round 4).**
+    // The first version of this split kept the `(target, blob)` pairs pass 1 resolved and copied those,
+    // which reintroduced this ticket's original arbitrary write: `confined_to`'s answer for entry #1 was
+    // reached before every *other* entry was validated and written, so the window stopped being one
+    // `create_dir_all` and became the whole pass plus the whole preceding write run. An attacker need
+    // not race that blindly — the first byte hitting disk is the signal that pass 1 is over and its
+    // verdicts are stale — and swapping an already-blessed interior component for a junction then landed
+    // the write outside the folder **5 runs out of 5**, with `Ok(())` returned.
+    //
+    // Re-resolving costs one extra canonicalise per entry, on a path about to be written anyway, and
+    // restores the property the original per-entry loop had: the check a write relies on is the most
+    // recent thing that happened before it. Blind racers have failed tens of thousands of swaps against
+    // that shape across three rounds without an escape.
+    //
+    // Pass 1 is kept for what it is genuinely good at — the all-or-nothing decision, so a manifest with
+    // a refused entry writes *nothing* rather than a partial tree. Neither pass is sufficient alone.
+    //
+    // **Why not `fsutil::copy_file_into_claimed_slot` (CPE-1765) — asked, and answered no.** It closes
+    // the final component properly, claiming the name with `create_new` rather than writing to a name a
+    // probe pronounced free, and it is exactly right where the name is *picked*. This name is **chosen
+    // by the caller**, not picked, and `create_new` refuses a name that already exists: restoring a
+    // snapshot over a tree that still holds files, and `revert_engine`'s first-class `Overwrite` op,
+    // both depend on writing onto an existing file. Claiming the slot would turn those into refusals.
+    // The residual is therefore the final-component TOCTOU `confined_to`'s own doc records, narrowed to
+    // the gap between this check and this copy — recorded, not papered over.
+    for (rel, file) in &manifest.files {
+        let (target, blob) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash).map_err(|why| {
+            format!(
+                "{why}
+(detected immediately before writing it — the destination changed during the                  restore, so entries written before this one may already be on disk)"
+            )
+        })?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        fs::copy(blob, target).map_err(|e| format!("{}: {e}", blob.display()))?;
+        fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
     }
     Ok(())
 }
@@ -1821,6 +1851,74 @@ mod tests {
         assert!(
             err.contains("ccc-also-bad.txt"),
             "and so must the second — one run, every offending entry: {err}"
+        );
+    }
+
+    /// **CPE-1823 round 4 — the window the pre-pass opened, and the reason pass 2 re-judges.** When
+    /// `restore` validated everything and then wrote everything, `confined_to`'s verdict for a late entry
+    /// was reached before every earlier entry had been written. The attacker does not race blindly: the
+    /// first file appearing under the destination *is* the signal that pass 1 has finished and its
+    /// verdicts are stale.
+    ///
+    /// Staged the cheap way — the swap only has to **create** a junction at a name pass 1 already
+    /// blessed. `zzz` does not exist during pass 1, so `confined_to` walks up to the destination and
+    /// passes it; creating the junction afterwards means pass 2's `create_dir_all` finds a directory
+    /// already there and the copy follows it straight out of the folder. Nothing has to be deleted or
+    /// won by timing beyond "after the first write, before the last".
+    ///
+    /// The `aaa/` entries exist to make the write run long enough to interleave with, and `zzz` sorts
+    /// last in the manifest's `BTreeMap` so it is written after them.
+    #[test]
+    fn cpe_1823_a_component_swapped_after_validation_is_caught_before_its_own_write() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let store = scratch("cpe1823-toctou-store");
+        let dest = scratch("cpe1823-toctou-dest");
+        let outside = scratch("cpe1823-toctou-outside");
+        plant_blob(&store, GOOD_HASH);
+
+        let mut entries: Vec<(String, &str)> =
+            (0..400).map(|i| (format!("aaa/f{i:04}.txt"), GOOD_HASH)).collect();
+        entries.push(("zzz/target.txt".to_string(), GOOD_HASH));
+        let pairs: Vec<(&str, &str)> = entries.iter().map(|(p, h)| (p.as_str(), *h)).collect();
+        plant_manifest(&store, "planted", &pairs);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let attacker = {
+            let (dest_p, outside_p, stop) = (dest.to_path_buf(), outside.to_path_buf(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                // Wait for proof that pass 1 is over: a byte on disk. Then plant the junction at the
+                // already-blessed name.
+                while !stop.load(Ordering::Relaxed) {
+                    if dest_p.join("aaa").join("f0000.txt").exists() {
+                        return crate::fsutil::make_dir_link(&outside_p, &dest_p.join("zzz"));
+                    }
+                    std::thread::yield_now();
+                }
+                false
+            })
+        };
+
+        let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+        stop.store(true, Ordering::Relaxed);
+        let swap_landed = attacker.join().unwrap_or(false);
+
+        if !swap_landed {
+            crate::skip_notice!(
+                "[CPE-1823] SKIPPED the pre-pass TOCTOU leg: the swap never landed (no link privilege, \
+                 or the restore finished first). NOTHING on this run covered a component swapped \
+                 between validation and its own write."
+            );
+            return;
+        }
+        // The harm is a file OUTSIDE the destination. Asserting on `r` alone would miss it entirely:
+        // the vulnerable version returned `Ok(())`.
+        assert!(
+            !outside.join("target.txt").exists(),
+            "HARM: a component swapped after pass 1 blessed it took the write outside the restore \
+             folder — pass 2 must re-judge each entry immediately before its own copy (restore returned \
+             {r:?})"
         );
     }
 
