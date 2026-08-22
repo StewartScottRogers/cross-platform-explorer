@@ -126,11 +126,17 @@ jobs:
             ./sidecar/agent-board -> target
             ./sidecar/repos -> target
 
+      # CPE-1824: same ForceIPv4/retry/timeout hardening CPE-1787 applied to ci.yml's identical
+      # site -- a GitHub-hosted-runner IPv6-connectivity stall can hang `apt-get update` with zero
+      # output before it ever falls back to IPv4, and this step has no `continue-on-error`, so an
+      # unbounded hang here previously rode all the way to the job's 360-minute default before
+      # anyone noticed the sidecar release wasn't shipping.
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-latest'
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -231,7 +237,15 @@ jobs:
       #     GPL library needed for DECODE-only use). This leg is the one part of this step that could
       #     not be dry-run on a real macOS runner while authoring this ticket (CPE-1258) — watch its
       #     first live run closely.
+      # CPE-1824: `timeout-minutes` is new -- this step had none at all before, and it's not
+      # `continue-on-error`, so an unbounded stall in any curl download OR (macOS leg) the `git
+      # clone`/`make` compile-from-source below previously rode to the job's 360-minute default
+      # instead of failing fast. Sized per-OS: Windows/Linux only download+extract small prebuilt
+      # archives (bounded to minutes even with curl retries, see the `fetch`/`verify_btbn_checksum`
+      # hardening below); macOS additionally clones ffmpeg's source and compiles it -- already
+      # called out above as "the slow outlier in this job" -- so it gets a much larger budget.
       - name: Stage native deps — ffmpeg + pdfium (CPE-1258)
+        timeout-minutes: ${{ matrix.platform == 'macos-latest' && 35 || 12 }}
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
@@ -280,9 +294,19 @@ jobs:
           # and checks the body actually starts with them, plus a minimum plausible size as a second,
           # independent signal - a "197-byte archive" isn't one even if its first bytes happen to line up.
           MIN_ARCHIVE_BYTES=65536
+          # CPE-1824: `curl -sSL` alone has no bound on a STALLED transfer -- `--retry`/`-L` only
+          # help once a connection attempt reaches a terminal state (refused, a retryable HTTP
+          # status, timeout), so a connection that hangs open with zero bytes moving previously
+          # rode this whole step to the job's default timeout. `--connect-timeout 15` bounds the
+          # TCP/TLS handshake phase only; `--max-time 240` bounds the ENTIRE curl invocation --
+          # per curl's own docs this includes time spent inside `-sSL`'s redirect follows -- so it
+          # is the one that actually catches a stall mid-transfer. 240s is generous headroom for
+          # the largest asset here (a BtbN ffmpeg static build, tens of MB) on a GitHub-hosted
+          # runner's bandwidth; it does NOT bound retries across multiple curl invocations (there
+          # is only one invocation per `fetch` call here, so that distinction doesn't apply).
           fetch() {
             url="$1"; out="$2"; magic="$3"; label="$4"
-            code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url") || true
+            code=$(curl -sSL --connect-timeout 15 --max-time 240 --write-out '%{http_code}' -o "$out" "$url") || true
             code="${code:-000}"
             if [ "$code" != "200" ]; then
               echo "::error::download failed (HTTP $code): $url"
@@ -336,7 +360,10 @@ jobs:
           verify_btbn_checksum() {
             file="$1"; asset_name="$2"; url="$3"
             sums_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/checksums.sha256"
-            sums_code=$(curl -sSL --write-out '%{http_code}' -o checksums.sha256.tmp "$sums_url") || true
+            # CPE-1824: same stall-bounding as the `fetch` helper above -- `--connect-timeout 15`
+            # for the handshake, `--max-time 60` for the whole invocation (a plain text checksum
+            # file is tiny, so 60s is already generous rather than tight).
+            sums_code=$(curl -sSL --connect-timeout 15 --max-time 60 --write-out '%{http_code}' -o checksums.sha256.tmp "$sums_url") || true
             sums_code="${sums_code:-000}"
             if [ "$sums_code" != "200" ]; then
               echo "::error::couldn't fetch BtbN's checksums.sha256 (HTTP $sums_code): $sums_url"

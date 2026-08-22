@@ -490,15 +490,29 @@ jobs:
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y ffmpeg
 
+      # CPE-1824: `brew install` has no documented per-invocation retry/timeout flag of its own
+      # (checked, not assumed -- unlike apt's `-o Acquire::*` options, there is nothing to pass
+      # here), so the only bound available is GitHub Actions' own step-level `timeout-minutes`.
+      # `continue-on-error: true` already means a hang here was ALWAYS going to be swallowed once
+      # it reached a terminal state -- this cap is what lets it reach one instead of riding to the
+      # job's 360-minute default.
       - name: Install ffmpeg (video-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
         continue-on-error: true
+        timeout-minutes: 10
         run: command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
 
+      # CPE-1824: Chocolatey DOES have a genuine timeout option -- `--execution-timeout` (alias
+      # `--timeout`), documented as CommandExecutionTimeout in SECONDS, bounding the whole command
+      # (download + install), not just a connect phase; it defaults to 2700s (45min) and choco's
+      # own enforcement has had bugs around disabling it (GH chocolatey/choco#1224/#1747), so the
+      # step-level `timeout-minutes` below stays as an independent backstop rather than relying on
+      # choco's internal timer alone.
       - name: Install ffmpeg (video-thumb real-render test, Windows)
         if: matrix.os == 'windows-latest'
         continue-on-error: true
-        run: choco install ffmpeg -y --no-progress
+        timeout-minutes: 10
+        run: choco install ffmpeg -y --no-progress --execution-timeout=480
 
       # pdfium prebuilt (BSD-3-Clause, bblanchon/pdfium-binaries) staged where
       # `Pdfium::bind_to_system_library()` resolves it via the OS's normal dynamic-library search path
@@ -506,27 +520,33 @@ jobs:
       # binary's pdfium is provisioned from in release-sidecar.yml.
       # curl uses --fail (a bad HTTP status is an error, not a silently-saved error page) + --retry so a
       # transient network blip retries instead of leaving a truncated/empty archive for tar to choke on.
+      # CPE-1824: --retry alone doesn't bound a STALLED transfer (a connection that hangs open with
+      # zero bytes moving never hits a retryable terminal state), so add --connect-timeout (handshake
+      # phase) and --max-time (the whole invocation, generous for a small pdfium archive on a
+      # GitHub-hosted runner) plus a step-level timeout-minutes backstop.
       - name: Install pdfium prebuilt (pdf-thumb real-render test, Linux)
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
+        timeout-minutes: 6
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           mkdir -p "$RUNNER_TEMP/pdfium"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 180 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.so
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Install pdfium prebuilt (pdf-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
         continue-on-error: true
+        timeout-minutes: 6
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           mkdir -p "$RUNNER_TEMP/pdfium"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 180 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.dylib
           echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
@@ -538,13 +558,14 @@ jobs:
       - name: Install pdfium prebuilt (pdf-thumb real-render test, Windows)
         if: matrix.os == 'windows-latest'
         continue-on-error: true
+        timeout-minutes: 6
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           dest="$(cygpath -u "$RUNNER_TEMP")/pdfium"
           mkdir -p "$dest"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$dest/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 180 -sS -o "$dest/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
           tar --force-local -xzf "$dest/pdfium.tgz" -C "$dest" bin/pdfium.dll
           echo "$(cygpath -w "$dest/bin")" >> "$GITHUB_PATH"
 

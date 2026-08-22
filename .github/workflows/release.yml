@@ -43,11 +43,17 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      # CPE-1824: same ForceIPv4/retry/timeout hardening CPE-1787 applied to ci.yml's identical
+      # site -- a GitHub-hosted-runner IPv6-connectivity stall can hang `apt-get update` with zero
+      # output before it ever falls back to IPv4, and this step has no `continue-on-error`, so an
+      # unbounded hang here previously rode all the way to the job's 360-minute default before
+      # anyone noticed the release wasn't shipping.
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -196,9 +202,15 @@ jobs:
 
       # The host crate's Linux keyring backend (CPE-322) links libdbus, so building any host
       # binary on Linux — including catalog-sign — needs it.
+      # CPE-1824: same hardening as the release job's apt-get site above -- no `continue-on-error`
+      # here either, so an unbounded hang previously rode to the job's 360-minute default instead
+      # of failing fast.
       - name: Install libdbus (host crate's Linux keyring dep)
         if: steps.k.outputs.has == 'true'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        timeout-minutes: 5
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libdbus-1-dev pkg-config
 
       - name: Build + sign the catalog bundle
         if: steps.k.outputs.has == 'true'
