@@ -180,20 +180,36 @@ The 18-minute run was reproduced twice, independently — by the UAT and again o
 figure is not a single anomalous observation.
 
 Six timeout messages is the mechanism made visible: **one full 180s cycle per attempt — 1 initial
-plus 5 retries — not one shared 180s budget.** `--retry-all-errors` is what closes the loop: it makes
-a `--max-time` expiry *itself* count as a retryable error, and each retry then gets a **fresh
-`--max-time` clock**. So the round-1 flags were not merely "resetting a timer" in the abstract; they
-were self-feeding — the very timeout meant to stop the stall was the thing that triggered the next
-attempt. That is the accurate statement of the bug.
+plus 5 retries — not one shared 180s budget.** Each retry gets a **fresh `--max-time` clock**, so the
+flags were self-feeding: the very timeout meant to stop the stall was the thing that triggered the
+next attempt.
+
+**Corrected in round 3 — `--retry-all-errors` is NOT the cause.** Round 2 of this log attributed the
+loop to `--retry-all-errors` ("what closes the loop"). That is wrong, and it is the same species of
+overstatement as the original blocker, one level down: a plausible causal story asserted without
+testing the counterfactual. curl's `retry.md` lists **"a timeout" FIRST** among the transient errors
+that **plain `--retry`** already retries. Measured counterexample, run here:
+`--retry 2 --retry-delay 1 --max-time 8` with **no** `--retry-all-errors` → **28.97s, exit 28, THREE
+timeout messages**. Dropping `--retry-all-errors` would have fixed nothing.
+
+The hazard is **`--retry` + `--max-time`, full stop** — which is, fortunately, exactly what the rule
+and the guard were already keyed on, so no unsafe configuration could ever have resulted from the
+wrong explanation. That is why this was non-blocking. It is corrected anyway, because on a ticket
+whose entire blocker was an inaccurate causal claim in a comment, an inaccurate causal claim in the
+correction is not acceptable.
 
 **The control matters just as much, and it means round 1 was not wrong everywhere.** The two
 `release-sidecar.yml` curl calls, which carry **no** `--retry`, were run against the same stall
 server:
 
-- `verify_btbn_checksum()` `--max-time 60` → died at **60.001s**, exit 28
-- `fetch()` `--max-time 240` → died at **240.001s**, exit 28
+- `verify_btbn_checksum()` `--max-time 60` → died at its `--max-time` on the first and only attempt, exit 28
+- `fetch()` `--max-time 240` → same, exit 28
 
-Exact to the millisecond, because with no retry there is exactly one attempt. So `--max-time` *does*
+One attempt each, no retry cycle. (Round 2 of this log wrote "60.001s / 240.001s — exact to the
+millisecond". That precision was optimistic and almost certainly a formatting artifact: repeated runs
+show a consistent **+10–20ms overshoot**, e.g. 60016ms for the 60s call and 8006–8016ms for an 8s
+one. The **property** — a single attempt that dies at `--max-time` — is what is confirmed, not a
+sub-millisecond figure.) So `--max-time` *does*
 bound the whole invocation when no `--retry` is present — the round-1 claim was **right for those
 two sites and wrong only where `--retry` appears**. The corrected comments are worded to preserve
 that distinction; over-correcting into "`--max-time` never bounds the invocation" would replace one
@@ -258,11 +274,72 @@ against the known mistake, not proof the timing is correct — that part is what
 is for. Anyone tempted to treat a green run of this file as evidence the timeouts *work* should
 re-read this paragraph.
 
+Two concrete limits of the scan, added in round 3 so nobody over-trusts a green run:
+
+1. **It enforces PAIRING, never SIZING.** Verified by injecting
+   `curl --retry 3 --retry-max-time 9999 --max-time 20` into `release.yml`: **15 passed**. Nothing
+   compares the numbers against the step's `timeout-minutes`. The three pdfium sites are protected
+   from a nonsense value only because the spot check hard-codes the literal `--retry-max-time 150` —
+   a string match, not arithmetic. A *new* site gets its pairing enforced and its sizing trusted.
+2. **It reads shell text lexically, not a shell parse.** Continuations are joined and comments
+   stripped first (round 3, below), but a flag assembled from a variable (`$CURL_OPTS`) would still
+   not be seen.
+
+**2026-08-21 (round 3)** — Reviewer APPROVED round 2 and raised six non-blocking findings; all six
+addressed. It also reproduced the measurement from scratch a third time (six timeouts on a 183.02s
+stride = 180 `--max-time` + 3s `--retry-delay`, last attempt ending ~1101s) and, better, confirmed
+the `retry-max-time + max-time` worst-case formula **by experiment** rather than by reading docs: a
+scaled run started its 4th attempt at elapsed 12.04s (< 15, so permitted) then ran the full 18.02s,
+finishing at **30.06s — twice the `--retry-max-time`**. So `150 + 180 = 330 < 360` holds.
+
+**F2 (the important one) — the guard was fully evaded by a backslash line continuation.**
+Round 2's `curlLines()` split `step.run` on newlines and required `--retry` and `--max-time` on the
+**same physical line**. The Reviewer inserted this into `release.yml` and got **15 passed, no
+detection**:
+
+    curl --fail --retry 3 \
+      --max-time 20 -sS -o /tmp/x https://example.com/x
+
+This was the one hole that failed **silently**, and it is not hypothetical formatting — **this repo
+already writes curl exactly that way** at `ffmpeg-pin-freshness.yml:251` and `:409`, and `apt-get`
+that way at `release.yml:56`. Any scan of shell text for a flag *combination* must join
+continuations first or it is checking nothing.
+
+Fixed by a new `logicalLines()` helper that joins backslash continuations and strips comments before
+any flag matching; `curlLines()` **and** `aptGetLines()` both now go through it (the apt sites are
+continuation-split too, so they had the same latent shape). Red-proofed: injected the continuation-
+split curl above at **`.github/workflows/release.yml:61-62`** → **1 failed / 14 passed**, the generic
+scan reporting `expected [ Array(1) ] to deeply equal []`; reverted, back to 15 passed.
+
+**F3 — inline trailing comments were read as code.** Round 2 dropped only lines whose *first*
+character was `#`, so `echo hi # curl --fail --retry 3 --max-time 20 ...` tripped the scan. This
+direction fails *loud* (a spurious offender), so it was never a safety hole, but it is precisely the
+comment-vs-code confusion this file's own header says the guard exists to avoid. `stripShellComment()`
+now removes `#` comments **quote-aware** — a `#` only opens a comment when unquoted and starting a
+word. The quote-awareness is deliberately in the safe direction: a naive "cut at the first `#`" would
+truncate a real curl whose URL carries a fragment, hiding it entirely — a silent false negative.
+Verified: the inline-comment case now yields 15 passed.
+
+**Attacks the guard was verified (by me, not taken on report) to CATCH**, worth recording so the next
+reader knows its real strength: a brand-new single-line `curl --fail --retry 3 --max-time 20` in
+`release.yml` → caught; the same split across a continuation → caught after the fix; adding
+`--retry 5` to `release-sidecar.yml`'s `fetch()` call → caught, which also demonstrates that file's
+assertion is **not vacuous**. Verified NOT to false-positive: offending flags inside a `#` comment,
+whether the comment starts the line or trails real code.
+
+**F6 — stale line pointer.** Round 2's red-proofs are recorded against `ci.yml:555`; after round 2b's
+comment block grew above it, that curl is at **`ci.yml:562`**. The red-proofs themselves stand — only
+the pointer was stale.
+
 Red-proofed twice, both reverted immediately after:
-- Deleted ` --retry-max-time 150` from `.github/workflows/ci.yml:555` (the Linux pdfium `curl`).
+- Deleted ` --retry-max-time 150` from **the Linux pdfium `curl` in `.github/workflows/ci.yml`** —
+  the line fetching `pdfium-linux-x64.tgz`, which is `ci.yml:568` at round-3 head. It was 555 when
+  the red-proof was run and 562 at round-2b head: the comment blocks above it have grown twice, so
+  the *identity* of the line is the durable pointer and the number is a snapshot. (Per round-3 F6,
+  which caught the 555 → 562 drift; refreshing it moved it again, to 568.)
   3 tests failed, 12 passed — including the new generic scan, reporting
   `expected [ Array(1) ] to deeply equal []`.
-- Deleted `--retry 5 ` from that same line 555. 2 tests failed, 13 passed — the generic scan went
+- Deleted `--retry 5 ` from that same line. 2 tests failed, 13 passed — the generic scan went
   *green* (the line no longer retries, so it is correctly not an offender) while the new
   non-vacuity test caught it with `expected 2 to be 3`. That is exactly the case the offenders scan
   structurally cannot see, which is why the non-vacuity test exists.
@@ -291,6 +368,25 @@ One caveat recorded with it, which must not be repeated as if it were current: `
 later step (CPE-1058, updater manifest/signature verification) that gates `catalog` out via `needs:`.
 Its apt-get timing data is real but **dated 2026-07-25** — cite it as dated, never as current, and
 note that this ticket's cap on that step has therefore never been exercised by a live run.
+
+**F5 — the `ffmpeg-pin-freshness.yml` exclusion, stated properly.** That file also pairs `--retry`
+with `--max-time` at `:251` and `:409`. It stays out of this ticket, but **not** because it is
+harmless — it is tracked as **CPE-1849**, and the Reviewer's arithmetic (re-checked here) shows it is
+**worse** there than at the pdfium sites:
+
+- one `head_check` worst case = 4 x 30s + 3 x 2s = **126s**;
+- the "HEAD-check pinned assets" step (`ffmpeg-pin-freshness.yml:229`) makes **five** `head_check`
+  calls — counted directly, not assumed — under a single **`timeout-minutes: 5`** (300s);
+- so a full stall blows the cap during the **third** call: the step dies by **opaque runner kill**,
+  with no curl diagnostic at all for the two sites never reached.
+
+What *is* different there, and the actual reason for the exclusion, is that its own comment is
+**accurate** ("`--max-time` bounds each attempt"), so the specific defect this ticket exists to fix —
+a false claim baked into a comment — is not present. It is **real work with a real failure mode, not
+tidying**, and it is deliberately not done here. Adding that file to the guard's `GUARDED` list
+before fixing those two sites would simply turn the guard red. The note lives immediately above the
+`GUARDED` list in the test file, where the next editor will look, and names CPE-1849 so the follow-up
+is findable.
 
 **5. UAT verdict: PASS.** It independently reproduced the retry bug by measurement, confirmed the
 control cases, confirmed a normal download still succeeds through the new flags, and raised no

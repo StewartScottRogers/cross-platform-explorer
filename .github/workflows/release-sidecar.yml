@@ -305,16 +305,18 @@ jobs:
           # is generous headroom for the largest asset here (a BtbN ffmpeg static build, tens of MB)
           # on a GitHub-hosted runner's bandwidth.
           # Measured, not assumed: against a server that accepts the connection then sends nothing,
-          # this call died at 240.001s and `verify_btbn_checksum()`'s `--max-time 60` at 60.001s,
-          # both exit 28 -- exact to the millisecond, because with no `--retry` there is exactly one
-          # attempt.
+          # this call and `verify_btbn_checksum()`'s `--max-time 60` each died on their FIRST and
+          # only attempt at their own `--max-time`, exit 28 -- one attempt, no retry cycle. (The
+          # observed times run ~10-20ms over the nominal value, e.g. 60016ms for the 60s call; the
+          # property is "dies at --max-time on a single attempt", not a sub-millisecond figure.)
           # CAUTION: that "entire invocation" property depends on there being no `--retry`. curl
           # RESETS the `--max-time` counter on every retry ("if you enable retrying the transfer
           # (--retry) then the maximum time counter is reset each time the transfer is retried"),
-          # and `--retry-all-errors` makes a max-time expiry itself retryable, so the same flags
-          # plus `--retry 5` measured 1101s instead of 180s over in ci.yml. Anyone adding `--retry`
-          # here must add `--retry-max-time` to keep a real bound.
-          # src/lib/releaseHangHardening.test.ts enforces exactly that pairing.
+          # and PLAIN `--retry` is enough to trigger it -- curl's retry.md lists "a timeout" first
+          # among the transient errors `--retry` covers, so `--retry-all-errors` is NOT required
+          # for the loop (measured). Adding just `--retry 5` here would take the bound from 240s to
+          # roughly 6 x 240s. Anyone adding `--retry` must add `--retry-max-time` to keep a real
+          # bound. src/lib/releaseHangHardening.test.ts enforces exactly that pairing.
           fetch() {
             url="$1"; out="$2"; magic="$3"; label="$4"
             code=$(curl -sSL --connect-timeout 15 --max-time 240 --write-out '%{http_code}' -o "$out" "$url") || true

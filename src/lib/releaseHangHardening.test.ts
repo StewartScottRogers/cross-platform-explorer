@@ -75,8 +75,66 @@ const HARDENING_FLAGS =
  *  re-deriving a third copy. */
 const APT_COMMAND_WORD = /(?<![\w-])apt(?:-get)?(?![\w-])/;
 
+/** Strips a shell `#` comment from one line, respecting quotes. A `#` only opens a comment when it
+ *  is unquoted AND starts a word (line start, or preceded by whitespace). The quote-awareness is
+ *  load-bearing in the SAFE direction: a naive "cut at the first #" would truncate a real curl
+ *  invocation whose URL carries a fragment, or whose quoted header value contains a `#`, hiding it
+ *  from the scan entirely -- a SILENT false negative, the dangerous direction.
+ *
+ *  Round 2 dropped only lines whose FIRST character was `#`, so an inline trailing comment such as
+ *  `echo hi # curl --retry 3 --max-time 20 ...` was read as code. That direction fails LOUD (a
+ *  spurious offender), so it was never a safety hole -- but it is exactly the comment-vs-code
+ *  confusion this file's header says the guard exists to avoid. */
+function stripShellComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
+  }
+  return line;
+}
+
+/** Splits a `run` script into LOGICAL shell lines: backslash continuations joined, `#` comments
+ *  stripped, before anything looks for a flag.
+ *
+ *  The join is the important half, and it closes a hole that was fully SILENT. Round 2's scan split
+ *  on newlines and required `--retry` and `--max-time` on the SAME physical line, so ordinary shell
+ *  formatting evaded it completely:
+ *
+ *      curl --fail --retry 3 \
+ *        --max-time 20 -sS -o /tmp/x https://example.com/x
+ *
+ *  Neither physical line carries both flags, so the pairing rule never fired and the file reported
+ *  a clean pass. That is not a hypothetical style: this repo ALREADY writes curl exactly that way
+ *  at ffmpeg-pin-freshness.yml:251 and :409, and apt-get that way at release.yml:56. Any scan of
+ *  shell text for a flag COMBINATION has to join continuations first, or it is checking nothing. */
+function logicalLines(run: string | undefined): string[] {
+  const out: string[] = [];
+  let pending = "";
+  for (const raw of (run ?? "").split("\n")) {
+    const line = stripShellComment(raw).trim();
+    if (line.endsWith("\\")) {
+      pending += `${line.slice(0, -1).trim()} `;
+      continue;
+    }
+    const joined = (pending + line).trim();
+    if (joined) out.push(joined);
+    pending = "";
+  }
+  if (pending.trim()) out.push(pending.trim());
+  return out;
+}
+
 function aptGetLines(run: string | undefined): string[] {
-  return (run ?? "").split("\n").filter((line) => APT_COMMAND_WORD.test(line));
+  return logicalLines(run).filter((line) => APT_COMMAND_WORD.test(line));
 }
 
 /** Matches each flag as an isolated FLAG WORD. The `(?![\w-])` tail is what keeps `--retry` from
@@ -86,18 +144,17 @@ const RETRY_FLAG = /(?<![\w-])--retry(?![\w-])/;
 const MAX_TIME_FLAG = /(?<![\w-])--max-time(?![\w-])/;
 const RETRY_MAX_TIME_FLAG = /(?<![\w-])--retry-max-time(?![\w-])/;
 
-/** Every real curl invocation line in a parsed workflow, tagged with where it lives. `#`-comment
- *  lines are dropped first: the `run` blocks in these workflows carry long explanatory comments
- *  that NAME these very flags, and counting one of those as an invocation would let a comment
- *  satisfy (or falsely trip) the assertion below -- the same comment-vs-key confusion CPE-1787's
- *  Reviewer round found in a regex-over-raw-text guard. */
+/** Every real curl invocation in a parsed workflow, tagged with where it lives, read as LOGICAL
+ *  lines (continuations joined, comments stripped) so that neither line-wrapping nor an
+ *  explanatory comment can move a flag out of the scan's view. The `run` blocks in these workflows
+ *  carry long comments that NAME these very flags, so letting one count as an invocation would let
+ *  a comment satisfy or falsely trip the assertions below -- the same comment-vs-key confusion
+ *  CPE-1787's Reviewer round found in a regex-over-raw-text guard. */
 function curlLines(doc: WorkflowDoc): { where: string; line: string }[] {
   const found: { where: string; line: string }[] = [];
   for (const [jobName, job] of Object.entries(doc.jobs)) {
     for (const step of job.steps) {
-      for (const raw of (step.run ?? "").split("\n")) {
-        const line = raw.trim();
-        if (line.startsWith("#")) continue;
+      for (const line of logicalLines(step.run)) {
         if (!/(?<![\w-])curl(?![\w-])/.test(line)) continue;
         found.push({ where: `${jobName} / ${step.name}`, line });
       }
@@ -261,12 +318,21 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
 // Confirmed by measurement afterwards, not only by reading the docs: run against a server that
 // accepts the connection and then sends nothing, the ci.yml flag set WITHOUT --retry-max-time took
 // 1101s (18.35 min) and printed six separate "Operation timed out after 1800xx ms" -- one full 180s
-// cycle for the initial attempt plus each of the 5 retries, because --retry-all-errors makes a
-// max-time expiry itself a retryable error and every retry then gets a FRESH max-time clock. With
-// --retry-max-time 150 the same test ends at 182s, exit 28, one timeout message. The control matters
-// just as much: release-sidecar.yml's curl calls, which pass NO --retry, died at exactly 60.001s and
-// 240.001s against the same server -- so --max-time really does bound the whole invocation there.
-// The original claim was wrong ONLY where --retry appears; nothing here should over-correct into
+// cycle for the initial attempt plus each of the 5 retries: PLAIN --retry already retries a timeout
+// (curl's retry.md lists "a timeout" FIRST among the transient errors it covers) and every retry
+// then gets a FRESH max-time clock. With --retry-max-time 150 the same test ends at 182s, exit 28,
+// one timeout message.
+//
+// --retry-all-errors is NOT the cause, and this file must not imply it is. Measured counterexample:
+// `--retry 2 --retry-delay 1 --max-time 8` with NO --retry-all-errors still burned three full
+// attempts (~29s, three timeout messages). Dropping --retry-all-errors would fix nothing. The
+// hazard is --retry + --max-time, full stop -- which is exactly what the rule below keys on.
+//
+// The control matters just as much: release-sidecar.yml's curl calls, which pass NO --retry, each
+// died on their first and only attempt at their own --max-time -- so --max-time really does bound
+// the whole invocation there. (Observed times run ~10-20ms over nominal, e.g. 60016ms for the 60s
+// call; the property is "one attempt, dies at --max-time", not a sub-millisecond figure.) The
+// original claim was wrong ONLY where --retry appears; nothing here should over-correct into
 // asserting --max-time is never a whole-invocation bound.
 //
 // WHAT THIS FILE CAN AND CANNOT DO. Every assertion here is STRUCTURAL -- it parses YAML and reads
@@ -277,15 +343,39 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
 // parser CAN enforce, standing in for a timing behaviour it cannot observe. Treat it as a tripwire
 // against the known mistake, not as proof the timing is right; that part came from measurement.
 //
+// Two specific limits, so nobody over-trusts a green run:
+//   1. It enforces PAIRING, never SIZING. `--retry 3 --retry-max-time 9999 --max-time 20` passes
+//      here (verified by injecting exactly that into release.yml -- 15 passed). Nothing checks the
+//      arithmetic against the step's timeout-minutes. The three pdfium sites are protected from a
+//      nonsense value only because the spot check hard-codes the literal "--retry-max-time 150" --
+//      a string match, not an arithmetic one. A new site gets pairing enforced and sizing trusted.
+//   2. It reads shell TEXT. Round 2's version split on physical newlines, so a backslash
+//      continuation split the pair across two lines and evaded it silently; logicalLines() now
+//      joins continuations and strips comments first, but the scan is still lexical, not a shell
+//      parser -- a flag assembled from a variable ($CURL_OPTS) would not be seen.
+//
+// Attacks this guard was verified to CATCH, for the next reader's calibration: a brand-new
+// `curl --fail --retry 3 --max-time 20` inserted into release.yml; the same split across a
+// backslash continuation; and adding `--retry 5` to release-sidecar.yml's fetch() call (so that
+// file's assertion is demonstrably not vacuous). Verified NOT to false-positive: offending flags
+// sitting in a `#` comment, whether the comment starts the line or trails real code.
+//
 // This is the assertion that stops that reasoning error recurring: it is a generic scan of every
 // curl line in these workflows rather than a spot check on the three known sites, so a NEW curl
 // added anywhere in them with --retry + --max-time and no --retry-max-time fails here.
 //
-// Scope note: .github/workflows/ffmpeg-pin-freshness.yml also pairs --retry with --max-time (two
-// head_check sites). It is deliberately NOT in this list -- its own comment already describes the
-// flag accurately ("--max-time bounds each attempt"), so the defect this guard exists to catch is
-// not present there, and that file is outside CPE-1824's stated scope. Adding it here is a
-// reasonable follow-up, not an omission.
+// Scope note: .github/workflows/ffmpeg-pin-freshness.yml also pairs --retry with --max-time (:251
+// and :409). It is deliberately NOT in this list, but do NOT read that as "harmless there" -- it is
+// tracked as CPE-1849 and the arithmetic is WORSE there than at the pdfium sites.
+//
+// What is different: that file's own comment is ACCURATE ("--max-time bounds each attempt"), so the
+// specific defect this guard exists to catch -- a false claim in a comment -- is not present, and
+// the file is outside CPE-1824's scope. What is worse: one head_check's worst case is
+// 4 x 30s + 3 x 2s = 126s, and the "HEAD-check pinned assets" step (ffmpeg-pin-freshness.yml:229)
+// makes FIVE head_check calls under a single `timeout-minutes: 5`. A full stall therefore blows the
+// 300s cap during the THIRD call and the step dies by opaque runner kill, with no curl diagnostic
+// for the two sites never reached. That is real work with a real failure mode, not tidying. Adding
+// this file to GUARDED without first fixing those two sites would simply turn the guard red.
 describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () => {
   const GUARDED = ["ci.yml", "release.yml", "release-sidecar.yml"] as const;
 

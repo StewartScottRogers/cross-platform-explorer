@@ -525,16 +525,22 @@ jobs:
       # play below, and each bounds ONLY its own scope -- they are not interchangeable:
       #   --connect-timeout 15  the TCP/TLS handshake phase of ONE attempt, nothing after it.
       #   --max-time 180        ONE attempt end-to-end (connect + transfer). With --retry present
-      #                         this is NOT a bound on the whole command: --retry-all-errors makes
-      #                         a max-time expiry itself count as a retryable error, and each retry
-      #                         then gets a FRESH max-time clock. Measured against a server that
-      #                         accepts the connection and then sends nothing: this exact flag set
-      #                         without --retry-max-time ran 1101s (18.35 min) and printed SIX
-      #                         separate "Operation timed out after 1800xx ms" -- one full 180s
-      #                         cycle for the initial attempt plus each of the 5 retries. With
+      #                         this is NOT a bound on the whole command: PLAIN --retry already
+      #                         retries a timeout -- curl's retry.md lists "a timeout" FIRST among
+      #                         the transient errors it covers -- and each retry then gets a FRESH
+      #                         max-time clock. Measured against a server that accepts the
+      #                         connection and then sends nothing: this exact flag set without
+      #                         --retry-max-time ran 1101s (18.35 min) and printed SIX separate
+      #                         "Operation timed out after 1800xx ms" -- one full 180s cycle for
+      #                         the initial attempt plus each of the 5 retries. With
       #                         --retry-max-time 150 added, the same test ends at 182s, exit 28,
-      #                         one timeout message. (Absent --retry, --max-time DOES bound the
-      #                         whole invocation -- see release-sidecar.yml, measured exact.)
+      #                         one timeout message.
+      #                         NB: --retry-all-errors is NOT the cause and dropping it would fix
+      #                         nothing -- measured, `--retry 2 --retry-delay 1 --max-time 8` with
+      #                         NO --retry-all-errors still burned 3 full attempts / ~29s. The
+      #                         hazard is --retry + --max-time, full stop; that is what the guard
+      #                         keys on. (Absent --retry, --max-time DOES bound the whole
+      #                         invocation -- see release-sidecar.yml.)
       #   --retry-max-time 150  the retry SERIES: before starting each new retry curl checks
       #                         elapsed time against this and stops retrying once it is reached.
       #                         An attempt already in flight is allowed to finish, so curl's real
