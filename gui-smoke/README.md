@@ -73,13 +73,20 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
    cargo install tauri-driver --version 2.0.6 --locked
    ```
    CPE-1843 pinned that version in `gui-smoke.yml` (both install sites) and it is repeated here so a
-   local run matches CI. The pin is load-bearing: `wdio.conf.ts`'s `beforeSession` passes `--port 4444`
-   and `--native-port 4445` explicitly and waits on **both** ports before the first `POST /session`
-   (the CPE-1772 + CPE-1832 startup-race fix), so it depends on those flag names, their 4444/4445
-   defaults, and `--native-host`'s 127.0.0.1 default — all three verified against 2.0.6's own
-   `src/cli.rs`. A renamed flag fails loudly (tauri-driver rejects unknown args); a **re-defaulted**
-   port would not. Before bumping the version, re-read the new `src/cli.rs` and update
-   `TAURI_DRIVER_PORT` / `NATIVE_DRIVER_PORT` in `wdio.conf.ts` if anything moved.
+   local run matches CI. The pin is load-bearing: `wdio.conf.ts`'s `beforeSession` spawns tauri-driver
+   with `--port 4444 --native-port 4445` and waits on **both** ports before the first `POST /session`
+   (the CPE-1772 + CPE-1832 startup-race fix). Two different dependencies, and the difference matters:
+
+   - `--port` / `--native-port` are passed **explicitly**, so only the flag *names* are load-bearing —
+     their defaults are overridden and cannot silently break anything, and a rename fails loudly because
+     tauri-driver rejects unknown args (`args.finish()`).
+   - `--native-host` is **not** passed; the harness polls `127.0.0.1`, which is merely that flag's
+     default. This is the one that could rot **silently** — a re-default would send the native driver
+     somewhere the harness never looks, and the wait would time out blaming the wrong thing.
+
+   All verified against 2.0.6's own `src/cli.rs`. Before bumping the version, re-read the new
+   `src/cli.rs` and update `TAURI_DRIVER_PORT` / `NATIVE_DRIVER_PORT` (or start passing `--native-host`)
+   in `wdio.conf.ts` if anything moved.
 2. **Windows: a matching Microsoft Edge Driver** on `PATH` (the runner's Edge/WebView2 version
    must match `msedgedriver.exe`):
    ```powershell

@@ -199,23 +199,33 @@ jobs:
       # this leg runs, but a hang here now fails named instead of riding to the job's own 15-minute cap.
       #
       # CPE-1843: VERSION-PINNED, and the pin is load-bearing — do not drop it back to "whatever
-      # crates.io has newest today". `wdio.conf.ts`'s `beforeSession` passes `--port 4444` and
-      # `--native-port 4445` explicitly and then waits on BOTH of those ports before letting WDIO issue
-      # its first `POST /session` (the CPE-1772 + CPE-1832 startup-race fix). That harness therefore
-      # depends on three things about this exact binary:
-      #   * `--port` and `--native-port` still exist as flags (they take a NUMBER each),
-      #   * their defaults are still 4444 / 4445, and
-      #   * `--native-host` still defaults to 127.0.0.1 (the host the harness polls).
-      # All three re-verified for 2.0.6 by reading its own `src/cli.rs` (`args.value_from_str("--port")
-      #   .unwrap_or(4444)`, `--native-port` -> 4445, `--native-host` -> "127.0.0.1"), which was also the
-      # newest published version on crates.io when this pin was added — so pinning changed nothing about
-      # what CI installs today, it only stops a future upstream release from changing it silently.
-      # tauri-driver is strict about unknown args (`args.finish()` errors on anything extraneous), so a
-      # RENAMED flag fails loudly; a RE-DEFAULTED port would not — the harness would simply wait on a port
-      # nothing ever binds and time out with a misleading "never accepted a connection" message.
-      # WHEN YOU BUMP THIS: re-read the new version's `src/cli.rs` and confirm those three facts still
-      # hold, then update TAURI_DRIVER_PORT / NATIVE_DRIVER_PORT in `gui-smoke/wdio.conf.ts` if they do
-      # not. The other install site in this file (`gui-smoke-linux-build`) must be bumped in lockstep.
+      # crates.io has newest today". `wdio.conf.ts`'s `beforeSession` spawns this binary with `--port
+      # 4444 --native-port 4445` and then waits on BOTH of those ports before letting WDIO issue its
+      # first `POST /session` (the CPE-1772 + CPE-1832 startup-race fix). That harness depends on this
+      # exact binary's CLI in two DIFFERENT ways, and the difference is the whole point:
+      #
+      #   * `--port` / `--native-port` — the harness passes both EXPLICITLY (wdio.conf.ts, the `spawn`
+      #     in `beforeSession`), so what matters is only that the flag NAMES still exist and still take a
+      #     port NUMBER. Their defaults do NOT matter here: an explicit value overrides them, so a
+      #     re-defaulted `--port`/`--native-port` cannot silently break this harness. And a RENAMED one
+      #     cannot break it silently either — tauri-driver rejects unknown args (`args.finish()` errors
+      #     on anything extraneous), so the process dies loudly at spawn.
+      #   * `--native-host` — the harness does NOT pass this, and polls `127.0.0.1`, which is only that
+      #     flag's DEFAULT. This is the one that can rot silently: if upstream ever re-defaults the
+      #     native host, tauri-driver would put the native driver somewhere the harness never looks and
+      #     the wait would time out with a misleading "never accepted a connection" message pointing at
+      #     the wrong thing entirely. The silent-re-default argument applies HERE, not to the two flags
+      #     above.
+      #
+      # Verified for 2.0.6 by reading its own `src/cli.rs`: `args.value_from_str("--port")
+      # .unwrap_or(4444)`, `--native-port` -> 4445, `--native-host` -> "127.0.0.1", plus the
+      # `args.finish()` strictness. 2.0.6 was also the newest published version on crates.io when this
+      # pin was added, so pinning changed nothing about what CI installs today — it only stops a future
+      # upstream release from changing any of the above without anyone deciding to accept it.
+      # WHEN YOU BUMP THIS: re-read the new version's `src/cli.rs`, confirm the two flag names and
+      # `--native-host`'s default, and update TAURI_DRIVER_PORT / NATIVE_DRIVER_PORT (or start passing
+      # `--native-host`) in `gui-smoke/wdio.conf.ts` if anything moved. The other install site in this
+      # file (`gui-smoke-linux-build`) must be bumped in lockstep.
       - name: Install tauri-driver
         timeout-minutes: 8
         run: cargo install tauri-driver --version 2.0.6 --locked
@@ -479,10 +489,12 @@ jobs:
       # `cargo install` cache; 8 minutes covers a cold one.
       #
       # CPE-1843: version-pinned for the same load-bearing reason as the Windows leg's identical step
-      # above — `gui-smoke/wdio.conf.ts` passes `--port 4444` / `--native-port 4445` and waits on both
-      # ports, so it depends on those flag NAMES and their 4444/4445 defaults (plus `--native-host`'s
-      # 127.0.0.1 default) staying put. Read that step's comment before bumping this, verify the new
-      # version's `src/cli.rs`, and bump BOTH sites together.
+      # above — `gui-smoke/wdio.conf.ts` passes `--port 4444` / `--native-port 4445` explicitly and waits
+      # on both ports, so it depends on those two flag NAMES existing (a rename fails loudly; their
+      # defaults are irrelevant because the harness overrides them) and on `--native-host` still
+      # defaulting to 127.0.0.1, which the harness does NOT pass and therefore can rot SILENTLY. Read
+      # that step's comment before bumping this, verify the new version's `src/cli.rs`, and bump BOTH
+      # sites together.
       - name: Install tauri-driver
         timeout-minutes: 8
         run: cargo install tauri-driver --version 2.0.6 --locked

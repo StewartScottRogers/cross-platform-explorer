@@ -21,8 +21,21 @@
 // guard and it says so — it cannot prove the ports are reachable at runtime (that is `waitForPort.test.ts`
 // plus the real CI run), only that the harness still waits for them.
 //
-// Red-proofed by deleting each `await` in turn (both the 4444 wait and the 4445 wait, separately) and
-// confirming this file fails each time; see CPE-1843's work log for the exact lines.
+// --- EVERY ASSERTION LIVES INSIDE AN `it()`, DELIBERATELY (CPE-1843 round-2 review) ------------------
+// The first version of this file parsed `wdio.conf.ts` and located `beforeSession` in the `describe`
+// BODY, so the two checks that prove this guard reached its target at all — the file being readable, and
+// exactly one `beforeSession` existing — ran outside any test. Measured consequence on **node 22.22.3**:
+// a throw from a `describe` callback prints `not ok 1 - ...` but still reports `# fail 0` and **exits 0**,
+// while the suite total silently drops by this file's cases. Under the two mutations that matter most —
+// renaming/moving `wdio.conf.ts` (ENOENT), and extracting the hook to a named helper
+// (`beforeSession: startTauriDriver,`, the very restructure FIX_HINT below anticipates) — the guard would
+// have VANISHED with CI still green. Node 20 (what `gui-smoke.yml` pins today) exits 1 on the same
+// mutation, so the old shape was safe only by accident of an unrelated version pin that nobody bumping
+// node would think to re-check. Keep the parse/locate inside `it()` bodies — same discipline as
+// `libLayout.test.ts`. A guard that can disappear quietly is worse than no guard.
+//
+// Red-proofed by deleting each `await` in turn (both the 4444 wait and the 4445 wait, separately), and
+// again by both vanish-mutations above; see CPE-1843's work log for the exact lines and exit codes.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -47,13 +60,20 @@ const FIX_HINT =
   "deliberately — do not delete it.";
 
 function parseWdioConf(): ts.SourceFile {
+  assert.ok(
+    fs.existsSync(WDIO_CONF_PATH),
+    `Could not find the file this guard exists to protect: ${WDIO_CONF_PATH}. If wdio.conf.ts was ` +
+      "renamed or moved, update WDIO_CONF_PATH here in the same PR — do not leave this guard pointing at " +
+      "nothing. " +
+      FIX_HINT,
+  );
   const source = fs.readFileSync(WDIO_CONF_PATH, "utf-8");
   return ts.createSourceFile(WDIO_CONF_PATH, source, ts.ScriptTarget.Latest, /* setParentNodes */ true, ts.ScriptKind.TS);
 }
 
 /** The `beforeSession` hook's function body, however it is spelled (`beforeSession: async () => {}`,
  *  `beforeSession: async function () {}`, or the `async beforeSession() {}` method shorthand). */
-function findBeforeSession(sourceFile: ts.SourceFile): {
+function locateBeforeSession(sourceFile: ts.SourceFile): {
   fn: ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration;
   line: number;
 } {
@@ -72,7 +92,10 @@ function findBeforeSession(sourceFile: ts.SourceFile): {
         found.push({ fn: node.initializer, line });
       } else {
         assert.fail(
-          `wdio.conf.ts:${line} — \`beforeSession\` is no longer a function literal this guard can read. ` +
+          `wdio.conf.ts:${line} — \`beforeSession\` is no longer a function literal this guard can read ` +
+            `(it is now \`${ts.SyntaxKind[node.initializer.kind]}\`, e.g. the hook extracted to a named ` +
+            "helper). This guard can then no longer see the port waits at all, so it must be pointed at " +
+            "wherever they moved, in the same PR. " +
             FIX_HINT,
         );
       }
@@ -109,12 +132,39 @@ function collectWaitForPortCalls(
   return calls;
 }
 
-describe("wdio.conf.ts beforeSession — both port waits stay awaited (CPE-1843)", () => {
+/** Parse + locate + collect, run fresh inside EVERY `it()` (see the header note on why none of this may
+ *  live in the `describe` body). Parsing a ~1350-line file a handful of times costs a few milliseconds. */
+function analyzeBeforeSession(): {
+  beforeSession: ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration;
+  beforeSessionLine: number;
+  calls: Array<{ call: ts.CallExpression; line: number; portArg: string }>;
+} {
   const sourceFile = parseWdioConf();
-  const { fn: beforeSession, line: beforeSessionLine } = findBeforeSession(sourceFile);
-  const calls = collectWaitForPortCalls(sourceFile, beforeSession);
+  const { fn, line } = locateBeforeSession(sourceFile);
+  return { beforeSession: fn, beforeSessionLine: line, calls: collectWaitForPortCalls(sourceFile, fn) };
+}
+
+describe("wdio.conf.ts beforeSession — both port waits stay awaited (CPE-1843)", () => {
+  // THE REACH CHECK. Every other case below depends on this one having been possible; asserting it as its
+  // own named test means "the guard could not find its target" fails as a FAILING TEST rather than as a
+  // suite that quietly shrinks. See the header note — this is the case that stops the guard from being
+  // hollow-in-waiting under a node upgrade.
+  it("locates the beforeSession hook in wdio.conf.ts", () => {
+    const { beforeSessionLine, calls } = analyzeBeforeSession();
+    assert.ok(
+      beforeSessionLine > 0,
+      "Located `beforeSession` but could not resolve its source line — the parse did not reach the file.",
+    );
+    assert.ok(
+      calls.length > 0,
+      `Found \`beforeSession\` at wdio.conf.ts:${beforeSessionLine} but NO \`waitForPort\` calls inside ` +
+        "it. The whole two-port startup wait is gone, not just an `await`. " +
+        FIX_HINT,
+    );
+  });
 
   it("declares beforeSession `async`, so an `await` inside it is even possible", () => {
+    const { beforeSession, beforeSessionLine } = analyzeBeforeSession();
     const isAsync = (ts.getModifiers(beforeSession) ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
     assert.ok(
       isAsync,
@@ -124,6 +174,7 @@ describe("wdio.conf.ts beforeSession — both port waits stay awaited (CPE-1843)
   });
 
   it("waits on BOTH tauri-driver's own port and the native WebDriver's port", () => {
+    const { calls } = analyzeBeforeSession();
     assert.equal(
       calls.length,
       REQUIRED_PORT_ARGS.length,
@@ -146,6 +197,7 @@ describe("wdio.conf.ts beforeSession — both port waits stay awaited (CPE-1843)
   // names WHICH wait lost its `await`, not just that one of them did.
   for (const portArg of REQUIRED_PORT_ARGS) {
     it(`awaits the waitForPort call for ${portArg}`, () => {
+      const { calls } = analyzeBeforeSession();
       const match = calls.find((c) => c.portArg === portArg);
       assert.ok(
         match,

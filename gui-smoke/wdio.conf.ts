@@ -108,9 +108,12 @@ const TAURI_DRIVER_BIN = path.resolve(
 //
 // CPE-1843: because these two constants and the `--port`/`--native-port` flags below are a contract with
 // a binary CI installs from crates.io, `gui-smoke.yml` now pins `cargo install tauri-driver --version
-// 2.0.6` at BOTH of its install sites rather than taking whatever is newest. A renamed flag would fail
-// loudly (tauri-driver errors on unknown args); a re-defaulted port would not — it would just make the
-// waits below poll a port nothing ever binds. Re-verify `src/cli.rs` when bumping that pin.
+// 2.0.6` at BOTH of its install sites rather than taking whatever is newest. Note WHICH parts of that
+// contract can rot quietly: `--port`/`--native-port` are passed explicitly below, so their upstream
+// defaults are overridden and only the flag NAMES matter — and a rename fails loudly, since tauri-driver
+// rejects unknown args. The silent one is `--native-host`, which we do NOT pass: the waits below poll
+// "127.0.0.1" purely because that is its default, so a future re-default would send the native driver
+// somewhere nothing ever looks. Re-verify `src/cli.rs` when bumping that pin.
 const TAURI_DRIVER_PORT = 4444;
 const NATIVE_DRIVER_PORT = 4445;
 
