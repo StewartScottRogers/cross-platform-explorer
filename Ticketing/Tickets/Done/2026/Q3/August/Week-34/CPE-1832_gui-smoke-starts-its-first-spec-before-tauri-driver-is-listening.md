@@ -3,11 +3,11 @@ id: CPE-1832
 title: gui-smoke starts its first spec before tauri-driver is listening, so a shard reds on a startup race
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-21
 ---
 
 ## Problem
