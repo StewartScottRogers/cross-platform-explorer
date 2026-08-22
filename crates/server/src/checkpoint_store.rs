@@ -532,6 +532,27 @@ pub struct FileDiff {
 /// — when: `rel_path` isn't in the checkpoint, `rel_path` escapes `root` (path-safety guard, reusing
 /// [`revert_engine::safe_target`]), either side is over [`DIFF_MAX_BYTES`], or either side isn't valid
 /// UTF-8 text (a binary file has no meaningful line diff here — mirrors `read_file_text`'s behaviour).
+/// Read at most `cap` bytes from `path` in **one** open: `Ok(None)` means the file is longer than `cap`,
+/// `Ok(Some(bytes))` that it fitted (CPE-1823 follow-up).
+///
+/// The point is that the limit is structural. A `metadata().len()` check followed by a `read` is two
+/// opens with an unbounded window between them, and a file that grows in that window is read in full —
+/// measured at 3× the cap. Reading `cap + 1` through a `Take` cannot exceed the cap no matter what the
+/// file does, so nothing has to be true about timing for the bound to hold.
+///
+/// Recorded, deliberately not handled: a *directory* in the blob slot has `len() == 0` on some platforms,
+/// so it would pass any size check — it then fails loudly at the read, which is the right outcome and
+/// needs no special case here.
+fn read_capped(path: &Path, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    fs::File::open(path)?.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
 pub fn checkpoint_diff_file(
     ctx: &dyn ServerCtx,
     root: &str,
@@ -545,27 +566,39 @@ pub fn checkpoint_diff_file(
         .get(rel_path)
         .ok_or_else(|| format!("{rel_path}: not present in checkpoint {manifest_id}"))?;
 
-    if state.size > DIFF_MAX_BYTES {
-        return Err(format!(
-            "{rel_path}: checkpoint content too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
-            state.size
-        ));
-    }
-    let blob_path = store_dir.join("blobs").join(&state.hash);
-    let before_bytes = fs::read(&blob_path).map_err(|e| format!("{}: {e}", blob_path.display()))?;
+    // CPE-1823, and this is the higher-impact of the two live sinks: `state.hash` is a manifest field,
+    // and `blobs/`.join(it) then `fs::read` **displayed** the bytes to the user through `FileDiff.before`
+    // — the command is registered and called from the frontend. `../../…/id_rsa` read any file the app
+    // could read. Same shared validator as every other blob join in the crate.
+    let blob_path = snapshot_capture::blob_source(&store_dir.join("blobs"), &state.hash)
+        .map_err(|why| format!("{rel_path}: {why}"))?;
+    // The cap is enforced on the READ, never on `state.size` (CPE-1823 follow-up 5). `size` is the
+    // manifest's *claim* about the content, from the same hand-editable JSON as the hash: an entry
+    // claiming `size: 1` sailed past the old check and the `fs::read` under it was then unbounded.
+    // Paired with the sink above, that made the read both arbitrary in target and unlimited in length.
+    //
+    // **One open, bounded by construction — not stat-then-read.** The first fix measured
+    // `fs::metadata().len()` and then `fs::read`, which is two separate opens with nothing holding the
+    // file: measured, a concurrent appender got `15728645` bytes past a `5242880` cap, because the real
+    // bound was whatever the file reached before the second open finished. `take(DIFF_MAX_BYTES + 1)`
+    // cannot be raced — the window is gone rather than narrowed — and it drops a redundant traversal.
+    // The `+ 1` is what distinguishes "exactly at the cap" from "over it".
+    let before_bytes = read_capped(&blob_path, DIFF_MAX_BYTES)
+        .map_err(|e| format!("{}: {e}", blob_path.display()))?
+        .ok_or_else(|| format!("{rel_path}: checkpoint content too large to diff (over the {DIFF_MAX_BYTES} byte limit)."))?;
     let before = String::from_utf8(before_bytes).map_err(|_| {
         format!("{rel_path}: checkpoint content is not valid UTF-8 text (binary diff isn't supported).")
     })?;
 
     let live_path = safe_target(Path::new(root), rel_path)?;
-    let meta = fs::metadata(&live_path).map_err(|e| format!("{}: {e}", live_path.display()))?;
-    if meta.len() > DIFF_MAX_BYTES {
-        return Err(format!(
-            "{rel_path}: live file too large to diff ({} bytes; limit {DIFF_MAX_BYTES}).",
-            meta.len()
-        ));
-    }
-    let after_bytes = fs::read(&live_path).map_err(|e| format!("{}: {e}", live_path.display()))?;
+    // Same one-open bound as the checkpoint half above. The live file is the one an attacker does NOT
+    // need to plant a manifest to grow — it is a file in the user's own tree that any process may be
+    // appending to right now — so leaving this half as stat-then-read would have kept the measured
+    // 3×-the-cap read available through the very command the other half just closed it in. Fixing one
+    // half of a symmetric pair is this ticket's own recurring mistake.
+    let after_bytes = read_capped(&live_path, DIFF_MAX_BYTES)
+        .map_err(|e| format!("{}: {e}", live_path.display()))?
+        .ok_or_else(|| format!("{rel_path}: live file too large to diff (over the {DIFF_MAX_BYTES} byte limit)."))?;
     let after = String::from_utf8(after_bytes).map_err(|_| {
         format!("{rel_path}: live file is not valid UTF-8 text (binary diff isn't supported).")
     })?;
@@ -925,6 +958,263 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
+    }
+
+    /// Rewrite one entry of a checkpoint's manifest on disk, exactly as someone editing the JSON would
+    /// (CPE-1823). The manifest is an ordinary unsigned file in the app's data directory; nothing signs
+    /// it and nothing checks it was written by us.
+    fn tamper(store: &Path, id: &str, key: &str, hash: Option<&str>, size: Option<u64>) {
+        let p = store.join("manifests").join(format!("{id}.json"));
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        if let Some(h) = hash {
+            v["files"][key]["hash"] = serde_json::Value::String(h.to_string());
+        }
+        if let Some(s) = size {
+            v["files"][key]["size"] = serde_json::json!(s);
+        }
+        fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
+    /// **CPE-1823 round 2 — the higher-impact live sink.** `checkpoint_diff_file` is a registered command
+    /// the frontend calls, and it joined the manifest's `hash` onto `blobs/` and `fs::read` it straight
+    /// into `FileDiff.before`, which is **displayed**. A climbing hash exfiltrated any file the app could
+    /// read to the screen.
+    ///
+    /// The harm assertion is on the returned content, not on the `Result`: the unfixed code returns
+    /// `Ok(FileDiff { .. })` and looks entirely normal — the secret simply appears in the diff pane.
+    #[test]
+    fn cpe_1823_diff_file_never_reads_a_blob_from_outside_the_store() {
+        const SECRET: &str = "THE VICTIM PRIVATE KEY FROM OUTSIDE THE STORE";
+        let app = scratch("cpe1823-diff-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1823-diff-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"original").unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store = store_dir_for(&ctx, &root_s).unwrap();
+
+        // The victim is planted as a SIBLING OF THE REAL STORE, and the climb is derived from that —
+        // never guessed. The first version of this test aimed `../../<a temp sibling>/id_rsa` at a
+        // scratch directory while `blobs/` actually sits at `<app>/data/checkpoints/<64-hex>/blobs`, so
+        // the real climb is five, not two. At the wrong depth the target simply does not exist, the raw
+        // join returns NotFound, and `!shown.contains(SECRET)` could not fail before OR after the fix —
+        // the test certified nothing while appearing to pass. (It did red under sabotage, but only on
+        // the error-message assertion, which any differently-worded error would have satisfied too.)
+        let secret_file = store.parent().unwrap().join("cpe1823-victim-id_rsa");
+        fs::write(&secret_file, SECRET).unwrap();
+
+        // Both escaping shapes, and the absolute one is the belt to the climb's braces — it reaches the
+        // victim regardless of how deep the store turns out to be, which is precisely what went wrong.
+        for hash in ["../../cpe1823-victim-id_rsa".to_string(), secret_file.to_string_lossy().into_owned()] {
+            // **The fixture is asserted LIVE before the guard is asked about it.** Without this the test
+            // could not fail on its harm axis at all: at the wrong depth the raw join is `NotFound`, so
+            // `!shown.contains(SECRET)` is true before and after the fix, and the whole certification is
+            // inert while looking green.
+            assert_eq!(
+                fs::read(store.join("blobs").join(&hash)).unwrap(),
+                SECRET.as_bytes(),
+                "fixture is inert: {hash:?} must actually reach the victim through a raw join, or this \
+                 test certifies nothing"
+            );
+            tamper(&store, &id, "a.txt", Some(&hash), None);
+            fs::write(root.join("a.txt"), b"changed").unwrap();
+
+            let got = checkpoint_diff_file(&ctx, &root_s, &id, "a.txt");
+
+            let shown = got.as_ref().map(|d| d.before.clone()).unwrap_or_default();
+            assert!(
+                !shown.contains(SECRET),
+                "HARM: hash {hash:?} put a file from outside the store on screen: {shown:?}"
+            );
+            let err = got.expect_err("a manifest naming a blob outside the store must be refused");
+            // Naming the entry is not enough to pin this: prefixing the raw io error with `rel_path` —
+            // something this crate does routinely — would satisfy `err.contains("a.txt")` with the sink
+            // wide open. The assertion is on the *rule* that refused it.
+            assert!(
+                err.contains("plain hex blob name"),
+                "the refusal must come from the blob-name rule, not from an incidental I/O error that \
+                 happens to mention the path: {err}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// **CPE-1823 follow-up 5.** The cap was applied to `state.size` — the manifest's *claim* about the
+    /// content — and the `fs::read` beneath it was then unbounded. An entry claiming `size: 1` sailed
+    /// through and read the whole file. Paired with the sink above, that made the read both arbitrary in
+    /// target and unlimited in length; alone it is still an unbounded read into memory from a file the
+    /// user never asked to diff.
+    ///
+    /// **The live file is shrunk to a few bytes after the capture, and that is the whole reason this test
+    /// says anything.** The first cut left the oversize file on disk, so with the guard sabotaged the
+    /// function still returned `Err` — from the *live* half's cap, which has always measured the real
+    /// file — and the assertion on the byte count matched that message just as happily. It passed under
+    /// sabotage: a test proving the sibling check works while claiming to prove this one. With the live
+    /// side small, only the checkpoint half can trip a cap, and the message is asserted to be that half's.
+    #[test]
+    fn cpe_1823_the_diff_cap_is_measured_on_the_blob_not_on_the_manifests_claim() {
+        let app = scratch("cpe1823-size-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1823-size-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("huge.txt"), vec![b'x'; (DIFF_MAX_BYTES + 1) as usize]).unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store = store_dir_for(&ctx, &root_s).unwrap();
+        // The blob on disk is unchanged and over the cap; only the manifest's claim about it shrinks.
+        tamper(&store, &id, "huge.txt", None, Some(1));
+        fs::write(root.join("huge.txt"), b"small now").unwrap(); // so only the checkpoint half can cap
+
+        let got = checkpoint_diff_file(&ctx, &root_s, &id, "huge.txt");
+
+        let served = got.as_ref().map(|d| d.before.len()).unwrap_or(0) as u64;
+        assert!(
+            served <= DIFF_MAX_BYTES,
+            "HARM: {served} bytes were read and returned past the {DIFF_MAX_BYTES} cap, on the strength \
+             of a manifest claiming size: 1"
+        );
+        let err = got.expect_err("a lie about the size must not unlock an unbounded read of the blob");
+        assert!(
+            err.contains("checkpoint content too large"),
+            "the refusal must come from the CHECKPOINT half, not the live one: {err}"
+        );
+        assert!(
+            err.contains(&DIFF_MAX_BYTES.to_string()),
+            "and it must name the limit that was exceeded: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// **CPE-1823 round 4, and this one needs no attacker at all.** A macOS or Linux capture holding
+    /// `a.txt ` — a name those platforms store happily — cherry-reverted on Windows destroyed the user's
+    /// `a.txt`. `revert_one` asks `checkpoint.get("a.txt")`, gets `None` because the checkpoint spells it
+    /// with a trailing space, and plans a lone `Delete`; on Windows the two are the same file, so the
+    /// checkpoint *does* hold it. Measured before the fix:
+    ///
+    /// ```text
+    /// plan   = [("a.txt", "Delete")]
+    /// report = RestoreReport { applied: 1, skipped: [] }; a.txt = Err(NotFound)
+    /// ```
+    ///
+    /// Round 3's stand-down could not catch it: a one-action cherry-revert plan contains **no write**, so
+    /// nothing could be skipped and the condition never armed. Keying it on the checkpoint's keys instead
+    /// of on the plan's outcome is what closes it.
+    ///
+    /// Driven through the registered command rather than through `execute_restore`, because the whole
+    /// defect is that this *path* through the code produces a plan the guards never see.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_cherry_reverting_never_deletes_a_file_the_checkpoint_holds_under_an_aliased_name() {
+        const LIVE: &[u8] = b"the user's only copy";
+        let app = scratch("cpe1823-revone-app");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("cpe1823-revone-root");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), LIVE).unwrap();
+        fs::write(root.join("other.txt"), b"untouched").unwrap();
+
+        // A capture made where `a.txt ` is a legal, distinct filename — reproduced here by renaming the
+        // key in the manifest, which is exactly what a store carried over from macOS or Linux contains.
+        let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store = store_dir_for(&ctx, &root_s).unwrap();
+        let p = store.join("manifests").join(format!("{id}.json"));
+        let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        // `remove`, not `take` — `take` leaves the key behind holding `null`, which fails to deserialize
+        // into `PersistedFileState`, so the command errors before it ever plans anything and the test
+        // panics at this `unwrap` having proved nothing about deletes.
+        let entry = v["files"].as_object_mut().unwrap().remove("a.txt").unwrap();
+        v["files"]["a.txt "] = entry;
+        fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let outcome = checkpoint_revert_one(&ctx, &root_s, &id, "a.txt").unwrap();
+
+        assert_eq!(
+            fs::read(root.join("a.txt")).ok().as_deref(),
+            Some(LIVE),
+            "HARM: cherry-revert deleted the user's only copy of a file the checkpoint holds under an \
+             aliased name — outcome was {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+
+    /// **CPE-1823 round 5, through the registered commands, both of them.** Round 4's stand-down keys on
+    /// SPELLING — `checkpoint.keys().filter(|k| safe_segments(k).is_err())` — and `A.txt` passes
+    /// `safe_segments` just as `a.txt` does, so on a case-alias the filter is empty and nothing arms.
+    /// Measured before this fix:
+    ///
+    /// ```text
+    /// CMD revert[case-alias]     -> applied=2 skipped=0; a.txt = Err(NotFound)
+    /// CMD revert_one[case-alias] -> applied=1 skipped=0; a.txt = Err(NotFound)
+    /// ```
+    ///
+    /// Byte-for-byte the round-3 harm with `A.txt` substituted for `a.txt `, and it needs no name a
+    /// platform disallows: both spellings are legal everywhere, which is why the fix had to move to the
+    /// resolved path. Driven through `checkpoint_revert` **and** `checkpoint_revert_one` because this
+    /// ticket has three times fixed one of a pair and left the other reachable.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_neither_revert_command_destroys_a_file_reached_under_a_case_alias() {
+        const CAPTURED: &[u8] = b"what the checkpoint captured";
+        const LIVE: &[u8] = b"the user's current work, which this revert must not silently destroy";
+        for whole_tree in [true, false] {
+            let app = scratch("cpe1823-casecmd-app");
+            let ctx = HeadlessCtx::new(app.to_path_buf());
+            let root = scratch("cpe1823-casecmd-root");
+            let root_s = root.to_string_lossy().to_string();
+            fs::write(root.join("a.txt"), CAPTURED).unwrap();
+            // Fixture is inert on a case-sensitive volume: there `A.txt` is a different file, the plan is
+            // legitimate, and this leg certifies nothing.
+            assert_eq!(
+                fs::read(root.join("A.txt")).ok().as_deref(),
+                Some(CAPTURED),
+                "fixture is inert: `A.txt` must already address the user's `a.txt` on this volume"
+            );
+
+            // A capture made where `A.txt` and `a.txt` are distinct — reproduced by renaming the key in
+            // the manifest, which is what a store carried from a case-sensitive machine contains, and
+            // what a hand-edited one contains regardless.
+            let created = checkpoint_create(&ctx, &root_s, "cp").unwrap();
+            let id = created.checkpoint.manifest_id.clone();
+            let store = store_dir_for(&ctx, &root_s).unwrap();
+            let p = store.join("manifests").join(format!("{id}.json"));
+            let mut v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+            let entry = v["files"].as_object_mut().unwrap().remove("a.txt").unwrap();
+            v["files"]["A.txt"] = entry;
+            fs::write(&p, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+            // The user's current work, distinct from the captured bytes on purpose: it makes the write
+            // half destructive too, so the `Create` guard and the delete guard are each independently
+            // load-bearing here rather than covering for one another.
+            fs::write(root.join("a.txt"), LIVE).unwrap();
+
+            let outcome = if whole_tree {
+                checkpoint_revert(&ctx, &root_s, &id).unwrap()
+            } else {
+                checkpoint_revert_one(&ctx, &root_s, &id, "a.txt").unwrap()
+            };
+
+            assert_eq!(
+                fs::read(root.join("a.txt")).ok().as_deref(),
+                Some(LIVE),
+                "HARM: {} destroyed the user's file through a case alias — the aliased manifest names \
+                 `A.txt`, so nothing here may be applied to `a.txt` at all. Outcome was {outcome:?}",
+                if whole_tree { "checkpoint_revert" } else { "checkpoint_revert_one" }
+            );
+            assert_eq!(outcome.applied, 0, "nothing may be counted applied: {outcome:?}");
+
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(&app);
+        }
     }
 
     #[test]

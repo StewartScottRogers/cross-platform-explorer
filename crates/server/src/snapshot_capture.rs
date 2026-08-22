@@ -36,7 +36,7 @@
 //! - CoW/reflink/hardlink store optimisation is **out of scope for v1** — blobs are plain-copied in and
 //!   out; a later ticket can swap the copy primitive without touching this module's public API.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -95,11 +95,25 @@ fn relative_slash_path(root: &Path, path: &Path) -> Option<String> {
     }
 }
 
-/// The inverse of [`relative_slash_path`]: rebuild an absolute path under `root` from a `/`-joined
-/// relative path, using the host OS's native separator. `pub(crate)` so sibling command-layer modules
-/// (e.g. [`crate::checkpoint_store`]'s per-file diff) can resolve the same live-file path this module's
-/// own [`capture`]/[`restore`] use, without duplicating the join logic.
-pub(crate) fn root_relative_to_abs(root: &Path, rel: &str) -> PathBuf {
+/// The inverse of [`relative_slash_path`] **for a name this process just scanned off the disk**: rebuild
+/// an absolute path under `root` from a `/`-joined relative path, using the host OS's native separator.
+///
+/// **CPE-1823 — this is deliberately the unvalidated join, and it has exactly one caller.** Until that
+/// ticket it was also what [`restore`] used to turn a *manifest-supplied* path into a write target, which
+/// was the whole bug: `Path::push` with an absolute component **replaces** the accumulated path, and a
+/// `..` component walks up out of the restore root, so a hand-edited manifest chose where the bytes
+/// landed. The untrusted side now goes through [`crate::revert_engine::safe_target`] instead (see
+/// [`restore`]); nothing here may be reused for a caller-supplied path.
+///
+/// It survives for [`capture`]'s blob-copy loop, whose `rel` is not input at all: it was produced moments
+/// earlier by [`relative_slash_path`] `strip_prefix`ing a real [`std::fs::DirEntry`] path under this same
+/// `root`, so every segment is by construction one real, existing directory entry, and the path is used
+/// to **read** a file the scan just hashed. Routing that through `safe_target` would be strictly worse
+/// than useless: its (correct, for untrusted input) blanket refusal of `:` and `\` in a segment would
+/// abort a whole capture on Linux or macOS because the user owns a file legitimately named
+/// `2026-08-21 10:30 notes.txt` — breaking a working operation on two platforms to re-check a name the
+/// filesystem itself just handed us.
+fn scan_source_path(root: &Path, rel: &str) -> PathBuf {
     let mut p = root.to_path_buf();
     for part in rel.split('/') {
         p.push(part);
@@ -182,7 +196,7 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
         let Some(rel) = source_for_hash.get(blob.hash.as_str()) else {
             return Err(format!("internal: no source path recorded for new blob {}", blob.hash));
         };
-        let src = root_relative_to_abs(root_path, rel);
+        let src = scan_source_path(root_path, rel);
         fs::copy(&src, &dest).map_err(|e| format!("{}: {e}", src.display()))?;
     }
 
@@ -223,22 +237,321 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
 /// Recreate every file recorded in manifest `manifest_id` (from the store at `store_dir`) under `dest`,
 /// byte-for-byte, creating parent directories as needed. `dest` need not exist yet. Files the original
 /// capture skipped (oversize/budget) are absent from the manifest and so are not recreated.
+///
+/// # The manifest is INPUT, not a trusted record (CPE-1823)
+///
+/// A manifest is an ordinary JSON file in an ordinary directory — hand-editable, copyable from another
+/// machine, restorable from a shared drive, syncable by a cloud client, and unsigned. Both paths it
+/// carries per entry used to be joined straight onto a root:
+///
+/// - the **write target** (`dest` + the entry's `/`-joined path) via [`scan_source_path`]'s `push` loop,
+///   where an absolute segment *replaces* the whole path and `..` walks up — arbitrary file **write**;
+/// - the **read source** (`store_dir/blobs/` + the entry's `hash`), where the same two shapes in a field
+///   nothing validated made it an arbitrary file **read**.
+///
+/// Three guards now stand between the JSON and the filesystem, all applied **before** this entry creates
+/// any directory:
+///
+/// 1. [`crate::revert_engine::safe_target`] — the crate's existing "resolve a caller-supplied relative
+///    path safely under a root" helper, already guarding [`crate::revert_engine`]'s writes against
+///    manifests from this same store. Reused rather than re-implemented, so a restore and a revert of the
+///    same manifest cannot disagree about which entries are legal.
+/// 2. [`crate::fsutil::confined_to`] on the resolved target — `safe_target` is a *textual* check, blind
+///    to a symlink or junction planted at an interior component, which needs neither `..` nor an absolute
+///    segment and redirects the write just as effectively. `confined_to` canonicalises and fails closed.
+/// 3. [`blob_source`] on the read side — a plain hex content hash, then the same containment check
+///    against `blobs/`, so a link planted at a blob's name cannot feed some other file's bytes into the
+///    restored tree.
+///
+/// # A rejected entry fails the restore — it is never skipped
+///
+/// The refusal is loud, per-entry, and names the offending path. Skipping it and returning `Ok` would
+/// hand the user a restore that reports success while a file they asked for is missing, which is the
+/// worse failure: a restore is *believed*, and a silently absent file is discovered later, if ever.
+///
+/// # Judge everything, then write — the abort is total
+///
+/// Two passes. Pass 1 runs all three guards over every entry and creates nothing; pass 2 does the writes,
+/// and by then no entry can be refused. So a refused manifest leaves the destination **exactly as it was**
+/// — the same "the refusal costs nothing" property [`prune`] gets by validating before its point of no
+/// return — and one message names every offending entry instead of surfacing them one re-run at a time.
+///
+/// Two refusals are necessarily *not* total, and both say so in their own message: the pass-2
+/// re-validation (a component swapped mid-restore) and the pass-2 collision check (two entries that
+/// resolve onto one file, which in a fresh destination is invisible until the first of them exists).
+/// Both are still `Err` — the alternative is a tree that looks complete and is not.
+///
+/// This replaced a refuse-as-you-go loop justified by the claim that "nothing legitimate can produce a
+/// refused entry". That claim was **false twice over**, which is why the structure changed instead of the
+/// wording. First within a platform: `safe_segments` refused `:` and `\` everywhere, so an ordinary Linux
+/// or macOS filename (`2026-08-21 10:30 notes.txt`, or any Finder name containing `/`, which macOS stores
+/// as `:`) aborted a restore mid-tree — fixed at the source by `cfg!(windows)`-gating it. Then across
+/// platforms, where the same argument fails for the rules that gating introduced: `NUL`, `notes. ` and
+/// `a\b` are all names a Linux or macOS [`capture`] stores happily and a Windows restore must refuse, and
+/// a store carried between machines is this ticket's own threat premise, not an exotic case. A partial
+/// tree was therefore always reachable through legitimate use. Now it is not reachable at all.
+///
+/// # Windows-only rules stay on Windows
+///
+/// Two rules apply on Windows and nowhere else, and **both live inside `safe_segments`**, not here:
+/// its refusal of `:` and `\`, and its refusal of a reserved device name or a trailing dot/space. On
+/// Linux and macOS every one of those is an ordinary byte in an ordinary filename that [`capture`] will
+/// happily store, and refusing them there would break a working round trip to defend against a hazard
+/// that exists only on the third platform — the mistake [`crate::fsutil::win32_name_is_unstable`]'s doc
+/// records being made and reverted once already.
+///
+/// **They are in `safe_segments` because this function is not where the risk is.** CPE-1823 twice landed
+/// a guard here, on a function with no production caller, while `revert_engine`'s `apply_write` and
+/// `apply_delete` — reached from the registered `checkpoint_revert` commands — went unguarded and, in
+/// the trailing-space case, *deleted the user's file* while reporting complete success. Every rule that
+/// belongs to "resolve a manifest-supplied relative path under a root" now sits in the one helper all
+/// four call sites share, so the two paths cannot drift again.
+///
+/// The gates are a property of the **host**, not of the manifest: a manifest captured on Linux carrying
+/// `a\b` or `notes. ` restores as a literal name there and is refused here. Right direction, but it means
+/// one manifest is legal on one machine and not another — the round-trip asymmetry is reduced, not gone.
 pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), String> {
     let store_path = Path::new(store_dir);
     let dest_path = Path::new(dest);
     let manifest = load_manifest(store_path, manifest_id)?;
-    fs::create_dir_all(dest_path).map_err(|e| format!("{}: {e}", dest_path.display()))?;
     let blobs_dir_path = blobs_dir(store_path);
+    // The caller's own destination, created before pass 1 because `safe_target`'s containment check
+    // resolves against it. This is the one thing a fully-refused restore leaves behind, and it is not
+    // manifest-controlled: it is the empty directory the caller named in the call.
+    fs::create_dir_all(dest_path).map_err(|e| format!("{}: {e}", dest_path.display()))?;
+
+    // ---- pass 1: the ABORT DECISION only. Judges every entry, touches nothing. ---------------------
+    let mut refusals: Vec<String> = Vec::new();
+    // **CPE-1823 round 5 — two entries that ADDRESS ONE FILE.** Every rule before this one judges an
+    // entry on its own, and this hazard has no single offending entry: `A.txt` and `a.txt` are both
+    // perfectly legal names on every platform, so no per-entry rule may refuse either, and on a
+    // case-folding volume they are one file. Restoring both wrote one file holding whichever content
+    // was copied last, lost the other, and returned `Ok(())` — a restore is *believed*, so a manifest
+    // entry that silently never arrived is exactly the failure this module's own doc exists to forbid.
+    //
+    // Asked of the resolved path rather than of the spelling, per [`crate::fsutil::confined_to`]'s
+    // principle, so it covers trailing spaces and dots, 8.3 short names, Unicode-folding volumes and a
+    // link inside `dest` without naming any of them.
+    let mut lands_on: HashMap<PathBuf, &String> = HashMap::new();
     for (rel, file) in &manifest.files {
-        let target = root_relative_to_abs(dest_path, rel);
+        if let Err(why) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash) {
+            refusals.push(why);
+        }
+        if let Some(at) = crate::revert_engine::landing(dest_path, rel) {
+            if let Some(first) = lands_on.insert(at, rel) {
+                refusals.push(refusal(
+                    rel,
+                    &format!(
+                        "it addresses the same file as the entry {first:?} — two manifest entries, one \
+                         surviving file, and whichever is copied last silently wins"
+                    ),
+                ));
+            }
+        }
+    }
+    if !refusals.is_empty() {
+        return Err(refusal_summary(&refusals));
+    }
+
+    // ---- pass 2: re-judge each entry IMMEDIATELY before its own write ------------------------------
+    //
+    // **Pass 1's verdicts are deliberately not carried here, and that is the whole point (round 4).**
+    // The first version of this split kept the `(target, blob)` pairs pass 1 resolved and copied those,
+    // which reintroduced this ticket's original arbitrary write: `confined_to`'s answer for entry #1 was
+    // reached before every *other* entry was validated and written, so the window stopped being one
+    // `create_dir_all` and became the whole pass plus the whole preceding write run. An attacker need
+    // not race that blindly — the first byte hitting disk is the signal that pass 1 is over and its
+    // verdicts are stale — and swapping an already-blessed interior component for a junction then landed
+    // the write outside the folder **5 runs out of 5**, with `Ok(())` returned.
+    //
+    // Re-resolving costs one extra canonicalise per entry, on a path about to be written anyway, and
+    // restores the property the original per-entry loop had: the check a write relies on is the most
+    // recent thing that happened before it. Blind racers have failed tens of thousands of swaps against
+    // that shape across three rounds without an escape.
+    //
+    // Pass 1 is kept for what it is genuinely good at — the all-or-nothing decision, so a manifest with
+    // a refused entry writes *nothing* rather than a partial tree. Neither pass is sufficient alone.
+    //
+    // **Why not `fsutil::copy_file_into_claimed_slot` (CPE-1765) — asked, and answered no.** It closes
+    // the final component properly, claiming the name with `create_new` rather than writing to a name a
+    // probe pronounced free, and it is exactly right where the name is *picked*. This name is **chosen
+    // by the caller**, not picked, and `create_new` refuses a name that already exists: restoring a
+    // snapshot over a tree that still holds files, and `revert_engine`'s first-class `Overwrite` op,
+    // both depend on writing onto an existing file. Claiming the slot would turn those into refusals.
+    //
+    // **The residual, stated accurately — an earlier draft overstated it.** It is *not* that the final
+    // component is unprotected: `confined_to` canonicalises the final component too, and an independent
+    // audit planted 17,488 symlinks at it and got **zero** writes through. What remains is that the
+    // check and the copy are two syscalls — checked, but not atomically — so a link swapped into the
+    // final component in the gap between them is the one shape left.
+    //
+    // And that is **reducible, not irreducible**: this crate already ships the pattern that closes it —
+    // `batch_media`'s "never follow a link at the final component" open (`O_NOFOLLOW` on Unix,
+    // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, hard-coded per target with no libc dependency, pinned
+    // by a runtime test and already used by `batch_execute`). Adopting it means opening the target and
+    // writing through the handle instead of `fs::copy`, which changes `fs::copy`'s attribute-preserving
+    // behaviour on Windows — so it is CPE-1846, deliberately not folded in here, and this comment
+    // must not read as "nothing more can be done".
+    let mut written: HashSet<PathBuf> = HashSet::new();
+    for (rel, file) in &manifest.files {
+        let (target, blob) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash).map_err(|why| {
+            format!(
+                "{why} (detected immediately before writing it — the destination changed during the \
+                 restore, so entries written before this one may already be on disk)"
+            )
+        })?;
+        // Pass 1's collision check can only see entries that already resolve to something, so in a
+        // *fresh* destination it sees neither `A.txt` nor `a.txt` until one of them exists. This closes
+        // that half by observation instead of prediction: after each copy the file's real identity goes
+        // in `written`, and a later entry that resolves onto one of them is refused **before** its copy
+        // rather than silently overwriting a sibling entry's content.
+        //
+        // Unlike a pass-1 refusal this one is not total — earlier entries are already on disk — but the
+        // alternative is not a clean tree, it is a clean-looking tree with a file missing and `Ok(())`
+        // returned. Deliberately checked here and not carried from pass 1, for round 4's reason: the
+        // only verdict a write may rely on is the one taken immediately before it.
+        if let Some(at) = crate::revert_engine::landing(dest_path, rel) {
+            if written.contains(&at) {
+                return Err(refusal(
+                    rel,
+                    "it resolves onto a file this same restore has already written — two manifest \
+                     entries address one file, so one of them would silently vanish (entries written \
+                     before this one are already on disk)",
+                ));
+            }
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let blob = blobs_dir_path.join(&file.hash);
         fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
+        if let Ok(at) = fs::canonicalize(&target) {
+            written.insert(at);
+        }
     }
     Ok(())
 }
+
+/// The three guards for one manifest entry, yielding the `(target, blob)` pair pass 2 will use. Pure
+/// judgement — it creates nothing, which is what lets [`restore`] run it over the whole manifest first.
+fn resolve_entry(
+    dest_path: &Path,
+    blobs_dir_path: &Path,
+    rel: &str,
+    hash: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    // Both the textual rules and the resolved-containment check now live inside `safe_target`, so this
+    // function and `revert_engine`'s two sinks cannot disagree about what is safe (CPE-1823 round 3).
+    let target = crate::revert_engine::safe_target(dest_path, rel).map_err(|why| refusal(rel, &why))?;
+    let blob = blob_source(blobs_dir_path, hash).map_err(|why| refusal(rel, &why))?;
+    Ok((target, blob))
+}
+
+/// How many refused entries a [`restore`] failure names before summarising the rest. A planted manifest
+/// can carry thousands; a multi-megabyte error string helps nobody, and the first few establish the shape.
+const MAX_NAMED_REFUSALS: usize = 10;
+
+/// Every refusal in one message. The user gets the whole picture from a single run instead of discovering
+/// the next bad entry only after fixing the previous one — which, for a manifest that is planted rather
+/// than merely damaged, is the difference between seeing an attack and seeing a typo.
+fn refusal_summary(refusals: &[String]) -> String {
+    let mut out = format!(
+        "this manifest cannot be restored: {} of its entries were refused, and nothing was written.\n",
+        refusals.len()
+    );
+    for why in refusals.iter().take(MAX_NAMED_REFUSALS) {
+        out.push_str("  - ");
+        out.push_str(why);
+        out.push('\n');
+    }
+    if refusals.len() > MAX_NAMED_REFUSALS {
+        out.push_str(&format!("  …and {} more\n", refusals.len() - MAX_NAMED_REFUSALS));
+    }
+    out
+}
+
+/// The per-entry refusal message (CPE-1823), in one place so every rejected shape reads the same and all
+/// of them name the manifest path that was rejected. The path is what the user has to act on: it is the
+/// only thing tying the refusal back to a line in the JSON, and it is also the evidence that the manifest
+/// was tampered with rather than merely unlucky.
+/// An empty `rel` is named explicitly rather than producing the headless `": refusing …"` the first cut
+/// emitted — a message whose subject is invisible is barely a message.
+pub(crate) fn refusal(rel: &str, why: &str) -> String {
+    let named = if rel.is_empty() { "(a manifest entry with an empty path)" } else { rel };
+    format!("{named}: refusing this manifest entry — {why}")
+}
+
+/// Resolve a manifest entry's `hash` to the blob file it names, or refuse (CPE-1823).
+///
+/// `hash` is a manifest field, so it is input: `blobs_dir.join(hash)` with `hash = "../../../etc/passwd"`
+/// (or, on Windows, an absolute `C:\…`, which `join` lets *replace* the whole path) made [`restore`] copy
+/// any file the app could read into the restored tree, under a name the same manifest chose.
+///
+/// Two checks, in this order:
+/// - the name must be a plain hex content address — which is all [`capture`] ever writes, since every
+///   hash comes from [`crate::checksum::hash_file`]'s lowercase sha256 hex. Hex alone already forbids
+///   `.`, `/`, `\`, `:` and `..`, so no path shape survives it;
+/// - and the join must still land inside `blobs_dir` per [`crate::fsutil::confined_to`], because the hex
+///   check only constrains the *spelling*. A symlink or junction planted at `blobs/<hash>` is a legal hex
+///   name whose bytes come from somewhere else entirely — and [`capture`]'s CPE-1769 blob loop
+///   deliberately leaves such a slot alone (it reads as `Occupied` and is skipped, never written
+///   through), so a planted link can still be sitting there at restore time.
+///
+/// **`pub(crate)` because this is the whole crate's rule for that field, not this module's.** The same
+/// manifest `hash` is joined onto `blobs/` at three other sinks the shipped app actually reaches —
+/// [`crate::revert_engine`]'s `apply_write`, [`crate::checkpoint_store::checkpoint_diff_file`], and
+/// [`prune`] — and the first version of this fix hardened only [`restore`], which has no production
+/// caller at all. Three of those four call **this** function; [`prune`] deliberately calls only
+/// [`validate_blob_name`], because the containment half answers "could this read pull bytes from outside
+/// the store" and a `remove_file` on a planted link removes the link, never its target — see its call
+/// site.
+///
+/// # What containment does NOT catch here, stated because an earlier draft of this doc overclaimed
+///
+/// - A **hard link** planted at `blobs/<hash>`. It needs no privilege on Windows, and `canonicalize`
+///   resolves it to *itself* — a hard link is not a redirection the filesystem can report — so both this
+///   check and [`crate::fsutil::confined_to`] see an ordinary file inside the store and pass it. The
+///   earlier sentence "a link planted at a blob's name cannot substitute another file's bytes" was true
+///   only of symlinks and junctions, which *are* both refused. Rated follow-up rather than blocker
+///   because a hard link does not survive the copy or sync step in this threat model — a planted store
+///   arrives as ordinary files — but the limit is real and is recorded rather than papered over.
+/// - Replacing **`blobs/` itself** with a directory link. `confined_to` canonicalises the root too, so a
+///   relocated store is self-consistently "contained" in its new location. Guarding it means pinning the
+///   store root at open time, which is a different ticket's shape.
+///
+/// The length bound is a sanity cap, not the security property: it keeps a 4 MB "hash" out of a path
+/// buffer without hard-coding sha256's 64 characters into a format that has already been described as
+/// swappable in this module's own header.
+pub(crate) fn blob_source(blobs_dir: &Path, hash: &str) -> Result<PathBuf, String> {
+    validate_blob_name(hash)?;
+    // Distinguished from the containment failure below on purpose: an absent `blobs/` is an incomplete
+    // or half-deleted store, and reporting that as "does not resolve inside the blob store" reads as
+    // tampering and sends the user hunting for an attack that isn't there. `confined_to` fails closed on
+    // an unresolvable root (correctly), so without this the two causes are indistinguishable.
+    if let Err(e) = std::fs::metadata(blobs_dir) {
+        return Err(format!("the blob store {} could not be opened: {e}", blobs_dir.display()));
+    }
+    let blob = blobs_dir.join(hash);
+    if !crate::fsutil::confined_to(&blob, blobs_dir) {
+        return Err(format!(
+            "blob {hash:?} does not resolve inside the blob store {}",
+            blobs_dir.display()
+        ));
+    }
+    Ok(blob)
+}
+
+/// The name half of [`blob_source`]'s rule, split out because [`prune`] needs exactly this and not the
+/// containment half (see its call site). A blob file is named by a content address and nothing else.
+pub(crate) fn validate_blob_name(hash: &str) -> Result<(), String> {
+    if hash.is_empty() || hash.len() > MAX_BLOB_NAME_LEN || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("its content hash {hash:?} is not a plain hex blob name"));
+    }
+    Ok(())
+}
+
+/// Longest blob name [`validate_blob_name`] will entertain. Comfortably past sha256's 64 hex characters
+/// (and sha512's 128) without pinning the digest this module happens to use today.
+const MAX_BLOB_NAME_LEN: usize = 128;
 
 /// Drop manifest `manifest_id`'s hold on its blobs via [`release`] and remove the now-unreferenced blob
 /// files from disk. Returns the bytes freed. The manifest file itself is deleted; a manifest no longer on
@@ -256,6 +569,19 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     let store_path = Path::new(store_dir);
     let manifest = load_manifest(store_path, manifest_id)?; // read what we need before anything mutates
     let hashes: BTreeSet<String> = manifest.files.values().map(|f| f.hash.clone()).collect();
+
+    // CPE-1823: the loop below `remove_file`s `blobs/<hash>` for every hash the store no longer refs, so
+    // the same unvalidated manifest field that gave `restore` an arbitrary read gives this an arbitrary
+    // **delete**. Validated here, before the point of no return, so a planted manifest costs nothing at
+    // all rather than costing the manifest file and then failing: at this line nothing has been touched,
+    // so the refusal is total. Reuses `validate_blob_name`, where the "what may a hash name" rule lives.
+    // The name check alone, deliberately — `blob_source`'s second, `confined_to` half answers "could this
+    // read pull bytes from outside the store", and a `remove_file` on a planted link removes the link,
+    // never its target, so there is nothing here for it to protect. Requiring it would also make `prune`
+    // refuse on a store whose `blobs/` directory is already gone, which is a legitimate thing to prune.
+    for hash in &hashes {
+        validate_blob_name(hash).map_err(|why| refusal(manifest_id, &why))?;
+    }
 
     let mpath = manifest_path(store_path, manifest_id);
     fs::remove_file(&mpath).map_err(|e| format!("{}: {e}", mpath.display()))?; // point of no return
@@ -1179,6 +1505,597 @@ mod tests {
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    // ---- CPE-1823: a planted manifest is input, not a trusted record ----------------------------
+    //
+    // Every test below stages a manifest a hand-editor could write and asserts **the harm did not
+    // happen** — the escape target is untouched, and nothing appeared under the restore folder — BEFORE
+    // it looks at the `Result`. Order matters: the unfixed code returns `Ok(())` for most of these, so a
+    // test that checked the `Result` first would report "expected Err, got Ok" and say nothing about
+    // where the bytes went; and `!dest.join(x).exists()` at the *intended* location passes happily while
+    // the escape succeeds, which is why the assertion is on the escape target.
+
+    /// A 64-character lowercase hex string — the shape [`crate::checksum::hash_file`] produces, so the
+    /// manifests planted below differ from a real one only in the field under test.
+    const GOOD_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// The bytes a successful attack would deposit. Distinctive so a stray copy is identifiable.
+    const PAYLOAD: &[u8] = b"PWNED BY A PLANTED MANIFEST";
+
+    /// Write a manifest straight to `store/manifests/<id>.json`, exactly as someone editing the JSON in a
+    /// text editor would. Deliberately **not** via [`save_manifest`]: the attack is on the read side, and
+    /// a manifest is only ever a file on disk to `load_manifest`.
+    fn plant_manifest(store: &Path, id: &str, entries: &[(&str, &str)]) {
+        let dir = manifests_dir(store);
+        fs::create_dir_all(&dir).unwrap();
+        let files: BTreeMap<String, PersistedFileState> = entries
+            .iter()
+            .map(|(path, hash)| {
+                ((*path).to_string(), PersistedFileState { hash: (*hash).to_string(), size: PAYLOAD.len() as u64 })
+            })
+            .collect();
+        let manifest = PersistedManifest { id: id.to_string(), created_ms: 0, files, skipped: Vec::new() };
+        fs::write(manifest_path(store, id), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+    }
+
+    /// Put real bytes at `store/blobs/<hash>`. Without this the copy the attack depends on would fail for
+    /// want of a source, and a test asserting "nothing was written" would pass on the wrong reason.
+    fn plant_blob(store: &Path, hash: &str) {
+        let dir = blobs_dir(store);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(hash), PAYLOAD).unwrap();
+    }
+
+    /// Every regular file currently under `dir`, using this module's own walker. Used to assert a refused
+    /// restore wrote **nothing at all**, not merely nothing at the path the manifest asked for — the
+    /// absolute-component shape resolves differently per platform, and this catches the write wherever it
+    /// would have landed inside the tree.
+    fn files_under(dir: &Path) -> Vec<String> {
+        scan_dir(&dir.to_string_lossy()).unwrap().into_keys().collect()
+    }
+
+    /// The temp-directory name of a scratch dir, for building a `../<sibling>` escape that actually
+    /// reaches it.
+    fn dir_name(p: &Path) -> String {
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    /// `..` in a manifest path walks straight up out of the restore folder: `Path::push("..")` appends a
+    /// `ParentDir` component that the filesystem then resolves. The staged escape lands in a **sibling
+    /// scratch directory**, so this asserts on a real file appearing somewhere it must never appear.
+    #[test]
+    fn cpe_1823_a_dotdot_manifest_path_writes_nothing_outside_the_restore_folder() {
+        let store = scratch("cpe1823-dotdot-store");
+        let dest = scratch("cpe1823-dotdot-dest");
+        let outside = scratch("cpe1823-dotdot-outside");
+        assert_eq!(dest.parent(), outside.parent(), "the escape below assumes the two are siblings");
+
+        // The entry carries a **directory** component on purpose: `create_dir_all(parent)` is the other
+        // thing a manifest entry makes the process do, and it is attacker-chosen directory creation
+        // anywhere on the volume. `files_under` enumerates files only, so it structurally cannot see a
+        // stray directory — without the `planted-dir` assertion below, moving the three guards to *after*
+        // `create_dir_all` passes every other test in this file while creating that directory outside the
+        // restore folder.
+        let rel = format!("../{}/planted-dir/pwned.txt", dir_name(&outside));
+        let escape = outside.join("planted-dir").join("pwned.txt");
+        let escape_dir = outside.join("planted-dir");
+        plant_blob(&store, GOOD_HASH);
+        plant_manifest(&store, "planted", &[(rel.as_str(), GOOD_HASH)]);
+
+        let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+        assert!(
+            !escape.exists(),
+            "HARM: a `..` manifest path wrote {} — arbitrary file write from a hand-edited manifest",
+            escape.display()
+        );
+        assert!(
+            !escape_dir.exists(),
+            "HARM: a `..` manifest path created the directory {} — every guard must run BEFORE the \
+             entry's create_dir_all, not after it",
+            escape_dir.display()
+        );
+        assert!(files_under(&dest).is_empty(), "a refused entry must write nothing at all");
+        let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
+        assert!(err.contains(&rel), "the refusal must name the offending manifest path, got: {err}");
+    }
+
+    /// An **absolute** component: `Path::push` with one *replaces* everything accumulated so far, so a
+    /// single segment relocates the write anywhere the process can reach.
+    ///
+    /// The two platforms fail differently and both legs are real. On Windows the whole native path
+    /// (`C:\…\outside`) survives `split('/')` as one segment, `push` replaces, and the bytes land in
+    /// `outside` — the escape assertion is the live one. On Unix the same string splits on its leading
+    /// `/` into an **empty** first segment, so `push` never replaces and the unfixed code instead
+    /// materialises the absolute path *inside* the restore folder (`dest/tmp/…/pwned.txt`) — which the
+    /// `files_under` assertion is what catches. Asserting only the escape target would have made this
+    /// test pass on Linux and macOS while proving nothing there.
+    #[test]
+    fn cpe_1823_an_absolute_manifest_path_writes_nothing_outside_the_restore_folder() {
+        let store = scratch("cpe1823-abs-store");
+        let dest = scratch("cpe1823-abs-dest");
+        let outside = scratch("cpe1823-abs-outside");
+
+        let rel = format!("{}/pwned.txt", outside.display());
+        let escape = outside.join("pwned.txt");
+        plant_blob(&store, GOOD_HASH);
+        plant_manifest(&store, "planted", &[(rel.as_str(), GOOD_HASH)]);
+
+        let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+        assert!(
+            !escape.exists(),
+            "HARM: an absolute manifest component wrote {} — the push replaced the restore root",
+            escape.display()
+        );
+        assert!(
+            files_under(&dest).is_empty(),
+            "a refused entry must write nothing at all, and wrote: {:?}",
+            files_under(&dest)
+        );
+        let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
+        assert!(err.contains(&rel), "the refusal must name the offending manifest path, got: {err}");
+    }
+
+    /// A **drive-relative** component (`Z:name`) — a Windows shape with no Unix analogue: it carries a
+    /// prefix but no root, which `PathBuf::push` documents as replacing `self` entirely. It then resolves
+    /// against that drive's *current directory*.
+    ///
+    /// The drive is taken from the process's own working directory rather than hard-coded to `C:`,
+    /// deliberately: the per-drive current directory for the drive the process is already on **is** the
+    /// process CWD, so the landing site is known exactly. `C:` would resolve against a per-drive CWD this
+    /// test does not control (and may not be able to write to), and a write that merely failed for want
+    /// of permission would look like a passing guard.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_drive_relative_manifest_path_never_writes_to_the_working_directory() {
+        let store = scratch("cpe1823-drive-store");
+        let dest = scratch("cpe1823-drive-dest");
+
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        assert_eq!(cwd_str.as_bytes()[1], b':', "expected a drive-lettered CWD, got {cwd_str}");
+        let drive = &cwd_str[..2]; // ASCII drive letter + colon
+        let name = "cpe1823-drive-relative-pwned.txt";
+        let rel = format!("{drive}{name}");
+        let landing = cwd.join(name);
+        assert!(!landing.exists(), "sanity: {} must not already exist", landing.display());
+
+        plant_blob(&store, GOOD_HASH);
+        plant_manifest(&store, "planted", &[(rel.as_str(), GOOD_HASH)]);
+
+        let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+        let landed = landing.exists();
+        let _ = fs::remove_file(&landing); // never leave the repo dirty, even on the failing path
+        assert!(
+            !landed,
+            "HARM: a drive-relative manifest path wrote {} — into the app's working directory",
+            landing.display()
+        );
+        assert!(files_under(&dest).is_empty(), "a refused entry must write nothing at all");
+        let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
+        assert!(err.contains(&rel), "the refusal must name the offending manifest path, got: {err}");
+    }
+
+    /// A link planted at an **interior** component. Every segment here (`link/pwned.txt`) is a plain,
+    /// textually innocent name — no `..`, no absolute component — so the string check alone passes it and
+    /// only resolving the path on disk reveals that `dest/link` leads out of the restore folder. This is
+    /// the leg that covers the `confined_to` half of the fix; the textual guard cannot see it.
+    ///
+    /// A **directory** link, so the leg runs on Windows too (a junction needs no privilege), and the
+    /// shape is right: an interior component is a directory by definition.
+    #[test]
+    fn cpe_1823_a_link_at_an_interior_component_never_redirects_the_restore_out_of_the_folder() {
+        let store = scratch("cpe1823-link-store");
+        let dest = scratch("cpe1823-link-dest");
+        let outside = scratch("cpe1823-link-outside");
+
+        let link = dest.join("link");
+        if !crate::fsutil::make_dir_link(&outside, &link) {
+            crate::skip_notice!(
+                "[CPE-1823] SKIPPED the interior-link restore leg: this machine could not create a \
+                 directory link at {} (no symlink privilege and no junction). NOTHING on this run \
+                 covered a restore whose path runs THROUGH a link out of the restore folder.",
+                link.display()
+            );
+            return;
+        }
+
+        let escape = outside.join("pwned.txt");
+        plant_blob(&store, GOOD_HASH);
+        plant_manifest(&store, "planted", &[("link/pwned.txt", GOOD_HASH)]);
+
+        let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+        assert!(
+            !escape.exists(),
+            "HARM: the restore followed the planted link and wrote {} — outside the restore folder",
+            escape.display()
+        );
+        let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
+        assert!(err.contains("link/pwned.txt"), "the refusal must name the offending path, got: {err}");
+    }
+
+    /// The **read** side: `hash` is joined onto `blobs/` with nothing checking it, so a manifest could
+    /// name any file the app can read and have its bytes copied into the restored tree under a name the
+    /// same manifest chose. Both escaping shapes are staged — a `..` climb and an absolute path, which
+    /// `Path::join` lets replace the whole base on Unix as well as Windows.
+    ///
+    /// The harm assertion is on the restored file's **existence and content**: here the intended location
+    /// *is* where the stolen bytes land, so `!dest/stolen.txt` is the escape assertion, not a decoy.
+    #[test]
+    fn cpe_1823_an_escaping_hash_never_reads_a_file_outside_the_blob_store() {
+        const SECRET: &[u8] = b"this is the victim's private file";
+        let secrets = scratch("cpe1823-hash-secrets");
+        let secret = secrets.join("secret.txt");
+        fs::write(&secret, SECRET).unwrap();
+
+        // `blobs/` is `<store>/blobs`, so `../../<sibling>/secret.txt` climbs store → temp and back down.
+        let climb = format!("../../{}/secret.txt", dir_name(&secrets));
+        let absolute = secret.to_string_lossy().into_owned();
+
+        for hash in [climb.as_str(), absolute.as_str()] {
+            let store = scratch("cpe1823-hash-store");
+            let dest = scratch("cpe1823-hash-dest");
+            fs::create_dir_all(blobs_dir(&store)).unwrap();
+            plant_manifest(&store, "planted", &[("stolen.txt", hash)]);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            let stolen = dest.join("stolen.txt");
+            let leaked = fs::read(&stolen).unwrap_or_default();
+            assert!(
+                !stolen.exists() && leaked != SECRET,
+                "HARM: hash {hash:?} pulled {} bytes from outside the blob store into the restored tree",
+                leaked.len()
+            );
+            assert!(files_under(&dest).is_empty(), "a refused entry must write nothing at all");
+            let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
+            assert!(err.contains("stolen.txt"), "the refusal must name the offending path, got: {err}");
+        }
+    }
+
+    /// The same unvalidated `hash` reaches a `remove_file` in [`prune`] — an arbitrary **delete**. The
+    /// refusal has to come before the manifest file itself is unlinked (that step is documented as the
+    /// point of no return), so this asserts the victim survives *and* that the store is intact enough to
+    /// prune legitimately afterwards.
+    #[test]
+    fn cpe_1823_an_escaping_hash_never_deletes_a_file_outside_the_blob_store() {
+        let store = scratch("cpe1823-prune-store");
+        let victims = scratch("cpe1823-prune-victims");
+        let victim = victims.join("important.txt");
+        fs::write(&victim, b"the user's only copy").unwrap();
+
+        fs::create_dir_all(blobs_dir(&store)).unwrap();
+        let hash = format!("../../{}/important.txt", dir_name(&victims));
+        plant_manifest(&store, "planted", &[("a.txt", hash.as_str())]);
+
+        let r = prune(&store.to_string_lossy(), "planted");
+
+        assert!(victim.exists(), "HARM: prune deleted {} — outside the blob store", victim.display());
+        assert!(
+            manifest_path(&store, "planted").exists(),
+            "the refusal must land before the manifest is unlinked, so the refusal costs nothing"
+        );
+        let err = r.expect_err("a manifest naming a path outside the store must be refused loudly");
+        assert!(err.contains("planted"), "the refusal must name the manifest, got: {err}");
+    }
+
+    /// **The pairing of guard 1 and guard 2 is not held together by platform luck.** Breaking guard 1
+    /// alone reds nothing on Windows (guard 2 catches every shape the other tests stage there), so
+    /// without this a Windows-only developer could delete `safe_target` and see local green. These two
+    /// entries are refusable by guard 1 and by nothing else on any platform: `confined_to(dest, dest)`
+    /// answers *true* for the empty path — the root is contained in itself, by design — and `a//b`
+    /// resolves to the perfectly-contained `dest/a/b`, so the filesystem has no objection to either.
+    /// What is wrong with them is structural, and only the textual guard can say so.
+    #[test]
+    fn cpe_1823_only_the_textual_guard_can_refuse_an_empty_or_doubled_separator_path() {
+        for rel in ["", "a//b"] {
+            let store = scratch("cpe1823-textual-store");
+            let dest = scratch("cpe1823-textual-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(&store, "planted", &[(rel, GOOD_HASH)]);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            assert!(files_under(&dest).is_empty(), "a refused entry must write nothing at all");
+            let err = r.unwrap_err();
+            // **The discriminating assertion, and the empty leg had none until now.** With guard 1
+            // broken, `rel = ""` gives `target == dest`, `fs::copy` fails because dest is a directory,
+            // `files_under` is empty and the error starts `C:\…` — so both assertions above passed and
+            // all the power sat in the `a//b` leg. The refusal must come from the *textual* guard,
+            // named, and for an empty path it must still identify its subject (the first cut emitted a
+            // headless `": refusing this manifest entry — empty path"`). This also pins `refusal()`'s
+            // empty-name handling, which nothing else covered.
+            assert!(
+                err.contains("empty path"),
+                "the refusal must be the textual guard's, not an incidental I/O failure: {err:?}"
+            );
+            if rel.is_empty() {
+                assert!(
+                    err.contains("(a manifest entry with an empty path)"),
+                    "an empty path must still be named as the subject of its own refusal: {err:?}"
+                );
+            }
+        }
+    }
+
+    /// **Blocker 3 — an entry that is neither refused nor written, returning `Ok(())`.** Both shapes were
+    /// observed doing exactly that. They are Windows-only *hazards* (and the guard is `cfg!(windows)`),
+    /// but the aliasing one is the more serious: three distinct entries collapse onto one file, so two
+    /// vanish and the survivor holds content the user never asked for at that name — a restore that
+    /// reports success and hands back a tree that is wrong in a way nothing announces.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_a_win32_aliasing_or_device_name_entry_is_refused_not_silently_swallowed() {
+        // A reserved device name: `fs::copy` "succeeds" into the null device and nothing lands on disk.
+        {
+            let store = scratch("cpe1823-nul-store");
+            let dest = scratch("cpe1823-nul-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(&store, "planted", &[("sub/NUL", GOOD_HASH)]);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            let err = r.expect_err(
+                "a device-name entry writes nothing to disk, so returning Ok reports a restore that did \
+                 not happen",
+            );
+            assert!(err.contains("sub/NUL"), "the refusal must name the entry, got: {err}");
+            assert!(!dest.join("sub").exists(), "and it must refuse before creating the parent");
+        }
+        // Trailing-space aliasing: three entries, one surviving file, content from whichever won.
+        {
+            let store = scratch("cpe1823-alias-store");
+            let dest = scratch("cpe1823-alias-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(
+                &store,
+                "planted",
+                &[("a.txt", GOOD_HASH), ("a.txt ", GOOD_HASH), ("a.txt.", GOOD_HASH)],
+            );
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            // Harm before `Result`, which is this file's convention and which the first cut of this leg
+            // skipped: the point of the aliasing shape is not that an entry is lost, it is that THREE
+            // entries collapse onto ONE file holding whichever content was copied last. Asserting only
+            // the `Err` never observes that, so it would pass against a fix that refused for some
+            // unrelated reason while leaving the collapse in place.
+            let landed = files_under(&dest);
+            assert!(
+                landed.is_empty(),
+                "HARM: three distinct manifest entries collapsed onto {landed:?} — two vanished and the \
+                 survivor holds content the user never asked for at that name"
+            );
+            let err = r.expect_err("entries that Win32 collapses onto one name must be refused");
+            assert!(
+                err.contains("a.txt ") || err.contains("a.txt."),
+                "the refusal must name the aliasing entry, got: {err}"
+            );
+        }
+    }
+
+
+    /// **CPE-1823 round 5 — two entries, one file, and it returned `Ok`.** `A.txt` and `a.txt` are legal
+    /// names on every platform, so no per-entry rule may refuse either; on a case-folding volume they are
+    /// one file. Restoring a manifest holding both wrote one file with whichever content was copied last,
+    /// lost the other entry entirely, and reported success. A restore is *believed*, so a manifest entry
+    /// that silently never arrived is the exact failure this module's doc forbids.
+    ///
+    /// Both legs are staged because they are caught by different halves of the fix: a destination that
+    /// **already holds** the file is visible to pass 1 (total abort, nothing written at all), while a
+    /// **fresh** destination is invisible until the first entry exists and is caught in pass 2, before
+    /// the second copy rather than after it.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1823_two_manifest_entries_that_resolve_to_one_file_are_refused() {
+        const OTHER_HASH: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+        // Leg 1 — fresh destination. Nothing resolves until the first entry lands.
+        {
+            let store = scratch("cpe1823-collapse-store");
+            let dest = scratch("cpe1823-collapse-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_blob(&store, OTHER_HASH);
+            plant_manifest(&store, "planted", &[("A.txt", GOOD_HASH), ("a.txt", OTHER_HASH)]);
+
+            // Fixture is inert on a case-SENSITIVE volume: there the two entries really are two files
+            // and there is nothing to collapse, so this leg would certify nothing.
+            let probe = scratch("cpe1823-collapse-probe");
+            fs::write(probe.join("A.txt"), b"probe").unwrap();
+            assert_eq!(
+                fs::read(probe.join("a.txt")).ok().as_deref(),
+                Some(&b"probe"[..]),
+                "fixture is inert: this volume must fold case, or the two entries are two files and \
+                 this test certifies nothing"
+            );
+            let _ = fs::remove_dir_all(&probe);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            // Harm before `Result`, this file's convention: the point is not that an entry errors, it is
+            // that TWO entries became ONE file and the caller was told everything arrived.
+            let landed = files_under(&dest);
+            assert!(
+                !(r.is_ok() && landed.len() < 2),
+                "HARM: a manifest with two entries restored as {landed:?} and returned {r:?} — one \
+                 captured file silently never arrived"
+            );
+            let err = r.expect_err("two entries addressing one file cannot be reported as a full restore");
+            assert!(
+                err.contains("A.txt") || err.contains("a.txt"),
+                "the refusal must name the colliding entry, got: {err}"
+            );
+        }
+
+        // Leg 2 — a destination that already holds the file, which pass 1 can see: the abort is total.
+        {
+            const LIVE: &[u8] = b"already in the destination";
+            let store = scratch("cpe1823-collapse2-store");
+            let dest = scratch("cpe1823-collapse2-dest");
+            plant_blob(&store, GOOD_HASH);
+            plant_blob(&store, OTHER_HASH);
+            plant_manifest(&store, "planted", &[("A.txt", GOOD_HASH), ("a.txt", OTHER_HASH)]);
+            fs::write(dest.join("a.txt"), LIVE).unwrap();
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            assert_eq!(
+                fs::read(dest.join("a.txt")).ok().as_deref(),
+                Some(LIVE),
+                "HARM: a manifest refused for a collision still overwrote the destination — the abort \
+                 must be total when pass 1 can see the collision. Result was {r:?}"
+            );
+            let err = r.expect_err("a collision pass 1 can see must abort before anything is written");
+            assert!(err.contains("nothing was written"), "and it must say so, got: {err}");
+        }
+    }
+
+    /// **The abort is total: a refused entry anywhere means nothing is written anywhere.** The good entry
+    /// sorts *first* in the manifest's `BTreeMap`, so the refuse-as-you-go loop this replaced wrote it to
+    /// disk and only then hit the bad one — leaving a half-restored tree the user has no way to tell from
+    /// a complete one. Ordering is the whole test: with the names reversed it would pass against either
+    /// implementation.
+    ///
+    /// Also pins that one run names *every* offending entry rather than surfacing them one re-run at a
+    /// time, which for a planted manifest is the difference between seeing an attack and seeing a typo.
+    #[test]
+    fn cpe_1823_one_refused_entry_means_nothing_at_all_is_written() {
+        let store = scratch("cpe1823-total-store");
+        let dest = scratch("cpe1823-total-dest");
+        plant_blob(&store, GOOD_HASH);
+        plant_manifest(
+            &store,
+            "planted",
+            &[
+                ("aaa-good.txt", GOOD_HASH),   // sorts first — written by a refuse-as-you-go loop
+                ("bbb-bad.txt", "../nope"),    // sorts second — the refusal
+                ("ccc-also-bad.txt", "zzzz!"), // and a second refusal, to prove one run names both
+            ],
+        );
+
+        let err = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy())
+            .expect_err("a manifest with refused entries must not restore");
+
+        assert!(
+            files_under(&dest).is_empty(),
+            "HARM: entries sorting before the refused one were already written — the abort must be \
+             total, not partial: {:?}",
+            files_under(&dest)
+        );
+        assert!(err.contains("bbb-bad.txt"), "the first refusal must be named: {err}");
+        assert!(
+            err.contains("ccc-also-bad.txt"),
+            "and so must the second — one run, every offending entry: {err}"
+        );
+    }
+
+    /// **CPE-1823 round 4 — the window the pre-pass opened, and the reason pass 2 re-judges.** When
+    /// `restore` validated everything and then wrote everything, `confined_to`'s verdict for a late entry
+    /// was reached before every earlier entry had been written. The attacker does not race blindly: the
+    /// first file appearing under the destination *is* the signal that pass 1 has finished and its
+    /// verdicts are stale.
+    ///
+    /// Staged the cheap way — the swap only has to **create** a junction at a name pass 1 already
+    /// blessed. `zzz` does not exist during pass 1, so `confined_to` walks up to the destination and
+    /// passes it; creating the junction afterwards means pass 2's `create_dir_all` finds a directory
+    /// already there and the copy follows it straight out of the folder. Nothing has to be deleted or
+    /// won by timing beyond "after the first write, before the last".
+    ///
+    /// The `aaa/` entries exist to make the write run long enough to interleave with, and `zzz` sorts
+    /// last in the manifest's `BTreeMap` so it is written after them.
+    #[test]
+    fn cpe_1823_a_component_swapped_after_validation_is_caught_before_its_own_write() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let store = scratch("cpe1823-toctou-store");
+        let dest = scratch("cpe1823-toctou-dest");
+        let outside = scratch("cpe1823-toctou-outside");
+        plant_blob(&store, GOOD_HASH);
+
+        let mut entries: Vec<(String, &str)> =
+            (0..400).map(|i| (format!("aaa/f{i:04}.txt"), GOOD_HASH)).collect();
+        entries.push(("zzz/target.txt".to_string(), GOOD_HASH));
+        let pairs: Vec<(&str, &str)> = entries.iter().map(|(p, h)| (p.as_str(), *h)).collect();
+        plant_manifest(&store, "planted", &pairs);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let attacker = {
+            let (dest_p, outside_p, stop) = (dest.to_path_buf(), outside.to_path_buf(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                // Wait for proof that pass 1 is over: a byte on disk. Then plant the junction at the
+                // already-blessed name.
+                while !stop.load(Ordering::Relaxed) {
+                    if dest_p.join("aaa").join("f0000.txt").exists() {
+                        return crate::fsutil::make_dir_link(&outside_p, &dest_p.join("zzz"));
+                    }
+                    std::thread::yield_now();
+                }
+                false
+            })
+        };
+
+        let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+        stop.store(true, Ordering::Relaxed);
+        let swap_landed = attacker.join().unwrap_or(false);
+
+        if !swap_landed {
+            crate::skip_notice!(
+                "[CPE-1823] SKIPPED the pre-pass TOCTOU leg: the swap never landed (no link privilege, \
+                 or the restore finished first). NOTHING on this run covered a component swapped \
+                 between validation and its own write."
+            );
+            return;
+        }
+        // The harm is a file OUTSIDE the destination. Asserting on `r` alone would miss it entirely:
+        // the vulnerable version returned `Ok(())`.
+        assert!(
+            !outside.join("target.txt").exists(),
+            "HARM: a component swapped after pass 1 blessed it took the write outside the restore \
+             folder — pass 2 must re-judge each entry immediately before its own copy (restore returned \
+             {r:?})"
+        );
+    }
+
+    /// The counterweight, and it is not decoration: the *other* helper CPE-1823 considered —
+    /// [`crate::transfer::is_safe_name`] — rejects any leaf beginning with `..` and any leaf containing
+    /// `:`, which would have made a file the capture happily stored **unrestorable**. `..evil` is an
+    /// ordinary, legal filename on all three platforms. A future tightening that reaches for the stricter
+    /// predicate reds here instead of silently breaking a round trip.
+    #[test]
+    fn cpe_1823_a_legal_dotdot_prefixed_filename_still_round_trips() {
+        let src = scratch("cpe1823-ok-src");
+        let store = scratch("cpe1823-ok-store");
+        let dest = scratch("cpe1823-ok-dest");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub/..evil"), b"perfectly ordinary bytes").unwrap();
+        // The reported regression was in **this** function — `restore` aborts the whole manifest where
+        // `revert_engine` skips one file — so the colon name is exercised here and not only through
+        // `execute_restore`. The shared predicate covers both today; if `restore` ever stops going
+        // through `safe_segments`, only this assertion notices. `\` too: also a legal Unix byte, also
+        // refused by the ungated rule, and on macOS a Finder name containing `/` is stored as `:`.
+        #[cfg(unix)]
+        for legal_here in ["2026-08-21 10:30 notes.txt", r"Q1\Q2 report.txt", "NUL", "notes. "] {
+            fs::write(src.join(legal_here), b"ordinary on this platform").unwrap();
+        }
+
+        let outcome =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        restore(&store.to_string_lossy(), &outcome.manifest_id, &dest.to_string_lossy())
+            .expect("a legal filename that merely starts with `..` must still restore");
+        assert_eq!(fs::read(dest.join("sub").join("..evil")).unwrap(), b"perfectly ordinary bytes");
+        #[cfg(unix)]
+        for legal_here in ["2026-08-21 10:30 notes.txt", r"Q1\Q2 report.txt", "NUL", "notes. "] {
+            assert_eq!(
+                fs::read(dest.join(legal_here)).unwrap(),
+                b"ordinary on this platform",
+                "{legal_here:?} is an ordinary filename here — a Windows-only rule must not refuse it"
+            );
+        }
     }
 
     #[test]
