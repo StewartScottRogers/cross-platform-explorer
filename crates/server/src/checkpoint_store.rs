@@ -1677,4 +1677,62 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
     }
+
+    /// CPE-1861 end-to-end through the **registered commands** — `checkpoint_create`,
+    /// `checkpoint_prune_apply`, `checkpoint_revert`, the three `snapshot_run_due` and the UI actually
+    /// drive. The unit fixtures assert the store's state; this one asserts the thing the user has:
+    /// a file on disk with the right bytes in it, after a retention pass they never asked for.
+    ///
+    /// CPE-1847's reverted fix measured here as `prune_apply -> kept: [id], pruned: [id-backup]`,
+    /// `blobs = []`, and then `checkpoint_revert -> applied: 0, skipped: [a.txt: blobs/…: cannot find
+    /// the file]` with `a.txt` still reading `"damaged"` — content destroyed, complete success reported,
+    /// unattended.
+    #[test]
+    fn cpe_1861_a_duplicated_manifest_file_cannot_cost_a_revert_its_content() {
+        let app = scratch("app-data-dup");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("root-dup");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"original").unwrap();
+
+        let created = checkpoint_create(&ctx, &root_s, "before").unwrap();
+        let id = created.checkpoint.manifest_id.clone();
+        let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+        let mdir = store_dir.join("manifests");
+
+        // The trigger: a second copy of the manifest file. Explorer copy/paste, a cloud-sync conflict
+        // copy, a backup script — no user action inside this app at all.
+        fs::copy(mdir.join(format!("{id}.json")), mdir.join(format!("{id} - Copy.json"))).unwrap();
+
+        // FIXTURE LIVENESS — the copy is on disk, parses as a manifest, and names the same blob as the
+        // original (which is what made pruning it destructive).
+        assert!(mdir.join(format!("{id} - Copy.json")).exists(), "LIVE: the copy is not on disk");
+        let copy_doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(mdir.join(format!("{id} - Copy.json"))).unwrap())
+                .unwrap();
+        let hash = copy_doc["files"]["a.txt"]["hash"].as_str().unwrap().to_string();
+        assert!(store_dir.join("blobs").join(&hash).exists(), "LIVE: the shared blob is missing");
+
+        let policy = RetentionPolicy { hourly: 2, daily: 0, weekly: 0, monthly: 0 };
+        let retained = checkpoint_prune_apply(&ctx, &root_s, &policy, None).unwrap();
+        assert!(!retained.kept.is_empty());
+
+        // Now the ordinary thing the checkpoint exists for: the tree is damaged and reverted.
+        fs::write(root.join("a.txt"), b"damaged").unwrap();
+        let kept = retained.kept[0].clone();
+        let outcome = checkpoint_revert(&ctx, &root_s, &kept).unwrap();
+
+        // Content first, Result second — the order CPE-1847 established, because "complete success
+        // reported" was the failure mode.
+        assert_eq!(
+            fs::read(root.join("a.txt")).unwrap(),
+            b"original",
+            "HARM: the checkpoint retention says it kept could not put the file back"
+        );
+        assert_eq!(outcome.applied, 1);
+        assert!(outcome.skipped.is_empty(), "HARM: {:?}", outcome.skipped);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
 }

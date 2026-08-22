@@ -79,17 +79,17 @@ and it would protect against any future path that prunes something sharing blobs
 
 ## Acceptance criteria
 
-- [ ] An inner id disagreeing with its filename neither steers retention nor wedges the pass.
-- [ ] **The duplicated-manifest fixture must show `restore(<kept id>) = Ok(())` with its tree intact after
+- [x] An inner id disagreeing with its filename neither steers retention nor wedges the pass.
+- [x] **The duplicated-manifest fixture must show `restore(<kept id>) = Ok(())` with its tree intact after
       a retention pass.** This is the gate; nothing merges without it.
-- [ ] `a..b.json` (and a filename with `:` or `\` on Unix) must not turn the pass into `Err`.
-- [ ] Decide skip-and-leak versus prune-the-liar versus fixing `prune`'s refcount release, and record why.
+- [x] `a..b.json` (and a filename with `:` or `\` on Unix) must not turn the pass into `Err`.
+- [x] Decide skip-and-leak versus prune-the-liar versus fixing `prune`'s refcount release, and record why.
       If refs are the fix, state the invariant plainly: one manifest, one refcount, and a release must not
       drop a blob another manifest still names.
-- [ ] Assert each test's fixture is live — that the tamper landed on disk **and** reached the planner —
+- [x] Assert each test's fixture is live — that the tamper landed on disk **and** reached the planner —
       before asserting harm. CPE-1823 caught six inert tests; CPE-1847's three-sabotage liveness check is
       the pattern to copy.
-- [ ] Red-proof every test with the minimal realistic change, observe red, revert, record the line.
+- [x] Red-proof every test with the minimal realistic change, observe red, revert, record the line.
 
 ## Notes
 
@@ -99,3 +99,215 @@ the reason the split was taken.
 
 Related: CPE-1847 (the zero-entry stand-down that shipped), CPE-1844 (`index.json` steering prune — the
 same store, the same "a hand-editable file steers a destructive decision" shape).
+
+## Work Log
+
+### 2026-08-22 — fixed, branch `cpe-1861-manifest-id-vs-filename`
+
+**Everything below was reproduced first, on unmodified `origin/main`, through `snapshot_prune::apply`
+and the registered commands — before a line was changed.** All four figures came back as the ticket
+states them; the two regressions were re-measured by *temporarily re-applying* CPE-1847's reverted
+`file_stem` line and then reverting it (`git diff --numstat` clean afterwards), so the "after" column is
+measured on this branch rather than copied from the other ticket's record.
+
+```text
+BEFORE (origin/main)                     harm
+  inner id -> a sibling's id             Ok(kept: [m3, m2, m3], pruned: [])   nothing thinned at all
+  inner id -> "no-such-manifest"         Err(".../no-such-manifest.json: cannot find the file")
+  CMD checkpoint_prune_apply, same       Ok(kept: ["no-such-manifest"])  -- reports keeping a
+                                         checkpoint that does not exist
+BEFORE (origin/main + the reverted file_stem line)     regression
+  cp <id>.json <id>-backup.json          preview keep=[id] prune=[id-backup]
+                                         apply pruned=[id-backup] bytes_freed=1  blobs=[]
+                                         restore(id)=Err(".../blobs/ca97…: cannot find the file")  tree=[]
+  CMD, same fixture                      prune_apply kept=[id] pruned=[id-backup]; then
+                                         checkpoint_revert -> Ok(applied: 0, skipped: [a.txt: blobs/06
+                                         82…: cannot find the file]) and a.txt still reads "damaged"
+  plant a..b.json                         apply -> Err("a..b: not a valid manifest id")   every pass
+```
+
+The command leg is the one worth keeping: a **successful-looking** revert that leaves the damaged file
+damaged, after a retention pass the user never asked for.
+
+### The design choice, settled: neither (a) nor (b) alone — both, because they answer different questions
+
+The ticket framed it as skip-and-leak **versus** fixing `prune`. Measured, they are not alternatives:
+each closes shapes the other cannot, and the pair is what makes the result hold.
+
+**Half 1 — identity, in `list_manifests`: a manifest must agree with the name it is filed under.**
+The filename is *already* the operative identity everywhere else in the module (`load_manifest`,
+`restore`, `prune`, `manifest_snapshot` all resolve by it; `save_manifest` writes by it). The inner `id`
+is a redundant copy, and `list_manifests` was the one place reading the copy instead. The two coherent
+repairs are "trust the filename" (round 1) and "require the two to agree" (this). Round 1 failed because
+a filename is chosen by *whoever put the file there* — the OS copy dialog, a sync client, a backup
+script — so trusting it **invents a checkpoint out of a stray file**, and retention then prunes the
+invention. Requiring agreement keeps the filename authoritative without ever letting a name mint an
+identity: a copy, a liar and a crafted name are simply not checkpoints, and the rest of the store is
+thinned normally — which the duplicate-id collapse used to prevent outright.
+
+Two conditions ride along, and both earn their place with their own red-proof:
+
+- `validate_manifest_id(stem)` — **a hole the ticket's candidate did not cover.** `m.id != stem` alone
+  passes a *self-consistent* crafted file (`a..b.json` whose inner id is also `"a..b"`), which then
+  wedges the pass inside `prune`. That is regression 2 with one extra step. Red-proofed:
+  `HARM: planting a..b.json killed the whole retention pass: a..b: not a valid manifest id`.
+- `file_count_disagreement` — **CPE-1847's own recorded, unfixed wedge, closed here.** That ticket added
+  the self-consistency refusal and wrote next to it that one tampered manifest therefore stops the
+  retention pass permanently. It is the identical failure to a missing file, so it gets the identical
+  treatment: the *same predicate*, factored into one function, used as a **refusal** by `load_manifest`
+  and as a **skip** by `list_manifests`, so the two can never drift.
+
+That yields the invariant the module now carries, pinned by its own test: **every id `list_manifests`
+hands out is one `load_manifest` accepts.** Its only caller feeds those ids straight to `prune` and
+propagates the error with `?`, so an id that cannot be loaded does not fail one manifest — it kills that
+store's retention for good.
+
+**The cost, stated as a decision rather than discovered later: a file that fails these checks is never
+reclaimed.** It leaks. That is this module's chosen failure direction everywhere else (`prune`'s
+documented "leak over corruption", `capture`'s skip-on-error), it is bounded — a duplicate shares its
+original's blobs and costs one small JSON file — and it is pinned by assertion so nobody "fixes" it back
+without meeting the reasoning. CPE-1847's prune test, which asserted the liar **is** pruned, is not
+reinstated; it went with its fix in that ticket's revert, so nothing is lost, only not restored.
+
+**Half 2 — blob safety, in `prune`: one manifest, one refcount, and a release must not drop a blob
+another manifest still names.**
+
+The ticket asks whether the refcount bookkeeping can even answer that question. **It cannot, and that is
+measured in the fixture rather than argued.** `refs` is a counter bumped by `apply_capture` at capture
+time, not a count of the manifest files on disk, so every way the two can diverge is a way for `prune` to
+delete live content:
+
+```text
+cp <id>.json <id>-backup.json   ->   index.json says   refs: 1
+                                     manifests/ holds  2 files naming that blob
+```
+
+A copy adds a namer without ever going through a capture. So the index is asked only the *cheap*
+question — which of this manifest's hashes could even hit zero (`refs <= 1`, or absent from the index at
+all, since the blob-delete loop keys off `!store.contains`) — and the authoritative question is answered
+by **recomputing from the manifests actually on disk**, the shape CPE-1823 kept landing on. Nothing is
+scanned unless a blob is genuinely about to be freed.
+
+The repair is to **skip the decrement**, not to decrement and restore: the survivor's hold is what the
+count should have been, so leaving it is the correct value, and it is self-correcting — prune the last
+namer and nothing protects it, so the blob is freed then. Pinned in both directions: the honest
+two-captures-share-a-blob case never even reaches the scan (`refs` is 2), and an over-tightened version
+that protects everything reds three tests.
+
+The survivor scan is **deliberately more permissive than `list_manifests`**, and the asymmetry is the
+point. `list_manifests` asks "may this file *steer* a destructive decision?" and demands a
+self-consistent record. `manifests_naming` asks "would deleting these bytes destroy something that still
+points at them?", where any parseable manifest file counts — including the duplicate, the liar and the
+crafted name the other rule refuses to list. Applying the strict rule here would re-open exactly the hole
+it closes.
+
+**Why both halves.** Half 2 alone makes regression 1 impossible but leaves both original harms (nothing
+thinned; the pass dead forever). Half 1 alone meets the gate but leaves `prune` able to destroy shared
+content down any future path. Measured, not asserted: with half 2 in place, re-applying round 1's
+`file_stem` line leaves **the two duplicate-manifest gate tests green** and reds the other five — the
+data-loss regression really is gone at its cause, and what still needs half 1 is the steering and the
+wedge.
+
+```text
+AFTER
+  inner id -> a sibling's id      Ok; kept has no duplicate and every kept id restores; m2/m3 restore
+                                  byte-for-byte; the liar is left on disk, unlisted, unpruned
+  inner id -> "no-such-manifest"  Ok(pruned: [m2]) -- and the NEXT pass is Ok too
+  a..b.json (+ a:b, a\ b on unix) Ok(pruned: [m1]); the crafted name is never a checkpoint
+  file_count contradiction        Ok -- CPE-1847's recorded permanent stall, closed
+  cp <id>.json <id>-backup.json   apply Ok; blobs intact; restore(kept) = Ok(()) tree=["a.txt"]
+  CMD, same fixture               prune_apply Ok; checkpoint_revert -> Ok(applied: 1, skipped: [])
+                                  and a.txt reads "original" again
+```
+
+### The enumeration — everything that reads or writes a manifest id or a blob refcount
+
+Walked rather than trusted; `list_manifests` having exactly one production caller is itself an
+enumeration result, and it is what makes the skip safe (nothing else shows these ids to a user).
+
+| # | Sink | Which identity it uses | Disposition |
+|---|---|---|---|
+| 1 | `save_manifest` | writes `manifests/<manifest.id>.json` — field and filename agree **by construction** at write time | The reason "require agreement" costs nothing legitimate |
+| 2 | `load_manifest(id)` | filename; ignores the inner field entirely | Unchanged. Now also the *shared* home of the `file_count` predicate |
+| 3 | `restore` / `prune` / `manifest_snapshot` | filename, via `load_manifest` | Unchanged; `prune` gains the blob-witness rule |
+| 4 | `list_manifests` | **read the inner field** — the bug | **Fixed.** Requires agreement + a resolvable name + a self-consistent count |
+| 5 | `snapshot_prune::preview` / `apply` | ids from #4, fed straight to `prune` with `?` | The only production caller. Fixed by #4; nothing else needed |
+| 6 | `checkpoint_store::checkpoints.json` (`Checkpoint.manifest_id`) | its own append-only index, written from `CaptureOutcome.manifest_id`, read by `checkpoint_list` and the preview's ts lookup | **Not a sink for this bug** — never consults a manifest's inner field. Carries a separate pre-existing wart: retention prunes manifests without touching these rows, so the UI can list a checkpoint whose manifest is gone (it errors on use). Recorded, not fixed — it is a reporting gap, not a destructive one, and belongs with CPE-1845 |
+| 7 | `snapshot_schedule::snapshot_run_due` | `checkpoint_prune_apply` per due root | The unattended trigger. Covered through the command-level test |
+| 8 | `fresh_manifest_id` / `pick_manifest_id` | filename existence only | Unchanged |
+| 9 | `snapshot::apply_capture` (**writer**, +1 per capture) | — | The origin of the drift: a manifest that arrives by copy never runs this |
+| 10 | `snapshot::release` (**writer**, −1, GC at 0) | — | Still the mechanism; `prune` now decides *which* hashes reach it |
+| 11 | `BlobStore::contains` in `plan_capture` (dedup) | — | Unaffected — a protected blob stays in the index, so dedup keeps working |
+| 12 | `BlobStore::total_bytes` → `store_total_bytes` → `preview.total_bytes` + the byte-cap loop | — | Unaffected; the byte-cap loop goes through the same `prune`, so it inherits the rule |
+| 13 | `prune`'s blob-file delete loop (`!store.contains`) | — | **Also guarded** — a hash absent from the index is treated as at-risk, which is exactly the case the refcount could never have vetoed |
+| 14 | `load_store` / `save_store` (`index.json`) | — | Untouched. CPE-1844 owns tampering with that file itself |
+
+### Evidence — red-proofs, one line each, observed red then reverted
+
+Every fixture asserts it is **live** before it asserts harm: the tamper is read back off disk, and (for
+the id shapes) the planner's own view is compared before and after, so an inert fixture reds on the
+liveness assertion instead of passing quietly. Where the guard *is* the only visible change to that view
+— the `file_count` shape — the liveness assertion is the independent one (the file really is unloadable
+now) and the view comparison is deliberately moved **after** the harm assertion, so a removed guard reds
+on the stall rather than on a proxy. That ordering bug was caught by running the red-proofs, not by
+reading the tests.
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| `m.id != stem` | `if m.id != stem` → `if false && m.id != stem` | `steer: kept names 1787415049204 twice: ["…204", "…197", "…204"]` — the ticket's `kept=[m3,m2,m3]` — **and** `HARM: one manifest whose inner id names nothing killed the whole retention pass: …\manifests\no-such-manifest.json: The system cannot find the file specified. (os error 2)`. Both original harms, each red independently |
+| `validate_manifest_id(stem)` | `\|\| validate_manifest_id(stem).is_err()` → `\|\| (false && …)` | `HARM: planting a..b.json killed the whole retention pass: a..b: not a valid manifest id` — regression 2's exact string, from the self-consistent crafted file. Plus the invariant test: `only self-describing manifests may steer a retention decision` |
+| `file_count_disagreement` | `\|\| file_count_disagreement(&m).is_some()` → `\|\| (false && …)` | `HARM: a manifest contradicting its own count killed the whole retention pass: …: this manifest says it holds 2 files but its file list has 1 …` — CPE-1847's recorded stall |
+| `prune`'s blob witness | `manifests_naming(store_path, &at_risk)` → `manifests_naming(store_path, &BTreeSet::new())` | `HARM: pruning one of two manifest files naming a blob deleted the blob`. Only that one test reds — correctly, because half 1 stops retention ever *reaching* the copy; the guard is proved by driving `prune` directly |
+| the whole round-1 "obvious fix" (realistic re-introduction) | re-added `out.push(ManifestSummary { id: stem.to_string(), … })` for every skipped file | **5 of 8 red**: the crafted-filename and file_count stalls, the invariant test, and the two id fixtures red on `LIVE: the tamper never reached the planner` (the tamper genuinely goes inert under filename-derivation — the liveness check catches it rather than passing quietly). **The two duplicate-manifest gate tests stay green**, which is the measured proof that half 2 removes regression 1 at its cause |
+| over-tightening into a permanent leak (pin) | `manifests_naming` → `return wanted.clone()` unconditionally | **3 red**, including the pre-existing `prune_gcs_blobs_no_longer_referenced_and_keeps_shared_ones` (`only-in-first.txt's blob, held only by the pruned manifest, is freed`), `apply_keeps_gfs_survivors…` (`bytes_freed > 0`), and this branch's own `the last namer's prune still frees the blob` |
+
+### Cost, measured
+
+Release build, this machine. The scheduled shape — `snapshot_run_due` pruning the one capture that just
+aged out — is what actually runs:
+
+```text
+                       without the witness scan   with it
+50 manifests × 20 files, prune 1        6.2 ms     6.8 ms
+200 manifests × 50 files, prune 1       9.6 ms    18.3 ms
+200 manifests × 50 files, prune 197   1.080 s    1.814 s     (worst case: a bulk thin is quadratic —
+                                                              `prune` rescans survivors per call)
+```
+
+Recorded next to the function: if a store ever grows enough for the bulk case to bite, the fix is to
+hoist the scan out of the per-manifest call, not to weaken it.
+
+### Gates
+
+`crates/server`: `cargo clippy --all-targets -- -D warnings` → **exit 0**. `cargo test` (every target) →
+**2327 lib** passed (4 ignored) + `ticket_mcp` 0 + `archive_panic_safety` 21 +
+`binary_data_preview_panic_safety` 22 + `checkpoint_roundtrip` 2 + `finder_tags_os_interop` 1 +
+`native_meta_os_interop` 1 + `parser_panic_safety` 45 + `sample_fixtures` 16 + `thumb_svg_panic_safety`
+32 — **0 failed**. The lib delta is **+8**, accounted for rather than asserted: `cargo test --lib --
+--list` counts **2323** on the stashed tree and **2331** with the branch applied, and the branch adds
+exactly 8 tests (5 in `snapshot_prune`, 2 in `snapshot_capture`, 1 in `checkpoint_store`).
+
+`src-tauri`, both feature modes: clippy default → **0**, `--features sidecar-platform` → **0**;
+`cargo test` → **214**, `--features sidecar-platform` → **269** — unchanged from CPE-1847, as expected:
+nothing in `src-tauri` was touched.
+
+No `specta::Type` struct or command signature changed (`PersistedManifest` is private serde-only;
+`ManifestSummary` is not a specta type; `RetentionPreview`/`RetentionApplyResult` are untouched), so
+`bindings.gen.ts` is unaffected.
+
+In-app docs: `src/docs/16-checkpoints.md` gains a "Copying files inside the snapshot store" subsection
+under Scheduled snapshots — what happens to a duplicate or hand-renamed file in the store, that one odd
+file no longer stalls the cleanup, that pruning can never leave another snapshot unable to restore, and
+the practical advice (copy the whole store folder, not files inside it). No new `Section`, so
+`sectionDocs.ts` is unchanged.
+
+### Not verified on this machine
+
+- The `#[cfg(unix)]` legs — a manifest filename containing `:` or `\` — cannot be created on Windows
+  (NTFS refuses both), so those two shapes are exercised only by `Server crates` on **ubuntu and
+  macOS**. That is the merge gate, as it was for CPE-1823 and CPE-1847. The `a..b` leg runs everywhere,
+  including here.
+- Frontend tests were not run locally (no `node_modules` in the worktree). The change is body text in one
+  markdown file with no frontmatter or link changes, and `docs.test.ts` only reads frontmatter, ordering
+  and content length — CI's frontend job covers it.
+- The `checkpoints.json` / pruned-manifest reporting gap in enumeration row 6 is recorded, not fixed.

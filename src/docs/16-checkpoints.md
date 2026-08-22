@@ -108,6 +108,24 @@ This is **opt-in and off by default**: with no folders added, the scheduler does
 captures, no background work. A folder you add is captured by a background timer while the app is open;
 the first capture happens shortly after you add it (or after launch), then on its interval.
 
+### Copying files inside the snapshot store
+
+Automatic pruning deletes old snapshots, so it takes care over which files it is allowed to decide about.
+A snapshot's record has to agree with the name it is filed under; anything in the store that doesn't
+describe itself that way — a duplicate left by a copy/paste or a cloud-sync conflict, a file renamed by
+hand, a record edited after it was written — is **ignored by pruning rather than acted on**. It stays on
+disk, taking a little space, until you remove it yourself.
+
+Two consequences worth knowing:
+
+- One odd file can no longer stop the cleanup. Pruning keeps thinning everything else around it, instead
+  of stalling on the file it can't make sense of.
+- Nothing that another snapshot still needs is ever deleted. Pruning checks the snapshots that remain
+  before it frees any stored content, so removing one snapshot can never leave another unable to restore.
+
+If you want to keep a copy of a snapshot store, copy the **whole store folder** somewhere outside it
+rather than duplicating individual files inside it.
+
 ## What this is (and isn't)
 
 This is the palette-driven, headless-friendly way to create and use checkpoints, usable on any folder at
