@@ -3,11 +3,11 @@ id: CPE-1834
 title: release.ps1 bumps three version files through a bare Set-Content, the exact call that corrupts files here
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-21
 ---
 
 ## Problem
