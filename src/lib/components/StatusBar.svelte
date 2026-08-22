@@ -309,13 +309,34 @@
      statusbar's fixed 26px box. Same fix as `.notice`, now also SHRINKS-FIRST priority (see the ordering
      comment above `.dim`) — free-space is the least essential fact on the bar, so it's last in the
      shrinks-first sub-order (git-branch and the notes above give up room before `.disk` does). */
+  /* CPE-1859: `.disk` ANCHORS ITSELF to the right edge. It used to carry only `margin-left: 12px` and
+     sat right purely because `.git` precedes it carrying the row's one `margin-left: auto` — so with no
+     repo in the current folder (`{#if git && git.is_repo}` removes the chip outright) the free-space
+     text rendered next to the ITEM COUNT. That is not a rare race: it is the steady state of every
+     non-repo folder. Measured in real Chrome via scripts/dev-harness/statusbar-notice at w=900 —
+     `.disk` landed at left=84.9 / right=216.0, i.e. 670.0px short of the bar's right padding edge and
+     26.0px from `.item-count` (the bar's 14px `gap` + this 12px margin).
+
+     `margin-left: auto` alone — the obvious fix, and the one the ticket proposed — is WRONG, and this
+     was measured rather than reasoned: flexbox distributes positive free space EQUALLY among all
+     main-axis auto margins, so with `.git` also carrying one the chip stopped anchoring and parked
+     mid-row, moving from left=637.3 to left=361.1 (276.2px) with both readouts present.
+
+     Hence the pair. `.disk` owns the anchor by default; when `.git` actually precedes it, `.git`'s auto
+     margin is the anchor and `.disk` reverts to the plain 12px separator it has always had — so the
+     both-present layout is byte-identical to before (measured: `.git` left=637.3, `.disk` right=886.0
+     flush with the content edge, in both the pre- and post-fix renders). The sibling rule is 0-2-0 and
+     the base rule 0-1-0, so order in this stylesheet is not what decides it. */
   .disk {
-    margin-left: 12px;
+    margin-left: auto;
     flex: 0 var(--priority-shrink) auto;
     min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .git ~ .disk {
+    margin-left: 12px;
   }
 
   /* Classic bottom-right sizing grip: three diagonal strokes in the corner, clipped to the

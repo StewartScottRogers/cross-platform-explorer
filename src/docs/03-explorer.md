@@ -28,6 +28,10 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
   The grip is also keyboard-actionable: focus it (Tab) and press **Arrow Up / Arrow Down** to move the
   section a slot at a time, no drag required. A **Reset section order** control at the bottom of the
   sidebar puts every section back in its original position.
+- **Drive free-space bars keep up** — each drive's bar and its "N free" figure refresh about once a
+  minute, and again the moment you switch back to the window, so a big copy, an extract or an emptied
+  trash is reflected without relaunching. They are read per **drive**, not per folder, so simply opening
+  a subfolder does not re-read them.
 - **Drives update live** — plug in a USB stick or external disk and it appears in the **Drives**
   section within a few seconds, with its free-space bar and eject button; unplug (or eject) one and it
   drops out. No relaunch or manual refresh needed.
@@ -176,7 +180,9 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   drive holding the current folder, and (when that folder is a git repository) a branch chip with its
   Pull/Push/Sync… buttons. Both describe the folder the explorer is *in*, so both disappear in any view
   that isn't a plain folder — Home, an archive opened in place, an open smart folder, and an open saved
-  search — rather than sitting there still reporting the last real folder you were in.
+  search — rather than sitting there still reporting the last real folder you were in. In those views
+  the sidebar's per-drive bars are your free-space readout, and they stay current (see **Drive
+  free-space bars** above).
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing — and
   the folder listing itself does too: if a row can't be read (a permissions/timing issue while the

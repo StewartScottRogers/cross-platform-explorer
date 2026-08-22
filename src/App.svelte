@@ -1600,7 +1600,16 @@
   // archives; a stale response (navigated away before it resolved) is discarded.
   let diskFree: number | null = null;
   let diskTotal: number | null = null;
-  /** Per-drive free/total for the sidebar usage bars (CPE-406); filled once on mount. */
+  /** Per-drive free/total for the sidebar usage bars (CPE-406). Filled on mount, on any change to the
+   *  drive SET (`applyDriveList`), and — since CPE-1859 — on a 60s tick and on window focus.
+   *
+   *  The refresh is new, and the reason is a load-bearing change of role rather than polish. Until
+   *  CPE-1854 these bars were a secondary readout: the status bar carried a live free-space figure for
+   *  the current folder's drive, refetched on every navigation. CPE-1854 removed that figure inside
+   *  Home/archives/smart folders/structured searches, and its UAT justified doing so partly on the
+   *  grounds that free space is "already on screen permanently" here. That makes the sidebar the
+   *  PRIMARY free-space readout in those views — and a primary readout probed once at launch is a
+   *  false statement after any large copy, extract, or empty-trash. */
   let driveUsage: Record<string, { free: number; total: number }> = {};
 
   /** Probe each drive's capacity once, non-blocking — a slow/failed probe never delays the UI. */
@@ -1615,6 +1624,32 @@
         }
       }),
     );
+  }
+
+  /** CPE-1859: re-probe the CURRENT drive set's free space. Wired to a 60s tick and to window focus in
+   *  onMount, mirroring the auto-mirror scheduler (CPE-497) and the drive watcher's focus poke
+   *  (CPE-1280) — the focus half is the one that matters, since the worst staleness is precisely after
+   *  the user has been away in another app for hours.
+   *
+   *  Deliberately NOT on navigation. Navigation is this app's hottest path and the fact being refreshed
+   *  is per-DRIVE, not per-folder, so a per-navigation refresh would issue one `disk_space` per drive
+   *  for a value that cannot have changed just because the user opened a subfolder. On a coarse timer
+   *  the cost is one `GetDiskFreeSpaceEx`-class call per drive per minute.
+   *
+   *  `inFlight` exists because that cost is not uniform: `disk_space` against a disconnected mapped
+   *  network drive can block for the OS's own timeout, which is longer than the tick. Without the guard
+   *  a dead share would accumulate overlapping probes indefinitely. It is a NEW exposure only in
+   *  frequency — mount and every drive-set change already probe the same paths the same way. */
+  let driveUsageTimer: ReturnType<typeof setInterval> | undefined;
+  let driveUsageInFlight = false;
+  async function refreshDriveUsage() {
+    if (driveUsageInFlight || drives.length === 0) return;
+    driveUsageInFlight = true;
+    try {
+      await loadDriveUsage(drives);
+    } finally {
+      driveUsageInFlight = false;
+    }
   }
 
   /** Which drives are REMOVABLE, so only those rows show an eject button (CPE-1278). Non-blocking; a
@@ -6391,6 +6426,12 @@
     // (fires only on a real drive-set change); poke it on focus for instant feedback after alt-tabbing.
     startDriveWatch(applyDriveList);
     window.addEventListener("focus", pokeDriveWatch);
+
+    // Sidebar free-space refresh (CPE-1859) — see `refreshDriveUsage` for why a coarse tick + focus
+    // rather than a per-navigation refetch. Distinct from `pokeDriveWatch` above, which re-enumerates
+    // WHICH drives exist; this re-reads how full the ones already listed are.
+    driveUsageTimer = setInterval(refreshDriveUsage, 60_000);
+    window.addEventListener("focus", refreshDriveUsage);
   });
 
   onDestroy(() => {
@@ -6416,6 +6457,11 @@
     stopDriveScheduler();
     stopDriveWatch(); // CPE-1280: stop live drive polling
     window.removeEventListener("focus", pokeDriveWatch); // CPE-1280
+    // CPE-1859: the sidebar free-space refresh's own two handles. Both torn down here for the same
+    // reason CPE-1643 gave for the pair above it — a timer or listener that outlives the component
+    // keeps probing drives for a UI that is gone.
+    if (driveUsageTimer) clearInterval(driveUsageTimer);
+    window.removeEventListener("focus", refreshDriveUsage);
     // CPE-1643: `showNotice`'s timer was only ever cleared by the NEXT notice replacing it, never on
     // destroy — a pending one otherwise outlives the component.
     if (noticeTimer) clearTimeout(noticeTimer);
