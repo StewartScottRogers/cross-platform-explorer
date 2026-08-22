@@ -39,8 +39,16 @@ name: ffmpeg/pdfium pin freshness check
 # 403, 429, 5xx -- lumped together as "000" by curl on a connect-level failure) is "inconclusive":
 # it does NOT mean the pin rotted, so it must never file a stale-pin issue against a healthy pin,
 # but it also must not be swallowed as a quiet pass -- the job fails loudly instead (see "HEAD-check
-# pinned assets" below). `curl --retry` only retries connection-level failures, never an HTTP status
-# already received, so a real 404 is never retried away and a real 200 is never manufactured.
+# pinned assets" below). `curl --retry` retries only what curl calls a TRANSIENT error, which its
+# own retry.md defines as "a timeout, an FTP 4xx response code or an HTTP 408, 429, 500, 502, 503,
+# 504, 522 or 524 response code" -- so 404 and 200 are both outside that set: a real 404 is never
+# retried away and a real 200 is never manufactured, which is the property this three-way verdict
+# depends on. (An earlier version of this line said --retry "only retries connection-level failures,
+# never an HTTP status already received". That was false as stated -- 429 and the 5xx family ARE
+# retried, which is a feature here, since a transient rate limit gets a few chances before being
+# reported as inconclusive. The conclusion it was drawn for happened to survive; the reason did not,
+# and CPE-1824 is the standing lesson about leaving a wrong reason in place because its conclusion
+# looks right.)
 # bblanchon/pdfium-binaries was confirmed NOT to prune (418 releases live back to chromium/3218,
 # years old) before adding its checks -- a safety net, not expected to legitimately fire.
 #
@@ -243,13 +251,52 @@ jobs:
           head_check() {
             local label="$1" url="$2"
             local code
-            # --retry (connection-level failures only -- refused/reset/timeout -- NEVER an HTTP
-            # status already received, so a real 404 is never retried into a false pass, and a
-            # transient 000/403/5xx is given a few chances to resolve itself before we count it).
-            # --max-time bounds each attempt so a single hung attempt can't chain into the step's
-            # 5-minute timeout on its own.
-            code=$(curl -sSL --max-time 30 --retry 3 --retry-delay 2 --retry-connrefused \
-              -o /dev/null -w '%{http_code}' --head "$url")
+            # --retry retries curl's TRANSIENT set only: a timeout, or HTTP 408/429/500/502/503/
+            # 504/522/524 (plus refused, via --retry-connrefused). 404 and 200 are outside it, so a
+            # real 404 is never retried into a false pass and a real 200 is never manufactured;
+            # a transient 000/429/5xx does get a few chances before we count it as inconclusive.
+            # (A 403 is NOT in curl's set and is therefore NOT retried -- it goes straight to the
+            # inconclusive branch below on the first response. The previous wording here claimed
+            # --retry covered "connection-level failures only, NEVER an HTTP status already
+            # received", which contradicted its own next clause and is contradicted by curl's
+            # retry.md; corrected under CPE-1849.)
+            # --max-time bounds each ATTEMPT -- and that is all it bounds, because --retry resets
+            # its counter on every retry. --retry-max-time (CPE-1849) is what bounds the SERIES.
+            # Measured against a server that accepts, reads the request, then sends nothing: this
+            # exact flag set WITHOUT --retry-max-time took 126.7s per call (4 x 30s + 3 x 2s, four
+            # separate "Operation timed out" messages), so FIVE calls is ~634s against this step's
+            # 300s timeout-minutes -- the step died by opaque runner kill partway through the THIRD
+            # call, and assets 4 and 5 were never checked at all. That silently defeats the
+            # `set -uo pipefail` (not -e) decision above, whose entire point is that every asset
+            # gets checked even when an earlier one is bad. With --retry-max-time 20 the same case
+            # is 31.1s, one message, exit 28 -- so all five calls run and report.
+            #
+            # Sizing: curl checks the retry timer BEFORE starting each retry, then sleeps
+            # --retry-delay, then lets the attempt it started run to completion. So one call's
+            # worst case is --retry-max-time + --retry-delay + --max-time = 20 + 2 + 30 = 52s, and
+            # 5 x 52 = 260s sits inside the 300s cap with 40s spare. The margin is the point: curl
+            # loses on its OWN terms, returning exit 28 and an http_code of 000 that the `*)`
+            # branch below classifies as inconclusive, rather than being killed silently by the
+            # runner with no diagnostic.
+            #
+            # The --retry-delay term is easy to drop and doing so makes the formula WRONG, not just
+            # loose. Measured on curl 8.21.0 against the stall server, --max-time 2 --retry 10
+            # --retry-max-time 4 gave 7.9s at --retry-delay 3 and 7.0s at --retry-delay 2 -- both
+            # past the 6s that "retry-max-time + max-time" predicts -- but only 5.6s at
+            # --retry-delay 1, which is why two earlier rounds of this reasoning (CPE-1824's, and
+            # this ticket's first pass) checked the formula with a 1s delay and saw it "hold".
+            #
+            # 20 costs the retries nothing they actually do: their job is connection-level failures
+            # (refused/reset), which fail in milliseconds, so all three retries plus their 2s delays
+            # finish inside ~6s. And it has to be small: worst case is (N + 2 + 30) per call, so
+            # N = 30 already makes 5 calls 310s -- OVER the 300s cap, not merely grazing it -- and
+            # the largest N that fits at all is 27. The five-call multiplier, not --max-time, is
+            # what forces N well under 30 here; do not copy 20 to a site with a different call
+            # count without redoing this sum. src/lib/releaseHangHardening.test.ts now COMPUTES it
+            # (calls x (retry-max-time + retry-delay + max-time) < timeout-minutes x 60, with
+            # margin), so a change to any term here fails there rather than needing to be noticed.
+            code=$(curl -sSL --max-time 30 --retry 3 --retry-max-time 20 --retry-delay 2 \
+              --retry-connrefused -o /dev/null -w '%{http_code}' --head "$url")
             echo "  ${label}: HTTP ${code} (${url})"
             case "$code" in
               200) ;;
@@ -406,8 +453,15 @@ jobs:
             for entry in "win64 ${win64_url}" "linux64 ${linux64_url}"; do
               label=${entry%% *}
               url=${entry#* }
-              code=$(curl -sSL --max-time 30 --retry 3 --retry-delay 2 --retry-connrefused \
-                -o /dev/null -w '%{http_code}' --head "$url")
+              # Same flag set, same reasoning, as "HEAD-check pinned assets" above -- including
+              # --retry-max-time 20 (CPE-1849), without which --max-time bounds one attempt and not
+              # the series. This loop makes only TWO calls, so 2 x (20 + 2 + 30) = 104s leaves far more
+              # room under this step's own `timeout-minutes: 5` than the five-call sibling has; the
+              # value is deliberately kept identical anyway rather than relaxed, because a larger
+              # one would buy nothing (the retries' real work finishes in ~6s) and would only widen
+              # the stall worst case.
+              code=$(curl -sSL --max-time 30 --retry 3 --retry-max-time 20 --retry-delay 2 \
+                --retry-connrefused -o /dev/null -w '%{http_code}' --head "$url")
               echo "  recommended ffmpeg ${label}: HTTP ${code} (${url})"
               # Same three-way split as "HEAD-check pinned assets" above: 200 fine, 404 a CONFIRMED
               # problem with this candidate, anything else inconclusive (never treated as a
