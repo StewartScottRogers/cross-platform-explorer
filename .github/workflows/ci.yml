@@ -524,10 +524,17 @@ jobs:
       # zero bytes moving never hits a retryable terminal state). Four different mechanisms are in
       # play below, and each bounds ONLY its own scope -- they are not interchangeable:
       #   --connect-timeout 15  the TCP/TLS handshake phase of ONE attempt, nothing after it.
-      #   --max-time 180        ONE attempt end-to-end (connect + transfer). Per curl's own docs
-      #                         ("if you enable retrying the transfer (--retry) then the maximum
-      #                         time counter is reset each time the transfer is retried") this is
-      #                         NOT a bound on the whole command when --retry is present.
+      #   --max-time 180        ONE attempt end-to-end (connect + transfer). With --retry present
+      #                         this is NOT a bound on the whole command: --retry-all-errors makes
+      #                         a max-time expiry itself count as a retryable error, and each retry
+      #                         then gets a FRESH max-time clock. Measured against a server that
+      #                         accepts the connection and then sends nothing: this exact flag set
+      #                         without --retry-max-time ran 1101s (18.35 min) and printed SIX
+      #                         separate "Operation timed out after 1800xx ms" -- one full 180s
+      #                         cycle for the initial attempt plus each of the 5 retries. With
+      #                         --retry-max-time 150 added, the same test ends at 182s, exit 28,
+      #                         one timeout message. (Absent --retry, --max-time DOES bound the
+      #                         whole invocation -- see release-sidecar.yml, measured exact.)
       #   --retry-max-time 150  the retry SERIES: before starting each new retry curl checks
       #                         elapsed time against this and stops retrying once it is reached.
       #                         An attempt already in flight is allowed to finish, so curl's real

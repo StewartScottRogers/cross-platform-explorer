@@ -258,6 +258,25 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
 // level worst case near 5x180s plus delays, not 180s -- the step-level `timeout-minutes` was doing
 // all the real bounding while the comment credited curl.
 //
+// Confirmed by measurement afterwards, not only by reading the docs: run against a server that
+// accepts the connection and then sends nothing, the ci.yml flag set WITHOUT --retry-max-time took
+// 1101s (18.35 min) and printed six separate "Operation timed out after 1800xx ms" -- one full 180s
+// cycle for the initial attempt plus each of the 5 retries, because --retry-all-errors makes a
+// max-time expiry itself a retryable error and every retry then gets a FRESH max-time clock. With
+// --retry-max-time 150 the same test ends at 182s, exit 28, one timeout message. The control matters
+// just as much: release-sidecar.yml's curl calls, which pass NO --retry, died at exactly 60.001s and
+// 240.001s against the same server -- so --max-time really does bound the whole invocation there.
+// The original claim was wrong ONLY where --retry appears; nothing here should over-correct into
+// asserting --max-time is never a whole-invocation bound.
+//
+// WHAT THIS FILE CAN AND CANNOT DO. Every assertion here is STRUCTURAL -- it parses YAML and reads
+// flags off the text; it never executes curl. That is precisely why the first round of this guard
+// passed while the behaviour its comments described was wrong: a semantic interaction between two
+// flags is invisible to a structural check. The assertion below is the structural PROXY for that
+// semantic property -- "if you retry, you must also bound the retry series" is a flag-pairing rule a
+// parser CAN enforce, standing in for a timing behaviour it cannot observe. Treat it as a tripwire
+// against the known mistake, not as proof the timing is right; that part came from measurement.
+//
 // This is the assertion that stops that reasoning error recurring: it is a generic scan of every
 // curl line in these workflows rather than a spot check on the three known sites, so a NEW curl
 // added anywhere in them with --retry + --max-time and no --retry-max-time fails here.

@@ -304,11 +304,17 @@ jobs:
           # attempt and nothing resets the counter. That is what catches a stall mid-transfer. 240s
           # is generous headroom for the largest asset here (a BtbN ffmpeg static build, tens of MB)
           # on a GitHub-hosted runner's bandwidth.
-          # CAUTION: the "entire invocation" property above depends on there being no `--retry`.
-          # curl RESETS the `--max-time` counter on every retry ("if you enable retrying the
-          # transfer (--retry) then the maximum time counter is reset each time the transfer is
-          # retried"), so anyone adding `--retry` here must add `--retry-max-time` to keep a real
-          # bound. src/lib/releaseHangHardening.test.ts enforces exactly that pairing.
+          # Measured, not assumed: against a server that accepts the connection then sends nothing,
+          # this call died at 240.001s and `verify_btbn_checksum()`'s `--max-time 60` at 60.001s,
+          # both exit 28 -- exact to the millisecond, because with no `--retry` there is exactly one
+          # attempt.
+          # CAUTION: that "entire invocation" property depends on there being no `--retry`. curl
+          # RESETS the `--max-time` counter on every retry ("if you enable retrying the transfer
+          # (--retry) then the maximum time counter is reset each time the transfer is retried"),
+          # and `--retry-all-errors` makes a max-time expiry itself retryable, so the same flags
+          # plus `--retry 5` measured 1101s instead of 180s over in ci.yml. Anyone adding `--retry`
+          # here must add `--retry-max-time` to keep a real bound.
+          # src/lib/releaseHangHardening.test.ts enforces exactly that pairing.
           fetch() {
             url="$1"; out="$2"; magic="$3"; label="$4"
             code=$(curl -sSL --connect-timeout 15 --max-time 240 --write-out '%{http_code}' -o "$out" "$url") || true

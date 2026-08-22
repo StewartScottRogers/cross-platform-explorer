@@ -162,6 +162,50 @@ Consequence at the three `ci.yml` pdfium sites (the only sites in these three wo
 `--retry` with `--max-time`): with `--retry 5 --retry-delay 3 --max-time 180`, curl's own worst case
 was roughly 5 x 180s plus delays — about 15 minutes — not the 180s the comment asserted.
 
+**Then it was MEASURED, by an independent UAT and again here — two methods, same conclusion.** The
+doc quote establishes the rule; the measurement establishes the magnitude and the exact mechanism,
+and is much stronger evidence than the quote alone.
+
+A local HTTP server was stood up that accepts the connection, reads the request, then sends nothing
+(the precise failure mode `--retry` cannot see, because the transfer never reaches a terminal state
+on its own). The **actual** `ci.yml` pdfium flag set was run against it:
+
+| flag set | elapsed | exit | curl's own stderr |
+|---|---|---|---|
+| `--retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 180` (round 1) | **1101s** (UAT) / **1100s** (reproduced here) | 28 | **six** separate `Operation timed out after 1800xx milliseconds`, both times |
+| the same, plus `--retry-max-time 150` (round 2) | **182s** | 28 | **one** `Operation timed out after 180002 milliseconds` |
+
+The 18-minute run was reproduced twice, independently — by the UAT and again on this machine (curl
+8.21.0), landing within one second of each other and printing the same six messages. So the round-1
+figure is not a single anomalous observation.
+
+Six timeout messages is the mechanism made visible: **one full 180s cycle per attempt — 1 initial
+plus 5 retries — not one shared 180s budget.** `--retry-all-errors` is what closes the loop: it makes
+a `--max-time` expiry *itself* count as a retryable error, and each retry then gets a **fresh
+`--max-time` clock**. So the round-1 flags were not merely "resetting a timer" in the abstract; they
+were self-feeding — the very timeout meant to stop the stall was the thing that triggered the next
+attempt. That is the accurate statement of the bug.
+
+**The control matters just as much, and it means round 1 was not wrong everywhere.** The two
+`release-sidecar.yml` curl calls, which carry **no** `--retry`, were run against the same stall
+server:
+
+- `verify_btbn_checksum()` `--max-time 60` → died at **60.001s**, exit 28
+- `fetch()` `--max-time 240` → died at **240.001s**, exit 28
+
+Exact to the millisecond, because with no retry there is exactly one attempt. So `--max-time` *does*
+bound the whole invocation when no `--retry` is present — the round-1 claim was **right for those
+two sites and wrong only where `--retry` appears**. The corrected comments are worded to preserve
+that distinction; over-correcting into "`--max-time` never bounds the invocation" would replace one
+false statement with another, and would have made `release-sidecar.yml`'s bounds look unsound when
+they are exact.
+
+Positive control, re-run with the chosen `--retry-max-time 150` in place, so the fix is not just
+"fails faster" but "still succeeds normally": the real pinned pdfium asset
+(`chromium/7961`, `pdfium-win-x64.tgz`) fetched through the **identical** new flag set — exit 0, 6s,
+3,741,865 bytes, valid gzip+tar, 51 members, `bin/pdfium.dll` present (the member the Windows CI step
+actually extracts).
+
 **This was never a live hang risk.** All three steps also carry an independent `timeout-minutes: 6`,
 so GitHub Actions kills them at 360s wall-clock regardless of what curl believes. The shipped
 behaviour was always bounded; what was broken was the explanation. A wrong claim presented as a
@@ -203,6 +247,17 @@ stops `--retry-delay`/`--retry-all-errors`/`--retry-connrefused`/`--retry-max-ti
 `--retry`. `#`-comment lines are stripped first, because these `run` blocks contain long comments
 naming these very flags — the comment-vs-key confusion CPE-1787's Reviewer round already found once.
 
+**What this guard can and cannot do — worth stating plainly, because it is the reason the bug
+survived round 1.** Every assertion in that file is **structural**: it parses YAML and reads flags
+off the text, and never executes curl. A semantic *interaction between two flags* is invisible to a
+structural check, so the round-1 guard passed with flying colours while the behaviour its comments
+described was false. The new assertion is therefore best understood as the **structural proxy** for a
+semantic property: *"if you retry, you must also bound the retry series"* is a flag-pairing rule a
+parser **can** enforce, standing in for a timing behaviour it **cannot** observe. It is a tripwire
+against the known mistake, not proof the timing is correct — that part is what the measurement above
+is for. Anyone tempted to treat a green run of this file as evidence the timeouts *work* should
+re-read this paragraph.
+
 Red-proofed twice, both reverted immediately after:
 - Deleted ` --retry-max-time 150` from `.github/workflows/ci.yml:555` (the Linux pdfium `curl`).
   3 tests failed, 12 passed — including the new generic scan, reporting
@@ -222,5 +277,23 @@ Round 1 and the PR body claimed zero line overlap with both CPE-1842 and CPE-183
   grep came back clean and was reported as "no overlap" when the real question was which lines
   CPE-1839's work will land on. Whoever takes CPE-1839 should expect to rebase over this PR's change
   to that line rather than finding it untouched.
+
+**4. Cap sizing is settled with data — do NOT tighten any `timeout-minutes`.**
+The independent UAT measured every capped step's real duration against CI history via `gh api`, so
+the caps chosen in round 1 are no longer guesses. Every site has comfortable headroom and **nothing
+is under 3x**. The one flagged in round 1 as the highest-risk outlier — the macOS
+ffmpeg-from-source compile under the 35-minute leg of the `Stage native deps` cap — runs **198s to
+333s across 30 runs**, i.e. **6.3x** headroom at its worst. A future reviewer should treat "is that
+cap too generous?" as answered, and answered with measurements rather than intuition.
+
+One caveat recorded with it, which must not be repeated as if it were current: `release.yml`'s
+`catalog` job **has not completed in 27 days**. Every run since 2026-08-04 fails at an unrelated
+later step (CPE-1058, updater manifest/signature verification) that gates `catalog` out via `needs:`.
+Its apt-get timing data is real but **dated 2026-07-25** — cite it as dated, never as current, and
+note that this ticket's cap on that step has therefore never been exercised by a live run.
+
+**5. UAT verdict: PASS.** It independently reproduced the retry bug by measurement, confirmed the
+control cases, confirmed a normal download still succeeds through the new flags, and raised no
+blocking issue.
 
 Gates re-run in round 2 — numbers in the PR comment.
