@@ -4108,6 +4108,301 @@ mod tests {
         );
     }
 
+    // ── CPE-1851: the CONSUMER end of CPE-1815's reasons ──────────────────────────────────────────
+
+    /// Environment marker that tells [`cpe_1851_require_staged_reason_panic_names_the_step_it_was_given`]
+    /// it is the spawned child and should do the real work rather than spawn again.
+    const CPE_1851_CHILD_MARKER: &str = "CPE_1851_STAGING_CONSUMER_CHILD";
+
+    /// The `--exact` filter the parent hands the child. If this ever stops naming the test below, the
+    /// child runs **zero** tests, exits 0, and the parent reds on the missing sentinel rather than
+    /// quietly certifying nothing.
+    const CPE_1851_CHILD_TEST: &str =
+        "fsutil::tests::cpe_1851_require_staged_reason_panic_names_the_step_it_was_given";
+
+    /// Printed by the child only after its last assertion has passed, so "the child exited 0" cannot be
+    /// confused with "the child never ran the assertions".
+    const CPE_1851_SENTINEL: &str = "CPE-1851-CHILD-COMPLETED-ALL-ASSERTIONS";
+
+    /// Depth belt, carried on **argv** rather than in the environment (PR #995 review).
+    ///
+    /// The marker variable above is what makes the child do the work instead of spawning again — so it
+    /// is also the only thing bounding the recursion. If anything ever stripped environment variables
+    /// between parent and child, the failure mode would be an unbounded fork bomb under `.output()`
+    /// rather than a red test: severe consequence, cheap belt. `libtest` accepts `--skip <value>` and
+    /// simply excludes tests matching it, so this token rides along harmlessly (no test name contains
+    /// it, and `--exact` makes the skip match exact anyway) while remaining visible to
+    /// `std::env::args()` — which no environment filter can touch. A process that sees the token but
+    /// not the marker refuses to spawn and fails loudly.
+    const CPE_1851_DEPTH_TOKEN: &str = "cpe-1851-child-depth-1";
+
+    /// Where the panic hook parks the location it saw, for the `#[track_caller]` assertions.
+    type Cpe1851Loc = std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>;
+
+    /// Run `f`, which must panic, and hand back `(panic message, reported file, reported line)`.
+    ///
+    /// The file/line are the ones a **panic hook** observed, which is exactly what `#[track_caller]`
+    /// decides — the payload alone cannot tell you where the panic was attributed.
+    fn cpe_1851_panic(loc: &Cpe1851Loc, f: impl FnOnce()) -> (String, String, u32) {
+        *loc.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err(
+            "CPE-1851: with `supported_here = true`, a failed probe and CPE_STAGING_STRICT=1, the \
+             staging gate MUST panic. It returned instead, which means the strict path is not reaching \
+             this call at all and everything below would be vacuous.",
+        );
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic payload>")
+            .to_string();
+        let (file, line) = loc
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("the installed panic hook must have recorded a location for the panic just caught");
+        (msg, file, line)
+    }
+
+    /// The real body of the CPE-1851 test, run **in a child process** (see the parent test's doc
+    /// comment for why it cannot run in-process).
+    fn cpe_1851_child_body() {
+        // Preconditions. Without these the `Fail` arm is unreachable and every assertion below would
+        // pass vacuously against a function that never panicked for the reason we think it did.
+        assert!(
+            staging_is_strict(),
+            "CPE-1851: the child must run with CPE_STAGING_STRICT=1 — without strictness the verdict is \
+             LegitimateSkip and the panic path this test exists to cover is never entered"
+        );
+        assert!(
+            !staging_is_sabotaged(),
+            "CPE-1851: the child must run with CPE_STAGING_SABOTAGE unset — sabotage forces Fail from an \
+             Ok probe, which would route the reason through `staged_fail_reason`'s fallback text instead \
+             of the reason the caller passed in"
+        );
+
+        const MECH_REASONED: &str = "cpe_1851_reasoned_probe";
+        const MECH_BARE: &str = "cpe_1851_bare_probe";
+        const REASON_A: &str = "cpe-1851-nonce-alpha: trash::delete rejected the probe file";
+        const REASON_B: &str = "cpe-1851-nonce-bravo: restore_all did not put the probe back";
+        assert_ne!(
+            REASON_A, REASON_B,
+            "fixture is inert: the two reasons this test feeds in are the same string, so \"the message \
+             carries the reason it was GIVEN\" degenerates into \"the message carries some reason\" and \
+             this test certifies nothing"
+        );
+
+        // Record where each panic is attributed, and suppress the default hook's output while we are
+        // deliberately panicking (three genuine panics printed into a CI log train people to scroll past
+        // panics). Restored immediately after the captures, so a failing assertion below still prints.
+        let loc: Cpe1851Loc = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&loc);
+        let prior_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(l) = info.location() {
+                *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some((l.file().to_string(), l.line()));
+            }
+        }));
+
+        // `line!() + 1` is only correct while each call stays on the single line after it — deliberate,
+        // and the `#[track_caller]` assertions below are what notice if it ever stops being true.
+        let want_line_a = line!() + 1;
+        let (msg_a, file_a, line_a) = cpe_1851_panic(&loc, || { let _ = require_staged_reason(MECH_REASONED, true, Err(REASON_A)); });
+        let want_line_b = line!() + 1;
+        let (msg_b, file_b, line_b) = cpe_1851_panic(&loc, || { let _ = require_staged_reason(MECH_REASONED, true, Err(REASON_B)); });
+        let want_line_bare = line!() + 1;
+        let (msg_bare, file_bare, line_bare) = cpe_1851_panic(&loc, || { let _ = require_staged(MECH_BARE, true, false); });
+
+        // The non-panicking arms, captured while we are here — they cost nothing and they prove the
+        // strict environment did not simply turn every call into a panic.
+        let staged_ok = require_staged_reason(MECH_REASONED, true, Ok(()));
+        let reasoned_skip = require_staged_reason(MECH_REASONED, false, Err(REASON_A));
+        let bare_ok = require_staged(MECH_BARE, true, true);
+        let bare_skip = require_staged(MECH_BARE, false, false);
+
+        std::panic::set_hook(prior_hook);
+
+        // ── 1. the reason reaches the message require_staged_reason actually panics with ──
+        assert!(msg_a.contains("[CPE-1717]"), "still the same panic family, got: {msg_a}");
+        assert!(msg_a.contains(MECH_REASONED), "must still name the mechanism, got: {msg_a}");
+        assert!(
+            msg_a.contains(REASON_A),
+            "CPE-1851: `require_staged_reason` panicked WITHOUT the reason it was handed. Two shapes \
+             land here: the round-1 one (the `Fail` arm calling `staging_failure_message` and dropping \
+             `staged`), which `cargo clippy -D warnings` also catches as \"`staged_fail_reason` is never \
+             used\"; and the round-2 one (`staged_fail_reason(Err(\"staging failed\"))` hardcoded), which \
+             clippy CANNOT catch because every function stays used. Panic was: {msg_a}"
+        );
+        let first_a = msg_a.lines().next().expect("panic message must not be empty");
+        assert!(
+            first_a.contains("[CPE-1717]") && first_a.contains(REASON_A),
+            "CPE-1815/1851: the reason must reach the SAME first line as `CPE-1717`, which is the line \
+             CI's `grep -m1 -A6 'CPE-1717'` is guaranteed to print — first line was: {first_a:?}"
+        );
+        assert!(msg_b.contains(REASON_B), "the second reason must reach its own message too: {msg_b}");
+
+        // ── 2. the fixture is LIVE: the message is a function of the reason passed in ──
+        // This is the assertion that reds on the mutation clippy cannot see, where the `Fail` arm keeps
+        // calling every function but hardcodes what it feeds them:
+        //     panic!("{}", staging_failure_message_with_reason(mechanism, staged_fail_reason(Err("staging failed"))))
+        // Every function stays "used", `staged` stays used via `staged.is_ok()`, and the seven-way
+        // distinction is erased at the exact point it is consumed.
+        assert!(
+            !msg_a.contains(REASON_B) && !msg_b.contains(REASON_A),
+            "fixture is inert: a panic told reason A reported reason B (or vice versa), so the message \
+             is not built from the argument this test controls and the test certifies nothing.\nA: \
+             {msg_a}\nB: {msg_b}"
+        );
+        assert_ne!(
+            msg_a, msg_b,
+            "fixture is inert: two DIFFERENT reasons produced byte-identical panic text, so \
+             `require_staged_reason` never consulted the reason it was given — it is emitting a constant \
+             — and every \"the message contains the reason\" assertion above would pass against a \
+             hardcoded string. This test certifies nothing."
+        );
+        assert_ne!(
+            msg_a,
+            staging_failure_message(MECH_REASONED),
+            "CPE-1851: `require_staged_reason`'s panic is byte-identical to the reason-LESS \
+             `staging_failure_message`, i.e. the whole of CPE-1815 has been discarded on delivery while \
+             the producer-side tests stay green"
+        );
+
+        // ── 3. `#[track_caller]` still attributes the panic to the CALL SITE ──
+        // Both helpers live in this same file, so only the LINE discriminates: without `#[track_caller]`
+        // the panic would be reported inside `require_staged_reason`/`require_staged`'s own body, several
+        // hundred lines above these call sites.
+        for (label, file, line, want) in [
+            ("require_staged_reason (reason A)", &file_a, line_a, want_line_a),
+            ("require_staged_reason (reason B)", &file_b, line_b, want_line_b),
+            ("require_staged", &file_bare, line_bare, want_line_bare),
+        ] {
+            assert!(
+                file.replace('\\', "/").ends_with("src/fsutil.rs"),
+                "{label}: panic attributed to an unexpected file: {file}"
+            );
+            assert_eq!(
+                line, want,
+                "{label}: `#[track_caller]` regressed — the panic must be reported at the CALL SITE \
+                 (line {want}) so a red CI build names the leg that stopped staging, not this helper's \
+                 own body (reported line {line})"
+            );
+        }
+
+        // ── 4. the sibling `require_staged` reports the mechanism and nothing it does not have ──
+        assert!(msg_bare.contains("[CPE-1717]"), "same panic family for the bare form: {msg_bare}");
+        assert!(msg_bare.contains(MECH_BARE), "the bare form must still name the mechanism: {msg_bare}");
+        assert_eq!(
+            msg_bare,
+            staging_failure_message(MECH_BARE),
+            "CPE-1851: `require_staged` must panic with exactly `staging_failure_message(mechanism)` — \
+             nothing else in the tree pins the text this ~36-call-site gate actually panics with"
+        );
+        assert!(
+            !msg_bare.contains("failing step:"),
+            "the bare form has no failing step to name; inventing one would misreport: {msg_bare}"
+        );
+
+        // ── 5. the arms that must NOT panic ──
+        assert!(staged_ok, "a staged probe must return true, not panic");
+        assert!(!reasoned_skip, "an unsupported platform is a LegitimateSkip (false), not a panic");
+        assert!(bare_ok, "the bare form's staged probe must return true");
+        assert!(!bare_skip, "the bare form's unsupported platform must return false");
+
+        println!("{CPE_1851_SENTINEL}");
+    }
+
+    /// CPE-1851: **the consumer end.** `require_staged_reason` is where CPE-1815's seven reasons are
+    /// actually spent, and until this test nothing in the tree invoked it. The producer end is pinned
+    /// (`trash_roundtrip_reasons_are_pairwise_distinct` and
+    /// `trash_roundtrip_available_indexes_every_reason_exactly_once`, both in `src-tauri/src/lib.rs`) and
+    /// `staging_failure_message_with_reason` is tested in isolation above — but the wire between them was
+    /// held only by `cargo clippy --all-targets -D warnings` reporting `staged_fail_reason` as unused,
+    /// and PR #986's review found a mutation that keeps every function used while still erasing the
+    /// distinction (see the comment at assertion group 2). Measured against the pre-fix tree: 2313
+    /// passed, 0 failed, clippy clean.
+    ///
+    /// # Why a child process rather than a plain `catch_unwind`
+    ///
+    /// The `Fail` arm is only reachable when `staging_is_strict()` is true, and that reads the
+    /// process-global `CPE_STAGING_STRICT`. `cargo test` runs this binary's tests on many threads at
+    /// once, and `archive.rs`, `copilot.rs` and `dispatch.rs` all call `require_staged` from their own
+    /// tests — so setting the variable in-process (even under a mutex those tests do not take) would
+    /// make *their* legitimate skips panic, non-deterministically, on whichever machine happens to lack
+    /// symlink privilege or ACL support. A test that passes alone and reds its neighbours is worse than
+    /// no test. So the strict environment is confined to a child process that runs **only this test**
+    /// (`--exact`), and this process's environment is never touched: no lock is needed because nothing
+    /// shared is mutated.
+    ///
+    /// # What it does NOT catch — measured, not guessed
+    ///
+    /// - **A `staged_fail_reason` that discriminates on the reason's CONTENT** (PR #995 review, which
+    ///   built it and measured it): an arm like `Err(r) if r.starts_with("cpe-1851-") => r, Err(_) =>
+    ///   "staging failed"` is clippy clean and leaves the whole suite green — 2314 passed, 0 failed —
+    ///   while collapsing all seven real trash reasons to one string. This test drives the function with
+    ///   synthetic nonces and never with a real `trash_roundtrip_available` reason, so a mutation keyed
+    ///   on the argument's *value* passes both nonces through untouched. That is the inherent limit of a
+    ///   synthetic-fixture unit test, and it is deliberate sabotage rather than a plausible regression;
+    ///   the producer-side pair in `src-tauri/src/lib.rs` is what pins the real reasons.
+    /// - A reason that is *misattributed* rather than dropped — though this caveat is **nearly moot in
+    ///   the direction it covers**: the only per-call values in scope inside the `Fail` arm are
+    ///   `mechanism` and `staged`, and a mutation forwarding `mechanism` IS caught, because both
+    ///   messages then become equal and the byte-for-byte liveness assertion reds. What survives is the
+    ///   content-discriminating shape above, not a plain substitution.
+    /// - Anything about *which* of the seven real trash reasons a given probe step picks. That is the
+    ///   producer end, and it lives in `src-tauri`'s two guard tests by design.
+    /// - The `LegitimateSkip` path's caller-side reason plumbing (CPE-1815's `(cause: {})` skip notices
+    ///   in `src-tauri/src/lib.rs`); this test only asserts that arm returns `false` without panicking.
+    #[test]
+    fn cpe_1851_require_staged_reason_panic_names_the_step_it_was_given() {
+        if std::env::var(CPE_1851_CHILD_MARKER).is_ok() {
+            cpe_1851_child_body();
+            return;
+        }
+
+        // Depth belt (see `CPE_1851_DEPTH_TOKEN`). Reached only if this process was itself spawned as
+        // the child but arrived without its marker variable — i.e. the environment was stripped in
+        // between. Refuse to spawn: a red test, not a fork bomb.
+        assert!(
+            !std::env::args().any(|a| a == CPE_1851_DEPTH_TOKEN),
+            "CPE-1851: this process carries the child depth token on its argv but {CPE_1851_CHILD_MARKER} \
+             is not set, so the environment was stripped between parent and child. Refusing to spawn \
+             again — without this guard the spawn would recurse unboundedly under `.output()`."
+        );
+
+        let exe = std::env::current_exe().expect("the running test binary must have a path");
+        let out = std::process::Command::new(&exe)
+            .args([
+                CPE_1851_CHILD_TEST,
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                "--skip",
+                CPE_1851_DEPTH_TOKEN,
+            ])
+            .env(CPE_1851_CHILD_MARKER, "1")
+            .env("CPE_STAGING_STRICT", "1")
+            .env_remove("CPE_STAGING_SABOTAGE")
+            .output()
+            .unwrap_or_else(|e| panic!("could not re-run the test binary {}: {e}", exe.display()));
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success(),
+            "CPE-1851: the strict-mode child failed. Its output follows.\n{combined}"
+        );
+        assert!(
+            combined.contains(CPE_1851_SENTINEL),
+            "CPE-1851: the child exited successfully but never printed its completion sentinel, so the \
+             assertions did not run — most likely the `--exact` filter {CPE_1851_CHILD_TEST:?} no longer \
+             names this test (a rename or a module move). Child output:\n{combined}"
+        );
+    }
+
     /// `CPE_STAGING_STRICT` has to override `CI` in both directions, because CI is exactly where the
     /// escape hatch is needed if a runner image regresses before the fix lands.
     ///
