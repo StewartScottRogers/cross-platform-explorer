@@ -19,6 +19,20 @@ TypeScript**; it installs as a proper native app and updates itself automaticall
 
 ---
 
+## 📽 Watch the project evolve
+
+<p align="center">
+  <video src="https://raw.githubusercontent.com/StewartScottRogers/cross-platform-explorer/gource/gource-history.mp4" autoplay loop muted playsinline width="100%">
+    A <a href="https://gource.io/">Gource</a> animation of this repository's commit history.
+  </video>
+</p>
+
+<sub>A <a href="https://gource.io/">Gource</a> flythrough of the repo's whole commit history, re-rendered
+automatically every week by the <a href="./.github/workflows/gource-visualization.yml">Gource visualization
+workflow</a>. Video not playing inline? <a href="https://raw.githubusercontent.com/StewartScottRogers/cross-platform-explorer/gource/gource-history.mp4">Download / open the MP4</a>.</sub>
+
+---
+
 ## Get started
 
 1. **Download** the installer for your OS from the
