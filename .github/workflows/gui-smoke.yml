@@ -197,9 +197,28 @@ jobs:
       # "Install tauri-driver") got a `timeout-minutes` and this one hadn't, which reads as an
       # oversight rather than a deliberate choice. Added for consistency; low value given how rarely
       # this leg runs, but a hang here now fails named instead of riding to the job's own 15-minute cap.
+      #
+      # CPE-1843: VERSION-PINNED, and the pin is load-bearing — do not drop it back to "whatever
+      # crates.io has newest today". `wdio.conf.ts`'s `beforeSession` passes `--port 4444` and
+      # `--native-port 4445` explicitly and then waits on BOTH of those ports before letting WDIO issue
+      # its first `POST /session` (the CPE-1772 + CPE-1832 startup-race fix). That harness therefore
+      # depends on three things about this exact binary:
+      #   * `--port` and `--native-port` still exist as flags (they take a NUMBER each),
+      #   * their defaults are still 4444 / 4445, and
+      #   * `--native-host` still defaults to 127.0.0.1 (the host the harness polls).
+      # All three re-verified for 2.0.6 by reading its own `src/cli.rs` (`args.value_from_str("--port")
+      #   .unwrap_or(4444)`, `--native-port` -> 4445, `--native-host` -> "127.0.0.1"), which was also the
+      # newest published version on crates.io when this pin was added — so pinning changed nothing about
+      # what CI installs today, it only stops a future upstream release from changing it silently.
+      # tauri-driver is strict about unknown args (`args.finish()` errors on anything extraneous), so a
+      # RENAMED flag fails loudly; a RE-DEFAULTED port would not — the harness would simply wait on a port
+      # nothing ever binds and time out with a misleading "never accepted a connection" message.
+      # WHEN YOU BUMP THIS: re-read the new version's `src/cli.rs` and confirm those three facts still
+      # hold, then update TAURI_DRIVER_PORT / NATIVE_DRIVER_PORT in `gui-smoke/wdio.conf.ts` if they do
+      # not. The other install site in this file (`gui-smoke-linux-build`) must be bumped in lockstep.
       - name: Install tauri-driver
         timeout-minutes: 8
-        run: cargo install tauri-driver --locked
+        run: cargo install tauri-driver --version 2.0.6 --locked
 
       - name: Install gui-smoke dependencies
         working-directory: gui-smoke
@@ -458,9 +477,15 @@ jobs:
       # own unit tests had passed) — see the apt step's identical comment above for the full
       # reasoning. Compiling `tauri-driver` from source normally takes well under a minute with a warm
       # `cargo install` cache; 8 minutes covers a cold one.
+      #
+      # CPE-1843: version-pinned for the same load-bearing reason as the Windows leg's identical step
+      # above — `gui-smoke/wdio.conf.ts` passes `--port 4444` / `--native-port 4445` and waits on both
+      # ports, so it depends on those flag NAMES and their 4444/4445 defaults (plus `--native-host`'s
+      # 127.0.0.1 default) staying put. Read that step's comment before bumping this, verify the new
+      # version's `src/cli.rs`, and bump BOTH sites together.
       - name: Install tauri-driver
         timeout-minutes: 8
-        run: cargo install tauri-driver --locked
+        run: cargo install tauri-driver --version 2.0.6 --locked
 
       # The two binaries a shard job needs and cannot cheaply reproduce. `ls -l` is not decoration: it is
       # the record of what was actually staged, and the file sizes are the first thing to check if a shard

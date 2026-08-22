@@ -5,7 +5,8 @@
 // file is deliberately isolated in gui-smoke/ with its own package.json/lockfile/tsconfig — it never
 // touches the app's package.json, src-tauri, or the root vitest suite.
 //
-// Prereqs (see README.md): `cargo install tauri-driver --locked`, a matching msedgedriver on PATH
+// Prereqs (see README.md): `cargo install tauri-driver --version 2.0.6 --locked` (CPE-1843 pinned that
+// version in CI and here — see TAURI_DRIVER_PORT below for what depends on it), a matching msedgedriver on PATH
 // (Windows), and — CRITICAL — a REAL release build via the Tauri CLI's `build` subcommand:
 //     npm run build && npm run tauri build -- --no-bundle
 //
@@ -104,6 +105,12 @@ const TAURI_DRIVER_BIN = path.resolve(
 // REAL platform WebDriver (WebKitWebDriver on Linux, msedgedriver on Windows) on and proxies every
 // request to (`cli.rs`'s `--native-port` default, also 4445 — verified by reading the vendored
 // tauri-driver-2.0.6 source in the local cargo registry cache, `src/{main,cli,server}.rs`).
+//
+// CPE-1843: because these two constants and the `--port`/`--native-port` flags below are a contract with
+// a binary CI installs from crates.io, `gui-smoke.yml` now pins `cargo install tauri-driver --version
+// 2.0.6` at BOTH of its install sites rather than taking whatever is newest. A renamed flag would fail
+// loudly (tauri-driver errors on unknown args); a re-defaulted port would not — it would just make the
+// waits below poll a port nothing ever binds. Re-verify `src/cli.rs` when bumping that pin.
 const TAURI_DRIVER_PORT = 4444;
 const NATIVE_DRIVER_PORT = 4445;
 

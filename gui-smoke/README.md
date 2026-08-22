@@ -70,8 +70,16 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
 1. **`tauri-driver`** — the official WebDriver proxy (version is independent of the Tauri crate
    version):
    ```
-   cargo install tauri-driver --locked
+   cargo install tauri-driver --version 2.0.6 --locked
    ```
+   CPE-1843 pinned that version in `gui-smoke.yml` (both install sites) and it is repeated here so a
+   local run matches CI. The pin is load-bearing: `wdio.conf.ts`'s `beforeSession` passes `--port 4444`
+   and `--native-port 4445` explicitly and waits on **both** ports before the first `POST /session`
+   (the CPE-1772 + CPE-1832 startup-race fix), so it depends on those flag names, their 4444/4445
+   defaults, and `--native-host`'s 127.0.0.1 default — all three verified against 2.0.6's own
+   `src/cli.rs`. A renamed flag fails loudly (tauri-driver rejects unknown args); a **re-defaulted**
+   port would not. Before bumping the version, re-read the new `src/cli.rs` and update
+   `TAURI_DRIVER_PORT` / `NATIVE_DRIVER_PORT` in `wdio.conf.ts` if anything moved.
 2. **Windows: a matching Microsoft Edge Driver** on `PATH` (the runner's Edge/WebView2 version
    must match `msedgedriver.exe`):
    ```powershell
