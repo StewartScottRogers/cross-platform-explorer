@@ -3,11 +3,11 @@ id: CPE-1823
 title: "Security: a planted snapshot manifest is arbitrary file read and write on restore"
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
