@@ -135,3 +135,71 @@ unrelated pre-existing `future-incompat` note about the `russh` dependency, not 
 a clippy warning).
 
 Not moved out of `Backlog/` per the sprint runner's instruction — PR is up for review/merge first.
+
+**2026-08-21, round 2** — Independent review of PR #985 approved the 553-not-550 call (verified
+against RFC 959 §5.4 verbatim and vsftpd's own `ftpcodes.h`/`postlogin.c`, more primary-source
+confirmation than round 1 had) and confirmed there is no production FTP-remote write path at all, so
+the "nothing broke" claim from round 1 stands even more strongly. It found one real coverage gap plus
+two cheap corrections, and flagged one adjacent pre-existing bug. All addressed on the same branch,
+`crates/ftp/src/lib.rs` only:
+
+1. **Gap — the guard survived an `is_dir()` → `exists()` mutation.** Nothing exercised "parent exists
+   but is a plain file" (`STOR /at-root.txt/child.txt` where `at-root.txt` is an ordinary file). The
+   guard already used `is_dir()` (correctly refusing this shape), but no test proved it. Extended
+   `stor_refuses_a_missing_parent_and_still_works_for_one_that_exists` with that exact case. **Red-proof:**
+   changed `if !parent.is_dir()` to `if !parent.exists()` (one line) →
+   ```
+   thread 'tests::stor_refuses_a_missing_parent_and_still_works_for_one_that_exists' panicked at crates\ftp\src\lib.rs:1013:14:
+   STOR whose parent exists but is a plain file must be refused: ()
+   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.03s
+   ```
+   Reverted; suite green again.
+
+2. **The "filesystem gains nothing" assertion was graded by the client.** `provider.stat("/nosuchdir").is_err()`
+   used `FtpProvider::stat`, which is `list(parent)` + `parse_list_line` and deliberately skips
+   unparsable rows — a garbled `LIST` line would pass this assertion even if the directory existed.
+   Changed to `!root.path().join("nosuchdir").exists()`, reading the rig's own real temp directory
+   directly with `std::fs`, independent of the client under test — this repo's own convention, per
+   `crates/vfs/tests/real_server_conformance.rs`'s `assert_mkdir_rename_delete_verified_from_host_disk`
+   ("read it back with something other than the client"). `exact_server()`'s `_root` binding is now
+   used (renamed to `root`).
+
+3. **Stale rig-wide invariant.** The doc comment on `CPE_1730_ESCAPED_ROOT_REFUSAL` said `553`
+   "belongs to CPE-1731's root-destination guard" and that a second `553`-answering guard would mask
+   it. This round added exactly such a second guard (`STOR`'s missing-parent refusal). Verified there
+   is no actual masking: CPE-1731's `reply.starts_with("553")` rows are driven exclusively through
+   `rnfr_rnto`/`raw_commands`, which send only `RNFR`/`RNTO` and never open a data connection, so a
+   `STOR`-only `553` reply is structurally unreachable from those tests. Reworded "belongs to" →
+   "verb-scoped, not exclusive to this rig's confinement guards," with the reachability argument spelled
+   out inline.
+
+4. **Adjacent pre-existing bug, fixed rather than merely recorded:** `STOR` onto a path that is
+   **itself an existing directory** (e.g. `provider.write("/madedir", ...)` where `/madedir` was made
+   via `MKD`) passed the missing-parent guard (its parent, the root, exists) and reached `fs::write`,
+   which fails on a directory — but the error was swallowed (`let _ = ...`) and the rig answered
+   `226 Transfer complete` anyway. Fixed by refusing with the same `553` line when `path.is_dir()`.
+   Chose to fix rather than only record: this round's own new comments claim "STOR refuses what a real
+   daemon refuses," and leaving this shape broken while asserting that would make my own claim false.
+   **Provenance is weaker for this sub-case than for the missing-parent one** — I have no first-party
+   vsftpd source citation for the exact wire text an existing-directory `STOR` gets (the review's
+   `ftpcodes.h`/`postlogin.c` citation was for the missing-parent path specifically), so the code
+   comment says so explicitly rather than implying the same evidentiary weight. **Red-proof:** disabled
+   the check (`if false && path.is_dir()`, one line) →
+   ```
+   thread 'tests::stor_refuses_a_missing_parent_and_still_works_for_one_that_exists' panicked at crates\ftp\src\lib.rs:1029:14:
+   STOR onto an existing directory must be refused, not silently swallowed: ()
+   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.29s
+   ```
+   Reverted; suite green again.
+
+5. **Nits, both taken:** removed the dead `!parent.as_os_str().is_empty()` condition (unreachable —
+   `real_path`/`joined_path` always yield an absolute path, so `.parent()` here is never `Some("")`),
+   with a comment explaining why it was safe to drop. Added the trailing period to the wire text
+   (`"553 Could not create file.\r\n"`), matching vsftpd's literal reply more faithfully; the test still
+   uses `contains` so this was cosmetic-safe either way.
+
+**Gates, re-run:** `cargo test -p cpe-ftp` 21/21 green (no new test *functions* — the new assertions
+extend the one existing CPE-1742 test rather than adding new ones, so the count is unchanged from round
+1's 21). `cargo clippy --all-targets -- -D warnings` on `crates/ftp`: clean, no warnings, no errors.
+
+`git diff --numstat` for round 2: `114  34  crates/ftp/src/lib.rs` — the only file touched.
