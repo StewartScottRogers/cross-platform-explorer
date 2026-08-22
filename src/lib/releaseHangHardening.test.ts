@@ -114,8 +114,17 @@ function stripShellComment(line: string): string {
  *
  *  Neither physical line carries both flags, so the pairing rule never fired and the file reported
  *  a clean pass. That is not a hypothetical style: this repo ALREADY writes curl exactly that way
- *  at ffmpeg-pin-freshness.yml:251 and :409, and apt-get that way at release.yml:56. Any scan of
- *  shell text for a flag COMBINATION has to join continuations first, or it is checking nothing. */
+ *  in ffmpeg-pin-freshness.yml (the `head_check()` call in "HEAD-check pinned assets" and the
+ *  candidate-URL call in "Validate the recommendation before publishing it" -- identified by step
+ *  rather than by line number, per CPE-1824 round 3's stale-pointer finding), and apt-get that way
+ *  in release.yml's "Install Linux system dependencies". Any scan of shell text for a flag
+ *  COMBINATION has to join continuations first, or it is checking nothing.
+ *
+ *  CPE-1849 re-verified the join against those two ffmpeg-pin-freshness.yml sites rather than
+ *  assuming it generalised: adding that file to GUARDED before fixing it reported BOTH sites as
+ *  offenders, each as one fully-joined logical line carrying --max-time and --retry together. It
+ *  also confirms stripShellComment()'s quote-awareness on real code -- the joined tail contains
+ *  `-w '%{http_code}'`, whose `#` is quoted and must not truncate the line. */
 function logicalLines(run: string | undefined): string[] {
   const out: string[] = [];
   let pending = "";
@@ -263,6 +272,38 @@ describe("release-sidecar.yml apt-get + curl sites carry hang hardening (CPE-182
   });
 });
 
+// CPE-1849. The generic scan below enforces PAIRING and explicitly cannot check SIZING, and for
+// this file the sizing rests on two numbers a future edit could move without touching any curl
+// line at all: the step's `timeout-minutes` and HOW MANY times it calls the one shared helper.
+// `--retry-max-time 20` was chosen as 5 x (20 + 30) = 250s inside 300s; add a sixth head_check, or
+// drop the cap to 4 minutes, and that stops being true while every flag still reads fine. These
+// two assertions pin the inputs to the arithmetic so such a change has to come here and re-do it.
+describe("ffmpeg-pin-freshness.yml's HEAD-check sizing inputs are pinned (CPE-1849)", () => {
+  const doc = parseWorkflow("ffmpeg-pin-freshness.yml");
+
+  it("'HEAD-check pinned assets' still makes exactly five head_check calls under a 5-minute cap", () => {
+    const step = findStep(doc.jobs["check-pins"], "HEAD-check pinned assets");
+    expect(step["timeout-minutes"]).toBe(5);
+    // Count CALLS, not the definition: `head_check() {` declares it, `head_check "label" "$URL"`
+    // invokes it. Only the invocations multiply the worst case.
+    const calls = logicalLines(step.run).filter((l) => /^head_check\s+"/.test(l));
+    expect(calls.length).toBe(5);
+    // No continue-on-error: this step's failure is the workflow's whole signal, so the cap must
+    // stay a hard failure rather than something swallowed into a green run.
+    expect(step["continue-on-error"]).toBeUndefined();
+  });
+
+  it("'Validate the recommendation before publishing it' still HEAD-checks two URLs under a 5-minute cap", () => {
+    const step = findStep(doc.jobs["check-pins"], "Validate the recommendation before publishing it");
+    expect(step["timeout-minutes"]).toBe(5);
+    // Here the multiplier is the `for entry in ...` list, not repeated call lines: one curl inside
+    // a two-element loop. Assert the loop is still two-element, since that is the N in the sizing.
+    const loop = logicalLines(step.run).find((l) => l.startsWith("for entry in "));
+    expect(loop).toBe('for entry in "win64 ${win64_url}" "linux64 ${linux64_url}"; do');
+    expect(step["continue-on-error"]).toBeUndefined();
+  });
+});
+
 describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)", () => {
   const doc = parseWorkflow("ci.yml");
 
@@ -364,20 +405,31 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
 // curl line in these workflows rather than a spot check on the three known sites, so a NEW curl
 // added anywhere in them with --retry + --max-time and no --retry-max-time fails here.
 //
-// Scope note: .github/workflows/ffmpeg-pin-freshness.yml also pairs --retry with --max-time (:251
-// and :409). It is deliberately NOT in this list, but do NOT read that as "harmless there" -- it is
-// tracked as CPE-1849 and the arithmetic is WORSE there than at the pdfium sites.
+// CPE-1849 folded .github/workflows/ffmpeg-pin-freshness.yml into GUARDED. CPE-1824 had left it out
+// with a note saying it was deliberate rather than missed; that exclusion is now spent and the note
+// is gone with it, because a stale "deliberately out of scope" comment is itself the kind of
+// once-true-now-false claim this file exists to stop.
 //
-// What is different: that file's own comment is ACCURATE ("--max-time bounds each attempt"), so the
-// specific defect this guard exists to catch -- a false claim in a comment -- is not present, and
-// the file is outside CPE-1824's scope. What is worse: one head_check's worst case is
-// 4 x 30s + 3 x 2s = 126s, and the "HEAD-check pinned assets" step (ffmpeg-pin-freshness.yml:229)
-// makes FIVE head_check calls under a single `timeout-minutes: 5`. A full stall therefore blows the
-// 300s cap during the THIRD call and the step dies by opaque runner kill, with no curl diagnostic
-// for the two sites never reached. That is real work with a real failure mode, not tidying. Adding
-// this file to GUARDED without first fixing those two sites would simply turn the guard red.
+// Its two sites (the `head_check()` call in "HEAD-check pinned assets", and the candidate-URL call
+// in "Validate the recommendation before publishing it") both gained `--retry-max-time 20` first.
+// The order mattered: adding the file here before fixing them turns the guard red -- which is
+// exactly what CPE-1849 did on purpose, as its pre-fix check, and got both sites reported.
+//
+// Why 20 and not 150 like the pdfium sites: the arithmetic is per-step, never a house number. The
+// "HEAD-check pinned assets" step makes FIVE head_check calls under ONE `timeout-minutes: 5`, so
+// the worst case that has to fit inside 300s is 5 x (retry-max-time + max-time), not one of them.
+// With --max-time 30 that gives 5 x 50 = 250s, ~50s of margin. Measured, not just derived: without
+// --retry-max-time one call took 126.7s against a stalling server (4 x 30s + 3 x 2s, four timeout
+// messages), so five calls is ~634s -- the step used to die by opaque runner kill during the THIRD
+// call, leaving assets 4 and 5 unchecked despite that step's deliberate `set -uo pipefail` (not -e)
+// "check every asset even if an earlier one is bad" design. With the flag it is 31.1s per call.
+//
+// That is the general lesson for anyone adding the next site: this guard checks PAIRING and this
+// comment cannot check SIZING for you (see limit 1 above). A step that loops N curl calls under one
+// cap needs N x (retry-max-time + max-time) inside that cap, and copying a sibling's number without
+// counting the calls is how you get a value that passes here and still gets killed by the runner.
 describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () => {
-  const GUARDED = ["ci.yml", "release.yml", "release-sidecar.yml"] as const;
+  const GUARDED = ["ci.yml", "release.yml", "release-sidecar.yml", "ffmpeg-pin-freshness.yml"] as const;
 
   for (const fileName of GUARDED) {
     it(`${fileName}: every curl combining --retry with --max-time also carries --retry-max-time`, () => {
@@ -400,6 +452,21 @@ describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () 
     expect(retrying.length).toBe(3);
     for (const { line } of retrying) {
       expect(line).toContain("--retry-max-time 150");
+    }
+  });
+
+  it("the scan is not vacuous for ffmpeg-pin-freshness.yml either -- both HEAD-check sites are reached (CPE-1849)", () => {
+    // Same non-vacuity role as the ci.yml case above, and needed for the same reason: the pairing
+    // scan goes green both when a site is correctly bounded AND when it stopped retrying at all
+    // (or when curlLines()/logicalLines() quietly stopped reaching it). Only a count can tell the
+    // two apart. 2, not 5 -- "HEAD-check pinned assets" calls one shared head_check() helper five
+    // times, so there is exactly ONE curl line there, plus one in "Validate the recommendation".
+    const retrying = curlLines(parseWorkflow("ffmpeg-pin-freshness.yml")).filter(
+      ({ line }) => RETRY_FLAG.test(line) && MAX_TIME_FLAG.test(line),
+    );
+    expect(retrying.length).toBe(2);
+    for (const { line } of retrying) {
+      expect(line).toContain("--retry-max-time 20");
     }
   });
 });
