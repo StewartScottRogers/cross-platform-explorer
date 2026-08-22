@@ -216,6 +216,9 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
     let manifest = PersistedManifest {
         id: manifest_id.clone(),
         created_ms: to_epoch_ms(SystemTime::now()).unwrap_or(0),
+        // CPE-1847: the map's one falsifiable claim about itself — see `PersistedManifest::file_count`.
+        // Computed here from the map that is about to be written, so the two cannot drift apart.
+        file_count: Some(files.len()),
         files,
         skipped: plan
             .skipped
@@ -642,7 +645,22 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
         }
         let Ok(data) = fs::read_to_string(&path) else { continue };
         let Ok(m) = serde_json::from_str::<PersistedManifest>(&data) else { continue };
-        out.push(ManifestSummary { id: m.id, created_ms: m.created_ms });
+        // CPE-1847 — **the id is where the file is, not what the file says it is.** This used to report
+        // `m.id`, the manifest's own account of itself, while `prune` resolves an id back to a file by
+        // name (`manifests/<id>.json`). One edited string therefore made a retention pass decide about a
+        // manifest other than the one it was looking at: pointed at a sibling, the tampered manifest's
+        // id landed in `keep` and nothing was pruned at all; pointed at nothing, `prune` was asked for a
+        // file that does not exist and the **whole pass** returned `Err`, so no checkpoint was ever
+        // thinned again. Either way the offending manifest is immortal and the store grows without
+        // bound. `save_manifest` writes every manifest at `manifests/<id>.json` by construction, so the
+        // filename is the authority and the inner field now steers nothing.
+        //
+        // Deliberately recomputation rather than a self-consistency check in `load_manifest`: refusing
+        // the mismatched manifest there would wedge the retention pass at `prune` time, which is the
+        // outcome this removes. Same shape as CPE-1847's zero-entry rule — prefer the mechanism that
+        // makes the wrong decision unreachable over the one that makes the file look valid.
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(ManifestSummary { id: id.to_string(), created_ms: m.created_ms });
     }
     Ok(out)
 }
@@ -694,6 +712,30 @@ struct PersistedManifest {
     /// reused. A path whose content was skipped is absent (see [`capture`]'s filtering).
     files: BTreeMap<String, PersistedFileState>,
     skipped: Vec<PersistedSkipped>,
+    /// How many entries [`capture`] put in `files` — written by the capture, cross-checked by
+    /// [`load_manifest`] (CPE-1847).
+    ///
+    /// **What it is for, stated precisely, because it is easy to over-claim.** A revert derives
+    /// *destruction* from *absence*: a path in the tree but not in `files` is planned as a `Delete`. An
+    /// absence is unfalsifiable — an entry someone removed and an entry that was never written are the
+    /// same bytes — so removing entries from this map silently converts a revert into a delete of
+    /// exactly those paths, measured at `applied: 4, survivors: ["f1.txt"]` for 4 of 5 entries removed.
+    /// This field gives the map one falsifiable claim about itself, so the *cheapest* form of that
+    /// tamper — deleting text and nothing else — is refused at load on every route rather than silently
+    /// re-read as a smaller tree.
+    ///
+    /// **What it is NOT.** It lives in the same hand-editable JSON as the map it describes, so an
+    /// attacker who edits both is not stopped, and it is therefore never allowed to *authorise*
+    /// anything: [`crate::revert_engine::execute_restore`]'s zero-entry stand-down does not consult it,
+    /// and a manifest asserting `file_count: 0` unlocks no deletes. Only a keyed signature would be a
+    /// boundary, and this store has no key. Recorded as a cost-raiser, deliberately not as a guard.
+    ///
+    /// `Option`, `#[serde(default)]`: manifests written before this field existed are absent-not-zero
+    /// and must keep loading — refusing them would destroy access to every checkpoint already on disk,
+    /// which is the over-tightening this ticket's sibling spent four rounds learning to avoid. Every
+    /// manifest written from now on carries it.
+    #[serde(default)]
+    file_count: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -848,7 +890,41 @@ fn load_manifest(store_dir: &Path, manifest_id: &str) -> Result<PersistedManifes
     validate_manifest_id(manifest_id)?;
     let path = manifest_path(store_dir, manifest_id);
     let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_str(&data).map_err(|e| format!("{}: {e}", path.display()))
+    let manifest: PersistedManifest =
+        serde_json::from_str(&data).map_err(|e| format!("{}: {e}", path.display()))?;
+    // CPE-1847 — the `files` map's declared size, checked against the map. See
+    // `PersistedManifest::file_count` for what this does and does not claim.
+    //
+    // Here rather than at any one reader, for the reason `validate_manifest_id` above is here: this is
+    // the single chokepoint every caller-supplied manifest id funnels through — `restore`, `prune`,
+    // `manifest_snapshot` (and through it `checkpoint_store`'s preview / diff / revert / revert_one) —
+    // so preview, diff and both revert routes refuse together instead of each deciding separately. That
+    // matters more than usual for this shape: the cherry-revert route never consults the preview at all,
+    // so a check that only guarded the preview would guard the route nobody is attacked through.
+    //
+    // A mismatch is `Err`, never a silent repair or a skip. No writer can produce one — `capture`
+    // computes the count from the map it is writing in the same expression — so a disagreement means
+    // the file was edited after it was written, and a store whose records contradict themselves is not
+    // a store to quietly act on. The refusal names both numbers so the user can see what changed.
+    //
+    // **Recorded, not fixed:** this makes a tampered manifest unprunable — `snapshot_prune::apply`
+    // propagates `prune`'s error with `?`, so one such manifest wedges the whole retention pass until it
+    // is removed by hand. The same is already true of a manifest whose JSON is malformed, so this
+    // widens an existing shape rather than introducing one; the alternative — pruning a manifest whose
+    // file list we know is wrong — releases the wrong blob refs and is worse.
+    if let Some(declared) = manifest.file_count {
+        if declared != manifest.files.len() {
+            return Err(format!(
+                "{}: this manifest says it holds {declared} file{} but its file list has {} — it has \
+                 been edited since it was written, and a checkpoint that contradicts itself cannot be \
+                 used to decide what to restore or delete",
+                path.display(),
+                if declared == 1 { "" } else { "s" },
+                manifest.files.len()
+            ));
+        }
+    }
+    Ok(manifest)
 }
 
 /// Reject a caller-supplied `manifest_id` that isn't a single safe path segment, so
@@ -968,6 +1044,7 @@ mod tests {
                 created_ms: 0,
                 files: Default::default(),
                 skipped: Vec::new(),
+                file_count: Some(0),
             },
         );
 
@@ -993,6 +1070,7 @@ mod tests {
                 created_ms: 7,
                 files: Default::default(),
                 skipped: Vec::new(),
+                file_count: Some(0),
             },
         )
         .expect("a free id must save");
@@ -1535,7 +1613,13 @@ mod tests {
                 ((*path).to_string(), PersistedFileState { hash: (*hash).to_string(), size: PAYLOAD.len() as u64 })
             })
             .collect();
-        let manifest = PersistedManifest { id: id.to_string(), created_ms: 0, files, skipped: Vec::new() };
+        let manifest = PersistedManifest {
+            id: id.to_string(),
+            created_ms: 0,
+            file_count: Some(files.len()),
+            files,
+            skipped: Vec::new(),
+        };
         fs::write(manifest_path(store, id), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
     }
 
@@ -2096,6 +2180,93 @@ mod tests {
                 "{legal_here:?} is an ordinary filename here — a Windows-only rule must not refuse it"
             );
         }
+    }
+
+    /// **CPE-1847 — the `file_count` cross-check, and the three things it must NOT refuse.**
+    ///
+    /// `load_manifest` is the single chokepoint every caller-supplied manifest id funnels through, so
+    /// this one check covers `restore`, `prune`, and `manifest_snapshot` (and through it the command
+    /// layer's preview, diff, revert and cherry-revert). The over-tightening legs are the point of the
+    /// test as much as the refusal leg is: a manifest written before this field existed, and a genuine
+    /// capture of an empty folder, must both keep loading, or the fix destroys access to real
+    /// checkpoints — the failure mode CPE-1823 spent four rounds learning to avoid.
+    #[test]
+    fn cpe_1847_load_manifest_refuses_a_file_list_that_contradicts_its_own_count() {
+        let store = scratch("cpe1847-count");
+        let dir = manifests_dir(&store);
+        fs::create_dir_all(&dir).unwrap();
+        let one_entry = r#""a.txt": { "hash": "abcd", "size": 4 }"#;
+        let plant = |id: &str, count_field: &str, files: &str| {
+            fs::write(
+                manifest_path(&store, id),
+                format!(r#"{{ "id": "{id}", "created_ms": 0, "files": {{ {files} }}, "skipped": []{count_field} }}"#),
+            )
+            .unwrap();
+        };
+
+        // The tamper: four of five entries removed, count left alone. Same refusal for a map emptied
+        // entirely — both are "the list contradicts the number written beside it".
+        plant("tampered", r#", "file_count": 5"#, one_entry);
+        let err = load_manifest(&store, "tampered")
+            .err()
+            .expect("a file list that contradicts its own count must be refused, not read as a smaller tree");
+        assert!(err.contains("5 file"), "the refusal must name the count claimed: {err}");
+        assert!(err.contains("has 1"), "and what the list actually holds: {err}");
+
+        // A manifest written before this field existed: absent is not zero. Refusing these would make
+        // every checkpoint already on disk unusable.
+        plant("legacy", "", one_entry);
+        assert_eq!(
+            load_manifest(&store, "legacy").expect("a legacy manifest must still load").files.len(),
+            1,
+            "a manifest with no `file_count` at all is exempt, not treated as claiming zero"
+        );
+
+        // A genuine capture of an empty folder: `files: {}` with the count positively asserting 0.
+        plant("genuinely-empty", r#", "file_count": 0"#, "");
+        assert!(
+            load_manifest(&store, "genuinely-empty").unwrap().files.is_empty(),
+            "a real capture of an empty directory must load — this is the constraint that makes a \
+             naive refusal of `files: {{}}` wrong"
+        );
+
+        // And the ordinary agreeing case, so the check is not simply refusing everything.
+        plant("agreeing", r#", "file_count": 1"#, one_entry);
+        assert!(load_manifest(&store, "agreeing").is_ok());
+
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1847 — the round trip a naive refusal would break, at the `capture`/`restore` level.**
+    /// Capturing an empty directory is legal, produces `files: {}` (the very shape the attack produces),
+    /// and must still restore. `checkpoint_store`'s command-level test pins the revert half.
+    #[test]
+    fn cpe_1847_capture_of_an_empty_directory_round_trips_through_restore() {
+        let src = scratch("cpe1847-empty-src");
+        let store = scratch("cpe1847-empty-store");
+        let dest = scratch("cpe1847-empty-dest");
+
+        let outcome =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        assert_eq!(outcome.new_blobs, 0, "fixture is inert: an empty capture must store no blobs");
+        let manifest = load_manifest(&store, &outcome.manifest_id).unwrap();
+        assert!(
+            manifest.files.is_empty(),
+            "fixture is inert: the capture must have produced the zero-entry shape this test is about"
+        );
+        assert_eq!(
+            manifest.file_count,
+            Some(0),
+            "the capture must positively assert zero rather than leave the count absent"
+        );
+
+        restore(&store.to_string_lossy(), &outcome.manifest_id, &dest.to_string_lossy())
+            .expect("a genuine capture of an empty directory must still restore");
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0, "and restore to an empty tree");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
     }
 
     #[test]

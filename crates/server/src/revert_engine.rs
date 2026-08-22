@@ -125,30 +125,29 @@ pub fn execute_restore(
     //   to `\\?\NUL`, which is not a file any checkpoint entry can collide with — so the two are
     //   complementary, not redundant.
     //
-    // **The WIDEST destructive shape a planted manifest still has is an emptied `"files": {}`
-    // (CPE-1847).** It turns a revert into "delete every file", with no writes to stand down and no
-    // error. Both routes measured:
+    // **The widest destructive shape a planted manifest had was an emptied `"files": {}` (CPE-1847),
+    // and it is closed just below by the first `hold` branch.** It turned a revert into "delete every
+    // file", with no writes to stand down and no error. Both routes measured on this branch before the
+    // fix, reproducing CPE-1823's round-5 figures exactly:
     //
     // ```text
     // C1 CMD revert[empty manifest]:     applied=5 skipped=0   survivors = []
     // C2 CMD revert_one[empty manifest]: applied=1 skipped=0   survivors = [f1, f2, f4, f5]
     // ```
     //
-    // C2 is the row that settles the ranking, and it is why this is wider than either checker first
+    // C2 is the row that settled the ranking, and it is why this was wider than either checker first
     // said. The same emptied manifest destroys files **one at a time** through `checkpoint_revert_one`,
     // behind a per-file confirm that says nothing about a mass delete and never consults
     // `checkpoint_preview_revert` at all. An earlier draft of this comment ranked it narrower *because*
     // of that preview — measured false, and stated here rather than quietly dropped, since this passage
     // exists to correct false claims and had become one.
     //
-    // Not closed here, and not by refusing it: an empty checkpoint is a legal capture of an empty
-    // folder, so a rule that refuses it refuses a real one. That is CPE-1847's problem to solve.
-    //
     // The **resolution collision** below — one planted key, one live file, reachable through
     // cherry-revert, destroying a file the attacker names — was the widest shape while it was open, and
     // rounds 3 and 4 both mis-ranked it (round 4's comment here said the empty-`files` shape was "not
     // this one", and that the alias was out of scope; both wrong). It is closed in this function as of
-    // round 5, which is what leaves CPE-1847 standing as the widest **remaining** shape.
+    // round 5. What CPE-1847 leaves standing as the widest **remaining** shape is a `files` map emptied
+    // only *partially* — see that first `hold` branch's doc, which records it measured.
     //
     // The condition is a property of the **checkpoint**, not of this plan. Round 3 keyed it on
     // `report.skipped`, which reads "some write failed" — and a *cherry-revert* plan contains no write
@@ -180,7 +179,92 @@ pub fn execute_restore(
     // real user with a real capture. This keeps the restorable half working.
     let unrestorable: Vec<&String> =
         checkpoint.keys().filter(|key| safe_segments(key).is_err()).collect();
-    let hold = if !unrestorable.is_empty() {
+    let hold = if checkpoint.is_empty() {
+        // **CPE-1847 — a checkpoint that records no files cannot justify deleting any.**
+        //
+        // This is the shape every rule above and below is structurally blind to, because there is
+        // nothing for them to look at. `plan_restore` reads an empty `checkpoint` as "the tree was empty
+        // then", so every live file becomes a `Delete`; there is no write to fail, no key to judge, and
+        // no entry to resolve. Measured through the registered commands on this branch before this
+        // branch existed — the ticket's figures, reproduced exactly:
+        //
+        // ```text
+        // CMD revert[empty manifest]:     applied=5 skipped=0   survivors = []
+        // CMD revert_one[empty manifest]: applied=1 skipped=0   survivors = [f1, f2, f4, f5]
+        // ```
+        //
+        // Complete success reported, whole tree gone, from the cheapest tamper there is: **deleting
+        // text**. Every other manifest attack CPE-1823 closed needed a crafted key that survived a
+        // guard; this one needs three characters (`{}`) and reaches through `checkpoint_revert_one`,
+        // where nothing consults `checkpoint_preview_revert` at all.
+        //
+        // # Why the fix is a stand-down and not a refusal
+        //
+        // **An empty checkpoint is legitimately representable** — capturing an empty directory produces
+        // exactly this manifest, measured: `new_blobs: 0, added_bytes: 0, files: {}`. So refusing to
+        // *load* it, or erroring here, would refuse a real capture. It is also byte-for-byte
+        // indistinguishable from an emptied map: there is no evidence anywhere on disk that separates a
+        // genuine empty capture from one whose entries were removed, which is why this ticket was a
+        // judgement call rather than a detection problem. (`file_count` in
+        // [`crate::snapshot_capture`]'s persisted manifest raises the cost of producing the emptied
+        // shape, but it is a field in the same hand-editable file, so it cannot be the thing that makes
+        // the harm impossible. It is deliberately **not** consulted here, and asserting `file_count: 0`
+        // unlocks nothing.)
+        //
+        // So the rule is about what a zero-entry checkpoint can *authorise*, and it costs the legitimate
+        // reading nothing the checkpoint could have given back:
+        //
+        // - A delete's whole justification — this function's standing premise since CPE-1823 round 3 —
+        //   is "this path is not in the checkpoint". A checkpoint holding nothing says that of every
+        //   path in the universe. It is an absence, and an absence is unfalsifiable: a removed entry and
+        //   an entry that was never written are the same bytes.
+        // - **A zero-entry checkpoint has no constructive half at all.** It can restore nothing, so
+        //   every delete it authorises destroys content it cannot give back, and holding the destructive
+        //   half back forfeits no restorable state. That asymmetry is what makes standing down
+        //   proportionate here and not merely cautious.
+        //
+        // # What this costs, measured, and why it is the right trade anyway
+        //
+        // The one legitimate flow it changes: capture an empty folder, let something fill it, revert to
+        // clean it out. Measured before this branch — `applied: 3`, tree emptied. Now those deletes are
+        // **held back and named**, one reason per path with the count, on the same loud channel as every
+        // other hold-back; the user deletes them themselves. That is a lost convenience against total,
+        // unrecoverable, silently-reported loss of an entire tree — and the checkpoint was never
+        // restoring anything in that flow, only authorising deletion.
+        //
+        // Not changed, and pinned by test: a genuine empty capture still loads, still previews, still
+        // diffs, and reverting an **unchanged** empty tree still succeeds — the plan is empty, so
+        // nothing is held back and `applied: 0` with no error. The round trip the ticket names as the
+        // constraint that makes a naive refusal wrong is intact.
+        //
+        // # The residual, measured rather than assumed
+        //
+        // A **partially** emptied map evades this branch entirely and is strictly wider: removing 4 of 5
+        // entries measured `applied: 4, survivors: ["f1.txt"]`. No rule in this engine can close it —
+        // the surviving entry makes the checkpoint look ordinary, and the plan it produces is exactly
+        // what a real revert of a real checkpoint looks like. It is met one layer up, at the only place
+        // the tamper is visible: `load_manifest`'s `file_count` cross-check, which refuses a `files` map
+        // whose size disagrees with the count the capture wrote. That raises the cost from "delete text"
+        // to "delete text and rewrite a number", which is a real bar for the cheapest tamper and
+        // explicitly not a security boundary — a keyed signature is the only thing that would be, and
+        // that is not something this store has.
+        //
+        // # Reporting
+        //
+        // Deliberately on the existing `"not deleted:"` reason channel rather than a new one. The UI can
+        // only tell a deliberate hold-back from a failure by matching that prefix, which is the
+        // structural gap CPE-1845 owns; adding a second prefix here would give it two shapes to
+        // reconcile instead of one.
+        Some(format!(
+            "not deleted: this checkpoint records no files at all, so it cannot say that anything is \
+             \"not in the checkpoint\" — and it holds nothing to restore in exchange. An emptied \
+             `files` map and a genuine capture of an empty folder are the same bytes on disk, so this \
+             revert would have deleted {} file{} and restored none. Delete them yourself if that is \
+             what you meant.",
+            deletes.len(),
+            if deletes.len() == 1 { "" } else { "s" }
+        ))
+    } else if !unrestorable.is_empty() {
         let named: Vec<String> =
             unrestorable.iter().take(NAMED_CAUSES).map(|k| format!("{k:?}")).collect();
         let more = unrestorable.len().saturating_sub(named.len());
@@ -1182,8 +1266,18 @@ mod tests {
         fs::create_dir_all(root.join("a/b")).unwrap();
         fs::write(root.join("a/b/c.txt"), b"deep").unwrap();
         fs::write(root.join("top.txt"), b"shallow").unwrap();
+        fs::write(root.join("keep.txt"), b"unchanged since the checkpoint").unwrap();
 
-        let checkpoint = Snapshot::new(); // both files are new-since-checkpoint -> deletes
+        // Both deleted files are new-since-checkpoint. `keep.txt` is in the checkpoint and unchanged, so
+        // it contributes no action — it is here solely so the checkpoint is not **zero-entry**, which
+        // CPE-1847 stands every delete down on. This test was written with `Snapshot::new()`, i.e. with
+        // the exact shape that ticket is about; keeping it that way would have made it a test of the
+        // attack rather than of delete ordering.
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert(
+            "keep.txt".to_string(),
+            crate::restore_plan::FileState::new("deadbeef", 30),
+        );
         let plan = vec![
             RestoreAction { path: "top.txt".to_string(), op: RestoreOp::Delete },
             RestoreAction { path: "a/b/c.txt".to_string(), op: RestoreOp::Delete },
