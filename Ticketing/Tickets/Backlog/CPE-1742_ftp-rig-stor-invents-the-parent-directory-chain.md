@@ -265,3 +265,108 @@ not exist at all until `real_path` returns `Some`, so nothing reaches either new
 
 `git diff --numstat` for round 3: `14  6  crates/ftp/src/lib.rs` — the only file touched, as expected
 for a two-edit round.
+
+**2026-08-21, round 3 (continued) — CI went red on macOS, folded into round 3 per the coordinator.**
+
+`Server crates (macos-latest)` failed at head `09b72443` (the round-2 commit, before the two comment
+edits above): `stor_refuses_a_missing_parent_and_still_works_for_one_that_exists` panicked on Refusal 2
+(parent exists but is a plain file) — `/at-root.txt/child.txt` came back `[550] Path escapes the served
+root` instead of `553`. Windows was green for the same case. **This is not a flaky test or a test bug —
+it did not exist before round 2, so it is pre-existing rig behaviour on macOS (and, by the same
+reasoning, Linux) that nothing had ever probed before. Round 2 did not break macOS; it revealed macOS
+was already answering the wrong question.**
+
+**Diagnosis**, from reading `crates/server/src/fsutil.rs`'s `confined_to` and `crates/ftp/src/lib.rs`'s
+`real_path`/`joined_path` directly rather than assuming the coordinator's hypothesis:
+
+`real_path(root, arg)` is `joined_path(root, arg)` gated by `confined_to(&joined, root)` — if
+`confined_to` returns `false`, `real_path` returns `None` and the caller sends the confinement refusal.
+`confined_to` walks: `canonicalize(probe)`; on success, test containment; on failure, if the error kind
+is `NotFound`, drop the last path component and retry (this is the deliberate "the file doesn't exist
+yet, but its ancestors might, and that's enough to know if it's inside root" logic the STOR/MKD create
+case needs); on any OTHER error kind, `return false` immediately — refuse, no retry.
+
+For `probe = <root>/at-root.txt/child.txt` where `at-root.txt` is a real file: `canonicalize` cannot
+resolve past `at-root.txt` because it is not a directory. **The two platforms report that failure with
+different `io::ErrorKind`s, and that is the entire split:**
+
+- **POSIX** (`realpath(3)`, which is what `std::fs::canonicalize` calls on Linux/macOS): a non-final
+  path component that exists but is not a directory is `ENOTDIR`, which Rust maps to
+  `ErrorKind::NotADirectory` (stable since Rust 1.83) — a DIFFERENT kind from `ENOENT`'s `NotFound`. The
+  old code's guard (`e.kind() == NotFound`) does not match `NotADirectory`, so it falls straight to
+  `Err(_) => return false` on the very FIRST canonicalize attempt — refused as an escape, without ever
+  walking up far enough to discover `<root>/at-root.txt` itself resolves and is inside `root`.
+- **Windows** (`CreateFileW` via `GetFinalPathNameByHandleW`): the same shape returns
+  `ERROR_PATH_NOT_FOUND`, which Rust's io error mapping puts under `ErrorKind::NotFound` — the SAME kind
+  the genuinely-missing-parent case produces. Windows does not distinguish "component doesn't exist"
+  from "component exists but isn't a directory" at this API surface, so the existing `NotFound` branch
+  already let the walk-up run, found `<root>/at-root.txt` canonicalizes and is inside `root`, and
+  correctly answered "contained" — which is why the STOR guard's own `553` was reachable on Windows
+  before this fix and never on macOS/Linux.
+
+Round-1's reviewer had flagged exactly this shape of risk in advance and said so honestly ("Not proven
+locally") — its reasoning was right for a MISSING directory prefix (`NotFound` walks up correctly on
+every platform already) and did not extend to a PLAIN-FILE prefix, which is a genuinely different errno
+or the caller's platform mapping of one. The three-OS CI gate caught what a Windows-only local run
+structurally could not.
+
+**The defect is not the test — it is `confined_to` reporting the wrong VERDICT on two of three
+platforms.** Before this fix, macOS/Linux told an FTP client "Path escapes the served root" about a
+path that does not escape the served root at all (`/at-root.txt/child.txt` is squarely inside it); the
+real problem is that `at-root.txt` is a file, which is a different question `confined_to` has no
+business answering — that belongs to the caller (`cpe-ftp`'s `STOR`, which is exactly what its `553`
+guard is for). A wrong-reason refusal is the same defect class this whole ticket exists to close: a
+reply that misdescribes what actually happened.
+
+**Fix, `crates/server/src/fsutil.rs`'s `confined_to`:** the retry guard now also treats
+`ErrorKind::NotADirectory` as "nothing conclusive yet, keep walking up", the same as `NotFound` already
+was:
+```rust
+Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
+```
+This makes POSIX's walk-up behave the way Windows's already accidentally did for this shape — find the
+nearest ancestor that DOES canonicalize (`<root>/at-root.txt`), and test THAT for containment. It does
+not weaken CPE-1730: the walk-up only ever answers "is the nearest resolvable ancestor inside root",
+which is exactly the same question already asked for the `NotFound` case, and a genuinely escaping path
+(`..`, absolute, symlinked-out) still resolves its walked-up ancestor to somewhere outside root and is
+still refused — confirmed by re-running the MUT F red-proof below.
+
+**Did NOT make the test platform-conditional.** Accepting either `550` or `553` depending on OS would
+have papered over a reply that is factually wrong on two of three platforms rather than fixed it — the
+coordinator's stated last resort, not taken, because the fix was findable and clean.
+
+**New regression coverage**, `crates/server/src/fsutil.rs`'s
+`confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths` (the test that already pins
+`confined_to`'s escape/admit taxonomy directly, independent of any rig): added
+`confined_to(&root.join("a.txt/new.txt"), &root)` must be `true` — the exact shape that was `false` on
+macOS/Linux before this fix. This is the platform-portable place to pin it (`crates/server`'s own suite
+runs on the 3-OS matrix, unlike a rig-specific probe), and it fails loudly at the SOURCE of the bug
+rather than only at one of its call sites.
+
+**Red-proof, MUT F (re-run per the coordinator's instruction, to confirm the fix did not weaken
+CPE-1730):** `STOR`'s `let Some(path) = real_path(&root, &arg) else { … }` mutated to
+`let Some(path) = Some(joined_path(&root, &arg)) else { … }` — bypassing confinement entirely. Both of
+CPE-1730's filesystem-asserting STOR tests went red on Windows (the only platform available locally):
+```
+thread 'tests::cpe_1730_an_absolute_request_path_cannot_replace_the_root' panicked at crates\ftp\src\lib.rs:1847:9:
+assertion `left == right` failed: an absolute STOR path must not replace the served root (outcome was Ok(()))
+thread 'tests::cpe_1730_a_request_path_that_escapes_the_served_root_is_refused' panicked at crates\ftp\src\lib.rs:1742:9:
+assertion `left == right` failed: STOR to /../cpe-ftp-srv-32816-0-cpe-1730-victim/victim.txt must NOT reach a file outside the served root (outcome was Ok(()))
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.03s
+```
+Reverted; `cargo test -p cpe-ftp` confirmed 21/21 green again before committing.
+
+**What I could not verify locally, stated rather than implied:** I cannot run macOS or Linux in this
+environment. The diagnosis above is a source-level derivation (POSIX `realpath(3)`/`ENOTDIR` semantics
+vs. Windows `CreateFileW`/`ERROR_PATH_NOT_FOUND`), not a local observation on either platform — the
+verification step is pushing this commit and reading the actual ubuntu-latest and macos-latest CI run
+results by SHA (below), not trusting a Windows-only pass.
+
+**Gates, re-run (Windows, this session):** `cargo test -p cpe-ftp` 21/21 green; `cargo test` in
+`crates/server` 2287/2287 lib tests passed, 0 failed, 4 pre-existing `#[ignore]`d, all integration test
+binaries green; `cargo clippy --all-targets -- -D warnings` clean on both `crates/ftp` and
+`crates/server`.
+
+`git diff --numstat` for this fix: `28  1  crates/server/src/fsutil.rs` — the only file touched (the two
+comment edits above already landed in the round-3 commit; this fix is the file the coordinator's CI
+report pointed at, not `crates/ftp`).

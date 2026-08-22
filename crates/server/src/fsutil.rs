@@ -2712,7 +2712,24 @@ pub fn confined_to(path: &Path, root: &Path) -> bool {
             // `starts_with` is component-wise, so `<root>2` does not start with `<root>`, and it is
             // true for `real_root` itself — the root is contained in itself, by design (see above).
             Ok(real) => return real.starts_with(&real_root),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // CPE-1742 review, cross-OS gate: `NotFound` alone is not the whole "nothing here yet,
+            // keep walking up" class. A path whose PREFIX component exists but is a plain FILE, not a
+            // directory (`<root>/a.txt/new.txt`), also cannot canonicalize — but POSIX `realpath(3)`
+            // reports that as `ENOTDIR` (Rust: `ErrorKind::NotADirectory`, stable since 1.83), a
+            // DIFFERENT kind from `ENOENT`'s `NotFound`. Windows does not make that distinction here:
+            // `CreateFileW` on the same shape returns `ERROR_PATH_NOT_FOUND`, which Rust maps to the
+            // same `NotFound` the missing-parent case already produces — so on Windows the walk-up
+            // below already ran for this shape, found `<root>/a.txt` canonicalizes and is inside
+            // `root`, and answered "contained". On macOS/Linux, before this fix, `NotADirectory` fell
+            // straight to the `Err(_) => return false` arm below — refusing this as an ESCAPE, on a
+            // path that is not one, before ever reaching the walk-up. Caught by CI's three-OS gate
+            // (macOS red, Windows green) on a `cpe-ftp` `STOR` test that never touched this function
+            // directly; `confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths` below
+            // now pins the same case here so this exact regression cannot reach that gate silently
+            // again. Whether `<root>/a.txt/new.txt` is a WRITABLE target is a different question this
+            // function has no opinion on — that belongs to the caller (e.g. `cpe-ftp`'s `STOR`, which
+            // refuses it with its own `553 Could not create file.` once this returns `true` for it).
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
             Err(_) => return false, // EACCES / ELOOP / … — cannot tell, so refuse
         }
         // `NotFound` is two different situations. A dangling symlink is one of them, and it is the
@@ -4153,6 +4170,16 @@ mod tests {
              and it is exactly where `contained_under` fails open"
         );
         assert!(confined_to(&root.join("sub/deep/new.txt"), &root), "…including under missing parents");
+        assert!(
+            confined_to(&root.join("a.txt/new.txt"), &root),
+            "a prefix component that exists but is a PLAIN FILE, not a directory (`a.txt` is a real \
+             file above), must still be admitted — it is lexically inside the root, not an escape. \
+             POSIX `canonicalize` fails with `NotADirectory` here (not `NotFound`), a distinct error \
+             kind the walk-up must also treat as \"nothing here yet, keep going\" or this reads as an \
+             escape and answers the wrong refusal — the CPE-1742-review regression, caught by CI's \
+             macOS leg on a `cpe-ftp` test that exercised this indirectly. Whether the write itself is \
+             valid is a different question for the caller, not this function."
+        );
 
         // (a) `..`-shaped.
         assert!(!confined_to(&root.join("../sibling/victim.txt"), &root), "(a) `..` to a sibling");
