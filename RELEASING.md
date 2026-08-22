@@ -17,6 +17,20 @@ cd Z:\repos\cross-platform-explorer
 ./scripts/release.ps1 -Version 0.2.0
 ```
 
+Add `-BumpOnly` to edit the three manifests and stop there — no commit, no tag, no push — when you
+want to read the diff before anything leaves the machine (CPE-1841):
+
+```powershell
+./scripts/release.ps1 -Version 0.2.0 -BumpOnly
+git diff --numstat   # expect exactly `1  1` for each of the three manifests
+```
+
+The script bumps only each manifest's own version — `package.json`'s and `tauri.conf.json`'s
+**top-level** `"version"`, and `Cargo.toml`'s `version` inside **`[package]`**. A dependency pin, a
+nested tool version, or a version number inside a description or URL is left alone, and a manifest
+that no longer matches at all aborts the release loudly instead of being written back unchanged and
+reported as bumped (CPE-1841; guarded by `src/lib/releaseVersionBump.test.ts`).
+
 What happens next, automatically:
 
 1. GitHub Actions builds signed installers for Windows, macOS (universal), and
