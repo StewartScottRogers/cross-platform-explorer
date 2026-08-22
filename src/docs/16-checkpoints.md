@@ -114,7 +114,12 @@ Automatic pruning deletes old snapshots, so it takes care over which files it is
 A snapshot's record has to agree with the name it is filed under; anything in the store that doesn't
 describe itself that way — a duplicate left by a copy/paste or a cloud-sync conflict, a file renamed by
 hand, a record edited after it was written — is **ignored by pruning rather than acted on**. It stays on
-disk, taking a little space, until you remove it yourself.
+disk until you remove it yourself.
+
+**So does the content it points at**, and that is the part worth knowing: automatic cleanup never
+deletes stored content that any record in the store still refers to, and it never acts on a record it
+can't make sense of. An ignored file therefore holds on to its snapshot's stored content — which can be
+as much space as that whole snapshot, not the size of the file itself — until you delete the file.
 
 Two consequences worth knowing:
 

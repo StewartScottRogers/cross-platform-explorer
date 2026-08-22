@@ -93,6 +93,11 @@ pub fn apply(
 
     let mut bytes_freed = 0u64;
     let mut pruned = Vec::new();
+    // This loop is where the quadratic term lives: each `prune` re-scans the surviving manifests to
+    // check nothing else still names the blobs it is about to free (CPE-1861). Fine for the scheduled
+    // shape — one snapshot ageing out — and measurable on a bulk thin. Before optimising the retention
+    // pass, read the cost note on `snapshot_capture::manifests_naming`: hoisting that scan out of the
+    // per-manifest call is the fix, weakening it is not.
     for id in &result.prune {
         bytes_freed += snapshot_capture::prune(store_dir, id)?;
         pruned.push(id.clone());

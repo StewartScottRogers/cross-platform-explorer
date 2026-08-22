@@ -164,9 +164,36 @@ store's retention for good.
 
 **The cost, stated as a decision rather than discovered later: a file that fails these checks is never
 reclaimed.** It leaks. That is this module's chosen failure direction everywhere else (`prune`'s
-documented "leak over corruption", `capture`'s skip-on-error), it is bounded — a duplicate shares its
-original's blobs and costs one small JSON file — and it is pinned by assertion so nobody "fixes" it back
-without meeting the reasoning. CPE-1847's prune test, which asserted the liar **is** pruned, is not
+documented "leak over corruption", `capture`'s skip-on-error), and it is pinned by assertion so nobody
+"fixes" it back without meeting the reasoning.
+
+**Corrected in review, and the correction is the important part, because the first version of this
+record was wrong in the flattering direction.** I wrote that the leak is "bounded — a duplicate shares
+its original's blobs and costs one small JSON file". It costs the *snapshot's stored content*. The two
+halves interact, and neither comment said so: `prune` protects a blob **because** a manifest file still
+names it, and half 1 guarantees that file is never listed — so "prune the last namer", the escape my own
+`prune` comment leaned on for its "no permanent leak" claim, is **unreachable through retention**.
+Measured here, driving the real `apply`:
+
+```text
+3 captures (m1 oldest, unique 12-byte blob) + an Explorer copy "<m1> - Copy.json"; hourly=2
+  pass 1       pruned=[m1]  kept=[m3, m2]  bytes_freed=0
+               m1's unique blob still on disk after its owner was pruned: true   (index refs: 1)
+  passes 2-4   pruned=[]    freed=0        every time
+  final        blob present; manifests/ = ["<m1> - Copy.json", "<m2>.json", "<m3>.json"]
+  prune("<m1> - Copy") by id  ->  freed=12, blob gone
+```
+
+So a copy pins the whole pruned snapshot's unique content indefinitely. The leak *is* bounded — by that
+snapshot's blob set — but the bound I stated was wrong by however large the snapshot is, and it is
+reached by the ordinary unattended copy/paste or cloud-sync trigger this ticket is written around.
+Reclaiming it needs the file removed by hand, or `prune` driven by that id directly — the last line
+above, which is what `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` already
+exercises. The trade still goes the same way (a leak of one snapshot's blobs is recoverable by deleting
+one file; a stray file steering a delete is not), but the whole stated value of pinning it was that a
+future maintainer meets the reasoning — and they were being handed a few hundred bytes. Corrected in all
+four places rather than softened: `prune`'s comment, `list_manifests`'s comment, the in-app docs page,
+and here. CPE-1847's prune test, which asserted the liar **is** pruned, is not
 reinstated; it went with its fix in that ticket's revert, so nothing is lost, only not restored.
 
 **Half 2 — blob safety, in `prune`: one manifest, one refcount, and a release must not drop a blob
@@ -232,7 +259,7 @@ enumeration result, and it is what makes the skip safe (nothing else shows these
 | 3 | `restore` / `prune` / `manifest_snapshot` | filename, via `load_manifest` | Unchanged; `prune` gains the blob-witness rule |
 | 4 | `list_manifests` | **read the inner field** — the bug | **Fixed.** Requires agreement + a resolvable name + a self-consistent count |
 | 5 | `snapshot_prune::preview` / `apply` | ids from #4, fed straight to `prune` with `?` | The only production caller. Fixed by #4; nothing else needed |
-| 6 | `checkpoint_store::checkpoints.json` (`Checkpoint.manifest_id`) | its own append-only index, written from `CaptureOutcome.manifest_id`, read by `checkpoint_list` and the preview's ts lookup | **Not a sink for this bug** — never consults a manifest's inner field. Carries a separate pre-existing wart: retention prunes manifests without touching these rows, so the UI can list a checkpoint whose manifest is gone (it errors on use). Recorded, not fixed — it is a reporting gap, not a destructive one, and belongs with CPE-1845 |
+| 6 | `checkpoint_store::checkpoints.json` (`Checkpoint.manifest_id`) | its own append-only index, written from `CaptureOutcome.manifest_id`, read by `checkpoint_list` and the preview's ts lookup | **Not a sink for this bug** — never consults a manifest's inner field. Carries a separate pre-existing wart: retention prunes manifests without touching these rows, so the UI can list a checkpoint whose manifest is gone (it errors on use). Recorded, not fixed — it is a reporting gap, not a destructive one. **Now filed as CPE-1862.** (First written here as "belongs with CPE-1845"; that was the wrong home — CPE-1845 is about `OpResult` lacking a structural discriminant, a result-*shape* defect, whereas this is an append-only index nobody reconciles, and CPE-1845's own file carried no record of it, so the note would have been lost) |
 | 7 | `snapshot_schedule::snapshot_run_due` | `checkpoint_prune_apply` per due root | The unattended trigger. Covered through the command-level test |
 | 8 | `fresh_manifest_id` / `pick_manifest_id` | filename existence only | Unchanged |
 | 9 | `snapshot::apply_capture` (**writer**, +1 per capture) | — | The origin of the drift: a manifest that arrives by copy never runs this |
@@ -307,7 +334,8 @@ the practical advice (copy the whole store folder, not files inside it). No new 
   (NTFS refuses both), so those two shapes are exercised only by `Server crates` on **ubuntu and
   macOS**. That is the merge gate, as it was for CPE-1823 and CPE-1847. The `a..b` leg runs everywhere,
   including here.
-- Frontend tests were not run locally (no `node_modules` in the worktree). The change is body text in one
-  markdown file with no frontmatter or link changes, and `docs.test.ts` only reads frontmatter, ordering
-  and content length — CI's frontend job covers it.
+- ~~Frontend tests were not run locally~~ — run in review round 2 after linking the repo's
+  `node_modules` into the worktree: `vitest run src/lib/docs.test.ts src/lib/sectionDocs.test.ts` →
+  **11 passed** (9 + 2). The change is body text in one markdown file with no frontmatter or link
+  changes; the rest of the frontend suite is unaffected and CI covers it.
 - The `checkpoints.json` / pruned-manifest reporting gap in enumeration row 6 is recorded, not fixed.

@@ -606,8 +606,14 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     // So the index is asked only for the *cheap* question — which of this manifest's hashes are even in
     // danger of hitting zero — and the authoritative question ("does anything still name it?") is
     // answered by **recomputing from the manifests actually on disk**, the shape CPE-1823 kept landing
-    // on. Nothing is scanned unless a blob is genuinely about to be freed, so the honest path pays a
-    // single map lookup per hash.
+    // on. The index lookup is the cheap gate: a hash whose `refs` is 2 or more cannot reach zero here,
+    // so it costs one map lookup and nothing more.
+    //
+    // **That gate does not usually spare the scan, and it should not be read as if it did.** The
+    // ordinary scheduled prune removes a snapshot holding unique blobs nothing else references, so at
+    // least one hash is at risk and `manifests/` is walked on essentially every pass — which is what
+    // the 6.2 ms → 6.8 ms figure in `manifests_naming`'s cost note actually measures. The scan is the
+    // normal cost of a prune, not an exceptional one.
     let at_risk: BTreeSet<String> = hashes
         .iter()
         // `map_or(true, ..)`: a hash the index doesn't know about is at risk too — the delete loop
@@ -621,10 +627,31 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     let still_named = manifests_naming(store_path, &at_risk);
 
     // Skip the decrement rather than decrement-and-restore: the survivor's hold is what the count
-    // *should* have been all along, so leaving it at its current value is the repair, and it is
-    // self-correcting — prune the last namer and nothing protects it any more, so the blob is freed
-    // then. No permanent leak, and the honest two-captures-share-a-blob case is untouched (its `refs`
-    // is 2, so it is never even at risk).
+    // *should* have been all along, so leaving it at its current value is the repair. As a rule about
+    // this function it is self-correcting — prune the last namer and nothing protects the blob any
+    // more, so it is freed then — and the honest two-captures-share-a-blob case is untouched (its
+    // `refs` is 2, so it is never even at risk).
+    //
+    // **"Prune the last namer" is not reachable through retention, though, and an earlier version of
+    // this comment claimed "no permanent leak" on the strength of it.** That was wrong, because the two
+    // halves of CPE-1861 interact and neither one says so on its own: `list_manifests` refuses to list
+    // a manifest file that does not describe itself, so the very file protecting this blob is one
+    // retention can never name. Measured, driving the real `snapshot_prune::apply`:
+    //
+    // ```text
+    // 3 captures (m1 oldest, unique 12-byte blob) + an Explorer copy "<m1> - Copy.json"; hourly=2
+    //   pass 1       pruned=[m1]  kept=[m3, m2]  bytes_freed=0
+    //                m1's unique blob still on disk after its owner was pruned: true   (index refs: 1)
+    //   passes 2-4   pruned=[]    freed=0        every time
+    //   final        blob present; manifests/ = ["<m1> - Copy.json", "<m2>.json", "<m3>.json"]
+    //   prune("<m1> - Copy") by id  ->  freed=12, blob gone
+    // ```
+    //
+    // So a copy pins the whole pruned snapshot's unique content for as long as it sits in the store.
+    // Reclaiming it needs the file removed by hand, or `prune` called with that id directly — the last
+    // line above, which is exactly what
+    // `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` exercises. The same
+    // correction is stated from the other side at `list_manifests`, where the size of the residue is.
     let to_release: BTreeSet<String> = hashes.difference(&still_named).cloned().collect();
     let freed = release(&mut store, &to_release);
     let blobs_dir_path = blobs_dir(store_path);
@@ -775,12 +802,34 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
         // which the duplicate-id collapse used to prevent — it stopped the whole pass, not just the
         // liar.
         //
-        // The cost, stated plainly: **a file that fails these checks is never reclaimed.** That is a
-        // leak, and it is the failure direction this module chooses everywhere else (`prune`'s
-        // "leak over corruption", `capture`'s skip-on-error). It is also bounded — a copy shares its
-        // original's blobs and costs one small JSON file — and it is not the last line of defence:
-        // `prune` no longer frees a blob any manifest file still names, so even if a future change did
-        // start pruning these, the duplicate could not destroy the survivor's content.
+        // **The cost, stated plainly — and corrected in review, because the first version of it was
+        // wrong in the flattering direction.** A file that fails these checks is never reclaimed, and
+        // *neither is any blob it names*. That is a leak, and it is the failure direction this module
+        // chooses everywhere else (`prune`'s "leak over corruption", `capture`'s skip-on-error) — but
+        // it is **not** "one small JSON file", which is what this comment used to say.
+        //
+        // The two halves of CPE-1861 interact to make it larger than either half implies. `prune`
+        // refuses to free a blob any manifest file still names — *including a file this function
+        // declines to list* — and because this function declines to list it, retention can never prune
+        // it and so can never reach the "last namer" case that would free those blobs. Measured
+        // through the real `snapshot_prune::apply`:
+        //
+        // ```text
+        // 3 captures (m1 oldest, unique 12-byte blob) + an Explorer copy "<m1> - Copy.json"; hourly=2
+        //   pass 1      pruned=[m1] kept=[m3, m2] bytes_freed=0; m1's unique blob present, index refs 1
+        //   passes 2-4  pruned=[] freed=0, every time
+        //   final       manifests/ = ["<m1> - Copy.json", "<m2>.json", "<m3>.json"], blob still present
+        // ```
+        //
+        // So the residue is **that snapshot's stored content**, pinned for as long as the file sits in
+        // the store — bounded by the snapshot's blob set, not by a few hundred bytes, and reached by the
+        // ordinary unattended cloud-sync/copy-paste trigger this ticket is written around. Reclaiming it
+        // needs the file removed by hand, or `prune` driven by that id directly.
+        //
+        // Traded knowingly and in that direction anyway: a leak of one snapshot's blobs is recoverable
+        // by deleting one file, and the alternative is a stray file steering a delete, which is not. But
+        // whoever reconsiders this should meet the real number rather than the reassuring one — that is
+        // the whole value of pinning the decision here.
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
         if m.id != stem
             // The name must also be one this module could hand out and resolve. Without this, a file
