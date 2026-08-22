@@ -122,9 +122,21 @@ function stripShellComment(line: string): string {
  *
  *  CPE-1849 re-verified the join against those two ffmpeg-pin-freshness.yml sites rather than
  *  assuming it generalised: adding that file to GUARDED before fixing it reported BOTH sites as
- *  offenders, each as one fully-joined logical line carrying --max-time and --retry together. It
- *  also confirms stripShellComment()'s quote-awareness on real code -- the joined tail contains
- *  `-w '%{http_code}'`, whose `#` is quoted and must not truncate the line. */
+ *  offenders, each as one fully-joined logical line carrying --max-time and --retry together --
+ *  which also confirms parseWorkflow() accepts that file, since it throws rather than returning
+ *  empty when the bounded-subset parser cannot read one.
+ *
+ *  That probe says NOTHING about stripShellComment()'s quote-awareness, and an earlier draft of
+ *  this comment claimed it did, citing a `#` inside `-w '%{http_code}'`. There is no `#` in
+ *  `%{http_code}` -- the characters are % { h t t p _ c o d e } -- and neither curl invocation in
+ *  that file contains a `#` anywhere. The probe could not have proven it even if one did: --retry
+ *  and --max-time both sit BEFORE the `-w` tail, so a strip that truncated there would still leave
+ *  an offender to report, and the test would look identical. Demonstrated, not reasoned: replacing
+ *  stripShellComment()'s whole body with a naive `line.slice(0, line.indexOf("#"))` -- no quote
+ *  tracking at all -- left every test in this file passing, so nothing in the suite exercised
+ *  quote-awareness at all. It is now exercised directly, on synthetic input, by the describe block
+ *  "logicalLines() handles shell comments and continuations" below: a real property needs a real
+ *  test, not a claim that some unrelated probe happened to cover it. */
 function logicalLines(run: string | undefined): string[] {
   const out: string[] = [];
   let pending = "";
@@ -153,6 +165,23 @@ const RETRY_FLAG = /(?<![\w-])--retry(?![\w-])/;
 const MAX_TIME_FLAG = /(?<![\w-])--max-time(?![\w-])/;
 const RETRY_MAX_TIME_FLAG = /(?<![\w-])--retry-max-time(?![\w-])/;
 
+/** Builds a matcher for a flag set to an EXACT value. The `(?![\d.])` tail is the whole point and
+ *  is not decoration: `"--retry-max-time 200".includes("--retry-max-time 20")` is **true**, so the
+ *  substring spot checks these tests used to rely on pinned a PREFIX, not a value. Demonstrated
+ *  under CPE-1849 -- setting the head_check site to `--retry-max-time 200` (5 x 230s against a
+ *  300s cap, comfortably broken) left every test green. Any assertion that a numeric flag holds a
+ *  particular value must go through this, never through `toContain`. */
+function flagValue(flag: string, value: number): RegExp {
+  return new RegExp(`(?<![\\w-])${flag}\\s+${value}(?![\\d.])`);
+}
+
+/** Reads a numeric flag's value off a joined shell line, or null if the flag is absent. Used by the
+ *  arithmetic assertion below, which needs the NUMBERS, not merely the flags' presence. */
+function flagNumber(line: string, flag: string): number | null {
+  const m = line.match(new RegExp(`(?<![\\w-])${flag}\\s+(\\d+(?:\\.\\d+)?)(?![\\d.])`));
+  return m ? Number(m[1]) : null;
+}
+
 /** Every real curl invocation in a parsed workflow, tagged with where it lives, read as LOGICAL
  *  lines (continuations joined, comments stripped) so that neither line-wrapping nor an
  *  explanatory comment can move a flag out of the scan's view. The `run` blocks in these workflows
@@ -171,6 +200,51 @@ function curlLines(doc: WorkflowDoc): { where: string; line: string }[] {
   }
   return found;
 }
+
+// CPE-1849. Every other assertion in this file reads the REAL workflows, which means a helper is
+// only ever exercised on the inputs those workflows happen to contain today. stripShellComment()'s
+// quote-awareness was exercised by none of them -- replacing its body with a naive
+// `line.slice(0, line.indexOf("#"))` left the whole suite green -- so the property the comment on
+// logicalLines() calls "load-bearing in the SAFE direction" was pure prose.
+//
+// These tests supply the inputs the workflows do not. The first is the one that matters: a `#`
+// inside a quoted URL fragment must NOT truncate the line, because that direction fails SILENTLY --
+// the curl vanishes from the scan and the pairing rule reports a clean pass on an unbounded site.
+// The others cover the loud direction, which is a correctness bug but never a safety hole.
+describe("logicalLines() handles shell comments and continuations (CPE-1849)", () => {
+  it("does not truncate a curl at a `#` inside a quoted URL fragment -- the SILENT failure direction", () => {
+    const run = `curl --fail --retry 3 --max-time 20 -sS -o /tmp/x "https://example.com/a#frag"`;
+    const [line] = logicalLines(run);
+    expect(line).toContain("https://example.com/a#frag");
+    // The point of not truncating: the flags must still be visible to the pairing scan.
+    expect(RETRY_FLAG.test(line)).toBe(true);
+    expect(MAX_TIME_FLAG.test(line)).toBe(true);
+    expect(RETRY_MAX_TIME_FLAG.test(line)).toBe(false);
+  });
+
+  it("still strips a real trailing comment that follows code", () => {
+    const [line] = logicalLines(`echo hi # curl --fail --retry 3 --max-time 20 https://x`);
+    expect(line).toBe("echo hi");
+    expect(RETRY_FLAG.test(line)).toBe(false);
+  });
+
+  it("drops a whole-line comment", () => {
+    expect(logicalLines(`# curl --retry 3 --max-time 20 https://x`)).toEqual([]);
+  });
+
+  it("does not treat a `#` mid-word as opening a comment", () => {
+    const [line] = logicalLines(`curl -sS https://example.com/a#frag --retry 3 --max-time 20`);
+    expect(line).toContain("a#frag");
+    expect(MAX_TIME_FLAG.test(line)).toBe(true);
+  });
+
+  it("joins a backslash continuation before matching, including across three physical lines", () => {
+    const run = ["curl --fail --retry 3 \\", "  --max-time 20 \\", "  -sS https://example.com/x"].join("\n");
+    const lines = logicalLines(run);
+    expect(lines.length).toBe(1);
+    expect(RETRY_FLAG.test(lines[0]) && MAX_TIME_FLAG.test(lines[0])).toBe(true);
+  });
+});
 
 describe("release.yml apt-get sites carry the ForceIPv4/retry/timeout hardening (CPE-1824)", () => {
   const doc = parseWorkflow("release.yml");
@@ -272,12 +346,104 @@ describe("release-sidecar.yml apt-get + curl sites carry hang hardening (CPE-182
   });
 });
 
-// CPE-1849. The generic scan below enforces PAIRING and explicitly cannot check SIZING, and for
-// this file the sizing rests on two numbers a future edit could move without touching any curl
-// line at all: the step's `timeout-minutes` and HOW MANY times it calls the one shared helper.
-// `--retry-max-time 20` was chosen as 5 x (20 + 30) = 250s inside 300s; add a sixth head_check, or
-// drop the cap to 4 minutes, and that stops being true while every flag still reads fine. These
-// two assertions pin the inputs to the arithmetic so such a change has to come here and re-do it.
+/** curl's own worst case for ONE invocation that retries, in seconds.
+ *
+ *  `--retry-max-time` is checked BEFORE each new retry is started; a retry permitted at an elapsed
+ *  time just under the limit then sleeps `--retry-delay` and runs a further attempt which is
+ *  allowed to finish, so the supremum is `retry-max-time + retry-delay + max-time`.
+ *
+ *  THE `retry-delay` TERM IS NOT PEDANTRY -- omitting it makes the formula WRONG, not merely
+ *  loose, and both CPE-1824 and CPE-1849's first round omitted it. Measured on curl 8.21.0 against
+ *  a server that accepts and then sends nothing:
+ *
+ *      --max-time 2 --retry 10 --retry-delay 3 --retry-max-time 4  ->  7,928 ms   (rmt+mt = 6,000: EXCEEDED)
+ *      --max-time 2 --retry 10 --retry-delay 2 --retry-max-time 4  ->  7,039 ms   (rmt+mt = 6,000: EXCEEDED)
+ *      --max-time 2 --retry 10 --retry-delay 1 --retry-max-time 4  ->  5,581 ms   (inside 6,000)
+ *      --max-time 6 --retry  5 --retry-delay 1 --retry-max-time 10 -> 14,379 ms   (inside 16,000)
+ *
+ *  The last two are why the omission survived review twice: a 1s delay is too small a term to push
+ *  the total past `rmt + mt`, and both earlier scaled experiments happened to use `--retry-delay 1`.
+ *  A confirming experiment chosen from inside the wrong model confirms the wrong model.
+ *
+ *  curl's default `--retry-delay` is not 0 (it backs off exponentially from 1s), so a line with no
+ *  explicit delay still has a delay term; 1 is used as the floor rather than 0 for that reason. */
+function curlWorstCaseSeconds(line: string): number | null {
+  const maxTime = flagNumber(line, "--max-time");
+  const retryMaxTime = flagNumber(line, "--retry-max-time");
+  if (maxTime === null || retryMaxTime === null) return null;
+  const retryDelay = flagNumber(line, "--retry-delay") ?? 1;
+  return retryMaxTime + retryDelay + maxTime;
+}
+
+// CPE-1849. Round 1 of this ticket pinned only the INPUTS to the sizing (the cap, the call count)
+// and left the arithmetic itself to prose, repeating CPE-1824's documented "enforces PAIRING, never
+// SIZING" gap one ticket later. That gap was then shown to be live on BOTH terms of the product:
+// raising `--max-time` from 30 to 300 left every test green, and so did `--retry-max-time 200`
+// (which `toContain("--retry-max-time 20")` matches as a prefix -- see flagValue()). A file that
+// has now had two tickets about arithmetic nobody was checking should check the arithmetic.
+//
+// So this block computes it. For each site: calls x (retry-max-time + retry-delay + max-time) must
+// fit inside the step's `timeout-minutes`, with margin. The margin is the substantive requirement,
+// not a rounding allowance -- it is what makes curl lose on its OWN terms (a real exit code, and an
+// http_code of 000 the step classifies as inconclusive) instead of being killed opaquely by the
+// runner partway through, which is the exact failure this ticket fixed.
+//
+// This assertion would have caught finding 2 (the missing retry-delay term) by construction, and
+// it is deliberately written to fail on the numbers rather than to encode the specific value 20 --
+// a future edit may raise the cap, drop a call, or change --max-time, and any of those is fine so
+// long as the product still fits.
+//
+// WHY ci.yml's THREE pdfium SITES ARE NOT INCLUDED, since the helper is general enough to cover
+// them and the honest answer is not "scope". Run the corrected formula over them and they come to
+// 150 + 3 + 180 = 333s against a `timeout-minutes: 6` (360s) cap: inside it, so NOT broken, but
+// only 27s / 7.5% of margin -- under the 10% this block requires, so folding them in would turn the
+// guard red on work this ticket did not do. (CPE-1824 computed 330s there, omitting the same
+// retry-delay term; the corrected figure is 333s and its conclusion likewise survives.) Whether 27s
+// is enough margin for a step that also untars and copies is a real question with a real answer,
+// and it belongs to whoever picks that up -- flagged here rather than silently skipped, and
+// deliberately not "fixed" by loosening MIN_MARGIN_FRACTION until it passes, which would convert a
+// finding into a rubber stamp.
+describe("ffmpeg-pin-freshness.yml's HEAD-check sizing is arithmetically sound (CPE-1849)", () => {
+  const doc = parseWorkflow("ffmpeg-pin-freshness.yml");
+
+  /** Fraction of the cap that must remain unused. 10% of 300s is 30s -- comfortably more than the
+   *  step's own non-curl work (echo/case/printf, milliseconds) while still refusing a value that
+   *  merely grazes the cap. */
+  const MIN_MARGIN_FRACTION = 0.1;
+
+  for (const [stepName, calls] of [
+    ["HEAD-check pinned assets", 5],
+    ["Validate the recommendation before publishing it", 2],
+  ] as const) {
+    it(`${stepName}: ${calls} x curl worst case fits inside the step's timeout-minutes`, () => {
+      const step = findStep(doc.jobs["check-pins"], stepName);
+      const capSeconds = Number(step["timeout-minutes"]) * 60;
+      expect(Number.isFinite(capSeconds)).toBe(true);
+
+      const retrying = logicalLines(step.run).filter(
+        (l) => /(?<![\w-])curl(?![\w-])/.test(l) && RETRY_FLAG.test(l),
+      );
+      // One shared curl line per step -- five head_check CALLS, but one curl; two loop iterations,
+      // but one curl. The multiplier is the call count, asserted separately below.
+      expect(retrying.length).toBe(1);
+
+      const worst = curlWorstCaseSeconds(retrying[0]);
+      expect(worst, `could not read --max-time/--retry-max-time off: ${retrying[0]}`).not.toBeNull();
+
+      const total = calls * (worst as number);
+      // Reported as a message so a failure states the real numbers rather than "expected true".
+      expect(
+        total,
+        `${stepName}: ${calls} calls x ${worst}s = ${total}s against a ${capSeconds}s cap ` +
+          `(needs < ${capSeconds * (1 - MIN_MARGIN_FRACTION)}s to keep ${MIN_MARGIN_FRACTION * 100}% margin)`,
+      ).toBeLessThan(capSeconds * (1 - MIN_MARGIN_FRACTION));
+    });
+  }
+});
+
+// The companion to the arithmetic above: it multiplies by a call count, and nothing in a curl line
+// reveals that count. These two assertions pin it, plus the cap the arithmetic divides into. Add a
+// sixth head_check or a third loop entry and the product changes without any flag changing.
 describe("ffmpeg-pin-freshness.yml's HEAD-check sizing inputs are pinned (CPE-1849)", () => {
   const doc = parseWorkflow("ffmpeg-pin-freshness.yml");
 
@@ -340,8 +506,11 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
       // neither should be dropped in favour of the other.
       expect(curlLine).toContain("--retry 5");
       // ...and because --retry RESETS the --max-time counter, --retry-max-time is what actually
-      // bounds the series. 150 + one in-flight attempt's 180 = 330s, inside the 360s step cap.
-      expect(curlLine).toContain("--retry-max-time 150");
+      // bounds the series. 150 + a --retry-delay 3 + one in-flight attempt's 180 = 333s, inside
+      // the 360s step cap. (CPE-1824 wrote 330 here, omitting the delay term -- see CPE-1849's
+      // correction of the formula at the arithmetic assertion below. Its conclusion survives.)
+      // flagValue(), not toContain: "--retry-max-time 1500" contains "--retry-max-time 150".
+      expect(curlLine).toMatch(flagValue("--retry-max-time", 150));
       expect(step["timeout-minutes"]).toBe(6);
       expect(step["continue-on-error"]).toBe(true);
     }
@@ -417,17 +586,20 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
 //
 // Why 20 and not 150 like the pdfium sites: the arithmetic is per-step, never a house number. The
 // "HEAD-check pinned assets" step makes FIVE head_check calls under ONE `timeout-minutes: 5`, so
-// the worst case that has to fit inside 300s is 5 x (retry-max-time + max-time), not one of them.
-// With --max-time 30 that gives 5 x 50 = 250s, ~50s of margin. Measured, not just derived: without
+// the worst case that has to fit inside 300s is 5 x (retry-max-time + retry-delay + max-time), not
+// one of them. That gives 5 x 52 = 260s, 40s of margin. Measured, not just derived: without
 // --retry-max-time one call took 126.7s against a stalling server (4 x 30s + 3 x 2s, four timeout
 // messages), so five calls is ~634s -- the step used to die by opaque runner kill during the THIRD
 // call, leaving assets 4 and 5 unchecked despite that step's deliberate `set -uo pipefail` (not -e)
 // "check every asset even if an earlier one is bad" design. With the flag it is 31.1s per call.
 //
-// That is the general lesson for anyone adding the next site: this guard checks PAIRING and this
-// comment cannot check SIZING for you (see limit 1 above). A step that loops N curl calls under one
-// cap needs N x (retry-max-time + max-time) inside that cap, and copying a sibling's number without
-// counting the calls is how you get a value that passes here and still gets killed by the runner.
+// That is the general lesson for anyone adding the next site: a step that makes N curl calls under
+// one cap needs N x (retry-max-time + retry-delay + max-time) inside that cap, and copying a
+// sibling's number without counting the calls is how you get a value that passes a PAIRING check
+// and still gets killed by the runner. Limit 1 above ("enforces PAIRING, never SIZING") is now
+// narrower than it was: the ffmpeg-pin-freshness.yml sites DO get their arithmetic computed, by the
+// describe block above this one. It still holds for every other file here, ci.yml's pdfium sites
+// included -- see the note in that block about why they were not folded in.
 describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () => {
   const GUARDED = ["ci.yml", "release.yml", "release-sidecar.yml", "ffmpeg-pin-freshness.yml"] as const;
 
@@ -451,7 +623,7 @@ describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () 
     );
     expect(retrying.length).toBe(3);
     for (const { line } of retrying) {
-      expect(line).toContain("--retry-max-time 150");
+      expect(line).toMatch(flagValue("--retry-max-time", 150));
     }
   });
 
@@ -466,7 +638,7 @@ describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () 
     );
     expect(retrying.length).toBe(2);
     for (const { line } of retrying) {
-      expect(line).toContain("--retry-max-time 20");
+      expect(line).toMatch(flagValue("--retry-max-time", 20));
     }
   });
 });

@@ -271,21 +271,30 @@ jobs:
             # gets checked even when an earlier one is bad. With --retry-max-time 20 the same case
             # is 31.1s, one message, exit 28 -- so all five calls run and report.
             #
-            # Sizing: curl checks the retry timer BEFORE starting each retry and lets an already-
-            # started attempt run to completion (verified in curl's own retry-max-time docs and by
-            # experiment: --retry-max-time 10 --max-time 6 against the stall server ended at 13.8s,
-            # a 2nd attempt permitted at ~7s then running its full 6s). So one call's worst case is
-            # --retry-max-time + --max-time = 20 + 30 = 50s, and 5 x 50 = 250s sits inside the 300s
-            # cap with ~50s spare. The margin is the point: curl loses on its OWN terms, returning
-            # exit 28 and an http_code of 000 that the `*)` branch below classifies as
-            # inconclusive, rather than being killed silently by the runner with no diagnostic.
+            # Sizing: curl checks the retry timer BEFORE starting each retry, then sleeps
+            # --retry-delay, then lets the attempt it started run to completion. So one call's
+            # worst case is --retry-max-time + --retry-delay + --max-time = 20 + 2 + 30 = 52s, and
+            # 5 x 52 = 260s sits inside the 300s cap with 40s spare. The margin is the point: curl
+            # loses on its OWN terms, returning exit 28 and an http_code of 000 that the `*)`
+            # branch below classifies as inconclusive, rather than being killed silently by the
+            # runner with no diagnostic.
+            #
+            # The --retry-delay term is easy to drop and doing so makes the formula WRONG, not just
+            # loose. Measured on curl 8.21.0 against the stall server, --max-time 2 --retry 10
+            # --retry-max-time 4 gave 7.9s at --retry-delay 3 and 7.0s at --retry-delay 2 -- both
+            # past the 6s that "retry-max-time + max-time" predicts -- but only 5.6s at
+            # --retry-delay 1, which is why two earlier rounds of this reasoning (CPE-1824's, and
+            # this ticket's first pass) checked the formula with a 1s delay and saw it "hold".
             #
             # 20 costs the retries nothing they actually do: their job is connection-level failures
             # (refused/reset), which fail in milliseconds, so all three retries plus their 2s delays
-            # finish inside ~6s. And it has to be small: the worst case is (N + 30) per call, so
-            # N = 30 already makes 5 calls exactly 300s -- the cap with zero margin -- and anything
-            # larger is past it. The five-call multiplier, not --max-time, is what forces N < 30
-            # here; do not copy 20 to a site with a different call count without redoing this sum.
+            # finish inside ~6s. And it has to be small: worst case is (N + 2 + 30) per call, so
+            # N = 30 already makes 5 calls 310s -- OVER the 300s cap, not merely grazing it -- and
+            # the largest N that fits at all is 27. The five-call multiplier, not --max-time, is
+            # what forces N well under 30 here; do not copy 20 to a site with a different call
+            # count without redoing this sum. src/lib/releaseHangHardening.test.ts now COMPUTES it
+            # (calls x (retry-max-time + retry-delay + max-time) < timeout-minutes x 60, with
+            # margin), so a change to any term here fails there rather than needing to be noticed.
             code=$(curl -sSL --max-time 30 --retry 3 --retry-max-time 20 --retry-delay 2 \
               --retry-connrefused -o /dev/null -w '%{http_code}' --head "$url")
             echo "  ${label}: HTTP ${code} (${url})"
@@ -446,7 +455,7 @@ jobs:
               url=${entry#* }
               # Same flag set, same reasoning, as "HEAD-check pinned assets" above -- including
               # --retry-max-time 20 (CPE-1849), without which --max-time bounds one attempt and not
-              # the series. This loop makes only TWO calls, so 2 x (20 + 30) = 100s leaves far more
+              # the series. This loop makes only TWO calls, so 2 x (20 + 2 + 30) = 104s leaves far more
               # room under this step's own `timeout-minutes: 5` than the five-call sibling has; the
               # value is deliberately kept identical anyway rather than relaxed, because a larger
               # one would buy nothing (the retries' real work finishes in ~6s) and would only widen

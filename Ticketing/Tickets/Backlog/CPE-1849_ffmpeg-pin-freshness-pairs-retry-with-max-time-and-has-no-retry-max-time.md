@@ -2,7 +2,7 @@
 id: CPE-1849
 title: ffmpeg-pin-freshness pairs --retry with --max-time and has no --retry-max-time
 type: task
-priority: Low
+priority: Medium
 status: Backlog
 tags: ready
 estimate: S
@@ -22,23 +22,45 @@ stop a stall is what triggers the next attempt. Measured against a deliberately 
 `ci.yml` sites ran **1101 seconds** against a claimed 180-second bound, printing six separate
 `Operation timed out` messages. Adding `--retry-max-time` brought the same case to **182 seconds**.
 
-## Why this is Low and not a repeat of CPE-1824
+## Why this is NOT a repeat of CPE-1824 — and why it is Medium, not Low
 
-The defect CPE-1824 fixed was a **false claim recorded as verified fact** — code comments asserting
-`--max-time` bounded the whole invocation. This file's own comment is already **accurate**: it says
-*"--max-time bounds each attempt"*. So nothing here is lying.
+**Raised from Low to Medium on 2026-08-22, and this section rewritten rather than appended to.** It
+argued a position the work then falsified, and leaving it standing would make this ticket the exact
+once-true-now-false artefact the CPE-1824 family exists to remove — the same reason CPE-1824's stale
+exclusion note was deleted rather than amended.
 
-The worst case is also much smaller: `3 x 30s` plus delays, not `5 x 180s`.
+What the original section got right, and what still stands: the defect CPE-1824 fixed was a **false
+claim recorded as verified fact**, and this file's `--max-time` comment was already **accurate**
+("--max-time bounds each attempt"). Nothing here was lying. That remains true and is why this is a
+different ticket rather than a repeat.
 
-What remains is that the workflow has no explicit series bound, so its real worst case rests on
-whatever outer `timeout-minutes` applies rather than on anything the curl line states.
+What it got wrong was the *severity*, on two counts:
+
+1. **"The worst case is also much smaller."** Smaller per call, yes — but the original reasoning
+   stopped at one call. The `HEAD-check pinned assets` step invokes one shared `head_check()` helper
+   **five times under a single `timeout-minutes: 5`**, so the number that matters is `5 x 126.7s =
+   ~634s` against a 300s cap, not `3 x 30s`. The multiplier was never in the analysis.
+
+2. **"What remains is that the workflow has no explicit series bound."** That framing makes it
+   sound like tidying — a true statement missing a formality. It is not. Measured end-to-end on the
+   step's own script (Work Log below): the step was **SIGKILLed at 300.9s having checked 2 of its 5
+   assets**, emitting **no `::error::` annotation** and writing **nothing** to `$GITHUB_OUTPUT`.
+
+The second point is the reason for Medium. This is the **only** workflow that detects a rotted
+native-dep pin, and it was silently losing 40% of its coverage while producing a failure
+indistinguishable from an infrastructure flake. A pin could rot in `pdfium macos` — the fifth and
+never-reached check — and this workflow would never say so. Silent partial coverage in the detector
+of last resort is not Low.
 
 ## Acceptance criteria
 
 - [x] Both sites either gain a `--retry-max-time` coherent with the step's `timeout-minutes`, or record
       why the outer backstop is sufficient here. CPE-1824's arithmetic is the precedent: curl checks the
       retry timer *before* starting each retry and lets an in-flight attempt finish, so worst case is
-      `retry-max-time + max-time`, and the value must satisfy `N + max-time < timeout-minutes` with margin
+      `retry-max-time + max-time` <!-- SUPERSEDED: the real bound is retry-max-time + retry-delay +
+      max-time; this criterion's formula was inherited from CPE-1824 and is wrong. Disproved by
+      measurement in the Work Log's "CORRECTION (round 2)". The criterion is still met, against the
+      corrected formula. -->, and the value must satisfy `N + max-time < timeout-minutes` with margin
       — the point being that curl loses on its own terms, with a real exit code and `--fail`
       diagnostics, rather than being killed opaquely by the runner.
 - [x] Confirm what outer `timeout-minutes` actually applies to each site before choosing a value. Do not
@@ -62,6 +84,23 @@ this ticket does not need to re-derive the mechanism.
 
 **2026-08-22** — Both sites bounded, guard extended, and the failure reproduced end-to-end on the
 workflow's own script rather than on a hand-built approximation of it.
+
+> **Round 2 (same day) — Reviewer returned CHANGES REQUESTED and was right on every count.** It
+> independently reproduced the headline measurement (301,951 ms / exit 137 / 2 of 5 assets before;
+> 155,647 ms / exit 1 / 5 of 5 after — within 1–2% of the figures below) and confirmed the coverage
+> framing, then found that this PR, whose subject is *a wrong reason left standing because its
+> conclusion looks right*, had introduced three new wrong reasons of its own:
+> a **fabricated `#`** in `%{http_code}` propping up a quote-awareness claim; a **worst-case formula
+> missing its `--retry-delay` term**, disproved by measurement; and a **value assertion that matched
+> a prefix**, so `--retry-max-time 200` passed. It also showed the arithmetic gap round 1 admitted
+> and declined to fix was live on *both* terms of the product, and that the ticket's own "Why this is
+> Low" section had been falsified by this very Work Log and left standing.
+>
+> All four fixed, plus the recommended arithmetic assertion; the section rewritten and the priority
+> raised to Medium. Each correction is marked **CORRECTION (round 2)** in place below rather than
+> appended at the end, so nobody reads the superseded claim first. Round 1's conclusions all survive
+> — every correction either strengthened the argument or closed a hole in the evidence for it, and
+> none changed the shipped flags.
 
 ### The outer cap, established before choosing anything
 
@@ -115,15 +154,38 @@ allowed to run to completion even if this makes the total wall clock time exceed
 
 Attempt 1 died at 6s; elapsed 6 < 10 so a retry was permitted at ~7s; that attempt then ran its
 **full** 6s and ended at ~13s — past the 10s `--retry-max-time`. Before a third retry, elapsed 13
->= 10, so it stopped. Worst case really is `retry-max-time + max-time`, not `retry-max-time`.
+>= 10, so it stopped.
+
+### CORRECTION (round 2): the formula also needs the `--retry-delay` term
+
+The Reviewer disproved `retry-max-time + max-time` by experiment, and the disproof was reproduced
+here independently before acting on it. curl checks the retry timer, **then sleeps `--retry-delay`,
+then** runs the attempt it just permitted — so the supremum is
+`retry-max-time + retry-delay + max-time`. Measured here on curl 8.21.0 against the stall server:
+
+| flags | elapsed | `rmt + mt` predicts | verdict |
+|---|---|---|---|
+| `--max-time 2 --retry 10 --retry-delay 3 --retry-max-time 4` | **7,928 ms** | 6,000 ms | **EXCEEDED** |
+| `--max-time 2 --retry 10 --retry-delay 2 --retry-max-time 4` | **7,039 ms** | 6,000 ms | **EXCEEDED** |
+| `--max-time 2 --retry 10 --retry-delay 1 --retry-max-time 4` | 5,581 ms | 6,000 ms | inside |
+| `--max-time 6 --retry 5 --retry-delay 1 --retry-max-time 10` | 14,379 ms | 16,000 ms | inside |
+
+The bottom two rows are why this survived three rounds of review across two tickets: **a 1s delay is
+too small a term to push the total past the wrong bound**, and both CPE-1824's scaled experiment and
+this ticket's round-1 one happened to use `--retry-delay 1`. A confirming experiment chosen from
+inside the wrong model confirms the wrong model. The corrected formula is now *computed* by the
+guard rather than asserted in prose — see the arithmetic assertion below.
+
+CPE-1824's own sites carry the same omission: it recorded `150 + 180 = 330s` for the pdfium sites,
+where the corrected figure is `150 + 3 + 180 = 333s`. Its conclusion survives too (333 < 360).
 
 ### Value chosen: `--retry-max-time 20`, at both sites
 
-Sized against the **binding** step, the five-call one:
+Sized against the **binding** step, the five-call one, using the corrected formula:
 
-- worst case per call = `retry-max-time + max-time` = `20 + 30` = **50s**;
-- five calls = **250s**, inside the 300s cap with **50s (17%) of margin**;
-- the two-call site is the same 50s worst case x 2 = **100s**, 200s of margin.
+- worst case per call = `retry-max-time + retry-delay + max-time` = `20 + 2 + 30` = **52s**;
+- five calls = **260s**, inside the 300s cap with **40s (13%) of margin**;
+- the two-call site is the same 52s worst case x 2 = **104s**, 196s of margin.
 
 Why the same value at both rather than a looser one where there is room: a larger `N` buys the
 retries nothing. Their actual job here is connection-level failure (refused/reset), which fails in
@@ -132,10 +194,12 @@ would only widen the stall worst case. One number, one rule, tighter site govern
 
 **Why the value is necessarily *below* `--max-time`, which is worth stating because it looks odd.**
 It falls straight out of the multiplier, not out of any property of `--max-time`: worst case per
-call is `N + 30`, so `N = 30` already puts five calls at exactly 300s — the cap with zero margin —
-and anything larger is past it. Five calls under one cap is what forces `N < 30` here; the two-call
-site would tolerate up to `N = 120`, which is precisely why the value must not be copied between
-sites without recounting the calls.
+call is `N + 2 + 30`, so `N = 30` puts five calls at **310s — already OVER the 300s cap**, and the
+largest `N` that fits at all is 27. (Round 1 said "exactly 300s, the cap with zero margin"; that was
+the missing-`retry-delay` formula. The correction **strengthens** this argument rather than
+weakening it.) Five calls under one cap is what forces `N` well under 30 here; the two-call site
+would tolerate up to `N = 118`, which is precisely why the value must not be copied between sites
+without recounting the calls.
 
 A consequence worth naming, since it is what makes 20 look wrong at a glance: because `20 < 30`, a
 **fully stalled** first attempt (which burns the entire 30s) has already passed the retry limit, so
@@ -206,27 +270,81 @@ the note is removed rather than amended.
       "check-pins / HEAD-check pinned assets: code=$(curl -sSL --max-time 30 --retry 3 …"
       "check-pins / Validate the recommendation before publishing it: code=$(curl -sSL …"
 
-Three things fall out of that one run: `logicalLines()` really does join this file's backslash
-continuations (each offender is reported as one joined logical line carrying both flags); the repo's
-bounded-subset `parseYaml` really does parse this file (`parseWorkflow` throws otherwise, and did
-not); and `stripShellComment()`'s quote-awareness holds on real code here, because the joined tail
-contains `-w '%{http_code}'` whose `#` is quoted and would otherwise truncate the line into
-invisibility.
+**Two** things fall out of that one run: `logicalLines()` really does join this file's backslash
+continuations (each offender is reported as one joined logical line carrying both flags), and the
+repo's bounded-subset `parseYaml` really does parse this file (`parseWorkflow` throws otherwise, and
+did not).
+
+**CORRECTION (round 2): round 1 claimed a third thing, and it was false.** It said the same run
+confirmed `stripShellComment()`'s quote-awareness "because the joined tail contains `-w
+'%{http_code}'` whose `#` is quoted". **There is no `#` in `%{http_code}`** — the characters are
+`% { h t t p _ c o d e }` — and neither curl invocation in the file contains a `#` anywhere. Worse,
+the probe could not have proven it even if one had: `--retry` and `--max-time` both sit *before* the
+`-w` tail, so a strip that truncated there would still leave an offender to report and the run would
+have looked identical. Confirmed by mutation rather than by argument: replacing
+`stripShellComment()`'s whole body with a naive `line.slice(0, line.indexOf("#"))`, no quote
+tracking at all, left **all 21 tests passing**. Nothing in the suite exercised the property.
+
+On a ticket whose subject is a wrong reason left standing because its conclusion looked right, that
+is exactly the defect being fixed, reintroduced one level down — the second time this family has
+produced that shape (CPE-1824 round 2 did it with `--retry-all-errors`). Two responses, not one:
+the claim is deleted, **and** the gap it papered over is closed. A new describe block,
+`logicalLines() handles shell comments and continuations`, exercises the property directly on
+synthetic input — a quoted `#` in a URL fragment must not truncate the line (the **silent** failure
+direction: the curl vanishes and the pairing scan reports a clean pass on an unbounded site), a `#`
+mid-word must not open a comment, a real trailing comment must still be stripped, and a
+three-physical-line continuation must still join. Red-proofed against the same naive-strip mutation:
+**2 failed / 24 passed**, where before the whole suite was green.
 
 **Two assertions added beyond the pairing scan**, because for this file the sizing rests on inputs a
 future edit could move without touching any curl line: `HEAD-check pinned assets` still makes exactly
 five `head_check` calls under `timeout-minutes: 5`, and `Validate the recommendation` still loops
 over exactly the two-element `for entry in "win64 …" "linux64 …"` list under its own
 `timeout-minutes: 5`. Add a sixth asset, or drop a cap to 4 minutes, and `20` silently stops being
-correct while every flag still reads fine. This closes, *for this file only*, a slice of the "the
-guard enforces PAIRING, never SIZING" limitation CPE-1824 documented — it pins the **inputs** to the
-arithmetic, so a change to them has to come back here and redo it. It still does not check the
-arithmetic itself; the general limitation stands and its note is left intact.
+correct while every flag still reads fine.
 
-Guard went 15 tests → **19** (pairing scan for the new file, non-vacuity count for the new file, two
-sizing-input assertions).
+### The arithmetic assertion (round 2) — the gap round 1 admitted is now closed
 
-**Red-proofs — four, each reverted immediately:**
+Round 1 pinned only the **inputs** to the sizing and left the arithmetic to prose, recording the
+omission honestly under "not verified" and calling the fix disproportionate for a Low ticket. Both
+halves of that judgement were wrong. The Reviewer showed the gap was live on **both** terms of the
+product, each on its own sufficient to break the bound with every test green:
+
+- `--max-time` raised 30 → 300: **all tests passed** (worst case per call 322s, five calls 1610s
+  against a 300s cap);
+- `--retry-max-time 20` → `200`: **all tests passed**, because
+  `"--retry-max-time 200".includes("--retry-max-time 20")` is **true** — the spot check pinned a
+  *prefix*, not a value. CPE-1824's `toContain("--retry-max-time 150")` has the identical shape.
+
+So the file has now had two tickets about arithmetic nobody was checking, and everything needed to
+check it was already parsed. Added:
+
+- `flagValue(flag, n)` → `/(?<![\w-])--flag\s+n(?![\d.])/`, replacing all three `toContain` value
+  spot checks (the two CPE-1824 ones included — the pattern was reproduced from there, so fixing
+  only my copy would leave the same hole one line up).
+- `curlWorstCaseSeconds(line)`, reading the numbers off the joined curl line and applying the
+  **corrected** `retry-max-time + retry-delay + max-time` formula (floor of 1 for an absent
+  `--retry-delay`, since curl's default backs off from 1s rather than being 0).
+- A per-site assertion that `calls x worstCase < timeout-minutes x 60 x 0.9`, failing with the real
+  numbers in the message rather than "expected true". The 10% margin is the substantive requirement,
+  not rounding slack: it is what keeps curl losing on its own terms.
+
+This assertion would have caught the missing `retry-delay` term by construction, and it is written
+against the numbers rather than against the literal `20`, so a future edit may raise the cap, drop a
+call, or change `--max-time` freely as long as the product still fits.
+
+**Deliberately NOT extended to `ci.yml`'s three pdfium sites**, and the honest reason is not scope:
+run the corrected formula over them and they come to `150 + 3 + 180 = 333s` against a 360s cap —
+inside it, so not broken, but only **27s / 7.5% of margin**, under the 10% this block requires.
+Folding them in would turn the guard red on work this ticket did not do, and loosening
+`MIN_MARGIN_FRACTION` until they passed would convert a finding into a rubber stamp. It is flagged
+in the test file for whoever picks it up. **Follow-up worth filing:** whether 27s is adequate margin
+for a step that also untars and copies.
+
+Guard went 15 tests → **26**: pairing scan + non-vacuity for the new file, two sizing-input
+assertions, two arithmetic assertions, and five `logicalLines()` unit tests.
+
+**Red-proofs — eight in total, each reverted immediately. Rounds 1–4:**
 
 1. Deleted `--retry-max-time 20 ` from the `head_check()` curl → **2 failed / 17 passed** (pairing
    scan `expected [ …(2) ] to deeply equal []`; non-vacuity `expected '…' to contain
@@ -238,6 +356,20 @@ sizing-input assertions).
    17 passed**, `expected [ Array(1) ] to deeply equal []`.
 4. Changed `Validate the recommendation`'s `timeout-minutes: 5` to `4` → **1 failed / 18 passed**,
    `expected 4 to be 5`.
+
+**Round 2's four, on the new assertions (counts against the 26-test suite):**
+
+5. `--retry-max-time 20` → `200`, the exact prefix-match evasion → **2 failed / 19 passed**. The
+   arithmetic assertion reported `5 calls x 232s = 1160s against a 300s cap (needs < 270s to keep
+   10% margin)`, and the now-bounded value assertion reported `to match /…--retry-max-time\s+20(?![\d…/`.
+   Under round 1's suite this mutation was green.
+6. `--max-time 30` → `300` → **1 failed / 20 passed**, `5 calls x 322s = 1610s against a 300s cap`.
+   Also green under round 1's suite — so both terms of the product are now pinned.
+7. `--retry-delay 2` → `30`, confirming the corrected term is load-bearing in the assertion and not
+   decoration → **1 failed / 20 passed**, `5 calls x 80s = 400s against a 300s cap`.
+8. `stripShellComment()` replaced with the naive `line.slice(0, line.indexOf("#"))` → **2 failed /
+   24 passed** (the quoted-fragment test and the mid-word test). The same mutation left round 1's
+   entire suite green.
 
 ### One more correction, not asked for but found on the way
 
@@ -261,7 +393,8 @@ inconclusive branch on first response. No behaviour change.
 
 ### Gates
 
-- `npx vitest run` — **324 files / 4315 tests, all passed** (guard 15 → 19).
+- `npx vitest run` — round 1: **324 files / 4315 tests**. Round 2: **324 files / 4322 tests**, all
+  passed (guard 15 → 26).
 - `npm run check` — **0 errors, 0 warnings**.
 - **Real YAML parser**: every `.github/workflows/*.yml` parsed with **PyYAML 6.0.3**, not only the
   repo's bounded-subset parser — 6/6 OK. The structure was re-read *through PyYAML* to confirm the
@@ -269,10 +402,17 @@ inconclusive branch on first response. No behaviour change.
   `timeout-minutes: 5`, five `head_check` invocations.
 - Every `run:` block in the touched workflow extracted and passed `bash -n` — 6/6 shell-syntax OK,
   so the reflowed continuation is valid shell and not just valid YAML.
-- Line endings: the file is CRLF in the working tree (`core.autocrlf=true`). Verified byte-level
-  after every edit — CR count == LF count (570/570 workflow, 472/472 test file), trailing `\r\n`
-  intact, and `git diff --numstat` localised (54/11 and 81/14) rather than whole-file, which is what
-  an EOL rewrite would have looked like. No `sed -i` was used on any repo file.
+- Line endings: all three files are CRLF in the working tree (`core.autocrlf=true`). Verified
+  byte-level after every edit — CR count == LF count at round-2 head (581/581 workflow, 644/644 test
+  file, 412/412 ticket), no BOM on any of them, trailing `\r\n` intact, and `git diff --numstat`
+  localised (65/11, 256/17, 365/12 cumulative) rather than whole-file, which is what an EOL rewrite
+  would have looked like. No `sed -i` and no PowerShell write touched any repo file; the one
+  scripted edit in round 2 (the `stripShellComment()` mutation, twice, reverted from a byte copy)
+  went through Python with explicit `newline=''` so CRLF was preserved, and was verified by the
+  counts above afterwards.
+- Positive control re-run at round-2 head through the final flag set: `pdfium-linux-x64.tgz` →
+  exit 0, HTTP 200, 1,919 ms, **3,650,783 bytes**, 49 tar members, `lib/libpdfium.so` present —
+  byte-identical to round 1 and to the Reviewer's independent run.
 
 ### Not verified
 
@@ -288,8 +428,13 @@ inconclusive branch on first response. No behaviour change.
   `ubuntu-latest` with a different curl build. The per-attempt-reset behaviour is documented and
   build-independent, and CPE-1824 saw the same arithmetic on its sites, but the exact millisecond
   figures are this machine's.
-- **Sizing is still not machine-checked.** The new assertions pin the *inputs* (call count, caps);
-  nothing computes `5 x (20 + 30) < 300`. A future edit that changes `--max-time 30` to something
-  larger would pass every test here and break the arithmetic silently. Deliberate — an arithmetic
-  assertion would have to parse the flags numerically and the value out of `timeout-minutes`, which
-  is a bigger change than this Low ticket justifies — but recorded so nobody over-trusts a green run.
+- ~~**Sizing is still not machine-checked.**~~ **CLOSED in round 2** — see "The arithmetic assertion"
+  above. Round 1 recorded this gap and declined to fix it as disproportionate; the Reviewer then
+  demonstrated it was live on both terms of the product, and the fix turned out to be ~30 lines on
+  top of what the round-1 tests already parsed. Recorded rather than deleted, because "we knew and
+  chose not to" is the judgement that was wrong, and that is the reusable lesson.
+- **The arithmetic assertion's margin fraction is a judgement, not a measurement.** 10% of the cap
+  (30s at these sites) is argued from the steps' non-curl work being milliseconds, not derived from
+  observed step durations the way CPE-1824 sized its `timeout-minutes` caps against `gh api` history.
+  It is the reason `ci.yml`'s pdfium sites (7.5%) are excluded rather than folded in, so it is doing
+  real work and should be revisited with data if that follow-up is taken.
