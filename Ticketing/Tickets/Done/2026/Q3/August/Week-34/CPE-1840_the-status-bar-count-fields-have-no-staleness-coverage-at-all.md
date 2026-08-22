@@ -3,11 +3,11 @@ id: CPE-1840
 title: the status bar's two count fields have no staleness coverage, so a stale count can ship unnoticed
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
