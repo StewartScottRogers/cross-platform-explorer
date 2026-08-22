@@ -2944,6 +2944,41 @@ pub fn require_staged(mechanism: &str, supported_here: bool, staged: bool) -> bo
     }
 }
 
+/// Same gate as [`require_staged`], for a probe that can say **which** step failed rather than just
+/// that one did (CPE-1815). `trash_roundtrip_available`'s delete→list→restore→verify round-trip has
+/// six distinct ways to come back false, and a bare `bool` erases which one — on the one CI runner
+/// this crew cannot log into, that turns a red into a morning of adding instrumentation and re-pushing.
+/// `staged` carries the failing step's name as its `Err`; on [`StagingVerdict::Fail`] it is folded into
+/// the panic message so the CI log names the step, not just the mechanism. On
+/// [`StagingVerdict::LegitimateSkip`] the reason is dropped — same as a bare `bool` always was — the
+/// caller still prints its own leg-specific skip notice.
+#[track_caller]
+pub fn require_staged_reason(mechanism: &str, supported_here: bool, staged: Result<(), &str>) -> bool {
+    let ok = staged.is_ok();
+    match staging_verdict(supported_here, ok, staging_is_strict(), staging_is_sabotaged()) {
+        StagingVerdict::Staged => true,
+        StagingVerdict::LegitimateSkip => false,
+        StagingVerdict::Fail => {
+            panic!("{}", staging_failure_message_with_reason(mechanism, staged_fail_reason(staged)))
+        }
+    }
+}
+
+/// The reason text [`require_staged_reason`] reports on [`StagingVerdict::Fail`] — split out as a pure
+/// function of `staged` (no environment, no panic) so it is unit-testable the same way
+/// [`staging_verdict`] is. `staged` can be `Ok` here even though the verdict is `Fail`:
+/// `CPE_STAGING_SABOTAGE=1` forces `Fail` regardless of what the probe reported (see
+/// `staging_verdict`), and in that case the probe has no failing step to name.
+fn staged_fail_reason(staged: Result<(), &str>) -> &str {
+    match staged {
+        Err(reason) => reason,
+        Ok(()) => {
+            "(none — the probe reported success; CPE_STAGING_SABOTAGE=1 forced this red to prove the \
+             guard still bites)"
+        }
+    }
+}
+
 /// The message [`require_staged`] panics with, as a value rather than a `panic!` literal, so the CI
 /// guard step's `grep 'CPE-1717'` has something a unit test can assert on without catching an unwind.
 pub fn staging_failure_message(mechanism: &str) -> String {
@@ -2961,6 +2996,13 @@ pub fn staging_failure_message(mechanism: &str) -> String {
          leg's own notice — but treat that as a diagnosis step, not a fix.",
         os = std::env::consts::OS
     )
+}
+
+/// [`staging_failure_message`] plus the specific step [`require_staged_reason`] was told failed
+/// (CPE-1815), as a value rather than inlined into the `panic!` call so a unit test can assert on it
+/// the same way the plain message is asserted on above.
+pub fn staging_failure_message_with_reason(mechanism: &str, reason: &str) -> String {
+    format!("{}\n\nWhich step failed: {reason}", staging_failure_message(mechanism))
 }
 
 /// Owns a per-test scratch directory under `%TEMP%` and removes it (recursively, best-effort) when
@@ -3926,6 +3968,52 @@ mod tests {
             msg.contains("verified NOTHING"),
             "must say what actually went wrong — that the leg covered nothing — rather than only that \
              a helper returned false: {msg}"
+        );
+    }
+
+    /// CPE-1815: `require_staged_reason` exists so the panic names *which* step of a multi-step probe
+    /// failed, not just that the probe as a whole returned false. Unfixed code (plain `require_staged`
+    /// fed a bare `bool`) can only ever produce `staging_failure_message`'s generic text — it has no
+    /// step name to fold in, no matter what `Err` a probe would have carried. Asserting the reason text
+    /// actually appears distinguishes the fix from that unfixed shape; asserting only "message contains
+    /// CPE-1717" would pass on the unfixed code too, since that part is unchanged.
+    #[test]
+    fn cpe_1815_the_failure_message_with_reason_names_which_step_failed() {
+        let msg = staging_failure_message_with_reason(
+            "trash_roundtrip",
+            "trash::delete rejected the probe file",
+        );
+        assert!(msg.contains("CPE-1717"), "still the same panic family, got: {msg}");
+        assert!(msg.contains("trash_roundtrip"), "must still name the mechanism, got: {msg}");
+        assert!(
+            msg.contains("trash::delete rejected the probe file"),
+            "must name the SPECIFIC step that failed, not just that staging failed in general: {msg}"
+        );
+    }
+
+    /// CPE-1815: distinct `Err`s for distinct steps must produce distinct reasons — otherwise
+    /// `require_staged_reason` would be no more informative than the bare `bool` it replaces, just with
+    /// extra plumbing. Also covers the `Ok(())`-under-sabotage case, where the probe has no failing step
+    /// to report and the message must say so rather than fabricate one.
+    #[test]
+    fn cpe_1815_distinct_probe_steps_produce_distinct_reasons() {
+        let write_fail = staged_fail_reason(Err("could not write the probe file before trashing it"));
+        let list_fail = staged_fail_reason(Err(
+            "the deleted probe file is not listed back out of the trash (list() failed, or \
+             succeeded without the probe in it)",
+        ));
+        assert_ne!(
+            write_fail, list_fail,
+            "two different failing steps must not collapse into the same reason text"
+        );
+        assert!(write_fail.contains("write"));
+        assert!(list_fail.contains("listed"));
+
+        let sabotaged = staged_fail_reason(Ok(()));
+        assert!(
+            sabotaged.contains("SABOTAGE"),
+            "a sabotage-forced failure has no real failing step — the reason must say that rather than \
+             claim a step name it does not have: {sabotaged}"
         );
     }
 
