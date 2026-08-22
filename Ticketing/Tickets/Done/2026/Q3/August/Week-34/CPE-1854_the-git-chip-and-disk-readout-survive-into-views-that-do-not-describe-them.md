@@ -3,11 +3,11 @@ id: CPE-1854
 title: the git chip's guard is effectively non-reactive, so it goes stale even in an archive
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
