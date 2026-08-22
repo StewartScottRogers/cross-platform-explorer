@@ -3,11 +3,11 @@ id: CPE-1842
 title: the Windows signing step's codec is a host default, not a guarantee
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-21
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
