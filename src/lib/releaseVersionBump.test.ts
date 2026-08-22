@@ -161,8 +161,17 @@ function flat(text: string): string {
   // The ESC is written as the escape sequence \x1b, never as a raw control byte in this file, and
   // matched explicitly: a bare /\[[0-9;]*[A-Za-z]/ would eat the literal "[p" out of "[package]",
   // which is a phrase these very assertions check for.
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\s+/g, " ");
+  return (
+    text
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+      // PowerShell 7's ConciseView prefixes every CONTINUATION line of a wrapped error with a "|"
+      // gutter, so the wrap does not merely insert whitespace -- it inserts "| " mid-phrase. Windows
+      // PowerShell 5.1 does not. Strip the gutter before collapsing whitespace, or the wording match
+      // still misses, on "No | manifest was written".
+      .replace(/^[ \t]*\|[ \t]?/gm, " ")
+      .replace(/\s+/g, " ")
+  );
 }
 
 /** Everything a failed exit-status assertion needs to be diagnosable at a glance -- without it a red
