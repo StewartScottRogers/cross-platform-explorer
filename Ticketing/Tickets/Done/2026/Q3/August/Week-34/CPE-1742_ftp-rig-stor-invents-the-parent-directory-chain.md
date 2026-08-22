@@ -3,11 +3,11 @@ id: CPE-1742
 title: The FTP rig's STOR invents the parent directory chain, which no real daemon does
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
