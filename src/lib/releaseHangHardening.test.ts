@@ -365,13 +365,23 @@ describe("release-sidecar.yml apt-get + curl sites carry hang hardening (CPE-182
  *  the total past `rmt + mt`, and both earlier scaled experiments happened to use `--retry-delay 1`.
  *  A confirming experiment chosen from inside the wrong model confirms the wrong model.
  *
- *  curl's default `--retry-delay` is not 0 (it backs off exponentially from 1s), so a line with no
- *  explicit delay still has a delay term; 1 is used as the floor rather than 0 for that reason. */
+ *  ALL THREE FLAGS ARE REQUIRED; an absent one returns null rather than a default. An earlier cut
+ *  defaulted a missing `--retry-delay` to 1 "as a floor", which is the wrong shape for this file
+ *  because of the DIRECTION the error runs: curl's default backoff is *exponential*, so the sleep
+ *  before the final permitted retry can be 8s or 16s, not 1s. Substituting 1 therefore UNDER-states
+ *  the worst case, and an under-stated worst case makes the assertion below PASS a site that is
+ *  genuinely broken -- a guard that fails open. Returning null makes the assertion fail loudly with
+ *  the offending line instead, which is the only safe direction for a check whose whole job is to
+ *  refuse a bound that does not hold.
+ *
+ *  Dead code today -- every retrying curl across all six workflows carries an explicit
+ *  `--retry-delay` (the two here at 2, ci.yml's three at 3) -- but the shape matters more than
+ *  whether it currently fires. */
 function curlWorstCaseSeconds(line: string): number | null {
   const maxTime = flagNumber(line, "--max-time");
   const retryMaxTime = flagNumber(line, "--retry-max-time");
-  if (maxTime === null || retryMaxTime === null) return null;
-  const retryDelay = flagNumber(line, "--retry-delay") ?? 1;
+  const retryDelay = flagNumber(line, "--retry-delay");
+  if (maxTime === null || retryMaxTime === null || retryDelay === null) return null;
   return retryMaxTime + retryDelay + maxTime;
 }
 
@@ -398,17 +408,32 @@ function curlWorstCaseSeconds(line: string): number | null {
 // 150 + 3 + 180 = 333s against a `timeout-minutes: 6` (360s) cap: inside it, so NOT broken, but
 // only 27s / 7.5% of margin -- under the 10% this block requires, so folding them in would turn the
 // guard red on work this ticket did not do. (CPE-1824 computed 330s there, omitting the same
-// retry-delay term; the corrected figure is 333s and its conclusion likewise survives.) Whether 27s
-// is enough margin for a step that also untars and copies is a real question with a real answer,
-// and it belongs to whoever picks that up -- flagged here rather than silently skipped, and
-// deliberately not "fixed" by loosening MIN_MARGIN_FRACTION until it passes, which would convert a
-// finding into a rubber stamp.
+// retry-delay term; the corrected figure is 333s and ci.yml's comment now says so at its source.)
+//
+// Three reasons, in order of weight, for leaving them out rather than folding them in:
+//   1. They are NOT BROKEN -- 333 < 360. An assertion that reddens CI over a non-defect is a false
+//      alarm, and the first thing anyone would do with it is turn it off.
+//   2. Both alternatives are worse INSIDE THIS PR. Loosening MIN_MARGIN_FRACTION to 0.075 would
+//      turn the threshold into a DESCRIPTION OF THE STATUS QUO rather than a requirement; tightening
+//      ci.yml's 150 to 140 would be an unmeasured behaviour change to the release-critical fetch
+//      path, made from inside a ticket about a different workflow.
+//   3. The reason is recorded HERE, in code, where the next person to touch this guard reads it --
+//      the same standard CPE-1824's deleted exclusion note was held to.
+// Whether 27s is enough margin for a step that also untars and copies is a real question with a
+// real answer, and it belongs to whoever picks that up (CPE-1860).
 describe("ffmpeg-pin-freshness.yml's HEAD-check sizing is arithmetically sound (CPE-1849)", () => {
   const doc = parseWorkflow("ffmpeg-pin-freshness.yml");
 
   /** Fraction of the cap that must remain unused. 10% of 300s is 30s -- comfortably more than the
    *  step's own non-curl work (echo/case/printf, milliseconds) while still refusing a value that
-   *  merely grazes the cap. */
+   *  merely grazes the cap.
+   *
+   *  An INTERIM value, argued rather than measured, and deliberately not measured before merge. The
+   *  strongest evidence it is not tuned to flatter its own subject: the two sites it guards sit at
+   *  260/300 = 13.3% margin, comfortably clear rather than grazing. A threshold picked to pass its
+   *  own work would sit just under 13.3%. It also errs STRICT -- a wrong interim value produces a
+   *  loud red, never a silent pass. (CPE-1860 also notes it is a pure fraction with no absolute
+   *  floor, so on a site with a small cap 10% could be only a few seconds.) */
   const MIN_MARGIN_FRACTION = 0.1;
 
   for (const [stepName, calls] of [
@@ -428,7 +453,12 @@ describe("ffmpeg-pin-freshness.yml's HEAD-check sizing is arithmetically sound (
       expect(retrying.length).toBe(1);
 
       const worst = curlWorstCaseSeconds(retrying[0]);
-      expect(worst, `could not read --max-time/--retry-max-time off: ${retrying[0]}`).not.toBeNull();
+      // Fails loudly on an absent flag rather than defaulting one -- see curlWorstCaseSeconds().
+      expect(
+        worst,
+        `need --max-time, --retry-max-time AND --retry-delay to compute a worst case; ` +
+          `one is missing from: ${retrying[0]}`,
+      ).not.toBeNull();
 
       const total = calls * (worst as number);
       // Reported as a message so a failure states the real numbers rather than "expected true".

@@ -357,19 +357,80 @@ assertions, two arithmetic assertions, and five `logicalLines()` unit tests.
 4. Changed `Validate the recommendation`'s `timeout-minutes: 5` to `4` → **1 failed / 18 passed**,
    `expected 4 to be 5`.
 
-**Round 2's four, on the new assertions (counts against the 26-test suite):**
+**Round 2's four, on the new assertions.** Tallies below are against the **final 26-test suite**,
+re-run at round-3 head. (Round 2 first recorded 5–7 as `/19` and `/20`, which summed to 21 rather
+than 26 — they were measured before the five `logicalLines()` tests were added and never refreshed.
+Stale pass counts in a ticket about stale numbers; caught by the Reviewer. The failure counts and
+assertion messages were correct throughout, and #8 was already right.)
 
-5. `--retry-max-time 20` → `200`, the exact prefix-match evasion → **2 failed / 19 passed**. The
+5. `--retry-max-time 20` → `200`, the exact prefix-match evasion → **2 failed / 24 passed**. The
    arithmetic assertion reported `5 calls x 232s = 1160s against a 300s cap (needs < 270s to keep
    10% margin)`, and the now-bounded value assertion reported `to match /…--retry-max-time\s+20(?![\d…/`.
    Under round 1's suite this mutation was green.
-6. `--max-time 30` → `300` → **1 failed / 20 passed**, `5 calls x 322s = 1610s against a 300s cap`.
+6. `--max-time 30` → `300` → **1 failed / 25 passed**, `5 calls x 322s = 1610s against a 300s cap`.
    Also green under round 1's suite — so both terms of the product are now pinned.
 7. `--retry-delay 2` → `30`, confirming the corrected term is load-bearing in the assertion and not
-   decoration → **1 failed / 20 passed**, `5 calls x 80s = 400s against a 300s cap`.
+   decoration → **1 failed / 25 passed**, `5 calls x 80s = 400s against a 300s cap`.
 8. `stripShellComment()` replaced with the naive `line.slice(0, line.indexOf("#"))` → **2 failed /
    24 passed** (the quoted-fragment test and the mid-word test). The same mutation left round 1's
    entire suite green.
+
+**Round 3's, on the fail-open fix:**
+
+9. Deleted `--retry-delay 2` from the `head_check()` curl → **1 failed / 25 passed**, `need
+   --max-time, --retry-max-time AND --retry-delay to compute a worst case; one is missing from:
+   code=$(curl …)`. Then, with the flag still absent, `curlWorstCaseSeconds()` was temporarily
+   reverted to its `?? 1` default: **26 passed** — the fail-open confirmed by experiment rather than
+   argued, since it would have computed `20 + 1 + 30 = 51s`, `5 x 51 = 255s < 270s`, and waved
+   through a site whose real bound nobody had checked. Both reverted.
+
+### Round 3 — Reviewer APPROVED round 2; three small items, all closed
+
+It verified all five round-2 findings by **re-running the mutations that exposed them**, not by
+reading the diff, and confirmed the `N = 27` ceiling independently (28 gives exactly 300s, which
+does not fit strictly).
+
+**1. The corrected figure was not fixed at its source.** Round 2 corrected `330s → 333s` in the
+guard's comment but left `.github/workflows/ci.yml` still reading *"curl's real worst case is
+150 + 180 = 330s"* and *"leaving ~30s for the step's mkdir/tar/echo"* (really 27s). Not touching
+ci.yml was a defensible scope call; leaving a **known-stale arithmetic claim at its source** is the
+exact defect class this family exists to remove, and a reader of ci.yml would never have seen the
+correction. Both lines now state `150 + 3 + 180 = 333s` and `27s`, with a one-line note on why the
+term was missed. Two comment edits, no behaviour change.
+
+**2. `curlWorstCaseSeconds()` failed OPEN on an absent `--retry-delay`.** It defaulted to `?? 1`
+"as a floor". curl's default backoff is **exponential**, so the sleep before the final permitted
+retry can be 8s or 16s — meaning the substitution **under-states** the worst case, and an
+under-stated worst case makes the assertion **pass a genuinely broken site**. That is the one
+direction a guard must never fail in, and the round-2 comment was honest that 1 was a floor without
+saying which way the error ran. All three flags are now required; an absent one returns null and the
+assertion fails loudly with the offending line. Dead code today — every retrying curl across all six
+workflows carries an explicit `--retry-delay` — but the shape matters more than whether it fires.
+Red-proof 9 above confirms both halves, including that the old default really did wave the site
+through.
+
+**3. Stale red-proof tallies**, in a ticket about stale numbers — corrected above, with the reason
+recorded rather than quietly overwritten.
+
+**On the exclusion decision, which the Reviewer was asked to second-guess: it agrees, and its
+reasoning is stronger than mine, so its version is now what the code says.** Three reasons in order
+of weight: (1) the pdfium sites are **not broken** (333 < 360), so an assertion reddening CI over a
+non-defect is a false alarm and the first thing anyone would do is switch it off; (2) both
+alternatives are worse *inside this PR* — loosening the threshold to 0.075 makes it a **description
+of the status quo** rather than a requirement, and tightening ci.yml's 150 to 140 would be an
+unmeasured behaviour change to the release-critical fetch path made from inside a ticket about a
+different workflow; (3) the reason is recorded **in code**, where the next person to touch the guard
+reads it, not buried in a ticket — the same standard CPE-1824's deleted note was held to.
+
+**On the 10% threshold**: defensible as an interim and deliberately **not** measured before merge.
+The strongest evidence it is not tuned to flatter its own subject is that the two sites it guards sit
+at `260/300` = **13.3% margin**, comfortably clear rather than grazing — a threshold chosen to pass
+its own work would sit just under 13.3%. It also errs **strict**: a wrong interim value produces a
+loud red, never a silent pass. Both arguments are now recorded on `MIN_MARGIN_FRACTION` itself.
+
+Handed to **CPE-1860** (no action here): whether 27s is adequate margin for ci.yml's pdfium steps,
+and that `MIN_MARGIN_FRACTION` is a pure fraction with no absolute floor, so on a site with a small
+cap 10% could be only a few seconds.
 
 ### One more correction, not asked for but found on the way
 
@@ -393,23 +454,27 @@ inconclusive branch on first response. No behaviour change.
 
 ### Gates
 
-- `npx vitest run` — round 1: **324 files / 4315 tests**. Round 2: **324 files / 4322 tests**, all
-  passed (guard 15 → 26).
+- `npx vitest run` — round 1: **324 files / 4315 tests**. Rounds 2 and 3: **324 files / 4322 tests**,
+  all passed (guard 15 → 26).
 - `npm run check` — **0 errors, 0 warnings**.
 - **Real YAML parser**: every `.github/workflows/*.yml` parsed with **PyYAML 6.0.3**, not only the
   repo's bounded-subset parser — 6/6 OK. The structure was re-read *through PyYAML* to confirm the
   caps and call counts independently of the guard: `check-pins` job cap 30, both steps
   `timeout-minutes: 5`, five `head_check` invocations.
-- Every `run:` block in the touched workflow extracted and passed `bash -n` — 6/6 shell-syntax OK,
-  so the reflowed continuation is valid shell and not just valid YAML.
-- Line endings: all three files are CRLF in the working tree (`core.autocrlf=true`). Verified
-  byte-level after every edit — CR count == LF count at round-2 head (581/581 workflow, 644/644 test
-  file, 412/412 ticket), no BOM on any of them, trailing `\r\n` intact, and `git diff --numstat`
-  localised (65/11, 256/17, 365/12 cumulative) rather than whole-file, which is what an EOL rewrite
-  would have looked like. No `sed -i` and no PowerShell write touched any repo file; the one
-  scripted edit in round 2 (the `stripShellComment()` mutation, twice, reverted from a byte copy)
-  went through Python with explicit `newline=''` so CRLF was preserved, and was verified by the
-  counts above afterwards.
+- Every `run:` block in **both** touched workflows extracted and passed `bash -n` — **65/65**
+  shell-syntax OK across `ffmpeg-pin-freshness.yml` and `ci.yml` (round 3 added ci.yml to the
+  sweep), so the reflowed continuation is valid shell and not just valid YAML.
+- Line endings: all four touched files are CRLF in the working tree (`core.autocrlf=true`). Verified
+  byte-level after every edit — CR count == LF count **at round-3 head**: 581/581
+  `ffmpeg-pin-freshness.yml`, 1500/1500 `ci.yml`, 674/674 test file, 501/501 ticket. No BOM on any
+  (first three bytes are real content), trailing `\r\n` intact, and `git diff --numstat` localised
+  rather than whole-file, which is what an EOL rewrite would have looked like: **11/5, 65/11,
+  286/17, 455/13** cumulative against `main`. (Round 2 reported 65/11, 256/17, 365/12 and
+  CR 412/412 for the ticket — accurate when written, stale by the time it was read. Same class as
+  finding 2 above; refreshed here, and inherently self-referential since editing this line changes
+  the number it reports.) No `sed -i` and no PowerShell write touched any repo file; every scripted
+  edit (the two `stripShellComment()` mutations, reverted from a byte copy) went through Python with
+  explicit `newline=''` so CRLF was preserved, and was verified by the counts above afterwards.
 - Positive control re-run at round-2 head through the final flag set: `pdfium-linux-x64.tgz` →
   exit 0, HTTP 200, 1,919 ms, **3,650,783 bytes**, 49 tar members, `lib/libpdfium.so` present —
   byte-identical to round 1 and to the Reviewer's independent run.

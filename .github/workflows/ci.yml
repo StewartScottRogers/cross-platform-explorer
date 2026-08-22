@@ -546,13 +546,19 @@ jobs:
       #                         invocation -- see release-sidecar.yml.)
       #   --retry-max-time 150  the retry SERIES: before starting each new retry curl checks
       #                         elapsed time against this and stops retrying once it is reached.
-      #                         An attempt already in flight is allowed to finish, so curl's real
-      #                         worst case is 150 + 180 = 330s.
+      #                         An attempt already in flight is allowed to finish, and the check
+      #                         happens BEFORE the --retry-delay sleep, so curl's real worst case
+      #                         is 150 + 3 + 180 = 333s. (CPE-1849 corrected this: it read
+      #                         "150 + 180 = 330s" here, omitting the --retry-delay term. Measured
+      #                         -- with --max-time 2 --retry-max-time 4, a --retry-delay of 3 gave
+      #                         7.9s against the 6s that "retry-max-time + max-time" predicts. The
+      #                         omission survived because both earlier scaled experiments happened
+      #                         to use --retry-delay 1, too small a term to expose it.)
       #   timeout-minutes: 6    the outer GitHub Actions backstop (360s wall-clock), which kills
       #                         the step regardless of what is stuck inside it.
-      # 150 is chosen so that 330s worst case lands strictly inside the 360s backstop: curl loses on
-      # its own terms (real exit code + --fail diagnostics in the log) rather than being killed
-      # opaquely by the runner, leaving ~30s for the step's mkdir/tar/echo. It does not weaken what
+      # 150 is chosen so that the 333s worst case lands strictly inside the 360s backstop: curl loses
+      # on its own terms (real exit code + --fail diagnostics in the log) rather than being killed
+      # opaquely by the runner, leaving 27s for the step's mkdir/tar/echo. It does not weaken what
       # the retries are actually for -- 5 retryable terminal errors fail in seconds each plus 3s
       # delays, ~20s in total, far inside 150.
       # NB (round 2 of CPE-1824): this comment previously claimed --max-time bounded the entire
