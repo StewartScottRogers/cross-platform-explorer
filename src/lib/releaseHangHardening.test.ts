@@ -79,6 +79,33 @@ function aptGetLines(run: string | undefined): string[] {
   return (run ?? "").split("\n").filter((line) => APT_COMMAND_WORD.test(line));
 }
 
+/** Matches each flag as an isolated FLAG WORD. The `(?![\w-])` tail is what keeps `--retry` from
+ *  also matching `--retry-delay`/`--retry-all-errors`/`--retry-connrefused`/`--retry-max-time`,
+ *  which are different options entirely -- a line carrying only `--retry-delay` is not retrying. */
+const RETRY_FLAG = /(?<![\w-])--retry(?![\w-])/;
+const MAX_TIME_FLAG = /(?<![\w-])--max-time(?![\w-])/;
+const RETRY_MAX_TIME_FLAG = /(?<![\w-])--retry-max-time(?![\w-])/;
+
+/** Every real curl invocation line in a parsed workflow, tagged with where it lives. `#`-comment
+ *  lines are dropped first: the `run` blocks in these workflows carry long explanatory comments
+ *  that NAME these very flags, and counting one of those as an invocation would let a comment
+ *  satisfy (or falsely trip) the assertion below -- the same comment-vs-key confusion CPE-1787's
+ *  Reviewer round found in a regex-over-raw-text guard. */
+function curlLines(doc: WorkflowDoc): { where: string; line: string }[] {
+  const found: { where: string; line: string }[] = [];
+  for (const [jobName, job] of Object.entries(doc.jobs)) {
+    for (const step of job.steps) {
+      for (const raw of (step.run ?? "").split("\n")) {
+        const line = raw.trim();
+        if (line.startsWith("#")) continue;
+        if (!/(?<![\w-])curl(?![\w-])/.test(line)) continue;
+        found.push({ where: `${jobName} / ${step.name}`, line });
+      }
+    }
+  }
+  return found;
+}
+
 describe("release.yml apt-get sites carry the ForceIPv4/retry/timeout hardening (CPE-1824)", () => {
   const doc = parseWorkflow("release.yml");
 
@@ -214,8 +241,56 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
       // --max-time cover DIFFERENT failure modes (retryable terminal errors vs. an open stall) and
       // neither should be dropped in favour of the other.
       expect(curlLine).toContain("--retry 5");
+      // ...and because --retry RESETS the --max-time counter, --retry-max-time is what actually
+      // bounds the series. 150 + one in-flight attempt's 180 = 330s, inside the 360s step cap.
+      expect(curlLine).toContain("--retry-max-time 150");
       expect(step["timeout-minutes"]).toBe(6);
       expect(step["continue-on-error"]).toBe(true);
+    }
+  });
+});
+
+// CPE-1824 round 2. The first cut of this PR asserted --retry and --max-time were both present and
+// described --max-time in a code comment as bounding "the ENTIRE curl invocation including all
+// --retry attempts". That is backwards. curl's own docs for --max-time say: "If you enable retrying
+// the transfer (--retry) then the maximum time counter is reset each time the transfer is retried.
+// You can use --retry-max-time to limit the retry time." So `--retry 5 --max-time 180` has a curl-
+// level worst case near 5x180s plus delays, not 180s -- the step-level `timeout-minutes` was doing
+// all the real bounding while the comment credited curl.
+//
+// This is the assertion that stops that reasoning error recurring: it is a generic scan of every
+// curl line in these workflows rather than a spot check on the three known sites, so a NEW curl
+// added anywhere in them with --retry + --max-time and no --retry-max-time fails here.
+//
+// Scope note: .github/workflows/ffmpeg-pin-freshness.yml also pairs --retry with --max-time (two
+// head_check sites). It is deliberately NOT in this list -- its own comment already describes the
+// flag accurately ("--max-time bounds each attempt"), so the defect this guard exists to catch is
+// not present there, and that file is outside CPE-1824's stated scope. Adding it here is a
+// reasonable follow-up, not an omission.
+describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () => {
+  const GUARDED = ["ci.yml", "release.yml", "release-sidecar.yml"] as const;
+
+  for (const fileName of GUARDED) {
+    it(`${fileName}: every curl combining --retry with --max-time also carries --retry-max-time`, () => {
+      const offenders = curlLines(parseWorkflow(fileName))
+        .filter(
+          ({ line }) =>
+            RETRY_FLAG.test(line) && MAX_TIME_FLAG.test(line) && !RETRY_MAX_TIME_FLAG.test(line),
+        )
+        .map(({ where, line }) => `${where}: ${line}`);
+      expect(offenders).toEqual([]);
+    });
+  }
+
+  it("the scan is not vacuous -- it really does reach ci.yml's three pdfium curl sites", () => {
+    // Without this, deleting every --retry (or renaming the steps, or breaking curlLines) would
+    // leave the assertions above trivially green on an empty set and look like a pass.
+    const retrying = curlLines(parseWorkflow("ci.yml")).filter(
+      ({ line }) => RETRY_FLAG.test(line) && MAX_TIME_FLAG.test(line),
+    );
+    expect(retrying.length).toBe(3);
+    for (const { line } of retrying) {
+      expect(line).toContain("--retry-max-time 150");
     }
   });
 });

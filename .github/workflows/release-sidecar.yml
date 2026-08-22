@@ -298,12 +298,17 @@ jobs:
           # help once a connection attempt reaches a terminal state (refused, a retryable HTTP
           # status, timeout), so a connection that hangs open with zero bytes moving previously
           # rode this whole step to the job's default timeout. `--connect-timeout 15` bounds the
-          # TCP/TLS handshake phase only; `--max-time 240` bounds the ENTIRE curl invocation --
-          # per curl's own docs this includes time spent inside `-sSL`'s redirect follows -- so it
-          # is the one that actually catches a stall mid-transfer. 240s is generous headroom for
-          # the largest asset here (a BtbN ffmpeg static build, tens of MB) on a GitHub-hosted
-          # runner's bandwidth; it does NOT bound retries across multiple curl invocations (there
-          # is only one invocation per `fetch` call here, so that distinction doesn't apply).
+          # TCP/TLS handshake phase only; `--max-time 240` bounds one attempt end-to-end, which
+          # here IS the entire curl invocation -- per curl's own docs it covers time spent inside
+          # `-sSL`'s redirect follows, and this call passes no `--retry`, so there is exactly one
+          # attempt and nothing resets the counter. That is what catches a stall mid-transfer. 240s
+          # is generous headroom for the largest asset here (a BtbN ffmpeg static build, tens of MB)
+          # on a GitHub-hosted runner's bandwidth.
+          # CAUTION: the "entire invocation" property above depends on there being no `--retry`.
+          # curl RESETS the `--max-time` counter on every retry ("if you enable retrying the
+          # transfer (--retry) then the maximum time counter is reset each time the transfer is
+          # retried"), so anyone adding `--retry` here must add `--retry-max-time` to keep a real
+          # bound. src/lib/releaseHangHardening.test.ts enforces exactly that pairing.
           fetch() {
             url="$1"; out="$2"; magic="$3"; label="$4"
             code=$(curl -sSL --connect-timeout 15 --max-time 240 --write-out '%{http_code}' -o "$out" "$url") || true

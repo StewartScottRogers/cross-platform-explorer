@@ -99,16 +99,18 @@ Sites hardened, each with `HARDENING_FLAGS` = `-o Acquire::ForceIPv4=true -o Acq
   three pdfium `curl` sites (Linux/macOS/Windows) each gained `--connect-timeout 15 --max-time 180`
   plus `timeout-minutes: 6`; their pre-existing `--retry 5 --retry-all-errors --retry-delay 3` was
   left untouched (it covers a *different* failure mode — retryable terminal errors — and doesn't
-  bound a stall). All six `ci.yml` sites already carried `continue-on-error: true`, so each cap fails
+  bound a stall). **Round 2 also added `--retry-max-time 150` to all three — see the 2026-08-21
+  entry; without it the `--max-time` on these lines bounded one attempt, not the command.** All six
+  `ci.yml` sites already carried `continue-on-error: true`, so each cap fails
   the step fast and then gets swallowed into a green job outcome, exactly like CPE-1787's site 3/5.
 
 What each flag does and does NOT cover (per the ticket's instruction to verify, not assume):
 - `apt-get -o Acquire::*` — same four options CPE-1787 verified for ci.yml; unchanged here.
 - `curl --connect-timeout N` — bounds only the TCP/TLS handshake phase.
-- `curl --max-time N` — bounds the ENTIRE single curl invocation (connect + transfer + all
-  `--retry` attempts within that one process), confirmed against curl's own docs/`everything.curl.dev`
-  — this is the one that actually catches a mid-transfer stall, which `--retry` alone cannot (retry
-  only fires once an attempt reaches a terminal state).
+- `curl --max-time N` — bounds ONE attempt (connect + transfer). **Corrected in round 2 — the
+  original wording here was wrong; see the 2026-08-21 entry below.**
+- `curl --retry-max-time N` — bounds the retry SERIES; this is what makes a curl-level bound real
+  once `--retry` is in play.
 - `curl --retry N` — retries on a transient/retryable terminal error (refused connection, certain
   5xx); does NOT bound an open connection with zero bytes moving.
 - `choco --execution-timeout=N` (seconds) — bounds the whole choco command (download + install) via
@@ -135,4 +137,90 @@ test doubles as `--retry` and `--connect-timeout`/`--max-time`, and the choco te
 Gates: `npx vitest run` — 321 files / 4269 tests, all green. `npm run check` — 0 errors, 0 warnings.
 Did not touch `Set-Content -Encoding utf8` (CPE-1842's signing-step encoding bug) or any
 `PDFIUM_TAG`/`FFMPEG_BUILD_TAG`/hash-pinning lines (CPE-1839) — confirmed by a diff-content grep
-after finishing; no line overlap with either ticket's scope.
+after finishing; no line overlap with either ticket's scope. **The CPE-1839 half of that claim was
+wrong — corrected in round 2 below. The CPE-1842 half was re-checked and is correct.**
+
+**2026-08-21 (round 2)** — Reviewer returned CHANGES REQUESTED. Two corrections, one of them a
+false statement that had been recorded as verified fact.
+
+**1. `curl --max-time` does NOT bound a command that retries — the round-1 claim was backwards.**
+
+Round 1 wrote, in `ci.yml`'s code comment and twice in this Work Log, that `--max-time` bounds "the
+ENTIRE single curl invocation (connect + transfer + all `--retry` attempts within that one
+process)" and said it was "confirmed against curl's own docs". It is the opposite. curl's
+`docs/cmdline-opts/max-time.md` says:
+
+> "If you enable retrying the transfer (--retry) then the maximum time counter is reset each time
+> the transfer is retried. You can use --retry-max-time to limit the retry time."
+
+Re-verified here two independent ways before acting, rather than taking the Reviewer's word: fetched
+that file from curl's own repo, and read `curl --help all` on curl 8.21.0 locally, which describes
+`-m, --max-time` as "Maximum time allowed for transfer" (singular, per-transfer) and lists a separate
+`--retry-max-time` as "Retry only within this period". Both agree with the Reviewer, not with round 1.
+
+Consequence at the three `ci.yml` pdfium sites (the only sites in these three workflows that combine
+`--retry` with `--max-time`): with `--retry 5 --retry-delay 3 --max-time 180`, curl's own worst case
+was roughly 5 x 180s plus delays — about 15 minutes — not the 180s the comment asserted.
+
+**This was never a live hang risk.** All three steps also carry an independent `timeout-minutes: 6`,
+so GitHub Actions kills them at 360s wall-clock regardless of what curl believes. The shipped
+behaviour was always bounded; what was broken was the explanation. A wrong claim presented as a
+verified fact is worse than an honest assumption, because the next person to touch these lines
+reasons from it — and it was the headline methodology point of the whole PR.
+
+Fix: added `--retry-max-time 150` to all three pdfium `curl` lines, so the curl-level bound is
+genuinely true instead of merely softened in prose.
+
+Why 150 specifically. Per curl's `--retry-max-time` docs, the timer starts before the first attempt
+and is checked *before starting each new retry*; an attempt already in flight is allowed to run to
+completion. So curl's real worst case is `retry-max-time + max-time`, not `retry-max-time`. Sizing it
+against the existing backstop:
+
+- step backstop is `timeout-minutes: 6` = 360s;
+- an in-flight attempt can add up to `--max-time 180`;
+- so require `N + 180 < 360`, i.e. `N < 180`;
+- take `N = 150` → worst case 330s, landing strictly inside 360s with ~30s spare for the step's
+  `mkdir`/`tar`/`echo`.
+
+The point of leaving margin is that curl should lose on its *own* terms — a real exit code plus
+`--fail`'s diagnostics in the log — rather than being killed opaquely by the runner, which is what a
+value that raced the backstop would produce. 150 also costs the retries nothing in practice: their
+actual job is retryable terminal errors (refused connection, 5xx), which fail in seconds each, so 5
+of them plus 3s delays is ~20s — far inside 150.
+
+`release-sidecar.yml`'s two `curl` sites pass no `--retry` at all, so their `--max-time` really is a
+whole-invocation bound and their values (240s / 60s) stand unchanged. Their comment was reworded
+anyway to say the property holds *because* there is no `--retry`, with an explicit caution that
+adding one later requires `--retry-max-time` — otherwise that comment becomes the next false claim.
+
+**2. Guard extended so this exact reasoning error cannot recur.**
+`src/lib/releaseHangHardening.test.ts` 11 tests → 15. The new assertions are a *generic scan* of
+every non-comment `curl` line in `ci.yml`/`release.yml`/`release-sidecar.yml` (via the same
+`parseYaml` structural route as the rest of the file), failing if any line pairs `--retry` with
+`--max-time` but no `--retry-max-time` — so a NEW curl added anywhere in these workflows is caught,
+not just the three known sites. Flag matching uses `(?<![\w-])--retry(?![\w-])`, whose tail is what
+stops `--retry-delay`/`--retry-all-errors`/`--retry-connrefused`/`--retry-max-time` counting as
+`--retry`. `#`-comment lines are stripped first, because these `run` blocks contain long comments
+naming these very flags — the comment-vs-key confusion CPE-1787's Reviewer round already found once.
+
+Red-proofed twice, both reverted immediately after:
+- Deleted ` --retry-max-time 150` from `.github/workflows/ci.yml:555` (the Linux pdfium `curl`).
+  3 tests failed, 12 passed — including the new generic scan, reporting
+  `expected [ Array(1) ] to deeply equal []`.
+- Deleted `--retry 5 ` from that same line 555. 2 tests failed, 13 passed — the generic scan went
+  *green* (the line no longer retries, so it is correctly not an offender) while the new
+  non-vacuity test caught it with `expected 2 to be 3`. That is exactly the case the offenders scan
+  structurally cannot see, which is why the non-vacuity test exists.
+
+**3. The "zero line overlap" claim was half wrong (Reviewer's second correction).**
+Round 1 and the PR body claimed zero line overlap with both CPE-1842 and CPE-1839. Re-checked:
+- **CPE-1842 — correct, stands.** This PR touches no `Set-Content -Encoding utf8` / signing-step line.
+- **CPE-1839 — wrong.** This PR *did* edit the `sums_code=$(curl -sSL --connect-timeout 15
+  --max-time 60 ...)` line in `release-sidecar.yml`'s `verify_btbn_checksum()` (adding the timeout
+  flags), and that is a line CPE-1839 will need to edit again. The round-1 check only grepped for
+  `PDFIUM_TAG`/`FFMPEG_BUILD_TAG`/hash-pinning *tokens*, which that line does not contain — so the
+  grep came back clean and was reported as "no overlap" when the real question was which lines
+  CPE-1839's work will land on. Whoever takes CPE-1839 should expect to rebase over this PR's change
+  to that line rather than finding it untouched.
+
+Gates re-run in round 2 — numbers in the PR comment.
