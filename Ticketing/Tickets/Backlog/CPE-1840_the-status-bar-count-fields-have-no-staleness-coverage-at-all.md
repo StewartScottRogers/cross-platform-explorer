@@ -73,10 +73,9 @@ Added `src/App.statusBarCountStaleness.test.ts` (8 tests, App-level integration 
 harness). All three staleness paths are now pinned for BOTH fields:
 
 - **cache-served reset** (2 tests) — Home -> `C:\d` -> `C:\d\photos` (counted) -> Back to `C:\d` (a cache
-  hit, `goBack` passes `useCache=true`). `C:\d`'s `list_dir` is HELD (never resolves), so "the note is
-  gone" can only be satisfied by the cache branch's own reset, never by a revalidation racing in behind it.
-- **`revalidateDir` update** (2 tests) — the stream's count and `list_dir`'s count are deliberately
-  different (0 cached, 4/6 fresh), so a refreshed count is distinguishable from a remembered one.
+  hit, `goBack` passes `useCache=true`). `C:\d`'s `list_dir` is HELD (never resolves).
+- **`revalidateDir` update** (2 tests) — the stream's count and `list_dir`'s count differ (0 cached, 4/6
+  fresh), so the assertion can name the specific number only a refresh produces.
 - **`<StatusBar>` gate, per arm** (4 tests: Home, archive, smart folder, structured search) — each entered
   from a folder carrying 2 filtered + 3 unreadable, and none of `enterArchive`/`openSmartFolder`/
   `openStructuredSearch` calls `loadPath`, so the counts are still live in App state and the gate is the
@@ -94,22 +93,58 @@ Red-proof (every mutation applied, suite run, reverted; `git status` clean after
 | `App.svelte:6918` gate -> `isHome ? 0 : unreadableCount` | archive + smart folder + structured search (3 failed) |
 | `App.svelte:6917` gate -> drop the `isHome` arm | Home arm |
 | `App.svelte:6918` gate -> drop the `isHome` arm | Home arm |
+| `ExplorerPane.svelte:379/380` reset to the WRONG value `= 1` (added after review) | 4 failed, 4 passed — both cache tests + both revalidation pre-assertions |
 
 Gates: `npx vitest run` 321 files / 4266 tests passed; `npm run check` 0 errors, 0 warnings.
+
+### 2026-08-22 — review corrections (same branch, same PR #990)
+
+The independent Reviewer approved the PR, reproduced all eight mutations, and found the tests red under
+strictly more mutations than the rationale above required — but it also falsified two liveness claims and
+found one real hole. All three corrected here; **tests-only, still no production change**.
+
+1. **The `heldListDir` hold is NOT load-bearing** (my earlier "without it the test would have passed" was
+   wrong). With both `heldListDir.add("C:\d")` calls deleted, mutations 1+2 still red — they fail at the
+   assertion immediately after `backToDrive()`, which runs well inside the 300ms stale-while-revalidate
+   window at `ExplorerPane.svelte:450`, so nothing can race in behind it anyway. The hold is kept because
+   it makes each test's SECOND, post-400ms assertion non-vacuous and insures the first against timing
+   drift. Comments and this log now say that instead.
+2. **The differing stream/`list_dir` counts are NOT load-bearing either.** Equalising them keeps the file
+   green unmutated and still reds under mutations 3+4; equalised *and* with all four lines deleted, all
+   four tests still red, because the cache branch zeroes the count before the assertion so no remembered
+   value can survive. Kept for expressiveness ("it picked up 4", not "something non-zero appeared").
+3. **One real gap, closed.** A wrong non-zero cache reset was caught for every value except exactly `1`
+   on `filteredHidden`: `StatusBar.svelte:76-78` renders a singular sentence at `=== 1` ("1 entry was
+   hidden…") and `FILTERED_NOTE` was plural-only, so `filteredHidden = 1` at :379 left that test GREEN
+   (`= 7` reds it). `UNREADABLE_NOTE` already spanned both forms, which is why only that side caught it.
+   `FILTERED_NOTE` is now `/hidden because (its name|their names) could not be shown safely/`; the `= 1`
+   mutation goes from 2 failed to **4 failed**. All eight original mutations re-verified red 1:1 after
+   the change.
+
+Gates after the corrections: `npx vitest run` 321 files / 4266 tests passed; `npm run check` 0 errors,
+0 warnings.
 
 **Enumeration of the other listing-derived status-bar props** (the AC's fourth box):
 
 - `itemCount` / `totalCount` — genuinely listing-derived and they carry their own view gate
   (`(isHome && !smartFolder && !structuredSearch)`, plus `|| archive` for `totalCount`), but they are
-  **structurally immune** to all three staleness paths: they derive from `visible`/`shown`, which
-  `<ExplorerPane>` recomputes from `entries` / `smartOverride` / `archiveOverride`. The cache branch
-  replaces `entries` in the same statement block as the count reset, `revalidateDir` replaces `entries`
-  alongside the counts, and each virtual view supplies its own override list. No hole; nothing to fix.
+  **structurally immune** to all three staleness paths, for a stronger reason than "replaced in the same
+  statement block" (my first, weaker phrasing): they simply ARE the length of the array being rendered —
+  `App.svelte:2967/2969` read `visible.length` / `shown.length`, and `visible`/`shown` are what
+  `<ExplorerPane>` (`:85/:142/:165`) derives from `entries` / `smartOverride` / `archiveOverride` and puts
+  on screen. There is no side-channel scalar that can drift from the list. `filteredHidden` /
+  `unreadableCount` are hand-maintained scalars kept BESIDE the array, and that asymmetry is the whole
+  defect class. No hole; nothing to fix.
 - `selectedCount` / `selectedSize` — selection-derived (reset on navigation), not listing-derived.
 - `hiddenShown` — a persisted setting. `notice` / `noticeIsError` — transient toast state.
 - `diskFree` / `diskTotal` (`updateDiskSpace`) and `git` (`refreshGitStatus`) — **path**-derived, not
-  listing-derived, and their guards name Home + archive but NOT smart folder / structured search. Same
-  *shape* of partial gate, but not the same class of defect: both describe `currentPath`, which is still a
-  real folder while a virtual view is open, so neither makes a false statement about the listing on
-  screen. Recorded here as an observation; out of scope for this ticket and not fixed.
+  listing-derived, and their guards name Home + archive but NOT smart folder / structured search.
+  **My original reasoning for calling that harmless was backwards** and is retracted: I argued both still
+  describe `currentPath`, "which is still a real folder", so nothing false is on screen. The Reviewer
+  showed the guards do the OPPOSITE of what that predicts — while a smart folder or structured search is
+  open the breadcrumb reads `Home / <name>` and `currentPath` is not on screen at all (so an ungated disk
+  or branch readout is attributed to a view that doesn't name a folder), whereas in an archive — which IS
+  guarded — the breadcrumb still contains `splitPath(currentPath)`. It also judged the git case worse than
+  either of us thought. Filed by the coordinator as its own ticket; **not widened into this one**, and
+  this entry exists so the old rationale isn't left standing for a future maintainer to trust.
 

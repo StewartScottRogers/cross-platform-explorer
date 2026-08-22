@@ -23,9 +23,19 @@
  *
  * Harness: the same mocked-Tauri App-level harness as `App.filteredHiddenNote.test.ts` /
  * `App.archiveNav.test.ts`, extended with (a) per-path counts for the STREAM (first paint) and for
- * `list_dir` (the background revalidation), which are deliberately allowed to differ, and (b) a
- * `heldListDir` set that makes a chosen path's revalidation never resolve — so a "the note is gone"
- * assertion can only be satisfied by the cache-served RESET, never by a revalidation racing in behind it.
+ * `list_dir` (the background revalidation), which are allowed to differ, and (b) a `heldListDir` set
+ * that makes a chosen path's revalidation never resolve.
+ *
+ * Neither of those two is LOAD-BEARING for redness, and the CPE-1840 Reviewer proved it rather than
+ * arguing it: with both `heldListDir.add(...)` calls removed, mutations 1+2 still red; with the stream
+ * and `list_dir` counts equalised, mutations 3+4 still red (and so do all four with every one of the
+ * four lines deleted at once). Both are belt-and-braces, kept for what they actually buy:
+ *   - the hold makes each cache test's SECOND, post-400ms assertion non-vacuous (otherwise a real
+ *     revalidation lands in that window and clears the note for a reason the test isn't about), and
+ *     insures the first assertion against timing drift — it already runs inside the 300ms
+ *     stale-while-revalidate window at `ExplorerPane.svelte:450`, which is why it reds without the hold;
+ *   - the differing counts make each revalidation test name a SPECIFIC number that only the refresh can
+ *     produce, so the assertion reads as "it picked up 4" rather than "something non-zero appeared".
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
@@ -79,10 +89,11 @@ type Counts = { filtered: number; unreadable: number };
 
 /** Counts the STREAM reports per path — the first-paint path (`list_dir_stream`'s terminal result). */
 let streamCounts: Record<string, Counts> = {};
-/** Counts `list_dir` reports per path — what the BACKGROUND revalidation finds. Deliberately separate
- *  from `streamCounts`: a folder whose contents changed since it was cached is exactly the case
- *  `revalidateDir`'s count refresh exists for, and the only way to tell a refreshed count apart from a
- *  remembered one is to make the two numbers different. */
+/** Counts `list_dir` reports per path — what the BACKGROUND revalidation finds. Separate from
+ *  `streamCounts` so a revalidation test can name a specific number the cached paint never carried (a
+ *  folder whose contents changed since it was cached is the case `revalidateDir`'s refresh exists for).
+ *  Not required for redness — equalising the two leaves both revalidation tests red, because the cache
+ *  branch zeroes the count before the assertion, so no remembered value can survive to satisfy it. */
 let freshCounts: Record<string, Counts> = {};
 /** Paths whose `list_dir` never resolves, so a cache-served view stays cache-served for the whole test. */
 let heldListDir = new Set<string>();
@@ -140,7 +151,11 @@ beforeEach(() => {
   });
 });
 
-const FILTERED_NOTE = /entries were hidden because their names could not be shown safely/;
+// BOTH grammatical numbers, deliberately: `StatusBar.svelte` renders a singular sentence for a count of
+// exactly 1 ("1 entry was hidden…"), so a plural-only pattern would let a wrong-but-non-zero reset of
+// exactly `1` slip past the cache test — the one hole the CPE-1840 Reviewer found in the first cut of
+// this file. `UNREADABLE_NOTE` already spanned both forms, which is why that side caught it.
+const FILTERED_NOTE = /hidden because (its name|their names) could not be shown safely/;
 const UNREADABLE_NOTE = /Couldn.t read \d+ entr/;
 
 /** Home -> C:\d (fresh listing, cached on completion). */
@@ -171,8 +186,10 @@ function countPhotos(filtered: number, unreadable: number): void {
 
 describe("a cache-served paint never inherits the previous folder's counts (CPE-1840)", () => {
   // Mutation this reds under: delete `filteredHidden = 0;` from ExplorerPane.svelte's cache branch
-  // (~line 379). C:\d's revalidation is HELD, so nothing else can clear the note — if the reset is
-  // gone, "2 entries were hidden…" (a fact about C:\d\photos) stays on screen over C:\d.
+  // (~line 379) — "2 entries were hidden…", a fact about C:\d\photos, then stays on screen over C:\d.
+  // Also red under a WRONG reset (`= 7` or `= 1`), which is what `FILTERED_NOTE` spanning both
+  // grammatical numbers buys. C:\d's revalidation is held (see `heldListDir`) so the post-400ms
+  // assertion below is about the reset rather than about a refresh that happened to land.
   it("filteredHidden: a cache hit shows no filtered note at all until its own revalidation returns", async () => {
     countPhotos(2, 0);
     heldListDir.add("C:\\d");
@@ -184,8 +201,9 @@ describe("a cache-served paint never inherits the previous folder's counts (CPE-
     await backToDrive();
     expect(screen.queryByText(FILTERED_NOTE)).toBeNull();
 
-    // Past the 300ms stale-while-revalidate timer: the revalidation has been ISSUED and is hanging, so
-    // the note's absence can only be the cache branch's own reset, not a refresh racing in behind it.
+    // Past the 300ms stale-while-revalidate timer (ExplorerPane.svelte:450): the revalidation has been
+    // ISSUED and is hanging, so this second assertion still describes the cache branch's own reset
+    // rather than a completed refresh — which is the whole reason the hold is here.
     await new Promise((r) => setTimeout(r, 400));
     expect(screen.queryByText(FILTERED_NOTE)).toBeNull();
   });
