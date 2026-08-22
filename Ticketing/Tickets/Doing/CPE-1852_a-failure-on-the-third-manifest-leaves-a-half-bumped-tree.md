@@ -198,3 +198,48 @@ says the tree is clean after an abort — which is now true and previously was n
   not tested.
 - **The git half** of the script (`add`/`commit`/`tag`/`push`) is untouched and never exercised on a real
   repo. No release was cut.
+
+---
+
+## Work Log — round 2 (CI reds on the ubuntu/`pwsh` leg — the assertion, not the fix)
+
+PR #991, head `8633340b`. **All 18 checks green** (1 `skipping` by design: GUI smoke on windows). CI
+settled 2026-08-22 04:26 local.
+
+The first push (`8240a412`) went red on exactly one check — `Frontend — type-check and test`, the
+`ubuntu-latest` leg where `pwsh` is the only host — and on exactly one assertion:
+`/no manifest was written/`. **323 of 324 test files passed; the fix itself was green everywhere**,
+including the byte-level "first two manifests untouched" cases, on both hosts. What differed was the
+message *rendering*, and it took two rounds to pin because the two hosts break it differently:
+
+1. **`8240a412` → red.** PowerShell renders an uncaught `throw` through its own error formatter, which
+   **hard-wraps the message to the console width**. The wrap fell between "No" and "manifest" under
+   `pwsh` and elsewhere under 5.1, so the phrase matched locally and not on CI. Added `flat()`:
+   strip ANSI CSI escapes, collapse whitespace runs, then match.
+   *Trap inside the fix:* the ESC must be matched **explicitly as `\x1b`** — a bare
+   `/\[[0-9;]*[A-Za-z]/` eats the literal `[p` out of `[package]`, which is a phrase these same
+   assertions check for. And the escape goes in as the two-character sequence: a first attempt put a
+   **raw 0x1B control byte** into the source file (the Bash tool's heredoc transport interpreted it).
+   Caught by a byte scan before commit; the file ships with `rawESC=0`.
+2. **`adf139be` → still red, and the captured output said why.** PowerShell 7's **ConciseView prefixes
+   every continuation line of a wrapped error with a `|` gutter**, so the wrap does not merely insert
+   whitespace — it inserts `"| "` mid-phrase: `... found 0. No | manifest was written -- ...`. Windows
+   PowerShell 5.1 emits **no gutter at all**, which is why 5.1 stayed green through both rounds and no
+   amount of local iteration would have found it. `flat()` now strips the line-leading gutter before
+   collapsing whitespace, verified against the exact byte shape CI captured rather than a guess at it.
+3. **`8633340b` → green**, `Frontend — type-check and test` included.
+
+Also added `expect(out).not.toMatch(/refusing to write/i)`, which the earlier version only implied: the
+retired wording is now asserted absent, not merely the new wording present.
+
+**Worth carrying forward:** any assertion on the *text* of a PowerShell error must normalise first.
+The message bytes are identical on both hosts; the formatter's wrapping and gutter are not, and CI is
+the only place `pwsh` exists for this repo. `flat()` in `src/lib/releaseVersionBump.test.ts` is the
+reusable form.
+
+### Round-2 gates (local, Windows PowerShell 5.1)
+
+- `src/lib/releaseVersionBump.test.ts` + `src/lib/mojibakeGuard.test.ts`: **93 passed**.
+- `npm run check`: **0 errors, 0 warnings**.
+- Test file after every edit: `loneLF=0` (CRLF intact), `rawESC=0`, no BOM, trailing `\r\n` intact.
+- `scripts/release.ps1` unchanged since round 1 — rounds 2 and 3 touched only the test file.
