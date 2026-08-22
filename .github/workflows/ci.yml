@@ -490,15 +490,29 @@ jobs:
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y ffmpeg
 
+      # CPE-1824: `brew install` has no documented per-invocation retry/timeout flag of its own
+      # (checked, not assumed -- unlike apt's `-o Acquire::*` options, there is nothing to pass
+      # here), so the only bound available is GitHub Actions' own step-level `timeout-minutes`.
+      # `continue-on-error: true` already means a hang here was ALWAYS going to be swallowed once
+      # it reached a terminal state -- this cap is what lets it reach one instead of riding to the
+      # job's 360-minute default.
       - name: Install ffmpeg (video-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
         continue-on-error: true
+        timeout-minutes: 10
         run: command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
 
+      # CPE-1824: Chocolatey DOES have a genuine timeout option -- `--execution-timeout` (alias
+      # `--timeout`), documented as CommandExecutionTimeout in SECONDS, bounding the whole command
+      # (download + install), not just a connect phase; it defaults to 2700s (45min) and choco's
+      # own enforcement has had bugs around disabling it (GH chocolatey/choco#1224/#1747), so the
+      # step-level `timeout-minutes` below stays as an independent backstop rather than relying on
+      # choco's internal timer alone.
       - name: Install ffmpeg (video-thumb real-render test, Windows)
         if: matrix.os == 'windows-latest'
         continue-on-error: true
-        run: choco install ffmpeg -y --no-progress
+        timeout-minutes: 10
+        run: choco install ffmpeg -y --no-progress --execution-timeout=480
 
       # pdfium prebuilt (BSD-3-Clause, bblanchon/pdfium-binaries) staged where
       # `Pdfium::bind_to_system_library()` resolves it via the OS's normal dynamic-library search path
@@ -506,27 +520,65 @@ jobs:
       # binary's pdfium is provisioned from in release-sidecar.yml.
       # curl uses --fail (a bad HTTP status is an error, not a silently-saved error page) + --retry so a
       # transient network blip retries instead of leaving a truncated/empty archive for tar to choke on.
+      # CPE-1824: --retry alone doesn't bound a STALLED transfer (a connection that hangs open with
+      # zero bytes moving never hits a retryable terminal state). Four different mechanisms are in
+      # play below, and each bounds ONLY its own scope -- they are not interchangeable:
+      #   --connect-timeout 15  the TCP/TLS handshake phase of ONE attempt, nothing after it.
+      #   --max-time 180        ONE attempt end-to-end (connect + transfer). With --retry present
+      #                         this is NOT a bound on the whole command: PLAIN --retry already
+      #                         retries a timeout -- curl's retry.md lists "a timeout" FIRST among
+      #                         the transient errors it covers -- and each retry then gets a FRESH
+      #                         max-time clock. Measured against a server that accepts the
+      #                         connection and then sends nothing: this exact flag set without
+      #                         --retry-max-time ran 1101s (18.35 min) and printed SIX separate
+      #                         "Operation timed out after 1800xx ms" -- one full 180s cycle for
+      #                         the initial attempt plus each of the 5 retries. With
+      #                         --retry-max-time 150 added, the same test ends at 182s, exit 28,
+      #                         one timeout message.
+      #                         NB: --retry-all-errors is NOT the cause and dropping it would fix
+      #                         nothing -- measured, `--retry 2 --retry-delay 1 --max-time 8` with
+      #                         NO --retry-all-errors still burned 3 full attempts / ~29s. The
+      #                         hazard is --retry + --max-time, full stop; that is what the guard
+      #                         keys on. (Absent --retry, --max-time DOES bound the whole
+      #                         invocation -- see release-sidecar.yml.)
+      #   --retry-max-time 150  the retry SERIES: before starting each new retry curl checks
+      #                         elapsed time against this and stops retrying once it is reached.
+      #                         An attempt already in flight is allowed to finish, so curl's real
+      #                         worst case is 150 + 180 = 330s.
+      #   timeout-minutes: 6    the outer GitHub Actions backstop (360s wall-clock), which kills
+      #                         the step regardless of what is stuck inside it.
+      # 150 is chosen so that 330s worst case lands strictly inside the 360s backstop: curl loses on
+      # its own terms (real exit code + --fail diagnostics in the log) rather than being killed
+      # opaquely by the runner, leaving ~30s for the step's mkdir/tar/echo. It does not weaken what
+      # the retries are actually for -- 5 retryable terminal errors fail in seconds each plus 3s
+      # delays, ~20s in total, far inside 150.
+      # NB (round 2 of CPE-1824): this comment previously claimed --max-time bounded the entire
+      # invocation "including all --retry attempts". That was backwards; see the ticket's Work Log.
+      # src/lib/releaseHangHardening.test.ts now fails if any curl here pairs --retry with
+      # --max-time but no --retry-max-time, so the claim cannot silently rot back into being false.
       - name: Install pdfium prebuilt (pdf-thumb real-render test, Linux)
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
+        timeout-minutes: 6
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           mkdir -p "$RUNNER_TEMP/pdfium"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 150 --connect-timeout 15 --max-time 180 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.so
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Install pdfium prebuilt (pdf-thumb real-render test, macOS)
         if: matrix.os == 'macos-latest'
         continue-on-error: true
+        timeout-minutes: 6
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           mkdir -p "$RUNNER_TEMP/pdfium"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 150 --connect-timeout 15 --max-time 180 -sS -o "$RUNNER_TEMP/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP/pdfium" lib/libpdfium.dylib
           echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/pdfium/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
@@ -538,13 +590,14 @@ jobs:
       - name: Install pdfium prebuilt (pdf-thumb real-render test, Windows)
         if: matrix.os == 'windows-latest'
         continue-on-error: true
+        timeout-minutes: 6
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
         run: |
           dest="$(cygpath -u "$RUNNER_TEMP")/pdfium"
           mkdir -p "$dest"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$dest/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 150 --connect-timeout 15 --max-time 180 -sS -o "$dest/pdfium.tgz" "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
           tar --force-local -xzf "$dest/pdfium.tgz" -C "$dest" bin/pdfium.dll
           echo "$(cygpath -w "$dest/bin")" >> "$GITHUB_PATH"
 
