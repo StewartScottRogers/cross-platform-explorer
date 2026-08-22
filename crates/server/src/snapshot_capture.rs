@@ -165,7 +165,30 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
 
     let blobs_dir_path = blobs_dir(store_path);
     fs::create_dir_all(&blobs_dir_path).map_err(|e| format!("{}: {e}", blobs_dir_path.display()))?;
-    for blob in &plan.to_store {
+    // CPE-1844 — **`plan.reused` is walked here too, and that is the fix, not a tidy-up.** `reused` is
+    // `plan_capture`'s dedup verdict, and dedup asks exactly one question: `BlobStore::contains(hash)`,
+    // i.e. *does `index.json` list this hash*. That is a claim in a hand-editable file, and this loop
+    // used to act on it by writing nothing at all — so an index entry naming a blob whose file is not on
+    // disk made the next capture of that content store none of it, while reporting a checkpoint created.
+    // Reproduced through the registered commands before this changed, with no attacker in it: the index
+    // entry left behind is precisely `prune`'s own documented leak-over-corruption residue (blob files
+    // removed, then a failure before `save_store`), and it is also what a partial restore-from-backup of
+    // a store leaves — this module's stated threat premise.
+    //
+    // ```text
+    // blobs/<hash> deleted, index.json's entry for <hash> left in place
+    //   checkpoint_create        -> Ok, "second" checkpoint recorded, blob file still absent
+    //   checkpoint_revert(second)-> Ok(applied: 0, skipped: [a.txt: blobs/<hash>: cannot find the file])
+    //   a.txt still reads "damaged"
+    // ```
+    //
+    // The repair is to ask the disk instead of the index, and the existing slot probe below already *is*
+    // that question — a blob whose file is there is `Occupied` and skipped, costing one stat. So a reused
+    // blob is written when, and only when, its bytes are genuinely missing, and dedup goes back to being
+    // an optimisation rather than a promise. `added_bytes` deliberately still reports the plan's figure:
+    // it is "what this capture added that the store did not have", and a repair write is content the
+    // store was already supposed to be holding.
+    for blob in plan.to_store.iter().chain(plan.reused.iter()) {
         let dest = blobs_dir_path.join(&blob.hash);
         // CPE-1705: was `if dest.exists() { continue }`. The overwrite this guard's collapse permits is
         // benign — the blob store is content-addressed, so `dest`'s name IS the hash of the bytes about
@@ -557,7 +580,9 @@ pub(crate) fn validate_blob_name(hash: &str) -> Result<(), String> {
 const MAX_BLOB_NAME_LEN: usize = 128;
 
 /// Drop manifest `manifest_id`'s hold on its blobs via [`release`] and remove the now-unreferenced blob
-/// files from disk. Returns the bytes freed. The manifest file itself is deleted; a manifest no longer on
+/// files from disk. Returns the bytes freed — **measured from the files this call actually removed**
+/// (CPE-1844), not from the sizes `index.json` records for them. The manifest file itself is deleted; a
+/// manifest no longer on
 /// disk cannot be [`restore`]d.
 ///
 /// Ordering matters and is deliberate: the manifest file is deleted **first** — that single, atomic
@@ -565,7 +590,7 @@ const MAX_BLOB_NAME_LEN: usize = 128;
 /// same manifest would double-decrement a shared blob to 0 and delete content another snapshot still
 /// needs (silent data loss). Deleting the manifest up front makes a retry-after-failure always safe: if
 /// this `remove_file` fails, nothing else has changed → a clean retry; if it succeeds but a later step
-/// (`load_store`/`release`/`save_store`) fails, the manifest is already gone so no second `release` can
+/// (`release`/`save_store`) fails, the manifest is already gone so no second `release` can
 /// happen — the residue is only a refcount/space leak, never data loss. Same "leak over corruption"
 /// tradeoff [`capture`] makes.
 pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
@@ -586,10 +611,35 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
         validate_blob_name(hash).map_err(|why| refusal(manifest_id, &why))?;
     }
 
+    // CPE-1844 — **`load_store` is read here, ABOVE the point of no return, and that placement is the
+    // fix.** It used to sit just below the `remove_file`. `load_store` is fail-closed by design
+    // (CPE-1705: an `index.json` that is unparseable, or is not a regular file, or cannot be stat'd, is
+    // a refusal — reading it as a fresh store is that ticket's cross-snapshot data loss). Refusing after
+    // the manifest file is already deleted meant the refusal cost a checkpoint. Walking `prune`'s own
+    // gate list — the axis CPE-1861's enumeration recorded as the one it failed to walk — this was the
+    // one gate on the wrong side of the line. Measured through `checkpoint_prune_apply`, four
+    // checkpoints, `index.json` truncated to `{"blobs": {`:
+    //
+    // ```text
+    // pass 1  Err(index.json: EOF while parsing…)   manifests left = 3
+    // pass 2  Err(same)                             manifests left = 2
+    // pass 3  Err(same)                             manifests left = 1
+    // pass 4  Ok                                    manifests left = 1
+    // ```
+    //
+    // One checkpoint destroyed per retention pass, each pass reporting failure, their blobs leaked
+    // because `release` never ran — the store thinned to the one-survivor floor by an unreadable ledger.
+    // A torn write or a truncation is enough; no attacker is required. Hoisted, the refusal is total:
+    // nothing has been touched at this line, so a store whose index cannot be read is simply not pruned.
+    //
+    // The stall that leaves behind is deliberate and is the safe direction — there is nothing sound to
+    // do with a refcount ledger you cannot read except stop, and unlike CPE-1861's per-manifest stalls
+    // this one cannot be mirrored into `list_manifests`, because it is a property of the store rather
+    // than of any one manifest. It is also loud, recoverable, and no longer destructive.
+    let mut store = load_store(store_path)?;
+
     let mpath = manifest_path(store_path, manifest_id);
     fs::remove_file(&mpath).map_err(|e| format!("{}: {e}", mpath.display()))?; // point of no return
-
-    let mut store = load_store(store_path)?;
 
     // CPE-1861 — **one manifest, one refcount: a release must not drop a blob another manifest still
     // names.** That invariant is what the rest of this module assumes and what `index.json` alone
@@ -653,11 +703,26 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     // removed by hand, or `prune` called with that id directly — the last line above, which is exactly
     // what `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` exercises.
     let to_release: BTreeSet<String> = hashes.difference(&still_named).cloned().collect();
-    let freed = release(&mut store, &to_release);
+    release(&mut store, &to_release);
     let blobs_dir_path = blobs_dir(store_path);
+    // CPE-1844 — **the returned figure is the bytes whose files this loop actually removed**, measured
+    // one `metadata()` ahead of each `remove_file`, not `release`'s return value. `release` sums the
+    // `size` fields of the index entries it garbage-collected, which is `index.json`'s claim about how
+    // big those blobs are; on the fixture that opens this ticket it reported `bytes_freed=4000000000`
+    // for a store holding 45 bytes. That figure is reported to the caller as
+    // `RetentionApplyResult::bytes_freed` and shown as a result of a destructive operation, so it is
+    // held to the same rule as every other count in this tree (CPE-1803/1804/1805/1816): a number the
+    // user reads must describe what happened. An entry the index lists but whose file is already gone
+    // now contributes 0 rather than its recorded size, which is also simply true.
+    let mut freed = 0u64;
     for hash in &hashes {
         if !store.contains(hash) && !still_named.contains(hash) {
-            let _ = fs::remove_file(blobs_dir_path.join(hash)); // best-effort; index is the source of truth
+            let path = blobs_dir_path.join(hash);
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if fs::remove_file(&path).is_ok() {
+                // best-effort; index is the source of truth for *what* is free, the disk for how much
+                freed = freed.saturating_add(size);
+            }
         }
     }
     save_store(store_path, &store)?;
@@ -764,6 +829,14 @@ pub struct ManifestSummary {
 /// missing until the round-3 security audit found a hand-edited hash still stalling the pass — if you
 /// add a refusal to [`prune`] ahead of its `remove_file`, add its predicate here too, or you have
 /// re-opened the permanent stall.
+///
+/// **One exception, and it is deliberate (CPE-1844).** [`prune`] now also reads [`load_store`] ahead of
+/// its `remove_file`, and that refusal is **not** mirrored here — it cannot be, because it is a property
+/// of the store's one `index.json` rather than of any manifest, so there is no per-file predicate to
+/// skip on. An unreadable index therefore does stall the retention pass. That is the right direction:
+/// the whole store's refcount ledger is unreadable, so no prune in it is sound. Before that hoist the
+/// same condition was *destructive* instead of stalling — it cost one checkpoint per pass, measured in
+/// [`prune`]'s own comment.
 pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
     let dir = manifests_dir(Path::new(store_dir));
     let entries = match fs::read_dir(&dir) {
@@ -900,11 +973,87 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
     Ok(out)
 }
 
-/// The store's current total footprint in bytes (sum of unique blob sizes — see
-/// [`crate::snapshot::BlobStore::total_bytes`]). A store that has never captured (no `index.json` yet)
-/// reads as `0`, not an error.
+/// The store's current total footprint in bytes — **measured from the blob files actually on disk**,
+/// never read out of `index.json`. A store that has never captured (no `blobs/` directory yet) reads as
+/// `0`, not an error.
+///
+/// # CPE-1844 — this number authorises deletions, so it is measured rather than claimed
+///
+/// This was `load_store(store_dir)?.total_bytes()`: the sum of the `size` fields recorded in
+/// `index.json`, an ordinary hand-editable JSON file in the store — exactly as editable as the manifest
+/// CPE-1823 spent five rounds hardening, and receiving none of that validation. Its one consumer is
+/// [`crate::snapshot_prune::apply`]'s byte cap, which prunes survivors **oldest-first until the figure
+/// is under the cap or one checkpoint remains**. So one text edit turned a claim into real deletions of
+/// the user's other checkpoints. Reproduced through `checkpoint_prune_apply` before this was changed,
+/// on a store holding **45 bytes** against a **1,000,000-byte** cap, with a GFS policy that kept all
+/// five:
+///
+/// ```text
+/// index.json: every blob's "size" -> 1000000000       (one edit; no bytes written anywhere)
+///   preview.total_bytes  45  ->  5000000000
+///   CMD prune_apply  kept=[newest]  pruned=[4 others]  bytes_freed=4000000000
+///   manifests left on disk = 1 of 5
+/// ```
+///
+/// **Recomputed, not validated** — the lesson CPE-1823 paid for twice (its diff cap gated on the
+/// manifest's claimed `size` and fell to a manifest claiming `size: 1`; the fix was to measure the real
+/// file) and CPE-1861 reached independently (`manifests_naming` recomputes from the manifests on disk
+/// because the refcount structurally cannot answer the question). There is nothing to sanity-check here:
+/// a recorded size *is* the claim, so any bound on it is another claim. The footprint is a property of
+/// the filesystem, and the filesystem can be asked.
+///
+/// **What the recompute costs an attacker, stated precisely.** Inflating this figure now requires
+/// creating files in `blobs/` whose *logical* length is the inflated number, under names that are plain
+/// hex blob addresses. That is a real cost increase — the tamper is no longer free — but it is **not a
+/// barrier**: a sparse file (`fsutil sparse` on Windows, `truncate -s` on Unix) has a large logical
+/// length and near-zero allocation, so a determined editor of the store can still inflate the number
+/// without paying for the space. Recorded rather than implied away. Two things bound it: the tamper is
+/// now *visible* — files in the store, not a number in a config — and what it can still buy is bounded
+/// by CPE-1863, which owns the byte-cap loop's willingness to run to its one-survivor floor when
+/// pruning makes no progress.
+///
+/// **Deliberate under-counting, in the safe direction.** Only regular files whose names pass
+/// [`validate_blob_name`] count. A directory, a symlink (a `DirEntry::metadata` does not follow one, so
+/// it is not `is_file`), a sync client's `hash (1)` conflict copy, a stray `Thumbs.db` — none of them
+/// are content-addressed blobs this store wrote, and letting an attacker-or-OS-chosen filename
+/// contribute to a delete-driving total is the whole defect being fixed. An entry whose `metadata()`
+/// fails is skipped for the same reason. Every one of those choices *undercounts*, and undercounting a
+/// cap means pruning less — the only direction in which being wrong is not destructive.
+///
+/// **An unreadable `blobs/` is an error, not a zero.** Absent is `Ok(0)` (a store that has never
+/// captured, or one whose blobs were all freed). Unreadable is `Err`, following [`load_store`]'s
+/// CPE-1705 rule that there is no safe thing to do with a ledger you cannot read except stop: `apply`
+/// propagates it and deletes nothing.
+///
+/// Note this no longer opens `index.json` at all, so a store whose index is corrupt still reports an
+/// honest footprint to [`crate::snapshot_prune::preview`] instead of failing.
 pub fn store_total_bytes(store_dir: &str) -> Result<u64, String> {
-    Ok(load_store(Path::new(store_dir))?.total_bytes())
+    measure_blobs_dir(&blobs_dir(Path::new(store_dir)))
+}
+
+/// Sum the lengths of the content-addressed blob files directly under `dir`. See
+/// [`store_total_bytes`], which is this function's only reason to exist and carries the reasoning.
+fn measure_blobs_dir(dir: &Path) -> Result<u64, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        // The one answer that means "no blobs here": nothing at that path. Everything else is a
+        // directory we were told about and could not read, which is not a footprint of zero.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
+        if validate_blob_name(&name).is_err() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        total = total.saturating_add(meta.len());
+    }
+    Ok(total)
 }
 
 // ---- on-disk layout + persistence -----------------------------------------------------------------
@@ -2837,5 +2986,246 @@ mod tests {
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
+    }
+
+    // ---- CPE-1844: index.json is hand-editable, and it steers deletions ----------------------------
+
+    /// Sum every blob file's real length under `store`'s `blobs/`, independently of the code under test.
+    fn real_blob_bytes(store: &std::path::Path) -> u64 {
+        fs::read_dir(blobs_dir(store))
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Rewrite every `size` recorded in `store`'s `index.json` to `size`, and read it back so a tamper
+    /// that failed to land can never be mistaken for a guard that worked. Returns the total it now claims.
+    fn set_index_sizes(store: &std::path::Path, size: u64) -> u64 {
+        let p = index_path(store);
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        for (_h, m) in doc["blobs"].as_object_mut().unwrap().iter_mut() {
+            m["size"] = serde_json::json!(size);
+        }
+        fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let blobs = back["blobs"].as_object().unwrap();
+        assert!(
+            blobs.values().all(|m| m["size"].as_u64() == Some(size)),
+            "LIVE: the index.json size tamper never landed on disk"
+        );
+        blobs.values().map(|m| m["size"].as_u64().unwrap()).sum()
+    }
+
+    /// **CPE-1844, the headline.** `store_total_bytes` is the figure
+    /// [`crate::snapshot_prune::apply`]'s byte cap deletes checkpoints against. It used to be the sum of
+    /// the `size` fields in `index.json` — an ordinary hand-editable file in the store. This asserts the
+    /// figure now describes the blob files that are actually there.
+    #[test]
+    fn cpe_1844_store_total_bytes_measures_the_blobs_instead_of_believing_the_index() {
+        let src = scratch("1844-total-src");
+        let store = scratch("1844-total-store");
+        fs::write(src.join("a.txt"), b"twenty-nine bytes of content!").unwrap();
+        capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+
+        let real = real_blob_bytes(&store);
+        assert!(real > 0, "LIVE: the fixture stored no blobs at all");
+        assert_eq!(store_total_bytes(&store.to_string_lossy()).unwrap(), real, "the honest store");
+
+        // The tamper: one text edit, no bytes written anywhere on disk.
+        let claimed = set_index_sizes(&store, 1_000_000_000);
+        assert_eq!(
+            load_store(&store).unwrap().total_bytes(),
+            claimed,
+            "LIVE: the tamper did not reach the record the old figure was read from"
+        );
+        assert_ne!(claimed, real, "LIVE: the fixture's claim and its reality are the same number");
+
+        assert_eq!(
+            store_total_bytes(&store.to_string_lossy()).unwrap(),
+            real,
+            "HARM: a hand-edited index.json still dictates the store's reported footprint"
+        );
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// The measurement's deliberate exclusions, each of which under-counts — the only direction in which
+    /// being wrong about a delete-driving total is not destructive. A name that is not a plain hex blob
+    /// address is not something this store wrote, and letting an attacker-or-OS-chosen filename
+    /// contribute to the figure is the defect being fixed one layer down.
+    #[test]
+    fn cpe_1844_only_hex_named_regular_files_count_towards_the_footprint() {
+        let store = scratch("1844-measure");
+        let blobs = blobs_dir(&store);
+        fs::create_dir_all(&blobs).unwrap();
+
+        // An absent `blobs/` is a store that has never captured, not an error.
+        let empty = scratch("1844-measure-empty");
+        assert_eq!(measure_blobs_dir(&blobs_dir(&empty)).unwrap(), 0, "an absent blobs/ is zero, not Err");
+
+        fs::write(blobs.join("deadbeef"), b"0123456789").unwrap(); // 10 bytes, counted
+        fs::write(blobs.join("BEEF00"), b"01234").unwrap(); // 5 bytes; uppercase hex is still hex
+        fs::write(blobs.join("Thumbs.db"), vec![0u8; 5_000]).unwrap(); // not a blob name
+        fs::write(blobs.join("deadbeef (1)"), vec![0u8; 5_000]).unwrap(); // a sync client's conflict copy
+        fs::write(blobs.join("not-hex-at-all"), vec![0u8; 5_000]).unwrap();
+        fs::create_dir_all(blobs.join("cafe")).unwrap(); // a hex-named DIRECTORY
+
+        // LIVE: every decoy really is on disk and really is large, so a measurement that counted them
+        // would be visible as a number in the thousands rather than 15.
+        assert_eq!(blobs.join("Thumbs.db").metadata().unwrap().len(), 5_000, "LIVE: decoy is not staged");
+        assert_eq!(blobs.join("deadbeef (1)").metadata().unwrap().len(), 5_000, "LIVE: decoy is not staged");
+        assert!(blobs.join("cafe").is_dir(), "LIVE: the hex-named directory is not staged");
+
+        assert_eq!(
+            measure_blobs_dir(&blobs).unwrap(),
+            15,
+            "HARM: something that is not a content-addressed blob file contributed to the footprint"
+        );
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    /// **CPE-1844 — `prune` reports the bytes it removed, not the bytes `index.json` claimed.** The
+    /// figure is surfaced as `RetentionApplyResult::bytes_freed` after a destructive operation, so it is
+    /// held to this tree's rule that a number the user reads must describe what happened
+    /// (CPE-1803/1804/1805/1816). On the fixture that opens this ticket the old figure read
+    /// `bytes_freed = 4000000000` for a store holding 45 bytes.
+    #[test]
+    fn cpe_1844_prune_reports_the_bytes_it_actually_removed() {
+        let src = scratch("1844-freed-src");
+        let store = scratch("1844-freed-store");
+        fs::write(src.join("a.txt"), b"twenty-nine bytes of content!").unwrap();
+        let id = capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED)
+            .unwrap()
+            .manifest_id;
+        let real = real_blob_bytes(&store);
+        assert!(real > 0, "LIVE: nothing was stored, so nothing can be freed");
+
+        let claimed = set_index_sizes(&store, 1_000_000_000);
+        assert_eq!(
+            load_store(&store).unwrap().total_bytes(),
+            claimed,
+            "LIVE: the tamper did not reach the record `release` sums"
+        );
+
+        let freed = prune(&store.to_string_lossy(), &id).unwrap();
+        assert_eq!(real_blob_bytes(&store), 0, "LIVE: the prune removed no blob file, so it freed nothing");
+        assert_ne!(freed, claimed, "HARM: prune reported index.json's claim as bytes freed");
+        assert_eq!(freed, real, "HARM: prune's freed figure does not describe the files it removed");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1844 — an index entry is a claim about content, and `capture` used to act on it by writing
+    /// nothing.** Dedup asks `BlobStore::contains(hash)`, i.e. "does `index.json` list this hash", and a
+    /// `reused` verdict meant the blob's bytes were never written. An entry whose blob file is gone —
+    /// `prune`'s own documented leak-over-corruption residue, or a partial restore-from-backup of a
+    /// store — therefore made the next capture of that content store none of it.
+    #[test]
+    fn cpe_1844_a_reused_blob_whose_file_is_missing_is_written_not_assumed() {
+        let src = scratch("1844-dedup-src");
+        let store = scratch("1844-dedup-store");
+        fs::write(src.join("a.txt"), b"the user only copy").unwrap();
+        capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+
+        let hash = load_store(&store).unwrap().iter().next().unwrap().0.clone();
+        fs::remove_file(blobs_dir(&store).join(&hash)).unwrap();
+
+        // LIVE: the torn state really is staged — the file is gone and the index still claims it.
+        assert!(!blobs_dir(&store).join(&hash).exists(), "LIVE: the blob file is still on disk");
+        assert!(load_store(&store).unwrap().contains(&hash), "LIVE: the index no longer claims the blob");
+
+        let second =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        // LIVE: the dedup verdict really was "reused" — this fixture reaches the sink under test, and
+        // does not merely re-store the content as new.
+        assert_eq!(second.reused_blobs, 1, "LIVE: the capture did not take the dedup path");
+        assert_eq!(second.new_blobs, 0, "LIVE: the capture treated the blob as new, not reused");
+
+        let dest = scratch("1844-dedup-dest");
+        restore(&store.to_string_lossy(), &second.manifest_id, &dest.to_string_lossy())
+            .unwrap_or_else(|e| panic!("HARM: the checkpoint just taken cannot restore its content: {e}"));
+        assert_eq!(
+            fs::read(dest.join("a.txt")).unwrap(),
+            b"the user only copy",
+            "HARM: a checkpoint reported as created holds none of the file's content"
+        );
+        assert!(blobs_dir(&store).join(&hash).exists(), "the missing blob was repaired on disk");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// **CPE-1844 enumeration — the `refs` field, both directions, pinned rather than argued.**
+    /// Deflating a shared blob's refcount is the direction that could destroy content, and CPE-1861's
+    /// recomputed `manifests_naming` witness is what stops it; inflating it can only leak. Neither can
+    /// cost a surviving checkpoint its content, and this is the test that says so.
+    #[test]
+    fn cpe_1844_a_hand_edited_refcount_cannot_cost_a_surviving_checkpoint_its_content() {
+        let src = scratch("1844-refs-src");
+        let store = scratch("1844-refs-store");
+        fs::write(src.join("a.txt"), b"irreplaceable").unwrap();
+        let first = capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED)
+            .unwrap()
+            .manifest_id;
+        fs::write(src.join("b.txt"), b"second capture, same a.txt").unwrap();
+        let second = capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED)
+            .unwrap()
+            .manifest_id;
+        let hash = load_manifest(&store, &first).unwrap().files["a.txt"].hash.clone();
+        assert_eq!(load_store(&store).unwrap().get(&hash).unwrap().refs, 2, "LIVE: the blob is not shared");
+
+        // The tamper: the shared blob's refcount now says one snapshot holds it, when two do.
+        let p = index_path(&store);
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        doc["blobs"][&hash]["refs"] = serde_json::json!(1);
+        fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        assert_eq!(
+            load_store(&store).unwrap().get(&hash).unwrap().refs,
+            1,
+            "LIVE: the refcount tamper never landed on disk"
+        );
+
+        prune(&store.to_string_lossy(), &first).unwrap();
+        let dest = scratch("1844-refs-dest");
+        restore(&store.to_string_lossy(), &second, &dest.to_string_lossy())
+            .unwrap_or_else(|e| panic!("HARM: a deflated refcount cost the surviving checkpoint: {e}"));
+        assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"irreplaceable");
+
+        // The other direction: an inflated refcount can only keep a blob alive past its last namer — a
+        // space leak, never a delete. Asserted so the enumeration's "harmless" verdict is measured.
+        let leak_src = scratch("1844-refs-leak-src");
+        let leak_store = scratch("1844-refs-leak-store");
+        fs::write(leak_src.join("a.txt"), b"solo").unwrap();
+        let solo =
+            capture(&leak_src.to_string_lossy(), &leak_store.to_string_lossy(), &CaptureBudget::UNLIMITED)
+                .unwrap()
+                .manifest_id;
+        let solo_hash = load_manifest(&leak_store, &solo).unwrap().files["a.txt"].hash.clone();
+        let lp = index_path(&leak_store);
+        let mut ldoc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&lp).unwrap()).unwrap();
+        ldoc["blobs"][&solo_hash]["refs"] = serde_json::json!(9);
+        fs::write(&lp, serde_json::to_string_pretty(&ldoc).unwrap()).unwrap();
+        assert_eq!(load_store(&leak_store).unwrap().get(&solo_hash).unwrap().refs, 9, "LIVE: refs tamper");
+        prune(&leak_store.to_string_lossy(), &solo).unwrap();
+        assert!(
+            blobs_dir(&leak_store).join(&solo_hash).exists(),
+            "an inflated refcount leaks the blob — that is the recorded, non-destructive direction"
+        );
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+        let _ = fs::remove_dir_all(&leak_src);
+        let _ = fs::remove_dir_all(&leak_store);
     }
 }

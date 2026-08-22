@@ -137,6 +137,26 @@ Two consequences worth knowing:
 If you want to keep a copy of a snapshot store, copy the **whole store folder** somewhere outside it
 rather than duplicating individual files inside it.
 
+### How big the store thinks it is
+
+A snapshot store keeps a small bookkeeping file alongside the snapshots, recording how much space each
+piece of stored content takes. If you set a size limit on a folder's snapshots, that limit is what
+decides when older snapshots are deleted to make room — so the size figure decides deletions.
+
+**That figure is now measured from the stored content itself, every time, rather than read out of the
+bookkeeping file.** The practical difference: if the bookkeeping file is edited, out of date, or
+copied in from another machine, it can no longer make the app believe a small store is enormous and
+start deleting snapshots to get under a limit that was never exceeded. The footprint you see in the
+cleanup preview is the size of what is really there.
+
+The same applies in the other direction. Stored content is only ever treated as present if the file
+holding it is present — so a snapshot taken after part of a store went missing stores that content
+again rather than assuming it is already there, and a new snapshot can always put your files back.
+
+If the bookkeeping file is damaged outright, automatic cleanup **stops and says so** instead of
+guessing. Nothing is deleted while it can't be read. That is deliberate: acting on an unreadable
+record is how snapshots get lost.
+
 ## What this is (and isn't)
 
 This is the palette-driven, headless-friendly way to create and use checkpoints, usable on any folder at

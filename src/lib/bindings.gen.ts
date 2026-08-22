@@ -5638,7 +5638,8 @@ kept: string[];
  */
 pruned: string[]; 
 /**
- * Total bytes freed across every prune in this apply.
+ * Total bytes freed across every prune in this apply — the lengths of the blob files actually
+ * removed (CPE-1844), not the sizes `index.json` recorded for them.
  */
 bytes_freed: number }
 /**
@@ -5660,6 +5661,8 @@ keep: string[];
 prune: string[]; 
 /**
  * The store's current total footprint in bytes (informational only — `preview` never mutates it).
+ * Measured from the blob files on disk, not read out of `index.json` — see
+ * [`crate::snapshot_capture::store_total_bytes`] (CPE-1844).
  */
 total_bytes: number }
 /**

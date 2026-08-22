@@ -1735,4 +1735,158 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
     }
+
+    // ---- CPE-1844, through the registered commands -------------------------------------------------
+
+    /// Rewrite `root`'s snapshot-store `index.json` so every blob claims `size` bytes, and read it back
+    /// so a tamper that failed to land cannot be mistaken for a guard that worked. Returns the total the
+    /// file now claims — which is exactly what `store_total_bytes` used to hand the byte cap.
+    fn tamper_index_sizes(store_dir: &std::path::Path, size: u64) -> u64 {
+        let p = store_dir.join("index.json");
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        for (_h, m) in doc["blobs"].as_object_mut().unwrap().iter_mut() {
+            m["size"] = serde_json::json!(size);
+        }
+        fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let blobs = back["blobs"].as_object().unwrap();
+        assert!(
+            blobs.values().all(|m| m["size"].as_u64() == Some(size)),
+            "LIVE: the index.json size tamper never landed on disk"
+        );
+        blobs.values().map(|m| m["size"].as_u64().unwrap()).sum()
+    }
+
+    /// **CPE-1844 end-to-end through the registered commands** — `checkpoint_create`,
+    /// `checkpoint_prune_apply` and `checkpoint_revert`, which is what `snapshot_prune_apply` and
+    /// `snapshot_run_due` actually drive. The unit fixtures assert the store's state; this one asserts
+    /// the thing the user has: their earlier checkpoints still there, and still able to put a file back,
+    /// after a retention pass whose byte cap was handed a number out of a hand-edited file.
+    ///
+    /// Measured on `origin/main` before anything changed, five checkpoints, real footprint 45 bytes,
+    /// cap 1,000,000:
+    ///
+    /// ```text
+    /// index.json: every blob's "size" -> 1000000000
+    ///   CMD prune_apply  kept=[newest]  pruned=[the other four]  bytes_freed=4000000000
+    ///   manifests left on disk = 1 of 5
+    /// ```
+    #[test]
+    fn cpe_1844_a_hand_edited_index_cannot_prune_the_users_other_checkpoints() {
+        let app = scratch("app-data-1844");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("root-1844");
+        let root_s = root.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..5u64 {
+            fs::write(root.join("a.txt"), format!("version {i}").as_bytes()).unwrap();
+            ids.push(checkpoint_create(&ctx, &root_s, &format!("c{i}")).unwrap().checkpoint.manifest_id);
+        }
+        let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+        let store_s = store_dir.to_string_lossy().to_string();
+
+        // A day between captures, so the GFS pass keeps all five and the byte cap is the only thing in
+        // this test that can delete anything.
+        for (i, id) in ids.iter().enumerate() {
+            let p = store_dir.join("manifests").join(format!("{id}.json"));
+            let mut doc: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+            doc["created_ms"] = serde_json::json!(1_700_000_000_000u64 + (i as u64) * 86_400_000);
+            fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        }
+
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        let cap = 1_000_000u64;
+        let before = checkpoint_prune_preview(&ctx, &root_s, &policy).unwrap();
+        assert!(
+            before.prune.is_empty(),
+            "LIVE: the GFS pass would prune on its own, so this fixture does not isolate the byte cap"
+        );
+        assert!(before.total_bytes < cap, "LIVE: the honest store is not under the cap");
+
+        let claimed = tamper_index_sizes(&store_dir, 1_000_000_000);
+        assert!(claimed > cap, "LIVE: the tampered claim does not even exceed the cap");
+        assert_eq!(
+            crate::snapshot_capture::list_manifests(&store_s).unwrap().len(),
+            5,
+            "LIVE: the planner no longer sees five checkpoints, so the cap would have nothing to delete"
+        );
+
+        let applied = checkpoint_prune_apply(&ctx, &root_s, &policy, Some(cap)).unwrap();
+
+        // HARM FIRST — the user's earlier checkpoints are still on disk, and the oldest can still put
+        // its file back. Only then the Result.
+        let mut left: Vec<String> = fs::read_dir(store_dir.join("manifests"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), 5, "HARM: a hand-edited index.json deleted checkpoints — left {left:?}");
+
+        fs::write(root.join("a.txt"), b"damaged").unwrap();
+        let out = checkpoint_revert(&ctx, &root_s, &ids[0]).unwrap();
+        assert_eq!(
+            fs::read(root.join("a.txt")).unwrap(),
+            b"version 0",
+            "HARM: the oldest checkpoint could not put the file back after the retention pass"
+        );
+        assert_eq!(out.applied, 1);
+        assert!(applied.pruned.is_empty(), "HARM: pruned {:?}", applied.pruned);
+        assert_eq!(applied.kept.len(), 5);
+        assert_eq!(applied.bytes_freed, 0, "nothing was deleted, so nothing was freed");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// **CPE-1844's dedup sink, through the registered commands.** An `index.json` entry is a claim that
+    /// the store holds those bytes; `capture` used to honour it by writing nothing. With the blob file
+    /// gone and its index entry left behind — `prune`'s own documented leak-over-corruption residue, or
+    /// a partial restore-from-backup of a store — a fresh checkpoint of that content stored none of it:
+    ///
+    /// ```text
+    /// checkpoint_create        -> Ok, a checkpoint recorded; blobs/<hash> still absent
+    /// checkpoint_revert(it)    -> Ok(applied: 0, skipped: [a.txt: blobs/<hash>: cannot find the file])
+    /// a.txt still reads "damaged"
+    /// ```
+    #[test]
+    fn cpe_1844_a_checkpoint_taken_over_a_missing_blob_can_still_put_the_file_back() {
+        let app = scratch("app-data-1844-dedup");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("root-1844-dedup");
+        let root_s = root.to_string_lossy().to_string();
+
+        fs::write(root.join("a.txt"), b"the user only copy").unwrap();
+        checkpoint_create(&ctx, &root_s, "first").unwrap();
+        let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store_dir.join("index.json")).unwrap()).unwrap();
+        let hash = doc["blobs"].as_object().unwrap().keys().next().unwrap().clone();
+
+        fs::remove_file(store_dir.join("blobs").join(&hash)).unwrap();
+        assert!(!store_dir.join("blobs").join(&hash).exists(), "LIVE: the blob file is still on disk");
+        let back: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store_dir.join("index.json")).unwrap()).unwrap();
+        assert!(
+            back["blobs"].as_object().unwrap().contains_key(&hash),
+            "LIVE: the index no longer claims the blob, so dedup would not fire"
+        );
+
+        let second = checkpoint_create(&ctx, &root_s, "second").unwrap();
+        fs::write(root.join("a.txt"), b"damaged").unwrap();
+        let out = checkpoint_revert(&ctx, &root_s, &second.checkpoint.manifest_id).unwrap();
+
+        assert_eq!(
+            fs::read(root.join("a.txt")).unwrap(),
+            b"the user only copy",
+            "HARM: a checkpoint reported as created held none of the file's content"
+        );
+        assert_eq!(out.applied, 1);
+        assert!(out.skipped.is_empty(), "HARM: {:?}", out.skipped);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
 }
