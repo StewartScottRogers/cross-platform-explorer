@@ -3,11 +3,11 @@ id: CPE-1736
 title: The cpe-s3 test fixture cannot serve an encodable key or an XML-special one, so no end-to-end test covers them
 type: chore
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-21
 ---
 
 Found by the CPE-1727 (PR #903) UAT while trying to drive keys with spaces, non-ASCII and `&` through
