@@ -897,8 +897,12 @@ describe("evaluate — a non-boolean 'intermittent' value is never treated as in
 // happy path AND green when a quarter of the suite never ran.
 // ---------------------------------------------------------------------------------------------------
 
-/** The toy suite's three specs dealt across 2 shards by `assignShardSpecs`'s round-robin over a sorted
- *  list: shard 1 owns open-dir + saved-search, shard 2 owns samples. */
+/** The toy suite's three specs split across 2 shards. Written out by HAND rather than produced by
+ *  `assignShardSpecs`, deliberately: clause 9 is about what the join does with the manifests it RECEIVES,
+ *  including manifests that are wrong or missing, so tying these fixtures to the live partition function
+ *  would make the tests move whenever the partition is retuned (CPE-1858 retuned it from round-robin to a
+ *  cost-weighted bin-pack, which would today deal these three the other way round). `shard.test.ts` is
+ *  where the real partition is pinned. */
 const SHARD_1: ShardManifest = { shardIndex: 1, shardTotal: 2, specs: [OPEN_DIR, SAVED_SEARCH] };
 const SHARD_2: ShardManifest = { shardIndex: 2, shardTotal: 2, specs: [SAMPLES] };
 const ALL_SPEC_FILES = [OPEN_DIR, SAMPLES, SAVED_SEARCH];

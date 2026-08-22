@@ -316,15 +316,60 @@ at the root with zero nested directories (the pre-sharding gallery was also 82).
 for the others is `samples.smoke.ts` (46 cases, roughly 8 of those minutes by itself). No shard count gets
 below that floor — if the long pole ever binds again, the lever is **splitting `samples.smoke.ts`**, not
 adding shards. (Not free: 25 `known-failing.json` entries name it, and `spec` is the exemption key.)
-Headroom under the 30-minute shard cap, sized against the *worse* observed long pole: 13.78 min, worth
-roughly 30–76 more spec files averaged over the round-robin, or ~7 if every new spec is heavy *and* lands
-on the long-pole shard. The old cap had 3.3 minutes and 2–4 spec files.
 
-**How the split is decided.** `lib/shard.ts#assignShardSpecs` deals the spec files out round-robin over a
-code-unit-sorted list (`i % shardTotal === shardIndex - 1`), so every spec lands in **exactly one** shard
-and adding a spec changes each shard's **size** by at most one. It does not keep the *assignment* stable:
-measured, inserting one spec into the middle of the sorted list moves 23 of 41 specs to a different shard
-(contiguous blocks would move 3). Harmless today — nothing is cached per shard and the verdict is
+### CPE-1858 — the split is by measured cost, not by count
+
+The table above was left in place with the long pole treated as inherent. It was not: the *floor* is
+inherent, the *split* was not. Under round-robin the shard that happened to draw `samples.smoke.ts`
+carried it **on top of** a full ninth of everything else, so it ran ~14 min against ~6–7 for its
+siblings on every single run — three consecutive sightings with nothing causal in any diff.
+
+**Measured**, from the `@wdio/json-reporter` chunks of three green runs (`32585350872`, `32589428833`,
+`32592641384` — download `gui-smoke-results-ubuntu-shard-<n>`; each `wdio-*.json`'s top-level
+`start`/`end` is one spec file's in-session wall time):
+
+| spec | in-session, mean of 3 |
+|---|---:|
+| `samples.smoke.ts` | **479.3 s** (479.5 / 479.7 / 478.8) |
+| `preview-pane.smoke.ts` | 18.2 s |
+| `network.smoke.ts` | 16.2 s |
+| `saved-search.smoke.ts` | 12.0 s |
+| the other 37 | 1.3–4.0 s |
+| **all 41** | **611.5 s — of which one file is 78%** |
+
+Plus a fixed **~29.5 s of session setup/teardown per spec file** (`span − Σ durations` per shard: 29.9 /
+29.0 / 30.6 / 29.0 s). For 40 of the 41 specs that fixed cost dwarfs the spec's own work, which is why
+counting them is already the right cost model and only genuinely heavy specs get a measured entry.
+
+`assignShardSpecs` now cost-weights each spec (`SPEC_SESSION_OVERHEAD_MS` + its measured or default
+runtime) and **longest-processing-time-first bin-packs** them onto the least-loaded shard. With one spec
+at 78% of the total that gives `samples.smoke.ts` a shard to itself and deals the other 40 evenly:
+predicted **8.48 / 7.65 / 7.11 / 7.11 min** in-session against a measured **5.62 / 12.67 / 5.45 / 4.78**
+before. The long pole drops from ~14 min of job time to ~9.8 — and 4 shards is still the right number,
+because no shard count can get below `samples.smoke.ts`'s own 8 minutes.
+
+**No static proxy predicts runtime — this table is measured, and it is hand-maintained.** `it()` count,
+line count and byte count were all checked against the durations above and all three fail:
+`samples.smoke.ts` is 3 top-level `it()` blocks and 186 lines (mid-pack on every static measure, because
+it generates one case per file in `samples/` at load time), while `preview-pane.smoke.ts` has the *most*
+`it()` blocks (8) and is 26× faster. So the maintenance cost is real and stated plainly: a stale entry, or
+a new heavy spec nobody lists, degrades **balance only** — never correctness, since the partition stays a
+bijection either way. The one rot a static check can see (an entry naming a renamed or deleted spec) reds
+in `lib/shard.test.ts`, and so does a slowest shard more than one spec-slot past the floor. Re-measure
+with the `gh run download` recipe above rather than by argument; the full analysis is in
+`lib/shard.ts`'s "THE COST MODEL" block.
+
+**How the split is decided.** `lib/shard.ts#partitionSpecs` computes the **whole** partition — every
+shard's list — and `assignShardSpecs` keeps its own row, which is what makes the four rows provably
+disjoint rather than four independent guesses that happen to agree. Determinism is the property that
+matters more than balance: the spec list is re-sorted with a code-unit comparison (never `localeCompare`),
+weights are integer milliseconds from a committed constant so the load comparison is exact integer
+arithmetic, weight ties break by name and load ties by lowest shard index, and nothing in the path touches
+a clock, a random source or `process.*`. `lib/shard.test.ts` pins that by running the real
+`scripts/write-shard-manifest.ts` in **four separate child processes** and joining their manifests the way
+the verdict job does — deliberately not by calling the function twice in one process, which would pass
+even if the answer depended on the clock. Assignment *churn* is unchanged in kind: adding a spec can move
+others between shards. Harmless today — nothing is cached per shard and the verdict is
 reassembled from all of them every run — but it would stop being harmless the moment anything memoises a
 spec-to-shard mapping. `lib/specFiles.ts` is the single definition of
 "what counts as a spec file", used by `wdio.conf.ts`, the manifest writer and the ratchet alike — a
