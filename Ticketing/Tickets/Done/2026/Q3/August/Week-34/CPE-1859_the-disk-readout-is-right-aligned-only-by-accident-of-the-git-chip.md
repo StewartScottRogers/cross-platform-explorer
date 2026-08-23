@@ -3,11 +3,11 @@ id: CPE-1859
 title: the disk readout is right-aligned only by accident of the git chip preceding it
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
