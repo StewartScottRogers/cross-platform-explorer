@@ -3,11 +3,11 @@ id: CPE-1821
 title: three more undefined theme tokens mean their fallback hex always wins, in every theme
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
