@@ -14,18 +14,29 @@
 //!   blobs/                  content-addressed blobs        ] owned by
 //!   index.json              the persisted BlobStore        ] snapshot_capture
 //!   manifests/<id>.json     one per capture                ]
-//!   checkpoints.json        THIS module's checkpoint index (append-only JSON-lines)
+//!   checkpoints.json        THIS module's checkpoint index (append-only JSON-lines, retention-reconciled)
 //! ```
 //! `<root_key>` is the SHA-256 of the absolute root path, so two different roots never collide and no
 //! user path ever leaks into a directory name (the same "safe single segment" concern
 //! [`crate::audit_journal::record`] solves by sanitising a session id).
 //!
 //! ## Why `checkpoints.json` is JSON-**lines** and tolerant-read
-//! Like the audit journal it is append-only: [`checkpoint_create`] writes exactly one flushed line per
-//! checkpoint, and [`read_checkpoints`] reads them back **skipping any malformed line** — a torn/partial
-//! trailing write (or a hand-edit) degrades to "ignore that one record", never a crash or a lost index,
-//! exactly as [`crate::audit_journal::read_session`] degrades. Missing file → empty list. Newest-first on
-//! read for the UI.
+//! Like the audit journal it is append-only in the common case: [`checkpoint_create`] writes exactly one
+//! flushed line per checkpoint, and [`read_checkpoints`] reads them back **skipping any malformed line** —
+//! a torn/partial trailing write (or a hand-edit) degrades to "ignore that one record", never a crash or a
+//! lost index, exactly as [`crate::audit_journal::read_session`] degrades. Missing file → empty list.
+//! Newest-first on read for the UI.
+//!
+//! **CPE-1862 — reconciled, not purely append-only.** Nothing about this file's rows tracks whether the
+//! manifest they name is still on disk, and [`snapshot_prune::apply`] (reached from
+//! [`checkpoint_prune_apply`]) deletes manifests without this module in the loop at all — so a retention
+//! pass used to leave rows here naming manifests that no longer existed, and the UI listed a checkpoint
+//! that would error the moment the user tried to restore it. [`checkpoint_prune_apply`] now rewrites this
+//! file after every pass to drop what retention just removed, **and** [`checkpoint_list`] independently
+//! filters every read against [`snapshot_capture::list_manifests`]'s live/loadable set — the backstop for
+//! a manifest that's present but fails CPE-1861's identity checks, which retention deliberately never
+//! prunes (leak over corruption) and so the write-time reconciliation alone could never catch. See both
+//! functions' docs for the full reasoning and the trade each makes.
 //!
 //! Std + serde only — no new dependencies, not feature-gated (like the engines it drives). The revert
 //! path preserves the engine's skip-on-error guarantee: a single unreadable/locked file is reported in
@@ -33,6 +44,7 @@
 //! carries an [`OpOutcome`] saying whether it FAILED or was deliberately HELD BACK (and, if held back,
 //! whether re-running can help), with the shared explanation stated once in [`RevertOutcome::held_back`].
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -305,6 +317,46 @@ pub fn read_checkpoints(store_dir: &Path) -> Vec<Checkpoint> {
     out
 }
 
+/// **CPE-1862.** Rewrite `store_dir`'s checkpoint index so it names only `keep_ids`, dropping any row
+/// whose `manifest_id` retention just removed (or that was already dangling from before this function
+/// existed — see the module doc). Preserves on-disk (append/oldest-first) order for the rows that
+/// survive; a malformed line is left in place untouched (the same line [`read_checkpoints`] already
+/// skips on read, so leaving it costs nothing and a rewrite is not the place to also silently drop
+/// unrelated garbage). Crash-safe temp-file + rename, mirroring [`trim_failures`]. A missing index, or
+/// one where nothing needs dropping, is a no-op — no write, no rename.
+fn reconcile_checkpoints(store_dir: &Path, keep_ids: &BTreeSet<String>) -> Result<(), String> {
+    let file = index_file(store_dir);
+    let content = match fs::read_to_string(&file) {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // nothing recorded yet — nothing to reconcile
+    };
+    let mut dropped_any = false;
+    let mut kept_lines: Vec<&str> = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Checkpoint>(line) {
+            Ok(cp) if !keep_ids.contains(&cp.manifest_id) => dropped_any = true, // dangling — drop the row
+            _ => kept_lines.push(line), // still live, or unparseable (leave as-is; read skips it anyway)
+        }
+    }
+    if !dropped_any {
+        return Ok(());
+    }
+    let tmp = file.with_extension("json.tmp");
+    let mut body = kept_lines.join("\n");
+    if !kept_lines.is_empty() {
+        body.push('\n');
+    }
+    fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    // CPE-1710: app-private store, same as `trim_failures` below — a deliberate atomic replace of our
+    // own file, never a user-supplied path.
+    #[allow(clippy::disallowed_methods)]
+    fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Append one failed-attempt row to `store_dir`'s failures index (creating the dir if needed), then trim
 /// the file to its last [`MAX_CHECKPOINT_FAILURES`] lines (oldest rotated out first) — mirrors
 /// `audit_journal::trim`'s crash-safe temp-file + rename rewrite so a rotation can never leave a
@@ -389,8 +441,33 @@ pub fn checkpoint_create(
 }
 
 /// The checkpoints recorded for `root`, newest-first. Missing store → empty.
+///
+/// **CPE-1862.** Filtered against [`snapshot_capture::list_manifests`] — the same "fit to steer a
+/// retention decision" set `snapshot_prune::apply` itself plans against — so a row is only ever
+/// returned if its manifest both exists **and** is one [`snapshot_capture::load_manifest`] will accept.
+/// That excludes two things `checkpoints.json` alone cannot tell apart from a good row:
+/// - a manifest retention has since pruned (the row [`checkpoint_prune_apply`] otherwise reconciles
+///   away already, but this catches anything from before that existed, or any other way the two files
+///   could drift);
+/// - a manifest that is *present but unloadable* per CPE-1861's identity rules (inner id disagreeing
+///   with its filename, a crafted stem, a `file_count`/hash that contradicts the file's own content).
+///   Retention deliberately never prunes that file (leak-over-corruption), so nothing ever removes its
+///   `checkpoints.json` row either — this is the only place that can stop it from looking selectable.
+///   The manifest itself is left on disk untouched; only the misleading "you can restore this" listing
+///   is suppressed. There is no further UI text to add here: nothing can be done with it, and its
+///   presence on disk is preserved for the same reason `prune` leaks it — recoverable by hand, never by
+///   silently and speculatively "fixing" a record that might be evidence of tampering.
+///
+/// A checkpoint a user can see is therefore always one they can act on (the acceptance bar this ticket
+/// sets): [`checkpoint_preview_revert`]/[`checkpoint_revert`]/[`checkpoint_revert_one`] all resolve the
+/// same `manifest_id` through the same [`snapshot_capture::load_manifest`], so nothing offered here can
+/// diverge from what a click will actually do.
 pub fn checkpoint_list(ctx: &dyn ServerCtx, root: &str) -> Result<Vec<Checkpoint>, String> {
-    Ok(read_checkpoints(&store_dir_for(ctx, root)?))
+    let store_dir = store_dir_for(ctx, root)?;
+    let store = store_dir.to_string_lossy().to_string();
+    let live: BTreeSet<String> =
+        snapshot_capture::list_manifests(&store)?.into_iter().map(|m| m.id).collect();
+    Ok(read_checkpoints(&store_dir).into_iter().filter(|c| live.contains(&c.manifest_id)).collect())
 }
 
 /// Record that a best-effort pre-write checkpoint of `root` was **attempted and failed** (CPE-1600) —
@@ -542,14 +619,35 @@ pub fn checkpoint_prune_preview(
 
 /// Actually retention-prune `root`'s checkpoints to `policy` (+ an optional total-store-byte cap — see
 /// [`snapshot_prune::apply`]'s doc for the oldest-first/never-to-zero eviction rule beyond the GFS pass).
+///
+/// **CPE-1862.** `snapshot_prune::apply` deletes manifest files; until now nothing told
+/// `checkpoints.json` a row's manifest was gone, so the UI kept listing checkpoints that would error on
+/// `load_manifest` the moment the user tried to act on one. Reconciled here, right after the deletion,
+/// because retention is already the thing mutating the manifest store for this root — making it also
+/// retire the index rows that named what it just removed keeps `checkpoints.json` bounded to what is
+/// actually still on disk, rather than growing forever with dead rows nothing will ever restore. (The
+/// alternative the ticket poses, filtering only at read time, was rejected as the *sole* fix for exactly
+/// that reason — see [`checkpoint_list`]'s doc for why a read-time filter still exists too, as the
+/// backstop for the one case reconciliation here structurally cannot reach: a manifest that is present
+/// but never pruned at all.)
+///
+/// Reconciliation failure is deliberately **not** propagated: the manifests are already deleted by the
+/// time this runs (retention's destructive part is done and must not be undone by a bookkeeping write
+/// failing), and a `checkpoints.json` this call couldn't rewrite still can't mislead the user —
+/// [`checkpoint_list`]'s own live-manifest filter hides any row whose manifest isn't
+/// [`snapshot_capture::list_manifests`]-fit regardless of whether this reconciliation succeeded.
 pub fn checkpoint_prune_apply(
     ctx: &dyn ServerCtx,
     root: &str,
     policy: &RetentionPolicy,
     max_total_bytes: Option<u64>,
 ) -> Result<RetentionApplyResult, String> {
-    let store = store_dir_for(ctx, root)?.to_string_lossy().to_string();
-    snapshot_prune::apply(&store, policy, max_total_bytes)
+    let store_dir = store_dir_for(ctx, root)?;
+    let store = store_dir.to_string_lossy().to_string();
+    let result = snapshot_prune::apply(&store, policy, max_total_bytes)?;
+    let survivors: BTreeSet<String> = result.kept.iter().cloned().collect();
+    let _ = reconcile_checkpoints(&store_dir, &survivors); // best-effort — see doc above
+    Ok(result)
 }
 
 // ---- Per-file diff (CPE-1197 backend half, epic CPE-735) ---------------------------------------------
@@ -2233,5 +2331,173 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             let _ = fs::remove_dir_all(&app);
         }
+    }
+
+    // ---- CPE-1862 — checkpoints.json vs. manifests retention just deleted ---------------------------
+
+    /// Hand-edit manifest `id`'s `created_ms` in `store_dir` to `epoch_s * 1000`, same pattern
+    /// `snapshot_prune`'s own tests use to place captures at arbitrary spread timestamps without
+    /// sleeping. Reads the value back so a tamper that never landed can't be mistaken for one that did.
+    fn set_manifest_created_ms(store_dir: &std::path::Path, id: &str, epoch_s: u64) {
+        let path = store_dir.join("manifests").join(format!("{id}.json"));
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        doc["created_ms"] = serde_json::json!(epoch_s * 1000);
+        fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["created_ms"], serde_json::json!(epoch_s * 1000), "LIVE: created_ms tamper never landed");
+    }
+
+    /// **The core CPE-1862 fixture, produced by running real retention — not by hand-editing
+    /// `checkpoints.json`.** Three ordinary checkpoints land in the same hourly bucket (`hourly: 1`
+    /// keeps only the newest), so `checkpoint_prune_apply` genuinely deletes two manifest files. Before
+    /// this ticket's fix, their `checkpoints.json` rows survived that deletion untouched: the file kept
+    /// listing two checkpoints whose manifest was gone, and clicking either would error out of
+    /// `load_manifest` instead of never having been offered — the exact user experience the ticket
+    /// records. This asserts both halves of the repair: the index file itself is rewritten (not just
+    /// filtered on the way out), and every row `checkpoint_list` still returns genuinely loads.
+    #[test]
+    fn cpe_1862_retention_reconciles_checkpoints_json_and_every_listed_row_still_loads() {
+        let app = scratch("app-data-reconcile");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("root-reconcile");
+        let root_s = root.to_string_lossy().to_string();
+        let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+
+        fs::write(root.join("a.txt"), b"v1").unwrap();
+        let id1 = checkpoint_create(&ctx, &root_s, "v1").unwrap().checkpoint.manifest_id;
+        set_manifest_created_ms(&store_dir, &id1, 1_000);
+
+        fs::write(root.join("a.txt"), b"v2").unwrap();
+        let id2 = checkpoint_create(&ctx, &root_s, "v2").unwrap().checkpoint.manifest_id;
+        set_manifest_created_ms(&store_dir, &id2, 2_000);
+
+        fs::write(root.join("a.txt"), b"v3").unwrap();
+        let id3 = checkpoint_create(&ctx, &root_s, "v3").unwrap().checkpoint.manifest_id;
+        set_manifest_created_ms(&store_dir, &id3, 3_000);
+
+        // LIVE: all three rows are really in the index before anything is pruned.
+        assert_eq!(
+            read_checkpoints(&store_dir).len(),
+            3,
+            "LIVE: setup didn't record three checkpoints"
+        );
+
+        // All three timestamps (1000s/2000s/3000s) fall in hour bucket 0 — `hourly: 1` keeps only the
+        // newest of that bucket, so this is a real, ordinary GFS prune, not a contrived corner case.
+        let policy = RetentionPolicy { hourly: 1, daily: 0, weekly: 0, monthly: 0 };
+        let result = checkpoint_prune_apply(&ctx, &root_s, &policy, None).unwrap();
+        assert_eq!(result.kept, vec![id3.clone()], "the newest of the shared hour bucket survives");
+        let mut pruned_sorted = result.pruned.clone();
+        pruned_sorted.sort();
+        let mut want_pruned = vec![id1.clone(), id2.clone()];
+        want_pruned.sort();
+        assert_eq!(pruned_sorted, want_pruned, "HARM: retention did not actually prune id1/id2");
+
+        // FIXTURE LIVENESS — the manifests really are gone from disk, not merely absent from a report.
+        let mdir = store_dir.join("manifests");
+        assert!(!mdir.join(format!("{id1}.json")).exists(), "LIVE: id1's manifest was not actually deleted");
+        assert!(!mdir.join(format!("{id2}.json")).exists(), "LIVE: id2's manifest was not actually deleted");
+        assert!(mdir.join(format!("{id3}.json")).exists(), "LIVE: id3's manifest should still be on disk");
+
+        // THE GUARD (write-time half): the index file itself no longer names what retention deleted.
+        // Read with the raw, unfiltered reader — this is `checkpoints.json` on disk, not a view.
+        let raw = read_checkpoints(&store_dir);
+        assert_eq!(
+            raw.iter().map(|c| c.manifest_id.as_str()).collect::<Vec<_>>(),
+            vec![id3.as_str()],
+            "HARM: checkpoints.json still names a manifest retention deleted"
+        );
+
+        // THE GUARD (read-time half, AC2): every row the UI would actually be shown loads cleanly —
+        // list, then act on every row listed, exactly as the ticket demands.
+        let listed = checkpoint_list(&ctx, &root_s).unwrap();
+        assert_eq!(listed.len(), 1, "HARM: the UI would still list a pruned checkpoint");
+        for cp in &listed {
+            let preview = checkpoint_preview_revert(&ctx, &root_s, &cp.manifest_id, None);
+            assert!(
+                preview.is_ok(),
+                "HARM: a checkpoint the UI lists errored on load_manifest: {:?}",
+                preview.err()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    /// **AC3.** A manifest that is *present* but fails CPE-1861's identity rules (here: its inner `id`
+    /// disagrees with its own filename) is never pruned at all — `list_manifests` excludes it from the
+    /// planner's view entirely, so it never appears in a `RetentionApplyResult`'s `kept` or `pruned`. Its
+    /// `checkpoints.json` row therefore cannot be cleaned up by [`checkpoint_prune_apply`]'s reconcile,
+    /// which only ever sees ids retention actually decided about. This is the case the read-time filter
+    /// in [`checkpoint_list`] exists for: the row must never be handed to the UI as actionable, even
+    /// though nothing about `checkpoints.json` itself changed.
+    #[test]
+    fn cpe_1862_a_present_but_unloadable_manifest_is_never_listed() {
+        let app = scratch("app-data-unloadable");
+        let ctx = HeadlessCtx::new(app.to_path_buf());
+        let root = scratch("root-unloadable");
+        let root_s = root.to_string_lossy().to_string();
+        let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+
+        fs::write(root.join("a.txt"), b"keep me").unwrap();
+        let id1 = checkpoint_create(&ctx, &root_s, "good").unwrap().checkpoint.manifest_id;
+
+        fs::write(root.join("a.txt"), b"tampered").unwrap();
+        let id2 = checkpoint_create(&ctx, &root_s, "bad").unwrap().checkpoint.manifest_id;
+
+        // The tamper: id2's manifest is rewritten to claim id1's identity (CPE-1861's "inner id -> a
+        // sibling's id" shape) — a self-inconsistent file `list_manifests` refuses to hand to the
+        // planner at all, the same way an Explorer copy or a cloud-sync conflict copy would.
+        let mdir = store_dir.join("manifests");
+        let id2_path = mdir.join(format!("{id2}.json"));
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&id2_path).unwrap()).unwrap();
+        doc["id"] = serde_json::json!(id1.clone());
+        fs::write(&id2_path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        // LIVE: the tamper landed and the file still parses.
+        let back: serde_json::Value = serde_json::from_str(&fs::read_to_string(&id2_path).unwrap()).unwrap();
+        assert_eq!(back["id"], serde_json::json!(id1.clone()), "LIVE: the id tamper never landed");
+
+        // LIVE, and the crux of AC3: the planner's own view already excludes id2 before any listing
+        // decision is made — this is not a filter this ticket bolts on afterwards, it is the existing
+        // CPE-1861 rule this ticket must respect rather than route around.
+        let planner_ids: BTreeSet<String> =
+            snapshot_capture::list_manifests(&store_dir.to_string_lossy()).unwrap().into_iter().map(|m| m.id).collect();
+        assert!(planner_ids.contains(&id1), "LIVE: id1 should still be planner-visible");
+        assert!(!planner_ids.contains(&id2), "LIVE: the tamper never reached the planner");
+
+        // checkpoints.json itself is untouched so far — both rows are still there, from two ordinary
+        // captures. Nothing has pruned anything yet.
+        assert_eq!(read_checkpoints(&store_dir).len(), 2, "LIVE: both rows should still be recorded");
+
+        // THE GUARD: the UI-facing list must not offer id2, even though its row is still on disk and its
+        // manifest file still parses.
+        let listed = checkpoint_list(&ctx, &root_s).unwrap();
+        assert_eq!(
+            listed.iter().map(|c| c.manifest_id.as_str()).collect::<Vec<_>>(),
+            vec![id1.as_str()],
+            "HARM: a checkpoint whose manifest fails CPE-1861's identity check was listed as actionable"
+        );
+
+        // And it stays that way even after an ordinary retention pass that would keep everything: the
+        // tampered manifest is never pruned (leak over corruption, CPE-1861's own documented direction),
+        // so its file survives on disk untouched — but reconciliation still retires its now-orphaned
+        // checkpoints.json row, since `result.kept` (drawn only from the planner-visible set) never
+        // named it either.
+        let generous = RetentionPolicy { hourly: 5, daily: 5, weekly: 5, monthly: 5 };
+        let result = checkpoint_prune_apply(&ctx, &root_s, &generous, None).unwrap();
+        assert!(!result.kept.contains(&id2), "id2 was never planner-visible, so retention cannot keep it");
+        assert!(!result.pruned.contains(&id2), "id2 was never planner-visible, so retention cannot prune it either");
+        assert!(id2_path.exists(), "the tampered manifest file itself must survive untouched on disk");
+
+        let raw_after = read_checkpoints(&store_dir);
+        assert_eq!(
+            raw_after.iter().map(|c| c.manifest_id.as_str()).collect::<Vec<_>>(),
+            vec![id1.as_str()],
+            "the orphaned row should be reconciled away on the next real prune pass"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
     }
 }
