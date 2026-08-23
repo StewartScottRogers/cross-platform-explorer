@@ -127,6 +127,31 @@ Spawning sub-agents is **pre-authorised** during a sprint (this overrides the de
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
 conventions + the delete-test rule) so it doesn't re-derive from cold.
 
+### Dispatch contract — every Worker/Reviewer/UAT prompt states this, verbatim (CPE-1848)
+
+A dispatched sub-agent — Worker, Reviewer, UAT Tester, or any other role — **never receives a background
+task notification**. That wake-up is a capability of the **Foreman's own harness loop** (the heartbeat
+above: "Background agents re-invoke you" describes what happens to the Foreman when ITS sub-agents
+finish, not something a sub-agent can itself rely on). A sub-agent that backgrounds a CI watch, "arms a
+monitor," or otherwise defers to a signal it cannot receive **stalls forever** and returns nothing usable
+— observed three times in one batch, on three different tickets, each recovered only by a full Foreman
+round-trip. So **every** Worker/Reviewer/UAT dispatch prompt includes, verbatim or in substance:
+
+> You receive NO background task notifications. Run everything synchronously and in the foreground —
+> builds, tests, `gh` calls, all of it. To watch CI: `gh run watch <run-id> --interval 30` or
+> `gh pr checks <pr> --watch` (both block and return). `gh pr checks --watch` exits 0 when the branch
+> moves under it, not only when checks pass — after it returns, re-check explicitly, by **SHA** (not PR
+> number alone: a stale PR-number check can pass against a superseded head). If a wait is genuinely long,
+> poll in a bounded foreground loop and report the outcome — or return now with your findings plus an
+> explicit `CI still pending on <SHA>` so the Foreman can take it over. **Never** return a stub that
+> promises to report later, and never say a monitor is "armed" or "watching in the background" — that
+> phrasing is the exact defect this rule exists to prevent.
+
+This is a standing instruction, not a per-dispatch judgment call: include it in every Worker/Reviewer/UAT
+briefing regardless of how routine the ticket looks — the failure mode above hit ordinary tickets, not
+exotic ones. It applies unchanged inside a batched run (`/sprint-batched`): a stalled sub-agent there
+doesn't just cost a round-trip, it stalls the batch counter along with it.
+
 ## Shift kickoff — the Foreman introduces the crew, then starts
 
 Before announcing, the Foreman **reads the tail of `.claude/sprint-metrics/history.md`** to seed this
@@ -269,6 +294,55 @@ still rebases clean) instead of paying a full context-switch per PR.
 
 Every code change goes through a `CPE-NNN` ticket; **not pushed = not done**. Land each: branch (never
 `main`) → checks → review → merge → push.
+
+### Reading CI honestly — full logs and non-lying polls (CPE-1868)
+
+Two related failure shapes cost a real conclusion this run; both are now standing rules, recorded here —
+where dispatches are written — not only in a ticket.
+
+**A CI log fetch must fail loudly on a partial fetch, never return a silent prefix.** `gh run view --job
+<id> --log` (and `--log-failed`) go through the CLI's "spec"-reporter view, which **truncates around
+~4 MB** with no warning, no error, and no truncation marker — confirmed independently twice (CPE-1702;
+CPE-1728 / CPE-1859, where a 13,676-line job log returned only ~4,100 lines and exited 0). Reading the
+stopping point as the end of the run produced exactly the wrong conclusion once already (CPE-1859: "the
+process never fired an assertion" vs. the truth — one spec genuinely failed, two more ran and passed
+after it).
+
+- **Fetch the raw log, not the reporter view**, whenever a job's output could be long: `gh api
+  repos/:owner/:repo/actions/jobs/<job-id>/logs > job.log` returns the complete, untruncated text (this is
+  what recovered the real CPE-1859 verdict). For `gui-smoke` specifically, prefer the uploaded
+  `gui-smoke-suite-log-*` artifact (`gh run download <run-id> -p 'gui-smoke-suite-log-*' -D <dir>`,
+  documented in `gui-smoke/README.md`) — it's captured by `tee` before any CLI-side truncation can apply.
+- **State the log's total line count and that the fetch reached the end** in any conclusion drawn from a
+  CI log — `wc -l job.log`, plus a look at whether the tail reads like a real finish rather than a
+  mid-stream cut. Cheap, and it is precisely the check CPE-1859 skipped.
+- Never conclude "the process never ran" / "no assertion fired" from where a log stops without that
+  check — that reading is exactly what a truncated prefix produces.
+
+**A CI poll must never read an empty or moving board as a green one.**
+
+- **Read `total_count` and `mergeable` together with the pending count, never pending alone.**
+  `total_count == 0` is a state to *report* ("no checks scheduled yet — or the PR is `CONFLICTING` and
+  GitHub can't build a merge commit to run checks against"), never a state to treat as passing — CPE-1846
+  sat at `total_count: 0` for eight minutes while `mergeable: CONFLICTING` (a sibling PR had merged
+  underneath it) was the entire, immediately-visible explanation a `mergeable` check would have named in
+  seconds.
+- **`pending == 0` only means "done" once `total_count` has stopped moving.** Jobs schedule in waves
+  (e.g. `gui-smoke` shards only exist once their build job finishes), so `pending` can fall toward zero,
+  read as "nearly done," and then rise again as more checks appear — CPE-1863 measured `total_count`
+  14→18→19 while `pending` went 7→10, dipping before it rose. Require `total_count` to be **stable across
+  at least two reads** (or match a known expected count) before trusting a `pending == 0` reading.
+- **`gh pr checks --watch` exits 0 when the branch moves under it, not only when checks pass** (the
+  recorded trap the dispatch contract above already accounts for). After it returns, re-check the
+  *current* head explicitly — `gh pr checks <pr>` or `gh pr view <pr> --json
+  headRefOid,statusCheckRollup` — keyed to the SHA you expect.
+- **`gh api` pagination is the same shape from a third direction:** an unpaginated call silently returns
+  only the first page (default 30 items), with no truncation marker of its own. Pass `--paginate` (or
+  follow the `Link` header) whenever a listing could exceed one page, rather than trusting a short result
+  to mean "that's everything."
+- **State the totals whenever a poll's outcome is reported** — `total_count`, `pending`, `mergeable`, and
+  (for a log) the line count and the end-reached check. Every wrong conclusion in this family came from a
+  number that was true and incomplete.
 
 ## Escalation-decision policy (three-way, in order)
 
@@ -480,6 +554,13 @@ Workers implement the harnesses on their right-sized tier.
 
 ## Reporting — ASCII banners + timestamps + FOREMAN blocks
 
+- **A report naming a pending background task instead of results is incomplete, not a status update
+  (CPE-1848).** A sub-agent report is recognisable as a **stall**, not progress, when it contains
+  language like "a monitor is armed," "the background watch will report," "I'll wait for the
+  notification," or any variant that defers to a signal the agent cannot receive (per the dispatch
+  contract above). The Foreman must not treat that as "in flight and fine" — re-invoke the same agent
+  (`SendMessage` to its id/name) with the dispatch contract restated and an explicit "report now,
+  synchronously, with what you have" instruction, rather than waiting on it.
 - **Every message that directly addresses the user leads with an ASCII-art banner** (the user is often across
   the room and can't read prose) — see [[use-ascii-art-when-addressing-user]]. Keep the banner words short +
   high-contrast (`BUILDING…`, `RUNNING ✓`, `NEEDS YOU`, `DONE`).

@@ -9,6 +9,13 @@ Triggered by **"start a batched sprint"** / **`/sprint-batched [max_batches]`** 
 **"run N sprint batches"**. Everything in [`sprint.md`](sprint.md) applies unchanged — read it first;
 this file only adds the **batch bound**.
 
+**The dispatch contract in `sprint.md` → "The crew" (CPE-1848) applies unchanged and matters more here,
+not less:** an unattended, overnight batched run is exactly the case where nobody is watching to notice a
+sub-agent that stalled waiting on a background notification it can never receive. Every Worker/Reviewer/UAT
+prompt this run dispatches must still carry the "no background notifications, run synchronously, poll
+bounded or return with `CI still pending on <SHA>`" instruction — a stalled sub-agent here doesn't just
+cost a round-trip, it silently freezes the `K/N` batch counter along with it.
+
 ## What a "batch" is (the unit that gets counted)
 
 One **batch = one completed unit of shippable work**, i.e. any ONE of:

@@ -447,6 +447,16 @@ it**, so an exit-0 spanning a push is not a green signal. When you gate a merge 
 you gated on — a previous run's green does not describe the new head. Confirming the job's own
 `conclusion`, not just that its steps look finished, is the same distinction one level down.
 
+**Two more shapes in the same family (CPE-1868), same fix — read the total, not just the pending count:**
+an **empty board reads as a green one** (`total_count == 0` is not "nothing pending", it's "nothing
+scheduled yet, or the PR is `CONFLICTING` and GitHub can't build a merge commit to check" — CPE-1846 sat
+at `total_count: 0` for eight minutes for exactly that reason), and **the pending count can fall then
+rise** as jobs schedule in waves (CPE-1863: `total_count` 14→18→19, `pending` 7→10 — a poll watching only
+`pending` reads the dip as "nearly done," twice). Read `total_count` and `mergeable` alongside `pending`,
+and don't trust `pending == 0` until `total_count` has held stable across at least two reads. Full
+treatment + the matching `gh run view --log` truncation trap: `.claude/commands/sprint.md` → "Reading CI
+honestly".
+
 ---
 
 ## When to Auto-File a Ticket
