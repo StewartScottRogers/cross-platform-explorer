@@ -1229,6 +1229,29 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
     }
 }
 
+/// Does this **name** belong to an object that has more than one name? (CPE-1857)
+///
+/// `pub(crate)` so [`crate::revert_engine`] can *classify* a refusal
+/// [`crate::fsutil::copy_file_onto_no_follow`] has already issued — the engine splits refusals into
+/// transient ("fix the cause and re-running works") and permanent ("nothing about re-running changes
+/// this"), and a hard link is emphatically the second kind: a file does not stop having a second name
+/// because the user runs the revert again. Telling them to retry is precisely the loop CPE-1845 exists
+/// to stop sending people round.
+///
+/// **This is a PATH question and it is only ever safe to ask AFTER the write has been decided.** By the
+/// time the engine calls this the bytes have already been written or already been refused, so this
+/// chooses WORDING and can no longer choose where a byte goes. That is the one property that makes the
+/// same call unsafe before a write — see [`crate::fsutil::copy_file_onto_no_follow`], which reads the
+/// count off its open handle for exactly that reason and never from here.
+///
+/// Answers `false` for everything it cannot positively call multiply linked — an absent name, a link, an
+/// unreadable probe, a platform with no identity model. Failing "open" is right *here* and only here:
+/// the fallback is `transient`, which is the classification this path had for every refusal before
+/// CPE-1857, so an unknown answer degrades to the previous behaviour rather than to a new wrong one.
+pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
+    matches!(probe_no_follow(path), Probe::Real(facts) if facts.links > 1)
+}
+
 /// Probe a path's identity **without following links** — Unix reads it straight off the one
 /// `symlink_metadata` call this module already made before CPE-1642 (`dev`/`ino`/`nlink` are all on
 /// `MetadataExt`, no extra syscall).
