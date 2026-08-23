@@ -200,6 +200,30 @@ record is how snapshots get lost. The same applies if the snapshot records thems
 without them there is no way to tell which stored content still matters, so cleanup refuses rather
 than assuming all of it does.
 
+### When a size limit can't be met
+
+Deleting a snapshot doesn't always free space. Snapshots share their stored content, so if nothing
+changed in the folder between two of them, they are both pointing at the same stored bytes — and
+removing one gives back nothing at all, because the other still needs what it was holding.
+
+Cleanup used to keep going in that situation. It deleted the oldest snapshot, saw the size hadn't
+moved, deleted the next, and carried on until a single snapshot was left — then reported success. On
+six identical snapshots that cost five of them and freed nothing. The deletions weren't merely
+useless; they could never have worked, because the snapshots weren't what was using the space.
+
+Now cleanup **stops as soon as a deletion frees nothing**, and says the limit was not met rather than
+reporting success. It also says so when it runs out of snapshots it is allowed to remove — one
+snapshot is always kept, so a limit smaller than a single snapshot can never be reached. In both
+cases the honest answer is the same: thinning cannot get this folder under that limit, and the space
+is being held by something else.
+
+Two practical notes:
+
+- One snapshot is still deleted before this can be noticed, because there is no way to know what a
+  deletion will free without doing it. That is one, not all of them.
+- If the space is being held by a stray record file (see above), no amount of cleanup will reclaim
+  it. Look inside the store folder for duplicated or renamed record files and delete those instead.
+
 ## What this is (and isn't)
 
 This is the palette-driven, headless-friendly way to create and use checkpoints, usable on any folder at
