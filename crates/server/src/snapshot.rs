@@ -168,6 +168,18 @@ pub fn plan_capture(store: &BlobStore, scan: &Snapshot, budget: &CaptureBudget) 
     let mut plan = CapturePlan::default();
     // Track the projected footprint as we admit new blobs, so the store cap accounts for this capture's own
     // additions, not just the pre-existing store size.
+    //
+    // CPE-1844 enumeration, recorded here rather than fixed: on a disk-backed store this figure is the
+    // sum of the `size` fields in `index.json`, a hand-editable file, and inflating it makes the
+    // `max_total_bytes` branch below skip storing a file's content — a checkpoint that reports success
+    // and cannot restore that file. **It is not reachable from any registered command**: the app's only
+    // production capture (`crate::checkpoint_store::checkpoint_create`, and through it
+    // `snapshot_schedule::snapshot_run_due`) passes `CaptureBudget::UNLIMITED`, whose `max_total_bytes`
+    // of `0` disables this gate entirely. It is left as-is because `plan_capture` is pure — it is handed
+    // a `BlobStore`, not a store directory, so it has nothing to re-measure — and the fix belongs at
+    // whatever wires a real budget: measure the footprint with
+    // `crate::snapshot_capture::store_total_bytes`, which reads the blob files rather than the index,
+    // and hand the result in. If you give this a nonzero cap in production, do that first.
     let mut projected_total = store.total_bytes();
 
     for (hash, (size, path)) in distinct {

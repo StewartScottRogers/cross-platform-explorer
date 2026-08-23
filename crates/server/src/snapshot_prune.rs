@@ -28,6 +28,8 @@ pub struct RetentionPreview {
     /// Manifest ids the policy would prune, oldest-first.
     pub prune: Vec<String>,
     /// The store's current total footprint in bytes (informational only — `preview` never mutates it).
+    /// Measured from the blob files on disk, not read out of `index.json` — see
+    /// [`crate::snapshot_capture::store_total_bytes`] (CPE-1844).
     pub total_bytes: u64,
 }
 
@@ -40,7 +42,8 @@ pub struct RetentionApplyResult {
     pub kept: Vec<String>,
     /// Manifest ids actually removed — the GFS losers, plus any byte-cap eviction beyond them.
     pub pruned: Vec<String>,
-    /// Total bytes freed across every prune in this apply.
+    /// Total bytes freed across every prune in this apply — the lengths of the blob files actually
+    /// removed (CPE-1844), not the sizes `index.json` recorded for them.
     pub bytes_freed: u64,
 }
 
@@ -114,14 +117,70 @@ pub fn apply(
             let mut oldest_first = kept.clone();
             oldest_first.sort_by_key(|id| created_by_id.get(id.as_str()).copied().unwrap_or(0));
 
+            // CPE-1844 — **every figure this loop steers on is re-measured from disk, never carried
+            // forward as arithmetic over `index.json`'s claims.** Two of them were claims:
+            //
+            // 1. `store_total_bytes` used to sum the `size` fields recorded in `index.json`. One text
+            //    edit therefore drove this loop, which deletes the user's other checkpoints oldest-first
+            //    down to a single survivor. Fixed at the source — that function now measures the blob
+            //    files a manifest still names — so nothing is needed here for it.
+            // 2. `total = total.saturating_sub(freed)` was the second, and it is fixed here: `freed`
+            //    came from `release`, i.e. the same recorded sizes. A *deflated* index made each prune
+            //    look like it reclaimed almost nothing and kept the loop deleting. Re-measuring instead
+            //    of subtracting removes the input rather than bounding it, which is this ticket's whole
+            //    rule, and it also means the loop stops the moment the store is genuinely under the cap
+            //    even if the accounting disagrees.
+            //
+            // **No test will catch you if you delete the `total = store_total_bytes(..)` re-measure
+            // at the foot of this loop, on its own.** Once `prune` reports the bytes of the files it
+            // actually removed, that value and a fresh measurement
+            // agree on every fixture in the suite, so breaking only this line leaves the suite green.
+            // Its red-proof is the *pair* regression — restoring both the old `Ok(release(..))` in
+            // `prune` and the subtraction here — which reds
+            // `cpe_1844_a_deflated_index_cannot_keep_the_cap_loop_deleting_past_the_cap` at "1 left" of
+            // four. Written here rather than only in the ticket because every other guard in this module
+            // carries its own red-proof in a comment, and a maintainer tidying this line would otherwise
+            // see a green suite and no warning. It is kept for two reasons: it removes a carried-forward
+            // number rather than bounding it, and the two are *not* equal by construction — they diverge
+            // whenever the initial measurement under-counts something `prune` then removes and credits
+            // (a `metadata()` that failed once and succeeded later), where the re-measure is the safer
+            // side.
+            //
+            // **Interaction with CPE-1863, stated because that ticket is open and this loop is its
+            // subject.** CPE-1863 records that a prune freeing nothing never lets this loop see the cap
+            // met, so it runs to the `kept.len() <= 1` floor. That is untouched and deliberately not
+            // fixed here: when a prune really frees nothing, the re-measured `total` really has not
+            // moved, so the loop behaves exactly as CPE-1863 describes — the difference is only that it
+            // is now describing reality instead of an accounting artifact.
+            //
+            // **Scoped claim, because an earlier draft of this comment over-broadened it and was
+            // measurably false.** It read "Nothing here makes it worse", stated as if it covered the
+            // whole change; it is established only of *the subtraction*, where every case in which the
+            // old arithmetic advanced `total` faster than the disk did was an over-credit that ended the
+            // loop early. It was **not** established of the change of basis, and the security audit
+            // falsified that half: the first version of `store_total_bytes` summed the whole `blobs/`
+            // directory, so an **orphan** blob — `capture`'s own partial-write residue, which no prune
+            // can ever reclaim — counted toward the cap and drove this loop to its floor. Measured at
+            // `preview.total_bytes 45 -> 4000045`, `pruned 4 of 5`, `bytes_freed = 36`, on a store with
+            // no attacker in it, where before the change that residue contributed 0 and the pass did
+            // nothing. That is a shape the old code could not see at all, not an over-credit. It is
+            // closed by the witness in `store_total_bytes` rather than here, and it is why that function
+            // measures *reclaimable* footprint instead of disk usage.
+            //
+            // Cost: one `read_dir` of `blobs/` plus a stat per blob file, plus the witness walk over
+            // `manifests/`, per iteration, on top of the one this loop always paid. The loop only runs
+            // when a caller passes a cap at all — `snapshot_schedule::snapshot_run_due` passes `None`,
+            // so the scheduled path pays nothing — and it iterates only while survivors are still being
+            // deleted, which is bounded by `kept.len()`. The witness walk is the same scan
+            // `snapshot_capture::manifests_naming` already performs inside every `prune` this loop
+            // makes, so the loop's per-iteration cost is roughly doubled rather than newly incurred.
             let mut total = snapshot_capture::store_total_bytes(store_dir)?;
             for id in &oldest_first {
                 if total <= cap || kept.len() <= 1 {
                     break;
                 }
-                let freed = snapshot_capture::prune(store_dir, id)?;
-                bytes_freed += freed;
-                total = total.saturating_sub(freed);
+                bytes_freed += snapshot_capture::prune(store_dir, id)?;
+                total = snapshot_capture::store_total_bytes(store_dir)?;
                 kept.retain(|k| k != id);
                 pruned.push(id.clone());
             }
@@ -709,6 +768,240 @@ mod tests {
             let _ = fs::remove_dir_all(&dest);
         }
         assert!(store.join("blobs").join(&hash).exists(), "HARM: the shared blob was deleted");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    // ---- CPE-1844: a hand-edited index.json steers the byte cap ------------------------------------
+
+    /// Rewrite every `size` recorded in `store`'s `index.json` to `size`, reading it back so a tamper
+    /// that silently failed to land can never be mistaken for a guard that worked. Returns the total the
+    /// file now claims — which is exactly what `store_total_bytes` used to return.
+    fn set_index_sizes(store: &std::path::Path, size: u64) -> u64 {
+        let p = store.join("index.json");
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        for (_h, m) in doc["blobs"].as_object_mut().unwrap().iter_mut() {
+            m["size"] = serde_json::json!(size);
+        }
+        fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let blobs = back["blobs"].as_object().unwrap();
+        assert!(
+            blobs.values().all(|m| m["size"].as_u64() == Some(size)),
+            "LIVE: the index.json size tamper never landed on disk"
+        );
+        let claimed: u64 = blobs.values().map(|m| m["size"].as_u64().unwrap()).sum();
+        assert_eq!(
+            crate::snapshot_capture::load_store(store).unwrap().total_bytes(),
+            claimed,
+            "LIVE: the tamper never reached index.json as the production reader sees it"
+        );
+        claimed
+    }
+
+    fn real_blob_bytes(store: &std::path::Path) -> u64 {
+        fs::read_dir(store.join("blobs"))
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// **CPE-1844's headline harm, at the layer that does the deleting.** `apply`'s byte cap thins
+    /// survivors oldest-first until the store's footprint is under the cap or one checkpoint remains, and
+    /// the footprint used to be read out of `index.json`. Reproduced on `origin/main` through
+    /// `checkpoint_prune_apply` before anything was changed — a 45-byte store, a 1,000,000-byte cap, a
+    /// GFS policy keeping all five:
+    ///
+    /// ```text
+    /// index.json: every blob's "size" -> 1000000000      (one text edit; no bytes written)
+    ///   preview.total_bytes  45 -> 5000000000
+    ///   prune_apply  kept=[newest]  pruned=[the other 4]  bytes_freed=4000000000
+    ///   manifests left on disk = 1 of 5
+    /// ```
+    #[test]
+    fn cpe_1844_an_inflated_index_cannot_drive_the_byte_cap_into_deleting_checkpoints() {
+        let src = scratch("1844-cap-src");
+        let store = scratch("1844-cap-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        // Five captures, a day apart, each with its own content — so the GFS pass keeps every one of
+        // them and the byte cap is the ONLY thing in this test that can delete anything.
+        let mut ids = Vec::new();
+        for i in 0..5u64 {
+            fs::write(src.join("a.txt"), format!("version {i}").as_bytes()).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        let cap = 1_000_000u64;
+
+        let real = real_blob_bytes(&store);
+        assert!(real > 0 && real < cap, "LIVE: the honest store is not comfortably under the cap");
+        assert!(
+            preview(&store_s, &policy).unwrap().prune.is_empty(),
+            "LIVE: the GFS pass wants to prune something, so this fixture does not isolate the byte cap"
+        );
+
+        let claimed = set_index_sizes(&store, 1_000_000_000);
+        assert!(claimed > cap, "LIVE: the tampered claim does not even exceed the cap");
+        assert!(
+            snapshot_capture::list_manifests(&store_s).unwrap().len() == 5,
+            "LIVE: the planner no longer sees all five checkpoints, so the cap has nothing to delete"
+        );
+
+        let applied = apply(&store_s, &policy, Some(cap)).unwrap();
+
+        // HARM FIRST: the checkpoints the real on-disk state says should be kept are still there, and
+        // still usable. Only then the Result.
+        let mut left: Vec<String> = fs::read_dir(store.join("manifests"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left.len(),
+            5,
+            "HARM: a hand-edited index.json deleted the user's other checkpoints — {left:?}"
+        );
+        for id in &ids {
+            snapshot_capture::manifest_snapshot(&store_s, id)
+                .unwrap_or_else(|e| panic!("HARM: checkpoint {id} no longer loads: {e}"));
+        }
+        assert!(applied.pruned.is_empty(), "HARM: pruned {:?}", applied.pruned);
+        assert_eq!(applied.kept.len(), 5);
+        assert_eq!(applied.bytes_freed, 0, "nothing was freed because nothing was deleted");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// The byte cap must still *work*: a store genuinely over its cap is thinned oldest-first, and stops
+    /// as soon as the real footprint is under it. This is the over-tightening pin — a "measure the disk"
+    /// fix that simply never pruned would satisfy the test above and be useless.
+    #[test]
+    fn cpe_1844_the_byte_cap_still_thins_a_store_that_is_genuinely_over_it() {
+        let src = scratch("1844-honest-src");
+        let store = scratch("1844-honest-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..4u64 {
+            fs::write(src.join("a.txt"), vec![b'a' + i as u8; 200]).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        assert!(preview(&store_s, &policy).unwrap().prune.is_empty(), "LIVE: GFS would prune on its own");
+        assert_eq!(real_blob_bytes(&store), 800, "LIVE: the fixture's real footprint is not 4 x 200");
+
+        // Cap 700: one prune takes the store to 600, which is under it — so exactly one is deleted.
+        let applied = apply(&store_s, &policy, Some(700)).unwrap();
+        assert_eq!(applied.pruned, vec![ids[0].clone()], "the oldest, and only the oldest");
+        assert_eq!(applied.kept.len(), 3, "HARM: the cap deleted more than it needed to");
+        assert_eq!(real_blob_bytes(&store), 600, "the real footprint is now under the cap");
+        assert_eq!(applied.bytes_freed, 200, "the figure describes the file that was removed");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1844's second steering input, and the reason the loop re-measures rather than subtracts.**
+    /// `total = total.saturating_sub(freed)` carried `index.json`'s recorded sizes forward through the
+    /// loop's own arithmetic. With the sizes deflated to 1 the loop believed each prune reclaimed a
+    /// single byte and kept deleting long after the store was genuinely under its cap — all the way to
+    /// the one-survivor floor. Re-measuring removes the input instead of bounding it.
+    #[test]
+    fn cpe_1844_a_deflated_index_cannot_keep_the_cap_loop_deleting_past_the_cap() {
+        let src = scratch("1844-deflate-src");
+        let store = scratch("1844-deflate-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..4u64 {
+            fs::write(src.join("a.txt"), vec![b'a' + i as u8; 200]).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        assert!(preview(&store_s, &policy).unwrap().prune.is_empty(), "LIVE: GFS would prune on its own");
+        assert_eq!(real_blob_bytes(&store), 800, "LIVE: the fixture's real footprint is not 4 x 200");
+
+        // The tamper: every blob claims one byte. The real footprint is untouched at 800, so the loop
+        // legitimately fires — but each prune's *recorded* yield is now 1 instead of 200.
+        let claimed = set_index_sizes(&store, 1);
+        assert_eq!(claimed, 4, "LIVE: the deflated claim is not 4 x 1");
+        assert_eq!(real_blob_bytes(&store), 800, "LIVE: the tamper moved real bytes, which it must not");
+
+        let applied = apply(&store_s, &policy, Some(700)).unwrap();
+
+        // HARM FIRST: three of four checkpoints are what the deflated index used to buy.
+        let left = fs::read_dir(store.join("manifests")).unwrap().flatten().count();
+        assert_eq!(
+            left, 3,
+            "HARM: a deflated index.json kept the byte-cap loop deleting past the cap — {} left",
+            left
+        );
+        assert_eq!(applied.pruned, vec![ids[0].clone()]);
+        assert_eq!(real_blob_bytes(&store), 600);
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1844 — an unreadable `index.json` used to cost one checkpoint per retention pass.**
+    /// `load_store` is fail-closed by design (CPE-1705), but it sat *below* `prune`'s point of no
+    /// return, so every pass deleted a manifest file and then refused. Measured on `origin/main` through
+    /// `checkpoint_prune_apply` over four checkpoints, `index.json` truncated to `{"blobs": {`:
+    /// `Err`/3 left, `Err`/2 left, `Err`/1 left, then `Ok`. Walking `prune`'s own gate list — the axis
+    /// CPE-1861 recorded as the one its enumeration failed to walk — is what found it.
+    #[test]
+    fn cpe_1844_an_unreadable_index_refuses_totally_instead_of_costing_a_checkpoint_a_pass() {
+        let src = scratch("1844-corrupt-src");
+        let store = scratch("1844-corrupt-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..4u64 {
+            fs::write(src.join("a.txt"), format!("version {i}").as_bytes()).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 3_600));
+        }
+        // A policy that DOES want to thin, so the pass genuinely reaches `prune`.
+        let policy = RetentionPolicy { hourly: 1, daily: 0, weekly: 0, monthly: 0 };
+        assert!(!preview(&store_s, &policy).unwrap().prune.is_empty(), "LIVE: nothing would be pruned");
+
+        let idx = store.join("index.json");
+        fs::write(&idx, b"{\"blobs\": {").unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&idx).unwrap()).is_err(),
+            "LIVE: index.json still parses, so load_store would not refuse it"
+        );
+        assert_eq!(
+            snapshot_capture::list_manifests(&store_s).unwrap().len(),
+            4,
+            "LIVE: the planner no longer sees the checkpoints, so nothing would reach prune"
+        );
+
+        for pass in 1..=4 {
+            let r = apply(&store_s, &policy, None);
+            let left = fs::read_dir(store.join("manifests")).unwrap().flatten().count();
+            assert_eq!(
+                left, 4,
+                "HARM: pass {pass} destroyed a checkpoint on an unreadable index.json — {left} left"
+            );
+            assert!(r.is_err(), "an unreadable refcount ledger must refuse, loudly");
+        }
+        // And every checkpoint is still usable.
+        for id in &ids {
+            snapshot_capture::manifest_snapshot(&store_s, id)
+                .unwrap_or_else(|e| panic!("HARM: checkpoint {id} no longer loads: {e}"));
+        }
+        // The footprint no longer goes through `index.json` at all, so a preview still answers honestly
+        // on a store whose index is corrupt.
+        assert_eq!(preview(&store_s, &policy).unwrap().total_bytes, real_blob_bytes(&store));
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
