@@ -3,11 +3,11 @@ id: CPE-1862
 title: retention prunes manifests but nobody reconciles checkpoints.json, leaving dangling rows
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-22
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
