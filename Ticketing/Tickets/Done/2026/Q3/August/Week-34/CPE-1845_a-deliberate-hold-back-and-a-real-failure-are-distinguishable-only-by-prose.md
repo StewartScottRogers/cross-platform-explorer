@@ -3,11 +3,11 @@ id: CPE-1845
 title: a deliberate hold-back and a real failure are distinguishable only by string-matching the message
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-21
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
