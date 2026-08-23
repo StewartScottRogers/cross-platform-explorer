@@ -3,11 +3,11 @@ id: CPE-1844
 title: a hand-edited index.json steers prune into deleting the user's other checkpoints
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-21
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
