@@ -1001,6 +1001,14 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 ///   destinations (what [`crate::batch_media::open_output_verified`] does) would refuse legitimate
 ///   overwrites of ordinary hard-linked files in a user's own tree, which is the constraint that killed
 ///   the `create_new` approach and must not be reintroduced by another route.
+/// - **A link planted STRICTLY AFTER the open leaves the destination name holding the link while the
+///   bytes land in the now-unlinked file object, and this returns `Ok`.** Measured by the CPE-1846
+///   Security Auditor mid-copy of a 64 MiB blob: `Ok(67108864)`, victim untouched at 6 bytes — which is
+///   the handle-pinning property working exactly as designed, and the *point* of this function. It is
+///   recorded here because it is not nothing: no escape, but the restored entry is not at the name the
+///   report implies it is. The report is accurate about what was written and silent about where it now
+///   resolves. Detecting it would mean re-resolving the name after the write, i.e. asking a path
+///   question again at the one place this function exists to stop asking one.
 ///
 /// # Attribute preservation versus `fs::copy` — measured on Windows, CPE-1846
 ///
@@ -1032,12 +1040,22 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// are not carried".
 ///
 /// It is accepted because it is the identical trade [`copy_file_into_claimed_slot`] already made and
-/// documents at length: carrying a stream means addressing it as `dst:StreamName`, and that is a
-/// **path**, so the carry re-opens the destination by path after the handle was pinned — reintroducing
+/// documents at length: the obvious carry addresses the stream as `dst:StreamName`, and *that* spelling
+/// is a **path**, so it re-opens the destination by path after the handle was pinned — reintroducing
 /// precisely the window this change exists to close, with a window as wide as the whole copy rather than
 /// a syscall. The round-2 auditor on PR #968 won that race on its first attempt. A metadata convenience
 /// is not worth handing back the hole, and *this* is the file-restoration path, where writing the wrong
 /// object is unambiguously worse than writing the right object with a stale zone tag.
+///
+/// **That is the door being CLOSED, not LOCKED, and an earlier draft of this paragraph said "locked"
+/// (CPE-1846 review).** It asserted that carrying a stream *means* addressing a path — true only of a
+/// `std`-only implementation. This crate already links `windows` 0.56 (it is how [`crate::batch_media::handle_facts`]
+/// reads identity off a handle at all), so `BackupRead`/`BackupWrite` over the pinned handle, or a
+/// handle-relative `NtCreateFile` with the stream name, would carry streams **without re-opening by
+/// path** and without reopening this window. The decision stands, on cost and scope: it is a distinct
+/// piece of Win32 stream-format work, Windows-only, on a path whose bytes come from the user's own local
+/// store, and it is not what this ticket is for. But a future reader must not be told the route does not
+/// exist when what is actually true is that it was not taken.
 ///
 /// What it costs a restore concretely: `capture` stores blobs with `fs::copy`, so an original file's
 /// `Zone.Identifier` reached the blob and, until now, came back out on restore. After this change a
@@ -1048,6 +1066,41 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 ///
 /// Unix is unaffected on every row — `fs::copy` there carries neither times nor streams (there are none),
 /// only the mode, which `set_permissions` carries here as well.
+///
+/// # Speed: a 9x-29x wall-clock regression on Windows, and it is NOT the guards
+///
+/// **Recorded because CPE-1846 shipped without measuring it and the Security Auditor did.** Release
+/// build, Windows/NTFS, no racers:
+///
+/// ```text
+/// shape                               fs::copy    this fn     factor
+/// 3,000 x 19-byte files                1,485 ms   13,678 ms    9.2x   (0.5 ms -> 4.6 ms per file)
+/// 500 x 256 KiB  (128 MB total)          329 ms    9,628 ms     29x   (389 MB/s -> 13 MB/s)
+/// ```
+///
+/// A ~2 GB checkpoint revert therefore moves from roughly 5 s to roughly 2.5 minutes. That is squarely
+/// against PURPOSE.md's fast/small/predictable tiebreaker, and it is stated here rather than left for a
+/// user to discover.
+///
+/// **The guards are not the cost.** Six variants were bisected and a bare `File::create` + `write_all`
+/// with *zero* guards costs the same as this function. The whole regression is inherent to leaving
+/// `CopyFileExW` for a user-mode handle write, and is consistent with Defender scanning each file on
+/// close — i.e. it is per-file fixed cost, not per-byte.
+///
+/// **Why `COPY_CHUNK`'s existing benchmark did not catch it, which is the transferable lesson.** (Not an
+/// intra-doc link on purpose: that constant is `cfg`'d out on Linux, so linking it would be a broken
+/// rustdoc link on exactly the platform CI lints hardest.) That
+/// benchmark moves **one 200 MB file** and reports 2,101 MB/s for the streamed path — 66% of
+/// `CopyFileExW`. It amortises a single open/close/scan over 200 MB. A restore is the opposite shape:
+/// **many files**, where that fixed cost is the entire bill. CPE-1846 reused the benchmark's conclusion
+/// for a shape it does not cover. Do not cite `COPY_CHUNK`'s figures for a many-file caller; measure the
+/// caller's own shape.
+///
+/// Closing it means getting `CopyFileExW`'s throughput without its "resolve the destination by path"
+/// semantics — a real piece of work with its own trade-offs, so it is a follow-up rather than a tweak
+/// here. The security property this function exists for is not negotiable against it: the baseline it
+/// replaced was measured putting **63** checkpoint payloads on files outside the reverted tree across
+/// 10 rounds, with the revert reporting complete success.
 ///
 /// # Creation mode, and why it is deliberately *not* narrowed
 ///
@@ -1118,6 +1171,16 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
     // not report depending on its tag: `GetFileInformationByHandle` on the handle we are about to write
     // through. `handle_facts` returns `None` only on a platform whose identity model `batch_media` does
     // not know, where the path check above is the whole defence.
+    //
+    // **Both arms below appear UNREACHABLE on Windows, measured, and are kept anyway** (CPE-1846
+    // review). A directory and a junction both fail the `open` itself there, so the refusal a user
+    // actually sees for those is the generic "could not open the destination for writing" above — which,
+    // noted as a real if minor wording gap, omits the "Nothing was written for this entry" clause every
+    // other refusal here carries. They are kept because unreachable is a per-platform fact, not a
+    // property of the code: a filesystem or platform that *does* hand back a writable handle for a
+    // directory or a reparse point would land here, and on the `handle_facts == None` platforms the path
+    // check above is the only other thing standing. Deleting a refusal because one OS gets there first
+    // is how the next platform gets none.
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         let why = if facts.is_reparse_point {
             Some(

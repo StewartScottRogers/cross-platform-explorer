@@ -245,3 +245,119 @@ Server crates (windows-latest) — clippy + test   completed  success  head_sha=
 show all five `cpe_1846_*` tests running and passing, and — the part that matters — **zero**
 `[CPE-1846] SKIPPED` notices on either, so the symlink fixtures really staged there and the tests asserted
 rather than returning early.
+
+### 2026-08-23 — independent Security Audit: MERGE, with two records this ticket owed
+
+The same Security Auditor whose "17,488 plants, zero writes through" this ticket overturned returned
+**MERGE** and confirmed the false negative for the stated reason. Two things it recorded are worse than my
+own numbers, and one of them is a gap in this ticket that had to be closed before merge.
+
+**It measured the SHIPPING sink, which I did not.** My race drove `snapshot_capture::restore`, which has
+no production caller. It drove `execute_restore` — reached by `checkpoint_revert` /
+`checkpoint_revert_one` — 10 rounds x 3,000 entries:
+
+```text
+                            live plants   applied   WRITES THROUGH
+fs::copy baseline              352,373     29,959         63          <- EVERY round escaped
+copy_file_onto_no_follow     1,029,661     29,999          0
+```
+
+Sample round: `applied=3000, skipped=0, escapes=4` — a revert reporting **complete success** while putting
+four checkpoint payloads on files outside the reverted tree. That is arbitrary file write on the path
+users actually reach, and far easier to hit than my ~1-per-10,000. The fix wrote **more** entries under
+**3x** the plant density and produced **zero**, at a cost of one extra skip in 30,000.
+
+**And it sharpened my account of the false negative, which was only half right.** I explained CPE-1823's
+zero by its pre-pass abort — true for `snapshot_capture::restore`. But CPE-1823's log *also* records
+"20,000+ blind swaps, zero escapes" against the **shipping** `execute_restore`, which has **no pre-pass
+abort at all**. My mechanism does not explain that zero; it was simply under-powered aim. So **both zeros
+were wrong, for two different reasons** — one structural (the abort fired before the window opened), one
+just insufficient force. Recorded rather than left as one tidy explanation covering two different facts.
+
+### The record this ticket owed: a 9x-29x wall-clock regression, never measured here
+
+This ticket measured attribute preservation exhaustively and **never measured time**. Release build,
+Windows/NTFS, no racers:
+
+```text
+shape                               fs::copy    no-follow    factor
+3,000 x 19-byte files                1,485 ms   13,678 ms     9.2x    (0.5 ms -> 4.6 ms per file)
+500 x 256 KiB  (128 MB total)          329 ms    9,628 ms      29x    (389 MB/s -> 13 MB/s)
+```
+
+A ~2 GB checkpoint revert goes from roughly **5 s to roughly 2.5 minutes**. Squarely against PURPOSE.md's
+fast/small/predictable tiebreaker, and shipping it unrecorded was the one gap in an otherwise fully
+measured ticket.
+
+**The guards are not the cost.** Six variants were bisected: a bare `File::create` + `write_all` with
+**zero** guards costs the same as the shipped fix. The whole regression is inherent to leaving
+`CopyFileExW` for a user-mode handle write, consistent with Defender scanning each file on close — per-file
+fixed cost, not per-byte.
+
+**Why the crate's existing benchmark missed it, which is the transferable lesson.** `COPY_CHUNK`'s doc
+benchmarks **one 200 MB file** at 2,101 MB/s (66% of `CopyFileExW`), amortising a single
+open/close/scan over 200 MB. A restore is the opposite shape — **many files** — so that fixed cost is the
+entire bill. **I reused that benchmark's conclusion for a shape it does not cover.** Do not cite
+`COPY_CHUNK`'s figures for a many-file caller; measure the caller's own shape. Written into
+`copy_file_onto_no_follow`'s doc next to the mechanism, with the numbers.
+
+The security property is not traded against it: the baseline being replaced was measured putting 63
+checkpoint payloads outside the reverted tree. A follow-up owns the speed (getting `CopyFileExW`
+throughput without its resolve-the-destination-by-path semantics is real work, not a tweak). **Deliberately
+NOT written into `src/docs/16-checkpoints.md`**: a user-facing "reverts are slow now" sentence would be
+stale the moment that follow-up lands, and the docs already carry the two behaviour changes that are
+durable (link refusal, Mark-of-the-Web).
+
+### The one sentence that was wrong: the ADS door is closed, not locked
+
+My reasoning said carrying a stream *means* addressing `dst:StreamName`, "and that is a path". True of a
+`std`-only implementation — **but this crate already links `windows` 0.56** (it is how `handle_facts`
+reads identity off a handle at all), so `BackupRead`/`BackupWrite` over the pinned handle, or a
+handle-relative `NtCreateFile` with the stream name, would carry streams **without re-opening by path**
+and without reopening the window. The decision stands on cost and scope — distinct Win32 stream-format
+work, Windows-only, on a path whose bytes come from the user's own local store — but the framing told a
+future reader the door was locked when it is only closed. Corrected in place.
+
+**On the ADS trade the Auditor split my two shapes, and I agree with the split.** Rows 2 and 3 (a stale
+Mark-of-the-Web kept over restored content) are **not** a security problem: the error points toward *more*
+restriction, never less. **Row 1 is the one that weakens a control** — a `.docm` downloaded, captured and
+later restored comes back with no Mark-of-the-Web, so no SmartScreen prompt and no Protected View. Modest
+severity (the bytes are the user's own, from a local store), correctly traded against a demonstrated
+arbitrary write, and stated in plain words in both this log and the user docs rather than buried.
+
+### What it attacked, and what held
+
+Every shape refused: a privilege-free **NTFS junction** (refused at the open; tag verified `0xa0000003`),
+a real **directory**, a **symlink pointing at a bystander INSIDE the root** that `confined_to` correctly
+admits — and the good one, a link planted **strictly after the open**, mid-copy of a 64 MiB blob:
+`Ok(67108864)` with the victim untouched at 6 bytes. **Handle pinning proven: nothing after the open
+re-opens by path.** The `create_new` red-proof held line by line, all three overwrite paths red with the
+exact message. The guard-layering claim survived a four-way sabotage matrix exactly as written, including
+both post-open checks off giving `Ok(16)` (the silent write-to-nowhere) and the following-open variant
+materialising a dangling link's target **at the open**.
+
+### Two smaller findings, both recorded in code
+
+- **On Windows the `facts.is_dir` arm — and the reparse arm — appear unreachable**, because a directory
+  or a junction fails the `open` itself, so those refusals surface as the generic "could not open the
+  destination for writing", which omits the "Nothing was written for this entry" clause every other
+  refusal carries. A real if minor wording gap. The arms are **kept**: unreachable is a per-platform fact,
+  not a property of the code, and on a `handle_facts == None` platform the path check is the only other
+  thing standing.
+- **After a post-open swap the destination NAME holds the attacker's link while the bytes sit in the
+  now-unlinked file object, and the call returns `Ok`.** Not an escape — it is handle pinning working —
+  but the restored entry is not at the name the report implies. Detecting it would mean re-resolving the
+  name after the write, i.e. asking a path question again at the one place this function exists to stop
+  asking one.
+
+### The harness is not in the tree, and that is a real gap in this PR
+
+The PR is 6 files and none of them is a harness, so the Auditor **could not verify my self-inflict fix** —
+only my account of it. (My first triggered run reported 2,681 escapes, all of them the harness writing its
+own fixtures through links the racer had planted.) It built an independent harness that is *structurally
+incapable* of that failure: racers only unlink and symlink, never write content, and every victim is
+asserted byte-pristine immediately before the call as a hard panic. That is the better design, and mine
+was not committed because it runs ~35 s, needs the symlink privilege, and wins on baseline only ~50% of
+runs — a flaky pin, which is why the deterministic tests carry the property instead. Recorded as an
+acknowledged gap: a committed harness built the Auditor's way (assert-pristine-then-call, racer never
+writes) would be worth having, and belongs with the follow-up rather than in this merge.
