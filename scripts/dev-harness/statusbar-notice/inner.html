@@ -15,6 +15,18 @@
   </head>
   <body>
     <div id="mount"></div>
+    <!--
+      CPE-1859: the inner document now prints its OWN diagnostics here as well as publishing them on
+      `window` for the outer shell. The outer shell reads them across the frame boundary by polling,
+      which is fine for a human at a browser but is racy when the page is driven non-interactively
+      (`chrome --headless=new --virtual-time-budget=N --dump-dom`): virtual time fast-forwards the
+      poll's timers independently of the iframe's real network fetches, so the outer readout frequently
+      snapshots as "waiting for iframe…". Loading THIS document directly needs no cross-frame read at
+      all, and is what the anchor measurements in CPE-1859's work log were taken from. The outer shell
+      is still the right entry point when the measurement depends on a controlled narrow WIDTH, which
+      is what the iframe exists for (see index.html).
+    -->
+    <pre id="inner-readout" style="margin:0;padding:4px 6px;background:#000;color:#0f0;font:12px monospace;white-space:pre-wrap">booting…</pre>
     <script type="module" src="./inner-main.ts"></script>
   </body>
 </html>
