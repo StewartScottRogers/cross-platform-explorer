@@ -1,72 +1,65 @@
-# Sprint checkpoint — run `batched-2026-08-17-1929`
+# Checkpoint — batched run `batched-2026-08-20-1620`
 
-**Written 2026-08-20 10:00 local.** Batches **34 of 40**. Sub-agents used this session: **~143** of the
-~150 reset line — this is the quiesce-and-hand-off boundary, not a stop. A fresh session resumes under the
-same count by reading `BATCH-COUNTER`.
+**Status: COMPLETE. 40 of 40 batches. Nothing in flight.**
+Written 2026-08-23 before a planned reboot.
 
-## Standing user instruction (must survive the reset)
+## State at shutdown
 
-> "When you come towards the end of these batches please build, deploy and run the application before we
-> start the next set of batches."
+- `main` clean, fully pushed, HEAD `ac1fc7b0` (`release: bump to 0.57.69`)
+- Tags pushed: `v0.57.69`, `v0.57.69-sidecar`
+- **0.57.69 sidecar build installed and verified running** at
+  `%LOCALAPPDATA%\Cross-Platform Explorer (Sidecar)` — all processes stopped cleanly for the reboot
+- No open PRs from this run (#738 is pre-existing and unrelated)
+- `BATCH-COUNTER` and `SPRINT-LOCK` deleted — the run is torn down, not paused
 
-**Done once already** for v0.57.67-sidecar (built 3-OS green, published, installed, launched, verified).
-**Do it again once CPE-1804 merges** — that ticket changes user-visible behaviour. Bump to **0.57.68**.
+## What shipped
 
-**Versioning is FIVE files, not three** (CLAUDE.md was wrong and is now corrected): `package.json`,
-`src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `package-lock.json` (**two** version fields), and
-`src-tauri/Cargo.lock` (the `cross-platform-explorer` entry). Neither build passes `--locked`, so a stale
-lockfile never errors — it leaks out as a dirty working tree. `package-lock.json` had been three releases
-behind when this was found.
+40 tickets, each through an independent reviewer; the security-sensitive ones through a
+dedicated attacker as well. 2,204 agent outcomes in `ledger.jsonl`.
 
-Deploy sequence, in order, no step skipped:
-1. Confirm the draft release **carries installer assets** before publishing — an empty draft means the
-   build failed, and publishing it creates a broken public release.
-2. Kill **every** `cpe` / `ai-console` process **including `--session-daemon`**. NSIS silently skips a
-   file-locked sidecar and the registry version then lies.
-3. Install silently, then verify **both** the registry version **and** the sidecar exe timestamps.
-4. Launch, confirm responding.
-5. WebView2 cache survives reinstall — a stale `index.html` can make a real frontend fix look broken.
+The recurring finding, stated plainly: **the code was almost always right and the claims about it
+were not.** Ten hollow guards — tests that passed while proving nothing. A dozen comments stating
+things that were measurably false. Nearly all caught by *running* a sabotage rather than reading.
 
-## Open PRs
+## Open items the next session should know
 
-| PR | Ticket(s) | State |
-|----|-----------|-------|
-| **#961** | CPE-1806 | **APPROVED** (reviewer ×2 + UAT PASS). Head `ffd7dcd4`, mid-CI. **Merge on green as batch 35.** Approval carries a standing condition: `Backend (ubuntu-latest)` must be green. |
-| **#962** | CPE-1804 **+** CPE-1805 | Reviewer APPROVE, UAT PASS, but **RED on ubuntu** and reworking. Banks as **two** batches (36 and 37) since it closes two tickets. |
+**1. The plain release build has been broken for 27 days.**
+Every `Release` run since 2026-08-04 fails at *"Verify updater manifest + signatures (CPE-1058)"*,
+on all three platforms, which is why the `catalog` job is permanently skipped. It does **not**
+affect the sidecar build, which is what gets installed. **This was noticed during the run, recorded
+as context inside other tickets, and never filed on its own.** It should be.
 
-### #962's failure — the important context
-Two new tests panic inside `trash-5.2.6/src/freedesktop.rs:350` — the very dependency panic CPE-1791
-exists for. Fabricated `TrashItem`s reach `trash::os_limited::metadata` via `trash_item_to_entry:2240`;
-harmless on Windows, fatal on Linux. The reviewer had flagged "the new tests touch no OS trash" as a
-**wording** correction; that false belief was the reason the author never looked.
+**2. Nothing in these 40 batches has been looked at by a human.**
+The 0.57.69 build was installed and launched, but no attended visual check was made. The two
+genuinely visible changes are both in the status bar:
+- the free-space figure now anchors right in **every** folder (it sat 534px out of place in the
+  majority of them since 2026-07-14)
+- the git chip and disk figure now clear correctly on entering an archive / smart folder / saved
+  search, and neither repaints from a slow previous folder
 
-**Do not accept a `#[cfg(not(target_os = "linux"))]` fix** — that trades a visible red for a silent hole on
-the only platform where the underlying bug is real, which is precisely what CPE-1806 is fixing.
+**3. One new UI surface has never been seen at all.**
+CPE-1845's revert-outcome panel only appears when a revert holds deletions back, which needs a
+checkpoint containing a filename this filesystem cannot write. Worth staging deliberately.
 
-Also outstanding on #962: pin that both commands route through `listing_is_degraded`; remove the dependency
-on the machine's ambient Recycle Bin contents; the UAT's F1 (hardcode `skipped: 0` in both commands and all
-253 Rust tests still pass — the walker→command seam is unpinned); and two evidence corrections, noting red
--proof row 2's red count was understated **upward** (three, not one).
+**4. ~180 agent worktrees, ~700 GB, under `.claude/worktrees/`.**
+Disk is not tight (2.3 TB free) and they were left deliberately: this repo squash-merges, so a
+merged branch does not *look* merged by commit ancestry, and the obvious "is this work landed?"
+test gives the wrong answer. Removing a live or resumable worktree has caused loss here before.
+A proper cleanup needs the PR-to-directory mapping and is a job in itself.
+A full dirty-worktree scan was attempted at shutdown and **timed out partway** — no dirty tree was
+found before it did, but it did not finish. `main` itself is clean and pushed.
 
-## Remaining work for batches 38–40
+## Bench
 
-Backlog is **46**. Named candidates, best first: **CPE-1802** (ffmpeg override window — `.github/workflows`
-is free now), **CPE-1813** (TAR still does not deliver ZIP's no-link-support refusal), **CPE-1814**
-(dead `Skip|Abort` collapse + staging-failure `return` + dangling cfg-gated doc links + unqualified
-taxonomy line), **CPE-1810** (`--warn` is not a theme token), **CPE-1811** (two falsified S3 doc comments),
-**CPE-1817**, **CPE-1815**, **CPE-1816**.
+52 tickets open. The run filed 31 of them, almost all found by checkers attacking work that had
+already passed its author's own tests. Highest-value next, all created by this run's own findings:
 
-## Process rules learned this session — carry them forward
-
-- **Never `git add -A`.** Mine swept a sub-agent's stray `scratchpad_clippy_default.log` into an unrelated
-  ticket commit. Worktree-isolated agents still occasionally write into the main working copy. Stage
-  explicit paths.
-- **"0 failing" is not green.** It has meant "zero checks registered" once tonight. Always verify the
-  rollup is against the exact head SHA.
-- **Green means the tests that exist passed**, not that review findings were addressed. One PR went fully
-  green with its blocking finding unfixed.
-- **PowerShell corrupts repo files** — it BOMs/re-encodes, and fabricates a BOM even when *reading* through
-  `>`. Use Edit/Write or python; check `git diff --numstat`.
-- The dominant defect class this sprint was **a claim reading stronger than its evidence** — nine candidate
-  cannot-fail tests (eight real), a false premise that survived two tickets, four rounds of true code with
-  false prose. The question that found nearly all of them: *what does this test fail for, specifically?*
+- **CPE-1871** — two prune-loop design decisions argued at length and pinned by nothing; each
+  rejected alternative leaves the suite green. One fixture with an undeletable blob closes both.
+- **CPE-1869** — the held-back list names 8 of 200 paths and says "delete these files yourself".
+- **CPE-1862** — retention prunes manifests but nothing reconciles `checkpoints.json`.
+- **CPE-1868** — three distinct ways to misread a CI board, all found on 2026-08-23: a silently
+  truncated log fetch, a conflicting PR scheduling zero checks, and a pending count that dips
+  before it rises.
+- **CPE-1848** / **CPE-1856** — the two harness-level defects: workers stalling on notifications
+  they cannot receive, and concurrent agents mutating shared machine state.
