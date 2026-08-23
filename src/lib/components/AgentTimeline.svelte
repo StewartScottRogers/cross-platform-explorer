@@ -10,6 +10,7 @@
   import DiffPeek from "./DiffPeek.svelte";
   import DiffSideBySide from "./DiffSideBySide.svelte";
   import ConsultedFiles from "./ConsultedFiles.svelte";
+  import RevertOutcomePanel from "./RevertOutcomePanel.svelte"; // CPE-1845 — shared, reason-carrying
   import type { TimelineEntry } from "../agentActivity";
   import type { AgentSession } from "../sidecar";
   import { agentDiffs, diffFor, diffLineStats } from "../agentDiffs";
@@ -810,7 +811,7 @@
 
           {#if revertOutcome}
             <div class="cp-outcome" data-testid="checkpoint-outcome">
-              Reverted — applied {revertOutcome.applied} change{revertOutcome.applied === 1 ? "" : "s"}{#if revertOutcome.skipped.length}, skipped {revertOutcome.skipped.length}{/if}.
+              <RevertOutcomePanel outcome={revertOutcome} testid="checkpoint-outcome-panel" />
             </div>
           {/if}
           {#if revertError}<div class="cp-restore-err">{revertError}</div>{/if}

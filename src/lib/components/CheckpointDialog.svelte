@@ -15,6 +15,8 @@
   import type { Checkpoint, CheckpointFailure, RevertPreview, RevertOutcome, FileDiff } from "../bindings.gen";
   import Icon from "./Icon.svelte";
   import DiffPeek from "./DiffPeek.svelte"; // reused as-is (CPE-1197 frontend half, epic CPE-735)
+  import RevertOutcomePanel from "./RevertOutcomePanel.svelte"; // CPE-1845 — shared, reason-carrying
+  import { summarizeRevert } from "../revertHoldBack";
   import { t } from "../i18n";
   import { displaySafePath } from "../filename";
 
@@ -168,8 +170,9 @@
       outcome = kind === "one"
         ? unwrap(await commands.checkpointRevertOne(path.trim(), cp.manifest_id, revertOnePath.trim()))
         : unwrap(await commands.checkpointRevert(path.trim(), cp.manifest_id));
-      note = `Revert applied ${outcome.applied} change${outcome.applied === 1 ? "" : "s"}` +
-        (outcome.skipped.length ? `, skipped ${outcome.skipped.length}.` : ".");
+      // CPE-1845: the note is the same one-statement-plus-a-count the panel shows, so the two never
+      // disagree — and it no longer calls a deliberate hold-back "skipped" alongside real failures.
+      note = summarizeRevert(outcome).headline;
       dispatch("reverted");
     } catch (e) { error = String(e); } finally { loading = false; }
   }
@@ -307,8 +310,7 @@
 
     {#if outcome}
       <div class="outcome" data-testid="outcome-panel">
-        Applied {outcome.applied} change{outcome.applied === 1 ? "" : "s"}
-        {#if outcome.skipped.length}, skipped {outcome.skipped.length}{/if}.
+        <RevertOutcomePanel {outcome} testid="outcome" />
       </div>
     {/if}
 

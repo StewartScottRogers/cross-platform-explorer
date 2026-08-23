@@ -46,8 +46,9 @@ Two ways to revert, both from the checkpoint's row in the list:
 
 Both are destructive — files are overwritten or deleted on disk directly, not moved to the Recycle Bin —
 so both arm a confirmation panel first, restating what will happen. Nothing reverts on a single click.
-After a revert, the dialog reports how many changes were applied and how many were skipped (e.g. a locked
-or missing file); a skip never fails the rest of the revert.
+After a revert, the dialog reports how many changes were applied, how many failed (e.g. a locked or
+missing file), and how many deletions were held back — three separate counts, because a hold-back is the
+safety net working rather than a problem. Neither a failure nor a hold-back stops the rest of the revert.
 
 ### When a revert holds its deletions back
 
@@ -55,10 +56,19 @@ A revert deletes a file on one basis only: *that file is not in the checkpoint*.
 sure it read the checkpoint correctly, it applies everything it can restore and then **holds the
 deletions back** rather than performing them. Nothing is destroyed on a doubt.
 
-The revert result counts these alongside genuine failures, as **skipped**: a revert that reports changes
-applied and some number skipped, with your files still in place, has held its deletions back rather than
-failed. The specific reason is recorded per file but is not shown in the dialog yet — a future update
-will list it. Until then, the cases below are the ones to check against.
+This is the **held back** count above — kept apart from **failed** on purpose, because your files
+still being there is the safety net working rather than something going wrong.
+
+Held-back deletions come with the reason and a next step, shown once for the whole group rather than
+repeated for every file, followed by the file names (the first few, then a count). The next step is
+honest about whether trying again helps:
+
+- Where the cause is temporary — a locked file, or stored content that has gone missing — it says to fix
+  that and run the revert again, and the held-back cleanups then apply.
+- Where the cause is the checkpoint itself, **running it again will not help on this computer**, and the
+  screen says so instead of sending you round the same loop. It offers what you can actually do: the
+  restorable half has already been restored, so delete the leftover files yourself, or finish the revert
+  on the system the checkpoint was captured on.
 
 The cases you may meet:
 
@@ -66,12 +76,13 @@ The cases you may meet:
   so does a checkpoint file that has been edited or corrupted — on disk the two are identical. Such a
   checkpoint has nothing to restore, so it is never allowed to authorise deleting anything. Reverting an
   empty folder that is still empty works exactly as before; if the folder has since been filled, those
-  files are counted as skipped, left where they are, and you can delete them yourself.
+  files are held back, left where they are, and you can delete them yourself. Re-running changes nothing.
 - **A checkpoint holding a name this computer cannot write** (for example one captured on Linux or macOS
   with a name Windows reserves). Everything restorable still restores; deletions wait, because a name
-  spelled differently here might be the very file about to be removed.
-- **A file that could not be restored this time** (locked, or its stored content is missing). Re-run the
-  revert once that is fixed and the held-back cleanups apply.
+  spelled differently here might be the very file about to be removed. This one is also permanent on this
+  computer — the name is stored in the checkpoint and this filesystem cannot write it.
+- **A file that could not be restored this time** (locked, or its stored content is missing). This is the
+  temporary case: run the revert again once that is fixed and the held-back cleanups apply.
 
 A checkpoint whose stored file list contradicts its own recorded file count is refused outright, on every
 route — preview, compare and both revert commands — rather than quietly acted on as a smaller tree.

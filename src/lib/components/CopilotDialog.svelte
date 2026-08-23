@@ -21,6 +21,7 @@
   import { unwrap } from "../invoke";
   import * as settings from "../settings";
   import Icon from "./Icon.svelte";
+  import RevertOutcomePanel from "./RevertOutcomePanel.svelte"; // CPE-1845 — shared, reason-carrying
   import { displaySafePath } from "../filename";
 
   /** The folder the instruction applies to — shown prominently so the scope is never ambiguous. */
@@ -295,8 +296,7 @@
               {#if undoError}<div class="err" data-testid="undo-error">{undoError}</div>{/if}
               {#if undoOutcome}
                 <div class="note" data-testid="undo-outcome">
-                  Undo applied {undoOutcome.applied} change{undoOutcome.applied === 1 ? "" : "s"}
-                  {#if undoOutcome.skipped.length}, skipped {undoOutcome.skipped.length}{/if}.
+                  <RevertOutcomePanel outcome={undoOutcome} testid="undo-outcome-panel" />
                 </div>
               {/if}
             {/if}
