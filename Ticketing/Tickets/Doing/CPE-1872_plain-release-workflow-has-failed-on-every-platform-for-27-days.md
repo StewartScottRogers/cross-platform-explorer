@@ -21,11 +21,17 @@ Verify updater manifest + signatures (CPE-1058)
   → Process completed with exit code 1
 ```
 
-Verified on run `32645968177` (tag `v0.57.69`, 2026-08-23): `release (ubuntu-22.04)`,
+Verified on run `32645894722` (tag `v0.57.69`, 2026-08-23): `release (ubuntu-22.04)`,
 `release (macos-latest, --target universal-apple-darwin)` and `release (windows-latest)` all
 failed at that step, and the dependent **`catalog`** job was therefore `skipped` — as it has been
 on every release for 27 days. The agent-catalog bundle (CPE-377/308) has not been signed and
 published alongside an installer in that whole window.
+
+*(Correction, round 2: this originally cited run `32645968177`, but that run was triggered by tag
+`v0.57.69-sidecar`, not `v0.57.69` — a filing error by the Foreman, spotted during the round-2
+security-audit review. The real `v0.57.69` tag push is run `32645894722`, confirmed to have failed
+identically on all three legs at the same step. `32645968177` also failed identically, for the same
+reason, just under the wrong tag label — the root cause and every finding below are unaffected.)*
 
 The step is `.github/workflows/release.yml:184-191`:
 
@@ -95,8 +101,9 @@ Two consequences, in order of severity:
       doing. Proven locally instead (fixture red/green + the exact command-line shape); the real
       three-platform green is the first thing the next tagged release must show — see Notes.
 - [x] The verify step demonstrably goes **red** on a bad/missing manifest — shown, not asserted.
-      `crates/updater-verify/tests/release_guard.rs` (7 tests, all passing) plus a manual dedupe-logic
-      harness for the new watchdog — see Work Log below.
+      `crates/updater-verify/tests/release_guard.rs` (10 integration tests + 14 lib tests, all passing)
+      plus a manual dedupe-logic harness for the watchdog — see Work Log, including round 2's
+      independent-security-audit red/green proof for the smuggled-platform and basename-decoy holes.
 - [ ] The `catalog` job runs rather than being skipped. Same blocker as the green-release criterion
       above: `catalog` only runs after a real `release` job succeeds on a real tag push.
 - [x] Some mechanism now surfaces a persistently-failing release workflow to a human.
@@ -193,12 +200,147 @@ Two consequences, in order of severity:
   **YAML validity.** Both `release.yml` and the new `release-pipeline-watchdog.yml` parse cleanly
   under `yaml.safe_load`; both `run:` blocks pass `bash -n`.
 
-  **Not done / left for the next tag (Definition-of-done item 8).** Did not push a version tag —
-  forbidden by this ticket's working rules. The real proof of criteria 2 and 4 (`Release` green on all
-  three platforms; `catalog` running instead of skipped) only exists once the **next** `vX.Y.Z` tag is
-  pushed and `release.yml` runs for real. What that run should show: all three `release` matrix legs
-  green through "Verify updater manifest + signatures (CPE-1058)" (its stdout should read `OK: manifest
-  + 1 platform signature(s) verified against the configured pubkey` per leg, not
-  `no latest.json found`), the `catalog` job actually executing (no longer `skipped`), and — if
-  anything *does* go red on that run or a later one — `release-pipeline-watchdog.yml` should file a
-  `release-pipeline-red`-labeled issue within minutes rather than the failure sitting undetected.
+  **Not done / left for the next tag (Definition-of-done item 8) — superseded, see the round-2 entry
+  below for the current shape of what the next tag must show.** Did not push a version tag — forbidden
+  by this ticket's working rules.
+
+- **2026-08-23 (Worker, CPE-1872 round 2 — independent security-audit findings)** — Same worktree/
+  branch. PR #1008's gauntlet came back Reviewer `APPROVE`, UAT `UAT PASS`, but an independent Security
+  Auditor built real minisign keypairs and eleven fixture releases against round 1's binary and found
+  the verifier itself was weaker than its "OK" message claimed. Root cause from round 1 was
+  independently re-confirmed by both the Reviewer and UAT and is unchanged. Four findings, addressed
+  below in priority order; a fifth item (citation correction) was the Foreman's own filing error, fixed
+  in the Problem section above.
+
+  **FINDING 1 (HIGH) — a smuggled platform entry with no locally-checkable artifact passed `EXIT=0`.**
+  Root cause: `lib.rs`'s `verify_update_manifest` treated a platform whose `artifact()` closure returned
+  `None` as a *skip* (crypto check not run, no problem recorded), on the theory that a per-runner guard
+  could legitimately verify only the platforms it built locally. That theory was wrong in practice:
+  tauri-action's `upload-version-json.ts` downloads the *existing* published `latest.json` and merges
+  each runner's platform into it, so the manifest that ships is the UNION of the whole release matrix,
+  and no single leg's `src-tauri/target` ever contains every platform the manifest names — meaning "skip
+  what's missing" was really "skip whatever this leg didn't happen to build," which an attacker-supplied
+  platform entry (pointing at a URL nothing local will ever match) sails straight through. Independently
+  reproduced RED on this machine before touching any code (`smuggled_extra_platform`: an honest
+  `windows-x86_64` entry + a `linux-x86_64` entry signed by a different keypair, pointed at
+  `https://evil.example/pwn.AppImage.tar.gz` — `EXIT=0`, `OK: manifest + 1 platform signature(s)
+  verified`), matching the auditor's own finding exactly.
+
+  **(a) vs (b), and why (a).** The ticket allowed either "a post-matrix job that downloads the draft's
+  `latest.json` plus every asset it references and verifies all platforms" (a) or
+  "`--expect-platforms` driven from the matrix leg" (b). Chose (a) — also the auditor's and Foreman's
+  stated preference. Reasoning: (b) still only ever verifies each leg's OWN belief about which platforms
+  the eventual manifest will contain (`--expect-platforms` would have to be a per-leg guess at the
+  matrix's own shape), so it verifies a *model* of the release, not the release; a bug in that model (a
+  leg's expected-platform list drifting from what actually ships, e.g. after a matrix change) reproduces
+  the exact "checked something, but not the real thing" shape this whole finding is about. (a) verifies
+  the manifest AS PUBLISHED — the actual bytes a real Tauri updater will fetch — which is the literal
+  wording of the ticket's own invariant ("the signatures are checked over the bytes that actually
+  ship"). It also runs once instead of three times (cheaper) and, as a side effect, closes Finding 2
+  for free (see below). Did not do both, per the round-2 instructions.
+
+  **Fix.** `crates/updater-verify/src/lib.rs`: `verify_update_manifest` now pushes a new
+  `ManifestProblem::ArtifactUnavailable { platform }` (a hard failure) instead of silently skipping when
+  `artifact()` returns `None` — `Ok(())` is now only reachable when *every* named platform was fetched
+  and cryptographically verified. Added `pub fn manifest_platform_count(manifest_json) -> Option<usize>`
+  so callers can report "verified N of M" using the manifest's own shape. `verify-release-artifacts.rs`:
+  the success message is now `OK: verified {n} of {total} platform signature(s) against the configured
+  pubkey.` (never an unqualified "OK"), with a belt-and-suspenders check that fails loud if `n != total`
+  even though that should be unreachable now. `.github/workflows/release.yml`: removed the per-leg
+  "Detect updater signing key" + "Verify updater manifest + signatures" steps from the `release` matrix
+  job entirely and added a new job, `verify-published-manifest` (`needs: release`, runs once on
+  `ubuntu-latest` after the whole matrix completes): downloads `latest.json` from the draft release via
+  `gh release download`, extracts every platform's asset basename with `jq -r '.platforms[].url' | sed
+  's#.*/##' | sort -u`, downloads each one *individually* (not `--pattern '*'`, so a manifest naming an
+  asset that was somehow never uploaded is a loud `gh` failure here rather than a silently smaller
+  verified set), then runs the (now strict) binary against that clean, freshly-downloaded directory.
+
+  **FINDING 2 (MEDIUM) — basename collision in the artifact index let a decoy shadow the real build
+  output.** Root cause: `verify-release-artifacts.rs` indexed artifacts as `HashMap<basename, PathBuf>`
+  via `index.entry(name).or_insert_with(...)` over a `read_dir` walk of `--search src-tauri/target` — a
+  build dir `swatinem/rust-cache` restores between runs, i.e. not guaranteed clean. First-wins, in
+  whatever order the OS happens to visit files. Independently reproduced RED on this machine
+  (`basename_decoy`: a decoy directory sorting/reading first held the bytes a signature verifies
+  against; a differently-named "real build output" directory held different bytes and was never read —
+  `EXIT=0`), matching the auditor's finding once the fixture's byte assignment was corrected to put the
+  *signed* bytes in the decoy (an earlier attempt with the assignment reversed correctly failed instead,
+  which is itself useful: it shows the crypto check was never the broken part — only which file got
+  indexed was).
+
+  **Fix.** `verify-release-artifacts.rs`: the index build now tracks any basename seen more than once
+  across all `--search` dirs in a `BTreeSet`, and hard-fails before even attempting to locate the
+  manifest if the set is non-empty — `verify-release-artifacts: ambiguous artifact basename(s) found
+  more than once under the search dirs -- refusing to guess which one is real: <names>`. This is a
+  binary-level fix (applies regardless of which directory is searched), so it also protects the new
+  Finding-1 job's `release-assets` download directory, and any future/manual invocation against a dirty
+  `--search` dir. The new post-matrix job additionally sidesteps this in practice — a freshly-downloaded
+  directory has nothing stale to collide with — but the auditor's fixture proves the collision-detection
+  fix itself works independent of that.
+
+  **FINDING 3 — a stray committed `latest.json` at the repo root would have turned the fail-closed
+  "manifest missing" case into a silent pass.** tauri-action skips writing `latest.json` at all when it
+  finds no updater `.sig` artifacts ("Signature not found for the updater JSON. Skipping upload...") —
+  today that's fail-closed, since round 1's `--manifest latest.json` (repo-root-relative) then finds
+  nothing and fails loud. A committed stray file at that same path would survive `actions/checkout` and
+  make that same lookup find something real (if stale/fake) instead of nothing. **Note:** round 2's
+  Finding-1 redesign already structurally closes this specific hole for the verify step itself — the
+  new `verify-published-manifest` job never reads a local `latest.json` at all, it downloads the real
+  one from the release via `gh release download`. Implemented the requested hardening anyway, as
+  defense in depth against any other tooling/human trusting a stray committed copy: (1) `.gitignore`
+  gained `/latest.json` with a comment explaining why; (2) `release.yml`'s `release` job now runs `rm -f
+  latest.json` immediately before the "Build and publish release" (tauri-action) step, on every matrix
+  leg, so whatever tauri-action itself writes (or doesn't) is the only thing that can ever exist there.
+  **Judgment call, logged:** did not add the "assert the file is newer than the job start" check the
+  Foreman called optional ("consider") — with rm-f-before-build + gitignore, and no step in `release.yml`
+  reading a local repo-root `latest.json` for verification purposes anymore, the residual risk a
+  freshness check would guard against is already closed structurally.
+
+  Demonstrated red/green for the `.gitignore` half: stashed the `.gitignore` change, wrote a dummy
+  `latest.json` at the repo root — `git status --short` showed `?? latest.json` (RED: a normal,
+  stageable untracked file) and `git check-ignore -v latest.json` exited 1 (not ignored). Restored the
+  fix, repeated — `git status --short` showed nothing (GREEN: not stageable) and `git check-ignore -v`
+  reported `.gitignore:75:/latest.json  latest.json` (ignored). Working tree confirmed clean afterward.
+
+  **FINDING 4 (LOW) — the watchdog's `== 'failure'` gate missed `startup_failure`/`cancelled`/
+  `timed_out`.** `.github/workflows/release-pipeline-watchdog.yml`: changed the job's `if:` from
+  `github.event.workflow_run.conclusion == 'failure'` to `!= 'success'`, so a workflow that never
+  started, was cancelled, or hit its own timeout now also files/dedupes an issue and goes red, instead
+  of silently satisfying neither the old condition nor producing any signal.
+
+  **Nit — dropped `2>&1` from the dedupe capture.** `list_output` no longer merges `gh`'s stderr into
+  the captured stdout on a *successful* `gh issue list` call, which previously risked a `gh` warning
+  making `existing` non-numeric and breaking the follow-up `gh issue comment` call; stderr still reaches
+  the job log on its own, unredirected.
+
+  **Dedupe-logic re-verification (all 4 changes together).** Re-ran the fake-`gh` harness from round 1
+  against the updated script (`!= 'success'` + dropped `2>&1`), three scenarios, via a `PATH` built with
+  POSIX-style (`/c/Users/...`) segments per the explicit lesson from #1013/#1015 — with a hard abort
+  check (`resolved=$(PATH=".../fakebin:$PATH" which gh); [ "$resolved" = ".../fakebin/gh" ] || exit 1`)
+  run *before* any scenario, confirming the real `gh` binary was never shadowed-out. All three logged
+  `gh` calls came from the fake stub only: (1) simulated `gh issue list` failure → exit 1, zero
+  `issue create`/`comment` calls (CPE-1794 regression check still passes); (2) no existing issue →
+  `gh issue create` called once, exit 1 (backstop); (3) existing issue `#42` → `gh issue comment 42`
+  called, no `gh issue create` (no duplicate). No real GitHub issue was touched during this round's
+  testing.
+
+  **Environment note.** The Bash tool became unresponsive partway through this round (even trivial
+  `echo` calls timed out) — a raw `bash.exe` spawn measured ~8s just to start, consistent with the
+  machine being under heavy concurrent load rather than a bug in this ticket's changes. Switched to
+  PowerShell (directly, and via `& "...\bash.exe" <script>` for the bash-specific dedupe harness) for
+  the remainder of this round's verification; all reported results are real command output, not
+  inferred.
+
+  **Verification.** `cargo test --release` in `crates/updater-verify`: 24/24 pass (14 lib + 10
+  integration, including the 4 new security-audit regression tests —
+  `smuggled_extra_platform_is_rejected`, `smuggled_local_name_is_rejected` (control),
+  `basename_decoy_is_rejected`, plus the two round-1 tests whose expected success-message string
+  updated to match the new "verified N of M" wording). `cargo clippy --all-targets -- -D warnings`
+  clean. Both workflow YAMLs parse under `yaml.safe_load`; every `run:` block (including the PowerShell
+  one, which is expected to fail `bash -n` and was excluded) passes `bash -n`.
+
+  **What still can't be proven pre-tag.** Same as round 1: no version tag was pushed (forbidden). The
+  next tagged release must show: the `verify-published-manifest` job actually running and printing `OK:
+  verified N of N platform signature(s) against the configured pubkey.` (N = however many platforms
+  that release's matrix built, i.e. 3 today) rather than any earlier failure message; `catalog` running
+  (not skipped); and, if anything about that run or a later one goes red, a `release-pipeline-red`
+  issue appearing within minutes via `release-pipeline-watchdog.yml`.

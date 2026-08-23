@@ -82,7 +82,18 @@ fn main() -> ExitCode {
     };
 
     // --- Build a basename -> path index of every file under the search dirs, and find latest.json ---
+    //
+    // CPE-1872 (security-audit finding 2): this used to be `index.entry(name).or_insert_with(...)` --
+    // first-wins, in WHATEVER order the OS's directory walk happens to visit files in. `--search
+    // src-tauri/target` is a build dir a cache restore can leave stale/duplicate-named files in, and a
+    // basename collision anywhere in the search tree means the file actually verified is decided by
+    // filesystem enumeration order, not by which one is the genuine build output -- demonstrated by the
+    // auditor's `basename_decoy` fixture (a same-named file elsewhere in the tree, containing the bytes
+    // a signature actually verifies against, shadowed the real bundle output and passed EXIT=0 while the
+    // real file was never read). Every basename must now be UNIQUE across the entire search tree, or this
+    // refuses to guess and fails loud instead of silently keeping whichever one it saw first.
     let mut index: HashMap<String, PathBuf> = HashMap::new();
+    let mut duplicate_basenames: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut discovered_manifest: Option<PathBuf> = None;
     for dir in &search_dirs {
         walk(dir, &mut |p| {
@@ -93,9 +104,19 @@ fn main() -> ExitCode {
                         discovered_manifest = Some(p.to_path_buf());
                     }
                 }
-                index.entry(name.to_string()).or_insert_with(|| p.to_path_buf());
+                if index.contains_key(name) {
+                    duplicate_basenames.insert(name.to_string());
+                } else {
+                    index.insert(name.to_string(), p.to_path_buf());
+                }
             }
         });
+    }
+    if !duplicate_basenames.is_empty() {
+        return fail(&format!(
+            "ambiguous artifact basename(s) found more than once under the search dirs -- refusing to guess which one is real: {}",
+            duplicate_basenames.into_iter().collect::<Vec<_>>().join(", ")
+        ));
     }
 
     let manifest_path = match manifest_path.or(discovered_manifest) {
@@ -144,14 +165,21 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => {
+            // CPE-1872 (security-audit finding 1): as of the lib.rs fix, `Ok(())` is only possible when
+            // EVERY platform the manifest names was fetched and cryptographically verified -- a platform
+            // this runner couldn't fetch is now a hard `ArtifactUnavailable` failure, not a skip, so `n`
+            // is always the full platform count on this path. `served == 0` is therefore unreachable in
+            // practice (an empty `platforms` is already `NoPlatforms`, which is `Err`) -- kept as a
+            // belt-and-suspenders guard in case that invariant is ever loosened again, so a future
+            // regression fails loud here too rather than silently printing a misleading "OK".
             let n = served.get();
-            if n == 0 {
-                return fail(
-                    "manifest shape is valid but NO platform artifact matched a local file — nothing was \
-                     cryptographically verified (wrong --search dir, or artifacts not built?)",
-                );
+            let total = cpe_updater_verify::manifest_platform_count(&manifest).unwrap_or(n);
+            if n == 0 || n != total {
+                return fail(&format!(
+                    "manifest claims {total} platform(s) but only {n} were actually, cryptographically verified -- refusing to report success on a partial check (this should be unreachable; verify_update_manifest is supposed to fail before returning Ok in this case)",
+                ));
             }
-            println!("OK: manifest + {n} platform signature(s) verified against the configured pubkey.");
+            println!("OK: verified {n} of {total} platform signature(s) against the configured pubkey.");
             ExitCode::SUCCESS
         }
         Err(problems) => {

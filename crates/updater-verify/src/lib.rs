@@ -41,6 +41,13 @@ pub enum ManifestProblem {
     MissingUrl { platform: String },
     /// A platform entry has no `signature`.
     MissingSignature { platform: String },
+    /// The manifest names a platform whose artifact bytes could not be obtained locally to check its
+    /// signature against. CPE-1872 (security-audit finding 1): a manifest platform that cannot be
+    /// cryptographically checked is a **failure**, never a silent skip -- the old "skip what I don't
+    /// have" behavior is exactly what let a smuggled platform entry (pointing at an artifact that
+    /// simply never gets built/served locally) pass with `EXIT=0` while carrying an unverified,
+    /// attacker-controlled URL + signature.
+    ArtifactUnavailable { platform: String },
     /// The configured pubkey could not be base64-decoded or parsed as a minisign public key.
     BadPubkey(String),
     /// A platform's `signature` could not be base64-decoded or parsed as a minisign signature.
@@ -69,6 +76,10 @@ impl std::fmt::Display for ManifestProblem {
             ManifestProblem::MissingSignature { platform } => {
                 write!(f, "platform `{platform}` has no `signature`")
             }
+            ManifestProblem::ArtifactUnavailable { platform } => write!(
+                f,
+                "platform `{platform}` has no locally-available artifact bytes to verify its signature                  against -- a manifest platform that cannot be verified is a failure, not a skip"
+            ),
             ManifestProblem::BadPubkey(detail) => {
                 write!(f, "configured pubkey is unusable: {detail}")
             }
@@ -91,18 +102,28 @@ impl std::error::Error for ManifestProblem {}
 /// 1. `manifest_json` parses and has the required shape (top-level `version`; per-platform `url` +
 ///    `signature`, in either the `platforms` object-map or array form tauri-action can emit);
 /// 2. `version == expected_version`;
-/// 3. each platform's minisign `signature` verifies against `pubkey_config_b64` over the artifact bytes.
+/// 3. **every** platform's minisign `signature` verifies against `pubkey_config_b64` over the artifact
+///    bytes -- `Ok(())` means every platform the manifest names was actually, cryptographically checked.
 ///
 /// `pubkey_config_b64` is the value straight out of `tauri.conf.json` (double-base64, as Tauri stores it).
 ///
 /// `artifact` maps a platform's `url` to its raw bytes. Returning `None` means "I don't have this
-/// artifact" and the platform's *cryptographic* check is **skipped** (its shape is still validated) — this
-/// lets a per-runner release guard verify only the platforms it actually built while other runners verify
-/// theirs. Shape problems (missing `version`/`url`/`signature`, unparseable JSON, version mismatch) are
-/// always reported regardless of artifact availability. Callers that must confirm at least one signature
-/// was checked should count how often `artifact` returned `Some` (the release-guard bin does this).
+/// artifact", and — as of CPE-1872's security-audit round — that is now a hard [`ManifestProblem::ArtifactUnavailable`]
+/// failure, **not** a skip. It used to be a skip, on the theory that a per-runner release guard could
+/// verify only the platforms it actually built locally while other runners verified theirs; a real-world
+/// manifest is the UNION of an entire release matrix (tauri-action's `upload-version-json.ts` downloads
+/// the existing published manifest and merges each runner's platform into it), so no single runner's
+/// local build output ever contains every platform the manifest names — meaning "skip what's missing"
+/// was, in practice, "skip whatever I didn't happen to build," which a manifest platform pointed at an
+/// attacker-controlled URL sails straight through. Callers that want the old "verify only what I can
+/// reach" behavior must supply `artifact` closures that can actually FETCH every platform the manifest
+/// names (e.g. downloading each one from the published release, as `verify-release-artifacts` now does)
+/// rather than relying on this function to look the other way. See [`manifest_platform_count`] for
+/// callers that want to report "verified N of M platforms" using the manifest's own platform count.
 ///
-/// Returns `Ok(())` when nothing is wrong, else `Err` with every [`ManifestProblem`] found.
+/// Returns `Ok(())` only when every named platform was fetched AND verified; else `Err` with every
+/// [`ManifestProblem`] found (which platform(s) were unreachable is distinguishable from which failed
+/// crypto via [`ManifestProblem::ArtifactUnavailable`] vs [`ManifestProblem::VerificationFailed`]).
 pub fn verify_update_manifest(
     manifest_json: &str,
     pubkey_config_b64: &str,
@@ -173,9 +194,24 @@ pub fn verify_update_manifest(
             }
         };
 
-        // Only the cryptographic verification below needs a usable pubkey + local artifact bytes.
+        // Only the cryptographic verification below needs a usable pubkey. A bad pubkey already got
+        // reported once above and nothing can verify against it, so skip crypto for every platform in
+        // that case rather than repeating the same BadPubkey-adjacent noise per platform.
         let Some(pk) = pubkey.as_ref() else { continue };
-        let Some(bytes) = artifact(url) else { continue };
+
+        // CPE-1872 (security-audit finding 1): a platform whose artifact bytes could not be obtained is
+        // a FAILURE now, never a silent skip. The manifest's platform list is the union tauri-action
+        // builds across an entire release matrix, and a caller that only has some of those artifacts
+        // locally must fetch (or refuse to trust) the rest -- it must never let an unverifiable platform
+        // ride through as if it had been checked. `None` here used to mean "I don't have this one, skip
+        // it"; it now means "this platform cannot be trusted as published."
+        let bytes = match artifact(url) {
+            Some(b) => b,
+            None => {
+                problems.push(ManifestProblem::ArtifactUnavailable { platform: name });
+                continue;
+            }
+        };
 
         // quiet=true (no stderr chatter), output=false (don't echo the artifact), allow_legacy=true so
         // both minisign signature forms (prehashed + legacy ed25519) verify — Tauri uses prehashed.
@@ -238,6 +274,14 @@ fn collect_platforms(value: &serde_json::Value) -> Vec<(String, &serde_json::Val
             .collect();
     }
     Vec::new()
+}
+
+/// The number of per-platform entries a manifest names (regardless of whether it verifies), for callers
+/// that want to report "verified N of M platforms" (CPE-1872) using the manifest's own shape as M rather
+/// than recomputing it independently. Returns `None` if `manifest_json` does not even parse as JSON.
+pub fn manifest_platform_count(manifest_json: &str) -> Option<usize> {
+    let value: serde_json::Value = serde_json::from_str(manifest_json).ok()?;
+    Some(collect_platforms(&value).len())
 }
 
 #[cfg(test)]
@@ -436,12 +480,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_artifact_skips_crypto_but_keeps_shape_checks() {
-        // Loader returns None → crypto check skipped, but the (correct) shape passes → Ok.
+    fn missing_artifact_fails_verification() {
+        // CPE-1872 (security-audit finding 1): loader returns None -> that platform is now a hard
+        // failure, never a silent skip. A manifest platform nobody actually checked must never read as
+        // an overall Ok.
         let fx = new_fixture();
         let sig = sign_to_field(&fx.keypair, ARTIFACT);
         let m = manifest(VERSION, URL, &sig);
-        let res = verify_update_manifest(&m, &fx.pubkey_config_b64, VERSION, |_| None);
-        assert!(res.is_ok(), "missing artifact should skip crypto, got {res:?}");
+        let err = verify_update_manifest(&m, &fx.pubkey_config_b64, VERSION, |_| None).unwrap_err();
+        assert_eq!(
+            err,
+            vec![ManifestProblem::ArtifactUnavailable { platform: "windows-x86_64".into() }]
+        );
+    }
+
+    #[test]
+    fn manifest_platform_count_counts_named_platforms() {
+        let fx = new_fixture();
+        let sig = sign_to_field(&fx.keypair, ARTIFACT);
+        let m = manifest(VERSION, URL, &sig);
+        assert_eq!(manifest_platform_count(&m), Some(1));
+
+        let two_platform_manifest = serde_json::json!({
+            "version": VERSION,
+            "platforms": {
+                "windows-x86_64": { "signature": sig, "url": URL },
+                "linux-x86_64": { "signature": sig, "url": URL },
+            }
+        })
+        .to_string();
+        assert_eq!(manifest_platform_count(&two_platform_manifest), Some(2));
+
+        assert_eq!(manifest_platform_count("{ not json "), None);
     }
 }

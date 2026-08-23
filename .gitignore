@@ -66,3 +66,10 @@ native-deps/
 *.pfx
 *.p12
 .claude/sprint-metrics/BATCH-COUNTER
+
+# CPE-1872 round-2 security-audit finding 3: tauri-action writes the updater manifest to the repo
+# root (resolve(process.cwd(), 'latest.json')) during a release build and never commits it -- but
+# nothing previously forbade a stray copy from being committed by accident, which would survive
+# actions/checkout and could confuse anything that reads a repo-root latest.json by default. Never
+# committed; release.yml also `rm -f`s it immediately before each build for defense in depth.
+/latest.json

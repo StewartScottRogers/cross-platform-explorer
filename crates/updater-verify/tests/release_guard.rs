@@ -145,7 +145,7 @@ fn valid_release_passes() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("1 platform signature(s) verified"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("verified 1 of 1 platform signature(s)"));
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn manifest_at_repo_root_is_found_and_verified_via_explicit_manifest_flag() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("1 platform signature(s) verified"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("verified 1 of 1 platform signature(s)"));
 }
 
 /// CPE-1872 (RED): the fixed invocation still fails hard — never skips — when the manifest tauri-action
@@ -224,4 +224,197 @@ fn tampered_artifact_at_repo_root_layout_still_fails_the_release() {
     let out = run_repo_layout(dir.path());
     assert!(!out.status.success(), "tampered artifact must fail the guard");
     assert!(String::from_utf8_lossy(&out.stderr).contains("did NOT verify"));
+}
+
+// -- CPE-1872 round 2: independent security-audit findings ----------------------------------------
+//
+// The auditor built real minisign keypairs + eleven fixture releases against the round-1 binary and
+// found two holes in how it decided what counted as "verified". Both reproduced independently on this
+// machine against the pre-fix binary before being fixed:
+//
+//   RED  smuggled_extra_platform: exit=0 -- an honest windows entry + a linux-x86_64 entry pointing
+//        at https://evil.example/pwn.AppImage.tar.gz, signed by a DIFFERENT keypair, passed because
+//        no local artifact existed for the smuggled platform, so its crypto check was silently SKIPPED
+//        rather than failed.
+//   RED  basename_decoy: exit=0 -- a same-named file elsewhere in the search tree (readdir visits it
+//        first) held the bytes the signature actually verifies against, while the genuine build-output
+//        file of the identical basename was shadowed and never read.
+//
+// Both are now GREEN (non-zero exit) below: lib.rs's verify_update_manifest treats a platform with no
+// locally-fetchable artifact as ArtifactUnavailable (a hard failure, never a skip), and
+// verify-release-artifacts.rs now hard-fails the moment ANY basename is indexed more than once under
+// the search dirs, rather than silently keeping whichever file a directory walk happened to visit first.
+
+fn sign_bytes(keypair: &minisign::KeyPair, bytes: &[u8]) -> String {
+    let sig = minisign::sign(
+        Some(&keypair.pk),
+        &keypair.sk,
+        std::io::Cursor::new(bytes),
+        Some("trusted"),
+        Some("untrusted"),
+    )
+    .expect("sign");
+    B64.encode(sig.into_string().as_bytes())
+}
+
+fn pubkey_config_field(keypair: &minisign::KeyPair) -> String {
+    B64.encode(keypair.pk.to_box().expect("pk box").into_string().as_bytes())
+}
+
+/// CPE-1872 Finding 1 (HIGH, auditor's smuggled_extra_platform): a manifest carries an honest,
+/// correctly-signed windows-x86_64 entry alongside a linux-x86_64 entry whose URL points at an asset
+/// that is never built/served locally, signed by a key that is NOT the one configured in
+/// tauri.conf.json. Before the fix this was EXIT=0: the windows platform verified, the linux platform's
+/// crypto check was silently skipped (no local artifact to check it against), and "at least one
+/// signature checked" was treated as good enough. Must now fail.
+#[test]
+fn smuggled_extra_platform_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let honest = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
+    let evil = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
+
+    let win_name = "app_1.2.3_x64-setup.nsis.zip";
+    let win_bytes = b"the real windows installer bytes";
+    std::fs::write(root.join(win_name), win_bytes).expect("write windows artifact");
+    let win_sig = sign_bytes(&honest, win_bytes);
+
+    // Attacker's entry: no local artifact will ever exist for this basename, and it's signed by a key
+    // that isn't the configured pubkey -- both facts a real verifier must catch.
+    let evil_sig = sign_bytes(&evil, b"whatever the attacker wants to ship");
+
+    let manifest = serde_json::json!({
+        "version": VERSION,
+        "platforms": {
+            "windows-x86_64": {
+                "signature": win_sig,
+                "url": format!("https://example.com/releases/download/v{VERSION}/{win_name}")
+            },
+            "linux-x86_64": {
+                "signature": evil_sig,
+                "url": "https://evil.example/pwn.AppImage.tar.gz"
+            }
+        }
+    });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "plugins": { "updater": { "pubkey": pubkey_config_field(&honest) } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    let out = Command::new(BIN)
+        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap()])
+        .output()
+        .expect("run verify-release-artifacts");
+    assert!(
+        !out.status.success(),
+        "a smuggled platform entry with no locally-checkable artifact must fail the guard, not pass \
+         on the strength of an unrelated platform's signature; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("linux-x86_64"));
+}
+
+/// CPE-1872 Finding 1 control (the auditor's smuggled_local_name): identical to the scenario above,
+/// except the smuggled basename DOES exist locally. This must fail too, and for a DIFFERENT reason
+/// (signature verification, not artifact availability) -- proving the fix above closes the "missing
+/// artifact" hole specifically, without the crypto check itself having been broken all along.
+#[test]
+fn smuggled_local_name_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let honest = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
+    let evil = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
+
+    let win_name = "app_1.2.3_x64-setup.nsis.zip";
+    let win_bytes = b"the real windows installer bytes";
+    std::fs::write(root.join(win_name), win_bytes).expect("write windows artifact");
+    let win_sig = sign_bytes(&honest, win_bytes);
+
+    let evil_name = "pwn.AppImage.tar.gz";
+    let evil_bytes = b"whatever the attacker wants to ship";
+    std::fs::write(root.join(evil_name), evil_bytes).expect("write smuggled artifact locally");
+    let evil_sig = sign_bytes(&evil, evil_bytes);
+
+    let manifest = serde_json::json!({
+        "version": VERSION,
+        "platforms": {
+            "windows-x86_64": {
+                "signature": win_sig,
+                "url": format!("https://example.com/releases/download/v{VERSION}/{win_name}")
+            },
+            "linux-x86_64": {
+                "signature": evil_sig,
+                "url": format!("https://evil.example/{evil_name}")
+            }
+        }
+    });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "plugins": { "updater": { "pubkey": pubkey_config_field(&honest) } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    let out = Command::new(BIN)
+        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap()])
+        .output()
+        .expect("run verify-release-artifacts");
+    assert!(!out.status.success(), "signature from the wrong key must fail, artifact-availability aside");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("did NOT verify"));
+}
+
+/// CPE-1872 Finding 2 (MEDIUM, auditor's basename_decoy): two files share a basename somewhere under
+/// the search tree -- one (in a directory that a directory walk visits first) holds the bytes the
+/// signature actually verifies against, the other (the genuine build-output location) holds different
+/// bytes. Before the fix, first-wins indexing meant the decoy could shadow the real build output and
+/// pass EXIT=0 while the real file was never read. Must now hard-fail as ambiguous, regardless of which
+/// file "would have" won the race.
+#[test]
+fn basename_decoy_is_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let kp = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
+
+    let name = "app_1.2.3_x64-setup.nsis.zip";
+    let decoy_bytes = b"bytes the signature verifies against";
+    let real_build_output_bytes = b"a DIFFERENT current build's real output";
+    let decoy_dir = root.join("aaa_decoy");
+    let real_dir = root.join("real");
+    std::fs::create_dir_all(&decoy_dir).expect("mkdir decoy");
+    std::fs::create_dir_all(&real_dir).expect("mkdir real");
+    std::fs::write(decoy_dir.join(name), decoy_bytes).expect("write decoy");
+    std::fs::write(real_dir.join(name), real_build_output_bytes).expect("write real build output");
+
+    let sig = sign_bytes(&kp, decoy_bytes);
+    let manifest = serde_json::json!({
+        "version": VERSION,
+        "platforms": {
+            "windows-x86_64": {
+                "signature": sig,
+                "url": format!("https://example.com/releases/download/v{VERSION}/{name}")
+            }
+        }
+    });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "plugins": { "updater": { "pubkey": pubkey_config_field(&kp) } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    let out = Command::new(BIN)
+        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap()])
+        .output()
+        .expect("run verify-release-artifacts");
+    assert!(
+        !out.status.success(),
+        "a basename appearing more than once under the search tree must be refused as ambiguous, \
+         never silently resolved by directory-walk order; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous"));
 }

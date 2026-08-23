@@ -37,7 +37,14 @@ permissions:
 
 jobs:
   notify-on-failure:
-    if: github.event.workflow_run.conclusion == 'failure'
+    # CPE-1872 round-2 security-audit finding 4: `== 'failure'` misses the three most likely ways a
+    # pipeline goes dark WITHOUT a visible red X on the workflow itself -- a workflow that fails to
+    # start at all reports `startup_failure`, a leg killed at its own timeout reports `timed_out`, and
+    # a cancelled run reports `cancelled`. None of those satisfied the old condition, so none of them
+    # would have filed an issue or gone red here either -- exactly the blind spot this workflow exists
+    # to close. `!= 'success'` catches all of those plus `failure` itself, and only excludes the one
+    # conclusion that means nothing is wrong.
+    if: github.event.workflow_run.conclusion != 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -67,12 +74,15 @@ jobs:
           # CPE-1794 lesson: do NOT let a transient `gh` failure read as "no existing issue" and file a
           # duplicate. Capture the lookup's exit status separately from its output instead of the
           # `... || true` shape that swallowed it in ffmpeg-pin-freshness.yml's sibling dedupe step.
+          # Deliberately NOT `2>&1` (CPE-1872 round-2 nit): merging stderr into the captured stdout
+          # means a `gh` WARNING on an otherwise-successful call (exit 0) would land inside `existing`
+          # and make it non-numeric, breaking the `gh issue comment` call below on the success path.
+          # stderr is left alone here, so it still reaches the job log directly on its own either way.
           list_output="$(mktemp)"
-          if gh issue list --state open --label "$label" --json number --jq '.[0].number' > "$list_output" 2>&1; then
+          if gh issue list --state open --label "$label" --json number --jq '.[0].number' > "$list_output"; then
             existing="$(cat "$list_output")"
           else
-            echo "::error::could not query existing issues (gh issue list failed) -- see below. Not filing a new issue: a lookup failure is not evidence there is no existing one, and creating on that guess is exactly the CPE-1794 defect this workflow avoids."
-            cat "$list_output" >&2
+            echo "::error::could not query existing issues (gh issue list failed -- see its own output above). Not filing a new issue: a lookup failure is not evidence there is no existing one, and creating on that guess is exactly the CPE-1794 defect this workflow avoids."
             exit 1
           fi
 
