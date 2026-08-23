@@ -3,11 +3,11 @@ id: CPE-1856
 title: concurrent agents mutate shared machine state and silently break each other's test runs
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-22
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
