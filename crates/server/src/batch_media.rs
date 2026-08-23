@@ -1248,6 +1248,44 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
 /// unreadable probe, a platform with no identity model. Failing "open" is right *here* and only here:
 /// the fallback is `transient`, which is the classification this path had for every refusal before
 /// CPE-1857, so an unknown answer degrades to the previous behaviour rather than to a new wrong one.
+/// # The crate-wide sweep, and the decision taken for every row (CPE-1857 AC2)
+///
+/// CPE-1857's acceptance criterion is that whatever is chosen applies to **every** writer in the crate,
+/// not just the revert path. Every production write site under `crates/server/src` that can land on a
+/// **pre-existing** name was enumerated (54 production sites from 68 raw `fs::copy` / `fs::write` /
+/// `File::create` / `OpenOptions` hits, with `#[cfg(test)]` and doc lines stripped) and given a verdict.
+/// The table is the record; **a partial sweep presented as complete is this repo's most-repeated
+/// defect**, so the rows that were deliberately left alone are listed as loudly as the rows that changed.
+///
+/// **The scoping rule, stated once.** A write can only be redirected through a hard link if it lands on
+/// a name that **already exists** — a name claimed with `create_new`/`O_EXCL`/`CREATE_NEW` has exactly
+/// one link, so every `create_exclusive` / `claim_file_slot` / `claim_dir_slot` /
+/// `copy_file_into_claimed_slot` / `create_empty_zip` / `save_manifest` / `split_join` site is
+/// **structurally immune** and appears nowhere below. Likewise every site guarded by `clobber_refusal`
+/// (`create_slot_refusal`, `rename_slot_refusal` — `folder_template::stamp_nodes`, `copilot`'s tree
+/// copy) refuses *any* occupant, so a hard link is already refused there as an occupant.
+///
+/// ## Refused (the rule below now applies)
+///
+/// | writer | destination chosen by | where |
+/// |---|---|---|
+/// | `fsutil::copy_file_onto_no_follow` — `revert_engine::apply_write` + `snapshot_capture::restore` | a **checkpoint manifest** | on the open handle, `facts.links > 1` |
+/// | `archive::entry_sink_action` — rows 16/19/20/21/22 of the CPE-1733 table (zip, 7z, tar sinks) | an **archive entry** | this function |
+/// | `transfer::download_tree`'s leaf | a **remote server** | this function |
+/// | `batch_media::open_output_verified` | the user, but audited per batch | already did, since CPE-1642 — a dir census, kinder than a flat refusal |
+///
+/// ## Accepted, explicitly — CPE-1857's third option, taken on purpose per row
+///
+/// | writer(s) | why the limit is accepted rather than closed |
+/// |---|---|
+/// | `archive`'s six compressors (`compress_to_zip{,_encrypted,_streamed,…}`, `compress_to_targz{,_streamed}`) and the two `.gz` extract leaves | the destination is a name **the human typed into a Save dialog** and confirmed overwriting. No untrusted input picks it, so the threat model this ticket is about does not reach them, and refusing a hard-linked archive destination would be a capability loss with nothing behind it. |
+/// | `backup.rs::copy_one_verified` (`fs::copy(src, dst)`, no guard of any kind) | user-named destination **root**, `rel` from our own scan of the source tree. Same reasoning — but this one has *no* link guard at all, not even for symlinks, and it deserves its own ticket rather than a line edited in passing here. **Flagged, not fixed.** |
+/// | `secure_shred::shred_file` | writing through the existing inode **is the operation**. A shred of a multiply-linked file destroying the data at every name is what a shred means. |
+/// | `native_meta`'s Windows ADS write | a hard link shares the inode and therefore shares the alternate data streams. That is inode semantics, not a redirected write. |
+/// | the private JSON stores and journals — `settings`, `tags`, `column_config`, `macro_store`, `snapshot_schedule`, `folder_template`'s catalog, `tray_quick`, `connections`, `audit_journal`, `checkpoint_store`, `metrics_journal`, `replay_baseline`, `index`, `semantic_index`, `vector_index`, `known_hosts`, `snapshot_capture::save_store`, `thumbnail`'s cache, `bin/ticket_mcp` | fixed names the app owns and rewrites, inside its own app-data directory. Planting a hard link at one needs local filesystem write access, which is outside a threat model whose whole premise is that a **planted manifest cannot create a link, only aim at one**. Refusing would break settings saving and journal appends for a hazard nothing in the model can stage. |
+/// | `snapshot_capture::capture`'s `fs::copy` into `blobs/<hash>` | already gated: `classify_target_slot(...) == Occupied → continue`, and a hard link is an ordinary existing file, so it reads `Occupied` and is skipped rather than written through. |
+/// | `provider::LocalProvider::write` (reached by `transfer::upload_tree`) | the "remote" path is the user's own chosen upload target, not server-chosen. `download_tree` is the direction untrusted data picks the name, and that is the direction that changed. |
+///
 pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
     matches!(probe_no_follow(path), Probe::Real(facts) if facts.links > 1)
 }

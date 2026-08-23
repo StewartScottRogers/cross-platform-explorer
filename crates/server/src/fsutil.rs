@@ -1399,7 +1399,11 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
         if facts.links > 1 {
             drop(w);
             return Err(format!(
-                "{}: this file has {} names (it is hard-linked), and writing here would change the                  content at every one of them — including any that live outside the folder being                  restored, which no path check can see because a hard link resolves to itself. Break                  the link first (copy the file over itself) and run this again. Nothing was written                  for this entry",
+                "{}: this file has {} names (it is hard-linked), and writing here would change the \
+                 content at every one of them — including any that live outside the folder being \
+                 restored, which no path check can see because a hard link resolves to itself. Break \
+                 the link first (copy the file over itself) and run this again. Nothing was written \
+                 for this entry",
                 dst.display(),
                 facts.links
             ));
