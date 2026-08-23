@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { resetAppState } from "./lib/resetAppState.js";
 import { assignShardSpecs, parseShardId, shardResultFilePrefix } from "./lib/shard.js";
 import { listSpecFiles, specRunPath } from "./lib/specFiles.js";
 import { waitForPort } from "./lib/waitForPort.js";
@@ -981,6 +982,27 @@ function seedSamplesFixture(tmpDir: string): void {
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
+// CPE-1866: how many spec-file suites this worker has started — `beforeSuite` below uses it to skip the
+// reset before the very FIRST one (the app is already at the seeded root from launch, so resetting there
+// is redundant work, not a correctness need). Module-level and worker-local exactly like `tauriDriver`
+// above: each worker is its own process with its own fresh import of this file (see the CPE-1772/1832
+// comment on `beforeSession`), so this never needs to be reset between workers — it starts at 0 in each.
+let suiteCount = 0;
+
+// --- CPE-1866: per-spec-file result recording, replacing the "json" reporter -------------------
+// See the `reporters` config option's own comment for WHY: grouping a shard's specs into one worker
+// (this file's `specs` comment) means the built-in "json" reporter can no longer tell which spec file a
+// suite/test came from. `afterTest`/`afterHook` below fire with `test.file` already attached to every
+// record — no need to track "which file is currently running" separately — so they accumulate directly
+// into these two worker-local arrays, and `afterSuite` (fires once per spec file — see its own comment)
+// flushes exactly what THAT file produced into its own `RawResultChunk`-shaped JSON file, then clears
+// the arrays for the next one. `RESULTS_DIR` matches the built-in reporter's old `outputDir` so
+// `scripts/run-ratchet.ts`'s existing `.results/*.json` glob picks these up unchanged.
+const RESULTS_DIR = path.resolve(__dirname, ".results");
+let currentFileTests: { name: string; state: string }[] = [];
+let currentFileHooks: { title: string; state: string; error?: unknown }[] = [];
+let currentFileStart: string | undefined;
+
 function killTauriDriver() {
   shuttingDown = true;
   tauriDriver?.kill();
@@ -1015,7 +1037,19 @@ export const config: WebdriverIO.Config = {
   // that wdio, the shard manifest, and the ratchet's expected-spec-count all read the SAME list from the
   // SAME function — a partition computed from a different list than the expectation is checked against
   // is how a spec file ends up assigned to nobody and expected by nobody.
-  specs: SHARD_SPECS ? SHARD_SPECS.map(specRunPath) : listSpecFiles(path.resolve(__dirname, "specs")).map(specRunPath),
+  //
+  // CPE-1866: wrapped in ONE outer array so this is a SINGLE grouped job, not N flat ones. WDIO's local
+  // runner gives each TOP-LEVEL `specs` entry its own worker (and therefore its own WebDriver session —
+  // `beforeSession`/`before`/`after`/`afterSession` above all fire once per entry); nesting an array
+  // inside it runs every file in that nested array, in order, inside ONE worker/ONE session instead.
+  // This is THE fix: measured on a real CI run (this ticket's Work Log), the ~29.5s/spec fixed cost
+  // CPE-1858 found is >99% app-launch/session-create (~30.4-32.6s per spec, essentially constant across
+  // 33 samples) and <0.3s driver-process spawn — so the only lever that moves it is launching the app
+  // FEWER TIMES, not launching it faster. Grouping trades that repeated launch for ONE launch per shard
+  // (or per whole run, unsharded) plus `resetAppState` (see `lib/resetAppState.ts` and the `beforeSuite`
+  // hook below) between files — see this file's and that module's header comments for what that costs
+  // in isolation and how it's proven safe.
+  specs: [(SHARD_SPECS ?? listSpecFiles(path.resolve(__dirname, "specs"))).map(specRunPath)],
   maxInstances: 1,
   capabilities: [
     {
@@ -1123,27 +1157,22 @@ export const config: WebdriverIO.Config = {
   // an externally-cancelled job is not something this workflow file can make retry itself. CPE-1781
   // (same PR) reduces how much of that contention `main`'s own bookkeeping traffic was contributing.
   connectionRetryCount: 0,
-  // CPE-1594: "spec" stays for a human-readable log; the "json" reporter writes one machine-readable
-  // result file per spec-file worker into `.results/` (gitignored — run output, same treatment as
-  // `.screenshots/`) — `scripts/run-ratchet.ts` reads those files as the ratchet's source of truth
-  // instead of parsing the "spec" reporter's text, which is not a contract. `outputFileFormat` names
-  // each file after its worker `cid` so `maxInstances: 1`'s sequential-but-still-one-worker-per-spec
-  // runs never clobber each other's output.
-  reporters: [
-    "spec",
-    [
-      "json",
-      {
-        outputDir: "./.results",
-        // CPE-1753: the shard tag is LOAD-BEARING, not cosmetic. The verdict job downloads every shard's
-        // results artifact with `merge-multiple: true`, flattening them into one directory — and wdio's
-        // worker cids restart at `0-0` in every shard, so without the tag each shard would write a
-        // `wdio-0-0.json` and the merge would keep exactly one of them. Empty string when unsharded, so a
-        // local run's filenames are unchanged. See `lib/shard.ts#shardResultFilePrefix`.
-        outputFileFormat: (opts: { cid: string }) => `wdio-${shardResultFilePrefix(SHARD_ID)}${opts.cid}.json`,
-      },
-    ],
-  ],
+  // CPE-1594: "spec" stays for a human-readable log. The machine-readable result file `scripts/run-
+  // ratchet.ts` reads as its source of truth USED to come from the built-in "json" reporter — CPE-1866
+  // dropped it (see the `afterTest`/`afterHook`/`afterSuite` hooks below, which replace it) because that
+  // reporter buffers everything into ONE `ResultSet` per WORKER, and grouping every shard's specs into
+  // ONE worker (see this file's `specs` comment) means it can no longer tell which of a worker's several
+  // spec files a given suite/test came from — `@wdio/json-reporter`'s own `TestSuite` type
+  // (`node_modules/@wdio/json-reporter/build/types.d.ts`) carries no per-suite file identity, only the
+  // worker-level `specs: string[]`, so the OLD (pre-grouping) code's own doc comment on
+  // `lib/ratchet.ts#RawResultChunk` already flagged the fallback for a multi-spec chunk as "attributing
+  // the chunk's suites to every spec path it lists" — exactly wrong once a worker's `specs` genuinely has
+  // more than one entry with real, DIFFERENT suites inside. Rather than teach `lib/ratchet.ts` (a
+  // heavily-tested, load-bearing gate — 1106 lines of its own tests) to disambiguate a shape its input
+  // format cannot actually distinguish, the fix is upstream: write one correctly-scoped
+  // `RawResultChunk`-shaped file PER SPEC FILE ourselves, from hooks that already carry `test.file` on
+  // every record, so `lib/ratchet.ts` never has to guess.
+  reporters: ["spec"],
   mochaOpts: {
     ui: "bdd",
     // CPE-1481: already generous (90s per `it`, well under the 35-min job cap raised by this same
@@ -1350,19 +1379,94 @@ export const config: WebdriverIO.Config = {
     logPhase("beforeSession:driverReady", specLabel);
   },
 
-  // CPE-1866: fires once per worker (= once per spec file, see the CPE-1772/1832 comment above), AFTER
-  // WDIO's `POST /session` has returned — i.e. after the native driver has launched the real app
-  // process and the session is live. The gap between this and `beforeSession:driverReady` above is the
-  // app-launch/session-create phase: the actual Tauri/WebView2/WebKitGTK cold start, not the driver
-  // plumbing around it.
+  // CPE-1866: fires once per WORKER — since `specs` above now groups a shard's whole assignment into
+  // ONE nested array, that means once per SHARD (once per whole run, unsharded), not once per spec file
+  // any more. Fires right after WDIO's `POST /session` has returned — i.e. after the native driver has
+  // launched the real app process and the session is live. The gap between this and
+  // `beforeSession:driverReady` above is the app-launch/session-create phase: the actual
+  // Tauri/WebView2/WebKitGTK cold start, not the driver plumbing around it. This is the ONE time that
+  // cost is paid for the whole worker now — see `beforeSuite` below for what happens between files
+  // instead.
   before: (_capabilities, specs) => {
     logPhase("before:sessionReady", specLabelFrom(specs as readonly string[] | undefined));
   },
 
-  // CPE-1866: fires once per worker, after every `it()` in this spec file has run and BEFORE
-  // `afterSession` tears the session down. The gap between `before:sessionReady` and this is real test
-  // execution time — already known per-file from CPE-1858's `wdio-*.json` start/end — logged here too
-  // so it can be cross-checked against this run's own breakdown rather than assumed to transfer.
+  // CPE-1866: fires once per FILE now (mocha's own per-suite hook, not a WDIO worker-lifecycle one —
+  // every spec file is exactly one top-level `describe(...)`, verified across all 41 files, so this is
+  // "once per spec file" whether or not the session is shared). This is where the session-per-shard
+  // trade actually gets paid back: skip the reset before the FIRST suite (the app is already at the
+  // seeded tmpDir root from `--open=<tmpDir>` or, unsharded, from `before:sessionReady` above — resetting
+  // there would just be a redundant extra navigateTo), and run `resetAppState` before every one after
+  // that so each file starts from the same known-clean state a fresh relaunch used to provide for free.
+  // See `lib/resetAppState.ts`'s header for exactly what "clean" means and why it's safe.
+  beforeSuite: async (suite) => {
+    const label = path.basename(suite.file);
+    logPhase("beforeSuite:start", label);
+    // CPE-1866: reset the per-file result accumulator (see its declaration above) — a fresh start for
+    // whatever `afterTest`/`afterHook` record while THIS file's suite runs.
+    currentFileTests = [];
+    currentFileHooks = [];
+    currentFileStart = new Date().toISOString();
+    if (suiteCount === 0) {
+      logPhase("beforeSuite:firstSuiteSkipReset", label);
+    } else {
+      const { tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
+      await resetAppState(tmpDir);
+      logPhase("beforeSuite:resetDone", label);
+    }
+    suiteCount++;
+  },
+
+  // CPE-1866: `test.title` is the plain `it()` title (mocha convention — `fullTitle()` is the composed
+  // one), matching `known-failing.json`'s own "`test` = the it() title, verbatim" contract, so this needs
+  // no translation before it becomes a `RawResultChunk`'s `tests[].name`. `result.skipped`/`.passed` (not
+  // a `state` string — the WDIO `Test` object itself carries no such field, see `@wdio/types`'
+  // `Frameworks.Suite`/`Test`) are mapped to the three states `toCaseStatus` already recognises.
+  afterTest: (test, _context, result) => {
+    currentFileTests.push({
+      name: test.title,
+      state: result.skipped ? "skipped" : result.passed ? "passed" : "failed",
+    });
+  },
+
+  // CPE-1866: fires for EVERY hook (before/beforeEach/after/afterEach), passing or not — only a FAILING
+  // one is meaningful to `reduceResultChunks` (it turns a failing hook into a synthetic case; a passing
+  // hook is silently dropped there via `if (!hook.error) continue`), so only push when `result.error` is
+  // actually set. Harmless to push every hook instead, but this avoids inflating each file's JSON with
+  // dozens of no-op entries for `before`/`afterEach` hooks that never do anything spec-visible.
+  afterHook: (test, _context, result) => {
+    if (!result.error) return;
+    currentFileHooks.push({ title: test.title, state: "failed", error: result.error });
+  },
+
+  afterSuite: (suite) => {
+    const label = path.basename(suite.file);
+    logPhase("afterSuite:done", label);
+    // CPE-1866: flush THIS file's accumulated tests/hooks into its own `RawResultChunk`-shaped file —
+    // see the `reporters` and accumulator-declaration comments above for why this replaces the "json"
+    // reporter. `start`/`end` are extra fields `RawResultChunk` doesn't declare (TypeScript's structural
+    // typing means `run-ratchet.ts`'s `JSON.parse(...) as RawResultChunk` simply ignores them) — kept
+    // anyway because CPE-1858's own re-measurement recipe (this ticket's Work Log reuses it) reads
+    // exactly "each `wdio-*.json`'s top-level `start`/`end`" as one spec file's in-session wall time;
+    // dropping the "json" reporter must not also break that recipe for whoever re-measures next.
+    fs.mkdirSync(RESULTS_DIR, { recursive: true });
+    const stem = path.basename(suite.file).replace(/\.ts$/, "");
+    const outFile = path.join(RESULTS_DIR, `wdio-${shardResultFilePrefix(SHARD_ID)}${stem}.json`);
+    fs.writeFileSync(
+      outFile,
+      JSON.stringify({
+        specs: [suite.file],
+        start: currentFileStart,
+        end: new Date().toISOString(),
+        suites: [{ name: suite.title, tests: currentFileTests, hooks: currentFileHooks }],
+      }),
+      "utf-8",
+    );
+  },
+
+  // CPE-1866: fires once per WORKER (see `before`'s comment above for why that is no longer once per
+  // spec file) — after the LAST suite's last `it()` in this worker's whole spec-file group has run, and
+  // BEFORE `afterSession` tears the session down.
   after: (_result, _capabilities, specs) => {
     logPhase("after:testsDone", specLabelFrom(specs as readonly string[] | undefined));
   },
