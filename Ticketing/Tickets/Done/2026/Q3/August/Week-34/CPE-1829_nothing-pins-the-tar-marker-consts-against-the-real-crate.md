@@ -3,11 +3,11 @@ id: CPE-1829
 title: nothing pins the tar link-marker constants against the real crate, so a tar bump silently reverts CPE-1813
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
