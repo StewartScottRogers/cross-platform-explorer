@@ -60,3 +60,170 @@ already reduces it. That wording is being corrected in CPE-1823's round 5; this 
 
 Read CPE-1823's final Work Log first — it carries the attack record, including why `canonicalize` cannot
 see a hard link and the rule that a guard belongs where callers inherit it rather than at each call site.
+
+## Work Log
+
+### 2026-08-22 — the residual was winnable, and the crate's own pattern closes it
+
+**The headline: the residual CPE-1823 recorded as "real but narrow, and the auditor could not win it"
+is winnable, and this ticket's own racer won it — twice.** CPE-1823's auditor raced *blind*: it planted
+symlinks continuously from the start of the restore, which means it planted one before pass 1 had
+finished resolving, `confined_to` refused, the abort was total and **no write ever happened**. Measured
+here on exactly that shape: 12/12 rounds refused, **0 entries written**, 23,340 live plants, 0 writes
+through — a clean-looking zero that proves nothing about a window the run never entered.
+
+Triggering the racer on the **first restored byte** instead (CPE-1823 round 4's own insight: the first
+byte on disk is the signal pass 1 is over) puts the plants inside the write window. Against unmodified
+`fs::copy`:
+
+```text
+                        rounds  live plants  entries written  WRITES THROUGH
+fs::copy   run 1          40       4,989          2,012            1   <- victim104.txt = "RESTORED CONTENT 104"
+fs::copy   run 2          40       5,000          ~2,000           0
+fs::copy   run 3          40       4,969          ~2,000           0
+fs::copy   run 4          40       4,981          ~2,000           1   <- victim104.txt = "RESTORED CONTENT 104"
+                        totals    19,939                           2 escapes in 4 runs
+```
+
+An escape is a manifest entry's bytes landing on a file **outside the restore folder**, with the restore
+having reported nothing unusual. Roughly one escape per ~10,000 live plants, and one run in two. So the
+residual was not theoretical; it was under-measured because the attack had been aimed slightly wrong.
+
+With `fsutil::copy_file_onto_no_follow` in place, same harness, same machine:
+
+```text
+                        rounds  live plants  entries written  WRITES THROUGH
+no-follow  run 1          40       5,369          1,542            0
+no-follow  run 2          40       5,159          1,443            0
+no-follow  run 3          40       4,959          1,351            0
+no-follow  run 4          40       5,022          1,342            0
+no-follow  run 5          40       5,041          1,385            0
+                        totals    25,550          7,063            0
+```
+
+Link shape verified rather than inferred, per the CPE-1844 lesson: the harness probes its own plant
+before measuring anything and prints what Windows says it made — `fsutil reparsepoint query` →
+**`Reparse Tag Value : 0xa000000c`**, a real symlink (not `0xa0000003`, a junction). Developer Mode is on
+here, so `symlink_file` succeeds where `New-Item -ItemType SymbolicLink` would refuse; nothing was
+inferred from a cmdlet failing.
+
+**A harness bug caught before it became a finding.** The first triggered run reported **2,681 writes
+through** — all of them the harness's own fault. Its per-round setup wrote `PRE-EXISTING` into every
+destination name with `fs::write`, which *follows* a link the racer had already planted there, poisoning
+2,681 victims before the production code ran at all. Fixed by disarming the racer during setup and
+staging with `create_new`. Recorded because "2,681 escapes" would have been a spectacular false finding.
+
+**The fix, reusing the crate's existing per-target implementation and adding no `libc` dependency.**
+`batch_media::open_no_follow` is now `pub(crate)` and is the *only* place `O_NOFOLLOW` /
+`FILE_FLAG_OPEN_REPARSE_POINT` are spelled — its constants are already pinned by
+`secaudit_open_output_verified_refuses_a_symlink_final_component`, and a second copy could have drifted
+out from under that test silently. `fsutil::copy_file_onto_no_follow(src, dst)` wraps it: open without
+following, refuse the handle if it addresses a link or a directory, `set_len(0)`, stream via the existing
+`stream_bytes`, carry permissions and (Windows) mtime via the existing `carry_file_times`. Both sinks
+call it — `snapshot_capture::restore` pass 2 and `revert_engine::apply_write`.
+
+Step 1 of `batch_media`'s four-step pattern (`create_new`, claim the name) is still **not** taken, for
+CPE-1823's reason: it refuses an existing name, and restore-over-a-tree and `Overwrite` both need one.
+
+### Attribute preservation versus `fs::copy` — measured on Windows/NTFS, not assumed
+
+Source carried an ADS (`Zone.Identifier`, `ZoneId=3`), mtime epoch 1,000,000,000, creation time epoch
+900,000,000, and separately the read-only attribute and a 16 MiB sparse region. Copied both ways into a
+fresh name **and** onto an existing file that carried its own `Zone.Identifier` (`ZoneId=9`):
+
+| property | `fs::copy` | `copy_file_onto_no_follow` | verdict |
+|---|---|---|---|
+| content bytes | identical | identical | same |
+| modification time | `1000000000` carried | `1000000000` carried | same |
+| creation time | stamped "now" | stamped "now" | same — neither carries it |
+| read-only attribute | carried | carried | same |
+| `FILE_ATTRIBUTE_SPARSE_FILE` | not carried | not carried | same — neither carries it |
+| ADS onto a **fresh** name | `ZoneId=3` carried | **absent** | **REGRESSION** |
+| ADS onto an **existing** file | `ZoneId=3` (destination's replaced) | `ZoneId=9` (destination's kept) | **REGRESSION, different shape** |
+| plain source over an ADS destination | destination's stream **removed** | destination's stream **kept** | **REGRESSION, different shape** |
+
+**Decided explicitly rather than discovered later.** Only the alternate-data-stream rows move. The last
+two rows are the surprising half and are why they are tabulated separately: `CopyFileExW` *replaces* the
+destination file, so its streams go with it, while a truncate-and-write leaves them attached to a file
+object it did not replace. A restore over an existing file therefore does not merely lose the
+checkpoint's Mark-of-the-Web — it leaves the **live file's** Mark-of-the-Web sitting over restored
+content.
+
+Accepted, for the reason `copy_file_into_claimed_slot` already accepted it and documents at length:
+carrying a stream means addressing `dst:StreamName`, which is a **path**, so the carry re-opens the
+destination by path after the handle was pinned — reintroducing exactly the window this ticket closes,
+with a window as wide as the whole copy rather than a syscall (the PR #968 round-2 auditor won that race
+on its first attempt). The direction of the error also favours safety: on the overwrite path an existing
+warning is *kept*, not dropped. Written into `src/docs/16-checkpoints.md` so it reaches the user, not
+only the code.
+
+Unix is unaffected on every row. Creation mode is deliberately unchanged: `open_no_follow` creates at
+`0666 & ~umask` and `set_permissions` narrows afterwards — the same order `std::fs::copy` itself uses, so
+the brief window where a restored `0600` file sits at the default is exactly as wide as it was before.
+Narrowing it needs a mode-taking `open_no_follow`, i.e. a second spelling of the constants, which is the
+thing this reuse exists to avoid.
+
+### Which guard does what — measured by sabotage, and it is not the obvious answer
+
+Three things refuse a link here, and they are **not** interchangeable:
+
+- **The no-follow open** is the structural half. Swapped for an ordinary `create(true)` open, the
+  *dangling*-link test reds on its **harm** axis — the damage is done by the open itself, which
+  materialises the link's target before any check can run.
+- **The post-open refusals** are not redundant with it. With both disabled and the no-follow open intact,
+  the live-link tests red on their **verdict** axis with `Ok(16)` while their **harm** axis stays green:
+  on Windows a reparse-point handle accepts a truncate-and-write that reaches nothing, so without these a
+  restore would report **success having written the bytes nowhere** — the silent-skip class this crate
+  refuses (CPE-1803/1804/1805/1816).
+- **Neither post-open check reds alone on Windows**, stated plainly rather than left as an un-pinned
+  guard. They overlap only there. On Unix `O_NOFOLLOW` makes the `open` fail with `ELOOP` and neither
+  runs; the path check exists for the case `batch_media`'s runtime test guards — a wrong hard-coded
+  constant, which would leave it as the only defence.
+
+### The interior-component race is NOT closed and remains the recorded residual
+
+`safe_target` resolves the directories above the final component **by path**, and the open is by path
+too, so a directory link swapped into an interior component between them still redirects the write.
+Closing it needs `openat`-relative resolution, which `std` does not expose. Written next to the mechanism
+in all three places (`fsutil`, `snapshot_capture::restore`, `revert_engine::apply_write`) rather than
+implied away. A **hard link** at the destination is likewise still written through, exactly as before —
+there is nothing to refuse on the handle and `canonicalize` cannot see it either; refusing multiply-linked
+destinations (what `open_output_verified` does) would refuse legitimate overwrites of ordinary hard-linked
+files, which is the constraint that killed `create_new` arriving by another route.
+
+### Red-proofs — one line each, observed red, then reverted
+
+| Test | Line broken | Observed |
+|---|---|---|
+| `cpe_1846_a_dangling_link_at_the_destination_is_never_created_through` | `crate::batch_media::open_no_follow(dst)` → `std::fs::OpenOptions::new().write(true).create(true).open(dst).map(\|f\| (f, false))` | `HARM: the write followed a dangling link and created its target at …\restore-target.txt-target-that-does-not-exist`. The live-link tests stayed **green** under this same line — the path check still refused them — which is why that is recorded above rather than presented as one guard doing all the work |
+| `cpe_1846_a_live_file_link_at_the_destination_is_never_written_through` | the two post-open refusals disabled (`if false && std::fs::symlink_metadata(dst)…` **and** `let why = if false && facts.is_reparse_point`) | `writing onto a link at the final component must be refused: Ok(16)` — reds on the verdict, harm axis green. Neither line reds alone on Windows; both were tried individually first and both stayed green |
+| `cpe_1846_restore_over_a_tree_overwrites_but_never_through_a_link_at_the_final_component` | `crate::fsutil::copy_file_onto_no_follow(&blob, &target)` → `fs::copy(&blob, &target)` in `snapshot_capture::restore` | `HARM: the restore wrote a manifest entry's bytes through a link at the final component, onto a file the manifest never named — restore returned Ok(())` |
+| `cpe_1846_a_link_planted_at_an_overwrite_target_is_refused_and_the_other_overwrite_still_applies` | the same one line in `revert_engine::apply_write` | `HARM: the revert wrote the checkpoint's bytes through a link at the final component, onto a file the plan never named — report was RestoreReport { applied: 2, skipped: [] }` |
+| `cpe_1846_a_legitimate_overwrite_of_an_existing_regular_file_still_succeeds` | `crate::batch_media::open_no_follow(dst)` → `claim_file_slot_with_mode(dst, birth_mode_of(&meta)).map(\|f\| (f, true))` (i.e. reintroducing the `create_new` approach CPE-1823 rejected) | all three legitimate-overwrite paths red at once: the unit pin, `…: was free when this operation picked the name and is not free now`; the revert's ordinary `Overwrite` (`applied: 0`, both entries skipped); and restore-over-a-tree, which could not even complete its clean run |
+
+**Fixture liveness is folded into the helpers, not repeated per test** — the CPE-1844 fix. `make_file_link`
+asserts the slot holds a link *and* that it resolves to the intended target, and `require_staged` turns a
+staging failure on a platform that supports the mechanism into a **red**, not a silent skip;
+`make_dangling_link` asserts the link exists and dangles. Each test then adds one cheap second proof by
+*following* the link and asserting it reads the victim's bytes, so a link pointing somewhere harmless
+cannot certify anything. The race harness carries the same check inside `plant_link`, which is why 6 of
+37,100 plants were not counted as plants.
+
+### Gates
+
+`crates/server`: clippy `--all-targets -- -D warnings` → **exit 0**. `cargo test` → **2348 lib**
+(4 ignored) + `archive_panic_safety` 21 + `binary_data_preview_panic_safety` 22 + `checkpoint_roundtrip` 2
++ `finder_tags_os_interop` 1 + `native_meta_os_interop` 1 + `parser_panic_safety` 45 + `sample_fixtures` 16
++ `thumb_svg_panic_safety` 32 + `ticket_mcp` 0, **0 failed**. Delta: **+5 lib tests**, exactly the five
+added here (2343 → 2348); every other binary unchanged.
+
+`src-tauri`, both feature modes: clippy default → **0**, clippy `--features sidecar-platform` → **0**;
+`cargo test` → **214**, `--features sidecar-platform` → **269**. Delta from this change: **0** — no
+`src-tauri` file is touched. (Those figures are +4 on CPE-1823's 210/265; the difference is tickets merged
+between, not this one.) No `specta::Type` struct and no command signature changed, so `bindings.gen.ts` is
+unaffected.
+
+**Not verified locally:** every `#[cfg(unix)]` path through the new code, and in particular the claim that
+`O_NOFOLLOW` makes the open itself fail with `ELOOP` so the post-open checks never run there. CI's ubuntu
+and macOS `Server crates` legs are the only verification, and must be green on this head before merge. The
+race numbers are Windows/NTFS only; the equivalent measurement on ext4/APFS has not been taken.

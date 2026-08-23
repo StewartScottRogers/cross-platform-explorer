@@ -414,19 +414,29 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // snapshot over a tree that still holds files, and `revert_engine`'s first-class `Overwrite` op,
     // both depend on writing onto an existing file. Claiming the slot would turn those into refusals.
     //
-    // **The residual, stated accurately — an earlier draft overstated it.** It is *not* that the final
-    // component is unprotected: `confined_to` canonicalises the final component too, and an independent
-    // audit planted 17,488 symlinks at it and got **zero** writes through. What remains is that the
-    // check and the copy are two syscalls — checked, but not atomically — so a link swapped into the
-    // final component in the gap between them is the one shape left.
+    // **CPE-1846 took the other half of that pattern, which is the half a restore can use.** The
+    // rejection above covered only step 1 (claim the name atomically). Step 2 — *never follow a link at
+    // the final component* — costs a restore nothing, because opening an existing regular file for
+    // truncate-and-write is exactly what an overwrite is. `fsutil::copy_file_onto_no_follow` below opens
+    // the target with `batch_media`'s own `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT` open (the same
+    // per-target constants, not a second spelling), refuses the handle if it addresses a link or a
+    // directory, and streams the blob's bytes through it. So the final-component swap is no longer a
+    // race at all: the object written is the object opened.
     //
-    // And that is **reducible, not irreducible**: this crate already ships the pattern that closes it —
-    // `batch_media`'s "never follow a link at the final component" open (`O_NOFOLLOW` on Unix,
-    // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, hard-coded per target with no libc dependency, pinned
-    // by a runtime test and already used by `batch_execute`). Adopting it means opening the target and
-    // writing through the handle instead of `fs::copy`, which changes `fs::copy`'s attribute-preserving
-    // behaviour on Windows — so it is CPE-1846, deliberately not folded in here, and this comment
-    // must not read as "nothing more can be done".
+    // What that residual *was*, stated accurately because an earlier draft overstated it in both
+    // directions: it was never that the final component is unprotected — `confined_to` canonicalises the
+    // final component too, and an independent audit planted 17,488 symlinks at it for **zero** writes
+    // through — it was that the check and the copy were two syscalls, checked but not atomically. That
+    // gap is now gone.
+    //
+    // **The interior-component race is NOT closed and is still the recorded residual.** `safe_target`
+    // resolves the directories above the final component by path, and the open below is by path too, so
+    // a directory link swapped into an interior component between them still redirects the write.
+    // Closing that needs `openat`-relative resolution, which `std` does not expose. Pass 2 re-resolving
+    // immediately before each write is what keeps that window one open wide instead of a whole pass.
+    //
+    // The Windows cost of writing through a handle rather than `CopyFileExW` — alternate data streams
+    // are no longer carried — is measured and argued in `copy_file_onto_no_follow`'s own doc.
     let mut written: HashSet<PathBuf> = HashSet::new();
     for (rel, file) in &manifest.files {
         let (target, blob) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash).map_err(|why| {
@@ -458,7 +468,8 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
+        crate::fsutil::copy_file_onto_no_follow(&blob, &target)
+            .map_err(|why| format!("{}: {why}", blob.display()))?;
         if let Ok(at) = fs::canonicalize(&target) {
             written.insert(at);
         }
@@ -1729,6 +1740,72 @@ mod tests {
         // harmless, so the fix folds a link into that same bucket rather than inventing a new refusal
         // here. The capture as a whole is therefore still allowed to succeed.
         assert!(out.is_ok(), "an occupied (link) blob slot must be skipped, not turned into a hard failure: {out:?}");
+    }
+
+    /// **CPE-1846, both halves in one test, because they are the same trade.**
+    ///
+    /// Half 1 — restoring a snapshot **over a tree that still holds files** must keep working. This is
+    /// the constraint that made CPE-1823 decline `copy_file_into_claimed_slot`: `create_new` refuses a
+    /// name that already exists, so claiming the slot would turn every restore-over-a-tree into a pile
+    /// of refusals. CPE-1846 takes only step 2 of that pattern (never follow a link), so this half must
+    /// stay green, and it is asserted first so a fix that closes the link by refusing existing names
+    /// fails here rather than looking like a pass.
+    ///
+    /// Half 2 — a link planted at an entry's final component, pointing at a bystander file **inside the
+    /// same destination**, must not be written through. `confined_to` admits that link, and correctly:
+    /// the resolved target *is* contained. Containment was never the question at the final component;
+    /// atomicity was. Before this, the copy re-resolved the name and the bystander took the bytes.
+    #[test]
+    fn cpe_1846_restore_over_a_tree_overwrites_but_never_through_a_link_at_the_final_component() {
+        let src = scratch("cpe1846-src");
+        let store = scratch("cpe1846-store");
+        let dest = scratch("cpe1846-dest");
+        fs::write(src.join("a.txt"), b"CHECKPOINT A").unwrap();
+        fs::write(src.join("b.txt"), b"CHECKPOINT B").unwrap();
+        let out = capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::default())
+            .expect("capture must succeed");
+
+        // ---- half 1: the legitimate overwrite ----------------------------------------------------
+        fs::write(dest.join("a.txt"), b"LIVE A").unwrap();
+        fs::write(dest.join("b.txt"), b"LIVE B").unwrap();
+        fs::write(dest.join("bystander.txt"), b"BYSTANDER").unwrap();
+        restore(&store.to_string_lossy(), &out.manifest_id, &dest.to_string_lossy())
+            .expect("restoring over a tree that still holds files must succeed");
+        assert_eq!(fs::read(dest.join("a.txt")).ok().as_deref(), Some(&b"CHECKPOINT A"[..]));
+        assert_eq!(fs::read(dest.join("b.txt")).ok().as_deref(), Some(&b"CHECKPOINT B"[..]));
+
+        // ---- half 2: the planted link ------------------------------------------------------------
+        fs::remove_file(dest.join("a.txt")).unwrap();
+        if !crate::fsutil::make_file_link(&dest.join("bystander.txt"), &dest.join("a.txt")) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1846] SKIPPED the planted-link restore leg: no file symlink privilege on this \
+                 machine. NOTHING on this run covered the final-component swap in `restore`."
+            );
+            return;
+        }
+        // Liveness, a second way: following the link must reach the bystander's bytes.
+        assert_eq!(
+            fs::read(dest.join("a.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "fixture is inert: the planted link does not lead to the bystander"
+        );
+
+        let outcome = restore(&store.to_string_lossy(), &out.manifest_id, &dest.to_string_lossy());
+
+        // HARM FIRST, on the filesystem.
+        assert_eq!(
+            fs::read(dest.join("bystander.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "HARM: the restore wrote a manifest entry's bytes through a link at the final component, \
+             onto a file the manifest never named — restore returned {outcome:?}"
+        );
+        assert!(
+            fs::symlink_metadata(dest.join("a.txt")).is_ok_and(|m| m.file_type().is_symlink()),
+            "the planted link must still be there, not replaced by bytes written over it"
+        );
+        assert!(outcome.is_err(), "writing through a link at the final component must be refused: {outcome:?}");
     }
 
     /// Create a symlink at `link` pointing at `target`; returns false when creation isn't permitted (e.g.

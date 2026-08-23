@@ -963,6 +963,191 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
+/// Copy `src` onto `dst`, **creating it if absent and overwriting it if present**, without ever
+/// following a link at `dst`'s final component (CPE-1846).
+///
+/// This is [`copy_file_into_claimed_slot`]'s sibling for the one shape that helper deliberately cannot
+/// serve: a destination name **chosen by the caller** that may legitimately already exist.
+/// `copy_file_into_claimed_slot` claims the name with `create_new`, which *refuses* an existing name —
+/// right where the name is picked, wrong for `snapshot_capture::restore` (restoring a snapshot over a
+/// tree that still holds files) and for `revert_engine`'s first-class `Overwrite` op, both of which
+/// depend on writing onto a file that is already there. CPE-1823 asked and answered no for that reason.
+///
+/// What CPE-1823's answer covered was only **step 1** of [`crate::batch_media`]'s four-step pattern
+/// (claim the name atomically). **Step 2 — never follow a link at the final component** — is the half a
+/// restore can use unchanged, because opening an existing regular file for truncate-and-write is exactly
+/// what "overwrite" means. So this reuses [`crate::batch_media::open_no_follow`] verbatim (`O_NOFOLLOW`
+/// on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, hard-coded per target with no `libc` dependency)
+/// and then refuses the handle if it turns out to address a link or a directory.
+///
+/// # What this closes
+///
+/// The final-component link swap, **structurally**. Before this, `restore` and `apply_write` proved
+/// containment with `fsutil::confined_to` and then called `fs::copy` — two syscalls, so the verdict was
+/// microseconds stale by the time the bytes moved. The check was never absent (an independent audit
+/// planted **17,488** symlinks at the final component of a live restore for **zero** writes through), but
+/// it was not atomic. Now the object written is the object the handle was opened on, and a link swapped
+/// into that name after the open cannot be reached by a write already aimed at an open file.
+///
+/// # What this does NOT close — stated plainly, not implied away
+///
+/// - **The interior-component race remains the recorded residual.** `safe_target`'s `confined_to` still
+///   resolves the *directories* above the final component by path, and this function opens by path too,
+///   so a directory link swapped into an interior component between that check and this open still
+///   redirects the write. Closing that needs `openat`-relative resolution, which `std` does not expose.
+/// - **A hard link at the destination is written through, exactly as before.** A second name for the
+///   same object is not a link at the final component — there is nothing to refuse on the handle, and
+///   `canonicalize` cannot see it either. `fs::copy` behaved identically. Refusing multiply-linked
+///   destinations (what [`crate::batch_media::open_output_verified`] does) would refuse legitimate
+///   overwrites of ordinary hard-linked files in a user's own tree, which is the constraint that killed
+///   the `create_new` approach and must not be reintroduced by another route.
+///
+/// # Attribute preservation versus `fs::copy` — measured on Windows, CPE-1846
+///
+/// `fs::copy` on Windows is `CopyFileExW`; a byte stream through one handle is not. So this was measured
+/// rather than assumed, both ways, on NTFS on the machine this was written on. The source carried an
+/// alternate data stream (`Zone.Identifier`, `ZoneId=3`), a modification time of epoch 1,000,000,000, a
+/// creation time of epoch 900,000,000, and — in a second fixture — the read-only attribute and a 16 MiB
+/// sparse region. Each was copied by both routes into a fresh name **and** onto an existing file that
+/// carried its own `Zone.Identifier` (`ZoneId=9`):
+///
+/// ```text
+/// property                          fs::copy                    this function              verdict
+/// content bytes                     identical                   identical                  same
+/// modification time                 1000000000 (carried)        1000000000 (carried)       same
+/// creation time                     stamped "now"               stamped "now"              same — neither carries it
+/// read-only attribute               carried                     carried                    same
+/// FILE_ATTRIBUTE_SPARSE_FILE        not carried                 not carried                same — neither carries it
+/// ADS onto a FRESH name             ZoneId=3   (carried)        absent     (LOST)          REGRESSION
+/// ADS onto an EXISTING file         ZoneId=3   (replaced)       ZoneId=9   (dst's kept)    REGRESSION, different shape
+/// ADS, plain source over ADS dest   absent     (removed)        ZoneId=9   (dst's kept)    REGRESSION, different shape
+/// ```
+///
+/// **Only the alternate-data-stream rows move, and they are accepted deliberately.** Note the shape of
+/// the last two: `CopyFileExW` *replaces* the destination file wholesale, so the destination's own
+/// streams go with it, while a truncate-and-write through a handle leaves them attached to the file
+/// object it did not replace. So a restore over an existing file does not merely *lose* the checkpoint's
+/// Mark-of-the-Web — it leaves the **live file's** Mark-of-the-Web in place over restored content. That
+/// is the more surprising half and is why it is tabulated separately rather than filed under "streams
+/// are not carried".
+///
+/// It is accepted because it is the identical trade [`copy_file_into_claimed_slot`] already made and
+/// documents at length: carrying a stream means addressing it as `dst:StreamName`, and that is a
+/// **path**, so the carry re-opens the destination by path after the handle was pinned — reintroducing
+/// precisely the window this change exists to close, with a window as wide as the whole copy rather than
+/// a syscall. The round-2 auditor on PR #968 won that race on its first attempt. A metadata convenience
+/// is not worth handing back the hole, and *this* is the file-restoration path, where writing the wrong
+/// object is unambiguously worse than writing the right object with a stale zone tag.
+///
+/// What it costs a restore concretely: `capture` stores blobs with `fs::copy`, so an original file's
+/// `Zone.Identifier` reached the blob and, until now, came back out on restore. After this change a
+/// restored file has no Mark-of-the-Web of its own (or keeps the pre-restore file's), so SmartScreen will
+/// not prompt on it and Office will not open it in Protected View. Judged acceptable: the bytes are the
+/// user's own captured content from a local store, and the direction of the error is toward *keeping* an
+/// existing warning rather than dropping one on the overwrite path. Recorded, not discovered later.
+///
+/// Unix is unaffected on every row — `fs::copy` there carries neither times nor streams (there are none),
+/// only the mode, which `set_permissions` carries here as well.
+///
+/// # Creation mode, and why it is deliberately *not* narrowed
+///
+/// On Unix `open_no_follow` creates at `0666 & ~umask` and this function narrows afterwards with
+/// `set_permissions` — the same order `std::fs::copy` itself uses, so the brief window where a restored
+/// `0600` file sits at the platform default is **unchanged from before**. [`create_exclusive_with_mode`]
+/// exists precisely to close that window and is used where the mode is known before the create
+/// ([`copy_file_into_claimed_slot`]); wiring it in here would mean a second, mode-taking spelling of
+/// `open_no_follow`, i.e. a second copy of the very constants this reuse exists to keep single. It is a
+/// pre-existing window, no wider than it was, and closing it belongs with a mode-taking `open_no_follow`
+/// rather than with this change.
+///
+/// # Which guard does what — measured by sabotage, because the answer is not the obvious one
+///
+/// Three things refuse a link here and they are **not** interchangeable. Each was disabled on its own
+/// and the CPE-1846 tests re-run:
+///
+/// - **The no-follow open.** Swapping it for an ordinary `create(true)` open reds the *dangling*-link
+///   test on its harm axis — `HARM: the write followed a dangling link and created its target` — because
+///   with `create` the damage is done by the **open itself**, before any check can run. It did *not* red
+///   the live-link tests, since the path check below still refused those. This is the structural half.
+/// - **The post-open refusals** (`symlink_metadata` by path, `is_reparse_point`/`is_dir` on the handle).
+///   With both disabled and the no-follow open intact, the live-link tests red on their **verdict** axis
+///   with `Ok(16)` while their harm axis stays green: on Windows the reparse-point handle accepts a
+///   truncate-and-write that reaches nothing, so without these the victim is safe but a restore reports
+///   **success having written the bytes nowhere** — the silent-skip class this crate refuses
+///   (CPE-1803/1804/1805/1816). So they are not redundant with the open; they convert a silent no-op
+///   into a loud refusal.
+/// - **Neither post-open check reds *alone* on Windows**, and that is deliberate rather than an
+///   un-pinned guard. They overlap only there: on Unix `O_NOFOLLOW` makes the `open` itself fail with
+///   `ELOOP`, so neither check ever runs, and the path check exists precisely for the case the runtime
+///   test in [`crate::batch_media`] guards against — a wrong hard-coded `O_NOFOLLOW` constant, which
+///   would make the open follow the link and leave the path check as the only defence.
+///
+/// # Errors
+///
+/// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a
+/// restore is *believed*, so a silently skipped entry is the CPE-1803/1804/1805/1816 defect again.
+pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
+    let mut r = std::fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    // Read from the OPEN HANDLE, not from a path stat that a swap could have invalidated — the same
+    // authority `copy_file_into_claimed_slot` uses, and the reason a FIFO or directory substituted at
+    // `src` after this open still cannot make this function write nonsense.
+    let meta = r.metadata().map_err(|e| format!("{}: {e}", src.display()))?;
+    if !meta.is_file() {
+        return Err(not_a_regular_file(src));
+    }
+
+    let (mut w, created) = crate::batch_media::open_no_follow(dst)
+        .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))?;
+
+    // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
+    // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.
+    // Copied in shape from `batch_media::open_output_verified`, and for its reason.
+    if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        drop(w);
+        if created {
+            let _ = std::fs::remove_file(dst);
+        }
+        return Err(format!(
+            "{}: this name is a link, and a restore never writes through one — a link's target can be \
+             re-pointed after any check. Nothing was written for this entry",
+            dst.display()
+        ));
+    }
+
+    // THE authority on Windows, where a junction is a reparse point that `is_symlink` above may or may
+    // not report depending on its tag: `GetFileInformationByHandle` on the handle we are about to write
+    // through. `handle_facts` returns `None` only on a platform whose identity model `batch_media` does
+    // not know, where the path check above is the whole defence.
+    if let Some(facts) = crate::batch_media::handle_facts(&w) {
+        let why = if facts.is_reparse_point {
+            Some(
+                "this name is a reparse point (a link, junction or stand-in for another name), and a \
+                 restore never writes through one",
+            )
+        } else if facts.is_dir {
+            Some("this name is a directory, so there is nothing here a file's bytes could replace")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            drop(w);
+            if created {
+                let _ = std::fs::remove_file(dst);
+            }
+            return Err(format!("{}: {why}. Nothing was written for this entry", dst.display()));
+        }
+    }
+
+    // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
+    // A partial destination is left behind on a mid-copy error, exactly as `fs::copy` leaves one.
+    w.set_len(0).map_err(|e| format!("{}: could not truncate the destination: {e}", dst.display()))?;
+    let copied = stream_bytes(&mut r, &mut w).map_err(|e| format!("{}: {e}", dst.display()))?;
+    // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
+    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    carry_file_times(&meta, &w);
+    Ok(copied)
+}
+
 /// Recursively copy `src` into `dst`, claiming **every** directory and file name it creates
 /// (CPE-1765) — the tree form of [`copy_file_into_claimed_slot`].
 ///
@@ -7391,6 +7576,125 @@ mod tests {
         );
         assert!(secret.exists(), "the link's target must be untouched");
         assert!(matches!(outcome, RenameIntoSlot::Renamed), "{outcome:?}");
+    }
+
+    /// **CPE-1846 — the final-component link swap, closed structurally rather than raced.**
+    ///
+    /// This is the shape `snapshot_capture::restore` and `revert_engine::apply_write` were exposed to
+    /// while they wrote with `fs::copy`: `confined_to` proves containment, and then the *name* is
+    /// re-resolved by the copy, so a link swapped in between takes the bytes wherever it points.
+    /// CPE-1823 measured that window as real but narrow (17,488 planted symlinks, zero writes through);
+    /// CPE-1846's own racer, triggered on the first restored byte instead of racing blind, **won it
+    /// twice in four runs against `fs::copy`** and never once against this function.
+    ///
+    /// Asserted deterministically here rather than by racing, because a race that lands one time in five
+    /// thousand is not a red-proof — it is a coin toss. The link is already at the destination when the
+    /// copy is asked for, which is the same question the race asks, answered without the timing.
+    ///
+    /// **The fixture's liveness is proved by [`make_file_link`] itself** (it asserts the slot holds a
+    /// link *and* that the link resolves to the victim, and `require_staged` turns a staging failure on
+    /// a platform that supports the mechanism into a red rather than a silent skip), and then again here
+    /// by reading the victim's bytes *through* the link — if that read does not return the victim's
+    /// content, nothing about "the write followed the link" could have been tested.
+    #[test]
+    fn cpe_1846_a_live_file_link_at_the_destination_is_never_written_through() {
+        let d = scratch("cpe1846_live_link_dest");
+        let blob = d.path().join("blob");
+        std::fs::write(&blob, b"RESTORED CONTENT").unwrap();
+        let victim = d.path().join("victim.txt");
+        std::fs::write(&victim, b"VICTIM CONTENT").unwrap();
+        let dst = d.path().join("restore-target.txt");
+        if !make_file_link(&victim, &dst) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1846] SKIPPED the live-file-link destination leg: no file symlink privilege on \
+                 this machine. NOTHING on this run covered the final-component swap."
+            );
+            return;
+        }
+        // Liveness, a second way: following the link must reach the victim's bytes. A link that does not
+        // is a link a copy could not have followed either, and this test would certify nothing.
+        assert_eq!(
+            std::fs::read(&dst).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "fixture is inert: the planted link does not lead to the victim's bytes"
+        );
+
+        let outcome = copy_file_onto_no_follow(&blob, &dst);
+
+        // HARM FIRST, on the filesystem, before the verdict is looked at.
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "HARM: the restore wrote the blob's bytes through a link at the final component, into a file \
+             outside anything it was asked to touch"
+        );
+        assert!(
+            std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink()),
+            "the destination must still hold the link, not bytes written over it"
+        );
+        assert!(outcome.is_err(), "writing onto a link at the final component must be refused: {outcome:?}");
+    }
+
+    /// The privilege-free companion to the leg above: a **dangling** link, which
+    /// [`make_dangling_link`] stages as an NTFS junction when Windows withholds the symlink privilege,
+    /// so this one runs everywhere. `fs::copy` through a dangling symlink **creates** the link's target,
+    /// which is how CPE-1769 put a blob's bytes outside the content-addressed store.
+    #[test]
+    fn cpe_1846_a_dangling_link_at_the_destination_is_never_created_through() {
+        let d = scratch("cpe1846_dangling_dest");
+        let blob = d.path().join("blob");
+        std::fs::write(&blob, b"RESTORED CONTENT").unwrap();
+        let dst = d.path().join("restore-target.txt");
+        if !make_dangling_link(&dst) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1846] SKIPPED the dangling-link destination leg: no link or junction could be \
+                 staged here. NOTHING on this run covered it."
+            );
+            return;
+        }
+        let phantom = dangling_link_target(&dst);
+        assert!(!phantom.exists(), "fixture is inert: the staged link must really dangle");
+
+        let outcome = copy_file_onto_no_follow(&blob, &dst);
+
+        assert!(
+            !phantom.exists(),
+            "HARM: the write followed a dangling link and created its target at {}",
+            phantom.display()
+        );
+        assert!(outcome.is_err(), "writing onto a dangling link must be refused: {outcome:?}");
+    }
+
+    /// **The constraint that killed the `create_new` approach, pinned so it cannot be reintroduced by
+    /// another route.** CPE-1823 declined `copy_file_into_claimed_slot` precisely because `create_new`
+    /// refuses a name that already exists, and both restore-over-a-tree and `revert_engine`'s
+    /// first-class `Overwrite` op depend on writing onto one. This function takes only step 2 of that
+    /// pattern (never follow a link), not step 1 (claim the name), so an ordinary overwrite must still
+    /// go through — with the old content gone, not merely overwritten up to the new length.
+    #[test]
+    fn cpe_1846_a_legitimate_overwrite_of_an_existing_regular_file_still_succeeds() {
+        let d = scratch("cpe1846_overwrite");
+        let blob = d.path().join("blob");
+        std::fs::write(&blob, b"NEW").unwrap();
+        let dst = d.path().join("live.txt");
+        std::fs::write(&dst, b"OLD CONTENT, DELIBERATELY MUCH LONGER THAN THE NEW").unwrap();
+        assert!(dst.is_file(), "fixture is inert: the destination must already exist as a regular file");
+
+        let n = copy_file_onto_no_follow(&blob, &dst).expect("overwriting an existing regular file must succeed");
+
+        assert_eq!(n, 3);
+        assert_eq!(
+            std::fs::read(&dst).ok().as_deref(),
+            Some(&b"NEW"[..]),
+            "the destination must hold exactly the new bytes — a missing truncate leaves the old tail behind"
+        );
+        // …and the fresh-name half of the same call, so a regression to a create-only or an
+        // overwrite-only open is caught by one test rather than by neither.
+        let fresh = d.path().join("fresh.txt");
+        copy_file_onto_no_follow(&blob, &fresh).expect("a free name must also be writable");
+        assert_eq!(std::fs::read(&fresh).ok().as_deref(), Some(&b"NEW"[..]));
     }
 
     /// **PR #968 audit, F3.** The placeholder is deleted by something else and a REAL file is written at

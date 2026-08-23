@@ -1856,7 +1856,15 @@ pub(crate) fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
 /// Open for writing without following a link at the final component, reporting whether *we* created it.
 /// `create_new` first so the create is atomic (`O_EXCL`/`CREATE_NEW`): either the name was free and is
 /// now ours, or something was already there and we open that existing object explicitly.
-fn open_no_follow(path: &std::path::Path) -> std::io::Result<(std::fs::File, bool)> {
+///
+/// `pub(crate)` since CPE-1846: `fsutil::copy_file_onto_no_follow` — the write half of snapshot restore
+/// and checkpoint revert — needs step 2 of this module's four-step pattern (never follow a link at the
+/// final component) without step 1's *refusal* of an existing name, because overwriting an existing file
+/// is exactly what a restore means. Sharing this function rather than spelling the flags a second time is
+/// the point: [`O_NOFOLLOW`] and [`FILE_FLAG_OPEN_REPARSE_POINT_U32`] are hard-coded per target here and
+/// pinned by `secaudit_open_output_verified_refuses_a_symlink_final_component`, so a second copy of the
+/// constants could drift out from under that test without anything failing.
+pub(crate) fn open_no_follow(path: &std::path::Path) -> std::io::Result<(std::fs::File, bool)> {
     let mut create = std::fs::OpenOptions::new();
     create.write(true).create_new(true);
     let mut existing = std::fs::OpenOptions::new();

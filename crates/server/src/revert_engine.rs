@@ -691,15 +691,20 @@ fn apply_write(
     //
     // **Placed here, immediately before the copy, not in a pre-pass** — round 4's lesson, paid for once
     // already: a verdict reached before `create_dir_all` and `blob_source` is a verdict the destination
-    // can invalidate before the write it is protecting. Nothing may sit between this and `fs::copy`.
+    // can invalidate before the write it is protecting. Nothing may sit between this and the write.
     //
-    // What remains is the final-component link swap in the gap between this check and the copy —
-    // narrow, and **reducible**, not irreducible: this crate already ships the pattern that closes it
-    // (`batch_media`'s "never follow a link at the final component" open, `O_NOFOLLOW` on Unix and
-    // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, with no libc dependency, already used by
-    // `batch_execute`). Adopting it means opening the target and writing through the handle instead of
-    // `fs::copy`, which changes attribute-preserving behaviour on Windows — CPE-1846, deliberately
-    // not folded in here.
+    // **CPE-1846 closed the final-component link swap structurally.** The write below is no longer
+    // `fs::copy` but `fsutil::copy_file_onto_no_follow`, which opens `target` with `batch_media`'s
+    // never-follow-a-link open (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`, the same per-target
+    // constants, not a second spelling), refuses the handle if it addresses a link or a directory, and
+    // streams the blob through it. The object written is the object opened, so a link swapped into that
+    // name after this check has nothing left to redirect. `Overwrite` is unaffected: opening an existing
+    // regular file for truncate-and-write is exactly what it means.
+    //
+    // **Still open, and deliberately still recorded:** the *interior*-component race. `safe_target`
+    // resolves the directories above the final component by path and the open is by path too, so a
+    // directory link swapped into an interior component in between still redirects the write. `std`
+    // exposes no `openat`-relative resolution to close it with.
     if action.op == RestoreOp::Create && fs::symlink_metadata(&target).is_ok() {
         return Err(format!(
             "this entry restores a file the plan read as absent, but {} already answers to that name — \
@@ -708,7 +713,8 @@ fn apply_write(
             target.display()
         ));
     }
-    fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
+    crate::fsutil::copy_file_onto_no_follow(&blob, &target)
+        .map_err(|why| format!("{}: {why}", blob.display()))?;
     Ok(())
 }
 
@@ -783,6 +789,87 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1846 — the shipping sink's final-component link swap, and the overwrite it must not cost.**
+    ///
+    /// This is the one shape none of CPE-1823's five rounds closed. `safe_target`'s `confined_to`
+    /// correctly *admits* a link that resolves back **inside** the reverted tree — it is a containment
+    /// check, and the target is contained — and round 5's `Create`-premise rule deliberately leaves
+    /// `Overwrite` alone, because writing onto an existing file is what `Overwrite` means. So a link
+    /// planted at an `Overwrite` target after the plan was made, pointing at a bystander file in the same
+    /// tree, took the checkpoint's bytes straight onto the bystander and reported success.
+    ///
+    /// The plan is computed **before** the link is planted, deliberately: `scan_dir` does not traverse
+    /// links, so planting first would make `current` lose the path and the plan would say `Create` — a
+    /// different rule, already covered, and not the one this test exists for.
+    ///
+    /// The second half is the constraint that killed `create_new`: `b.txt`'s ordinary overwrite must
+    /// still apply in the same run. A fix that closes the link by refusing existing names would red here.
+    #[test]
+    fn cpe_1846_a_link_planted_at_an_overwrite_target_is_refused_and_the_other_overwrite_still_applies() {
+        let root = scratch("cpe1846-link-overwrite");
+        let store = scratch("cpe1846-link-store");
+
+        fs::write(root.join("a.txt"), b"checkpoint a").unwrap();
+        fs::write(root.join("b.txt"), b"checkpoint b").unwrap();
+        fs::write(root.join("bystander.txt"), b"BYSTANDER").unwrap();
+        let checkpoint = scan_dir(&root.to_string_lossy()).unwrap();
+        write_blobs(
+            &store,
+            &checkpoint,
+            &[("a.txt", b"checkpoint a"), ("b.txt", b"checkpoint b"), ("bystander.txt", b"BYSTANDER")],
+        );
+
+        fs::write(root.join("a.txt"), b"edited a").unwrap();
+        fs::write(root.join("b.txt"), b"edited b").unwrap();
+        let current = scan_dir(&root.to_string_lossy()).unwrap();
+        let plan = plan_restore(&checkpoint, &current);
+        assert_eq!(plan.len(), 2, "fixture is inert: expected two overwrites, got {plan:?}");
+        assert!(
+            plan.iter().all(|a| a.op == RestoreOp::Overwrite),
+            "fixture is inert: this test is about Overwrite, and the plan is {plan:?}"
+        );
+
+        // The swap, after the plan and before the write. Liveness is asserted inside `make_file_link`
+        // (the slot holds a link AND it resolves to the bystander) and again here by following it.
+        fs::remove_file(root.join("a.txt")).unwrap();
+        if !crate::fsutil::make_file_link(&root.join("bystander.txt"), &root.join("a.txt")) {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"[CPE-1846] SKIPPED the planted-link overwrite leg: no file symlink privilege here. \
+                  NOTHING on this run covered the final-component swap in the shipping revert sink.\n",
+            );
+            return;
+        }
+        assert_eq!(
+            fs::read(root.join("a.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "fixture is inert: the planted link does not lead to the bystander"
+        );
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        // HARM FIRST.
+        assert_eq!(
+            fs::read(root.join("bystander.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "HARM: the revert wrote the checkpoint's bytes through a link at the final component, onto a \
+             file the plan never named — report was {report:?}"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("a.txt")).is_ok_and(|m| m.file_type().is_symlink()),
+            "the planted link must still be there, not replaced by bytes written over it"
+        );
+        // …and the legitimate overwrite in the same plan must be unaffected.
+        assert_eq!(
+            fs::read(root.join("b.txt")).ok().as_deref(),
+            Some(&b"checkpoint b"[..]),
+            "an ordinary Overwrite of an existing regular file must still apply: {report:?}"
+        );
+        assert_eq!(report.applied, 1, "{report:?}");
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(report.skipped[0].0, "a.txt", "{report:?}");
     }
 
     #[test]
