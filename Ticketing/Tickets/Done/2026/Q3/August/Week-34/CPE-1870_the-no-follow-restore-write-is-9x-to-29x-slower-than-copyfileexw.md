@@ -3,11 +3,11 @@ id: CPE-1870
 title: the no-follow restore write is 9x-29x slower, and the benchmark that cleared it measured the wrong shape
 type: task
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
