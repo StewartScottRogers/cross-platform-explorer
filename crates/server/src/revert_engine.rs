@@ -1036,8 +1036,27 @@ mod tests {
         // Fixture liveness for the BRANCH: it must be the link refusal that armed the hold, not the
         // checkpoint-key stand-down above it and not some other rule.
         assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
+        // **The refusal READS differently per platform, and that asymmetry is load-bearing, not noise.**
+        // On Unix `O_NOFOLLOW` fails the **open itself**, so the post-open refusals never run and the
+        // message is the generic open error; on Windows the open succeeds on the reparse point and the
+        // post-open check is what refuses, in words. `copy_file_onto_no_follow`'s own doc says exactly
+        // this, and this test is where it was PROVEN: the first push asserted the Windows wording
+        // unconditionally and reddened `Server crates` on ubuntu **and** macOS with
+        // `could not open the destination for writing: Too many levels of symbolic links (os error 40)`.
+        // That is the ELOOP claim the Work Log had listed as "not verified locally", verified by CI in
+        // the strongest available way — a test that could not pass unless it were true.
+        //
+        // The errno's *text* is deliberately not matched (Linux and macOS need not word it alike, and a
+        // libc could reword it); the prefix plus the asserted-live planted link is what identifies the
+        // refusal. Asserting merely "something was refused" would let any earlier rule satisfy this.
+        let refusal = &report.skipped[0].1;
+        let is_the_link_refusal = if cfg!(windows) {
+            refusal.contains("never writes through one")
+        } else {
+            refusal.contains("could not open the destination for writing")
+        };
         assert!(
-            report.skipped[0].1.contains("never writes through one"),
+            is_the_link_refusal,
             "fixture is inert: the refusal is not the link one this test is about: {report:?}"
         );
         assert!(

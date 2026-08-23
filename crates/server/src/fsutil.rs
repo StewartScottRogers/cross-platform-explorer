@@ -1136,6 +1136,15 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 ///   test in [`crate::batch_media`] guards against — a wrong hard-coded `O_NOFOLLOW` constant, which
 ///   would make the open follow the link and leave the path check as the only defence.
 ///
+/// **The `ELOOP` half of that is measured, not reasoned** (CPE-1846, and it was originally shipped as an
+/// unverified claim because this is a Windows machine). A revert test asserted the Windows refusal
+/// wording unconditionally and reddened `Server crates` on ubuntu **and** macOS with
+/// `could not open the destination for writing: Too many levels of symbolic links (os error 40)` — the
+/// open failing, exactly as claimed, with the post-open refusals never reached. The consequence for
+/// anyone writing a test here: **the refusal's wording is platform-specific and the classification is
+/// not.** Assert the class (refused, permanent, victim untouched) freely; gate any assertion on the
+/// sentence itself behind `cfg!(windows)`.
+///
 /// # Errors
 ///
 /// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a

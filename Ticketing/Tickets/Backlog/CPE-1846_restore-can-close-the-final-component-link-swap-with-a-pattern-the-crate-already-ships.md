@@ -422,3 +422,46 @@ unchanged.
 this merge's 1 new test. `src-tauri` both modes: clippy **0** / **0**; tests **214** / **269**, unchanged.
 The frontend was **not** run locally: this worktree has no `node_modules`, and my only frontend change is
 prose inside an existing docs page (no frontmatter, no slug), so CI's `Frontend` job is its verification.
+
+### The merge gate went RED on both Unix legs — and it proved the one claim this ticket could not
+
+`Server crates` **failed on ubuntu and macOS** on `e3e66b2c`, green on Windows. Full ubuntu job log
+downloaded (**4,932 lines**), not read through `gh run view --log`. One test, and it was the new one:
+
+```text
+thread 'revert_engine::tests::cpe_1846_a_link_at_the_destination_is_reported_permanent_not_as_run_it_again'
+panicked at src/revert_engine.rs:1039:
+fixture is inert: the refusal is not the link one this test is about:
+  skipped: [("a.txt", "/tmp/…/a.txt: could not open the destination for writing:
+                       Too many levels of symbolic links (os error 40)")]
+  held_back: HeldBackByCheckpoint … "Re-running will not clear this on its own: …"
+test result: FAILED. 2349 passed; 1 failed; 4 ignored
+```
+
+**Read what actually failed.** The *classification* — this merge's whole decision — was **correct on
+Unix**: `HeldBackByCheckpoint`, not retryable, next step "Re-running will not clear this on its own".
+What failed was my **fixture-liveness assertion**, which looked for the Windows refusal wording
+"never writes through one". On Unix that sentence never exists, because `O_NOFOLLOW` fails the **open
+itself** and the post-open refusals are never reached.
+
+**That is the claim the Work Log listed as "not verified locally", verified by CI in the strongest way
+available — a test that could not have failed this way unless it were true.** `os error 40` is `ELOOP`.
+The doc said the Unix open fails with `ELOOP` and the post-open checks never run; ubuntu and macOS have
+now both said so out loud. It is upgraded from assumption to measurement in
+`copy_file_onto_no_follow`'s doc, with the lesson for the next person written beside it: **the refusal's
+wording is platform-specific and the classification is not** — assert the class freely, gate any
+assertion on the sentence behind `cfg!(windows)`.
+
+Fixed exactly that way. The errno's *text* is deliberately not matched (Linux and macOS need not word it
+alike): the identifying facts are the open-failure prefix plus the already-asserted-live planted link.
+
+**Red-proofed, so the repaired assertion is not merely permissive.** Pointing the same action at
+`a/../evil.txt` — a *different* permanent rule — reds it:
+`fixture is inert: the refusal is not the link one this test is about: skipped: [("a/../evil.txt",
+"escapes dest_root: `.`/`..` segment")]`. That matters because every downstream assertion in the test
+(`HeldBackByCheckpoint`, not retryable, no "run the revert again") is **satisfied by that other rule too**
+— so without this liveness check the test would have passed while covering nothing, which is the trap
+CPE-1845's own sibling test exists to catch and the seventh instance of it across CPE-1823/1844/1846.
+
+**Also worth stating plainly: my local Windows-only gates cannot see this class of defect.** Both prior
+pushes were fully green on Windows before CI found this. The 3-OS matrix is not a formality here.
