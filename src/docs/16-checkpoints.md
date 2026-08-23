@@ -143,11 +143,21 @@ A snapshot store keeps a small bookkeeping file alongside the snapshots, recordi
 piece of stored content takes. If you set a size limit on a folder's snapshots, that limit is what
 decides when older snapshots are deleted to make room — so the size figure decides deletions.
 
-**That figure is now measured from the stored content itself, every time, rather than read out of the
-bookkeeping file.** The practical difference: if the bookkeeping file is edited, out of date, or
-copied in from another machine, it can no longer make the app believe a small store is enormous and
-start deleting snapshots to get under a limit that was never exceeded. The footprint you see in the
-cleanup preview is the size of what is really there.
+**That figure is now measured every time, from the stored content your snapshots actually refer
+to** — rather than read out of the bookkeeping file. Two things follow, and the second is the one
+that is easy to miss:
+
+- If the bookkeeping file is edited, out of date, or copied in from another machine, it can no longer
+  make the app believe a small store is enormous and start deleting snapshots to get under a limit
+  that was never exceeded.
+- Stray content in the store counts for nothing. A leftover file that no snapshot refers to — the
+  kind a crash mid-snapshot or a partly-restored backup can leave behind — is not counted towards
+  the limit, because deleting snapshots could never clear it anyway. Counting it would delete your
+  snapshots and free nothing.
+
+So the footprint you see in the cleanup preview is the space your snapshots are actually using: what
+deleting them would genuinely give back. It can be smaller than the size of the folder on disk, and
+if it is, the difference is leftovers you can delete yourself.
 
 The same applies in the other direction. Stored content is only ever treated as present if the file
 holding it is present — so a snapshot taken after part of a store went missing stores that content
@@ -155,7 +165,9 @@ again rather than assuming it is already there, and a new snapshot can always pu
 
 If the bookkeeping file is damaged outright, automatic cleanup **stops and says so** instead of
 guessing. Nothing is deleted while it can't be read. That is deliberate: acting on an unreadable
-record is how snapshots get lost.
+record is how snapshots get lost. The same applies if the snapshot records themselves can't be read:
+without them there is no way to tell which stored content still matters, so cleanup refuses rather
+than assuming all of it does.
 
 ## What this is (and isn't)
 

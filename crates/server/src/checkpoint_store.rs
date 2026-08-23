@@ -1754,7 +1754,13 @@ mod tests {
             blobs.values().all(|m| m["size"].as_u64() == Some(size)),
             "LIVE: the index.json size tamper never landed on disk"
         );
-        blobs.values().map(|m| m["size"].as_u64().unwrap()).sum()
+        let claimed: u64 = blobs.values().map(|m| m["size"].as_u64().unwrap()).sum();
+        assert_eq!(
+            crate::snapshot_capture::load_store(store_dir).unwrap().total_bytes(),
+            claimed,
+            "LIVE: the tamper never reached index.json as the production reader sees it"
+        );
+        claimed
     }
 
     /// **CPE-1844 end-to-end through the registered commands** — `checkpoint_create`,
@@ -1888,5 +1894,98 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);
+    }
+
+    /// **CPE-1844 round 2, through the registered commands** — the security audit's B1/B5, which
+    /// measured the pre-witness fix reproducing this ticket's own opening outcome from a file dropped in
+    /// `blobs/`, with no `index.json` edit:
+    ///
+    /// ```text
+    /// File::create("blobs/dead") + set_len(2_000_000_000)
+    ///   preview.total_bytes 45 -> 2000000045
+    ///   CMD prune_apply kept=1 pruned=4 bytes_freed=36 manifests_left=1
+    ///   revert(oldest) = Err(cannot find the file);  a.txt = "damaged"
+    /// orphan blob of 4 MB (capture's own crash residue, no attacker)
+    ///   preview.total_bytes 45 -> 4000045; same destruction, and PERMANENT — an index tamper
+    ///   self-heals when save_store rewrites honest sizes, a stray file does not
+    /// ```
+    #[test]
+    fn cpe_1844_a_file_dropped_in_blobs_cannot_prune_the_users_checkpoints() {
+        for (mode, name, len) in
+            [("planted", "dead", 2_000_000_000u64), ("orphan", "00ff00ff", 4_000_000), ("hardlink", "beef", 500_000_000)]
+        {
+            let app = scratch(&format!("app-1844-w-{mode}"));
+            let ctx = HeadlessCtx::new(app.to_path_buf());
+            let root = scratch(&format!("root-1844-w-{mode}"));
+            let root_s = root.to_string_lossy().to_string();
+
+            let mut ids = Vec::new();
+            for i in 0..5u64 {
+                fs::write(root.join("a.txt"), format!("version {i}").as_bytes()).unwrap();
+                ids.push(checkpoint_create(&ctx, &root_s, &format!("c{i}")).unwrap().checkpoint.manifest_id);
+            }
+            let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+            for (i, id) in ids.iter().enumerate() {
+                let p = store_dir.join("manifests").join(format!("{id}.json"));
+                let mut doc: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+                doc["created_ms"] = serde_json::json!(1_700_000_000_000u64 + (i as u64) * 86_400_000);
+                fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+            }
+            let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+            let cap = 1_000_000u64;
+            let honest = checkpoint_prune_preview(&ctx, &root_s, &policy).unwrap();
+            assert!(honest.prune.is_empty(), "LIVE[{mode}]: GFS would prune on its own");
+            assert!(honest.total_bytes < cap, "LIVE[{mode}]: the honest store is not under the cap");
+
+            let blobs = store_dir.join("blobs");
+            let victim = store_dir.join("cpe1844-victim.bin");
+            if mode == "hardlink" {
+                let vf = std::fs::File::create(&victim).unwrap();
+                vf.set_len(len).unwrap();
+                drop(vf);
+                if std::fs::hard_link(&victim, blobs.join(name)).is_err() {
+                    // Hard links are unavailable on this filesystem; the other two legs still run.
+                    let _ = fs::remove_dir_all(&root);
+                    let _ = fs::remove_dir_all(&app);
+                    continue;
+                }
+            } else {
+                let f = std::fs::File::create(blobs.join(name)).unwrap();
+                f.set_len(len).unwrap();
+                drop(f);
+            }
+
+            // LIVE: the plant is on disk, is huge, and passes the name/type filter — so anything that
+            // excludes it is the witness and nothing else. `blob_files_on_disk` is the stage before it.
+            let sum: u64 = crate::snapshot_capture::blob_files_on_disk(&blobs)
+                .unwrap()
+                .values()
+                .sum();
+            assert!(
+                sum >= len,
+                "LIVE[{mode}]: the plant never reached the measurement — {sum} < {len}"
+            );
+            assert!(sum > cap, "LIVE[{mode}]: the plant does not even exceed the cap");
+
+            let applied = checkpoint_prune_apply(&ctx, &root_s, &policy, Some(cap)).unwrap();
+
+            // HARM FIRST — the checkpoints are still there and the oldest still puts its file back.
+            let left = fs::read_dir(store_dir.join("manifests")).unwrap().flatten().count();
+            assert_eq!(left, 5, "HARM[{mode}]: a file dropped in blobs/ deleted checkpoints — {left} left");
+            fs::write(root.join("a.txt"), b"damaged").unwrap();
+            let out = checkpoint_revert(&ctx, &root_s, &ids[0]).unwrap();
+            assert_eq!(
+                fs::read(root.join("a.txt")).unwrap(),
+                b"version 0",
+                "HARM[{mode}]: the oldest checkpoint could not put the file back"
+            );
+            assert_eq!(out.applied, 1);
+            assert!(applied.pruned.is_empty(), "HARM[{mode}]: pruned {:?}", applied.pruned);
+
+            let _ = fs::remove_file(&victim);
+            let _ = fs::remove_dir_all(&root);
+            let _ = fs::remove_dir_all(&app);
+        }
     }
 }

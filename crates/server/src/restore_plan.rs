@@ -96,6 +96,22 @@ impl RestorePlanSummary {
 }
 
 /// Summarise a plan, sizing writes from the checkpoint (the content being restored).
+///
+/// **CPE-1844, recorded not fixed: `bytes_written` is a sum of manifest claims, not a measurement.**
+/// When the caller is a checkpoint revert, `checkpoint` came from
+/// [`crate::snapshot_capture::manifest_snapshot`], so each `f.size` is a number in a hand-editable
+/// manifest JSON. Editing one turns an honest `12` into `9000000000` in the revert preview the user
+/// confirms against.
+///
+/// Left alone deliberately, and the reason is the one that made CPE-1844's own headline worth fixing:
+/// **this figure authorises nothing.** It is displayed beside a confirm; no deletion, write, or
+/// retention decision is taken from it, unlike
+/// [`crate::snapshot_capture::store_total_bytes`], whose figure prunes checkpoints and is therefore
+/// measured from disk. Correcting it means sizing every write from its blob file, which is a stat per
+/// entry on the preview path for a cosmetic number. Found by CPE-1844's security audit as a
+/// thirteenth sink its enumeration missed — that walk covered `index.json`'s fields and `prune`'s
+/// gates, and this is the *manifest's* size field on the revert path. Recorded here so the next
+/// person meets it where it lives.
 pub fn summarize_plan(plan: &[RestoreAction], checkpoint: &Snapshot) -> RestorePlanSummary {
     let mut s = RestorePlanSummary::default();
     for a in plan {

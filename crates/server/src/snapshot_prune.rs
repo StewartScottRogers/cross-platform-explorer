@@ -122,8 +122,8 @@ pub fn apply(
             //
             // 1. `store_total_bytes` used to sum the `size` fields recorded in `index.json`. One text
             //    edit therefore drove this loop, which deletes the user's other checkpoints oldest-first
-            //    down to a single survivor. Fixed at the source — that function now measures `blobs/` —
-            //    so nothing is needed here for it.
+            //    down to a single survivor. Fixed at the source — that function now measures the blob
+            //    files a manifest still names — so nothing is needed here for it.
             // 2. `total = total.saturating_sub(freed)` was the second, and it is fixed here: `freed`
             //    came from `release`, i.e. the same recorded sizes. A *deflated* index made each prune
             //    look like it reclaimed almost nothing and kept the loop deleting. Re-measuring instead
@@ -131,21 +131,49 @@ pub fn apply(
             //    rule, and it also means the loop stops the moment the store is genuinely under the cap
             //    even if the accounting disagrees.
             //
+            // **No test will catch you if you delete the `total = store_total_bytes(..)` re-measure
+            // at the foot of this loop, on its own.** Once `prune` reports the bytes of the files it
+            // actually removed, that value and a fresh measurement
+            // agree on every fixture in the suite, so breaking only this line leaves the suite green.
+            // Its red-proof is the *pair* regression — restoring both the old `Ok(release(..))` in
+            // `prune` and the subtraction here — which reds
+            // `cpe_1844_a_deflated_index_cannot_keep_the_cap_loop_deleting_past_the_cap` at "1 left" of
+            // four. Written here rather than only in the ticket because every other guard in this module
+            // carries its own red-proof in a comment, and a maintainer tidying this line would otherwise
+            // see a green suite and no warning. It is kept for two reasons: it removes a carried-forward
+            // number rather than bounding it, and the two are *not* equal by construction — they diverge
+            // whenever the initial measurement under-counts something `prune` then removes and credits
+            // (a `metadata()` that failed once and succeeded later), where the re-measure is the safer
+            // side.
+            //
             // **Interaction with CPE-1863, stated because that ticket is open and this loop is its
             // subject.** CPE-1863 records that a prune freeing nothing never lets this loop see the cap
             // met, so it runs to the `kept.len() <= 1` floor. That is untouched and deliberately not
             // fixed here: when a prune really frees nothing, the re-measured `total` really has not
             // moved, so the loop behaves exactly as CPE-1863 describes — the difference is only that it
-            // is now describing reality instead of an accounting artifact. Nothing here makes it worse:
-            // every case where the old subtraction advanced `total` faster than the disk did was a case
-            // of *over*-crediting a prune, which ended the loop early.
+            // is now describing reality instead of an accounting artifact.
             //
-            // Cost: one `read_dir` of `blobs/` plus a stat per blob file, per iteration, on top of the
-            // one this loop always paid. The loop only runs when a caller passes a cap at all —
-            // `snapshot_schedule::snapshot_run_due` passes `None`, so the scheduled path pays nothing —
-            // and it iterates only while survivors are still being deleted, which is bounded by
-            // `kept.len()`. Next to `snapshot_capture::manifests_naming`'s per-prune manifest walk
-            // (which parses JSON), a directory stat walk is the cheaper half of each iteration.
+            // **Scoped claim, because an earlier draft of this comment over-broadened it and was
+            // measurably false.** It read "Nothing here makes it worse", stated as if it covered the
+            // whole change; it is established only of *the subtraction*, where every case in which the
+            // old arithmetic advanced `total` faster than the disk did was an over-credit that ended the
+            // loop early. It was **not** established of the change of basis, and the security audit
+            // falsified that half: the first version of `store_total_bytes` summed the whole `blobs/`
+            // directory, so an **orphan** blob — `capture`'s own partial-write residue, which no prune
+            // can ever reclaim — counted toward the cap and drove this loop to its floor. Measured at
+            // `preview.total_bytes 45 -> 4000045`, `pruned 4 of 5`, `bytes_freed = 36`, on a store with
+            // no attacker in it, where before the change that residue contributed 0 and the pass did
+            // nothing. That is a shape the old code could not see at all, not an over-credit. It is
+            // closed by the witness in `store_total_bytes` rather than here, and it is why that function
+            // measures *reclaimable* footprint instead of disk usage.
+            //
+            // Cost: one `read_dir` of `blobs/` plus a stat per blob file, plus the witness walk over
+            // `manifests/`, per iteration, on top of the one this loop always paid. The loop only runs
+            // when a caller passes a cap at all — `snapshot_schedule::snapshot_run_due` passes `None`,
+            // so the scheduled path pays nothing — and it iterates only while survivors are still being
+            // deleted, which is bounded by `kept.len()`. The witness walk is the same scan
+            // `snapshot_capture::manifests_naming` already performs inside every `prune` this loop
+            // makes, so the loop's per-iteration cost is roughly doubled rather than newly incurred.
             let mut total = snapshot_capture::store_total_bytes(store_dir)?;
             for id in &oldest_first {
                 if total <= cap || kept.len() <= 1 {
@@ -763,7 +791,13 @@ mod tests {
             blobs.values().all(|m| m["size"].as_u64() == Some(size)),
             "LIVE: the index.json size tamper never landed on disk"
         );
-        blobs.values().map(|m| m["size"].as_u64().unwrap()).sum()
+        let claimed: u64 = blobs.values().map(|m| m["size"].as_u64().unwrap()).sum();
+        assert_eq!(
+            crate::snapshot_capture::load_store(store).unwrap().total_bytes(),
+            claimed,
+            "LIVE: the tamper never reached index.json as the production reader sees it"
+        );
+        claimed
     }
 
     fn real_blob_bytes(store: &std::path::Path) -> u64 {

@@ -288,3 +288,195 @@ stops cleanup instead of guessing. No new `Section`, so `sectionDocs.ts` is unch
   `store_total_bytes`'s rustdoc rather than claimed closed.
 - CPE-1863 is untouched by design; the interaction is argued and partly measured (the pair red-proof
   shows the loop reaching the floor), not exhaustively explored.
+
+### 2026-08-22 — round 2: the headline fix was a lateral move, and it introduced a regression
+
+The independent Reviewer approved with four findings; the Security Auditor returned MERGE with a first
+item whose framing is the one that matters — **I replaced one hand-editable steering input with
+another.** Both are folded in here. Everything below was reproduced on **my own round-1 fix** through
+`checkpoint_prune_apply` / `checkpoint_create` / `checkpoint_revert` before anything was changed, rather
+than taken from the reports:
+
+```text
+              honest    tampered preview   CMD prune_apply                       revert(oldest)
+planted        45        2000000045        kept=1 pruned=4 freed=36 left=1        Err(cannot find the file)
+hardlink       45         500000045        kept=1 pruned=4 freed=36 left=1        Err(cannot find the file)
+orphan         45           4000045        kept=1 pruned=4 freed=36 left=1        Err(cannot find the file)
+                                                                                  a.txt = "damaged" in all three
+```
+
+Byte-for-byte this ticket's own opening outcome, with **no `index.json` edit at all**. `planted` is
+`File::create("blobs/dead") + set_len(2_000_000_000)`. `hardlink` is a hard link named `beef` to a
+500 MB file outside the store — and it needed **no elevation** on this machine, where a symlink does, so
+the residual note that named only the sparse file understated the cheapest primitive. `orphan` is a
+4 MB file that is `capture`'s own documented partial-write residue, **with no attacker in the fixture at
+all**.
+
+**`orphan` is a regression round 1 introduced, and that is the worst of the three.** Before it the
+orphan contributed 0 and the pass did nothing; after it, a crash residue deletes four of five
+checkpoints. It is also *permanent* where the index tamper is not — `save_store` rewrites honest sizes
+on the next capture, a stray file just sits there — and `bytes_freed = 36` is now *honestly* reported,
+which makes the destructive pass read as more legitimate rather than less.
+
+### The witness — reuse of `manifests_naming`, and where my round-1 reasoning was wrong
+
+Round 1 argued against reusing CPE-1861's `manifests_naming` because it answers *identity* while I
+needed *size*. That was right about the **figure** and wrong about the **filter**: the size question has
+a prior question — *whose content is this?* — and that is precisely the question `manifests_naming`
+recomputes from disk, and which `prune` already pays for on every call. `store_total_bytes` now measures
+only blob files some manifest on disk still names. The planted file, the hard link and the orphan all
+contribute **0**, and an index that is deflated, emptied or absent cannot inflate anything.
+
+The figure it returns is therefore **reclaimable footprint** — the bytes deleting checkpoints could
+actually free. That is not a softer definition, it is the only correct one for a cap *enforced by
+deleting checkpoints*: counting bytes no prune can reach is a category error, and `orphan` is what that
+category error costs.
+
+**Residual, at full strength.** Inflation now needs a **matched pair** — a hex-named file with a large
+logical length *and* a manifest naming that hash. `manifests_naming` is deliberately permissive (any
+parseable manifest counts), so the second half is a file to write, not a gate to defeat. What the
+witness buys is that the tamper is two coordinated files instead of one number, and that every
+*accidental* shape is worth zero.
+
+**The shared-predicate hazard, written into both call sites.** `prune` is safe when
+`manifests_naming` is **generous** (a blob wrongly called named is merely leaked); this site is safe
+when it is **stingy** (a blob wrongly called named inflates a figure that deletes checkpoints). Same
+predicate, opposite failure directions — the "one predicate, two meanings" drift CPE-1861 warns about,
+now with two callers on opposite sides. Tuning it for either caller breaks the other. That is why
+`store_total_bytes` checks `manifests/` is **readable itself** instead of handing the question over:
+`manifests_naming`'s own failure branch answers "all of them are named", the maximal footprint, at the
+one site where maximal deletes checkpoints.
+
+### Cost — it went up, and my numbers disagree with the audit's
+
+Release build, one manifest per 20 blobs, against the `index.json` read this replaces (`dir-sum` is
+round 1's witness-less version):
+
+```text
+blobs  manifests   index.json    dir-sum    witness   ratio
+   50          3       550 us      72 us     318 us   0.58x
+  200         10       661 us     223 us     630 us   0.95x
+ 1000         50      1147 us    1173 us    4189 us   3.65x
+ 5000        250      2394 us    6010 us   17101 us   7.14x
+50000       2500     21223 us   60926 us  177226 us   8.35x
+```
+
+**This does not match the ~1.16x at n=5000 the audit reported, and I am recording both rather than
+adopting the flattering one.** The ratio is driven by how much manifest JSON there is per blob, so a
+lighter fixture measures far cheaper; mine is heavier. Not gated, and the arithmetic is written next to
+the function: the shipped default `RetentionPolicy` caps a store at ~47 manifests (CPE-1861's figure),
+about 940 blobs at 20 files each — the ~4 ms row. The unattended caller passes `None`, so it pays this
+once per `preview` and never inside the loop. It also **cannot short-circuit** the way `prune`'s use
+does: `prune` asks about a handful of at-risk hashes, this asks about every blob in the store.
+
+### The four Reviewer items
+
+1. **The over-broad claim, narrowed and then corrected.** "Nothing here makes it worse" was scoped to
+   the *subtraction* and read as scoped to the whole change. It is now stated as such — and the S2
+   orphan case is recorded beside it as the measured falsification of the broader reading, since an
+   un-reclaimable residue is a shape the old code could not see at all rather than an over-credit. This
+   is CPE-1861's round-3 blocker class (a comment of mine stating something false), caught before merge
+   this time.
+2. **My red-proof count was wrong.** `freed.saturating_add(0)` reds **5 lib-wide**, not 2 — I ran the
+   `cpe_1844` filter and reported the filtered count. Verified myself: my two plus
+   `prune_gcs_blobs_no_longer_referenced_and_keeps_shared_ones`,
+   `apply_keeps_gfs_survivors_and_they_still_restore_byte_for_byte` and
+   `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names`. The guard is better protected
+   than I claimed. Every count below is now stated as "within the filter / lib-wide".
+3. **The honesty point moved into the code.** The comment explained why the re-measure exists but never
+   said *no test will catch you if you delete it alone*. It says so now, at the line, with its red-proof
+   named — in a module where every other guard carries its own. The Reviewer also found a better reason
+   to keep it than I gave: the two are **not** equal by construction, they diverge whenever the initial
+   measurement under-counts something `prune` then removes and credits, and the re-measure is the safer
+   side. Recorded.
+4. **CPE-1861's invariant sentence** now reads "…past its point of no return **(with one store-level
+   exception, below)**", so a reader who stops at the bolded claim no longer reads a false one.
+
+### Two more landed claims corrected
+
+- **"Dedup goes back to being an optimisation rather than a promise" over-claimed.** The repair covers
+  **absent** only. A blob file that is *present* but whose bytes were replaced is `Occupied` by the slot
+  probe and skipped, so a restore hands back whatever is now in the file — the audit measured
+  `restored bytes = "PLANTED BYTES"`. Pre-existing (that probe policy is CPE-1705's and CPE-1769's, and
+  re-hashing every reused blob per capture is a different ticket's cost), but the sentence claimed a
+  property the repair does not deliver. Rewritten to the one it does: *a claim about content the store
+  does not hold is no longer acted on by writing nothing.*
+- **The residual note named only the sparse file.** The hard link is cheaper — no API, no flag, no
+  privilege — and is now named first, with the measured 500,000,000.
+
+### Two recording-grade findings, no code
+
+- **`preview` and `apply` now disagree** about a store whose `index.json` is corrupt: removing that file
+  from `store_total_bytes` removed `preview`'s only reader of it, so `preview` succeeds while `apply`
+  refuses inside `prune`. Pre-PR both refused. Non-destructive either way and the honest preview is the
+  more useful half, but it is a new asymmetry rather than an intended design. Written next to
+  `store_total_bytes`.
+- **A thirteenth sink my walk could not have found**, because it walked `index.json`'s fields and
+  `prune`'s gates: the **manifests' own** `size` field, summed into the revert preview's `bytes_written`
+  at `restore_plan::summarize_plan`. An honest `12` becomes `9000000000`. Recorded at the function, not
+  fixed, and the reason is this ticket's own test: **that figure authorises nothing** — it is displayed
+  beside a confirm, and no deletion or write is taken from it, unlike `store_total_bytes`.
+
+### The liveness result inverts, and the corrected number is worse than I reported
+
+The audit applied CPE-1823's own copied-fixture trap to my helpers — read the real `index.json`, write
+and verify a **decoy sibling** — and my round-1 claim of *2 passed / 9 failed* became **9 passed /
+2 failed**, with three headline tests certifying nothing, including both command-path ones. My two
+`snapshot_capture` tests survived only because they asserted through `load_store`, a production reader,
+at their call sites.
+
+Fixed by folding that assertion into all three tamper helpers (`load_store` is now `pub(crate)` so the
+other two modules can reach the same production reader). Re-run here:
+
+- **Decoy-sibling trap:** all **5** index-tampering tests now red on `LIVE: the tamper never reached
+  index.json as the production reader sees it` / `…the record the old figure was read from`. Three of
+  them previously passed.
+- **Every tamper made inert** (both index helpers, both `refs` edits, both blob removals, the index
+  truncation, the planted file, the orphan, the hard link, the manifest copy): **2 passed / 12 failed**,
+  and after one fix all 12 fail on a `LIVE:` assertion. The one that did not —
+  `cpe_1844_a_blob_named_only_by_a_duplicate_manifest_still_counts` — died on an `unwrap` instead, which
+  is a crash rather than a certificate; it now carries an explicit liveness assertion that the duplicate
+  really protected the blob. The 2 that pass are the 2 tests with no tamper by design (the exclusion
+  list, and the over-tightening pin).
+
+### Round-2 red-proofs — eight guards, each observed red then reverted
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| the witness | `manifests_naming(store_path, &candidates)` → `candidates.clone()` | 2 red: `HARM: a blob file no manifest names steers the store's footprint` and, through the commands, `HARM[planted]: a file dropped in blobs/ deleted checkpoints — 1 left` |
+| `store_total_bytes` measures at all | early-`return Ok(load_store(store_path)?.total_bytes())` | **5 red** incl. `HARM: a hand-edited index.json deleted checkpoints — left ["…132.json"]` (1 of 5) |
+| hex-name / type filter | `if validate_blob_name(&name).is_err() {` → `if false && …` | red alone: `HARM: something that is not a content-addressed blob file contributed to the footprint` |
+| unreadable-witness refusal | `Err(e) => return Err(...)` → `Err(_e) => {}` | red alone: `HARM: an unreadable witness counted every blob file, which is the figure that deletes checkpoints`. **This guard was uncovered until this round** — the round-1 suite stayed green under it, found by running the proof rather than by reading. Now staged the way `classify_store_index` stages its own case: a **non-directory** at `manifests/`, which fails `read_dir` as not-`NotFound` on every platform without an ACL or `chmod` the two OSes disagree about |
+| `prune` measures what it removed | `freed = freed.saturating_add(size);` → `…(0);` | 2 red within the filter, **5 lib-wide** (the three pre-existing ones named above) |
+| `capture` writes a missing reused blob | `…iter().chain(plan.reused.iter())` → `plan.to_store.iter()` | 2 red, both layers |
+| `load_store` above the point of no return | that line moved back below `remove_file` | red alone: `HARM: pass 1 destroyed a checkpoint on an unreadable index.json — 3 left` |
+| the accounting **pair** (2 lines, the exact pre-fix code) | `Ok(release(..))` in `prune` + `total = total.saturating_sub(freed)` | `HARM: prune reported index.json's claim as bytes freed`; `HARM: … deleting past the cap — 1 left` of 4 |
+
+### Round-2 gates
+
+`crates/server`: clippy `--all-targets -- -D warnings` → **0**. `cargo test` → **2343 lib** (4 ignored)
++ ticket_mcp 0 + 21 + 22 + 2 + 1 + 1 + 45 + 16 + 32, **0 failed**. Lib delta **+4** on round 1's 2339
+(**+15** on CPE-1861's 2328): this round adds exactly 4 tests — 3 in `snapshot_capture`
+(no-manifest-names, duplicate-namer, unreadable-witness) and 1 in `checkpoint_store` (the command-level
+dropped-file test). Every integration binary unchanged.
+
+`src-tauri` both modes: clippy **0** / **0**; tests **214** / **269** — unchanged again.
+`bindings.gen.ts` regenerated and byte-identical to round 1's commit (no `specta::Type` doc touched this
+round).
+
+Frontend guards: `docs.test.ts` + `sectionDocs.test.ts` + `mojibakeGuard.test.ts` → **73 passed**.
+`src/docs/16-checkpoints.md`'s "How big the store thinks it is" is rewritten for the witness: the
+figure is the space the user's snapshots are actually using, stray leftovers count for nothing because
+deleting snapshots could never clear them, and unreadable snapshot records stop cleanup rather than
+making it assume everything matters.
+
+### Round-2 — not verified on this machine
+
+- The hard-link leg is skipped rather than failed where `fs::hard_link` is unavailable (a filesystem
+  without hard links); it ran here on NTFS. The planted and orphan legs run everywhere.
+- The **sparse-file** residual is still reasoned, not measured — `set_len` gives a large logical length
+  without a sparse flag, which is what the tests use and what the measurement reads, but I did not
+  confirm near-zero *allocation* separately.
+- The unreadable-`manifests/` case is staged as a non-directory, not as a permission denial; the
+  permission shape is the one `classify_store_index` records as unstageable on both platforms.
+- CPE-1863 remains untouched; the orphan case is handed to it as directed.
