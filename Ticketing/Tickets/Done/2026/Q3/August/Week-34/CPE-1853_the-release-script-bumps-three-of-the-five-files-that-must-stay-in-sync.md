@@ -3,11 +3,11 @@ id: CPE-1853
 title: the release script bumps three of the five files that must stay version-synchronised
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-22
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
