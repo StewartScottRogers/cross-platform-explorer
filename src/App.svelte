@@ -343,6 +343,25 @@
       (payload: string) => ingestCost(JSON.parse(payload));
   }
 
+  // CPE-1866: a test-mode-only hook mirroring the three above — lets the headless gui-smoke suite wipe
+  // every SYNTHETIC session/activity/cost row the three hooks above seeded, without a real "close all
+  // consoles" round trip (`closeAllConsoles()` reaches a real sidecar host that never exists in this
+  // harness). Needed because gui-smoke now shares ONE app session across every spec file in a shard
+  // (session-per-shard, CPE-1866) instead of relaunching per spec file: `clearAgentSessions()` empties
+  // `$agentSessions`, and this component's own `$: if (!activeWatchCwd) showTimeline = false;` then
+  // closes the Agent Watch drawer as a side effect of `activeWatchCwd` going empty — so one call
+  // between spec files undoes everything `checkpoint-restore.smoke.ts`/`cost-history.smoke.ts`/
+  // `cost-ledger.smoke.ts`/`radar.smoke.ts`/`replay.smoke.ts` inject via
+  // `__CPE_TEST_INGEST_SESSION__`/`__CPE_TEST_INGEST_ACTIVITY__`/`__CPE_TEST_INGEST_COST__`, none of
+  // which was ever cleaned up because every one of those specs was written assuming (correctly, before
+  // this ticket) that its OWN synthetic session would die with the app process at the end of its OWN
+  // spec file. Mirrors the same convention as the three hooks above: only attached when `testMode` is
+  // true, so it's absent (zero cost, zero attack surface) outside `--test-mode`.
+  if (testMode) {
+    (window as unknown as { __CPE_TEST_CLEAR_AGENT_SESSIONS__?: () => void }).__CPE_TEST_CLEAR_AGENT_SESSIONS__ =
+      clearAgentSessions;
+  }
+
   let notice = "";
   let noticeIsError = false;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
