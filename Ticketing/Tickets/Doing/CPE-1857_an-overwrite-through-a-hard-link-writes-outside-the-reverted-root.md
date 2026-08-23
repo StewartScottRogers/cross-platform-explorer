@@ -206,3 +206,36 @@ at all). That conflation is why this sat open.
 **Verification.** `cargo clippy --all-targets -- -D warnings` and `--features index` both clean;
 `cargo test --lib` 2368 passed / 0 failed; `checkpoint_roundtrip`, `archive_panic_safety`,
 `sample_fixtures` green.
+
+### 2026-08-23 (later) — CI caught the cross-platform half: directories have a link count too
+
+First push went red on `Server crates (ubuntu-latest)` and `(macos-latest)` and **green on
+`windows-latest`** — the exact asymmetry this repo has been bitten by before, in the other direction.
+
+```text
+archive::tests::cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure FAILED
+  a link entry that cannot displace a DIRECTORY is the write failing, not a guard refusing - it
+  aborts, like `File::create` on the same path would:
+  ArchiveReport { done: 1, failed: 0, skipped: 1, errors: ["good_link: ".../out/good_link" is a
+  hard link ..."] }
+```
+
+**Cause.** On Unix every directory has `nlink >= 2` **by construction** — its own `.` entry, plus the
+entry its parent holds for it, plus one more per subdirectory. On Windows `nNumberOfLinks` for a
+directory is 1. So `facts.links > 1` without an `is_dir` clause reads **every** directory on Linux and
+macOS as a hard link, and **no** directory on Windows. It turned that test's tar link entry — a link
+entry that cannot displace a directory, which is the *write failing* and must abort — into a hard-link
+*skip*.
+
+**Fix.** `name_is_multiply_linked` is now `!facts.is_dir && facts.links > 1`. Excluding directories costs
+nothing this rule exists for: a directory is not something a file's bytes can be written into, and every
+caller already refuses one on its own terms. `copy_file_onto_no_follow` and `open_output_verified` were
+never exposed — both run their `is_dir` refusal *before* the count — so the defect was confined to the
+new path-based helper.
+
+**Pinned** by `batch_media::tests::cpe_1857_the_link_count_rule_answers_no_for_a_plain_file_and_for_a_directory`,
+which asserts all three answers (plain file: no; **directory: no**, with the platform asymmetry spelled
+out in the failure message; absent name: no) plus the positive leg with its liveness proof. It runs on
+every platform, but only the Unix legs can red on the directory row — stated in the test rather than left
+for the next person to rediscover, since a Windows-only local run cannot reproduce this class at all.
+

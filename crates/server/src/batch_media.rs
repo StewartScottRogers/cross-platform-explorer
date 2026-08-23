@@ -1286,8 +1286,22 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
 /// | `snapshot_capture::capture`'s `fs::copy` into `blobs/<hash>` | already gated: `classify_target_slot(...) == Occupied → continue`, and a hard link is an ordinary existing file, so it reads `Occupied` and is skipped rather than written through. |
 /// | `provider::LocalProvider::write` (reached by `transfer::upload_tree`) | the "remote" path is the user's own chosen upload target, not server-chosen. `download_tree` is the direction untrusted data picks the name, and that is the direction that changed. |
 ///
+/// # `!facts.is_dir` is load-bearing, and leaving it out reddened two of the three CI legs
+///
+/// **On Unix every directory has `nlink >= 2` by construction** — its own `.` entry plus the entry the
+/// parent holds for it, plus one more per subdirectory. On Windows `nNumberOfLinks` for a directory is
+/// 1. So a link-count rule without this clause refuses **every** directory on Linux and macOS and **no**
+/// directory on Windows — precisely the shape that passes a Windows-only local run and reds the matrix.
+/// Measured: `cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure` went red on
+/// `ubuntu-latest` and `macos-latest` and green on `windows-latest` from exactly this, turning a tar
+/// link entry's "cannot displace a DIRECTORY, that is the write failing" **abort** into a hard-link
+/// **skip**.
+///
+/// Excluding directories costs nothing this exists for: a directory is not something a file's bytes can
+/// be written into, and every caller refuses one on its own terms already. This function's job is only
+/// the *hard link* question, which is a question about files.
 pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
-    matches!(probe_no_follow(path), Probe::Real(facts) if facts.links > 1)
+    matches!(probe_no_follow(path), Probe::Real(facts) if !facts.is_dir && facts.links > 1)
 }
 
 /// Probe a path's identity **without following links** — Unix reads it straight off the one
@@ -2395,6 +2409,49 @@ mod tests {
     /// drop) — mirrors `organize_apply.rs`'s test helper.
     fn scratch(tag: &str) -> tempfile::TempDir {
         tempfile::Builder::new().prefix(&format!("cpe-batchmedia-{tag}-")).tempdir().unwrap()
+    }
+
+    /// **CPE-1857 — the three answers [`name_is_multiply_linked`] must give, pinned in one test that
+    /// runs on every platform.** The middle row is the one that cost a red matrix: on Unix a directory
+    /// has `nlink >= 2` by construction, on Windows it has 1, so a rule that forgot `!is_dir` was green
+    /// locally on Windows and red on both Unix legs. Asserted here rather than only through the archive
+    /// sink, so the next reader meets the platform asymmetry at the rule itself.
+    #[test]
+    fn cpe_1857_the_link_count_rule_answers_no_for_a_plain_file_and_for_a_directory() {
+        let d = scratch("cpe1857-linkcount");
+        let plain = d.path().join("plain.txt");
+        std::fs::write(&plain, b"one name only").unwrap();
+        let dir = d.path().join("a-directory");
+        std::fs::create_dir_all(dir.join("with-a-child")).unwrap();
+
+        assert!(!name_is_multiply_linked(&plain), "a file with one name is not multiply linked");
+        assert!(
+            !name_is_multiply_linked(&dir),
+            "a DIRECTORY must answer no on every platform — on Unix its link count is >= 2 by \
+             construction (its own `.` plus the parent's entry plus one per subdirectory), and a rule \
+             that reads that as a hard link refuses every directory on Linux and macOS while passing a \
+             Windows-only local run"
+        );
+        assert!(!name_is_multiply_linked(&d.path().join("nothing-here")), "an absent name answers no");
+
+        let second = d.path().join("second-name.txt");
+        if std::fs::hard_link(&plain, &second).is_err() {
+            crate::skip_notice!(
+                "SKIPPING the positive leg of cpe_1857_the_link_count_rule_answers_no_for_a_plain_file_\
+                 and_for_a_directory: no hard-link support here. The negative legs above still ran."
+            );
+            return;
+        }
+        // Liveness: the two names really are one object, proved by writing through one and reading the
+        // other — not by trusting `hard_link`'s `Ok`.
+        std::fs::write(&second, b"written through the second name").unwrap();
+        assert_eq!(
+            std::fs::read(&plain).ok().as_deref(),
+            Some(&b"written through the second name"[..]),
+            "fixture is inert: the two names are not one object"
+        );
+        assert!(name_is_multiply_linked(&plain), "both names of one file must answer yes");
+        assert!(name_is_multiply_linked(&second), "both names of one file must answer yes");
     }
 
     // ---- CPE-1705: the PLANNER must not read a refused stat as a free output name -------------------
