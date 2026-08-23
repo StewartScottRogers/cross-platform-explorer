@@ -825,7 +825,10 @@ pub fn copy_file_into_claimed_slot(src: &Path, dst: &Path) -> Result<u64, String
         return Err(not_a_regular_file(src));
     }
     let mut w = claim_file_slot_with_mode(dst, birth_mode_of(&meta))?;
-    let copied = stream_bytes(&mut r, &mut w).map_err(|e| format!("{}: {e}", dst.display()))?;
+    // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
+    // the copy buffer, but taking it from the handle keeps this function free of a second path question.
+    let copied =
+        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
     w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
     // Everything past this point acts on `w`, the claimed HANDLE. Nothing re-opens `dst` by path — see
@@ -899,10 +902,45 @@ fn carry_file_times(_src: &std::fs::Metadata, _dst: &std::fs::File) {}
 ///
 /// Copy the predicate from `stream_bytes` verbatim if either is ever edited. A second spelling that
 /// happens to mean the same thing today is how the two drift apart tomorrow.
+///
+/// # It is a CEILING, not a size (CPE-1870)
+///
+/// This constant is the **largest** buffer [`stream_bytes`] will allocate; the actual buffer is the
+/// source's own length clamped to it. That distinction is the entire subject of CPE-1870, and it is
+/// worth stating here because the benchmark above is exactly what hid the problem:
+///
+/// **one 200 MB file amortises a single 1 MiB allocation to nothing.** A restore is the opposite shape
+/// — thousands of small files — and a flat 1 MiB buffer per call is then a per-file fixed cost paid in
+/// full for a 19-byte file. Measured by the committed `cpe_1870_copy_cost_by_shape`, Windows/NTFS,
+/// release, best of two passes, **unique random content per file** (a uniform payload lets an antivirus
+/// answer from its content-hash cache and hides the very cost being measured):
+///
+/// ```text
+/// shape                     fs::copy    flat 1 MiB (CPE-1846)   sized to source (now)
+/// 3,000 x 19 B   fresh       1,215 ms    1,788 ms  (1.45x)       1,272 ms  (1.05x)
+/// 3,000 x 19 B   overwrite   1,098 ms    1,665 ms  (1.46x)       1,166 ms  (1.06x)
+/// 500 x 256 KiB  fresh         267 ms      472 ms  (1.68x)         342 ms  (1.28x)
+/// 500 x 256 KiB  overwrite     245 ms      389 ms  (1.45x)         315 ms  (1.29x)
+/// ```
+///
+/// So the many-small-files restore lands within ~5% of the `fs::copy` baseline it was measured against,
+/// while keeping every handle-pinning property CPE-1846 exists for. Nothing about the large-file case
+/// changes: at or above 1 MiB the clamp returns this constant and the loop is byte-for-byte what it
+/// was.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 const COPY_CHUNK: usize = 1024 * 1024;
 
 /// Move `r`'s bytes into `w`, by the best route the platform gives us for two open file handles.
+///
+/// `size_hint` is the source's length **read off the open source handle** by the caller — never a
+/// path stat, which a swap could have invalidated. It only sizes the buffer, so a wrong hint costs a
+/// resize or a wasted page and can never truncate the copy: the loop still runs to `read` returning 0.
+/// Passing 0 for "unknown" is fine and yields a 1-byte buffer's worth of correctness with a lot of
+/// syscalls, so callers that have the metadata should pass it (both do).
+///
+/// **Why it exists (CPE-1870):** see [`COPY_CHUNK`]'s "it is a ceiling, not a size". A flat 1 MiB
+/// allocation per call is invisible on one 200 MB file and is *the* per-file cost on a 3,000-file
+/// restore.
 ///
 /// **Linux/Android keep [`std::io::copy`] deliberately.** `std` specialises it there to `copy_file_range`
 /// (falling back to `sendfile`), which is an in-kernel copy and, on btrfs/XFS, can be a **reflink** —
@@ -915,14 +953,19 @@ const COPY_CHUNK: usize = 1024 * 1024;
 /// there is that a 1 MiB loop cannot be worse than the same loop at 8 KiB, which is what `io::copy` would
 /// otherwise do.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn stream_bytes(r: &mut std::fs::File, w: &mut std::fs::File) -> std::io::Result<u64> {
+fn stream_bytes(r: &mut std::fs::File, w: &mut std::fs::File, _size_hint: u64) -> std::io::Result<u64> {
+    // The hint is deliberately unused here: `io::copy` picks its own strategy (`copy_file_range` /
+    // `sendfile`, and on btrfs/XFS possibly a reflink), so there is no buffer for it to size.
     std::io::copy(r, w)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn stream_bytes(r: &mut std::fs::File, w: &mut std::fs::File) -> std::io::Result<u64> {
+fn stream_bytes(r: &mut std::fs::File, w: &mut std::fs::File, size_hint: u64) -> std::io::Result<u64> {
     use std::io::{Read as _, Write as _};
-    let mut buf = vec![0u8; COPY_CHUNK];
+    // `max(1)`: a zero-length buffer would make `read` return `Ok(0)` forever and the loop below reads
+    // that as end-of-file, so an empty-source copy would still be correct — but a hint of 0 for a
+    // non-empty source would silently copy nothing. One byte cannot.
+    let mut buf = vec![0u8; size_hint.clamp(1, COPY_CHUNK as u64) as usize];
     let mut total = 0u64;
     loop {
         let n = match r.read(&mut buf) {
@@ -1064,44 +1107,87 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// user's own captured content from a local store, and the direction of the error is toward *keeping* an
 /// existing warning rather than dropping one on the overwrite path. Recorded, not discovered later.
 ///
+/// **CPE-1870 checked whether it could be closed cheaply, and the answer is no.** A route that copies
+/// with `CopyFileExW` into a claimed sibling and then places the result onto the target does carry the
+/// streams — measured, all three rows return to `fs::copy`'s behaviour exactly, including a plain
+/// source *removing* an existing destination's `Zone.Identifier`. It is rejected anyway, on what the
+/// placement step costs: a `rename` silently reduces the destination's explicit ACL to the parent
+/// directory's inherited set, and `ReplaceFileW`, which preserves it, costs 7.5 ms per small file
+/// against this function's 0.39 ms. Both measurements are in the speed section below. **So the
+/// alternate-data-stream regression stands, and it now stands on numbers rather than on reasoning.**
+///
 /// Unix is unaffected on every row — `fs::copy` there carries neither times nor streams (there are none),
 /// only the mode, which `set_permissions` carries here as well.
 ///
-/// # Speed: a 9x-29x wall-clock regression on Windows, and it is NOT the guards
+/// # Speed: measured twice, and the second measurement did not agree with the first (CPE-1870)
 ///
-/// **Recorded because CPE-1846 shipped without measuring it and the Security Auditor did.** Release
-/// build, Windows/NTFS, no racers:
+/// **CPE-1846 shipped without measuring time; its Security Auditor did, and recorded a 9.2x/29x
+/// wall-clock regression. CPE-1870 re-measured before changing anything and could NOT reproduce it —
+/// on the same machine, the same NTFS volume, the same release profile, with Defender real-time
+/// protection on.** Both records are kept here, because a number that could not be reproduced is a
+/// fact about the measurement and the next person deserves to know which one to trust.
 ///
-/// ```text
-/// shape                               fs::copy    this fn     factor
-/// 3,000 x 19-byte files                1,485 ms   13,678 ms    9.2x   (0.5 ms -> 4.6 ms per file)
-/// 500 x 256 KiB  (128 MB total)          329 ms    9,628 ms     29x   (389 MB/s -> 13 MB/s)
-/// ```
+/// CPE-1846's Auditor recorded 3,000 x 19 bytes at 1,485 ms -> 13,678 ms (9.2x) and 500 x 256 KiB at
+/// 329 ms -> 9,628 ms (29x). Its `fs::copy` baselines reproduce almost exactly; the figures for THIS
+/// function do not, by an order of magnitude. See `COPY_CHUNK`'s table for the re-measurement (not an
+/// intra-doc link, for the reason given below), taken
+/// by the committed `cpe_1870_copy_cost_by_shape` so anyone can re-take it: before this change,
+/// **1.45x-1.68x**; after it, **1.05x-1.29x**.
 ///
-/// A ~2 GB checkpoint revert therefore moves from roughly 5 s to roughly 2.5 minutes. That is squarely
-/// against PURPOSE.md's fast/small/predictable tiebreaker, and it is stated here rather than left for a
-/// user to discover.
+/// The unreproduced factor of ten is recorded rather than explained away. The likeliest cause is that
+/// the original was measured on a machine running a sprint's worth of concurrent builds — a
+/// measurement of the machine, not of this function — and it cannot be re-tested because that load no
+/// longer exists. What survives from that record is the part that did reproduce and did matter: this
+/// function was slower than `fs::copy` per file, and nobody had measured it.
 ///
-/// **The guards are not the cost.** Six variants were bisected and a bare `File::create` + `write_all`
-/// with *zero* guards costs the same as this function. The whole regression is inherent to leaving
-/// `CopyFileExW` for a user-mode handle write, and is consistent with Defender scanning each file on
-/// close — i.e. it is per-file fixed cost, not per-byte.
+/// **The measurement itself had to be fixed first, and that is worth carrying.** The obvious harness
+/// writes the *same* payload into every file. An antivirus caches its verdict by content hash, so 3,000
+/// identical files are one scan and 2,999 cache hits, and the per-file cost being measured disappears.
+/// Every figure above uses unique pseudorandom content per file, regenerated for every pass.
+///
+/// **The guards are not the cost, and neither is `CopyFileExW`.** CPE-1846's Auditor bisected six
+/// variants and found a bare `File::create` + `write_all` with *zero* guards as slow as this function,
+/// and concluded the cost was inherent to leaving the kernel copy path. The first half is confirmed
+/// here; the conclusion is not. What was actually costing per file was the copy buffer:
+/// `stream_bytes` allocated a flat 1 MiB for every call, so a 19-byte file paid for a 1 MiB
+/// allocation. Sizing the buffer to the source (CPE-1870) recovers the whole small-file gap without
+/// touching one line of the security mechanism.
 ///
 /// **Why `COPY_CHUNK`'s existing benchmark did not catch it, which is the transferable lesson.** (Not an
 /// intra-doc link on purpose: that constant is `cfg`'d out on Linux, so linking it would be a broken
 /// rustdoc link on exactly the platform CI lints hardest.) That
 /// benchmark moves **one 200 MB file** and reports 2,101 MB/s for the streamed path — 66% of
-/// `CopyFileExW`. It amortises a single open/close/scan over 200 MB. A restore is the opposite shape:
-/// **many files**, where that fixed cost is the entire bill. CPE-1846 reused the benchmark's conclusion
-/// for a shape it does not cover. Do not cite `COPY_CHUNK`'s figures for a many-file caller; measure the
-/// caller's own shape.
+/// `CopyFileExW`. It amortises a single open/close/scan **and a single 1 MiB allocation** over 200 MB. A
+/// restore is the opposite shape: **many files**, where that fixed cost is the entire bill. CPE-1846
+/// reused the benchmark's conclusion for a shape it does not cover. Do not cite `COPY_CHUNK`'s figures
+/// for a many-file caller; measure the caller's own shape.
 ///
-/// Closing it means getting `CopyFileExW`'s throughput without its "resolve the destination by path"
-/// semantics — a real piece of work with its own trade-offs, so it is **CPE-1870** rather than a tweak
-/// here. The security property this function exists for is not negotiable against it: the baseline it
-/// replaced was measured putting **63** checkpoint payloads on files outside the reverted tree across
-/// 10 rounds, with the revert reporting complete success. Speed is the thing to buy back; the
-/// path-resolving write is not.
+/// # What CPE-1870 tried and rejected, so it is not re-tried blind
+///
+/// The proposed fix was to get `CopyFileExW`'s throughput back by copying into a `create_new`-claimed
+/// **sibling** name and then placing it onto the target. It was built and measured, and it loses:
+///
+/// ```text
+/// route                                     3,000 x 19 B overwrite   what it costs
+/// this function (sized buffer)                 0.306 ms/file          —
+/// sibling + CopyFileExW + rename               0.529 ms/file          DESTROYS the destination's ACL
+/// sibling + CopyFileExW + ReplaceFileW         7.476 ms/file          16x slower than doing nothing
+/// ```
+///
+/// - **`rename` onto the target does not follow a link** (verified: the victim was untouched and the
+///   link was replaced), and it would even close the hard-link write-through this function still has.
+///   But it replaces the *file object*, and an `icacls` before/after shows an explicit ACE on the
+///   destination (`BUILTIN\Guests:(R)`) silently reduced to the parent directory's inherited set. A
+///   restore that quietly widens a deliberately restricted file's permissions is a worse bug than the
+///   one it was buying speed for.
+/// - **`ReplaceFileW`** preserves the destination's ACL, creation time and object id, and refuses a
+///   symlink target outright — and costs 7.5 ms per small file. It is not payable.
+/// - Confining the staged route to **fresh names only** (no destination metadata to lose) measured
+///   *slower* than this function on both small shapes and only won above ~1 MiB.
+///
+/// The security property this function exists for is not negotiable against speed in any case: the
+/// baseline it replaced was measured putting **63** checkpoint payloads on files outside the reverted
+/// tree across 10 rounds, with the revert reporting complete success.
 ///
 /// # Creation mode, and why it is deliberately *not* narrowed
 ///
@@ -1229,7 +1315,10 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
     // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
     // A partial destination is left behind on a mid-copy error, exactly as `fs::copy` leaves one.
     w.set_len(0).map_err(|e| format!("{}: could not truncate the destination: {e}", dst.display()))?;
-    let copied = stream_bytes(&mut r, &mut w).map_err(|e| format!("{}: {e}", dst.display()))?;
+    // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
+    // the copy buffer, but taking it from the handle keeps this function free of a second path question.
+    let copied =
+        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
     w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
     carry_file_times(&meta, &w);
@@ -7783,6 +7872,169 @@ mod tests {
         let fresh = d.path().join("fresh.txt");
         copy_file_onto_no_follow(&blob, &fresh).expect("a free name must also be writable");
         assert_eq!(std::fs::read(&fresh).ok().as_deref(), Some(&b"NEW"[..]));
+    }
+
+
+    /// **CPE-1870's measurement, in the tree.** CPE-1846 shipped a copier change without measuring
+    /// wall clock, and its Auditor's number (9.2x/29x) could not be reproduced here — the whole reason
+    /// this lives in the repo rather than in a Work Log is that the next person should be able to
+    /// re-take the measurement instead of arbitrating between two prose accounts of it.
+    ///
+    /// `#[ignore]`d for the usual reason wall-clock tests are: it asserts nothing about time, it only
+    /// prints. Run with
+    /// `cargo test --release -- --ignored --nocapture cpe_1870_copy_cost_by_shape`.
+    ///
+    /// **Two things about the harness matter more than the loop.**
+    ///
+    /// 1. **Every file gets UNIQUE pseudorandom content, regenerated for every pass.** Writing the same
+    ///    payload 3,000 times measures one antivirus scan and 2,999 content-hash cache hits, which is
+    ///    exactly the per-file cost under test. This was not a hypothetical: the first cut of this
+    ///    measurement used a uniform payload and showed the shipped copier at parity with `fs::copy`
+    ///    on the small shape, which it was not.
+    /// 2. **It measures MANY FILES.** `COPY_CHUNK`'s doc benchmark moves one 200 MB file, which
+    ///    amortises a single open, a single close, a single scan and a single 1 MiB allocation over
+    ///    200 MB. A restore is the opposite shape and pays all four per file. Do not answer a
+    ///    many-files question with the one-big-file number.
+    #[test]
+    #[ignore = "CPE-1870 wall-clock measurement: prints, asserts nothing about time"]
+    fn cpe_1870_copy_cost_by_shape() {
+        use std::io::Write as _;
+        // xorshift: unique bytes per file without a dependency, and deterministic per seed.
+        struct Rng(u64);
+        impl Rng {
+            fn fill(&mut self, buf: &mut [u8]) {
+                for c in buf.chunks_mut(8) {
+                    self.0 ^= self.0 << 13;
+                    self.0 ^= self.0 >> 7;
+                    self.0 ^= self.0 << 17;
+                    let v = self.0.to_le_bytes();
+                    let n = c.len();
+                    c.copy_from_slice(&v[..n]);
+                }
+            }
+        }
+
+        let d = scratch("cpe1870_bench");
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        for (label, count, size) in [("3,000 x 19 B", 3000usize, 19usize), ("500 x 256 KiB", 500, 256 * 1024)] {
+            for pre_existing in [false, true] {
+                for (route, f) in [
+                    ("fs::copy      ", 0u8),
+                    ("this function ", 1u8),
+                ] {
+                    let _ = f;
+                    let mut best = u128::MAX;
+                    for _pass in 0..2 {
+                        let src_dir = d.path().join("src");
+                        let dst_dir = d.path().join("dst");
+                        let _ = std::fs::remove_dir_all(&src_dir);
+                        let _ = std::fs::remove_dir_all(&dst_dir);
+                        std::fs::create_dir_all(&src_dir).unwrap();
+                        std::fs::create_dir_all(&dst_dir).unwrap();
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let mut rng = Rng(seed | 1);
+                        let mut payload = vec![0u8; size];
+                        let mut srcs = Vec::with_capacity(count);
+                        let mut dsts = Vec::with_capacity(count);
+                        for i in 0..count {
+                            rng.fill(&mut payload);
+                            let s = src_dir.join(format!("s{i:05}.bin"));
+                            std::fs::write(&s, &payload).unwrap();
+                            let t = dst_dir.join(format!("d{i:05}.bin"));
+                            if pre_existing {
+                                std::fs::write(&t, b"PRE").unwrap();
+                            }
+                            srcs.push(s);
+                            dsts.push(t);
+                        }
+                        let t0 = std::time::Instant::now();
+                        for (s, t) in srcs.iter().zip(dsts.iter()) {
+                            if route.starts_with("fs::copy") {
+                                std::fs::copy(s, t).unwrap();
+                            } else {
+                                copy_file_onto_no_follow(s, t).unwrap();
+                            }
+                        }
+                        best = best.min(t0.elapsed().as_millis());
+                    }
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[CPE-1870] {label:<14} {:<10} {route} {best:>6} ms  {:>7.3} ms/file",
+                        if pre_existing { "overwrite" } else { "fresh" },
+                        best as f64 / count as f64
+                    );
+                }
+            }
+        }
+    }
+
+    /// **CPE-1870: the size hint sizes a buffer and must never bound the copy.** The whole hazard of
+    /// handing [`stream_bytes`] a length is the tempting simplification that follows — "the buffer is
+    /// the file's size, so one `read` is enough" — which is wrong for any source that grows, for a
+    /// filesystem that reports `len() == 0` for readable content (Linux `procfs`), and for any short
+    /// read. The hint is asserted here at its two worst values, **1** and **0**, against a source far
+    /// larger than either.
+    #[test]
+    fn cpe_1870_a_size_hint_shorter_than_the_source_still_copies_every_byte() {
+        let d = scratch("cpe1870_short_hint");
+        // 300 KiB of non-uniform bytes: a repeated byte would let a truncated copy still compare equal
+        // for the prefix and hide a short read behind a length check alone.
+        let payload: Vec<u8> = (0..300 * 1024).map(|i| (i % 251) as u8).collect();
+        let src = d.path().join("src.bin");
+        std::fs::write(&src, &payload).unwrap();
+        assert_eq!(std::fs::metadata(&src).unwrap().len(), payload.len() as u64, "fixture is inert");
+
+        for hint in [1u64, 0] {
+            let dst = d.path().join(format!("dst-{hint}.bin"));
+            let mut r = std::fs::File::open(&src).unwrap();
+            let mut w = std::fs::File::create(&dst).unwrap();
+            let n = stream_bytes(&mut r, &mut w, hint).expect("a short hint must not fail the copy");
+            drop(w);
+            assert_eq!(n, payload.len() as u64, "hint {hint} reported the wrong byte count");
+            assert_eq!(
+                std::fs::read(&dst).unwrap(),
+                payload,
+                "hint {hint}: the destination must hold every source byte, in order"
+            );
+        }
+    }
+
+    /// The other end of the clamp: a source **larger than the ceiling** still arrives whole, so the
+    /// buffer really is a maximum rather than a limit on the copy. Driven end-to-end through
+    /// [`copy_file_onto_no_follow`] rather than through `stream_bytes` directly, so the caller's
+    /// `meta.len()` hint is the one under test.
+    #[test]
+    fn cpe_1870_a_source_larger_than_the_buffer_ceiling_copies_every_byte() {
+        let d = scratch("cpe1870_over_ceiling");
+        // 3 MiB — over any plausible ceiling, and deliberately NOT a multiple of it, so a copy that
+        // stops on a chunk boundary is off by a partial chunk rather than landing exactly.
+        let payload: Vec<u8> = (0..3 * 1024 * 1024 + 777).map(|i| (i % 251) as u8).collect();
+        let src = d.path().join("big.bin");
+        std::fs::write(&src, &payload).unwrap();
+        let dst = d.path().join("out.bin");
+
+        let n = copy_file_onto_no_follow(&src, &dst).expect("a multi-megabyte copy must succeed");
+
+        assert_eq!(n, payload.len() as u64);
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), payload.len() as u64);
+        assert_eq!(std::fs::read(&dst).unwrap(), payload, "every byte, in order");
+    }
+
+    /// An **empty** source is the case the hint's lower clamp exists for, and it has to survive the
+    /// overwrite shape too: restoring a now-empty file over a longer one must leave nothing behind.
+    #[test]
+    fn cpe_1870_an_empty_source_truncates_an_existing_destination_to_nothing() {
+        let d = scratch("cpe1870_empty_src");
+        let src = d.path().join("empty.bin");
+        std::fs::write(&src, b"").unwrap();
+        assert_eq!(std::fs::metadata(&src).unwrap().len(), 0, "fixture is inert: the source must be empty");
+        let dst = d.path().join("live.txt");
+        std::fs::write(&dst, b"OLD CONTENT THAT MUST NOT SURVIVE").unwrap();
+
+        let n = copy_file_onto_no_follow(&src, &dst).expect("copying an empty source must succeed");
+
+        assert_eq!(n, 0);
+        assert_eq!(std::fs::read(&dst).unwrap(), Vec::<u8>::new(), "the old tail must be gone, not merely unread");
     }
 
     /// **PR #968 audit, F3.** The placeholder is deleted by something else and a REAL file is written at

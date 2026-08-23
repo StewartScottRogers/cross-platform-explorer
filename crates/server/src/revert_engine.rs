@@ -2087,4 +2087,401 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&store);
     }
+
+    // ============================================================================================
+    // CPE-1870 — the committed triggered-race harness CPE-1846 acknowledged it owed
+    // ============================================================================================
+    //
+    // CPE-1846 measured this attack with a harness that was never committed, and its own Work Log
+    // records why that is a gap: the auditor "could not verify my self-inflict fix — only my account
+    // of it". Worse, that first uncommitted harness reported **2,681 escapes** which were entirely its
+    // own doing — its per-round setup wrote fixture content with `fs::write`, which *follows* a link
+    // the racer had already planted, so it poisoned its own victims before the code under test ran.
+    //
+    // This one is built so that failure is **structurally impossible**:
+    //
+    //  1. **The racer only ever unlinks and symlinks. It never writes a byte of content.** So no bytes
+    //     the harness itself produced can ever be mistaken for an escape.
+    //  2. **Every victim is asserted byte-pristine immediately before the call**, as a hard panic. A
+    //     victim already damaged by setup fails the run instead of being counted as a finding.
+    //  3. **The racer is armed on an observed effect of the code under test — the first restored byte —
+    //     never on "start".** CPE-1823 planted from the start of the run: the first plant landed before
+    //     the pre-pass had finished judging, the pre-pass refused, the abort was total and *no write
+    //     ever happened*. 23,340 plants against zero writes is a clean-looking zero that proves nothing.
+    //  4. **The denominator is published and asserted.** A run that wrote nothing, or that planted
+    //     nothing live, FAILS — it is not allowed to report "0 escapes". Two false negatives on
+    //     CPE-1823 were exactly "N plants, 0 escapes" with the count of entries actually written left
+    //     out of the record.
+    //  5. **A plant counts only if the name really holds a link naming the victim**, checked with
+    //     `read_link` — structurally, never by reading *through* the link, which would race the very
+    //     write under test and could mis-file a successful escape as "not a live plant".
+    //
+    // `#[ignore]`d, and that is deliberate rather than shyness: it takes tens of seconds, it needs the
+    // symlink privilege, and it is a **probabilistic attack, not a pin**. The deterministic pins for
+    // this property are the `cpe_1846_*` tests; this is the instrument that says how hard they were
+    // pushed. Run it with
+    // `cargo test --release -- --ignored --nocapture cpe_1870_triggered_race`.
+    //
+    // **Its positive control is a manual sabotage, and a zero from it is worthless without one.**
+    // Swap `crate::fsutil::copy_file_onto_no_follow(&blob, &target)` in `apply_write` for
+    // `fs::copy(&blob, &target)` and re-run: the numbers in CPE-1870's Work Log show that turns this
+    // harness's zero into escapes on the same machine, in the same run shape.
+
+    /// Plant a symlink at `at` pointing to `victim`, and report whether the name really holds one.
+    ///
+    /// Removes first, because the point is to replace a name the restore is about to write to. Both
+    /// steps are allowed to fail — the writer may be holding the name at this instant — and a failure
+    /// simply is not counted.
+    fn cpe1870_plant(victim: &Path, at: &Path) -> bool {
+        let _ = fs::remove_file(at);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(victim, at).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(victim, at).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let made = false;
+        made && fs::read_link(at).ok().as_deref() == Some(victim)
+    }
+
+    /// What the race measured. Every field is reported, including the denominators.
+    #[derive(Default, Debug)]
+    struct RaceTally {
+        rounds: u64,
+        live_plants: u64,
+        entries_written: u64,
+        writes_through: u64,
+    }
+
+    /// The racer thread: waits for the first restored byte at `trigger`, then plants links at the
+    /// remaining target names until told to stop. Never writes content.
+    fn cpe1870_spawn_racer(
+        targets: Vec<PathBuf>,
+        victims: Vec<PathBuf>,
+        trigger: PathBuf,
+        restored: Vec<u8>,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::atomic::AtomicU64>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        let stop = Arc::new(AtomicBool::new(false));
+        let plants = Arc::new(AtomicU64::new(0));
+        let (s, p) = (stop.clone(), plants.clone());
+        let handle = std::thread::spawn(move || {
+            // ARM ON AN OBSERVED EFFECT OF THE CODE UNDER TEST. Not a sleep, not "start": the first
+            // restored byte is the signal that the judging pass is over and the write window is open.
+            while !s.load(Ordering::Relaxed) {
+                if fs::read(&trigger).ok().as_deref() == Some(restored.as_slice()) {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            let mut i = 0usize;
+            while !s.load(Ordering::Relaxed) {
+                // Never the trigger name itself (index 0) — poisoning the arming signal would arm the
+                // racer against its own plant rather than against the restore.
+                let at = &targets[1 + (i % (targets.len() - 1))];
+                let victim = &victims[i % victims.len()];
+                if cpe1870_plant(victim, at) {
+                    p.fetch_add(1, Ordering::Relaxed);
+                    // FLICKER, and it is what makes this a measurement rather than a wall. Leaving the
+                    // link in place turns every name hostile, so the restore refuses ~99% of its
+                    // entries and the run reports "0 escapes" against a denominator of a couple of
+                    // hundred writes — a strong-looking attack that mostly never enters the window it
+                    // is aiming at. Withdrawing the link again (an unlink, never a write of content)
+                    // keeps the names writable, so the restore keeps writing, and each plant becomes a
+                    // brief hostile pulse exactly where the check-then-write window is. It only ever
+                    // removes a name it has just confirmed holds its OWN link, so a legitimately
+                    // restored file is never deleted out from under the denominator.
+                    if fs::symlink_metadata(at).is_ok_and(|m| m.file_type().is_symlink()) {
+                        let _ = fs::remove_file(at);
+                    }
+                }
+                i += 1;
+            }
+        });
+        (stop, plants, handle)
+    }
+
+    /// Assert every victim still holds exactly `pristine`, and return how many did not. Called
+    /// immediately BEFORE the run (where any failure means the fixture poisoned itself, a hard panic)
+    /// and again after (where a difference is the finding).
+    fn cpe1870_victims_intact(victims: &[PathBuf], pristine: &[u8], before: bool) -> u64 {
+        let mut damaged = 0;
+        for v in victims {
+            let now = fs::read(v).unwrap_or_default();
+            if now != pristine {
+                assert!(
+                    !before,
+                    "FIXTURE POISONED: {} was already not pristine before the restore ran — the \
+                     harness damaged its own victim and any 'escape' it reports would be its own \
+                     (this is the CPE-1846 2,681-false-escape shape)",
+                    v.display()
+                );
+                damaged += 1;
+            }
+        }
+        damaged
+    }
+
+    /// Stage `count` victims OUTSIDE the restored tree with `create_new`, so staging itself can never
+    /// follow a link the racer left behind.
+    fn cpe1870_victims(outside: &Path, count: usize, pristine: &[u8]) -> Vec<PathBuf> {
+        (0..count)
+            .map(|i| {
+                let v = outside.join(format!("victim{i:03}.txt"));
+                let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&v).unwrap();
+                std::io::Write::write_all(&mut f, pristine).unwrap();
+                v
+            })
+            .collect()
+    }
+
+    /// The verdict, with the denominators asserted before the zero is believed.
+    fn cpe1870_verdict(sink: &str, tally: &RaceTally) {
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!(
+                "\n[CPE-1870] {sink}: {} rounds, {} live plants, {} ENTRIES WRITTEN, {} writes through\n",
+                tally.rounds, tally.live_plants, tally.entries_written, tally.writes_through
+            )
+            .as_bytes(),
+        );
+        // THE DENOMINATORS, ASSERTED. A run that planted nothing live, or wrote nothing, has not
+        // exercised the window at all and must not be allowed to report a zero — that is precisely the
+        // shape of both CPE-1823 false negatives.
+        assert!(
+            tally.live_plants > 0,
+            "{sink}: NOT A RESULT — zero live plants, so nothing raced the write window. If this \
+             machine withholds the symlink privilege, this harness cannot measure anything here."
+        );
+        assert!(
+            tally.entries_written > 0,
+            "{sink}: NOT A RESULT — zero entries written, so the restore never entered its write \
+             window and a zero here proves nothing (CPE-1823's own false negative)."
+        );
+        assert_eq!(
+            tally.writes_through, 0,
+            "{sink}: a manifest entry's bytes landed on a file OUTSIDE the restored tree, against {} \
+             entries actually written under {} live plants",
+            tally.entries_written, tally.live_plants
+        );
+    }
+
+    /// The SHIPPING sink — `execute_restore`, reached from `checkpoint_revert` /
+    /// `checkpoint_revert_one`. CPE-1846's own race drove `snapshot_capture::restore`, which has no
+    /// production caller; its auditor's headline finding came from driving this one instead.
+    #[test]
+    #[ignore = "CPE-1870 race harness: tens of seconds, needs the symlink privilege, probabilistic"]
+    fn cpe_1870_triggered_race_against_the_shipping_revert_sink() {
+        use std::sync::atomic::Ordering;
+        const ROUNDS: u64 = 10;
+        const ENTRIES: usize = 3000;
+        const VICTIMS: usize = 64;
+        const PRISTINE: &[u8] = b"PRISTINE";
+        const RESTORED: &[u8] = b"RESTORED CONTENT";
+
+        let mut tally = RaceTally::default();
+        for round in 0..ROUNDS {
+            let root = scratch(&format!("cpe1870-race-revert-root-{round}"));
+            let store = scratch(&format!("cpe1870-race-revert-store-{round}"));
+            let outside = scratch(&format!("cpe1870-race-revert-outside-{round}"));
+
+            let targets: Vec<PathBuf> = (0..ENTRIES).map(|i| root.join(format!("t{i:05}.txt"))).collect();
+            for t in &targets {
+                fs::write(t, RESTORED).unwrap();
+            }
+            let checkpoint = scan_dir(&root.to_string_lossy()).unwrap();
+            let names: Vec<String> = (0..ENTRIES).map(|i| format!("t{i:05}.txt")).collect();
+            let contents: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), RESTORED)).collect();
+            write_blobs(&store, &checkpoint, &contents);
+            for t in &targets {
+                fs::write(t, b"edited").unwrap();
+            }
+            let current = scan_dir(&root.to_string_lossy()).unwrap();
+            let plan = plan_restore(&checkpoint, &current);
+            assert_eq!(plan.len(), ENTRIES, "fixture is inert: the plan must name every entry");
+
+            let victims = cpe1870_victims(&outside, VICTIMS, PRISTINE);
+            cpe1870_victims_intact(&victims, PRISTINE, true);
+
+            let trigger = targets[0].clone();
+            let (stop, plants, handle) =
+                cpe1870_spawn_racer(targets.clone(), victims.clone(), trigger, RESTORED.to_vec());
+
+            let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+            stop.store(true, Ordering::Relaxed);
+            handle.join().unwrap();
+
+            let through = cpe1870_victims_intact(&victims, PRISTINE, false);
+            tally.rounds += 1;
+            tally.live_plants += plants.load(Ordering::Relaxed);
+            tally.entries_written += report.applied as u64;
+            tally.writes_through += through;
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                format!(
+                    "[CPE-1870] execute_restore round {round}: live plants {}, applied {} (skipped {}), \
+                     writes through {through}\n",
+                    plants.load(Ordering::Relaxed),
+                    report.applied,
+                    report.skipped.len()
+                )
+                .as_bytes(),
+            );
+        }
+
+        cpe1870_verdict("execute_restore (the shipping sink)", &tally);
+    }
+
+    /// The other sink, `snapshot_capture::restore`, kept because the shared copier's guard lives in
+    /// both and a change to it has to be shown safe at both.
+    #[test]
+    #[ignore = "CPE-1870 race harness: tens of seconds, needs the symlink privilege, probabilistic"]
+    fn cpe_1870_triggered_race_against_snapshot_restore() {
+        use std::sync::atomic::Ordering;
+        const ROUNDS: u64 = 10;
+        const ENTRIES: usize = 1000;
+        const VICTIMS: usize = 64;
+        const PRISTINE: &[u8] = b"PRISTINE";
+        const RESTORED: &[u8] = b"RESTORED CONTENT";
+
+        let mut tally = RaceTally::default();
+        for round in 0..ROUNDS {
+            let src = scratch(&format!("cpe1870-race-snap-src-{round}"));
+            let store = scratch(&format!("cpe1870-race-snap-store-{round}"));
+            let dest = scratch(&format!("cpe1870-race-snap-dest-{round}"));
+            let outside = scratch(&format!("cpe1870-race-snap-outside-{round}"));
+
+            for i in 0..ENTRIES {
+                fs::write(src.join(format!("t{i:05}.txt")), RESTORED).unwrap();
+            }
+            let out = crate::snapshot_capture::capture(
+                &src.to_string_lossy(),
+                &store.to_string_lossy(),
+                &crate::snapshot::CaptureBudget::default(),
+            )
+            .expect("capture must succeed");
+
+            let targets: Vec<PathBuf> = (0..ENTRIES).map(|i| dest.join(format!("t{i:05}.txt"))).collect();
+            for t in &targets {
+                fs::write(t, b"edited").unwrap();
+            }
+            let victims = cpe1870_victims(&outside, VICTIMS, PRISTINE);
+            cpe1870_victims_intact(&victims, PRISTINE, true);
+
+            let trigger = targets[0].clone();
+            let (stop, plants, handle) =
+                cpe1870_spawn_racer(targets.clone(), victims.clone(), trigger, RESTORED.to_vec());
+
+            let outcome = crate::snapshot_capture::restore(
+                &store.to_string_lossy(),
+                &out.manifest_id,
+                &dest.to_string_lossy(),
+            );
+
+            stop.store(true, Ordering::Relaxed);
+            handle.join().unwrap();
+
+            // The denominator for THIS sink cannot come from a report — `restore` returns
+            // `Result<(), String>`. It is counted off the filesystem: names that are still ordinary
+            // files (not the racer's links) holding the restored bytes.
+            let written = targets
+                .iter()
+                .filter(|t| {
+                    fs::symlink_metadata(t).is_ok_and(|m| m.file_type().is_file())
+                        && fs::read(t).ok().as_deref() == Some(RESTORED)
+                })
+                .count() as u64;
+
+            let through = cpe1870_victims_intact(&victims, PRISTINE, false);
+            tally.rounds += 1;
+            tally.live_plants += plants.load(Ordering::Relaxed);
+            tally.entries_written += written;
+            tally.writes_through += through;
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                format!(
+                    "[CPE-1870] snapshot restore round {round}: live plants {}, entries written \
+                     {written}, writes through {through} (outcome {})\n",
+                    plants.load(Ordering::Relaxed),
+                    if outcome.is_ok() { "Ok" } else { "Err" }
+                )
+                .as_bytes(),
+            );
+        }
+
+        cpe1870_verdict("snapshot_capture::restore", &tally);
+    }
+
+    /// **Handle pinning, re-proved for CPE-1870 rather than inherited from CPE-1846's account of it.**
+    /// A link is planted at the destination name *strictly after* the copier has opened it, while a
+    /// large blob is still streaming through the handle. Nothing after the open re-opens by path, so
+    /// the bytes must land in the pinned object and the victim must be untouched.
+    #[test]
+    #[ignore = "CPE-1870 race harness: needs the symlink privilege, probabilistic"]
+    fn cpe_1870_a_link_planted_after_the_open_cannot_redirect_the_copy() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        const VICTIM: &[u8] = b"SAFE!!";
+        let d = scratch("cpe1870-postopen");
+        let outside = scratch("cpe1870-postopen-outside");
+        let blob = d.join("blob.bin");
+        fs::write(&blob, vec![b'B'; 64 * 1024 * 1024]).unwrap();
+        let victim = outside.join("victim.txt");
+        {
+            let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&victim).unwrap();
+            std::io::Write::write_all(&mut f, VICTIM).unwrap();
+        }
+        let dst = d.join("target.bin");
+        fs::write(&dst, b"OLD").unwrap();
+
+        // The plant starts only once the copy is demonstrably under way: the destination's length has
+        // grown past the old content, which can only happen after the open and after the first write.
+        let stop = Arc::new(AtomicBool::new(false));
+        let plants = Arc::new(AtomicU64::new(0));
+        let (s, p, dc, vc) = (stop.clone(), plants.clone(), dst.clone(), victim.clone());
+        let racer = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                if fs::metadata(&dc).map(|m| m.len()).unwrap_or(0) > 4 * 1024 * 1024 {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            while !s.load(Ordering::Relaxed) {
+                if cpe1870_plant(&vc, &dc) {
+                    p.fetch_add(1, Ordering::Relaxed);
+                }
+                i_yield();
+            }
+        });
+
+        let outcome = crate::fsutil::copy_file_onto_no_follow(&blob, &dst);
+        stop.store(true, Ordering::Relaxed);
+        racer.join().unwrap();
+
+        let landed = plants.load(Ordering::Relaxed);
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!("[CPE-1870] post-open plants: {landed}, copy returned {outcome:?}\n").as_bytes(),
+        );
+        assert!(
+            landed > 0,
+            "NOT A RESULT — no link was planted after the open, so nothing tested handle pinning"
+        );
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(VICTIM),
+            "HARM: a link planted AFTER the open redirected the copy onto a file outside the tree — \
+             the write re-resolved the destination by path"
+        );
+        assert_eq!(outcome, Ok(64 * 1024 * 1024), "the copy must complete into the pinned object");
+    }
+
+    fn i_yield() {
+        std::thread::yield_now();
+    }
 }
