@@ -146,12 +146,44 @@ cargo test --lib --features index                               2415 passed; 0 f
 cargo clippy --all-targets --features specta -- -D warnings      clean, 0 warnings (bindings-codegen mode; no
                                                                   specta::Type struct was touched, so no
                                                                   regen was needed)
+
+# src-tauri (its own test caught a latent bug my fix exposed — see the entry below)
+cargo clippy --all-targets -- -D warnings   (src-tauri)          clean, 0 warnings
+cargo test --lib                            (src-tauri)          214 passed; 0 failed
 ```
 
 CPE-1871's just-merged byte-cap pin test
 (`snapshot_prune::tests::cpe_1871_an_undeletable_blobs_freed_bytes_still_count_as_progress`) passes
 unmodified — this change never touches `snapshot_prune.rs`'s `apply`, only its caller in
 `checkpoint_store.rs`.
+
+### 2026-08-23 — CI (`Backend`, all three OSes) caught a pre-existing latent test bug my fix exposed
+
+`src-tauri/src/lib.rs`'s
+`tests::snapshot_schedule_tick_captures_a_due_enabled_root_then_holds_off_within_interval` failed on all
+three `Backend` OS legs after the first push: `assertion left == right failed: interval elapsed ⇒ second
+capture / left: 1 / right: 2`.
+
+Root cause, traced rather than patched over: `snapshot_run_due` retention-prunes after every scheduled
+capture using each manifest's **real** `created_ms` (`SystemTime::now()`), but this test injects a **fake**
+`now` (1000s, then 5000s) only for the due/hold-off scheduling clock — the two clocks were never the same
+clock. Both real captures in the test happen milliseconds apart in wall-clock time, so under
+`RetentionPolicy::default()` (`hourly: 24`) they always collided into the *same* real hourly bucket, and
+the second scheduled prune genuinely thinned them to one survivor on disk — even though the test's fake
+clock says they're 4000s (more than an hour) apart. Before this ticket's fix, `checkpoint_list` was blind
+to that: it just echoed `checkpoints.json`'s raw append count (2), so the test's `== 2` assertion passed by
+coincidence, never having actually verified two *restorable* checkpoints existed. That is CPE-1862's bug,
+caught in the wild by CI the moment `checkpoint_list` started telling the truth.
+
+Fixed the test, not routed around: after tick 1's capture, its manifest's `created_ms` is hand-edited to
+match the tick's own injected `now` (mirroring the `set_manifest_created_ms` pattern already used in
+`checkpoint_store.rs`'s own tests), via a small `find_manifest` helper that locates the file by name under
+the `HeadlessCtx`'s app-data dir (`checkpoint_store::store_dir_for`'s hashing is private to that module,
+so a src-tauri test can't recompute the path directly). That makes the fake scheduling clock and the real
+retention clock agree — as they would in the actual running app — so the two captures land in genuinely
+different hourly buckets (0 and 1) and both legitimately survive, restoring the test's original assertion
+value as a fact instead of an accident. Verified: `cargo test --lib` in `src-tauri` — 214 passed, 0 failed;
+`cargo clippy --all-targets -- -D warnings` — clean.
 
 **Assumptions logged:**
 - CI's "both feature modes" for `crates/server` are `default` and `--features index` (per

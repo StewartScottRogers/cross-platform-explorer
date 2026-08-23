@@ -14347,6 +14347,37 @@ mod tests {
     /// The enable→due→capture path: an enabled, never-run rule is due immediately, so the first tick
     /// captures it and records its run time; a second tick within the interval then captures nothing
     /// (the recorded last-run holds it off) — proving the timer doesn't re-capture every wake.
+    /// Locate a checkpoint-store manifest file named `<id>.json` somewhere under `app` (the
+    /// [`HeadlessCtx`]'s app-data dir). `checkpoint_store`'s per-root hashing (`root_key`) is private to
+    /// that module, so a src-tauri test can't recompute the store path directly — this finds it
+    /// structurally instead, exactly the way a human hunting for the file by name would.
+    fn find_manifest(app: &Path, id: &str) -> PathBuf {
+        fn walk(dir: &Path, name: &str) -> Option<PathBuf> {
+            for entry in fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(&path, name) {
+                        return Some(found);
+                    }
+                } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        walk(app, &format!("{id}.json")).unwrap_or_else(|| panic!("manifest {id}.json not found under {app:?}"))
+    }
+
+    /// Hand-edit a manifest's `created_ms` in place, reading it back so a tamper that never landed can't
+    /// be mistaken for one that did. Same pattern `crates/server`'s own retention tests use.
+    fn set_manifest_created_ms(path: &Path, epoch_s: u64) {
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        doc["created_ms"] = serde_json::json!(epoch_s * 1000);
+        fs::write(path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(back["created_ms"], serde_json::json!(epoch_s * 1000), "LIVE: created_ms tamper never landed");
+    }
+
     #[test]
     fn snapshot_schedule_tick_captures_a_due_enabled_root_then_holds_off_within_interval() {
         let app = sched_scratch("capture-app");
@@ -14365,6 +14396,18 @@ mod tests {
         assert_eq!(last_run.get(&root_s), Some(&1_000));
         assert_eq!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().len(), 1, "one scheduled capture landed");
 
+        // CPE-1862: `snapshot_run_due` retention-prunes after every scheduled capture, using each
+        // manifest's REAL `created_ms` (`SystemTime::now()`) — not the fake `now` this test injects for
+        // the due/hold-off clock. Left alone, both this capture and tick 3's would land seconds apart in
+        // the *same* real hourly bucket, so the default policy (`hourly: 24`) would genuinely thin them
+        // to one survivor regardless of the 4000s the injected clock says separates them, and
+        // `checkpoint_list` (now correctly reconciled) would report that true count — 1, not 2. Pinning
+        // the first manifest's `created_ms` to the injected tick-1 time makes the two clocks agree, the
+        // way they would in the real app, so this test is back to exercising only what it's named for:
+        // the due/hold-off timer logic, not an accidental race with the OS clock.
+        let id1 = checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap()[0].manifest_id.clone();
+        set_manifest_created_ms(&find_manifest(&app, &id1), 1_000);
+
         // Tick 2: still inside the 3600s interval ⇒ not due ⇒ no second capture.
         assert!(snapshot_schedule_tick(&ctx, 2_000, &mut last_run).is_empty(), "within interval ⇒ no re-capture");
         assert_eq!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().len(), 1, "still just the one capture");
@@ -14373,6 +14416,9 @@ mod tests {
         let captured3 = snapshot_schedule_tick(&ctx, 5_000, &mut last_run);
         assert_eq!(captured3, vec![root_s.clone()]);
         assert_eq!(last_run.get(&root_s), Some(&5_000));
+        // 1000s and 5000s are >1 hour apart (buckets 0 and 1), so both genuinely survive `hourly: 24` —
+        // and this count is now trustworthy (CPE-1862): it reflects what's actually on disk, not a raw,
+        // unreconciled append count.
         assert_eq!(checkpoint_store::checkpoint_list(&ctx, &root_s).unwrap().len(), 2, "interval elapsed ⇒ second capture");
 
         let _ = fs::remove_dir_all(&app);
