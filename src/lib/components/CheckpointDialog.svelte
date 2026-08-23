@@ -171,8 +171,10 @@
         ? unwrap(await commands.checkpointRevertOne(path.trim(), cp.manifest_id, revertOnePath.trim()))
         : unwrap(await commands.checkpointRevert(path.trim(), cp.manifest_id));
       // CPE-1845: the note is the same one-statement-plus-a-count the panel shows, so the two never
-      // disagree — and it no longer calls a deliberate hold-back "skipped" alongside real failures.
-      note = summarizeRevert(outcome).headline;
+      // disagree — and it no longer calls a deliberate hold-back "skipped" alongside real failures. It
+      // keeps the leading verb because it renders at the TOP of the dialog, in the slot shared with
+      // "Checkpoint … captured", detached from the panel that says what it is about.
+      note = `Revert — ${summarizeRevert(outcome).headline[0].toLowerCase()}${summarizeRevert(outcome).headline.slice(1)}`;
       dispatch("reverted");
     } catch (e) { error = String(e); } finally { loading = false; }
   }
@@ -310,7 +312,7 @@
 
     {#if outcome}
       <div class="outcome" data-testid="outcome-panel">
-        <RevertOutcomePanel {outcome} testid="outcome" />
+        <RevertOutcomePanel {outcome} testid="outcome" verb="Reverted" />
       </div>
     {/if}
 

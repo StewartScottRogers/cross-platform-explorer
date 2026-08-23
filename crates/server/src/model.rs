@@ -124,6 +124,38 @@ impl OpOutcome {
     }
 }
 
+/// The subset of [`OpOutcome`] that means "deliberately not attempted" — the only thing
+/// [`OpResult::held_back`] accepts.
+///
+/// This is a type rather than a `debug_assert!` because a `debug_assert!` is compiled out of release
+/// (review round 2): `held_back(p, OpOutcome::Applied, …)` would have SHIPPED `ok: false` alongside
+/// `outcome: Applied`, with the derivation test passing in CI and the inconsistency reaching users. Now
+/// it does not compile.
+///
+/// Deliberately NOT serialised and NOT a `specta::Type`: it is a constructor parameter, and adding a
+/// second enum to the wire for something the wire never carries would be noise in `bindings.gen.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldBackOutcome {
+    /// Retryable — see [`OpOutcome::SkippedByPlan`].
+    SkippedByPlan,
+    /// Not retryable on this platform — see [`OpOutcome::HeldBackByCheckpoint`].
+    HeldBackByCheckpoint,
+}
+
+impl HeldBackOutcome {
+    /// Widen to the wire enum. Total and infallible in this direction, which is the whole point.
+    pub fn as_outcome(self) -> OpOutcome {
+        match self {
+            HeldBackOutcome::SkippedByPlan => OpOutcome::SkippedByPlan,
+            HeldBackOutcome::HeldBackByCheckpoint => OpOutcome::HeldBackByCheckpoint,
+        }
+    }
+    /// Mirrors [`OpOutcome::retryable`] without the widening round trip.
+    pub fn retryable(self) -> bool {
+        self.as_outcome().retryable()
+    }
+}
+
 /// Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not
 /// abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
 /// which one failed.
@@ -160,13 +192,12 @@ impl OpResult {
     /// A deliberate hold-back: not attempted, and **not** a failure. `error` carries only what is
     /// specific to *this* path (often empty) — the shared explanation is stated once by the caller's
     /// summary rather than copied per path, which is what CPE-1847 measured at ~185 KB for 500 deletes.
-    pub fn held_back(path: &str, outcome: OpOutcome, detail: impl Into<String>) -> Self {
-        debug_assert!(outcome.is_held_back(), "held_back built with a non-hold-back outcome");
+    pub fn held_back(path: &str, outcome: HeldBackOutcome, detail: impl Into<String>) -> Self {
         Self {
             path: path.to_string(),
             ok: false,
             error: detail.into(),
-            outcome,
+            outcome: outcome.as_outcome(),
         }
     }
 }
@@ -584,11 +615,11 @@ mod tests {
             (OpResult::ok(Path::new("/x")), OpOutcome::Applied),
             (OpResult::err(Path::new("/x"), "e"), OpOutcome::Failed),
             (
-                OpResult::held_back("/x", OpOutcome::SkippedByPlan, ""),
+                OpResult::held_back("/x", HeldBackOutcome::SkippedByPlan, ""),
                 OpOutcome::SkippedByPlan,
             ),
             (
-                OpResult::held_back("/x", OpOutcome::HeldBackByCheckpoint, ""),
+                OpResult::held_back("/x", HeldBackOutcome::HeldBackByCheckpoint, ""),
                 OpOutcome::HeldBackByCheckpoint,
             ),
         ] {

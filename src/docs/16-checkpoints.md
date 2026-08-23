@@ -47,8 +47,9 @@ Two ways to revert, both from the checkpoint's row in the list:
 Both are destructive — files are overwritten or deleted on disk directly, not moved to the Recycle Bin —
 so both arm a confirmation panel first, restating what will happen. Nothing reverts on a single click.
 After a revert, the dialog reports how many changes were applied, how many failed (e.g. a locked or
-missing file), and how many deletions were held back — three separate counts, because a hold-back is the
-safety net working rather than a problem. Neither a failure nor a hold-back stops the rest of the revert.
+missing file), and how many deletions were held back — up to three separate counts, since a count of zero
+is left out. Held back is kept apart from failed because a hold-back is the safety net working rather than
+a problem. Neither a failure nor a hold-back stops the rest of the revert.
 
 ### When a revert holds its deletions back
 
@@ -66,9 +67,9 @@ honest about whether trying again helps:
 - Where the cause is temporary — a locked file, or stored content that has gone missing — it says to fix
   that and run the revert again, and the held-back cleanups then apply.
 - Where the cause is the checkpoint itself, **running it again will not help on this computer**, and the
-  screen says so instead of sending you round the same loop. It offers what you can actually do: the
-  restorable half has already been restored, so delete the leftover files yourself, or finish the revert
-  on the system the checkpoint was captured on.
+  screen says so instead of sending you round the same loop, then tells you what to do about that
+  particular cause. The advice is not the same for all of them — for one of the cases below, deleting the
+  files would be exactly the wrong move — so read what the screen says rather than assuming.
 
 The cases you may meet:
 
@@ -81,8 +82,15 @@ The cases you may meet:
   with a name Windows reserves). Everything restorable still restores; deletions wait, because a name
   spelled differently here might be the very file about to be removed. This one is also permanent on this
   computer — the name is stored in the checkpoint and this filesystem cannot write it.
+- **A file this computer resolves to one the checkpoint already holds**, under a different spelling —
+  `Report.txt` and `report.txt` on a drive that treats upper and lower case as the same name, or two
+  routes to one file through a folder shortcut. Deleting it would destroy the checkpoint's own content,
+  so it is held back. **Do not delete these**: they already are what the revert was trying to restore, and
+  there is nothing left to do.
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
-  temporary case: run the revert again once that is fixed and the held-back cleanups apply.
+  temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
+  revert also hit one of the permanent cases above, running it again clears only the temporary half — the
+  screen says which situation you are in.
 
 A checkpoint whose stored file list contradicts its own recorded file count is refused outright, on every
 route — preview, compare and both revert commands — rather than quietly acted on as a smaller tree.

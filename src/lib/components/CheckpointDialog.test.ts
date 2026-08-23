@@ -413,6 +413,65 @@ describe("CheckpointDialog (CPE-1125)", () => {
       expect(panel.textContent?.toLowerCase()).not.toContain("re-run after fixing");
     });
 
+    it("escapes the bidi/format characters a failure reason carries from a filename", async () => {
+      // `apply_delete`/`apply_write` format their reason as `"{target}: {os error}"`, so a
+      // user-controlled FILENAME rides inside `f.error`. It was rendered raw while `f.path` beside it
+      // went through displaySafePath (CPE-1845 UAT). U+202E flips the text that follows it.
+      const panel = await revertWith({
+        applied: 0,
+        skipped: [
+          {
+            path: "C:/w/invoice‮gnp.exe",
+            ok: false,
+            error: "C:/w/invoice‮gnp.exe: Access is denied. (os error 5)",
+            outcome: "failed",
+          },
+        ],
+        held_back: null,
+      });
+      const text = panel.textContent ?? "";
+      expect(text).not.toContain("‮");
+      // Escaped to its bracketed tag, the same treatment the adjacent path already got.
+      expect(text).toContain("[RLO]");
+    });
+
+    it("names the checkpoint entry a collided path belongs to, per path", async () => {
+      const panel = await revertWith({
+        applied: 0,
+        skipped: [
+          {
+            path: "A.txt",
+            ok: false,
+            error: 'same file as checkpoint entry "a.txt"',
+            outcome: "held_back_by_checkpoint",
+          },
+        ],
+        held_back: {
+          outcome: "held_back_by_checkpoint",
+          count: 1,
+          reason: "THE-ONE-REASON these paths resolve to the same files",
+          next_step: "THE-NEXT-STEP nothing needs doing",
+          retryable: false,
+        },
+      });
+      expect(panel.textContent).toContain('same file as checkpoint entry "a.txt"');
+    });
+
+    it("keeps the leading verb on the note at the top of the dialog, which is detached from the panel", async () => {
+      await revertWith(HELD);
+      // `note` renders in the shared slot with "Checkpoint … captured", so a bare "Applied 1 change"
+      // does not say what was applied.
+      expect(await screen.findByText(/^Revert — applied 1 change/)).toBeTruthy();
+    });
+
+    it("REGRESSION: a healthy checkpoint renders one line and no hold-back box at all", async () => {
+      const panel = await revertWith({ applied: 2, skipped: [], held_back: null });
+      expect(panel.textContent?.trim()).toBe("Reverted — applied 2 changes.");
+      expect(screen.queryByTestId("outcome-held-back")).toBeNull();
+      expect(screen.queryByTestId("outcome-held-paths")).toBeNull();
+      expect(screen.queryByTestId("outcome-failures")).toBeNull();
+    });
+
     it("shows a genuine failure separately from a hold-back, in the same result", async () => {
       const panel = await revertWith({
         applied: 0,

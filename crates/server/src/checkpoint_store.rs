@@ -203,7 +203,7 @@ impl RevertOutcome {
                 skipped.push(OpResult::held_back(path, group.outcome, detail.clone()));
             }
             HeldBackSummary {
-                outcome: group.outcome,
+                outcome: group.outcome.as_outcome(),
                 count: group.paths.len() as u32,
                 reason: group.reason,
                 next_step: group.next_step,
@@ -2100,7 +2100,7 @@ mod tests {
     ///
     /// ```text
     /// checkpoint_create        -> Ok, a checkpoint recorded; blobs/<hash> still absent
-    /// checkpoint_revert(it)    -> Ok(applied: 0, skipped: [a.txt: blobs/<hash>: cannot find the file])
+    /// checkpoint_revert(it)    -> Ok(applied: 0, skipped: [a.txt: stored copy (blob <hash>) could not be read])
     /// a.txt still reads "damaged"
     /// ```
     #[test]

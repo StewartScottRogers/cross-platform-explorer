@@ -29,7 +29,15 @@
  */
 import type { RevertOutcome } from "./bindings.gen";
 
-/** How many held-back paths to name before falling back to "+N more". */
+/**
+ * How many held-back paths to name before falling back to "and N more".
+ *
+ * The cap is real: the unrestorable-key case holds back *everything added since the checkpoint*, which
+ * can be thousands of paths. What it costs is recorded honestly rather than pretended away — at scale
+ * the advice ("delete these files yourself") and the list stop agreeing, because the list is truncated
+ * and the full set is visible nowhere else. A copy-the-full-list or reveal-in-the-file-pane affordance
+ * is the fix; it is deliberately not in this change, and is written up in the ticket.
+ */
 export const MAX_LISTED = 8;
 
 export type RevertSummary = {
@@ -47,9 +55,18 @@ export type RevertSummary = {
   nextStep: string;
   /** Whether running the revert again on this machine can perform the held-back deletes. */
   retryable: boolean;
-  /** Up to {@link MAX_LISTED} held-back paths, in plan order. */
-  listed: string[];
-  /** How many held-back paths are not in {@link listed}. */
+  /**
+   * Up to {@link MAX_LISTED} held-back paths, in plan order, each with the detail the backend produced
+   * for *that* path (usually `""` — the shared explanation is {@link RevertSummary.reason}). For the
+   * alias/collision hold-back the detail names the checkpoint entry the path collides with, which the
+   * engine's own comment calls the one thing that genuinely differs per path; dropping it threw away the
+   * single most useful per-path fact. Empty for every high-volume case, so it costs nothing at 200 paths.
+   */
+  listed: { path: string; detail: string }[];
+  /**
+   * How many held-back paths are not in {@link listed}. Never `1`: replacing one name with the line
+   * "and 1 more" is longer than the name it replaced, so the cap stretches by one instead.
+   */
   more: number;
   /** The genuine failures, each with its own (distinct) reason. */
   failures: { path: string; error: string }[];
@@ -66,7 +83,7 @@ export function summarizeRevert(outcome: RevertOutcome): RevertSummary {
     .map((r) => ({ path: r.path, error: r.error }));
   const heldBackPaths = outcome.skipped
     .filter((r) => r.outcome === "skipped_by_plan" || r.outcome === "held_back_by_checkpoint")
-    .map((r) => r.path);
+    .map((r) => ({ path: r.path, detail: r.error }));
 
   const parts = [`Applied ${outcome.applied} ${plural(outcome.applied, "change", "changes")}`];
   if (failures.length) parts.push(`${failures.length} failed`);
@@ -84,8 +101,10 @@ export function summarizeRevert(outcome: RevertOutcome): RevertSummary {
     nextStep: held?.next_step ?? "",
     // No hold-back means nothing is waiting on a re-run; `false` keeps callers from offering one.
     retryable: held?.retryable ?? false,
-    listed: heldBackPaths.slice(0, MAX_LISTED),
-    more: Math.max(0, heldBackPaths.length - MAX_LISTED),
+    // "and 1 more" is a longer line than the name it replaces, so at exactly one over the cap the list
+    // stretches by one rather than truncating.
+    listed: heldBackPaths.slice(0, heldBackPaths.length === MAX_LISTED + 1 ? MAX_LISTED + 1 : MAX_LISTED),
+    more: heldBackPaths.length > MAX_LISTED + 1 ? heldBackPaths.length - MAX_LISTED : 0,
     failures,
   };
 }

@@ -86,14 +86,15 @@ paths still listed in `skipped` (so `skipped.len()` keeps meaning "actions that 
 existing caller) but carrying an empty `error`. Measured on the ticket's own 200-delete shape:
 **60,400 bytes of per-path prose → 0**, one 302-character statement plus `count: 200`.
 
-**The second half — the wording.** The `report.skipped` branch (a locked file, a missing blob) is the
-only transient one and is the only branch that says "run the revert again". The two checkpoint-keyed
-branches — an emptied `files` map (CPE-1847) and a key this platform cannot restore (CPE-1823) — are
-`HeldBackByCheckpoint` and now say plainly that *re-running will not change this on this computer*, then
-offer what actually works: everything restorable has already been restored, so delete the leftovers
-yourself, or finish the revert on the system the capture came from. The round-5 resolution branch is also
+**The second half — the wording.** ~~The `report.skipped` branch (a locked file, a missing blob) is the
+only transient one and is the only branch that says "run the revert again".~~ **That sentence was false
+when written, and the code it described was wrong the same way — corrected in round 2, see below.** What
+stands: the two checkpoint-keyed branches — an emptied `files` map (CPE-1847) and a key this platform
+cannot restore (CPE-1823) — are `HeldBackByCheckpoint` and say plainly that *re-running will not change
+this on this computer*, then offer what actually works. The round-5 resolution branch is also
 `HeldBackByCheckpoint` and says the honest thing for it — nothing needs doing, those files **are** the
-checkpoint's content under another spelling on this volume.
+checkpoint's content under another spelling on this volume, so deleting them would destroy checkpoint
+content.
 
 **Consumer enumeration (AC 5), done before any conversion.** Two searches: `"not deleted"` across
 `crates/` + `src-tauri/`, and every `OpResult` / `RevertOutcome` / `.skipped` reference across Rust, TS
@@ -117,9 +118,11 @@ assert that a **genuine failure's** reason is helpful. They do not decide *what 
 they are not the coupling this ticket removes.
 
 *Frontend:* **zero** message-text matchers existed — the three screens could not distinguish the states at
-all. `folderWatch.ts` and `BackupDashboard.svelte` declare their own structural subsets of `OpResult`
-(`path`/`ok`/`error`) and read `ok` only; unaffected. One type-only fix: a `folderWatch.test.ts` fixture
-literal needed `outcome: "failed"`.
+all. **Three** files declare their own structural subsets of `OpResult` (`path`/`ok`/`error`) and read
+`ok` only, so all three are unaffected: `folderWatch.ts:19`, `BackupDashboard.svelte:15`, and
+`App.svelte:251` (`reportResults` at `:3110` filters on `!r.ok` and branches no further) — the third was
+missing from this list until review round 2 pointed it out. One type-only fix: a `folderWatch.test.ts`
+fixture literal needed `outcome: "failed"`.
 
 **AC 6 — surfacing the reasons: done, and the docs corrected to match.** The docs claim was real:
 CPE-1847's reviewer found `src/docs/16-checkpoints.md` promising "exactly which cleanups did not happen
@@ -197,3 +200,133 @@ reason / next-step / per-failure strings, the same class as most other entries i
 **Not verifiable on this machine, and it is the merge gate:** `Server crates` on **ubuntu and macOS**.
 The converted CPE-1823 assertions sit next to `#[cfg(unix)]` legs, and the new unrestorable-key wording
 leg runs on all three, so both must be green on this head by SHA before merge.
+
+### 2026-08-22 — round 2: the UAT's false sentence, and the Reviewer's blocker (the branch that is not one branch)
+
+The independent UAT PASSED the three single-case panels and the mixed case (it built a real
+`execute_restore` harness and rendered `RevertOutcomePanel` rather than paraphrasing), and the
+independent Reviewer verified every red-proof, the 60,400 figure (302 UTF-8 bytes × 200, derived
+independently), the empty-`error` compatibility question by enumeration, and the bidi guard's
+line-exactness. Both then found real defects. Everything below is in this branch.
+
+**THE BLOCKER, and it was this ticket's own acceptance criterion.** Round 1 labelled *every* hold-back
+derived from a non-empty `report.skipped` as `SkippedByPlan`, `retryable: true`, "…and run the revert
+again". But `report.skipped` is fed by **every** write refusal, and only some are transient. The Reviewer
+measured it through the production `execute_restore` rather than arguing it:
+
+```text
+PROBE skipped=[("a/../evil.txt", "escapes dest_root: `.`/`..` segment")]
+PROBE outcome=SkippedByPlan retryable=true
+      next_step=This one is temporary: … and run the revert again …
+```
+
+`escapes dest_root` (four forms), the Win32-unstable name rule, the resolved-containment failure and the
+Create-premise refusal are verdicts on the checkpoint's **stored spelling** — this platform reaches them
+identically every run. Only an attempt that was made and failed (a locked file, a pruned blob, a
+permission error) is transient.
+
+**Resolved by splitting the branch, not by softening the words.** The answer is now *carried from the
+point of refusal*, where it is known, instead of inferred later from prose or from which branch fired:
+`apply_write`/`apply_delete` return `Result<(), Refused>` where `Refused { reason, permanent }`, built by
+`Refused::transient(..)` / `Refused::permanent(..)` at each site; `execute_restore` accumulates
+`any_permanent_refusal`; the branch reads that flag. Every reason string is byte-identical to before —
+only the classification is new. Site by site: `safe_target` (all four `escapes dest_root` forms, the
+Win32 rule, the containment failure) → permanent; `no checkpoint entry for this path` → permanent;
+`blob_source` (non-hex hash, blob outside the store) → permanent; the Create-premise refusal → permanent;
+`create_dir_all`, `fs::copy`, `remove_file` → transient.
+
+**A test now pins the blocker** (`cpe_1845_a_permanent_write_refusal_is_never_reported_as_retryable`),
+running BOTH legs from the same fixture shape so neither passes by the other's accident, with a liveness
+assertion that the checkpoint-key stand-down above it did **not** arm — the first draft of this test
+passed with the fix disabled precisely because that branch had armed instead.
+
+**And a test that locked the wrong answer in is corrected in place.**
+`cpe_1823_a_case_aliased_entry_never_destroys_the_file_it_resolves_onto` asserted `SkippedByPlan` for an
+`A.txt`/`a.txt` case fold. A case-insensitive volume does not stop folding between runs, so that refusal
+is permanently non-retryable; the assertion now reads `HeldBackByCheckpoint` and carries the reason, so a
+later correct fix cannot read as a regression here. One fixture was wrong for a related reason: the
+retryable leg of the wording test used the blob name `"1845-no-such-blob"`, which is refused by the
+**hex-name rule** (permanent) rather than by the missing file (transient) — now `"1845bbbb"`.
+
+**THE UAT'S MUST-FIX — a false sentence in the mixed case.** With an unrestorable-name checkpoint AND a
+locked file or missing blob in the same run (an ordinary cross-platform backup restored on a machine with
+a file open), the panel printed *"Everything restorable has already been restored"* three lines above two
+entries that had just failed to restore. Not a harmless inaccuracy: it is the **premise** of the next
+clause, so a user who trusts it deletes the leftovers believing the restore half finished. The clause is
+now conditional on `report.skipped.is_empty()`; otherwise it reads *"The restorable half is restored only
+where it could be: check the failures listed above first."* Pinned by
+`cpe_1845_the_completeness_claim_is_absent_when_something_actually_failed`, and the pure case is pinned
+too (the claim must still be present when nothing failed) so the fix cannot degrade into deleting the
+sentence.
+
+**Docs enumerated three hold-back cases and there are four.** The alias/collision hold-back is real,
+permanent, and its advice is the **opposite** — those files *are* the checkpoint's own content, so
+deleting them destroys it. The screen already got this right; only `src/docs/16-checkpoints.md` misled,
+because its blanket permanent paragraph prescribed deletion. Fourth bullet added, and the paragraph no
+longer prescribes: it says the advice differs per cause and to read the screen. Also corrected: "three
+separate counts" → "up to three", since a zero count is omitted.
+
+**Per-failure error strings were rendered raw, in a place they had never been rendered at all.** Two
+problems, both fixed:
+
+- `apply_delete`/`apply_write` format their reason as `"{target}: {os error}"`, so a **user-controlled
+  filename** rides inside `f.error` — the exact bidi/spoof class `displaySafeName` exists for — and the
+  panel rendered it unescaped while the adjacent `f.path` was escaped. Now `displaySafeName(f.error)`,
+  pinned by a component test that plants U+202E and asserts the bracketed `[RLO]` tag appears instead.
+  The `bidiEscape.guard.test.ts` registry comment claiming these were "the same class as most other
+  entries in this table" was wrong and is corrected in place — most entries are counts and labels; this
+  one provably carried a filename.
+- The internal checkpoint-store path was reaching user-facing text. `fs::copy`'s reason now names the
+  blob by its (already hex-validated) **hash**, and `snapshot_capture::blob_source`'s two messages no
+  longer print `blobs_dir`. Asserted in the mixed-case test: no reason may contain `"blobs"`, and it must
+  still say *which* stored copy is missing.
+
+**`ok`/`outcome` consistency is now unrepresentable-if-wrong, not debug-asserted.** `OpResult::held_back`
+took an `OpOutcome` guarded by `debug_assert!` — compiled out of release, so
+`held_back(p, OpOutcome::Applied, …)` would have *shipped* `ok: false` with `outcome: Applied` while CI
+stayed green. It now takes a `HeldBackOutcome` (a two-variant Rust-only enum, deliberately not on the
+wire, with `as_outcome()`), and `HeldBack::outcome` is that narrow type too. **Still open, recorded not
+fixed:** `OpResult`'s fields are `pub` on a `pub` struct, so any crate could build an inconsistent
+literal; the Reviewer grepped `crates/` and `src-tauri/` and found none, and the constructors are the only
+construction path today.
+
+**Smaller items, all done.**
+
+- The per-path detail the engine deliberately produces (`same file as checkpoint entry "a.txt"`) was
+  discarded by `summarizeRevert`, which mapped to `r.path` only — the Reviewer's framing was "either
+  render it or stop claiming it as a design point". It is rendered, after the path, when non-empty; it is
+  empty for every high-volume case so it costs nothing at 200 paths.
+- `"and 1 more"` is a longer line than the name it replaces, so at exactly one over the cap the list
+  stretches by one instead of truncating. Pinned at `MAX_LISTED`, `+1` and `+2`.
+- `CheckpointDialog`'s `note` renders at the TOP of the dialog in the slot shared with "Checkpoint …
+  captured", detached from the panel, so a bare "Applied 2 changes" no longer said what was applied.
+  `RevertOutcomePanel` gained a `verb` prop ("Reverted" / "Undo"); the note reads `Revert — applied 2
+  changes.`
+
+**Recorded, NOT fixed — the cap/advice contradiction at scale.** With 200 held back, the panel says
+"delete these files yourself" and then lists 8 names plus "and 192 more", so the user is told to act on a
+list they cannot see. Survivable for the empty-checkpoint case (the held-back set is the whole folder);
+**not** survivable for the unrestorable-key case, where the set is "everything added since the
+checkpoint" and appears nowhere else. The fix is a copy-the-full-list / reveal-in-the-file-pane
+affordance — a new UI surface rather than a wording change, so out of scope here. Written into
+`MAX_LISTED`'s own doc comment and flagged for the coordinator to file.
+
+**Round-2 red-proofs** (in addition to round 1's five, all of which the Reviewer reproduced verbatim):
+
+| Guard | Line broken | Observed |
+|---|---|---|
+| the permanent/transient split | `revert_engine.rs` `if any_permanent_refusal {` → `if false && any_permanent_refusal {` | `cpe_1845_a_permanent_write_refusal_is_never_reported_as_retryable` red, reproducing the Reviewer's probe: `outcome: SkippedByPlan`, `"could not be restored this time (a/../evil.txt)"`, `"…and run the revert again"` |
+| the conditional completeness claim | `if report.skipped.is_empty() {` → `if true \|\| report.skipped.is_empty() {` | `cpe_1845_the_completeness_claim_is_absent_when_something_actually_failed` red: the UAT's exact false sentence, printed beside two failures |
+| the blob-path suppression | `fs::copy`'s reason reverted to `format!("{}: {e}", blob.display())` | same test red: `a reason shown to the user must not expose the private blob-store layout: gone1.txt: C:\…\blobs\11111111: The system cannot find the file specified. (os error 2)` |
+| the `f.error` escape | `RevertOutcomePanel.svelte` `{displaySafeName(f.error)}` → `{f.error}` | `expected 'Reverted — applied 0 changes, 1 faile…' not to contain '\u202e'` |
+
+**Round-2 gates.** `crates/server`: clippy `--all-targets -- -D warnings` → **0**; `cargo test` →
+**2350 lib** (4 ignored) + `archive_panic_safety` 21 + `binary_data_preview_panic_safety` 22 +
+`checkpoint_roundtrip` 2 + `finder_tags_os_interop` 1 + `native_meta_os_interop` 1 +
+`parser_panic_safety` 45 + `sample_fixtures` 16 + `thumb_svg_panic_safety` 32 + `ticket_mcp` 0 —
+**0 failed**. Round 1 was 2348 lib, so **+2**: the permanent-refusal test and the mixed-case test.
+`src-tauri` both feature modes: clippy **0** / **0**; `cargo test` **214** / **269**, unchanged.
+`npx vitest run` → **4390 passed / 328 files, 0 failed** (round 1: 4384, so **+6** — 2 in
+`revertHoldBack.test.ts`, 4 in `CheckpointDialog.test.ts`). `npm run check` → **0 errors, 0 warnings**.
+`bindings.gen.ts` regenerated with CI's own command: **no diff** — `HeldBackOutcome` is deliberately not a
+`specta::Type`, so the wire is unchanged from round 1.

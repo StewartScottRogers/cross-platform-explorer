@@ -86,12 +86,15 @@ const REGISTRY: Record<string, string[]> = {
   "ConsultedFiles.svelte": ["31:$agentConsulted.length","40:e.count"],
   "SessionHistoryDialog.svelte": ["101:s","109:k","116:error","123:formatDate(e.ts)","124:e.kind","132:filtered.length","132:filtered.length === 1 ? \"\" : \"s\""],
   "IntegrityDialog.svelte": ["84:hasBaseline ? `Baseline: ${baseline.length} files` : \"No baseline stored\"","85:note","90:error","97:report.corrupted.length","98:report.missing.length","99:report.edited.length","100:report.new.length","101:report.intact.length","107:label","107:list.length","115:report.intact.length"],
-  "CheckpointDialog.svelte": ["220:error", "221:note", "236:cp.label || shortId(cp.manifest_id)", "237:fmtTime(cp.ts)", "237:shortId(cp.manifest_id)", "251:$t('ckpt.failedTitle')", "251:cf.reason", "254:$t(\"ckpt.failedTitle\")", "255:cf.operation", "255:fmtTime(cf.ts)", "256:cf.reason", "277:preview.creates", "278:preview.overwrites", "279:preview.deletes", "280:fmtBytes(preview.bytes_written)", "282:preview.drift_count", "291:diffOpenPath === p ? \"Close diff\" : \"Open diff\"", "298:diffError", "322:selected.label || shortId(selected.manifest_id)", "325:selected.label || shortId(selected.manifest_id)"],
+  "CheckpointDialog.svelte": ["222:error", "223:note", "238:cp.label || shortId(cp.manifest_id)", "239:fmtTime(cp.ts)", "239:shortId(cp.manifest_id)", "253:$t('ckpt.failedTitle')", "253:cf.reason", "256:$t(\"ckpt.failedTitle\")", "257:cf.operation", "257:fmtTime(cf.ts)", "258:cf.reason", "279:preview.creates", "280:preview.overwrites", "281:preview.deletes", "282:fmtBytes(preview.bytes_written)", "284:preview.drift_count", "293:diffOpenPath === p ? \"Close diff\" : \"Open diff\"", "300:diffError", "324:selected.label || shortId(selected.manifest_id)", "327:selected.label || shortId(selected.manifest_id)"],
   // CPE-1845 — the shared revert-result panel used by CheckpointDialog, AgentTimeline and
-  // CopilotDialog. Both path renders go through displaySafePath; what remains is UI text this
-  // engine cannot prove safe (a count, plus the backend's own reason / next-step / per-failure
-  // error strings) — the same class as most other entries in this table.
-  "RevertOutcomePanel.svelte": ["25:summary.headline", "29:summary.reason", "30:summary.nextStep", "37:summary.more", "47:f.error"],
+  // CopilotDialog. Every path AND every backend-supplied reason on this page goes through
+  // displaySafePath/displaySafeName, including the per-failure `error` strings: `apply_delete` and
+  // `apply_write` format those as `"{target}: {os error}"`, so a USER-CONTROLLED FILENAME rides inside
+  // them. Review round 2 was right that the earlier note here ("the same class as most other entries")
+  // was wrong — most entries are counts and labels, this one provably carries a filename — so the
+  // strings are escaped and what is left recorded below is a count and a literal.
+  "RevertOutcomePanel.svelte": ["37:headline", "41:summary.reason", "42:summary.nextStep", "51:summary.more"],
   "DiffSideBySide.svelte": ["38:r.left ?? \"\"","39:r.right ?? \"\""],
   "InspectCryptoDialog.svelte": [],
   "BoardView.svelte": ["265:error","278:boardQuery.trim()","283:boardQuery.trim()","297:col","298:list.length","301:showArchived ? \"hide\" : `+${archivedEpicList.length} archived`","311:\"Open \" + e.id + \" — details\"","313:e.id","314:\"Copy \" + e.id","315:copiedId === e.id ? \"✓\" : \"⧉\"","316:e.status","318:e.title","321:bar.state === \"empty\" ? \"No sub-tickets yet\" : bar.state === \"complete\" && p.total === 0 ? \"Epic complete\" : p.done + \" of \" + p.total + \" tickets done\"","328:bar.label","350:col","351:list.length","354:showArchived ? \"hide\" : `+${archived.length} archived`","363:\"Open \" + c.id + \" — details\"","365:c.id","366:\"Copy \" + c.id","367:copiedId === c.id ? \"✓\" : \"⧉\"","368:c.priority","370:c.title","373:c.epic","374:c.sprint","375:t","394:grouped[l].length","394:l","396:error || note || \"\""],
