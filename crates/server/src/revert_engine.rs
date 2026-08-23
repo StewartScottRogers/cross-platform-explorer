@@ -26,15 +26,99 @@ use std::fs;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::model::HeldBackOutcome;
+#[cfg(test)]
+use crate::model::OpOutcome;
 use crate::restore_plan::{RestoreAction, RestoreOp, Snapshot};
 
-/// Outcome of [`execute_restore`]: how many ops applied cleanly, and which were skipped (with why).
+/// Outcome of [`execute_restore`]: how many ops applied cleanly, which genuinely could not be applied,
+/// and — kept structurally apart since CPE-1845 — which deletes were **deliberately held back**.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RestoreReport {
     /// Number of actions that applied successfully.
     pub applied: usize,
-    /// Actions that could not be applied: `(path, reason)`. Never fatal — the rest of the plan still runs.
+    /// Actions that were **attempted and could not be applied**: `(path, reason)`. Never fatal — the
+    /// rest of the plan still runs. These are genuine failures; a deliberate hold-back is **not** here,
+    /// it is in [`RestoreReport::held_back`].
     pub skipped: Vec<(String, String)>,
+    /// Deletes this engine chose not to perform, and why — **one** explanation for the whole group
+    /// (CPE-1845). `None` when nothing was held back.
+    pub held_back: Option<HeldBack>,
+}
+
+/// One stand-down, covering every delete it held back (CPE-1845).
+///
+/// **Why this is a group and not a per-path reason.** The pre-CPE-1845 engine pushed the same paragraph
+/// onto every held-back delete. CPE-1847's audit measured it: 500 held-back deletes emitted 500 copies of
+/// a ~370-character paragraph — roughly **185 KB** in one `RevertOutcome` — and CPE-1823's review measured
+/// the shape that produces it (`applied=1 skipped=201`, 200 of those 201 carrying an identical
+/// paragraph). The reason belongs to the *decision*, which happened once, not to each path it covers.
+///
+/// [`HeldBack::detail`] carries only what genuinely differs per path, and is usually empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldBack {
+    /// Which state this is: [`HeldBackOutcome::SkippedByPlan`] (retryable — fix the blocker, run
+    /// again) or [`HeldBackOutcome::HeldBackByCheckpoint`] (**not** retryable on this platform). The
+    /// narrow enum, so a hold-back carrying `Applied` or `Failed` cannot be built at all.
+    pub outcome: HeldBackOutcome,
+    /// The single explanation, stated **once**. Never copied per path.
+    pub reason: String,
+    /// What the user can actually do — a real next step, or an explicit statement that there is none on
+    /// this platform. For [`OpOutcome::HeldBackByCheckpoint`] this must **not** say "re-run": re-running
+    /// here cannot change the verdict (a capture holding a name this platform cannot write never will).
+    pub next_step: String,
+    /// The held-back paths, in the order the plan reached them, each with the detail specific to that
+    /// path (empty when the group [`reason`](HeldBack::reason) says everything).
+    pub paths: Vec<(String, String)>,
+}
+
+impl HeldBack {
+    fn new(outcome: HeldBackOutcome, reason: String, next_step: &str) -> Self {
+        Self { outcome, reason, next_step: next_step.to_string(), paths: Vec::new() }
+    }
+}
+
+/// One entry's refusal, plus **whether running the revert again on this machine could come out
+/// differently** (CPE-1845, review round 2).
+///
+/// This exists because the first cut of CPE-1845 inferred that answer from *which branch* produced the
+/// hold-back, and got it wrong. `RestoreReport::skipped` is fed by every write refusal, and only some of
+/// them are transient: a locked file and a missing stored blob clear if you fix them, while
+/// `escapes dest_root`, a Win32-unstable name, a containment failure and the Create-premise refusal are
+/// judgements about the checkpoint's own stored spelling that this platform reaches identically every
+/// time. The branch nevertheless labelled the whole group retryable and told the user to run the revert
+/// again — reproduced through the production `execute_restore` with a plan of `Create "a/../evil.txt"`
+/// plus `Delete "added.txt"`:
+///
+/// ```text
+/// PROBE skipped=[("a/../evil.txt", "escapes dest_root: `.`/`..` segment")]
+/// PROBE outcome=SkippedByPlan retryable=true
+///       next_step=This one is temporary: … and run the revert again …
+/// ```
+///
+/// That is this ticket's own acceptance criterion — *it must not say "re-run"* — surviving on a narrower
+/// set of shapes inside the change filed to remove it. So the answer is now **carried from the point of
+/// refusal**, where it is known, instead of inferred later from prose or from which branch fired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// The human reason, unchanged — this is what lands in [`RestoreReport::skipped`].
+    reason: String,
+    /// `true` when this refusal will be reached again, identically, on every re-run here.
+    permanent: bool,
+}
+
+impl Refused {
+    /// An attempt that was made and failed: a locked file, a missing stored blob, a permission error, a
+    /// directory that could not be created. Fix the cause and the same run succeeds.
+    fn transient(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into(), permanent: false }
+    }
+    /// A judgement about the checkpoint's stored content — a path that escapes the root, a name this
+    /// platform cannot address stably, a spelling that resolves onto a file the plan did not account
+    /// for. Nothing about re-running changes a stored spelling.
+    fn permanent(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into(), permanent: true }
+    }
 }
 
 /// Execute `plan` (as produced by [`crate::restore_plan::plan_restore`]) against the real directory
@@ -69,10 +153,17 @@ pub fn execute_restore(
     }
     deletes.sort_by_key(|a| std::cmp::Reverse(segment_depth(&a.path)));
 
+    // Whether ANY refusal so far is one this platform will reach again identically. Tracked here rather
+    // than re-derived from the reason strings later — deriving it from prose is exactly the coupling
+    // this ticket removes, and deriving it from "which branch fired" is what got it wrong first time.
+    let mut any_permanent_refusal = false;
     for action in &writes {
         match apply_write(action, dest_root_path, &blobs_dir, checkpoint) {
             Ok(()) => report.applied += 1,
-            Err(reason) => report.skipped.push((action.path.clone(), reason)),
+            Err(refused) => {
+                any_permanent_refusal |= refused.permanent;
+                report.skipped.push((action.path.clone(), refused.reason));
+            }
         }
     }
 
@@ -94,7 +185,9 @@ pub fn execute_restore(
     // `win32_addresses_a_different_path`, for one).
     //
     // Conservative in the safe direction and reported per path, never silent: the user is told exactly
-    // which cleanups were held back and why, and re-running after fixing the manifest performs them.
+    // which cleanups were held back and why. Whether re-running performs them depends on WHICH hold-back
+    // it is, and since CPE-1845 the two are separate `OpOutcome` variants carrying their own next step —
+    // `SkippedByPlan` says "fix it and run again", `HeldBackByCheckpoint` says re-running cannot help.
     //
     // Three consequences, recorded rather than fixed, so none of them reads later as an engine bug:
     //
@@ -109,13 +202,20 @@ pub fn execute_restore(
     //   transient.** Measured at scale: a checkpoint with one unrestorable key, 200 files added since,
     //   and one restorable entry gives `applied: 1, skipped: 201` with all 200 survivors intact and the
     //   restorable half correct. Re-running changes nothing, because nothing about the checkpoint's
-    //   spelling will change on this platform — which is why this branch's message deliberately does
-    //   **not** say "re-run once that is resolved" the way the `report.skipped` branch below does. The
-    //   `report.skipped` branch is the transient one (a locked file, a missing blob): there a
-    //   500-delete revert with one locked file holds back all 500, and re-running after fixing it does
-    //   perform them. `RevertOutcome::from_report` carries each path and reason, so the UI has what it
-    //   needs — but it can only tell a deliberate hold-back from a failure by string-matching
-    //   `"not deleted:"`, which is a structural gap in `OpResult` and is CPE-1845.
+    //   spelling will change on this platform — which is why this branch is
+    //   [`OpOutcome::HeldBackByCheckpoint`] and offers a next step that is **not** "re-run".
+    //   **CPE-1845 closed the reporting gap this used to carry**: a hold-back and a failure are now
+    //   separate `OpOutcome` variants on a typed field, so a consumer never string-matches
+    //   `"not deleted:"` to tell them apart, and the shared paragraph is stated once in
+    //   [`HeldBack::reason`] instead of copied onto all 200 paths.
+    //
+    //   **Correction, review round 2 — the `report.skipped` branch below is NOT "the transient one",**
+    //   and an earlier revision of this very comment said it was. That branch is fed by *every* write
+    //   refusal, and only an attempt that was made and failed (a locked file, a pruned blob) is
+    //   transient; `escapes dest_root`, the Win32-unstable name rule, the containment failure and the
+    //   Create-premise refusal are all verdicts on the checkpoint's stored spelling and recur forever.
+    //   It therefore splits on [`Refused::permanent`], carried from the point of refusal. The
+    //   500-locked-file example still holds — for the transient half of it.
     // - **Finer granularity is not available *from the spelling*, which is why round 5 stopped asking
     //   the spelling.** Pairing each delete with the write that would have covered it is precisely what
     //   the aliasing case makes invisible — `a.txt ` and `a.txt` look like different paths, which is the
@@ -296,49 +396,115 @@ pub fn execute_restore(
         // signature would, and see the field's own doc for why none of the repo's existing keys is that
         // key.
         //
-        // # Reporting
+        // # Reporting (rewritten by CPE-1845)
         //
-        // Deliberately on the existing `"not deleted:"` reason channel rather than a new one. The UI can
-        // only tell a deliberate hold-back from a failure by matching that prefix, which is the
-        // structural gap CPE-1845 owns; adding a second prefix here would give it two shapes to
-        // reconcile instead of one.
-        Some(format!(
-            "not deleted: this checkpoint records no files at all, so it cannot say that anything is \
-             \"not in the checkpoint\" — and it holds nothing to restore in exchange. An emptied \
-             `files` map and a genuine capture of an empty folder are the same bytes on disk, so this \
-             revert would have deleted {} file{} and restored none. Delete them yourself if that is \
-             what you meant.",
-            deletes.len(),
-            if deletes.len() == 1 { "" } else { "s" }
+        // Was: this paragraph copied onto every held-back delete, on the `"not deleted:"` prose channel,
+        // because that was the only channel there was. Now it is stated **once** in [`HeldBack::reason`]
+        // with [`OpOutcome::HeldBackByCheckpoint`] as the structural flag, so a consumer branches on a
+        // field and 500 deletes cost one paragraph rather than 500 copies of it (~185 KB, CPE-1847).
+        //
+        // Not retryable: the emptiness is a property of the stored checkpoint, and re-running the revert
+        // on this machine reads the same bytes and reaches the same verdict. So the next step is a real
+        // one — do it yourself — not "try again".
+        Some(HeldBack::new(
+            HeldBackOutcome::HeldBackByCheckpoint,
+            format!(
+                "This checkpoint records no files at all, so it cannot say that anything is \"not in \
+                 the checkpoint\" — and it holds nothing to restore in exchange. An emptied `files` map \
+                 and a genuine capture of an empty folder are the same bytes on disk, so this revert \
+                 would have deleted {} file{} and restored none.",
+                deletes.len(),
+                if deletes.len() == 1 { "" } else { "s" }
+            ),
+            "Re-running will not change this — the checkpoint is empty on disk and will read the same \
+             way every time. Delete these files yourself if that is what you meant, or pick a \
+             checkpoint that actually holds the content you want back.",
         ))
     } else if !unrestorable.is_empty() {
         let named: Vec<String> =
             unrestorable.iter().take(NAMED_CAUSES).map(|k| format!("{k:?}")).collect();
         let more = unrestorable.len().saturating_sub(named.len());
-        Some(format!(
-            "not deleted: {} of this checkpoint's entries cannot be restored on this platform ({}{}), \
-             so \"this file is not in the checkpoint\" cannot be trusted — deleting it may destroy a \
-             file the checkpoint does hold, under a name spelled differently here",
-            unrestorable.len(),
-            named.join(", "),
-            if more > 0 { format!(", and {more} more") } else { String::new() }
+        // **The branch CPE-1845 exists for.** This hold is PERMANENT on this platform: the offending
+        // entries are spelled in a way this filesystem cannot write, and no amount of re-running changes
+        // a stored name. Telling the user to "re-run after fixing" here — which is what the one shared
+        // wording used to do — points them at something that cannot succeed.
+        Some(HeldBack::new(
+            HeldBackOutcome::HeldBackByCheckpoint,
+            format!(
+                "{} of this checkpoint's entries cannot be restored on this computer ({}{}), so \"this \
+                 file is not in the checkpoint\" cannot be trusted — deleting it may destroy a file the \
+                 checkpoint does hold, under a name spelled differently here.",
+                unrestorable.len(),
+                named.join(", "),
+                if more > 0 { format!(", and {more} more") } else { String::new() }
+            ),
+            &format!(
+                "There is no fix for this on this computer: those names are stored in the checkpoint \
+                 and this filesystem cannot write them, so re-running the revert will hold the same \
+                 files back again. {} Delete these files yourself if you want them gone, or finish \
+                 the revert on the system the checkpoint was captured on.",
+                // **The completeness claim is CONDITIONAL, and that is not cosmetic** (CPE-1845 UAT):
+                // it is the PREMISE of the sentence after it. Both halves are reachable in one run — an
+                // unrestorable-name checkpoint AND a locked file or a missing blob, which is what an
+                // ordinary cross-platform backup restored on a machine with a file open looks like. The
+                // unconditional wording printed "Everything restorable has already been restored" three
+                // lines above two entries that had just failed to restore, and a user who believes it
+                // deletes the leftovers on a restore that did not finish.
+                if report.skipped.is_empty() {
+                    "Everything restorable has already been restored."
+                } else {
+                    "The restorable half is restored only where it could be: check the failures listed \
+                     above first."
+                }
+            ),
         ))
     } else if !report.skipped.is_empty() {
-        // Name the entries, not just the count. Both lines land in the same `skipped` list so a UI that
-        // renders all of it makes the cause discoverable — but a user looking at one held-back file
-        // should not have to scan the rest of the list to find out what blocked it.
+        // **The branch that is NOT one branch** (CPE-1845 review round 2). Its first cut labelled every
+        // hold-back derived from a non-empty `report.skipped` retryable and told the user to run the
+        // revert again. But `report.skipped` is fed by every write refusal, and most of them recur
+        // forever: `escapes dest_root` in its four forms, the Win32-unstable name rule, the resolved-
+        // containment failure, and the Create-premise refusal are all verdicts on the checkpoint's own
+        // stored spelling. Only an attempt that was made and failed — a locked file, a pruned blob — is
+        // transient. So the split is on `Refused::permanent`, carried from the point of refusal, and
+        // NOT on which branch fired or on what the reason says.
         let held = report.skipped.len();
         let named: Vec<&str> =
             report.skipped.iter().take(NAMED_CAUSES).map(|(path, _)| path.as_str()).collect();
         let more = held.saturating_sub(named.len());
-        Some(format!(
-            "not deleted: {held} checkpoint entr{} could not be restored ({}{}), so \"this file is not \
-             in the checkpoint\" cannot be trusted — re-run once that is resolved and this cleanup will \
-             apply",
-            if held == 1 { "y" } else { "ies" },
+        let listed = format!(
+            "({}{})",
             named.join(", "),
             if more > 0 { format!(", and {more} more") } else { String::new() }
-        ))
+        );
+        let entries = if held == 1 { "entry" } else { "entries" };
+        if any_permanent_refusal {
+            // At least one refusal will be reached again identically, so re-running cannot clear the
+            // hold even if the user fixes everything that IS fixable.
+            Some(HeldBack::new(
+                HeldBackOutcome::HeldBackByCheckpoint,
+                format!(
+                    "{held} checkpoint {entries} could not be restored {listed}, so \"this file \
+                     is not in the checkpoint\" cannot be trusted — and at least one of those \
+                     refusals is about the checkpoint itself rather than about this attempt."
+                ),
+                "Re-running will not clear this on its own: at least one of the entries above is \
+                 refused for what it IS, not for what happened this time, and this computer will \
+                 refuse it the same way every run. Fix anything transient listed above if you can, \
+                 then delete these files yourself if you want them gone — or finish the revert on the \
+                 system the checkpoint was captured on.",
+            ))
+        } else {
+            // Every refusal was an attempt that failed. This is the one branch entitled to say "again".
+            Some(HeldBack::new(
+                HeldBackOutcome::SkippedByPlan,
+                format!(
+                    "{held} checkpoint {entries} could not be restored this time {listed}, so \"this \
+                     file is not in the checkpoint\" cannot be trusted yet."
+                ),
+                "This one is temporary: close whatever is holding those files (or restore the missing \
+                 stored content) and run the revert again — the held-back cleanups will then apply.",
+            ))
+        }
     } else {
         None
     };
@@ -401,27 +567,41 @@ pub fn execute_restore(
                     .and_then(|at| checkpoint_lands_on.get(&at).copied())
                     .filter(|key| key.as_str() != action.path.as_str());
                 if let Some(key) = collides {
-                    report.skipped.push((
-                        action.path.clone(),
-                        format!(
-                            "not deleted: this path resolves to the same file as the checkpoint entry \
-                             {key:?}, so \"this file is not in the checkpoint\" is true of the spelling \
-                             but false of the file — deleting it would destroy content the checkpoint \
-                             holds"
-                        ),
-                    ));
+                    // A hold-back, not a failure, and **not** retryable: the two spellings resolve to
+                    // one file on this volume and will do so on every re-run. The group statement is
+                    // shared; the checkpoint entry that each path collides with is the one thing that
+                    // genuinely differs per path, so that — and only that — goes in the detail.
+                    let group = report.held_back.get_or_insert_with(|| {
+                        HeldBack::new(
+                            HeldBackOutcome::HeldBackByCheckpoint,
+                            "These paths resolve to the same files as entries the checkpoint already \
+                             holds, spelled differently. \"This file is not in the checkpoint\" is true \
+                             of the spelling and false of the file, so deleting them would destroy \
+                             content the checkpoint is there to protect."
+                                .to_string(),
+                            "Nothing needs doing and re-running will not change it: these files ARE \
+                             the checkpoint's own content, reached under another spelling on this \
+                             volume, so they are already in the state the revert was asking for.",
+                        )
+                    });
+                    group
+                        .paths
+                        .push((action.path.clone(), format!("same file as checkpoint entry {key:?}")));
                     continue;
                 }
                 match apply_delete(action, dest_root_path) {
                     Ok(()) => report.applied += 1,
-                    Err(reason) => report.skipped.push((action.path.clone(), reason)),
+                    Err(refused) => report.skipped.push((action.path.clone(), refused.reason)),
                 }
             }
         }
-        Some(reason) => {
+        Some(mut group) => {
+            // The 200-identical-paragraphs case (CPE-1823's measurement) collapses HERE: the paragraph
+            // lives once on `group.reason`; each path contributes only its name.
             for action in &deletes {
-                report.skipped.push((action.path.clone(), reason.clone()));
+                group.paths.push((action.path.clone(), String::new()));
             }
+            report.held_back = Some(group);
         }
     }
 
@@ -641,10 +821,13 @@ fn apply_write(
     dest_root: &Path,
     blobs_dir: &Path,
     checkpoint: &Snapshot,
-) -> Result<(), String> {
-    let target = safe_target(dest_root, &action.path)?;
+) -> Result<(), Refused> {
+    // Every `safe_target` refusal — `escapes dest_root` in its four textual forms, the Win32-unstable
+    // name rule, and the resolved-containment failure — is a verdict on the checkpoint's own stored
+    // spelling. It recurs identically on every run here, so none of them may be reported as retryable.
+    let target = safe_target(dest_root, &action.path).map_err(Refused::permanent)?;
     let Some(state) = checkpoint.get(&action.path) else {
-        return Err("no checkpoint entry for this path".to_string());
+        return Err(Refused::permanent("no checkpoint entry for this path"));
     };
     // CPE-1823: `state` comes from `snapshot_capture::manifest_snapshot` — the same planted JSON — and
     // `hash` was joined onto `blobs_dir` with nothing checking it, so `../../<anywhere>/secret` copied
@@ -655,9 +838,14 @@ fn apply_write(
     // One shared validator (`snapshot_capture::blob_source`), never a second spelling of the hex rule.
     // The refusal lands in this action's `Err`, which `apply_restore` records as a per-file
     // skip-with-reason in the report — this engine's existing loud channel, not a silent drop.
-    let blob = crate::snapshot_capture::blob_source(blobs_dir, &state.hash)?;
+    // A stored hash that is not a plain hex name, and a blob path that does not resolve inside the
+    // store, are both properties of the checkpoint file: permanent. (The far commoner "the blob FILE is
+    // missing" is not this — it surfaces at the `fs::copy` below, and it is genuinely transient.)
+    let blob =
+        crate::snapshot_capture::blob_source(blobs_dir, &state.hash).map_err(Refused::permanent)?;
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| Refused::transient(format!("{}: {e}", parent.display())))?;
     }
     // **CPE-1823 round 5 — a destructive NON-delete, structurally outside the delete stand-down.**
     // [`RestoreOp`] has three variants and every rule before this one guarded the third. A single
@@ -701,20 +889,36 @@ fn apply_write(
     // `fs::copy`, which changes attribute-preserving behaviour on Windows — CPE-1846, deliberately
     // not folded in here.
     if action.op == RestoreOp::Create && fs::symlink_metadata(&target).is_ok() {
-        return Err(format!(
+        // **Permanent** (review round 2). The shape that reaches this is a case fold or another alias —
+        // `A.txt` against a live `a.txt` on a case-insensitive volume — and the volume does not stop
+        // folding between runs. Reporting it as "temporary, run the revert again" sends the user round a
+        // loop that ends in the same place.
+        return Err(Refused::permanent(format!(
             "this entry restores a file the plan read as absent, but {} already answers to that name — \
              the spelling resolves to a file the scan did not see under it, and writing would overwrite \
              content nothing in this plan accounted for",
             target.display()
-        ));
+        )));
     }
-    fs::copy(&blob, &target).map_err(|e| format!("{}: {e}", blob.display()))?;
+    // The reason reaches the USER — CPE-1845 renders it in the revert panel — so it names the blob by
+    // its hash, already validated as plain hex by `blob_source`, rather than by its absolute path inside
+    // the app's private checkpoint store. Same diagnostic value, no internal layout leaked into a dialog.
+    // Transient, and the one that matters: a blob that has been pruned, a store on a disconnected
+    // drive, a destination the OS would not let us write this time.
+    fs::copy(&blob, &target).map_err(|e| {
+        Refused::transient(format!(
+            "the checkpoint's stored copy of this file (blob {}) could not be read: {e}",
+            state.hash
+        ))
+    })?;
     Ok(())
 }
 
-fn apply_delete(action: &RestoreAction, dest_root: &Path) -> Result<(), String> {
-    let target = safe_target(dest_root, &action.path)?;
-    fs::remove_file(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+fn apply_delete(action: &RestoreAction, dest_root: &Path) -> Result<(), Refused> {
+    let target = safe_target(dest_root, &action.path).map_err(Refused::permanent)?;
+    // A locked file or a permission error — transient by nature.
+    fs::remove_file(&target)
+        .map_err(|e| Refused::transient(format!("{}: {e}", target.display())))?;
     Ok(())
 }
 
@@ -723,6 +927,325 @@ mod tests {
     use super::*;
     use crate::restore_plan::plan_restore;
     use crate::snapshot_capture::scan_dir;
+
+    /// **CPE-1845 — the assertion helper that replaced `why.contains("not deleted")`.**
+    ///
+    /// Every test below used to prove a delete was held back by matching the *prose* of its reason.
+    /// That is exactly the coupling this ticket removes, and it also could not tell a deliberate
+    /// hold-back from a failure that happened to be worded similarly. This asks the structure instead:
+    /// is `path` in the report's hold-back group, and which of the two hold-back states is it?
+    ///
+    /// It deliberately does **not** look at `report.skipped` — an entry there is a genuine failure by
+    /// construction now, so a hold-back landing in it would be the bug, not a pass.
+    fn held_back_as(report: &RestoreReport, path: &str) -> Option<OpOutcome> {
+        let group = report.held_back.as_ref()?;
+        group.paths.iter().find(|(p, _)| p == path).map(|_| group.outcome.as_outcome())
+    }
+
+    /// Asserts the group carried by `report` is coherent, and returns it. Folded into a helper rather
+    /// than repeated per test so a fixture that never armed the hold-back cannot pass by omission —
+    /// the CPE-1844 lesson (a liveness claim that inverted under a decoy).
+    fn live_hold_back(report: &RestoreReport) -> &HeldBack {
+        let group = report
+            .held_back
+            .as_ref()
+            .unwrap_or_else(|| panic!("fixture is inert: nothing was held back at all: {report:?}"));
+        assert!(!group.paths.is_empty(), "a hold-back with no paths certifies nothing: {group:?}");
+        assert!(!group.reason.is_empty(), "a hold-back must state its reason once: {group:?}");
+        assert!(!group.next_step.is_empty(), "a hold-back must offer a next step: {group:?}");
+        group
+    }
+
+    /// **CPE-1845 review round 2 — a permanent refusal must not be reported as "run it again".**
+    ///
+    /// `RestoreReport::skipped` is fed by EVERY write refusal, and most of them recur forever: the four
+    /// `escapes dest_root` forms, the Win32-unstable name rule, the resolved-containment failure, and the
+    /// Create-premise refusal are all verdicts on the checkpoint's own stored spelling. The first cut of
+    /// this ticket labelled the whole group `SkippedByPlan`, `retryable: true`, "…and run the revert
+    /// again" — which is this ticket's own acceptance criterion violated on a narrower set of shapes.
+    /// Reproduced by the independent Reviewer through the production `execute_restore`:
+    ///
+    /// ```text
+    /// PROBE skipped=[("a/../evil.txt", "escapes dest_root: `.`/`..` segment")]
+    /// PROBE outcome=SkippedByPlan retryable=true
+    ///       next_step=This one is temporary: … and run the revert again …
+    /// ```
+    ///
+    /// Both legs run here, from the same fixture shape, so neither can pass by the other's accident.
+    #[test]
+    fn cpe_1845_a_permanent_write_refusal_is_never_reported_as_retryable() {
+        let store = scratch("1845-perm-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        // A real blob, so the RESTORABLE entry genuinely restores and `unrestorable` stays empty — this
+        // has to reach the `report.skipped` branch, not the checkpoint-key branch above it.
+        fs::write(store.join("blobs").join("1845aaaa"), b"ok").unwrap();
+
+        // ---- leg 1: a PERMANENT refusal (the Reviewer's probe, verbatim in shape). ----
+        let root = scratch("1845-perm-root");
+        fs::write(root.join("added.txt"), b"user file").unwrap();
+        // The checkpoint holds ONLY restorable keys, so the checkpoint-key stand-down above this branch
+        // stays disarmed and the `report.skipped` branch is genuinely the one under test. The bad path is
+        // in the PLAN, where `apply_write`'s own `safe_target` refuses it.
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("fine.txt".to_string(), crate::restore_plan::FileState::new("1845aaaa", 2));
+        let report = execute_restore(
+            &[
+                RestoreAction { path: "a/../evil.txt".to_string(), op: RestoreOp::Create },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &checkpoint,
+        );
+        // Fixture liveness, both halves: the refusal happened, AND it is the `report.skipped` branch
+        // that armed the hold — if `unrestorable` had caught it first this would certify nothing about
+        // the branch under test.
+        assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
+        assert!(
+            report.skipped[0].1.contains("escapes dest_root"),
+            "fixture is inert: the refusal is not the permanent one this test is about: {report:?}"
+        );
+        assert!(
+            checkpoint.keys().all(|k| safe_segments(k).is_ok()),
+            "fixture is inert: a checkpoint KEY is unrestorable, so the branch above this one armed and              the `report.skipped` branch under test never ran: {report:?}"
+        );
+        let group = live_hold_back(&report);
+        assert_eq!(
+            group.outcome,
+            HeldBackOutcome::HeldBackByCheckpoint,
+            "a refusal this platform reaches identically every run is NOT retryable: {group:?}"
+        );
+        assert!(!group.outcome.retryable(), "{group:?}");
+        assert!(
+            !group.next_step.to_lowercase().contains("run the revert again"),
+            "and it must not send the user round a loop that ends in the same place: {group:?}"
+        );
+
+        // ---- leg 2: the same shape with a TRANSIENT refusal still says "again". ----
+        let root2 = scratch("1845-transient-root");
+        fs::write(root2.join("added.txt"), b"user file").unwrap();
+        let mut cp2 = Snapshot::new();
+        // Valid hex, no such blob file → the refusal lands at `fs::copy`, which is genuinely transient.
+        cp2.insert("gone.txt".to_string(), crate::restore_plan::FileState::new("1845cccc", 2));
+        let report2 = execute_restore(
+            &[
+                RestoreAction { path: "gone.txt".to_string(), op: RestoreOp::Create },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root2.to_string_lossy(),
+            &store.to_string_lossy(),
+            &cp2,
+        );
+        assert_eq!(report2.skipped.len(), 1, "fixture is inert: nothing was refused: {report2:?}");
+        let group2 = live_hold_back(&report2);
+        assert_eq!(
+            group2.outcome,
+            HeldBackOutcome::SkippedByPlan,
+            "an attempt that merely failed IS retryable — the split must cut both ways or it is just a              blanket rename: {group2:?}"
+        );
+        assert!(group2.next_step.contains("run the revert again"), "{group2:?}");
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root2);
+    }
+
+    /// **CPE-1845 UAT — the false sentence in the mixed case.**
+    ///
+    /// An unrestorable-name checkpoint AND a genuine restore failure in the same run is not exotic: a
+    /// cross-platform backup restored on a machine with one file open reaches it. The independent UAT
+    /// stood the shape up and quoted the panel:
+    ///
+    /// ```text
+    /// Applied 0 changes, 2 failed, 1 deletion held back.
+    /// 1 of this checkpoint's entries cannot be restored on this computer ("a/../evil.txt") …
+    /// There is no fix … Everything restorable has already been restored — delete these files yourself …
+    ///   gone1.txt — …blobs\11111111: The system cannot find the file specified. (os error 2)
+    ///   gone2.txt — …blobs\22222222: The system cannot find the file specified. (os error 2)
+    /// ```
+    ///
+    /// The completeness claim sat three lines above two entries that had just failed to restore — and it
+    /// is the **premise** of the clause after it, so a user who trusts it deletes the leftovers believing
+    /// the restore half finished. This asserts it is absent, and that what replaces it points at the
+    /// failures instead.
+    #[test]
+    fn cpe_1845_the_completeness_claim_is_absent_when_something_actually_failed() {
+        let store = scratch("1845-mixed-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        let root = scratch("1845-mixed-root");
+        fs::write(root.join("added.txt"), b"user file").unwrap();
+
+        // Both halves at once: one checkpoint key this platform cannot restore (the permanent hold-back)
+        // plus two entries whose stored content is missing (two genuine failures).
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("a/../evil.txt".to_string(), crate::restore_plan::FileState::new("1845dead", 3));
+        checkpoint.insert("gone1.txt".to_string(), crate::restore_plan::FileState::new("11111111", 3));
+        checkpoint.insert("gone2.txt".to_string(), crate::restore_plan::FileState::new("22222222", 3));
+        let report = execute_restore(
+            &[
+                RestoreAction { path: "gone1.txt".to_string(), op: RestoreOp::Create },
+                RestoreAction { path: "gone2.txt".to_string(), op: RestoreOp::Create },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &checkpoint,
+        );
+
+        // Fixture liveness: BOTH halves must actually be present, or this certifies nothing. A run with
+        // no failures would pass a naive "the sentence is absent" assertion for the wrong reason.
+        assert_eq!(report.skipped.len(), 2, "fixture is inert: nothing failed to restore: {report:?}");
+        assert!(
+            root.join("added.txt").exists(),
+            "fixture is inert: the delete ran, so nothing was held back: {report:?}"
+        );
+        let group = live_hold_back(&report);
+        assert_eq!(
+            group.outcome,
+            HeldBackOutcome::HeldBackByCheckpoint,
+            "the unrestorable KEY must win over the transient branch — it is the permanent cause and \
+             the branch order encodes that: {group:?}"
+        );
+
+        assert!(
+            !group.next_step.contains("Everything restorable has already been restored"),
+            "the completeness claim is FALSE here — two entries failed to restore in this same run — and \
+             it is the premise of the clause telling the user to delete the leftovers: {group:?}"
+        );
+        assert!(
+            group.next_step.contains("check the failures listed above"),
+            "and what replaces it must point at the failures, not merely omit the claim: {group:?}"
+        );
+        // The advice that is still true either way survives.
+        assert!(group.next_step.to_lowercase().contains("delete these files yourself"), "{group:?}");
+
+        // And the internal checkpoint-store path stays out of user-facing text (UAT orange 2).
+        for (path, reason) in &report.skipped {
+            assert!(
+                !reason.contains("blobs"),
+                "a reason shown to the user must not expose the private blob-store layout: {path}: \
+                 {reason}"
+            );
+            assert!(
+                reason.contains("blob 11111111") || reason.contains("blob 22222222"),
+                "but it must still name WHICH stored copy is missing: {path}: {reason}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// **CPE-1845, the second half of the ticket — the wording must match the state.**
+    ///
+    /// The recorded UI wording was *"held back, re-run after fixing"*, applied to every hold-back. It is
+    /// right for [`OpOutcome::SkippedByPlan`] and **wrong** for [`OpOutcome::HeldBackByCheckpoint`],
+    /// where re-running on this platform can never help: the user is sent to do something that cannot
+    /// succeed, with no alternative offered. This asserts the two branches say opposite things, and
+    /// that the permanent one still offers a real next step rather than a dead end.
+    ///
+    /// Both fixtures are proved live by [`live_hold_back`] before anything is read off them.
+    #[test]
+    fn cpe_1845_only_the_retryable_hold_back_may_tell_the_user_to_run_it_again() {
+        let store = scratch("1845-wording-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+
+        // Both permanent branches, checked identically. Leg 1 is the empty checkpoint (CPE-1847); leg 2
+        // is a checkpoint key this platform cannot restore (CPE-1823) — armed portably with a `..`
+        // segment, which `safe_segments` refuses on every OS, so both CI legs cover it.
+        let mut unrestorable = Snapshot::new();
+        unrestorable
+            .insert("a/../b.txt".to_string(), crate::restore_plan::FileState::new("1845-none", 3));
+        for (leg, checkpoint) in [("empty", Snapshot::new()), ("unrestorable-key", unrestorable)] {
+            let root = scratch(&format!("1845-wording-{leg}"));
+            fs::write(root.join("added.txt"), b"user file").unwrap();
+            let report = execute_restore(
+                &[RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete }],
+                &root.to_string_lossy(),
+                &store.to_string_lossy(),
+                &checkpoint,
+            );
+            assert!(
+                root.join("added.txt").exists(),
+                "fixture is inert: the {leg} leg's delete actually ran, so nothing was held back and \
+                 the wording under test was never produced: {report:?}"
+            );
+            let permanent = live_hold_back(&report);
+            assert_eq!(permanent.outcome, HeldBackOutcome::HeldBackByCheckpoint, "{leg}");
+            assert!(
+                !permanent.outcome.retryable(),
+                "the {leg} hold-back cannot be fixed by running the revert again: {permanent:?}"
+            );
+            // The instruction forms only. The text may — and should — *mention* re-running in order to
+            // say it will not help; what it must never do is send the user to do it.
+            for imperative in [
+                "run the revert again",
+                "run it again",
+                "re-run the revert",
+                "re-run it",
+                "try again",
+                "please retry",
+            ] {
+                assert!(
+                    !permanent.next_step.to_lowercase().contains(imperative),
+                    "the {leg} hold-back must not tell the user to {imperative:?} — that is the \
+                     recorded wording CPE-1845 was filed to remove, and here it cannot succeed: \
+                     {permanent:?}"
+                );
+            }
+            assert!(
+                permanent.next_step.to_lowercase().contains("will not change")
+                    || permanent.next_step.to_lowercase().contains("no fix for this"),
+                "the {leg} hold-back must say plainly that re-running cannot help, rather than leave \
+                 the user guessing: {permanent:?}"
+            );
+            assert!(
+                permanent.next_step.to_lowercase().contains("delete these files yourself"),
+                "and it must offer a real next step, not just a refusal: {permanent:?}"
+            );
+            // Both legs here are the PURE case — nothing failed to restore. The unrestorable-key branch
+            // is the only one that makes a completeness claim at all (the empty-checkpoint branch says
+            // "restored none"), and with nothing failed that claim is true and must be present. The
+            // mixed-case test above is what proves it is not printed unconditionally.
+            assert!(report.skipped.is_empty(), "this leg is the pure case by construction: {report:?}");
+            if leg == "unrestorable-key" {
+                assert!(
+                    permanent.next_step.contains("Everything restorable has already been restored"),
+                    "with nothing failed, this hold-back may and should say the restore half finished: {permanent:?}"
+                );
+            }
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        // Retryable: a missing blob. Put the blob back and the delete applies — so "run it again" is
+        // exactly the right advice, and this branch is the one allowed to say it.
+        let root_retryable = scratch("1845-wording-retryable");
+        fs::write(root_retryable.join("added.txt"), b"user file").unwrap();
+        let mut cp = Snapshot::new();
+        // A VALID hex blob name whose file is absent. `"1845-no-such-blob"` would be refused by the
+        // hex-name rule instead, which is a property of the checkpoint and therefore permanent — the
+        // wrong leg entirely, and precisely the conflation review round 2 blocked this PR on.
+        cp.insert("gone.txt".to_string(), crate::restore_plan::FileState::new("1845bbbb", 9));
+        let retryable = execute_restore(
+            &[
+                RestoreAction { path: "gone.txt".to_string(), op: RestoreOp::Create },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root_retryable.to_string_lossy(),
+            &store.to_string_lossy(),
+            &cp,
+        );
+        let retryable = live_hold_back(&retryable);
+        assert_eq!(retryable.outcome, HeldBackOutcome::SkippedByPlan);
+        assert!(retryable.outcome.retryable());
+        assert!(
+            retryable.next_step.to_lowercase().contains("run the revert again"),
+            "the RETRYABLE hold-back must keep the advice that actually works: {retryable:?}"
+        );
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&root_retryable);
+    }
 
     fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::scratch_dir(&format!("cpe-revert-{tag}"))
@@ -976,9 +1499,12 @@ mod tests {
         );
         // Refusing the write alone did NOT save the file — the paired Delete finished the job. The
         // stand-down has to be visible in the report too, or the next reader will "simplify" it away.
-        assert!(
-            report.skipped.iter().any(|(p, why)| p == "a.txt" && why.contains("not deleted")),
-            "the paired delete must be held back and said so: {report:?}"
+        assert_eq!(
+            held_back_as(&report, "a.txt"),
+            Some(OpOutcome::HeldBackByCheckpoint),
+            "the paired delete must be held back and said so — structurally, not in prose (CPE-1845), \
+             and as the NOT-retryable kind because a stored trailing-space name never becomes writable \
+             here: {report:?}"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -1048,9 +1574,12 @@ mod tests {
             "a delete must not run while any checkpoint entry could not be restored: {report:?}"
         );
         assert_eq!(report.applied, 0, "nothing was applied: {report:?}");
-        assert!(
-            report.skipped.iter().any(|(p, why)| p == "added.txt" && why.contains("not deleted")),
-            "and the held-back delete must be reported with its reason, never silently dropped: {report:?}"
+        assert_eq!(
+            held_back_as(&report, "added.txt"),
+            Some(OpOutcome::SkippedByPlan),
+            "and the held-back delete must be reported with its reason, never silently dropped — and \
+             as the RETRYABLE kind, because the blocker here is a missing blob that can be put back \
+             (CPE-1845): {report:?}"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -1161,9 +1690,16 @@ mod tests {
             report.skipped.iter().any(|(p, _)| p == "A.txt"),
             "the aliasing write must be reported as skipped, not applied: {report:?}"
         );
-        assert!(
-            report.skipped.iter().any(|(p, why)| p == "a.txt" && why.contains("not deleted")),
-            "and the paired delete must be held back and said so: {report:?}"
+        // **NOT retryable, and that correction is the point** (CPE-1845 review round 2). The refusal
+        // that arms this hold-back is the Create-premise rule firing on a case fold: `A.txt` against a
+        // live `a.txt` on a case-insensitive volume. The volume does not stop folding between runs, so
+        // the refusal recurs forever and the user must not be told to run the revert again. This
+        // assertion read `SkippedByPlan` in the first cut of CPE-1845 and would have locked the wrong
+        // answer in — a later correct fix would have read as a regression here.
+        assert_eq!(
+            held_back_as(&report, "a.txt"),
+            Some(OpOutcome::HeldBackByCheckpoint),
+            "and the paired delete must be held back and said so, structurally (CPE-1845): {report:?}"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -1271,9 +1807,11 @@ mod tests {
              report was {report:?}"
         );
         assert_eq!(report.applied, 0, "nothing may be counted applied: {report:?}");
-        assert!(
-            report.skipped.iter().any(|(p, why)| p == "alias/f.txt" && why.contains("not deleted")),
-            "and the held-back delete must be reported with its reason: {report:?}"
+        assert_eq!(
+            held_back_as(&report, "alias/f.txt"),
+            Some(OpOutcome::HeldBackByCheckpoint),
+            "and the held-back delete must be reported with its reason, structurally (CPE-1845) — the \
+             NOT-retryable kind, since the two spellings resolve to one file on every re-run: {report:?}"
         );
 
         let _ = fs::remove_dir_all(&root);

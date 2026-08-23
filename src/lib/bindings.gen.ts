@@ -4805,6 +4805,34 @@ scheme: string;
  */
 url: string; admitted: boolean }
 /**
+ * The one statement behind a whole group of held-back deletes (CPE-1845), so 500 hold-backs cost one
+ * paragraph rather than 500 copies of it (~185 KB, measured in CPE-1847).
+ */
+export type HeldBackSummary = { 
+/**
+ * Which hold-back this is — `skipped_by_plan` (retryable) or `held_back_by_checkpoint` (not
+ * retryable on this platform). The same discriminant every entry in `skipped` carries.
+ */
+outcome: OpOutcome; 
+/**
+ * How many deletes this covers. Pair it with `reason` for the "one statement plus a count" the UI
+ * renders instead of N identical rows.
+ */
+count: number; 
+/**
+ * The shared explanation, stated once.
+ */
+reason: string; 
+/**
+ * What the user can actually do next. For `held_back_by_checkpoint` this states that re-running
+ * cannot help and gives the alternative; it never says "re-run".
+ */
+next_step: string; 
+/**
+ * Convenience mirror of [`OpOutcome::retryable`] so a template can branch without re-deriving it.
+ */
+retryable: boolean }
+/**
  * One decoded calendar component (`VEVENT` / `VTODO` / `VJOURNAL`), summarised for display. Every field
  * is best-effort — a component missing a property simply leaves it `None`/empty.
  */
@@ -5451,11 +5479,66 @@ kind: string }
  */
 export type Node = { kind: "dir"; name: string; children?: Node[] } | { kind: "file"; name: string; contents?: string }
 /**
+ * **Why** a bulk-operation entry ended up where it did — the structural discriminant a consumer reads
+ * instead of string-matching [`OpResult::error`] (CPE-1845).
+ * 
+ * Before this existed, `OpResult` said only `ok: bool`, so a **deliberate, correct, fail-safe
+ * hold-back** and a **genuine failure** arrived through the same field carrying the same shape, and the
+ * only way to tell them apart was to match the prose prefix `"not deleted:"`. Measured on a staged
+ * checkpoint (CPE-1823 round-4 review): `applied=1 skipped=201`, of which **200 were deliberate
+ * hold-backs** and one was a real failure. A UI reading `ok` alone reports 201 problems.
+ * 
+ * The four states are deliberately the ones a *user-facing decision* turns on:
+ * 
+ * | variant | what happened | what the user can do |
+ * |---|---|---|
+ * | [`Applied`](OpOutcome::Applied) | the operation was performed | nothing |
+ * | [`Failed`](OpOutcome::Failed) | it was attempted and it failed | fix the named cause, try again |
+ * | [`SkippedByPlan`](OpOutcome::SkippedByPlan) | not attempted — something else in the same run failed, so this one's premise is unproven | fix that, **re-run**: this one then applies |
+ * | [`HeldBackByCheckpoint`](OpOutcome::HeldBackByCheckpoint) | not attempted — the *input* cannot be trusted on this platform | **re-running here can never help**; see [`OpOutcome::retryable`] |
+ * 
+ * The last two are both "held back", and collapsing them is exactly the bug this type exists to stop:
+ * the recorded UI wording *"held back, re-run after fixing"* is right for `SkippedByPlan` and **wrong**
+ * for `HeldBackByCheckpoint`, where a Linux capture holding one colon-named file will never
+ * delete-clean on Windows no matter how many times it is re-run.
+ * 
+ * Serialised `snake_case` so the TS side reads `"applied" | "failed" | "skipped_by_plan" |
+ * "held_back_by_checkpoint"` — a discriminated union, not a prefix.
+ */
+export type OpOutcome = 
+/**
+ * The operation was performed.
+ */
+"applied" | 
+/**
+ * The operation was attempted and failed (locked file, permission denied, source gone, a
+ * path-safety refusal of *this* item). Retrying after fixing the named cause is meaningful.
+ */
+"failed" | 
+/**
+ * **Deliberately not attempted, retryable.** Something else in the same run failed, so this item's
+ * premise is unproven — fixing that and re-running performs it.
+ */
+"skipped_by_plan" | 
+/**
+ * **Deliberately not attempted, NOT retryable on this platform.** The checkpoint/manifest driving
+ * the run cannot be read correctly here, and nothing about re-running on this machine changes that.
+ * A consumer must not tell the user to "re-run"; see the accompanying next step.
+ */
+"held_back_by_checkpoint"
+/**
  * Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not
  * abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
  * which one failed.
+ * 
+ * `outcome` (CPE-1845) is the field to branch on. `ok` is kept as the one-bit summary every existing
+ * caller already reads, and is exactly `outcome == Applied` — it is derived, never set independently.
  */
-export type OpResult = { path: string; ok: boolean; error: string }
+export type OpResult = { path: string; ok: boolean; error: string; 
+/**
+ * Structural discriminant (CPE-1845). Branch on this, **never** on `error`'s wording.
+ */
+outcome: OpOutcome }
 /**
  * The outcome of an apply: the checkpoint captured **before** any file moved, plus the per-file move
  * results (never all-or-nothing — see [`apply_proposals`]).
@@ -5667,8 +5750,14 @@ prune: string[];
 total_bytes: number }
 /**
  * Outcome of a revert — an `OpResult`-style summary: how many actions applied, plus the ones that were
- * skipped (each carried as a failed [`OpResult`] with the skip reason), preserving the engine's
- * skip-on-error guarantee.
+ * not, preserving the engine's skip-on-error guarantee.
+ * 
+ * **CPE-1845.** Two things live in `skipped` that are not the same thing: an action that was *attempted
+ * and failed*, and a delete the engine *deliberately declined to perform* because it could not trust the
+ * checkpoint. Every entry now carries [`cpe_server::model::OpOutcome`](crate::model::OpOutcome) saying
+ * which, so a consumer branches on a field rather than on the wording of `error`; and the explanation
+ * shared by a whole group of hold-backs is stated **once**, in [`RevertOutcome::held_back`], instead of
+ * being copied onto every path.
  */
 export type RevertOutcome = { 
 /**
@@ -5676,10 +5765,17 @@ export type RevertOutcome = {
  */
 applied: number; 
 /**
- * Actions skipped (missing blob, locked/permission-denied, path-safety refusal): `ok:false` +
- * `error` = the reason. Never fatal to the rest of the revert.
+ * Actions that did not apply — genuine failures **and** deliberate hold-backs, in that order.
+ * Read each entry's `outcome` to tell them apart; `error` carries only what is specific to that
+ * path (empty for most hold-backs — their shared explanation is in
+ * [`held_back`](RevertOutcome::held_back)). Never fatal to the rest of the revert.
  */
-skipped: OpResult[] }
+skipped: OpResult[]; 
+/**
+ * Present when the revert deliberately held its deletions back: the single explanation, the count,
+ * and a next step honest about whether re-running can help. `None` when nothing was held back.
+ */
+held_back: HeldBackSummary | null }
 /**
  * A preview of what reverting to a checkpoint would do: the restore-plan summary plus a **drift** report.
  * 
