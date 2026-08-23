@@ -33,8 +33,66 @@ pub struct RetentionPreview {
     pub total_bytes: u64,
 }
 
+/// What became of the optional byte cap in one [`apply`] — a **pass-level** verdict on a budget, not a
+/// per-item one (CPE-1863).
+///
+/// It exists because "the cap was met" and "the cap could not be met and we destroyed checkpoints
+/// discovering that" used to be the same answer: an `Ok(RetentionApplyResult)` with a non-empty `pruned`
+/// list. A caller reading `pruned` alone reports success either way, which is the whole of CPE-1863.
+///
+/// | variant | what happened | what the caller can say |
+/// |---|---|---|
+/// | [`NotRequested`](ByteCapOutcome::NotRequested) | no cap was passed (`None`, or `Some(0)`) | nothing — the GFS policy alone decided |
+/// | [`Met`](ByteCapOutcome::Met) | the store's measured footprint is at or under the cap | the cap holds |
+/// | [`StoppedNoProgress`](ByteCapOutcome::StoppedNoProgress) | an eviction reclaimed **nothing**, so the loop stopped | the cap was **not** met, and deleting more checkpoints would not have helped |
+/// | [`StoppedAtFloor`](ByteCapOutcome::StoppedAtFloor) | the loop ran out of evictable survivors (a store is never pruned below one snapshot) | the cap was **not** met; the store cannot get smaller by thinning |
+///
+/// **Why this is not [`crate::model::OpOutcome`]** (CPE-1845's discriminant), checked rather than
+/// assumed: that enum answers "what happened to *this one item*, and can the user retry it" for a bulk
+/// per-path operation, and every manifest this loop deletes is unambiguously `Applied` — the item
+/// succeeded. What is unresolved is the *budget the deletions were justified by*, which has no item.
+/// Mapping a missed cap onto `SkippedByPlan`/`HeldBackByCheckpoint` would mean reporting a hold-back for
+/// operations that were in fact performed. Its *conventions* are reused deliberately, because those are
+/// the reusable part: a discriminated union rather than a prose prefix, `snake_case` on the wire, and
+/// variants chosen by the user-facing decision they drive rather than by internal control flow.
+///
+/// Serialised `snake_case`, so TS reads `"not_requested" | "met" | "stopped_no_progress" |
+/// "stopped_at_floor"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum ByteCapOutcome {
+    /// No byte cap was requested, so there was nothing to meet. The default, and what every caller in
+    /// the app gets today — `snapshot_schedule::snapshot_run_due` passes `None`.
+    #[default]
+    NotRequested,
+    /// The store's measured footprint is at or under the cap. This includes the common case where it
+    /// already was before any eviction.
+    Met,
+    /// **The cap was not met.** An eviction reclaimed nothing — the store's re-measured footprint did not
+    /// fall — so the loop stopped rather than keep deleting checkpoints that cannot help. See the
+    /// no-progress rule on [`apply`].
+    StoppedNoProgress,
+    /// **The cap was not met.** Only one snapshot is left — a store is never thinned to zero — and the
+    /// footprint is still over the cap. Also the safe label on [`apply`]'s structurally unreachable
+    /// out-of-candidates arm; see the comment there before reading that as a second real cause.
+    StoppedAtFloor,
+}
+
+impl ByteCapOutcome {
+    /// Was a cap requested and *not* met? The two `Stopped*` variants, i.e. exactly the cases where
+    /// [`apply`] returned `Ok` having failed to do what it was asked. A consumer that reports a
+    /// retention pass as a success must not do so without consulting this.
+    ///
+    /// This is a convenience for phrasing, never the discriminant: which of the two it is decides what
+    /// the user can do about it, and that distinction is the variant.
+    pub fn cap_missed(self) -> bool {
+        matches!(self, ByteCapOutcome::StoppedNoProgress | ByteCapOutcome::StoppedAtFloor)
+    }
+}
+
 /// The outcome of actually pruning a store: which manifests survived, which were removed (by the GFS
-/// policy and/or the optional byte cap), and how many bytes were freed.
+/// policy and/or the optional byte cap), how many bytes were freed, and whether the byte cap was met.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RetentionApplyResult {
@@ -44,7 +102,23 @@ pub struct RetentionApplyResult {
     pub pruned: Vec<String>,
     /// Total bytes freed across every prune in this apply — the lengths of the blob files actually
     /// removed (CPE-1844), not the sizes `index.json` recorded for them.
+    ///
+    /// `bytes_freed == 0` with a **non-empty `pruned`** is the anomaly CPE-1863 is about: checkpoints
+    /// were destroyed and nothing was reclaimed. When the GFS policy alone drove it, it is not an anomaly
+    /// at all — the user asked for fewer checkpoints, not for fewer bytes.
+    ///
+    /// **It does not imply [`ByteCapOutcome::StoppedNoProgress`], and an earlier draft of this comment
+    /// said it did.** The two are measured in different currencies on purpose (see the no-progress rule
+    /// on [`apply`]): `bytes_freed` counts blob *files removed*, `byte_cap` turns on the *re-measured
+    /// footprint*. In precisely the divergence case the rule exists to serve — a blob whose last namer
+    /// was pruned and whose file could not be deleted — `prune` credits 0 while `total` falls, so the
+    /// loop correctly keeps going and can finish at [`ByteCapOutcome::Met`] or
+    /// [`ByteCapOutcome::StoppedAtFloor`] with `bytes_freed == 0` and a non-empty `pruned`. Read the two
+    /// fields together; neither derives the other.
     pub bytes_freed: u64,
+    /// What became of the byte cap (CPE-1863). [`ByteCapOutcome::NotRequested`] whenever no cap was
+    /// passed, which is every caller in the app today.
+    pub byte_cap: ByteCapOutcome,
 }
 
 /// Load every manifest in `store_dir` as a [`RetentionSnapshot`] (`id` + `epoch_s`) for
@@ -69,9 +143,18 @@ pub fn preview(store_dir: &str, policy: &RetentionPolicy) -> Result<RetentionPre
 /// Actually prune `store_dir` to `policy`: run the same [`thin`] decision [`preview`] would, then
 /// [`crate::snapshot_capture::prune`] every losing manifest. If `max_total_bytes` is `Some` (and nonzero),
 /// after the GFS pass the survivors are further thinned **oldest-first** — protecting the newest snapshots
-/// last — until the store's footprint is at or under the cap or only one survivor remains (a policy is
-/// never allowed to prune a store down to zero snapshots; that would make `max_total_bytes` a silent
-/// full-wipe knob instead of a cap).
+/// last — until one of three things happens:
+///
+/// - the store's re-measured footprint is at or under the cap ([`ByteCapOutcome::Met`]);
+/// - an eviction **reclaims nothing**, so the loop stops rather than keep deleting checkpoints that
+///   cannot help ([`ByteCapOutcome::StoppedNoProgress`], CPE-1863);
+/// - only one survivor remains ([`ByteCapOutcome::StoppedAtFloor`]) — a policy is never allowed to prune
+///   a store down to zero snapshots; that would make `max_total_bytes` a silent full-wipe knob instead
+///   of a cap.
+///
+/// **Only the first of those met the cap**, and [`RetentionApplyResult::byte_cap`] says which one it was.
+/// A caller that reads `pruned` alone and reports success is the bug CPE-1863 records; the reasoning for
+/// the no-progress rule, and what it costs, is on the loop itself.
 pub fn apply(
     store_dir: &str,
     policy: &RetentionPolicy,
@@ -96,6 +179,8 @@ pub fn apply(
 
     let mut bytes_freed = 0u64;
     let mut pruned = Vec::new();
+    // No cap unless one is asked for, and the byte-cap branch below is the only thing that may change it.
+    let mut byte_cap = ByteCapOutcome::NotRequested;
     // This loop is where the quadratic term lives: each `prune` re-scans the surviving manifests to
     // check nothing else still names the blobs it is about to free (CPE-1861). Fine for the scheduled
     // shape — one snapshot ageing out — and measurable on a bulk thin. Before optimising the retention
@@ -146,12 +231,11 @@ pub fn apply(
             // (a `metadata()` that failed once and succeeded later), where the re-measure is the safer
             // side.
             //
-            // **Interaction with CPE-1863, stated because that ticket is open and this loop is its
-            // subject.** CPE-1863 records that a prune freeing nothing never lets this loop see the cap
-            // met, so it runs to the `kept.len() <= 1` floor. That is untouched and deliberately not
-            // fixed here: when a prune really frees nothing, the re-measured `total` really has not
-            // moved, so the loop behaves exactly as CPE-1863 describes — the difference is only that it
-            // is now describing reality instead of an accounting artifact.
+            // **Interaction with CPE-1863, which is now fixed below rather than deferred.** CPE-1844
+            // left it standing with the note that when a prune really frees nothing, the re-measured
+            // `total` really has not moved — so this re-measure describes reality rather than an
+            // accounting artifact, but the loop still ran to its floor on it. That re-measure is exactly
+            // what CPE-1863's no-progress rule now reads: see the block above the loop.
             //
             // **Scoped claim, because an earlier draft of this comment over-broadened it and was
             // measurably false.** It read "Nothing here makes it worse", stated as if it covered the
@@ -174,20 +258,104 @@ pub fn apply(
             // deleted, which is bounded by `kept.len()`. The witness walk is the same scan
             // `snapshot_capture::manifests_naming` already performs inside every `prune` this loop
             // makes, so the loop's per-iteration cost is roughly doubled rather than newly incurred.
+            //
+            // **CPE-1863 — the no-progress rule, and the definition it turns on.** This loop used to
+            // have exactly one exit besides the cap being met: the `kept.len() <= 1` floor. So a store
+            // where evicting a checkpoint reclaims *nothing* was thinned all the way down to a single
+            // survivor and then reported `Ok`. Measured on a store with no tamper in it at all — six
+            // identical captures, so one blob is shared by every manifest and pruning any of them frees
+            // nothing:
+            //
+            // ```text
+            // apply(cap = total - 1)  ->  kept = 1, pruned = 5, bytes_freed = 0
+            // ```
+            //
+            // Five checkpoints destroyed, zero bytes reclaimed, reported as success. The deletions were
+            // not merely useless: they could not have worked, because the survivors were not what was
+            // using the space.
+            //
+            // **"Progress" is measured in the cap's own currency — the re-measured `total` — not in
+            // `prune`'s return value.** The two normally agree, and the `freed == 0` case is the common
+            // instance, but they are not the same question and the difference decides a real case: a
+            // blob whose last namer was pruned but whose *file* could not be deleted (this module's
+            // documented leak-over-corruption direction) is credited 0 by `prune` while genuinely
+            // leaving the reclaimable footprint — which is what the cap is compared against — smaller.
+            // Stopping on `freed == 0` there would abandon a loop that was working. The cap is a
+            // statement about `total`, so progress has to be too.
+            //
+            // **What it costs, stated rather than discovered later: one checkpoint.** The first eviction
+            // still happens, because nothing here can know a prune's yield without performing it — the
+            // yield is "blobs no other manifest *file* still names", which is `prune`'s own witness scan.
+            // So the fixture above now loses one checkpoint instead of five. The strictly better fix is a
+            // predictor — ask what evicting a candidate *would* free and skip a zero-yield one without
+            // deleting it — which needs a witness-with-exclusion query alongside `prune`'s, and a mirror
+            // of that predicate that drifts is worse than the bounded loss. Left as the follow-up; the
+            // residual is not silent, it is `StoppedNoProgress` with `bytes_freed == 0`.
+            //
+            // **And the accepted cost of NOT continuing: a later candidate might have freed bytes.**
+            // `m1={A}, m2={A,B}, m3={A}` — evicting m1 frees nothing while evicting m2 would free B. The
+            // loop stops at m1 and reports the cap unmet. That is the deliberate direction: continuing
+            // spends *certain* destruction of the user's history on a *speculative* reclaim, and the
+            // usual reason an eviction freed nothing is that the blobs are shared with everything, in
+            // which case continuing destroys the lot for nothing. Reporting honestly costs the user a
+            // decision; guessing costs them their checkpoints.
+            //
+            // **The rule is PER PASS. It holds no state across invocations, and that bounds what
+            // "at most one checkpoint" is honestly a claim about.** Per invocation it is exact. Across a
+            // *repeating schedule* with a cap wired up, each pass is entitled to its own fruitless
+            // eviction, so the six-identical-captures fixture above still ends at the floor — five
+            // evictions over five passes instead of five in one. Materially weaker than the headline
+            // framing, and written here rather than only in the ticket because this loop is where a
+            // maintainer will look. `cpe_1863_an_invisible_manifest_pinning_blobs_stops_the_cap_without_
+            // stalling_it` pins the two-pass shape deliberately. Removing the erosion needs the predictor
+            // above, not more state: remembering "this store made no progress last time" would have to be
+            // invalidated by every capture, and a stale memory that suppresses a *needed* eviction is a
+            // worse failure than a slow one.
+            //
+            // **Interaction with CPE-1861's accepted leak, checked because that ticket's residual makes
+            // `freed == 0` the *expected* outcome.** A manifest file `list_manifests` refuses — an
+            // Explorer "- Copy.json", a 122-byte witness that is invisible and permanent — still counts
+            // as a namer to `prune`'s witness and to `store_total_bytes`, so its snapshot's blobs are
+            // pinned, counted toward the cap, and reclaimable by no prune this loop can make. Before this
+            // rule that store was thinned to its floor every pass. It now stops after one eviction and
+            // says `StoppedNoProgress`, which is the honest answer: the space is held by something
+            // retention cannot reach. That is a stop, not a stall — `apply` returns `Ok`, the GFS pass
+            // above has already run in full, and nothing about the next pass is wedged.
             let mut total = snapshot_capture::store_total_bytes(store_dir)?;
-            for id in &oldest_first {
-                if total <= cap || kept.len() <= 1 {
-                    break;
+            let mut candidates = oldest_first.iter();
+            byte_cap = loop {
+                if total <= cap {
+                    break ByteCapOutcome::Met;
                 }
+                // The floor: a policy is never allowed to prune a store down to zero snapshots.
+                if kept.len() <= 1 {
+                    break ByteCapOutcome::StoppedAtFloor;
+                }
+                // **Structurally unreachable, and kept as defence rather than as a case.** `oldest_first`
+                // is a clone of `kept`, and the arm above breaks at `kept.len() <= 1`, so one candidate is
+                // always left unconsumed. Only an internal inconsistency between the two — `kept` holding
+                // an id `oldest_first` never did, or a future edit that stops them being the same set —
+                // could arrive here, which is a bug in this function, not a store that ran out of
+                // snapshots. `StoppedAtFloor` is the safe *label* for it (it is the honest "nothing left
+                // to evict" answer and never reports a cap as met) but it is the wrong *diagnosis*: do
+                // not read this arm as evidence that running out of candidates is a real outcome.
+                let Some(id) = candidates.next() else {
+                    break ByteCapOutcome::StoppedAtFloor;
+                };
                 bytes_freed += snapshot_capture::prune(store_dir, id)?;
-                total = snapshot_capture::store_total_bytes(store_dir)?;
+                let after = snapshot_capture::store_total_bytes(store_dir)?;
                 kept.retain(|k| k != id);
                 pruned.push(id.clone());
-            }
+                let progressed = after < total;
+                total = after;
+                if !progressed {
+                    break ByteCapOutcome::StoppedNoProgress;
+                }
+            };
         }
     }
 
-    Ok(RetentionApplyResult { kept, pruned, bytes_freed })
+    Ok(RetentionApplyResult { kept, pruned, bytes_freed, byte_cap })
 }
 
 #[cfg(test)]
@@ -1002,6 +1170,292 @@ mod tests {
         // The footprint no longer goes through `index.json` at all, so a preview still answers honestly
         // on a store whose index is corrupt.
         assert_eq!(preview(&store_s, &policy).unwrap().total_bytes, real_blob_bytes(&store));
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    // ---- CPE-1863: the byte-cap loop must not delete checkpoints that cannot help ------------------
+
+    /// **Every CPE-1863 fixture's liveness, in one place.** These tests are all assertions about the
+    /// byte-cap loop, and the loop only reaches its own logic if the GFS pass leaves it something to do
+    /// and the store measures as non-empty. This proves that before any harm is asserted: the planner
+    /// hands `thin` exactly `expected` checkpoints, the policy would prune **none** of them (so the byte
+    /// cap is the only pressure in the test), and the store has a real measured footprint — returned,
+    /// because that is what every cap here is expressed relative to.
+    ///
+    /// Folded into a helper rather than written out per test **on CPE-1861's evidence**: three of that
+    /// ticket's tests certified nothing under a decoy-sibling trap, because each carried its own
+    /// hand-written liveness checks and the claim inverted from 2-passed/9-failed to 9-passed/2-failed
+    /// without anyone noticing. One helper cannot rot in three places.
+    fn live_cap_fixture(store: &std::path::Path, policy: &RetentionPolicy, expected: usize) -> u64 {
+        let store_s = store.to_string_lossy().to_string();
+        let seen = planner_view(store);
+        assert_eq!(
+            seen.len(),
+            expected,
+            "LIVE: the planner sees {} checkpoints, not {expected} — {seen:?}",
+            seen.len()
+        );
+        assert!(
+            preview(&store_s, policy).unwrap().prune.is_empty(),
+            "LIVE: the GFS pass wants to prune on its own, so this fixture does not isolate the byte cap"
+        );
+        let total = snapshot_capture::store_total_bytes(&store_s).unwrap();
+        assert!(total > 0, "LIVE: the store measures as empty, so no cap can bite it");
+        total
+    }
+
+    /// The other half of a no-progress fixture: the store's blobs are **shared**, which is the condition
+    /// under which evicting a checkpoint reclaims nothing. Strictly fewer blob files than checkpoints
+    /// proves at least one blob has more than one namer. Returns the blob-file count.
+    ///
+    /// Paired with [`live_cap_fixture`] so a no-progress test can never quietly become a test of a store
+    /// where pruning would have freed bytes anyway — which would pass for the wrong reason.
+    fn assert_blobs_are_shared(store: &std::path::Path, checkpoints: usize) -> usize {
+        let blobs: Vec<String> = fs::read_dir(store.join("blobs"))
+            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        assert!(!blobs.is_empty(), "LIVE: the store has no blobs, so there is nothing to share");
+        assert!(
+            blobs.len() < checkpoints,
+            "LIVE: {} blob files for {checkpoints} checkpoints — nothing is shared, so a prune WOULD \
+             free bytes and this fixture does not test no-progress",
+            blobs.len()
+        );
+        blobs.len()
+    }
+
+    /// **CPE-1863's headline harm, with no tamper of any kind in the fixture.** Six identical captures —
+    /// an ordinary store where nothing changed between snapshots — so one blob is shared by every
+    /// manifest and evicting any of them reclaims nothing. `total = total.saturating_sub(freed)` never
+    /// saw the cap met, and the loop's only other exit was its one-survivor floor. Measured on
+    /// `origin/main`:
+    ///
+    /// ```text
+    /// apply(cap = total - 1)  ->  kept = 1, pruned = 5, bytes_freed = 0
+    /// ```
+    ///
+    /// Five checkpoints destroyed, zero bytes reclaimed, reported as `Ok`. The cap was never going to be
+    /// met by deleting them, because they were not what was using the space.
+    #[test]
+    fn cpe_1863_a_cap_no_eviction_can_meet_stops_instead_of_emptying_the_store() {
+        let src = scratch("1863-shared-src");
+        let store = scratch("1863-shared-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        // Six captures of the SAME content, a day apart. No tamper: this is what a store looks like when
+        // a scheduled capture runs over a folder nobody edited.
+        fs::write(src.join("a.txt"), vec![7u8; 400]).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..6u64 {
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+
+        let total = live_cap_fixture(&store, &policy, 6);
+        assert_eq!(assert_blobs_are_shared(&store, 6), 1, "LIVE: six identical captures are not one blob");
+
+        // A cap one byte under the store's real footprint: satisfiable only by freeing something, and
+        // nothing here can be freed while any manifest survives.
+        let applied = apply(&store_s, &policy, Some(total - 1)).unwrap();
+
+        // HARM FIRST, on disk, before the Result is consulted at all.
+        let left = manifest_files(&store);
+        assert_eq!(
+            left.len(),
+            5,
+            "HARM: the byte cap destroyed {} of 6 checkpoints to reclaim nothing — {left:?}",
+            6 - left.len()
+        );
+        assert_eq!(
+            snapshot_capture::store_total_bytes(&store_s).unwrap(),
+            total,
+            "HARM: the footprint the cap was chasing did not move, which is the whole point"
+        );
+        assert_kept_ids_all_restore(&store, &applied.kept, "1863-shared");
+
+        // And the Result says so rather than reading as a success.
+        assert_eq!(applied.byte_cap, ByteCapOutcome::StoppedNoProgress);
+        assert!(applied.byte_cap.cap_missed(), "a cap that was not met must not read as met");
+        assert_eq!(applied.bytes_freed, 0, "no eviction here can free a byte");
+        assert_eq!(applied.pruned.len(), 1, "the loop stops after the first fruitless eviction");
+        assert_eq!(applied.pruned, vec![ids[0].clone()], "and it is the oldest, as always");
+        assert_eq!(applied.kept.len(), 5);
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **The over-tightening pin.** A "stop when a prune frees nothing" rule that stopped a loop which
+    /// *is* reclaiming bytes would satisfy the test above and make the byte cap useless. Four distinct
+    /// 200-byte captures, a cap of 450: the loop must evict **two** — each eviction genuinely freeing
+    /// 200 — and stop the moment the store is under the cap, not before and not at the floor.
+    #[test]
+    fn cpe_1863_the_cap_still_evicts_more_than_once_while_each_eviction_frees_bytes() {
+        let src = scratch("1863-progress-src");
+        let store = scratch("1863-progress-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..4u64 {
+            fs::write(src.join("a.txt"), vec![b'a' + i as u8; 200]).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        assert_eq!(live_cap_fixture(&store, &policy, 4), 800, "LIVE: the fixture is not 4 x 200 bytes");
+
+        // 800 -> 600 (still over) -> 400 (under). Two evictions, and the third must not happen.
+        let applied = apply(&store_s, &policy, Some(450)).unwrap();
+
+        assert_eq!(
+            applied.pruned,
+            vec![ids[0].clone(), ids[1].clone()],
+            "HARM: the no-progress rule stopped a loop that was reclaiming bytes"
+        );
+        assert_eq!(manifest_files(&store).len(), 2, "HARM: the cap deleted more than it needed to");
+        assert_eq!(real_blob_bytes(&store), 400, "the real footprint is now under the cap");
+        assert_eq!(applied.bytes_freed, 400);
+        assert_eq!(applied.byte_cap, ByteCapOutcome::Met);
+        assert!(!applied.byte_cap.cap_missed());
+        assert_kept_ids_all_restore(&store, &applied.kept, "1863-progress");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// A cap that is genuinely unreachable because there is nothing left to evict — every eviction here
+    /// frees its 200 bytes, so the loop is working, and it still cannot get a 4-checkpoint store under 1
+    /// byte. It stops at the one-survivor floor and **says so**. Before CPE-1863 this returned an `Ok`
+    /// indistinguishable from a cap that was met.
+    #[test]
+    fn cpe_1863_a_cap_no_store_can_reach_reports_the_floor_rather_than_success() {
+        let src = scratch("1863-floor-src");
+        let store = scratch("1863-floor-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..4u64 {
+            fs::write(src.join("a.txt"), vec![b'a' + i as u8; 200]).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        assert_eq!(live_cap_fixture(&store, &policy, 4), 800, "LIVE: the fixture is not 4 x 200 bytes");
+
+        let applied = apply(&store_s, &policy, Some(1)).unwrap();
+
+        assert_eq!(applied.kept.len(), 1, "the floor still holds: a store is never thinned to zero");
+        assert_eq!(applied.pruned, vec![ids[0].clone(), ids[1].clone(), ids[2].clone()]);
+        assert_eq!(applied.bytes_freed, 600, "every one of those evictions did reclaim its bytes");
+        assert_eq!(
+            applied.byte_cap,
+            ByteCapOutcome::StoppedAtFloor,
+            "HARM: a cap the store cannot reach was reported as met"
+        );
+        assert!(applied.byte_cap.cap_missed());
+        assert_kept_ids_all_restore(&store, &applied.kept, "1863-floor");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// A pass with no cap at all — every caller in the app today, `snapshot_schedule::snapshot_run_due`
+    /// included — must not claim a cap outcome it was never given.
+    #[test]
+    fn cpe_1863_a_pass_with_no_cap_reports_no_cap() {
+        let src = scratch("1863-nocap-src");
+        let store = scratch("1863-nocap-store");
+        let store_s = store.to_string_lossy().to_string();
+        fs::write(src.join("a.txt"), b"v1").unwrap();
+        let m1 = capture_at(&src, &store, 3600);
+        fs::write(src.join("a.txt"), b"v2").unwrap();
+        let m2 = capture_at(&src, &store, 2 * 3600);
+        fs::write(src.join("a.txt"), b"v3").unwrap();
+        let m3 = capture_at(&src, &store, 3 * 3600);
+        assert_eq!(planner_view(&store).len(), 3, "LIVE: the planner does not see three checkpoints");
+
+        // A policy that DOES thin, so the GFS pass really deletes something — and still no cap verdict.
+        let applied = apply(&store_s, &all_pol(), None).unwrap();
+        assert_eq!(applied.pruned, vec![m1], "LIVE: the GFS pass pruned nothing, so this proves nothing");
+        assert_eq!(applied.byte_cap, ByteCapOutcome::NotRequested);
+        assert!(!applied.byte_cap.cap_missed());
+        let _ = (m2, m3);
+
+        // `Some(0)` is documented as "no cap", not "a cap of zero bytes", and must read the same way.
+        let applied = apply(&store_s, &all_pol(), Some(0)).unwrap();
+        assert_eq!(applied.byte_cap, ByteCapOutcome::NotRequested);
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **The CPE-1861 interaction, which the fix must not turn into a stall.** CPE-1861 accepted a
+    /// residual: a manifest file `list_manifests` refuses — an Explorer `"<id> - Copy.json"`, ~122 bytes,
+    /// invisible to the planner and permanent — still counts as a namer to `prune`'s witness and to
+    /// `store_total_bytes`. Its snapshot's blobs are therefore pinned, counted toward the cap, and
+    /// reclaimable by no prune retention can make, so `freed == 0` is the *expected* outcome there.
+    ///
+    /// Three things are asserted, in this order: the pass still returns `Ok` and the GFS half of it still
+    /// ran (a stop, not a stall); it stops after one eviction instead of walking to the floor; and a
+    /// **second pass is not wedged** — it evicts a candidate that does free bytes, so the rule stops a
+    /// fruitless walk without stopping a productive one.
+    ///
+    /// It also pins this fix's accepted cost, in the open: pruning `m2` *would* have freed 200 bytes,
+    /// and pass 1 does not find that out. Continuing would spend certain destruction of the user's
+    /// history on a speculative reclaim, and the usual reason an eviction freed nothing is that the
+    /// blobs are shared with everything — in which case continuing destroys the lot for nothing.
+    #[test]
+    fn cpe_1863_an_invisible_manifest_pinning_blobs_stops_the_cap_without_stalling_it() {
+        let src = scratch("1863-pinned-src");
+        let store = scratch("1863-pinned-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..3u64 {
+            fs::write(src.join("a.txt"), vec![b'a' + i as u8; 200]).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        assert_eq!(live_cap_fixture(&store, &policy, 3), 600, "LIVE: the fixture is not 3 x 200 bytes");
+
+        // The residual, exactly as CPE-1861 leaves it: an ordinary Explorer copy of the OLDEST
+        // checkpoint. The planner never sees it; `prune`'s witness always does.
+        let copy = plant_copy(&store, &ids[0], &format!("{} - Copy", ids[0]), None);
+        assert!(copy.exists() && fs::metadata(&copy).unwrap().len() > 0, "LIVE: the copy is not on disk");
+        assert_eq!(
+            live_cap_fixture(&store, &policy, 3),
+            600,
+            "LIVE: the copy became visible to the planner, so this is not CPE-1861's residual"
+        );
+        assert_eq!(manifest_files(&store).len(), 4, "LIVE: the copy is not in manifests/");
+
+        let pass1 = apply(&store_s, &policy, Some(1)).unwrap();
+
+        // HARM FIRST: two checkpoints are what the walk to the floor used to cost here.
+        assert_eq!(
+            planner_view(&store).len(),
+            2,
+            "HARM: the cap walked to the floor over blobs no prune of it could ever free"
+        );
+        assert_eq!(pass1.pruned, vec![ids[0].clone()]);
+        assert_eq!(pass1.bytes_freed, 0, "the copy still names m1's blob, so nothing was reclaimed");
+        assert_eq!(pass1.byte_cap, ByteCapOutcome::StoppedNoProgress);
+        assert_kept_ids_all_restore(&store, &pass1.kept, "1863-pinned-1");
+
+        // A STOP, NOT A STALL: pass 2 runs, and evicting m2 does free its 200 bytes, so the no-progress
+        // rule does not freeze a store it once fired on.
+        let pass2 = apply(&store_s, &policy, Some(1)).unwrap();
+        assert_eq!(pass2.pruned, vec![ids[1].clone()], "HARM: the store is wedged — pass 2 did nothing");
+        assert_eq!(pass2.bytes_freed, 200, "HARM: a productive eviction was refused");
+        assert_eq!(pass2.byte_cap, ByteCapOutcome::StoppedAtFloor, "one survivor left, cap still unmet");
+        assert_kept_ids_all_restore(&store, &pass2.kept, "1863-pinned-2");
+
+        // The pinned blob is still there, still unreclaimable, and still counted — CPE-1861's residual,
+        // unchanged by this ticket and now *named* by the outcome rather than paid for in checkpoints.
+        assert!(
+            snapshot_capture::store_total_bytes(&store_s).unwrap() >= 200,
+            "CPE-1861's pinned blob is still part of the measured footprint"
+        );
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);

@@ -3958,6 +3958,56 @@ export type BuildStats = { dirs_scanned: number;
  */
 truncated: boolean }
 /**
+ * What became of the optional byte cap in one [`apply`] — a **pass-level** verdict on a budget, not a
+ * per-item one (CPE-1863).
+ * 
+ * It exists because "the cap was met" and "the cap could not be met and we destroyed checkpoints
+ * discovering that" used to be the same answer: an `Ok(RetentionApplyResult)` with a non-empty `pruned`
+ * list. A caller reading `pruned` alone reports success either way, which is the whole of CPE-1863.
+ * 
+ * | variant | what happened | what the caller can say |
+ * |---|---|---|
+ * | [`NotRequested`](ByteCapOutcome::NotRequested) | no cap was passed (`None`, or `Some(0)`) | nothing — the GFS policy alone decided |
+ * | [`Met`](ByteCapOutcome::Met) | the store's measured footprint is at or under the cap | the cap holds |
+ * | [`StoppedNoProgress`](ByteCapOutcome::StoppedNoProgress) | an eviction reclaimed **nothing**, so the loop stopped | the cap was **not** met, and deleting more checkpoints would not have helped |
+ * | [`StoppedAtFloor`](ByteCapOutcome::StoppedAtFloor) | the loop ran out of evictable survivors (a store is never pruned below one snapshot) | the cap was **not** met; the store cannot get smaller by thinning |
+ * 
+ * **Why this is not [`crate::model::OpOutcome`]** (CPE-1845's discriminant), checked rather than
+ * assumed: that enum answers "what happened to *this one item*, and can the user retry it" for a bulk
+ * per-path operation, and every manifest this loop deletes is unambiguously `Applied` — the item
+ * succeeded. What is unresolved is the *budget the deletions were justified by*, which has no item.
+ * Mapping a missed cap onto `SkippedByPlan`/`HeldBackByCheckpoint` would mean reporting a hold-back for
+ * operations that were in fact performed. Its *conventions* are reused deliberately, because those are
+ * the reusable part: a discriminated union rather than a prose prefix, `snake_case` on the wire, and
+ * variants chosen by the user-facing decision they drive rather than by internal control flow.
+ * 
+ * Serialised `snake_case`, so TS reads `"not_requested" | "met" | "stopped_no_progress" |
+ * "stopped_at_floor"`.
+ */
+export type ByteCapOutcome = 
+/**
+ * No byte cap was requested, so there was nothing to meet. The default, and what every caller in
+ * the app gets today — `snapshot_schedule::snapshot_run_due` passes `None`.
+ */
+"not_requested" | 
+/**
+ * The store's measured footprint is at or under the cap. This includes the common case where it
+ * already was before any eviction.
+ */
+"met" | 
+/**
+ * **The cap was not met.** An eviction reclaimed nothing — the store's re-measured footprint did not
+ * fall — so the loop stopped rather than keep deleting checkpoints that cannot help. See the
+ * no-progress rule on [`apply`].
+ */
+"stopped_no_progress" | 
+/**
+ * **The cap was not met.** Only one snapshot is left — a store is never thinned to zero — and the
+ * footprint is still over the cap. Also the safe label on [`apply`]'s structurally unreachable
+ * out-of-candidates arm; see the comment there before reading that as a second real cause.
+ */
+"stopped_at_floor"
+/**
  * A brokered permission a sidecar may request. No capability = no access.
  */
 export type Capability = 
@@ -5709,7 +5759,7 @@ export type ResolvedRun = { ops: ResolvedOp[]; inverses: InverseOp[] }
 export type ResultKind = "action" | "folder" | "file" | "recent"
 /**
  * The outcome of actually pruning a store: which manifests survived, which were removed (by the GFS
- * policy and/or the optional byte cap), and how many bytes were freed.
+ * policy and/or the optional byte cap), how many bytes were freed, and whether the byte cap was met.
  */
 export type RetentionApplyResult = { 
 /**
@@ -5723,8 +5773,26 @@ pruned: string[];
 /**
  * Total bytes freed across every prune in this apply — the lengths of the blob files actually
  * removed (CPE-1844), not the sizes `index.json` recorded for them.
+ * 
+ * `bytes_freed == 0` with a **non-empty `pruned`** is the anomaly CPE-1863 is about: checkpoints
+ * were destroyed and nothing was reclaimed. When the GFS policy alone drove it, it is not an anomaly
+ * at all — the user asked for fewer checkpoints, not for fewer bytes.
+ * 
+ * **It does not imply [`ByteCapOutcome::StoppedNoProgress`], and an earlier draft of this comment
+ * said it did.** The two are measured in different currencies on purpose (see the no-progress rule
+ * on [`apply`]): `bytes_freed` counts blob *files removed*, `byte_cap` turns on the *re-measured
+ * footprint*. In precisely the divergence case the rule exists to serve — a blob whose last namer
+ * was pruned and whose file could not be deleted — `prune` credits 0 while `total` falls, so the
+ * loop correctly keeps going and can finish at [`ByteCapOutcome::Met`] or
+ * [`ByteCapOutcome::StoppedAtFloor`] with `bytes_freed == 0` and a non-empty `pruned`. Read the two
+ * fields together; neither derives the other.
  */
-bytes_freed: number }
+bytes_freed: number; 
+/**
+ * What became of the byte cap (CPE-1863). [`ByteCapOutcome::NotRequested`] whenever no cap was
+ * passed, which is every caller in the app today.
+ */
+byte_cap: ByteCapOutcome }
 /**
  * How many buckets to keep at each granularity. `0` disables a tier.
  */
