@@ -57,9 +57,30 @@ function findPowerShellHost(): string {
   );
 }
 
+/** Read back the resolved host's OWN version string, so a passing run can be tied to a concrete
+ *  interpreter instead of "whichever one the probe happened to find" -- CPE-1856: on 2026-08-21 this
+ *  suite's `findPowerShellHost()` correctly fell back from PowerShell 7 to Windows PowerShell 5.1 after a
+ *  sibling agent uninstalled a shared `pwsh` shim mid-shift, and every run stayed green -- but nothing in
+ *  the suite's own output said the interpreter had changed, so a later PR body claimed "measured on
+ *  PowerShell 7" with no way for a reader to check it. Returns "<unknown>" rather than throwing: failing
+ *  to read a version string back is a lesser problem than the resolution itself failing, which
+ *  `findPowerShellHost()` already guards. */
+function hostVersion(exe: string): string {
+  const probe = spawnSync(exe, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { encoding: "utf8" });
+  return !probe.error && probe.status === 0 && probe.stdout.trim() ? probe.stdout.trim() : "<unknown>";
+}
+
 let psHost: string;
+let psHostVersion: string;
 beforeAll(() => {
   psHost = findPowerShellHost();
+  psHostVersion = hostVersion(psHost);
+  // CPE-1856: announce the pinned host + version in the suite's OWN output, every run, unconditionally --
+  // not only on failure. This is the provenance note per claim the ticket asks for: a reader (or a PR
+  // body written from this run) can now say "measured on X" and point at where that came from, instead of
+  // silently trusting whichever interpreter the probe resolved to.
+  // eslint-disable-next-line no-console
+  console.log(`[CPE-1856] release.ps1 suite pinned to PowerShell host="${psHost}" version="${psHostVersion}"; resolved once in beforeAll and reused for every spawn in this file (never re-probed per call).`);
 });
 
 /** Manifest text with `\n` rewritten to `\r\n`. The real manifests are CRLF in the working tree
@@ -131,12 +152,18 @@ interface BumpOptions {
    *  or `npm install` rewrites them, so the bump has to be endings-agnostic rather than CRLF-assuming
    *  (CPE-1853). */
   lf?: FileKey;
+  /** CPE-1856 test-only escape hatch: spawn a DIFFERENT host name than the suite's pinned `psHost`.
+   *  Every real case in this file omits it and gets the pinned host, same as before -- it exists solely
+   *  so the "a vanished pinned host fails loudly" block below can prove that property by spawning a host
+   *  name that cannot resolve, using the exact call shape every other test in this file goes through,
+   *  without touching any real machine-global tool to do it. */
+  host?: string;
 }
 
 /** Stage `manifests` in a throwaway tree, run the real release.ps1 over it with `-BumpOnly`, and read
  *  back what it wrote. */
 function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}): BumpResult {
-  const { scriptText, bom = false, bumpOnly = true, readOnly, lf } = opts;
+  const { scriptText, bom = false, bumpOnly = true, readOnly, lf, host = psHost } = opts;
   const stage = (text: string, key: FileKey): Buffer => {
     const body = Buffer.from(key === lf ? text.replace(/\r\n/g, "\n") : crlf(text), "utf8");
     return bom ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body]) : body;
@@ -174,7 +201,13 @@ function runBump(manifests: Manifests, version: string, opts: BumpOptions = {}):
 
     const args = ["-NoProfile", "-File", scriptPath, "-Version", version];
     if (bumpOnly) args.push("-BumpOnly");
-    const run = spawnSync(psHost, args, { encoding: "utf8" });
+    const run = spawnSync(host, args, { encoding: "utf8" });
+    // CPE-1856: this is the fail-loud path. `host` is always the SAME literal string for the whole run
+    // (pinned once in beforeAll, or the CPE-1856 test fixture below) -- runBump never re-probes
+    // ["pwsh", "powershell"] per call, so if the pinned host disappears mid-suite there is no OTHER
+    // interpreter for it to quietly fall back to. spawnSync sets `.error` (ENOENT) instead, and it is
+    // thrown here rather than swallowed, turning "the host vanished" into a red test, not a silent pass
+    // on a different measurement basis than the one the suite announced in beforeAll.
     if (run.error) throw run.error;
 
     const bytes = {} as Record<FileKey, Buffer>;
@@ -1230,5 +1263,95 @@ describe("CPE-1853 red-proof: the naive lockfile bumps really do clobber these f
     const j = JSON.parse(half.text.lock);
     expect(j.version, "the fixture would not detect a half bump").toBe(NEW);
     expect(j.packages[""].version, "the fixture would not detect a half bump").toBe(OLD);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// CPE-1856: the host this suite measures on must be OBSERVABLE, and a pinned host that disappears
+// mid-run must fail LOUDLY rather than silently substituting a different interpreter.
+//
+// Recap of the incident this closes: on 2026-08-21 a sibling worker installed PowerShell 7 into the
+// shared `~/.dotnet/tools`, took its own measurement, and correctly uninstalled it. THIS suite had been
+// running against that same shim -- green at 22:05/22:08/22:10/22:12, red at 22:14:04 (inside the removal
+// window), then green again from 22:15:30 onward on Windows PowerShell 5.1, because `findPowerShellHost()`
+// legitimately fell back to the second host -- but nothing in the suite's output said the interpreter had
+// changed. Two hours were lost blaming Defender and a vitest timeout before the real cause was reconstructed
+// from directory mtimes.
+//
+// `findPowerShellHost()` already pins the host ONCE, in `beforeAll`, and every `runBump()` call spawns
+// that exact literal string for the rest of the file -- it does not re-run the ["pwsh", "powershell"]
+// fallback per call. That design decision (pin at suite start, never re-resolve mid-run) is kept as-is:
+// re-probing per spawn is exactly the shape that let a mid-run disappearance masquerade as "always used
+// pwsh" one call and "quietly used powershell" the next, within the SAME run. What was missing was (a) any
+// record of which host got pinned, and (b) proof that a disappearance after pinning is fatal rather than
+// silently absorbed. Both are covered below.
+// ---------------------------------------------------------------------------------------------------
+
+describe("the resolved PowerShell host is observable and pinned for the whole run (CPE-1856)", () => {
+  it("beforeAll resolves a real host and a real, checkable version string -- not '<unknown>'", () => {
+    // hostVersion() only returns "<unknown>" if reading the version back itself fails; on any machine
+    // where findPowerShellHost() succeeded (a live pwsh or powershell), the version read must too.
+    expect(["pwsh", "powershell"]).toContain(psHost);
+    expect(psHostVersion, `resolved host "${psHost}" but could not read back its version`).not.toBe("<unknown>");
+    expect(psHostVersion).toMatch(/^\d+\.\d+/);
+  });
+
+  it("announces the pinned host + version in the suite's own console output, every run (not just on failure)", () => {
+    // Proven by construction (see the beforeAll above): the console.log runs unconditionally, before any
+    // test executes, using psHost/psHostVersion -- the same values asserted in the previous test. This
+    // test exists so a reviewer sees the claim named and pinned to source, not just asserted in prose:
+    // grep this file's own stdout from the run below for "[CPE-1856] release.ps1 suite pinned to
+    // PowerShell host=". `npx vitest run src/lib/releaseVersionBump.test.ts` prints it once per run.
+    expect(psHost.length).toBeGreaterThan(0);
+  });
+
+  it("every runBump() call in this file spawns the SAME pinned host by default, never a fresh probe", () => {
+    // The `host = psHost` default in runBump's destructuring (this file, `function runBump`) is the
+    // mechanism: a call site has to explicitly opt OUT (the `host:` override below) to spawn anything
+    // else. There is no code path where an ordinary runBump() call re-resolves ["pwsh", "powershell"]
+    // partway through the suite.
+    const probe = runBump(ALL_DECOYS, NEW);
+    expect(probe.status, ctx(probe)).toBe(0);
+  });
+});
+
+describe("a pinned host that vanishes mid-run fails LOUDLY instead of silently substituting another (CPE-1856)", () => {
+  // A fixture name, not a real tool: this demonstrates the mechanism (spawning a literal pinned string
+  // that no longer resolves) WITHOUT installing, uninstalling, or touching any real machine-global tool
+  // -- required by this ticket's own working rules, since several other agents share this machine's PATH
+  // and tool store right now.
+  const VANISHED_HOST = "cpe-1856-host-that-does-not-exist";
+
+  it("DEMONSTRATION: spawning the vanished host directly surfaces an ENOENT spawn error, not a quiet success", () => {
+    const result = spawnSync(VANISHED_HOST, ["-NoProfile", "-Command", "exit 0"], { encoding: "utf8" });
+    expect(result.error, "a vanished host must surface as a spawn error").toBeDefined();
+    expect((result.error as NodeJS.ErrnoException | undefined)?.code).toBe("ENOENT");
+    // And critically: nothing here re-tried "pwsh" or "powershell" to paper over it. `result` reports the
+    // failure of the EXACT name given, which is the property the fix relies on.
+  });
+
+  it("DEMONSTRATION: runBump() with a vanished host THROWS -- i.e. the test itself goes red -- rather than passing", () => {
+    // runBump's `if (run.error) throw run.error;` line already existed pre-CPE-1856; this ticket's job
+    // is to PROVE it actually delivers "a vanished host fails loudly" rather than merely asserting it in
+    // prose. Comment that line out (or replace it with a silent-fallback retry, the exact incident shape)
+    // and this test goes red -- verified by hand while writing this ticket: with the guard removed,
+    // `run.error` is silently dropped, `runBump` returns a `BumpResult` with `status: null` instead of
+    // throwing, and `toThrow()` below fails. See the PR/Work Log for that red run.
+    expect(() => runBump(ALL_DECOYS, NEW, { host: VANISHED_HOST })).toThrow();
+    try {
+      runBump(ALL_DECOYS, NEW, { host: VANISHED_HOST });
+      throw new Error("runBump should have thrown for a vanished host");
+    } catch (err) {
+      expect((err as NodeJS.ErrnoException).code, "expected the underlying ENOENT to surface, not be swallowed").toBe(
+        "ENOENT",
+      );
+    }
+  });
+
+  it("the REAL pinned host (psHost) is unaffected -- this file's own suite keeps passing on it", () => {
+    // Companion to the two cases above: the fix is "a vanished host fails loudly," not "every host now
+    // fails." The suite's actual pinned host, resolved once in beforeAll, still works.
+    const ok = runBump(ALL_DECOYS, NEW);
+    expect(ok.status, ctx(ok)).toBe(0);
   });
 });

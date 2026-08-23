@@ -16,6 +16,16 @@
 // (CPE-1846) and a pending count that dips before it rises (CPE-1863) — costs the same kind of wrong
 // conclusion from a poll instead of a log. sprint.md must carry the fetch idiom and the poll idiom that
 // cannot silently return a partial truth.
+//
+// CPE-1856: worktrees isolate the filesystem, not the MACHINE. A worker on CPE-1842 installed and then
+// correctly uninstalled PowerShell 7 into the shared `~/.dotnet/tools`; a sibling worker on CPE-1841 was
+// running its suite against that same shim, went red the moment it was removed, then went silently green
+// again on a DIFFERENT host (Windows PowerShell 5.1) because the harness's tool probe fell back without
+// announcing it -- two hours were lost to wrong diagnoses before a worker reconstructed the real cause
+// from directory mtimes. sprint.md must state that a machine-global tool install/uninstall/upgrade is a
+// shared-resource change (removal is the harmful half), that a measurement claim records its host/tool
+// version, that a harness tool probe must announce what it resolved to, and must enumerate the other
+// machine-global state (env vars, global git config, ports, the cargo cache, %TEMP%) beyond tool installs.
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -96,5 +106,42 @@ describe("sprint.md carries a CI poll idiom that can't mistake an empty or movin
 
   it("covers the gh api pagination neighbour named in the ticket", () => {
     expect(SPRINT_MD).toMatch(/--paginate/);
+  });
+});
+
+describe("sprint.md treats machine-global tool installs as a shared-resource change (CPE-1856)", () => {
+  it("names the incident: PowerShell 7 removed from under a sibling agent's green suite", () => {
+    expect(SPRINT_MD).toMatch(/dotnet tool install --tool-path/);
+    expect(SPRINT_MD).toMatch(/~\/\.dotnet\/tools/);
+    expect(SPRINT_MD).toMatch(/22:14:04/);
+  });
+
+  it("states that a machine-global install affects every other agent, not just the one making it", () => {
+    expect(SPRINT_MD).toMatch(/machine-global/);
+    expect(SPRINT_MD).toMatch(/affects \*\*every other agent running/i);
+  });
+
+  it("names removal, not install, as the harmful half, and requires leaving a shared install in place with a note", () => {
+    expect(SPRINT_MD).toMatch(/removal, not install, is the harmful half/i);
+    expect(SPRINT_MD).toMatch(/leave it installed and say so in your Work\s*\n?\s*> Log/i);
+  });
+
+  it("requires a provenance note per measurement claim: which host/tool version, and how determined", () => {
+    expect(SPRINT_MD).toMatch(/measurement or benchmark claim records which host\/tool version/i);
+    expect(SPRINT_MD).toMatch(/provenance note per claim/i);
+  });
+
+  it("requires a harness tool probe to pin once and announce the resolved host/version, never fall through silently", () => {
+    expect(SPRINT_MD).toMatch(/Harness tool probes must not fall through silently/i);
+    expect(SPRINT_MD).toMatch(/findPowerShellHost\(\)/);
+    expect(SPRINT_MD).toMatch(/announce the resolved host and version/i);
+    expect(SPRINT_MD).toMatch(/must fail loudly/i);
+  });
+
+  it("sweeps beyond tool installs: env vars, global git config, ports, the cargo cache, %TEMP%", () => {
+    expect(SPRINT_MD).toMatch(/global git config/i);
+    expect(SPRINT_MD).toMatch(/listening\s*\nports|listening ports/i);
+    expect(SPRINT_MD).toMatch(/cargo registry\/build cache/i);
+    expect(SPRINT_MD).toMatch(/%TEMP%/);
   });
 });
