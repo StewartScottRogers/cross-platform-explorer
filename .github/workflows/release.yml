@@ -166,13 +166,13 @@ jobs:
           includeUpdaterJson: true
 
       # CPE-1058 — verify the updater manifest we just built, before it ships. Reads pubkey + version from
-      # tauri.conf.json, locates this runner's freshly-built latest.json + updater artifacts under
-      # src-tauri/target, and re-checks each platform's minisign signature against the configured pubkey
-      # over the real artifact bytes — the same check the runtime plugin performs. Fails the release on a
-      # bad manifest (wrong signature / version mismatch / malformed). Guarded by the signing-key secret so
-      # it SKIPS (never fails) when updater signing isn't configured, mirroring the catalog job below and
-      # the OS-code-signing pattern above, keeping fork/PR builds green. The verify crate is standalone and
-      # NOT linked into the app (its minisign dep never enters the shipped binary).
+      # tauri.conf.json, locates this runner's freshly-built latest.json + updater artifacts, and re-checks
+      # each platform's minisign signature against the configured pubkey over the real artifact bytes — the
+      # same check the runtime plugin performs. Fails the release on a bad manifest (wrong signature /
+      # version mismatch / malformed / missing). Guarded by the signing-key secret so it SKIPS (never fails)
+      # when updater signing isn't configured, mirroring the catalog job below and the OS-code-signing
+      # pattern above, keeping fork/PR builds green. The verify crate is standalone and NOT linked into the
+      # app (its minisign dep never enters the shipped binary).
       - name: Detect updater signing key
         id: sig
         shell: bash
@@ -181,14 +181,26 @@ jobs:
         run: |
           if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
 
+      # CPE-1872 — the manifest is NOT under src-tauri/target. tauri-action's own
+      # upload-version-json.ts writes latest.json to `resolve(process.cwd(), 'latest.json')` — the
+      # step's cwd, i.e. this job's $GITHUB_WORKSPACE (the repo root, since the "Build and publish
+      # release" step above has no working-directory override) — then uploads that exact file as the
+      # release asset. It has never been written anywhere under the bundle tree, on any of the three
+      # platforms (confirmed identical on run 32645968177's ubuntu/macos/windows legs), which is why a
+      # search rooted at src-tauri/target always found nothing. Run this step from the repo root too
+      # (no working-directory override, --manifest-path instead) and point --manifest at the exact file
+      # tauri-action just wrote, instead of widening --search until something turns up — a search that
+      # finds nothing must stay a failure, not go green by looking harder. --search still targets
+      # src-tauri/target because that's where the signed installers/.sig files the manifest's platform
+      # entries reference actually live.
       - name: Verify updater manifest + signatures (CPE-1058)
         if: steps.sig.outputs.has == 'true'
-        working-directory: crates/updater-verify
         shell: bash
         run: |
-          cargo run --release --bin verify-release-artifacts -- \
-            --conf ../../src-tauri/tauri.conf.json \
-            --search ../../src-tauri/target
+          cargo run --manifest-path crates/updater-verify/Cargo.toml --release --bin verify-release-artifacts -- \
+            --conf src-tauri/tauri.conf.json \
+            --manifest latest.json \
+            --search src-tauri/target
 
   # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
   # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by
