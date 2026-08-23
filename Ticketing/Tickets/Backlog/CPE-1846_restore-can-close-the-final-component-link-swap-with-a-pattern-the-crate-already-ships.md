@@ -227,3 +227,21 @@ unaffected.
 `O_NOFOLLOW` makes the open itself fail with `ELOOP` so the post-open checks never run there. CI's ubuntu
 and macOS `Server crates` legs are the only verification, and must be green on this head before merge. The
 race numbers are Windows/NTFS only; the equivalent measurement on ext4/APFS has not been taken.
+
+### CI — the merge gate, checked by SHA
+
+PR **#1001**, head **`ea1cb2d3`** (first push). Every check on that SHA completed: **18 success, 1 skipped**
+(`GUI smoke (windows-latest)`, conditional). The merge gate re-checked explicitly by SHA rather than by
+branch — `gh pr checks --watch` exits 0 when the branch moves under it:
+
+```text
+Server crates (ubuntu-latest)  — clippy + test   completed  success  head_sha=ea1cb2d3…  run_id=97144961021
+Server crates (macos-latest)   — clippy + test   completed  success  head_sha=ea1cb2d3…  run_id=97144960994
+Server crates (windows-latest) — clippy + test   completed  success  head_sha=ea1cb2d3…  run_id=97144960983
+```
+
+**The Unix legs are confirmed live, not merely green.** Full job logs were downloaded (not read through
+`gh run view --log`, which can return a silent prefix): **ubuntu 17,370 lines, macOS 16,079 lines**. Both
+show all five `cpe_1846_*` tests running and passing, and — the part that matters — **zero**
+`[CPE-1846] SKIPPED` notices on either, so the symlink fixtures really staged there and the tests asserted
+rather than returning early.
