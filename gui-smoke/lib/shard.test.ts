@@ -46,6 +46,14 @@ const REAL_SPECS_DIR = path.join(GUI_SMOKE_DIR, "specs");
  * Anything beyond that is a real imbalance. This is deliberately tight enough to have FAILED on the
  * CPE-1753 round-robin split it replaces — that split put ~13.4 min on one shard against a ~7.6 min
  * mean, roughly 5 min past this bound — and loose enough never to red merely because a spec was added.
+ *
+ * WHAT IT DOES NOT CHECK, stated here because the wording invites the wrong reading (CPE-1858 review).
+ * The loads AND the bound both come from `specWeightMs`, so this is the model checked against ITSELF.
+ * It reds when the PARTITIONING ALGORITHM stops packing well; it is blind, by construction, to the
+ * TABLE drifting away from reality. Halve `samples.smoke.ts`'s real runtime, or triple
+ * `preview-pane.smoke.ts`'s, and this stays green while CI quietly un-balances. That is exactly the
+ * "balance degrades only, correctness never" mode `shard.ts` documents — it is not a claim that the
+ * shards are still balanced on a real runner. Only a re-measurement closes that loop.
  */
 function assertBalanced(allSpecs: string[], shardTotal: number, loads: number[]): void {
   const total = allSpecs.reduce((sum, s) => sum + specWeightMs(s), 0);
@@ -188,6 +196,15 @@ describe("assignment determinism across SEPARATE PROCESSES (CPE-1858)", () => {
   // So this runs the REAL `scripts/write-shard-manifest.ts` — the same file CI's "Declare this shard's
   // spec assignment" step runs — four times, as four separate `node` processes, each told only its own
   // shard index, and joins their manifests exactly as `gui-smoke-linux-verdict` does.
+  //
+  // HOW STRONG THIS TEST ACTUALLY IS, measured rather than asserted (CPE-1858 review). Red-proofed with
+  // `let target = Date.now() % shardTotal` in `partitionSpecs`, THIS test redded in six runs out of seven
+  // — not seven. The four children are spawned about a second apart, and 1000 is 0 mod 4, so their
+  // `Date.now() % 4` can coincide across all four and produce four mutually-consistent manifests. (In the
+  // seventh run the balance assertion redded instead, so the guard SET caught the mutation 7/7; this
+  // individual test catches it USUALLY.) Do not quote it as a deterministic red for a clock dependency.
+  // It is a statement about the test, not about the risk: a real clock dependency in production faces
+  // four runners starting minutes apart, where that coincidence does not save you.
   const TSX_CLI = path.join(GUI_SMOKE_DIR, "node_modules", "tsx", "dist", "cli.mjs");
   const MANIFEST_SCRIPT = path.join(GUI_SMOKE_DIR, "scripts", "write-shard-manifest.ts");
   const SHARD_TOTAL = 4;

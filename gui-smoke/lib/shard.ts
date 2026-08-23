@@ -197,6 +197,13 @@ function assertShardId({ shardIndex, shardTotal }: ShardId): void {
 // that fixed cost DWARFS the spec's own work (29.5 s vs a 1.3-18.2 s spread), so counting them is
 // already the correct cost model and a per-spec measured table would buy nothing while rotting 41 ways.
 //
+// That 29.5 is a BRACKET, not a constant, and the CPE-1858 review is why this now says so. Re-derived
+// independently it lands at 26.1-27.5 s if you divide the artifact spans and 29.5-31.9 s if you divide
+// the workflow STEP duration (which also carries per-step setup the artifacts never see). Both are
+// defensible definitions of the same quantity and the number below sits at the boundary. It does not
+// matter to the design: under EITHER bracket the fixed cost still exceeds every non-`samples` spec's own
+// runtime by 1.5x to 20x, which is the only thing the coarse model rests on.
+//
 // THE INCLUSION RULE, stated so the table cannot grow by taste: a spec earns an entry only when its
 // measured runtime EXCEEDS the per-spec session overhead — i.e. when the spec's own work, not the
 // session it runs in, is the dominant term. Exactly one spec qualifies today (479.3 s vs 29.5 s); the
@@ -204,17 +211,42 @@ function assertShardId({ shardIndex, shardTotal }: ShardId): void {
 // half of one session's overhead.
 //
 // WHAT HAPPENS WHEN A RUNTIME CHANGES — i.e. how this rots, stated plainly rather than wished away.
-// There is NO self-correcting static proxy available: `it()` count, line count and byte count were all
-// measured against the durations above and all three FAIL. `samples.smoke.ts` is 3 top-level `it()`
-// blocks and 186 lines — mid-pack on every static measure — because it generates one case per file in
-// the repo's `samples/` tree at spec-load time. `preview-pane.smoke.ts` has the MOST `it()` blocks (8)
-// and is 26x faster. So the table is measured, and it is hand-maintained. The failure modes:
+// No self-correcting proxy over a spec's own SOURCE is available: `it()` count, line count and byte
+// count were all measured against the durations above and all three FAIL. `samples.smoke.ts` is 3
+// top-level `it()` blocks and 186 lines — mid-pack on every static measure — because it generates one
+// case per file in the repo's `samples/` tree at spec-load time. `preview-pane.smoke.ts` has the MOST
+// `it()` blocks (8) and is 26x faster.
+//
+// That claim is scoped to SOURCE-based proxies on purpose (CPE-1858 review). A proxy does exist off the
+// source: `samples.smoke.ts`'s case count IS the file count under `samples/` (48 files, less READMEs and
+// the separately-run `malformed.pdf` = 46 cases, 479.3 / 46 = 10.4 s each), so counting that tree would
+// track its dominant term self-correctingly. It is NOT adopted, and the reason is design rather than
+// ignorance: it would put filesystem I/O into a module that is deliberately pure and no-I/O so it can be
+// unit-tested without a fixture tree, and it would hard-code a per-spec special case ("this one spec is
+// costed by walking a directory two levels up") into the one function every job must agree on. A weight
+// this module cannot compute from its inputs alone is a weight four runners could disagree about. If the
+// hand-maintenance below ever becomes the real cost, that is the door to reopen — with the I/O in
+// `specFiles.ts` and the result passed IN, never read from here.
+//
+// So the table is measured, and it is hand-maintained. The failure modes:
 //   - a table entry goes stale (samples gets faster/slower): balance degrades toward what round-robin
-//     would have given. Correctness is untouched — the partition is still a bijection.
+//     would have given. Correctness is untouched — the partition is still a bijection. NOTHING CATCHES
+//     THIS. `shard.test.ts`'s balance assertion computes the loads AND the bound it checks them against
+//     from `specWeightMs`, so it is the model checked against itself: it reds on a regression in the
+//     PARTITIONING ALGORITHM and is blind, by construction, to the TABLE drifting from reality. Only a
+//     re-measurement (recipe below) closes that loop. Read the balance test as "the packer still packs",
+//     never as "the shards are still balanced in CI".
 //   - a NEW spec becomes heavy and is not listed: it is costed as ordinary, lands on some shard, and
-//     that shard grows. Again balance only.
+//     that shard grows. Again balance only, and again unwatched.
 //   - an entry names a spec that was renamed or deleted: caught LOUDLY by a test in `shard.test.ts`,
 //     because that is the one rot a static check CAN see.
+//
+// WHERE THE NEXT IMBALANCE WILL COME FROM, since the table cannot see it. The three runner-up specs
+// (`preview-pane`, `network`, `saved-search` — 18.2 + 16.2 + 12.0 s) all land on ONE shard, shard 4,
+// which finishes only ~28 s of in-session time (~40 s of job time) behind the long pole. That margin is
+// thin: if those three roughly double, shard 4 becomes the long pole and neither this table nor any test
+// notices — the leg just gets slower. Re-measure when any of them grows, not only when `samples` does.
+//
 // The floor is set by the heaviest single spec no matter what: no partition and no shard count can put
 // `samples.smoke.ts` in two places. If ~8.5 min ever stops being acceptable, the lever is SPLITTING
 // that spec file (or trimming `samples/`), not editing this table.
