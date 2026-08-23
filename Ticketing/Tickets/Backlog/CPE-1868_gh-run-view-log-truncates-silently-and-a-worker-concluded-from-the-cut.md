@@ -47,6 +47,20 @@ prefix produces, and it is exactly the conclusion that excuses a red.
 - [ ] Record the idiom where dispatches are written, not only in a ticket. The knowledge that did not
       reach the prompt is the knowledge that failed here.
 
+## A second shape, same family: an empty board reads as a green board
+
+CPE-1846 hit this while the first ticket was still open. Its PR went **CONFLICTING** after a sibling
+merged underneath it, and GitHub cannot build a merge commit for a conflicting PR — so **zero check runs
+were scheduled**. `total_count` stayed **0 for eight minutes**.
+
+A poller that counts only *pending* jobs sees zero pending and concludes the board is green. **An empty
+board and a passing board are identical to it.** Every merge in this run polls exactly that way.
+
+- [ ] Every CI poll must read `total_count` (or the equivalent) and refuse to conclude anything from an
+      empty board. Zero checks is a state to report, never a state to pass.
+- [ ] Check the `mergeable` field alongside it — `CONFLICTING` is the usual cause, and a poller that reads
+      it would have named the real problem in seconds rather than after eight minutes of silence.
+
 ## Notes
 
 Found by the CPE-1859 worker itself when challenged on its account — it re-fetched the full archive,
