@@ -1059,6 +1059,26 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
 /// - [`manifests_naming`] is deliberately permissive — any parseable manifest counts, including a
 ///   planted one — so the manifest half is a file to write, not a gate to defeat.
 ///
+/// **And the pair is cheaper and quieter than "two files" suggests — both halves measured by the
+/// round-2 audit, and both understated by an earlier draft of this note.**
+///
+/// - **The witness manifest does not scale with the plant.** It is **122 bytes** for one hash, and one
+///   manifest can name any number of them: a single 8 KB manifest validated **200** planted blobs,
+///   i.e. 200 GB of claimed footprint. The cost of the second half is therefore essentially fixed no
+///   matter how large the inflation, and "a matched pair" must not be read as "a pair per blob".
+/// - **It is invisible and permanent.** Give the planted manifest an inner `id` that disagrees with
+///   its filename and CPE-1861's rule makes [`list_manifests`] skip it — so it never appears in the
+///   UI and is never a prune candidate — while [`manifests_naming`] still honours it, because that
+///   function is deliberately the permissive one. The two CPE-1861 halves compose into a witness
+///   nothing can see and nothing can remove. Measured: six manifest files in, four pruned, **two
+///   left** — one real survivor plus the planted witness, which re-pins the one-survivor floor on
+///   every future pass.
+///
+/// That is not a reason to tighten [`manifests_naming`] — see the shared-predicate hazard below,
+/// where tightening it re-opens CPE-1861's blob-deletion hole for [`prune`]. It is a reason to state
+/// the residual at its real size: an attacker who can already write into the store gets an arbitrary
+/// footprint for about 8 KB, undetectably.
+///
 /// What the witness buys is that the tamper is now two coordinated files inside the store rather than
 /// one number, and that every *accidental* shape (crash residue, stale-index restore, a stray file) is
 /// worth zero. What it can still buy is bounded by CPE-1863, which owns the byte-cap loop's willingness
@@ -1090,44 +1110,54 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
 /// blobs freed); an unreadable one is `Err`. An absent `manifests/` is `Ok(0)` — nothing names anything,
 /// so nothing is accounted for — while an **unreadable** `manifests/` is `Err` rather than being handed
 /// to [`manifests_naming`], whose own conservative branch answers "all of them are named" and would
-/// therefore over-count at precisely the site where over-counting deletes checkpoints. That check is why
-/// the generous branch is not reachable from here except in a race between it and the scan; in that
-/// race the figure is at most the directory sum, which is the behaviour of the version this replaces.
+/// therefore over-count at precisely the site where over-counting deletes checkpoints.
 /// [`crate::snapshot_prune::apply`] propagates either `Err` and deletes nothing.
+///
+/// **That pre-check is check-then-walk, and the window is measured reachable rather than
+/// theoretical.** An earlier draft of this paragraph said the generous branch was unreachable
+/// "except in a race", which reads as a dismissal. The round-2 audit ran it: with a thread renaming
+/// `manifests/` away and back, out of 30,000 calls the fallback was hit and returned the full 2 GB
+/// directory sum — the pre-witness behaviour. The bound stated here held exactly (at most the
+/// directory sum), and it grants an attacker nothing they do not already have: anyone able to rename
+/// `manifests/` can plant the 122-byte witness manifest instead, which is quieter and
+/// deterministic. Filed separately rather than widened into this change; the close is a
+/// [`manifests_naming`] variant that returns its `read_dir` failure instead of falling back, so this
+/// site opens the directory once instead of twice.
 ///
 /// # Cost, measured rather than assumed — and it went UP
 ///
-/// Release build, this machine, one manifest per 20 blobs, against the `index.json` read this
-/// replaces. `dir-sum` is the witness-less first version, for the record:
+/// **The driver is total manifest JSON bytes — manifests x files-per-tree — not blob count.** Two
+/// earlier figures in this ticket were both internally correct and neither was plannable: the audit's
+/// ~1.16x measured the witness-less directory sum, with no manifest parsing in it at all, and my own
+/// 8.35x used 2,500 manifests, a shape retention can never produce. Measured instead on the shape the
+/// shipped default `RetentionPolicy` (24/7/4/12) actually produces — **47 manifests, each listing a
+/// whole tree, blobs shared between them**:
 ///
 /// ```text
-/// blobs  manifests   index.json    dir-sum    witness    ratio to index.json
-///    50          3       550 us      72 us     318 us    0.58x
-///   200         10       661 us     223 us     630 us    0.95x
-///  1000         50      1147 us    1173 us    4189 us    3.65x
-///  5000        250      2394 us    6010 us   17101 us    7.14x
-/// 50000       2500     21223 us   60926 us  177226 us    8.35x
+/// manifests x files   manifest JSON   witness    ratio to the index.json read it replaces
+///     47 x     20          68 KB        105 us    2.6x
+///     47 x    200         648 KB        343 us    3.7x
+///     47 x  2,000         6.5 MB       3199 us    4.3x
+///     47 x 10,000        32.9 MB      15541 us    5.1x
 /// ```
 ///
-/// **This does not match the ~1.16x at n=5000 the security audit reported, and the difference is the
-/// fixture, not the machine.** The ratio is driven by how much manifest JSON there is to parse per
-/// blob, so a fixture with fewer or smaller manifests measures far cheaper. Both are recorded because
-/// the shape of the store is the variable, and the higher figure is the one to plan against.
+/// **The number to plan against is ~16 ms**, for a 10,000-file tree under the default policy: about
+/// 5x the index read it replaces, and just under the 18.3 ms this crate already accepts for
+/// [`manifests_naming`]'s scan inside a single `prune`.
 ///
 /// **Why it does not short-circuit.** [`manifests_naming`] stops early once every hash in `wanted` is
 /// accounted for. [`prune`] asks about a handful of at-risk hashes, so it usually stops after a few
 /// files; this asks about **every blob in the store**, so it reads every manifest, every time. That is
 /// inherent to the question rather than an implementation choice.
 ///
-/// **Not gated, and here is the arithmetic behind that.** The shipped default `RetentionPolicy`
-/// (24/7/4/12) caps a store at roughly 47 manifests (CPE-1861's figure), which at 20 files each is
-/// about 940 blobs — the ~4 ms row. The 17 ms and 177 ms rows need a store an order of magnitude past
-/// what retention permits. The one caller that runs unattended,
-/// [`crate::snapshot_schedule::snapshot_run_due`], passes `max_total_bytes: None`, so it pays this
-/// once per `preview` and never inside the byte-cap loop, all of it inside `spawn_blocking`. If a store
-/// ever does grow enough for this to bite, the fix is the same one CPE-1861 records for its own scan:
-/// hoist the manifest walk out so [`crate::snapshot_prune::preview`] — which already parses every
-/// manifest via [`list_manifests`] — shares one pass with this. Not weaken the witness.
+/// **Not gated, and here is the arithmetic behind that.** ~16 ms is the *worst* row a default-policy
+/// store can reach, and it needs a 10,000-file tree; an ordinary tree is the 105 us row. The one
+/// caller that runs unattended, [`crate::snapshot_schedule::snapshot_run_due`], passes
+/// `max_total_bytes: None`, so it pays this once per `preview` and never inside the byte-cap loop,
+/// all of it inside `spawn_blocking`. If a store ever does grow past what retention permits, the fix
+/// is the one CPE-1861 records for its own scan: hoist the manifest walk out so
+/// [`crate::snapshot_prune::preview`] — which already parses every manifest via
+/// [`list_manifests`] — shares one pass with this. Not weaken the witness.
 ///
 /// Note this no longer opens `index.json` at all. Recorded rather than left to be discovered:
 /// [`crate::snapshot_prune::preview`] and `apply` therefore now *disagree* about a store whose index is

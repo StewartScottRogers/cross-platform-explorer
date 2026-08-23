@@ -104,14 +104,25 @@ impl RestorePlanSummary {
 /// confirms against.
 ///
 /// Left alone deliberately, and the reason is the one that made CPE-1844's own headline worth fixing:
-/// **this figure authorises nothing.** It is displayed beside a confirm; no deletion, write, or
-/// retention decision is taken from it, unlike
-/// [`crate::snapshot_capture::store_total_bytes`], whose figure prunes checkpoints and is therefore
-/// measured from disk. Correcting it means sizing every write from its blob file, which is a stat per
-/// entry on the preview path for a cosmetic number. Found by CPE-1844's security audit as a
-/// thirteenth sink its enumeration missed — that walk covered `index.json`'s fields and `prune`'s
-/// gates, and this is the *manifest's* size field on the revert path. Recorded here so the next
-/// person meets it where it lives.
+/// **this figure authorises nothing.**
+///
+/// The line that separates the two is **whether the code branches on the number**, not whether a
+/// human reads it before a destructive action — a distinction worth stating precisely, because the
+/// looser version would have dragged this in and it does not belong.
+/// [`crate::snapshot_capture::store_total_bytes`] *selects which checkpoints to delete*, so it is
+/// measured from disk. This is rendered and discarded: the destructive content of the confirm it
+/// appears in is the create/overwrite/delete counts and paths, and those come from the plan, not
+/// from `size`. Correcting it means sizing every write from its blob file, a stat per entry on the
+/// preview path for a cosmetic number.
+///
+/// **If it is ever revisited, the dangerous edit is `0`, not `9000000000`.** An implausibly huge figure
+/// is loud and gets questioned; a preview saying a revert writes *nothing* is the shape a user
+/// confirms without reading, and the revert then proceeds to write and delete exactly as planned.
+/// The inverse case is the one to test first.
+///
+/// Found by CPE-1844's security audit as a thirteenth sink its enumeration missed — that walk
+/// covered `index.json`'s fields and `prune`'s gates, and this is the *manifest's* size field on the
+/// revert path. Recorded here so the next person meets it where it lives.
 pub fn summarize_plan(plan: &[RestoreAction], checkpoint: &Snapshot) -> RestorePlanSummary {
     let mut s = RestorePlanSummary::default();
     for a in plan {

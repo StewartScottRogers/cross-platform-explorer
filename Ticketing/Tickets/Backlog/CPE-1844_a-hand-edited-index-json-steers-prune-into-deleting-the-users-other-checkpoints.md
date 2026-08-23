@@ -480,3 +480,91 @@ making it assume everything matters.
 - The unreadable-`manifests/` case is staged as a non-directory, not as a permission denial; the
   permission shape is the one `classify_store_index` records as unstageable on both platforms.
 - CPE-1863 remains untouched; the orphan case is handed to it as directed.
+
+### 2026-08-22 — round 3: records only. The witness holds; three of my own numbers did not
+
+The re-audit returned **MERGE**: both round-1 criticals are closed at the command path and the
+no-attacker regression is genuinely gone, measured through the registered commands —
+
+```text
+AUDIT R2-8 [plant]               preview.total_bytes=45          pruned=0  manifests_left=5
+AUDIT R2-8 [orphan]              preview.total_bytes=45          pruned=0  manifests_left=5
+AUDIT R2-8 [plant-with-manifest] preview.total_bytes=2000000045  pruned=4  manifests_left=2
+```
+
+— and the decoy-sibling trap re-run against the round-2 helpers reds all five index-tampering tests on
+`LIVE`, including the three that previously certified nothing, with the fix noted as being in the right
+place (inside the helpers rather than patched per test). No code changed this round.
+
+**The cost dispute is resolved, and neither figure in this log was the right one.** The driver is
+**total manifest JSON bytes — manifests × files-per-tree — not blob count**. The audit's ~1.16x measured
+the *dir-sum* with no manifest parsing in it at all, so it was never a witness figure. My 8.35x used
+2,500 manifests, which the shipped 24/7/4/12 policy can never produce, so it overstates. Both internally
+correct, neither plannable. Measured on the shape the default policy actually produces — 47 manifests,
+each listing a whole tree, blobs shared:
+
+```text
+manifests x files   manifest JSON   witness    ratio
+    47 x     20          68 KB        105 us    2.6x
+    47 x    200         648 KB        343 us    3.7x
+    47 x  2,000         6.5 MB       3199 us    4.3x
+    47 x 10,000        32.9 MB      15541 us    5.1x
+```
+
+**~16 ms is the number to plan against** — a 10,000-file tree under the default policy, about 5x the
+index read it replaces and just under the 18.3 ms this crate already accepts for `manifests_naming`
+inside a single `prune`. My non-gating argument survives, and the mechanism it rests on was confirmed:
+with `wanted` = every blob in the store the early-exit essentially never fires, so all 47 manifests are
+parsed on every call. The table in `store_total_bytes`'s rustdoc is replaced with this one and cites the
+policy shape; the round-2 table above is left standing as the record of a figure that was correct about
+its own fixture and wrong about the store.
+
+**My residual note understated the matched pair in two ways, both measured.**
+
+- **The witness manifest does not scale with the plant.** It is **122 bytes** for one hash, and one
+  manifest can name any number: a single **8 KB** manifest validated **200** planted blobs — 200 GB of
+  claimed footprint. "A matched pair" must not be read as "a pair per blob"; the second half is a fixed
+  cost regardless of how large the inflation is.
+- **It is invisible and permanent.** Give the planted manifest an inner `id` disagreeing with its
+  filename and CPE-1861's rule makes `list_manifests` skip it — never shown in the UI, never a prune
+  candidate — while `manifests_naming`, deliberately the permissive one, still honours it. The two
+  CPE-1861 halves compose into a witness nothing can see and nothing can remove. The measured row shows
+  it: six manifest files in, four pruned, **two left** — one real survivor plus the planted witness,
+  re-pinning the one-survivor floor on every future pass.
+
+My "a file to write, not a gate to defeat" framing was accurate as far as it went; it is now written at
+full size — an attacker who can already write into the store gets an arbitrary footprint for about 8 KB,
+undetectably. That is still not a reason to tighten `manifests_naming`, which would re-open CPE-1861's
+blob-deletion hole for `prune`.
+
+**The `bytes_written` disposition was right, and the reason is sharper than I stated it.** The line is
+not "does a human read it before a destructive action" — it is **whether the code branches on the
+number**. `store_total_bytes` selects which checkpoints to delete; `bytes_written` is rendered and
+discarded, and the destructive content of that confirm is the create/overwrite/delete counts and paths,
+which come from the plan and not from `size`. So "it authorises nothing" is correct *and correctly
+scoped*, and the looser test would have dragged this in wrongly. Added at `summarize_plan`, with the
+follow-up framed on the inverse case: **`0` is the dangerous edit, not `9000000000`** — an implausibly
+huge figure is loud and gets questioned, while a preview saying a revert writes *nothing* is the shape
+that gets confirmed without being read. That is the case to test first if it is ever revisited.
+
+**My check-then-walk note said "except in a race", which reads as a dismissal, and the race is measured
+reachable.** With a thread renaming `manifests/` away and back, out of 30,000 calls the fallback fired
+and returned the full 2 GB directory sum — round-1 behaviour. The bound I stated held exactly ("at most
+the directory sum"), and it grants an attacker nothing they do not already have, since anyone who can
+rename `manifests/` can plant the 122-byte witness instead, quieter and deterministically. **Filed
+separately and deliberately not fixed here** — the close is a `manifests_naming` variant returning its
+`read_dir` failure instead of falling back, so the site opens the directory once instead of twice. The
+rustdoc now records it as measured rather than hypothetical.
+
+**Also confirmed rather than trusted**, and worth keeping because it bounds the claim: every "readable
+but yields nothing" and "partially readable" shape **under**-counts, which is the safe direction here;
+and the framing that `manifests_naming` fails *open* for `prune` and would fail *closed-wrong* here is
+correct, with the pre-check the right place to split them.
+
+### Round-3 gates
+
+No code changed — comments, one rustdoc table, and this log. `crates/server`: clippy
+`--all-targets -- -D warnings` → **0**; `cargo test` → **2343 lib** (4 ignored) + ticket_mcp 0 + 21 + 22
++ 2 + 1 + 1 + 45 + 16 + 32, **0 failed** — identical to round 2, as expected. `src-tauri` both feature
+modes: clippy **0** / **0**; tests **214** / **269**. No `specta::Type` struct or command signature
+touched, so `bindings.gen.ts` is unaffected and unchanged.
