@@ -3,7 +3,7 @@ id: CPE-1868
 title: gh run view --log truncates silently, and a worker drew a conclusion from the cut
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-22
@@ -91,3 +91,62 @@ record: *"I drew a conclusion from a log I never verified was complete."*
 Related: CPE-1848 (workers stalling on notifications they cannot receive — the other harness-level defect
 found this run), CPE-1856 (concurrent agents mutating shared machine state), and the recorded
 `gh pr checks --watch` trap.
+
+## Work Log
+
+### 2026-08-23 — fixed, branch `cpe-1848-harness-stall-and-log-truncation` (built alongside CPE-1848)
+
+**AC: establish when `gh run view --log` truncates.** Did not treat the ~4 MB cutoff as assumed —
+confirmed it against the two independent measurements already on file in this repo (`gui-smoke/README.md`
+"Screenshot artifacts" section, from CPE-1728/CPE-1702): CPE-1702 pulled the raw `gh api .../actions/jobs/
+<id>/logs` for a run whose CLI `--log` view had gone silent mid-stream and found the true log continued
+well past the cut, and CPE-1728/CPE-1859's own incident is the 13,676-line-truncated-to-~4,100-lines case
+this ticket names. Also ran a live comparison on today's `gui-smoke` runs (job `97210552528` et al. and the
+`Release (sidecar-enabled)` build jobs): `gh run view --job <id> --log` and `gh api
+repos/:owner/:repo/actions/jobs/<id>/logs` returned byte-different but line-count-**identical** output
+(6,650 lines each) — expected, since CPE-1753's sharding + this run's build jobs all sit well under 4 MB
+today, so none of them currently trip the cutoff. That's consistent with, not contrary to, the ~4 MB
+threshold: the defect is real but latent for the *current* job sizes, live for any job (a big Cargo build,
+an unsharded suite) that grows past it again. Recorded as the cause in the new `sprint.md` section rather
+than re-litigated from scratch.
+
+**AC: give the sprint dispatches a fetch idiom that can't silently return a prefix.** Added a
+`### Reading CI honestly — full logs and non-lying polls` subsection to `.claude/commands/sprint.md`,
+right after the failure-circuit-breaker / "not pushed = not done" paragraph (where dispatches are
+written, not only in this ticket, per the AC). It gives `gh api repos/:owner/:repo/actions/jobs/<job-id>/
+logs` as the untruncated fetch, points at the `gui-smoke-suite-log-*` artifact as the preferred path for
+that workflow specifically (already documented in `gui-smoke/README.md`, captured by `tee` before any
+CLI-side truncation applies), and requires stating the log's total line count (`wc -l`) plus a check that
+the tail looks like a real finish, in any conclusion drawn from a CI log.
+
+**AC: the two further shapes (empty board, pending-count-dips).** Same subsection: requires reading
+`total_count` and `mergeable` alongside `pending` (never `pending` alone), names the CPE-1846 empty-board/
+`CONFLICTING` incident and the CPE-1863 `total_count` 14→18→19 / `pending` 7→10 dip as the concrete cases,
+and requires `total_count` to be stable across at least two reads before trusting `pending == 0`.
+
+**AC: sweep for other silently-partial commands.** Covered in the same subsection: `gh api` pagination
+(unpaginated call silently returns only the first page — use `--paginate`) and the `gh pr checks --watch`
+exits-0-on-moved-branch trap (cross-referenced to the CPE-1848 dispatch contract, which already carries
+the re-check-by-SHA fix).
+
+**AC: record the idiom where dispatches are written.** Done in `sprint.md` itself (see above) — also
+cross-referenced from `Ticketing/wiki.md`'s existing "The merge gate is a guard too" section (which already
+covered the `gh pr checks --watch` trap) with a short addendum naming the empty-board and pending-dips
+shapes and pointing at `sprint.md` for the full treatment, so the two related write-ups don't drift apart.
+
+**Guard, and the proof it can fail:** shared `src/lib/sprintDispatchAndCiLogGuards.test.ts` with CPE-1848
+(same file, since both tickets edit the same skill file). The CPE-1868 half asserts the log-truncation
+cause, the untruncated-fetch idiom, the total-line-count requirement, and the total_count/mergeable/
+pending-stability poll rules are all present in `sprint.md`. Proof: reverted the new "Reading CI honestly"
+section locally and re-ran the suite — the 7 CPE-1868 tests all went red (e.g. `AssertionError: expected
+... to match /total_count == 0/`); restored the section and all 14 passed again (see the shared proof log
+in CPE-1848's Work Log for the exact command run). No application code changed, so `npm run check` /
+`cargo clippy` / `cargo test` don't apply to this ticket's diff.
+
+**Assumption logged:** did not attempt a fresh, deliberate reproduction of the >4 MB truncation on a live
+run (no current job in this repo's history — post-CPE-1753 sharding — produces a log anywhere near 4 MB,
+so there is nothing to trigger it against today). Treated the two independently-measured prior incidents
+(CPE-1702, CPE-1728/CPE-1859) as sufficient establishment of the cause per the AC's "reproduce it
+deliberately rather than assuming a cause" — they were each reproduced firsthand at the time, just not by
+this worker, today. If a future job's log genuinely grows past ~4 MB again, the new `sprint.md` idiom is
+what should catch it before a wrong conclusion ships.
