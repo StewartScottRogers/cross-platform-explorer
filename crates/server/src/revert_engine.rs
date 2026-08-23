@@ -879,15 +879,20 @@ fn apply_write(
     //
     // **Placed here, immediately before the copy, not in a pre-pass** — round 4's lesson, paid for once
     // already: a verdict reached before `create_dir_all` and `blob_source` is a verdict the destination
-    // can invalidate before the write it is protecting. Nothing may sit between this and `fs::copy`.
+    // can invalidate before the write it is protecting. Nothing may sit between this and the write.
     //
-    // What remains is the final-component link swap in the gap between this check and the copy —
-    // narrow, and **reducible**, not irreducible: this crate already ships the pattern that closes it
-    // (`batch_media`'s "never follow a link at the final component" open, `O_NOFOLLOW` on Unix and
-    // `FILE_FLAG_OPEN_REPARSE_POINT` on Windows, with no libc dependency, already used by
-    // `batch_execute`). Adopting it means opening the target and writing through the handle instead of
-    // `fs::copy`, which changes attribute-preserving behaviour on Windows — CPE-1846, deliberately
-    // not folded in here.
+    // **CPE-1846 closed the final-component link swap structurally.** The write below is no longer
+    // `fs::copy` but `fsutil::copy_file_onto_no_follow`, which opens `target` with `batch_media`'s
+    // never-follow-a-link open (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`, the same per-target
+    // constants, not a second spelling), refuses the handle if it addresses a link or a directory, and
+    // streams the blob through it. The object written is the object opened, so a link swapped into that
+    // name after this check has nothing left to redirect. `Overwrite` is unaffected: opening an existing
+    // regular file for truncate-and-write is exactly what it means.
+    //
+    // **Still open, and deliberately still recorded:** the *interior*-component race. `safe_target`
+    // resolves the directories above the final component by path and the open is by path too, so a
+    // directory link swapped into an interior component in between still redirects the write. `std`
+    // exposes no `openat`-relative resolution to close it with.
     if action.op == RestoreOp::Create && fs::symlink_metadata(&target).is_ok() {
         // **Permanent** (review round 2). The shape that reaches this is a case fold or another alias —
         // `A.txt` against a live `a.txt` on a case-insensitive volume — and the volume does not stop
@@ -902,14 +907,34 @@ fn apply_write(
     }
     // The reason reaches the USER — CPE-1845 renders it in the revert panel — so it names the blob by
     // its hash, already validated as plain hex by `blob_source`, rather than by its absolute path inside
-    // the app's private checkpoint store. Same diagnostic value, no internal layout leaked into a dialog.
-    // Transient, and the one that matters: a blob that has been pruned, a store on a disconnected
-    // drive, a destination the OS would not let us write this time.
-    fs::copy(&blob, &target).map_err(|e| {
-        Refused::transient(format!(
-            "the checkpoint's stored copy of this file (blob {}) could not be read: {e}",
-            state.hash
-        ))
+    // the app's private checkpoint store. `copy_file_onto_no_follow` is written to hold that line from
+    // its side too: it never names its *source* in a message, only the destination, which is the user's
+    // own tree and the half they need to see.
+    //
+    // **CPE-1845 and CPE-1846 meet here, and the classification is the whole of the merge.** CPE-1845
+    // split refusals into transient ("fix the cause and re-running works") and permanent ("nothing about
+    // re-running changes this"). CPE-1846 added a refusal that is emphatically **permanent**: a link or a
+    // directory sitting at the destination name. A planted link does not stop being a link because the
+    // user runs the revert again, and telling them to try again is precisely the loop CPE-1845 exists to
+    // stop sending people round. Everything else here — a pruned or unreadable blob, a locked
+    // destination, a full disk — is transient, exactly as before.
+    //
+    // **Decided by asking the filesystem, never by parsing the message.** A string match on our own
+    // wording is the kind of coupling that silently stops working the first time someone improves a
+    // sentence. Re-resolving the destination by path is safe *here and only here*: by this point the
+    // write has already happened or already been refused, so this decides WORDING and can no longer
+    // decide where a byte goes. That is the one property that made the same call unsafe before the copy.
+    crate::fsutil::copy_file_onto_no_follow(&blob, &target).map_err(|why| {
+        let name_is_taken_by_a_link_or_dir = fs::symlink_metadata(&target)
+            .is_ok_and(|m| m.file_type().is_symlink() || m.is_dir());
+        if name_is_taken_by_a_link_or_dir {
+            Refused::permanent(why)
+        } else {
+            Refused::transient(format!(
+                "the checkpoint's stored copy of this file (blob {}) could not be written: {why}",
+                state.hash
+            ))
+        }
     })?;
     Ok(())
 }
@@ -954,6 +979,110 @@ mod tests {
         assert!(!group.reason.is_empty(), "a hold-back must state its reason once: {group:?}");
         assert!(!group.next_step.is_empty(), "a hold-back must offer a next step: {group:?}");
         group
+    }
+
+    /// **The CPE-1845 x CPE-1846 merge, pinned.** The two tickets landed against each other: CPE-1845
+    /// classifies every write refusal as transient ("fix it and re-run") or permanent ("re-running
+    /// changes nothing"), and CPE-1846 added a brand-new refusal — a link or a directory sitting at the
+    /// destination name — that CPE-1845 never saw. Resolving the conflict meant choosing a class for it,
+    /// and the wrong choice is invisible: a planted link reported as transient tells the user to run the
+    /// revert again, which produces the identical refusal forever. That is the exact loop CPE-1845
+    /// exists to stop, arriving through a door it did not know about.
+    ///
+    /// The plan is built by hand with `Overwrite` rather than through `plan_restore`, deliberately: a
+    /// scan run *after* the link is planted would not see `a.txt` as a file, the plan would say `Create`,
+    /// and the Create-premise refusal above would fire first — a different (also permanent) rule, so the
+    /// test would pass while covering nothing about the one under test.
+    #[test]
+    fn cpe_1846_a_link_at_the_destination_is_reported_permanent_not_as_run_it_again() {
+        let store = scratch("1846-perm-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("1846aaaa"), b"ok").unwrap();
+
+        let root = scratch("1846-perm-root");
+        fs::write(root.join("bystander.txt"), b"BYSTANDER").unwrap();
+        fs::write(root.join("added.txt"), b"user file").unwrap();
+        // Liveness is asserted inside `make_file_link` (the slot holds a link AND resolves to the
+        // bystander); `require_staged` turns a staging failure on a platform that supports the mechanism
+        // into a red rather than a silent skip.
+        if !crate::fsutil::make_file_link(&root.join("bystander.txt"), &root.join("a.txt")) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1846] SKIPPED the permanent-classification leg: no file symlink privilege here. \
+                 NOTHING on this run covered how a link refusal is reported."
+            );
+            return;
+        }
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("a.txt".to_string(), crate::restore_plan::FileState::new("1846aaaa", 2));
+        let report = execute_restore(
+            &[
+                RestoreAction { path: "a.txt".to_string(), op: RestoreOp::Overwrite },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &checkpoint,
+        );
+
+        // HARM FIRST, before any claim about how it was reported.
+        assert_eq!(
+            fs::read(root.join("bystander.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "HARM: the revert wrote through a link at the final component: {report:?}"
+        );
+        // Fixture liveness for the BRANCH: it must be the link refusal that armed the hold, not the
+        // checkpoint-key stand-down above it and not some other rule.
+        assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
+        // **The refusal READS differently per platform, and that asymmetry is load-bearing, not noise.**
+        // On Unix `O_NOFOLLOW` fails the **open itself**, so the post-open refusals never run and the
+        // message is the generic open error; on Windows the open succeeds on the reparse point and the
+        // post-open check is what refuses, in words. `copy_file_onto_no_follow`'s own doc says exactly
+        // this, and this test is where it was PROVEN: the first push asserted the Windows wording
+        // unconditionally and reddened `Server crates` on ubuntu **and** macOS with
+        // `could not open the destination for writing: Too many levels of symbolic links (os error 40)`.
+        // That is the ELOOP claim the Work Log had listed as "not verified locally", verified by CI in
+        // the strongest available way — a test that could not pass unless it were true.
+        //
+        // The errno's *text* is deliberately not matched (Linux and macOS need not word it alike, and a
+        // libc could reword it); the prefix plus the asserted-live planted link is what identifies the
+        // refusal. Asserting merely "something was refused" would let any earlier rule satisfy this.
+        let refusal = &report.skipped[0].1;
+        let is_the_link_refusal = if cfg!(windows) {
+            refusal.contains("never writes through one")
+        } else {
+            refusal.contains("could not open the destination for writing")
+        };
+        assert!(
+            is_the_link_refusal,
+            "fixture is inert: the refusal is not the link one this test is about: {report:?}"
+        );
+        assert!(
+            checkpoint.keys().all(|k| safe_segments(k).is_ok()),
+            "fixture is inert: a checkpoint KEY is unrestorable, so the branch above this one armed"
+        );
+        // The refusal text reaches the revert panel, so it must not carry the private store's layout.
+        assert!(
+            !report.skipped[0].1.contains("blobs"),
+            "a user-visible refusal must not name the app's private checkpoint store: {report:?}"
+        );
+
+        let group = live_hold_back(&report);
+        assert_eq!(
+            group.outcome,
+            HeldBackOutcome::HeldBackByCheckpoint,
+            "a link at the destination is still a link on the next run — this is NOT retryable: {group:?}"
+        );
+        assert!(!group.outcome.retryable(), "{group:?}");
+        assert!(
+            !group.next_step.to_lowercase().contains("run the revert again"),
+            "telling the user to re-run produces the identical refusal forever: {group:?}"
+        );
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// **CPE-1845 review round 2 — a permanent refusal must not be reported as "run it again".**
@@ -1306,6 +1435,87 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1846 — the shipping sink's final-component link swap, and the overwrite it must not cost.**
+    ///
+    /// This is the one shape none of CPE-1823's five rounds closed. `safe_target`'s `confined_to`
+    /// correctly *admits* a link that resolves back **inside** the reverted tree — it is a containment
+    /// check, and the target is contained — and round 5's `Create`-premise rule deliberately leaves
+    /// `Overwrite` alone, because writing onto an existing file is what `Overwrite` means. So a link
+    /// planted at an `Overwrite` target after the plan was made, pointing at a bystander file in the same
+    /// tree, took the checkpoint's bytes straight onto the bystander and reported success.
+    ///
+    /// The plan is computed **before** the link is planted, deliberately: `scan_dir` does not traverse
+    /// links, so planting first would make `current` lose the path and the plan would say `Create` — a
+    /// different rule, already covered, and not the one this test exists for.
+    ///
+    /// The second half is the constraint that killed `create_new`: `b.txt`'s ordinary overwrite must
+    /// still apply in the same run. A fix that closes the link by refusing existing names would red here.
+    #[test]
+    fn cpe_1846_a_link_planted_at_an_overwrite_target_is_refused_and_the_other_overwrite_still_applies() {
+        let root = scratch("cpe1846-link-overwrite");
+        let store = scratch("cpe1846-link-store");
+
+        fs::write(root.join("a.txt"), b"checkpoint a").unwrap();
+        fs::write(root.join("b.txt"), b"checkpoint b").unwrap();
+        fs::write(root.join("bystander.txt"), b"BYSTANDER").unwrap();
+        let checkpoint = scan_dir(&root.to_string_lossy()).unwrap();
+        write_blobs(
+            &store,
+            &checkpoint,
+            &[("a.txt", b"checkpoint a"), ("b.txt", b"checkpoint b"), ("bystander.txt", b"BYSTANDER")],
+        );
+
+        fs::write(root.join("a.txt"), b"edited a").unwrap();
+        fs::write(root.join("b.txt"), b"edited b").unwrap();
+        let current = scan_dir(&root.to_string_lossy()).unwrap();
+        let plan = plan_restore(&checkpoint, &current);
+        assert_eq!(plan.len(), 2, "fixture is inert: expected two overwrites, got {plan:?}");
+        assert!(
+            plan.iter().all(|a| a.op == RestoreOp::Overwrite),
+            "fixture is inert: this test is about Overwrite, and the plan is {plan:?}"
+        );
+
+        // The swap, after the plan and before the write. Liveness is asserted inside `make_file_link`
+        // (the slot holds a link AND it resolves to the bystander) and again here by following it.
+        fs::remove_file(root.join("a.txt")).unwrap();
+        if !crate::fsutil::make_file_link(&root.join("bystander.txt"), &root.join("a.txt")) {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"[CPE-1846] SKIPPED the planted-link overwrite leg: no file symlink privilege here. \
+                  NOTHING on this run covered the final-component swap in the shipping revert sink.\n",
+            );
+            return;
+        }
+        assert_eq!(
+            fs::read(root.join("a.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "fixture is inert: the planted link does not lead to the bystander"
+        );
+
+        let report = execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        // HARM FIRST.
+        assert_eq!(
+            fs::read(root.join("bystander.txt")).ok().as_deref(),
+            Some(&b"BYSTANDER"[..]),
+            "HARM: the revert wrote the checkpoint's bytes through a link at the final component, onto a \
+             file the plan never named — report was {report:?}"
+        );
+        assert!(
+            fs::symlink_metadata(root.join("a.txt")).is_ok_and(|m| m.file_type().is_symlink()),
+            "the planted link must still be there, not replaced by bytes written over it"
+        );
+        // …and the legitimate overwrite in the same plan must be unaffected.
+        assert_eq!(
+            fs::read(root.join("b.txt")).ok().as_deref(),
+            Some(&b"checkpoint b"[..]),
+            "an ordinary Overwrite of an existing regular file must still apply: {report:?}"
+        );
+        assert_eq!(report.applied, 1, "{report:?}");
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert_eq!(report.skipped[0].0, "a.txt", "{report:?}");
     }
 
     #[test]

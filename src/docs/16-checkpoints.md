@@ -87,10 +87,22 @@ The cases you may meet:
   routes to one file through a folder shortcut. Deleting it would destroy the checkpoint's own content,
   so it is held back. **Do not delete these**: they already are what the revert was trying to restore, and
   there is nothing left to do.
+- **A shortcut, symlink or junction sitting where a checkpointed file's own name should be.** A revert
+  writes onto files, never *through* a link — following one would put the checkpoint's content into
+  whatever the link points at, which is not the file you asked to restore. That entry is held back and
+  named. This one is permanent until you act: running the revert again changes nothing on its own, because
+  the link is still a link. Remove or rename it and the entry restores. It applies only to the name at the
+  very end of the path — a shortcut standing in for one of the *folders* above it is still followed, since
+  that is an ordinary way to arrange a tree.
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
   temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
   revert also hit one of the permanent cases above, running it again clears only the temporary half — the
   screen says which situation you are in.
+
+One Windows-only side effect of writing onto the file rather than replacing it: a restored file no longer
+picks up the **"downloaded from the internet" mark** that the captured original carried, and a file that
+already had one keeps its own. If you rely on that mark (SmartScreen prompts, Office Protected View),
+re-check it after a revert.
 
 A checkpoint whose stored file list contradicts its own recorded file count is refused outright, on every
 route — preview, compare and both revert commands — rather than quietly acted on as a smaller tree.
