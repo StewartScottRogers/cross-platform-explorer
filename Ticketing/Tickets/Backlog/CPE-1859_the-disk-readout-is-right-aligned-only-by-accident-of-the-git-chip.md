@@ -277,9 +277,10 @@ a harness that silently returns nothing a third of the time is not evidence anyb
 
 ### Gates
 
-`npx vitest run` — **327 files, 4349 tests, all passing** (326/4345 before; +1 file, +4 tests for the
-sidebar refresh, and the 5 anchor tests land inside a new file counted in the +1... precisely: two new
-files, 9 new tests, 4345 → 4349 reflects the run after both). `npm run check` — **0 errors, 0 warnings**;
+`npx vitest run` — **327 files, 4349 tests, all passing**. Baseline on `origin/main` was **325 files,
+4340 tests**; this adds **two files and nine tests** (5 anchor + 4 sidebar). The intermediate run
+recorded mid-ticket, 326/4345, is the state after the anchor file and before the sidebar file — noted
+so the two sets of numbers are not read as contradicting each other. `npm run check` — **0 errors, 0 warnings**;
 notably it does **not** flag `.git ~ .disk` as an unused selector. `npm run build` — clean, and the
 compiled CSS was inspected directly (above) rather than assumed. gui-smoke `npm run test:unit` not run:
 nothing under `gui-smoke/` was touched.
