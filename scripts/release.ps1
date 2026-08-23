@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Cut a release: bump the version in all three manifests, commit, tag, and push.
+  Cut a release: bump the version in all five version-synchronised files, commit, tag, and push.
 .EXAMPLE
   ./scripts/release.ps1 -Version 0.2.0
 #>
@@ -9,7 +9,7 @@ param(
   [ValidatePattern('^\d+\.\d+\.\d+$')]
   [string]$Version,
 
-  # CPE-1841: bump the three manifests and stop -- no git add/commit/tag/push. Exists so the
+  # CPE-1841: bump the five version-synchronised files and stop -- no git add/commit/tag/push. Exists so the
   # version-scoping tests (src/lib/releaseVersionBump.test.ts) can exercise THIS script against
   # throwaway manifest copies in a scratch tree, rather than a re-implementation of its regexes;
   # and so a human can dry-run the bump and read the diff before anything is committed.
@@ -160,6 +160,148 @@ function Find-TomlPackageVersionValue {
   return $hits
 }
 
+# CPE-1853: package-lock.json carries the app version in TWO places -- the root object's "version" and
+# `packages[""]`'s "version" (the lockfile's own entry for the root package). Both must move together;
+# bumping one and leaving the other is a half-stale lockfile, which is exactly how this file drifts.
+# So this locator returns BOTH, and its plan declares -ExpectedCount 2: a change that landed only one
+# edit fails the count and writes nothing, rather than "succeeding" into the stale state.
+#
+# The walk is Find-JsonTopLevelVersionValue's, plus a stack of the enclosing key at each depth, because
+# `packages[""].version` cannot be identified by depth alone: `packages` is full of sibling entries of
+# the identical shape -- `"node_modules/foo": { "version": "1.2.3" }` sits at the SAME depth 3 and is a
+# dependency pin. Only the entry keyed by the empty string is the root package. (Root object = depth 1,
+# so `packages` is a key at depth 1, `""` a key at depth 2, and its `version` a key at depth 3.)
+#
+# Returns every match, same contract as the locators above -- `return $hits`, never `return , $hits`.
+function Find-NpmLockVersionValues {
+  param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+  $hits = @()
+  $keys = @{}   # depth -> the most recent KEY seen at that depth, i.e. the key we descended through
+  $depth = 0
+  $i = 0
+  $n = $Text.Length
+
+  while ($i -lt $n) {
+    $ch = $Text[$i]
+
+    if ($ch -eq '"') {
+      # Consume a complete string token, honouring backslash escapes, so a `{`, `}` or `"` INSIDE a
+      # string can never be mistaken for structure. (package-lock.json is full of "resolved" URLs and
+      # base64 "integrity" values.)
+      $tokenStart = $i
+      $i++
+      while ($i -lt $n) {
+        if ($Text[$i] -eq '\') { $i += 2; continue }
+        if ($Text[$i] -eq '"') { break }
+        $i++
+      }
+      if ($i -ge $n) { break }   # unterminated string: malformed JSON, let the caller's count fail
+      $tokenEnd = $i
+      $i++
+
+      # A KEY is a string whose next non-space character is ':'. Anything else is a value and must not
+      # touch the key stack -- a dependency whose VALUE is the literal string "version" would otherwise
+      # rewrite the enclosing context.
+      $j = $i
+      while ($j -lt $n -and [char]::IsWhiteSpace($Text[$j])) { $j++ }
+      if ($j -ge $n -or $Text[$j] -ne ':') { continue }
+
+      $name = $Text.Substring($tokenStart + 1, $tokenEnd - $tokenStart - 1)
+      $keys[$depth] = $name
+
+      $isRootVersion = $depth -eq 1 -and $name -eq 'version'
+      $isLockRootPackageVersion = $depth -eq 3 -and $name -eq 'version' -and $keys[1] -eq 'packages' -and $keys[2] -eq ''
+      if ($isRootVersion -or $isLockRootPackageVersion) {
+        # Each hit is TAGGED with which of the two fields it is, so the caller can insist on one of
+        # EACH rather than on a total of two. "Two hits" is also satisfied by two duplicate root-level
+        # "version" keys and no `packages` object at all -- measured: count=2, and a total-only guard
+        # passes. Unreachable from any npm output (npm never emits duplicate keys, and a real lockfile
+        # always has `packages`), so tagging is the guard saying what it means rather than a defect
+        # being fixed.
+        $kind = if ($isRootVersion) { 'root "version"' } else { 'packages[""]."version"' }
+
+        # ... and the value must be a double-quoted string. `"lockfileVersion": 3` is a number and is
+        # not a version of the app in any case; a non-string value here means the file is not the shape
+        # this script understands, and dropping the hit makes the count fail loudly.
+        $j++
+        while ($j -lt $n -and [char]::IsWhiteSpace($Text[$j])) { $j++ }
+        if ($j -lt $n -and $Text[$j] -eq '"') {
+          $valStart = $j + 1
+          $k = $valStart
+          while ($k -lt $n) {
+            if ($Text[$k] -eq '\') { $k += 2; continue }
+            if ($Text[$k] -eq '"') { break }
+            $k++
+          }
+          if ($k -lt $n) { $hits += , @{ Start = $valStart; Length = $k - $valStart; Kind = $kind } }
+        }
+      }
+      continue
+    }
+
+    if ($ch -eq '{' -or $ch -eq '[') { $depth++ }
+    elseif ($ch -eq '}' -or $ch -eq ']') { $depth-- }
+    $i++
+  }
+
+  return $hits
+}
+
+# CPE-1853: src-tauri/Cargo.lock's `[[package]]` entry for the app itself. This is the highest-stakes
+# locator in the file: Cargo.lock is ~1000 `[[package]]` blocks and every version in it EXCEPT this one
+# is a dependency pin. Rewriting one is precisely the defect CPE-1841 existed to fix, in the file that
+# contains the most of them -- and the damage is worse here than in Cargo.toml, because a bad pin in a
+# LOCK file is what actually gets resolved and built.
+#
+# So the scoping is by package identity, not by position: walk each `[[package]]` block (header to the
+# next `[`-headed table), and take the `version` only from the block whose `name` is the app's. That
+# excludes, by construction:
+#   - every other `[[package]]` block, including one whose version happens to equal the app's;
+#   - the lockfile's own `version = 3` format marker at the top of the file, which sits before the
+#     first `[[package]]` header (and is an unquoted integer besides);
+#   - `[[patch.unused]]` / `[metadata]` / any other table shape, even one carrying the app's own NAME
+#     -- a `[[patch.unused]]` entry is not the package entry and must not be bumped.
+# A rename of the crate makes this find zero and abort the release loudly, which is the intended
+# failure: a release script that cannot find the app in its own lockfile must not report a bump.
+function Find-CargoLockPackageVersionValue {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+    [string]$PackageName = 'cross-platform-explorer'
+  )
+
+  $hits = @()
+  # `\r?$` for the same reason as Find-TomlPackageVersionValue: .NET's multiline `$` matches AFTER the
+  # `\r` of a CRLF file, and Cargo.lock is CRLF in a fresh checkout here (core.autocrlf=true) but LF
+  # once cargo itself has rewritten it, so both must work.
+  foreach ($header in [regex]::Matches($Text, '(?m)^[ \t]*\[\[package\]\][ \t]*\r?$')) {
+    $sectionStart = $header.Index + $header.Length
+    $next = [regex]::Match($Text.Substring($sectionStart), '(?m)^[ \t]*\[')
+    $sectionEnd = if ($next.Success) { $sectionStart + $next.Index } else { $Text.Length }
+    $section = $Text.Substring($sectionStart, $sectionEnd - $sectionStart)
+
+    $nameMatch = [regex]::Match($section, '(?m)^[ \t]*name[ \t]*=[ \t]*"([^"]*)"')
+    if ($nameMatch.Success -and $nameMatch.Groups[1].Value -eq $PackageName) {
+      foreach ($m in [regex]::Matches($section, '(?m)^[ \t]*version[ \t]*=[ \t]*"([^"]*)"')) {
+        $g = $m.Groups[1]
+        $hits += , @{ Start = $sectionStart + $g.Index; Length = $g.Length }
+      }
+    }
+  }
+
+  return $hits
+}
+
+# The sorted, printable signature of a hit set's `Kind` tags, for the -ExpectedKinds guard below. A
+# locator that does not tag its hits (all of them except Find-NpmLockVersionValues, which are
+# single-hit and need no kinds) yields '(untagged)' -- so asking for kinds from an untagged locator
+# fails loudly rather than matching an empty expectation.
+function Get-HitKindSignature {
+  param([Parameter(Mandatory = $true)][AllowEmptyCollection()][array]$Hits)
+
+  return ((@($Hits | ForEach-Object { if ($null -eq $_.Kind) { '(untagged)' } else { $_.Kind } }) | Sort-Object) -join ' + ')
+}
+
 # Phase 1 of the bump: read, validate and compute -- never write. Returns a plan (a hashtable of
 # Path / Old / New / Text / Encoding) that the caller hands to Write-ManifestVersionPlan once EVERY
 # manifest has produced one. Any failure throws here, with nothing on disk touched by any manifest.
@@ -173,7 +315,16 @@ function New-ManifestVersionPlan {
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$NewVersion,
     [Parameter(Mandatory = $true)][string]$Locator,
-    [Parameter(Mandatory = $true)][string]$What
+    [Parameter(Mandatory = $true)][string]$What,
+    # CPE-1853: how many values in THIS file are the app's own version. One for the three manifests and
+    # for Cargo.lock's `[[package]]` entry; TWO for package-lock.json, which carries it at the root and
+    # again in `packages[""]`. Declared per file rather than inferred, so "the locator found fewer than
+    # this file is supposed to have" is a loud failure instead of a half-bumped lockfile.
+    [int]$ExpectedCount = 1,
+    # CPE-1853 (Reviewer): WHICH values, not just how many. A count of 2 on package-lock.json is also
+    # satisfied by two duplicate root-level "version" keys and no `packages` object -- measured, and a
+    # total-only guard passes it. Naming the kinds makes the guard say what it means. Empty = count only.
+    [string[]]$ExpectedKinds = @()
   )
 
   if (-not (Test-Path -LiteralPath $Path)) {
@@ -200,22 +351,51 @@ function New-ManifestVersionPlan {
 
   $text = [System.IO.File]::ReadAllText($Path, $utf8NoBom)
 
+  # Spelled as a word for 1 and 2 so the message reads as English ("expected exactly one ...",
+  # "expected exactly two ..."); anything else falls back to the numeral rather than inventing words.
+  $expectedWord = switch ($ExpectedCount) { 1 { 'one' } 2 { 'two' } default { "$ExpectedCount" } }
+
   $hits = @(& $Locator $text)
-  if ($hits.Count -ne 1) {
-    throw ("release.ps1: expected exactly one {0} in {1}, found {2}. No manifest was written -- every " -f $What, $Path, $hits.Count) +
+  if ($hits.Count -ne $ExpectedCount) {
+    throw ("release.ps1: expected exactly {0} {1} in {2}, found {3}. No manifest was written -- every " -f $expectedWord, $What, $Path, $hits.Count) +
       "manifest is validated before any is written, so the working tree is exactly as it was. A manifest " +
       "that no longer matches must fail the release loudly, not be written back unchanged and reported as bumped."
   }
 
-  $hit = $hits[0]
-  $old = $text.Substring($hit.Start, $hit.Length)
-  $updated = $text.Substring(0, $hit.Start) + $NewVersion + $text.Substring($hit.Start + $hit.Length)
+  # ... and, where the caller named them, ONE OF EACH KIND rather than N of anything.
+  $wantKindSignature = ((@($ExpectedKinds) | Sort-Object) -join ' + ')
+  if ($ExpectedKinds.Count -gt 0 -and (Get-HitKindSignature -Hits $hits) -ne $wantKindSignature) {
+    throw ("release.ps1: expected the {0} in {1} to be exactly [{2}], found [{3}]. No manifest was " -f $What, $Path, $wantKindSignature, (Get-HitKindSignature -Hits $hits)) +
+      "written -- the right NUMBER of version values is not the same as the right ONES, and a lockfile " +
+      "that no longer has the shape this script understands must fail the release loudly."
+  }
 
-  # Post-condition on the exact text about to be written, through the same locator: the value it
-  # finds must now BE $NewVersion. Catches a splice that landed at the wrong offset, and any future
-  # locator change that stops agreeing with itself.
+  # Splice from the LAST hit backwards: an earlier splice would shift every later offset, and the
+  # replacement is not the same length as what it replaces. Old values are read off the ORIGINAL text
+  # first, in source order, so the reported `old -> new` is what the file actually said.
+  $ordered = @($hits | Sort-Object { $_.Start })
+  $olds = @($ordered | ForEach-Object { $text.Substring($_.Start, $_.Length) })
+  $updated = $text
+  for ($idx = $ordered.Count - 1; $idx -ge 0; $idx--) {
+    $hit = $ordered[$idx]
+    $updated = $updated.Substring(0, $hit.Start) + $NewVersion + $updated.Substring($hit.Start + $hit.Length)
+  }
+  # Normally one distinct old value. Two DIFFERENT ones means the file was already internally
+  # inconsistent (package-lock.json's root and packages[""] having drifted apart), which the bump
+  # repairs -- so report both rather than picking one and implying the other agreed.
+  $old = (($olds | Sort-Object -Unique) -join " / ")
+
+  # Post-condition on the exact text about to be written, through the same locator: every value it
+  # finds must now BE $NewVersion, and there must still be exactly as many as we were promised.
+  # Catches a splice that landed at the wrong offset, a multi-hit splice that updated only some of its
+  # hits, and any future locator change that stops agreeing with itself.
   $check = @(& $Locator $updated)
-  if ($check.Count -ne 1 -or $updated.Substring($check[0].Start, $check[0].Length) -ne $NewVersion) {
+  $spliceFailed = $check.Count -ne $ExpectedCount
+  if ($ExpectedKinds.Count -gt 0 -and (Get-HitKindSignature -Hits $check) -ne $wantKindSignature) { $spliceFailed = $true }
+  foreach ($c in $check) {
+    if ($updated.Substring($c.Start, $c.Length) -ne $NewVersion) { $spliceFailed = $true }
+  }
+  if ($spliceFailed) {
     throw "release.ps1: splice check failed for $Path -- the $What did not read back as $NewVersion. No manifest was written."
   }
 
@@ -235,7 +415,7 @@ function New-ManifestVersionPlan {
   # Count=4 and shifts every plan after it. Audited -- every expression in this function is either
   # assigned to a variable or sits inside an if(), so nothing but this return reaches the output
   # stream. Keep it that way.
-  return @{ Path = $Path; Old = $old; New = $NewVersion; Text = $updated; Encoding = $writeEncoding }
+  return @{ Path = $Path; Old = $old; New = $NewVersion; Text = $updated; Encoding = $writeEncoding; Places = $ordered.Count }
 }
 
 # Phase 2: write one already-validated plan. Nothing is decided here -- by the time this runs, every
@@ -244,20 +424,36 @@ function Write-ManifestVersionPlan {
   param([Parameter(Mandatory = $true)][hashtable]$Plan)
 
   [System.IO.File]::WriteAllText($Plan.Path, $Plan.Text, $Plan.Encoding)
-  Write-Host ("  {0}: {1} -> {2}" -f $Plan.Path, $Plan.Old, $Plan.New)
+  # The place count is printed when a file carries the version more than once, so package-lock.json's
+  # two edits are visible in the release output rather than being taken on trust.
+  $places = if ($Plan.Places -gt 1) { " ({0} places)" -f $Plan.Places } else { "" }
+  Write-Host ("  {0}: {1} -> {2}{3}" -f $Plan.Path, $Plan.Old, $Plan.New, $places)
 }
 
-# 1. package.json             -- the ROOT object's "version"
-# 2. src-tauri/tauri.conf.json -- the ROOT object's "version"
-# 3. src-tauri/Cargo.toml     -- `version` inside [package]
+# CLAUDE.md's five version-synchronised files, all of them, in one list:
 #
-# CPE-1852: plan all three, THEN write all three. A throw from any New-ManifestVersionPlan call
-# happens with the disk untouched, so a failure on the third manifest can no longer leave the first
-# two bumped. Do not collapse this back into a per-file update loop.
+# 1. package.json              -- the ROOT object's "version"
+# 2. src-tauri/tauri.conf.json -- the ROOT object's "version"
+# 3. src-tauri/Cargo.toml      -- `version` inside [package]
+# 4. package-lock.json         -- the ROOT object's "version" AND packages[""]'s  (TWO places)
+# 5. src-tauri/Cargo.lock      -- `version` in the [[package]] entry named cross-platform-explorer
+#
+# CPE-1852: plan all of them, THEN write all of them. A throw from any New-ManifestVersionPlan call
+# happens with the disk untouched, so a failure on a later file can no longer leave the earlier ones
+# bumped. Do not collapse this back into a per-file update loop.
+#
+# CPE-1853: 4 and 5 used to be manual, and they are the two that got missed -- CLAUDE.md records
+# package-lock.json sitting three releases behind (0.57.64 vs 0.57.67). Nothing failed when they
+# drifted: neither build passes --locked, so both lockfiles are silently rewritten at build time and
+# the stale version surfaces only as a dirty working tree, which reads as unrelated noise. Keep this
+# list and CLAUDE.md's "keep five files in sync" list identical -- src/lib/releaseVersionBump.test.ts
+# cross-checks them and reds if a file is added to one and not the other.
 $plans = @(
   New-ManifestVersionPlan -Path (Join-Path $repo "package.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
   New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/tauri.conf.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
   New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/Cargo.toml") -NewVersion $Version -Locator 'Find-TomlPackageVersionValue' -What 'version key inside [package]'
+  New-ManifestVersionPlan -Path (Join-Path $repo "package-lock.json") -NewVersion $Version -Locator 'Find-NpmLockVersionValues' -What 'app "version" keys' -ExpectedCount 2 -ExpectedKinds 'root "version"', 'packages[""]."version"'
+  New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/Cargo.lock") -NewVersion $Version -Locator 'Find-CargoLockPackageVersionValue' -What 'version key in the [[package]] entry named cross-platform-explorer'
 )
 
 $written = @()
@@ -289,7 +485,7 @@ foreach ($plan in $plans) {
   $written += $plan.Path
 }
 
-Write-Host "Bumped version to $Version in package.json, tauri.conf.json, Cargo.toml" -ForegroundColor Green
+Write-Host "Bumped version to $Version in package.json, tauri.conf.json, Cargo.toml, package-lock.json (2 places), Cargo.lock" -ForegroundColor Green
 
 if ($BumpOnly) {
   Write-Host "-BumpOnly: stopping before git add/commit/tag/push (no release was cut)." -ForegroundColor Yellow
@@ -311,7 +507,9 @@ function Invoke-Git {
   }
 }
 
-Invoke-Git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+# CPE-1853: all five, or the release commit ships a version bump with the lockfiles left behind --
+# which is the drift this ticket closed, merely moved one step later.
+Invoke-Git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml package-lock.json src-tauri/Cargo.lock
 Invoke-Git commit -m "release v$Version"
 Invoke-Git tag "v$Version"
 Invoke-Git push origin HEAD --tags

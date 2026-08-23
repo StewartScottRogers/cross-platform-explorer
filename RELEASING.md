@@ -9,39 +9,53 @@ authenticated as `StewartScottRogers`.
 ## Cut a new release
 
 A release is triggered by pushing a `vX.Y.Z` tag. The version must match in
-three files, so use the helper script — it edits all three, commits, tags, and
-pushes in one go:
+**five** files (CLAUDE.md's "keep five files in sync" list), so use the helper
+script — it edits all five, commits, tags, and pushes in one go:
 
 ```powershell
 cd Z:\repos\cross-platform-explorer
 ./scripts/release.ps1 -Version 0.2.0
 ```
 
-Add `-BumpOnly` to edit the three manifests and stop there — no commit, no tag, no push — when you
+Add `-BumpOnly` to edit the five files and stop there — no commit, no tag, no push — when you
 want to read the diff before anything leaves the machine (CPE-1841):
 
 ```powershell
 ./scripts/release.ps1 -Version 0.2.0 -BumpOnly
-git diff --numstat   # expect exactly `1  1` for each of the three manifests
+git diff --numstat   # expect `1  1` for four of them and `2  2` for package-lock.json
 
 # then put them back -- a dry run must not leave the tree dirty
-git checkout -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+git checkout -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml package-lock.json src-tauri/Cargo.lock
 ```
 
-That last line is not optional housekeeping. Three modified manifests left behind read as exactly the
+That last line is not optional housekeeping. Five modified files left behind read as exactly the
 "unrelated noise" this file's own five-files-in-sync section warns about — the kind that gets committed
 by accident or discarded along with real work.
 
-The script bumps only each manifest's own version — `package.json`'s and `tauri.conf.json`'s
-**top-level** `"version"`, and `Cargo.toml`'s `version` inside **`[package]`**. A dependency pin, a
-nested tool version, or a version number inside a description or URL is left alone, and a manifest
-that no longer matches at all aborts the release loudly instead of being written back unchanged and
-reported as bumped (CPE-1841; guarded by `src/lib/releaseVersionBump.test.ts`).
+`package-lock.json` is `2  2` rather than `1  1` because it carries the app version **twice**: the root
+object's `"version"` and `packages[""]`'s. Both move together or the run aborts; bumping one and leaving
+the other is the specific way that file goes stale (CPE-1853).
 
-That abort is **all-or-nothing across the three manifests**: all of them are read and validated before
-any is written, so a `Cargo.toml` that fails the check leaves `package.json` and `tauri.conf.json`
-untouched rather than already bumped (CPE-1852). If the script does abort, the tree is clean and there
-is nothing to revert — the failure message says so, and it is true of the whole run.
+The script bumps only each file's own version — `package.json`'s and `tauri.conf.json`'s **top-level**
+`"version"`, `Cargo.toml`'s `version` inside **`[package]`**, `package-lock.json`'s two app-version
+fields, and `Cargo.lock`'s `version` in the `[[package]]` block **named `cross-platform-explorer`**. A
+dependency pin, a nested tool version, or a version number inside a description or URL is left alone —
+including a pin whose version happens to equal the app's, which in `Cargo.lock` means ~1000 entries the
+bump must not touch. A file that no longer matches at all aborts the release loudly instead of being
+written back unchanged and reported as bumped (CPE-1841/CPE-1853; guarded by
+`src/lib/releaseVersionBump.test.ts`).
+
+That abort is **all-or-nothing across all five files**: every one of them is read and validated before
+any is written, so a `Cargo.lock` that fails the check leaves the other four untouched rather than
+already bumped (CPE-1852). If the script does abort, the tree is clean and there is nothing to revert —
+the failure message says so, and it is true of the whole run.
+
+**Why the script has to do this rather than a build check catching it.** Neither build passes
+`--locked`, so a stale lockfile version is silently rewritten at build time and never fails anything;
+`npm ci` does not check the `version` field either (it checks the dependency graph), which is how
+`package-lock.json` sat three releases behind — `0.57.64` against `0.57.67` — through many green CI
+runs. Adding `--locked` to the Rust builds would make that drift fail loudly on its own; see
+CPE-1853's Work Log for the measured recommendation.
 
 What happens next, automatically:
 
