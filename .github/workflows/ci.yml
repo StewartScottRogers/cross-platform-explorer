@@ -258,6 +258,12 @@ jobs:
       # `cpe_server::fsutil::require_staged_reason` since CPE-1815) could be deleted from ANY of the 9
       # sites with this step never noticing — the exact silent-vacuity shape CPE-1806 itself exists to
       # close, one level up.
+      #
+      # CPE-1817: this step originally only ever sabotage-tested 2 of those 9 sites (one of each shape)
+      # while this comment read as if the whole mechanism was covered — the same silent-vacuity shape one
+      # level up again. It now sabotage-tests all 9 individually (below), and cross-checks that count
+      # against a live grep of `lib.rs` so a 10th site added later either gets a canary or fails this step
+      # for drifting, on purpose rather than by omission.
       - name: skip-visibility guard (CPE-1717 / CPE-1806)
         working-directory: src-tauri
         shell: bash
@@ -281,12 +287,12 @@ jobs:
             grep -m1 -A6 'CPE-1717' "$log"
           fi
 
-          # ── CPE-1806: the trash-roundtrip mechanism (`trash_roundtrip_available()` /
+          # ── CPE-1806 / CPE-1817: the trash-roundtrip mechanism (`trash_roundtrip_available()` /
           # `cpe_server::fsutil::require_staged_reason("trash_roundtrip", ..)` since CPE-1815, 9 call
           # sites in `lib.rs`), asymmetric across all THREE legs of this same job's matrix rather than
           # just two.
           # `supported_here = true` for the two Linux-only malformed-`.trashinfo` panic-boundary tests
-          # (CPE-1791/CPE-1803); `supported_here = cfg!(target_os = "linux")` for the five
+          # (CPE-1791/CPE-1803); `supported_here = cfg!(target_os = "linux")` for the seven
           # `cfg(any(target_os = "windows", target_os = "linux"))` round-trip tests — matching the
           # measured verdict now recorded on `trash_roundtrip_available`'s own doc comment (grepped whole
           # raw job logs of two real runs: zero `CPE-1268` notices on Linux, five on Windows, same runs).
@@ -296,45 +302,108 @@ jobs:
           # applicable" (the same zero-match trap the fourth `link_status` block below guards against).
           # So: Linux must go RED under sabotage, Windows must stay a quiet passing skip, and macOS is
           # explicitly skipped rather than trusted to a false green.
-          echo "--- sabotaged run of the Linux-only panic-boundary test (CPE-1791/CPE-1803): trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file"
-          if [ "$RUNNER_OS" != "Linux" ]; then
-            echo "OK: skipped on $RUNNER_OS — this test is #[cfg(target_os = \"linux\")], so it doesn't compile here at all; a filtered run would prove nothing."
-          elif cargo test trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file > "$log" 2>&1; then
-            echo "::error::CPE-1806 regression: 'trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on, and the only execution CPE-1803's degraded-flag assertions ever get. A leg that staged nothing reported green; check require_staged_reason is still on this path."
-            fail=1
-          elif grep -q 'CPE-1717' "$log"; then
-            echo "OK: went red, and for the right reason:"
-            grep -m1 -A6 'CPE-1717' "$log"
-          else
-            echo "::error::CPE-1806: red, but not with the require_staged_reason panic — so this step is no longer evidence about skip visibility. Full log:"
-            cat "$log"
-            fail=1
-          fi
+          #
+          # CPE-1817: previously only one test of each shape was sabotage-tested here (2 of 9), so the
+          # other 7 sites (including the second Linux-only panic-boundary test,
+          # `restore_and_empty_trash_fail_loudly_instead_of_reporting_false_success_when_the_dependency_panics`)
+          # were deletable with this step never noticing, while the comment above read as if the whole
+          # mechanism was covered. Every one of the 9 sites now gets its own `cargo test <name>` below,
+          # via two small functions instead of nine copy-pasted blocks, and the Windows arm asserts the
+          # `CPE-1268` notice is actually present (previously `grep ... || true`, which could match
+          # nothing and still report OK — asserting nothing about whether the skip took the documented
+          # path).
 
-          echo "--- sabotaged run of the shared trash-roundtrip sites: list_trash_then_restore_trash_items_round_trips_a_probe_file"
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            echo "OK: skipped on macOS — none of the trash-roundtrip tests compile there (no cfg match), so a filtered run would prove nothing but a zero-match exit 0."
-          elif cargo test list_trash_then_restore_trash_items_round_trips_a_probe_file > "$log" 2>&1; then
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              echo "OK: on Windows this mechanism may legitimately not stage (a headless CI session can lack a working Recycle Bin), so it stayed a passing skip — no false red:"
-              grep -m1 'CPE-1268' "$log" || true
-            else
-              echo "::error::CPE-1806: on $RUNNER_OS the trash round-trip IS supposed to work, so a sabotaged run must be red. It passed, which means supported_here is wrong for this site or require_staged_reason is no longer on the path."
-              fail=1
+          assert_linux_only_trash_canary() {
+            local name="$1"
+            echo "--- sabotaged run of the Linux-only panic-boundary test: $name"
+            if [ "$RUNNER_OS" != "Linux" ]; then
+              echo "OK: skipped on $RUNNER_OS — this test is #[cfg(target_os = \"linux\")], so it doesn't compile here at all; a filtered run would prove nothing."
+              return 0
             fi
-          else
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              echo "::error::CPE-1806: a FALSE RED on Windows — the round-trip may legitimately fail to stage there, so this leg must skip quietly, not fail. Check its supported_here is cfg!(target_os = \"linux\"). Full log:"
-              cat "$log"
-              fail=1
+            if cargo test "$name" > "$log" 2>&1; then
+              echo "::error::CPE-1806 regression: '$name' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on. A leg that staged nothing reported green; check require_staged_reason is still on this path."
+              return 1
             elif grep -q 'CPE-1717' "$log"; then
-              echo "OK: on $RUNNER_OS it went red, and for the right reason:"
+              echo "OK: went red, and for the right reason:"
               grep -m1 -A6 'CPE-1717' "$log"
+              return 0
             else
-              echo "::error::CPE-1806: red, but not with the require_staged_reason panic. Full log:"
+              echo "::error::CPE-1806: '$name' red, but not with the require_staged_reason panic — so this step is no longer evidence about skip visibility. Full log:"
               cat "$log"
-              fail=1
+              return 1
             fi
+          }
+
+          assert_shared_trash_canary() {
+            local name="$1"
+            echo "--- sabotaged run of the shared trash-roundtrip site: $name"
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              echo "OK: skipped on macOS — none of the trash-roundtrip tests compile there (no cfg match), so a filtered run would prove nothing but a zero-match exit 0."
+              return 0
+            fi
+            if cargo test "$name" > "$log" 2>&1; then
+              if [ "$RUNNER_OS" = "Windows" ]; then
+                if grep -q 'CPE-1268' "$log"; then
+                  echo "OK: on Windows this mechanism may legitimately not stage (a headless CI session can lack a working Recycle Bin), so it stayed a passing skip, and the log proves it took the documented notice path rather than matching nothing:"
+                  grep -m1 'CPE-1268' "$log"
+                  return 0
+                else
+                  echo "::error::CPE-1806: '$name' passed under sabotage on Windows, but the log has no CPE-1268 notice — a bare pass can't be told apart from one that never touched require_staged_reason at all. Full log:"
+                  cat "$log"
+                  return 1
+                fi
+              else
+                echo "::error::CPE-1806: on $RUNNER_OS the trash round-trip IS supposed to work, so a sabotaged run of '$name' must be red. It passed, which means supported_here is wrong for this site or require_staged_reason is no longer on the path."
+                return 1
+              fi
+            else
+              if [ "$RUNNER_OS" = "Windows" ]; then
+                echo "::error::CPE-1806: a FALSE RED on Windows for '$name' — the round-trip may legitimately fail to stage there, so this leg must skip quietly, not fail. Check its supported_here is cfg!(target_os = \"linux\"). Full log:"
+                cat "$log"
+                return 1
+              elif grep -q 'CPE-1717' "$log"; then
+                echo "OK: on $RUNNER_OS it went red, and for the right reason:"
+                grep -m1 -A6 'CPE-1717' "$log"
+                return 0
+              else
+                echo "::error::CPE-1806: '$name' red, but not with the require_staged_reason panic. Full log:"
+                cat "$log"
+                return 1
+              fi
+            fi
+          }
+
+          linux_only_sites=0
+          for name in \
+            trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file \
+            restore_and_empty_trash_fail_loudly_instead_of_reporting_false_success_when_the_dependency_panics \
+          ; do
+            linux_only_sites=$((linux_only_sites + 1))
+            assert_linux_only_trash_canary "$name" || fail=1
+          done
+
+          shared_sites=0
+          for name in \
+            macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash \
+            list_trash_then_restore_trash_items_round_trips_a_probe_file \
+            restore_trash_items_reports_a_collision_as_a_distinguishable_per_item_error_without_aborting_the_batch \
+            cpe_1770_restore_trash_items_refuses_when_a_dangling_link_occupies_the_original_path \
+            cpe_1770_restore_from_trash_refuses_when_a_dangling_link_occupies_the_original_path \
+            empty_trash_purges_only_the_selected_probe_item \
+            list_trash_stream_flushes_batches_over_the_channel_and_matches_the_collect_variant \
+          ; do
+            shared_sites=$((shared_sites + 1))
+            assert_shared_trash_canary "$name" || fail=1
+          done
+
+          # CPE-1817: don't just trust the two lists above to stay in sync with lib.rs — count the real
+          # call sites and fail loudly on drift, so an 8th, 9th, 10th... site (CPE-1770 already added two
+          # after this step was first written) either gets a canary here or fails this step on purpose.
+          total_sites=$((linux_only_sites + shared_sites))
+          actual_sites=$(grep -c 'require_staged_reason("trash_roundtrip"' src/lib.rs)
+          if [ "$actual_sites" -ne "$total_sites" ]; then
+            echo "::error::CPE-1817: lib.rs has $actual_sites require_staged_reason(\"trash_roundtrip\", ..) call site(s) but this step only sabotage-tests $total_sites ($linux_only_sites linux-only + $shared_sites shared) — a call site was added or removed without updating the two name lists above (and the doc comment counts). Update them to match, deliberately."
+            fail=1
           fi
 
           exit $fail

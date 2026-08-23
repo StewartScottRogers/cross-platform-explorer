@@ -3,7 +3,7 @@ id: CPE-1817
 title: the skip-visibility guard covers two of seven sites while reading as if it covers the mechanism
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-20
