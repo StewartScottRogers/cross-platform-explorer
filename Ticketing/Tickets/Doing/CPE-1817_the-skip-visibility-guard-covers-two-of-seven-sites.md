@@ -132,3 +132,91 @@ per Evidence Rules.
 
 YAML validity: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` parses clean;
 `bash -n` on the extracted step script has no syntax errors.
+
+**2026-08-23 — round 2: gauntlet UAT FAIL, two findings in the new machinery itself, both fixed.**
+
+Reviewer approved; UAT failed with two findings. Both are defects in the widening this ticket added, not
+in the underlying `require_staged_reason` mechanism.
+
+**Finding 1 (non-blocking per UAT, fixed anyway per Foreman's ruling) — the drift check false-fails on a
+cosmetic reflow.** `grep -c 'require_staged_reason("trash_roundtrip"' src/lib.rs` requires the function
+name and the string literal on the same physical line. Wrapping one call's args across several lines —
+no rename, no logic change — dropped the count 9→8 and tripped `::error::CPE-1817: ... a call site was
+added or removed`, which is false: nothing was added or removed. Fixed by collapsing whitespace (newlines
+included) before counting: `tr -s '[:space:]' ' ' < src/lib.rs | grep -o 'require_staged_reason([[:space:]]*"trash_roundtrip"' | wc -l`.
+Verified locally (grep only, no rebuild needed):
+- Baseline: both old and new counting methods read 9.
+- Reflowed one call site (`require_staged_reason(` / `"trash_roundtrip",` / `cfg!(...)` / `trash_staged,` /
+  `)` each on their own line, `git diff -w` confirms no token changed): new method still reads 9 (no false
+  trip); old method dropped to 8 (the bug, reproduced and confirmed before fixing). Reverted.
+- Genuine deletion (one call's routing replaced with `if false`): new method correctly drops to 8.
+- Genuine addition (a fabricated extra `require_staged_reason("trash_roundtrip", ...)` call injected):
+  new method correctly rises to 10. Reverted.
+Also softened the failure message: it no longer asserts "a call site was added or removed" as the sole
+explanation — it says that is the most likely cause given the two counts have drifted, and names "the
+counting pattern may itself need to change for a new call shape" as the alternative, rather than
+overclaiming certainty about a cause the message can't actually verify.
+
+**Finding 2 (blocking) — the pass check could be satisfied by an unrelated staging gate.**
+`grep -q 'CPE-1717'` (bare substring) matches the panic prefix EVERY `require_staged`/`require_staged_reason`
+call emits, not just `trash_roundtrip`'s. Sites 4 and 5 (`cpe_1770_restore_trash_items_refuses_...` /
+`cpe_1770_restore_from_trash_refuses_...`) also call `cpe_server::fsutil::make_dangling_link`, which stages
+independently via its own `require_staged("make_dangling_link", true, ...)`. Fixed by tightening both
+matches (in `assert_linux_only_trash_canary` and `assert_shared_trash_canary`) to the mechanism-specific
+text `` grep -qF 'CPE-1717] `trash_roundtrip`' ``, which only the trash_roundtrip mechanism's own panic
+message contains.
+
+**The two checkers' configurations contradicted each other; resolved with evidence, not a coin flip.**
+Reproduced both, at site 4, with routing deleted (`if false`) and `make_dangling_link`'s own routing left
+untouched, rebuilt, `cargo test cpe_1770_restore_trash_items_refuses_when_a_dangling_link_occupies_the_original_path`:
+
+- **Config A — `CPE_STAGING_SABOTAGE=1 CI=true`** (this is what `.github/workflows/ci.yml`'s step
+  ALWAYS sets — `env: CPE_STAGING_SABOTAGE: "1"` at the step level, and GitHub Actions always sets
+  `CI=true` — so this is the config real CI actually runs under, always): test **FAILS** (exit 101),
+  panicking at `make_dangling_link`'s own gate (`[CPE-1717] \`make_dangling_link\` could not stage its
+  condition on windows...`), NOT trash_roundtrip's. Matches the reviewer's finding.
+- **Config B — `CPE_STAGING_SABOTAGE` unset, `CI=true`**: test **PASSES** (exit 0) on this box — no
+  panic at all, because `make_dangling_link_inner`'s privilege-free junction fallback genuinely succeeds
+  here without sabotage forcing anything. Matches the UAT's finding in spirit (silent pass), though not
+  byte-for-byte: the UAT's own box apparently could not even satisfy the junction fallback, so on their
+  machine `make_dangling_link` panicked for a REAL reason instead of passing — either way the panic (real
+  or sabotage-forced) carries the same mechanism-agnostic `[CPE-1717] \`make_dangling_link\`...` text.
+
+Both are real and reproduce as described — they are not in conflict once separated by WHICH CODE PATH
+each exercises, not by which config is "correct":
+- On Windows, my `assert_shared_trash_canary`'s failing branch takes an unconditional
+  `if RUNNER_OS = Windows: FALSE RED` path regardless of grep — so on a real Windows CI leg, this defect
+  never actually produced a guard-green (any red at all is fail=1 there, just mislabeled). This is what a
+  RUNNER_OS=Windows-labeled repro (the reviewer's) finds: FAIL.
+- On Linux — where `supported_here = cfg!(target_os = "linux")` is genuinely true for `trash_roundtrip`,
+  the actual case this whole mechanism exists to guard — the failing branch instead falls through to
+  `elif grep -q 'CPE-1717'`, which (pre-fix) accepted ANY require_staged panic, including
+  `make_dangling_link`'s. This is a REAL exposure on the real Linux CI leg, under the REAL Config A (since
+  `CPE_STAGING_SABOTAGE=1` is always what CI sets): `make_dangling_link`'s `supported_here` argument is
+  the literal `true` (not `cfg!(...)`, confirmed by reading `crates/server/src/fsutil.rs`), so it panics on
+  ANY OS whenever sabotage is set and CI is strict — `staging_verdict`'s `staged && !sabotaged` branch is
+  unreachable under sabotage regardless of whether the real construction would have succeeded. Proved this
+  directly: took the real Config-A panic log from this Windows box (message text for the mechanism name is
+  OS-independent) and ran the OLD grep against it with `RUNNER_OS=Linux` forced (matching the real Linux
+  leg's branch) — it printed `OK: ... went red, and for the right reason` and returned 0: a confirmed
+  guard-green on a genuine deletion, on the code path real Linux CI actually executes. Ran the NEW grep
+  against the identical log: it correctly fell to the `else` branch and reported the mismatch. Then
+  reproduced the same result through the actual (not hand-simulated) `assert_shared_trash_canary` function,
+  `RUNNER_OS=Linux` forced, site 4 mutated, both Config A and Config B: both configurations now produce
+  a guard failure (`fail=1`) — Config A via the corrected "not trash_roundtrip's own panic" message,
+  Config B via the pre-existing (unchanged) "passed when it must be red" branch, plus the drift check
+  (Finding 1's fix) independently catching the missing site too.
+
+**Resolution:** the UAT is right that a guard-green was reachable — on the Linux leg, which its repro
+(likely by not setting `RUNNER_OS=Windows`, landing on the same generic branch real Linux CI takes) happened
+to exercise even though its physical machine is Windows. The reviewer's "FAIL" on a properly
+`RUNNER_OS=Windows`-labeled repro is also correct, but was testing a different, already-safe branch (the
+unconditional Windows catch-all) that this defect never touched. Both checkers were right about what they
+tested; the fix (mechanism-specific grep) closes the gap on the branch that mattered — the Linux leg —
+without needing to touch the already-safe Windows branch.
+
+Verified after both fixes: full guard script green (`fail=0`) on the unmodified tree; the Finding-1 red/green
+triad (reflow no-trip, deletion trips, addition trips) all reproduced; the Finding-2 site-4 deletion now
+reds in both env configurations, confirmed via the real `assert_shared_trash_canary` function with
+`RUNNER_OS=Linux` forced, not just the hand-simulated grep. `bash -n` clean, YAML parses. Pushed; watching
+CI synchronously, then re-verifying by SHA per the round-2 instructions.

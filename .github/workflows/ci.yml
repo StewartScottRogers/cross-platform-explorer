@@ -323,12 +323,17 @@ jobs:
             if cargo test "$name" > "$log" 2>&1; then
               echo "::error::CPE-1806 regression: '$name' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on. A leg that staged nothing reported green; check require_staged_reason is still on this path."
               return 1
-            elif grep -q 'CPE-1717' "$log"; then
-              echo "OK: went red, and for the right reason:"
-              grep -m1 -A6 'CPE-1717' "$log"
+            elif grep -qF 'CPE-1717] `trash_roundtrip`' "$log"; then
+              # CPE-1817 round 2: matched on the MECHANISM NAME in the panic, not a bare 'CPE-1717'
+              # substring — every require_staged/require_staged_reason panic in the binary starts with
+              # that prefix, so a bare match would also accept an unrelated gate (e.g. make_dangling_link,
+              # which several of these tests also call) firing first and masking a genuinely deleted
+              # trash_roundtrip routing behind an unrelated, coincidental red.
+              echo "OK: went red, and for the right reason (trash_roundtrip's own gate, not an unrelated one):"
+              grep -m1 -A6 -F 'CPE-1717] `trash_roundtrip`' "$log"
               return 0
             else
-              echo "::error::CPE-1806: '$name' red, but not with the require_staged_reason panic — so this step is no longer evidence about skip visibility. Full log:"
+              echo "::error::CPE-1806: '$name' red, but not with trash_roundtrip's own require_staged_reason panic — a DIFFERENT staging gate firing first would land here too, which is no longer evidence this mechanism's routing is intact. Full log:"
               cat "$log"
               return 1
             fi
@@ -361,12 +366,16 @@ jobs:
                 echo "::error::CPE-1806: a FALSE RED on Windows for '$name' — the round-trip may legitimately fail to stage there, so this leg must skip quietly, not fail. Check its supported_here is cfg!(target_os = \"linux\"). Full log:"
                 cat "$log"
                 return 1
-              elif grep -q 'CPE-1717' "$log"; then
-                echo "OK: on $RUNNER_OS it went red, and for the right reason:"
-                grep -m1 -A6 'CPE-1717' "$log"
+              elif grep -qF 'CPE-1717] `trash_roundtrip`' "$log"; then
+                # CPE-1817 round 2: mechanism-specific match — see the sibling comment in
+                # assert_linux_only_trash_canary. Several of these sites also call make_dangling_link,
+                # which stages independently and, under global CPE_STAGING_SABOTAGE, panics on its own —
+                # a bare 'CPE-1717' match would accept that unrelated panic as proof of THIS routing.
+                echo "OK: on $RUNNER_OS it went red, and for the right reason (trash_roundtrip's own gate):"
+                grep -m1 -A6 -F 'CPE-1717] `trash_roundtrip`' "$log"
                 return 0
               else
-                echo "::error::CPE-1806: '$name' red, but not with the require_staged_reason panic. Full log:"
+                echo "::error::CPE-1806: '$name' red, but not with trash_roundtrip's own require_staged_reason panic — a DIFFERENT staging gate (e.g. make_dangling_link's) firing first would land here too, which is no longer evidence THIS mechanism's routing is intact. Full log:"
                 cat "$log"
                 return 1
               fi
@@ -400,9 +409,15 @@ jobs:
           # call sites and fail loudly on drift, so an 8th, 9th, 10th... site (CPE-1770 already added two
           # after this step was first written) either gets a canary here or fails this step on purpose.
           total_sites=$((linux_only_sites + shared_sites))
-          actual_sites=$(grep -c 'require_staged_reason("trash_roundtrip"' src/lib.rs)
+          # CPE-1817 round 2: a plain `grep -c` over raw lines false-fails on a cosmetic reflow — wrapping
+          # one call's args across several lines is a pure whitespace change, but it moves the function
+          # name and the string literal onto different physical lines, so a same-line grep stops matching
+          # and the count drops even though nothing was added or removed. Collapse all whitespace
+          # (newlines included) to single spaces first, so the count only changes when a call site
+          # genuinely appears or disappears, never when one is merely re-wrapped.
+          actual_sites=$(tr -s '[:space:]' ' ' < src/lib.rs | grep -o 'require_staged_reason([[:space:]]*"trash_roundtrip"' | wc -l)
           if [ "$actual_sites" -ne "$total_sites" ]; then
-            echo "::error::CPE-1817: lib.rs has $actual_sites require_staged_reason(\"trash_roundtrip\", ..) call site(s) but this step only sabotage-tests $total_sites ($linux_only_sites linux-only + $shared_sites shared) — a call site was added or removed without updating the two name lists above (and the doc comment counts). Update them to match, deliberately."
+            echo "::error::CPE-1817: lib.rs has $actual_sites require_staged_reason(\"trash_roundtrip\", ..) call site(s) (counted with whitespace/newlines between the call's tokens collapsed first, so line-wrapping a call alone cannot move this number) but this step only sabotage-tests $total_sites ($linux_only_sites linux-only + $shared_sites shared) — these two counts have drifted. Most likely a call site was added or removed in lib.rs without updating the two name lists above (and the doc comment counts); if that is not it, the counting pattern above may itself need to change for a new call shape. Either way, update deliberately rather than silencing this."
             fail=1
           fi
 
