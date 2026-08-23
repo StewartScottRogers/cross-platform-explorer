@@ -1241,6 +1241,21 @@ const TAR_HARDLINK_MARKER: &str = " when hard linking ";
 /// same reasoning before it was measured, so this is excluded structurally too: a level whose text
 /// contains `" while canonicalizing "` is never trusted, symlinks included, since the phrase cannot occur
 /// in a genuine `symlink`/`hard_link` syscall wrap.
+///
+/// **CPE-1829 — two more leaf-shaped wraps, enumerated but not previously written down.** `entry.rs:514`
+/// (`"hard link listed for {header} but no link name found"`) and `:522` (`"symlink destination for
+/// {header} is empty"`) both wrap via `other(&format!(..))` — `ErrorKind::Other`, no `source()` — and
+/// `{header}` is `String::from_utf8_lossy` of the entry's raw, fully attacker-controlled 512-byte tar
+/// header, so **either can carry either marker text** if an attacker shapes the header bytes that way.
+/// They are harmless *today*, for two independent reasons: `ErrorKind::Other` is what
+/// [`link_creation_is_categorical`] rejects outright when no `(os error N)` prefix parses, and
+/// [`tar_entry_refusal`] already refuses an entry with an empty or missing link target before `unpack_in`
+/// is ever reached, so this code path cannot fire from our own callers. **Say this out loud so the next
+/// person does not re-derive it and does not assume it is guaranteed: that safety is a coincidence of
+/// today's `ErrorKind` choice and today's pre-check, not a structural property of this function** — unlike
+/// the `" while canonicalizing "` exclusion above, nothing here stops a future `tar` release, or a caller
+/// that skips the pre-check, from making one of these two leaves reachable with a forged categorical
+/// prefix.
 fn recover_link_syscall_error(e: &std::io::Error, marker: &str) -> Option<std::io::Error> {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
     while let Some(err) = cur {
@@ -6401,6 +6416,120 @@ mod tests {
             recover_link_syscall_error(&symlink_shaped, TAR_HARDLINK_MARKER).is_none(),
             "a symlink-shaped wrap must not answer a hard-link marker query"
         );
+    }
+
+    /// **CPE-1829 — the one assertion in this file that pins `recover_link_syscall_error` against the
+    /// REAL `tar` crate, not [`wrap_like_tar_link_syscall_failure`]'s double.**
+    ///
+    /// Every other test above builds its wrapped error from a `FakeTarError` shaped by hand out of the
+    /// same [`TAR_HARDLINK_MARKER`]/[`TAR_SYMLINK_MARKER`] constants `recover_link_syscall_error` is
+    /// meant to be checked against — so a future `tar` release that reworded its wrap text would make
+    /// `recover_link_syscall_error` return `None` for every real archive, TAR would silently revert to
+    /// the pre-CPE-1813 abort-the-whole-run behaviour, and every test in this file (including the ones
+    /// above) would stay green, because the double would still agree with itself. This test drives a
+    /// real [`tar::Entry::unpack_in`] to a genuine hard-link-creation failure instead, so that a reworded
+    /// wrap goes red here.
+    ///
+    /// The destination name is pre-occupied so `fs::hard_link` genuinely fails with `AlreadyExists` —
+    /// unlike the symlink arm (see the sibling test below), `tar`'s hard-link code has no
+    /// remove-and-retry on an occupied name, so this is the one link kind guaranteed to fail the same
+    /// way, un-gated, on every platform this suite runs on. Cross-checked against the Reviewer's own
+    /// probe against `tar-0.4.46`'s source (this ticket's "What to do"): the real leaf renders
+    /// `"Cannot create a file when that file already exists. (os error 183) when hard linking … to …"`
+    /// on Windows; on POSIX the same occupied-name failure is `EEXIST` — both are `AlreadyExists`, which
+    /// is all this test depends on (the exact OS code differs legitimately by platform, so it is not
+    /// asserted).
+    #[test]
+    fn cpe1829_recover_link_syscall_error_pins_against_the_real_tar_crate_hardlink() {
+        let d = scratch("cpe1829_real_tar_hardlink");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("target.txt"), b"T").unwrap();
+        // Pre-occupy the entry's own destination name so the real `fs::hard_link` genuinely fails,
+        // rather than simulating the failure shape.
+        fs::write(dest.join("hard"), b"occupied").unwrap();
+
+        let bytes = craft_tar_with_hard_link("target.txt");
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut checked = false;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type() != tar::EntryType::Link {
+                continue;
+            }
+            let err = entry
+                .unpack_in(&dest)
+                .expect_err("the destination name is pre-occupied, so the real hard-link syscall must fail");
+            assert_eq!(
+                err.raw_os_error(),
+                None,
+                "precondition: tar's real wrap must discard raw_os_error the same way every double in \
+                 this file claims it does, or this test is not exercising the hazard CPE-1829 is about"
+            );
+            let recovered = recover_link_syscall_error(&err, TAR_HARDLINK_MARKER).unwrap_or_else(|| {
+                panic!(
+                    "the REAL tar-0.4.46 crate's wrap did not carry TAR_HARDLINK_MARKER ({TAR_HARDLINK_MARKER:?}) \
+                     where recover_link_syscall_error expects it — an upstream tar release reworded its wrap \
+                     text, which is exactly the silent-revert CPE-1829 exists to catch. Real wrapped error: {err}"
+                )
+            });
+            assert_eq!(
+                recovered.kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "recovered error's kind must match the real hard_link failure; got {recovered}"
+            );
+            checked = true;
+        }
+        assert!(checked, "the tar's hard-link entry must have been visited by the loop above");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1829 — the [`TAR_SYMLINK_MARKER`] half of the real-crate pin, Unix only.**
+    ///
+    /// The ticket asks for this leg "if it can be triggered without `SeCreateSymbolicLinkPrivilege`" and
+    /// to say so explicitly rather than write a leg that silently skips: on Windows, creating a symlink
+    /// (even a dangling one) needs that privilege — administrator rights or Developer Mode — which this
+    /// suite cannot assume the CI runner has, so **this leg does not run on Windows at all** (`#[cfg(unix)]`
+    /// below, not a runtime skip). The hard-link test above already pins `TAR_HARDLINK_MARKER` against
+    /// the real crate on every platform including Windows, so the real dependency is still exercised
+    /// there — just not this marker.
+    ///
+    /// On Unix, plain symlink creation needs no privilege, so this drives it for real. The destination
+    /// name is pre-occupied with a **directory**, not a file: `tar`'s symlink arm retries once via
+    /// `remove_file` + a second `symlink` when the occupant is a plain file (its own overwrite contract,
+    /// `entry.rs:561-568`) — which would silently succeed rather than failing. `remove_file` can never
+    /// remove a directory, so that retry itself fails and the real syscall path genuinely errors.
+    #[cfg(unix)]
+    #[test]
+    fn cpe1829_recover_link_syscall_error_pins_against_the_real_tar_crate_symlink() {
+        let d = scratch("cpe1829_real_tar_symlink");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(dest.join("link")).unwrap();
+
+        let bytes = craft_tar_with_symlink("link", "target.txt");
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let mut checked = false;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type() != tar::EntryType::Symlink {
+                continue;
+            }
+            let err = entry.unpack_in(&dest).expect_err(
+                "the destination name is occupied by a directory, so the real symlink attempt (and its \
+                 remove-and-retry) must fail",
+            );
+            recover_link_syscall_error(&err, TAR_SYMLINK_MARKER).unwrap_or_else(|| {
+                panic!(
+                    "the REAL tar-0.4.46 crate's wrap did not carry TAR_SYMLINK_MARKER ({TAR_SYMLINK_MARKER:?}) \
+                     where recover_link_syscall_error expects it — an upstream tar release reworded its wrap \
+                     text, which is exactly the silent-revert CPE-1829 exists to catch. Real wrapped error: {err}"
+                )
+            });
+            checked = true;
+        }
+        assert!(checked, "the tar's symlink entry must have been visited by the loop above");
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// **CPE-1813 review round 1, blocker 1 — a crafted entry name cannot forge a no-link-support
