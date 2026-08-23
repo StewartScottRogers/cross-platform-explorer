@@ -223,6 +223,7 @@ function describeContrast(
     const dialogBorder = resolve("--dialog-border")!;
     const danger = resolve("--danger")!;
     const success = resolve("--success")!;
+    const textMuted = resolve("--text-muted")!;
 
     it("all key tokens resolved to a concrete hex through the palette layer", () => {
       for (const [name, hex] of [
@@ -235,6 +236,7 @@ function describeContrast(
         ["--dialog-border", dialogBorder],
         ["--danger", danger],
         ["--success", success],
+        ["--text-muted", textMuted],
       ] as const) {
         expect(hex, `${name} did not resolve to a hex value`).toMatch(/^#[0-9a-fA-F]{6}$/);
       }
@@ -261,6 +263,16 @@ function describeContrast(
     // Dimmed/secondary text — still well above the normal palette's 3:1 large-text allowance.
     it("--text-dim on --bg >= 4.5:1 (stricter than the normal palette's 3:1 large-text bar)", () => {
       expect(contrastRatio(textDim, bg)).toBeGreaterThanOrEqual(4.5);
+    });
+
+    // CPE-1821: --text-muted was referenced (20 call sites: AgentTimeline/ConsultedFiles/FileList)
+    // but never defined anywhere, so its `#9a9a9a` fallback silently won in every theme — including
+    // both hc themes, whose entire premise is legibility. Resolved to the same value hc's own
+    // --text-faint already uses (10.37:1 hc-light / 10.57:1 hc-dark vs --surface), which clears even
+    // the strict AAA-inspired 7:1 bar every other body-text-weight token here is held to.
+    it("--text-muted on --bg and --surface >= 7:1 (AAA-inspired)", () => {
+      expect(contrastRatio(textMuted, bg)).toBeGreaterThanOrEqual(7);
+      expect(contrastRatio(textMuted, surface)).toBeGreaterThanOrEqual(7);
     });
 
     // Non-text UI (borders, accent) — stricter than the normal palette's 3:1 WCAG 1.4.11 bar.

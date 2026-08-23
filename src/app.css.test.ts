@@ -197,9 +197,21 @@ const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 //     values (not retuned — `--danger`/`--warn` are global tokens serving many surfaces and this
 //     pane's background is broken independently of them) with a comment explaining why, pending
 //     CPE-1821 (which now owns this whole log pane) making `--bg-dim` real. Two hex literals back.
-//     Brought it to the current 86/423.
+//     Brought it to 86/423.
+//  5. CPE-1821 defined the three tokens CPE-1810 explicitly deferred — `--text-muted` (undefined
+//     everywhere, 20 call sites across AgentTimeline/ConsultedFiles/FileList all carrying a bare
+//     `#9a9a9a` fallback), `--accent-2` (1 call site, BackupDashboard's `.mirror.auto`, `#209764`
+//     fallback), and `--bg-dim` (1 call site, SidecarManager's `.logs` pane, the `#0f0f0f` fallback
+//     step 4 above restored) — deleting one hex literal per fallback call site, 22 in total. Making
+//     `--bg-dim` real also finally let `.log-error`/`.log-warn` retokenize onto `var(--danger)`/
+//     `var(--warn)` per step 4's own note (measured safe THIS time — see SidecarManager.svelte's
+//     updated comment for the numbers against the pane's real, now-resolved background), removing
+//     2 more literals (`#d08b2b`, `#c9a227`). No file dropped out of the "has hex" set — every one
+//     of the five touched files (AgentTimeline/ConsultedFiles/FileList/BackupDashboard/
+//     SidecarManager) still carries unrelated hex literals out of this ticket's scope. Brought it to
+//     86/399 (423 − 24).
 const BASELINE_FILES_WITH_HEX = 86;
-const BASELINE_TOTAL_HEX_OCCURRENCES = 423;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 399;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

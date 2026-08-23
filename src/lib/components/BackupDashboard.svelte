@@ -212,10 +212,11 @@
   .builder .grow { flex: 1 1 130px; }
   input:not([type=checkbox]) { height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
   .chk { font-size: 12px; color: var(--text-dim); }
-  /* CPE-1632: --accent-2 is never defined anywhere, so this fallback is the value that actually
-     renders. The old one paired with the .mirror white text above at 2.96:1, under WCAG's 3:1
-     UI-component floor; darkened to clear it (3.70:1) — see src/app.css.solid-fill-contrast.test.ts. */
-  .mirror.auto { background: var(--accent-2, #209764); }
+  /* CPE-1632 darkened this fill to clear WCAG's 3:1 white-on-fill UI floor (3.70:1) — see
+     src/app.css.solid-fill-contrast.test.ts. CPE-1821 then made --accent-2 (which CPE-1632 already
+     paired this with) a real theme token instead of an undefined var()'s hex fallback — see
+     src/app.css's --pal-accent2-fill comment for why one value serves every theme. */
+  .mirror.auto { background: var(--accent-2); }
   .autorun { display: inline-flex; align-items: center; gap: 4px; }
   .mini { width: 24px; height: 24px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
   .actions { display: flex; justify-content: flex-end; margin-top: 16px; }
