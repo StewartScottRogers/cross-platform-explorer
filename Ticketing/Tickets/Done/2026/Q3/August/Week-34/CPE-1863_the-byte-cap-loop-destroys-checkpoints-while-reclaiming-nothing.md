@@ -3,11 +3,11 @@ id: CPE-1863
 title: the retention byte-cap loop destroys checkpoints while reclaiming nothing
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
