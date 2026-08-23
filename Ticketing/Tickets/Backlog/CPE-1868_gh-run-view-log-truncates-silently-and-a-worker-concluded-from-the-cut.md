@@ -61,6 +61,27 @@ board and a passing board are identical to it.** Every merge in this run polls e
 - [ ] Check the `mergeable` field alongside it — `CONFLICTING` is the usual cause, and a poller that reads
       it would have named the real problem in seconds rather than after eight minutes of silence.
 
+## A third shape: the pending count goes DOWN and then UP
+
+Observed on CPE-1863's final run. Jobs are scheduled in waves — the GUI-smoke shards only exist after
+their build job finishes — so the counts moved:
+
+```
+total_count  14 -> 18 -> 19
+pending       7 -> 10        (it went DOWN first, then up)
+```
+
+A poller watching only `pending` sees it fall toward zero and reads "nearly done" — **twice** — while the
+board is still growing underneath it. Reaching zero pending during a lull would read as "all green".
+
+This is the same failure as the empty board, arrived at from the other direction: **`pending == 0` is only
+meaningful against a `total_count` that has stopped moving.**
+
+- [ ] The poll must require `total_count` to be stable across at least two reads before it believes a zero
+      pending count, or must know the expected number of checks and wait for it.
+- [ ] Report the totals in whatever the poll prints. Every wrong conclusion in this family came from a
+      number that was true and incomplete.
+
 ## Notes
 
 Found by the CPE-1859 worker itself when challenged on its account — it re-fetched the full archive,
