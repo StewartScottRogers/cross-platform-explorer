@@ -116,6 +116,7 @@ describe("app.css light palette WCAG AA contrast (CPE-1632)", () => {
   const dialogBorder = resolveHex(lightSemanticDecls.get("--dialog-border")!)!;
   const danger = resolveHex(lightSemanticDecls.get("--danger")!)!;
   const success = resolveHex(lightSemanticDecls.get("--success")!)!;
+  const textMuted = resolveHex(lightSemanticDecls.get("--text-muted")!)!;
 
   it("all key tokens resolved to a concrete hex through the palette layer", () => {
     for (const [name, hex] of [
@@ -130,6 +131,7 @@ describe("app.css light palette WCAG AA contrast (CPE-1632)", () => {
       ["--dialog-border", dialogBorder],
       ["--danger", danger],
       ["--success", success],
+      ["--text-muted", textMuted],
     ] as const) {
       expect(hex, `${name} did not resolve to a hex value`).toMatch(/^#[0-9a-fA-F]{6}$/);
     }
@@ -172,6 +174,19 @@ describe("app.css light palette WCAG AA contrast (CPE-1632)", () => {
     expect(contrastRatio(textFaint, bg)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(textFaint, surface)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(textFaint, surfaceAlt)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  // CPE-1821: --text-muted was referenced (20 call sites: AgentTimeline/ConsultedFiles/FileList —
+  // small uppercase labels, badge borders/fills, table headers) but never defined anywhere, so its
+  // `#9a9a9a` fallback silently won in every theme, including light — where it measures only
+  // 2.81:1 against white, well under this bar. Resolved to the same already-verified value as
+  // --text-faint above (same de-emphasised-small-text role); asserted here directly, by name, so a
+  // future edit that repoints --text-muted at a different, uncalibrated value fails immediately
+  // instead of relying on --text-faint's own assertion as an indirect proxy.
+  it("--text-muted on --bg, --surface, and --surface-alt >= 4.5:1 (WCAG AA normal text)", () => {
+    expect(contrastRatio(textMuted, bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(textMuted, surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(textMuted, surfaceAlt)).toBeGreaterThanOrEqual(4.5);
   });
 
   // Non-text UI component contrast — WCAG 2.1 SC 1.4.11 requires >=3:1 for a control's visual

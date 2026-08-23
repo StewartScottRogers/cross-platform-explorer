@@ -374,7 +374,7 @@
     padding: 8px;
     max-height: 180px;
     overflow: auto;
-    background: var(--bg-dim, #0f0f0f);
+    background: var(--bg-dim);
     border: 1px solid var(--border, #3a3a3a);
     border-radius: 6px;
     font-size: 11px;
@@ -385,27 +385,27 @@
   .log-line {
     color: var(--text-dim, #a0a0a0);
   }
-  /* CPE-1810 round 3: reverted from var(--danger)/var(--warn) — this .logs pane's real background
-     is a FIXED literal (see .logs above: `background: var(--bg-dim, <hex>)`, and --bg-dim is
-     undefined nowhere in app.css, so that fallback always wins in every theme). The theme-
-     calibrated --danger/--warn values are tuned against each theme's own --surface (white in
-     light/hc-light) — a surface this pane never renders — so tokenizing them here regressed real
-     contrast against the pane's actual fixed backdrop: light 3.39:1/3.24:1 and hc-light
-     1.92:1/2.45:1, both under the 4.5:1 AA text floor (hc-light's .log-error under even the 3:1 UI
-     floor). No existing guard catches this because none of them check a token against a
-     component-local fixed literal instead of --surface/--bg. Restoring the pre-ticket literal
-     values below (both ~6.8-7.9:1 against the pane's actual backdrop in every theme, by accident of
-     having been picked for a dark backdrop) is the honest interim fix until CPE-1821 (which now owns
-     this whole log pane) makes --bg-dim a real token — only then can this pairing be tokenized
-     correctly. Do not retune --danger/--warn to fix this: they are global tokens serving many
-     surfaces, and this pane's background is broken independently of them. `.log-error` was
-     `var(--warn, <hex>)` before this ticket ever touched it — an undefined-token-with-fallback site
-     in its own right — so a bare literal with the fallback removed is the correct shape to restore,
-     not a re-added fallback. */
+  /* CPE-1821: --bg-dim is now a real per-theme token (resolves to the SAME primitive as --surface —
+     see src/app.css's --bg-dim comment), which is what makes this pane's background the theme's own
+     panel colour instead of the theme-invariant near-black (hex 0f0f0f) literal CPE-1810 round 3 found it stuck on.
+     That in turn is what makes THIS retokenization safe: --danger/--warn were already re-pointed
+     here once before (CPE-1810 round 2), then reverted (round 3) because they're calibrated against
+     each theme's own --surface and this pane's real background was a fixed near-black literal that
+     was never --surface in any theme — measuring the retokenized pair against the pane's ACTUAL
+     backdrop at the time (the hex-0f0f0f fallback) gave light 3.39:1/3.24:1 and hc-light 1.92:1/2.45:1,
+     both under WCAG AA (hc-light's .log-error even under the 3:1 UI floor). Now that --bg-dim IS
+     --surface, that mismatch is gone — --danger/--warn's already-asserted vs-`--surface` numbers
+     (src/app.css.light-contrast.test.ts / dark-contrast.test.ts / hc-contrast.test.ts) apply here
+     unchanged: light danger 5.66:1/warn 5.93:1, dark danger 4.60:1/warn 4.61:1, hc-light danger
+     10.01:1/warn 7.83:1, hc-dark danger 8.01:1/warn 13.03:1 — every pairing clears its theme's floor
+     (AA 4.5:1 light/dark, AAA-inspired 7:1 hc). This also fixes the semantic inversion CPE-1810
+     round 2 found and round 3 had to leave in place: `.log-error` reads as an actual error
+     (--danger), `.log-warn` reads as caution (--warn), instead of both sharing one undifferentiated
+     amber. */
   .log-error {
-    color: #d08b2b;
+    color: var(--danger);
   }
   .log-warn {
-    color: #c9a227;
+    color: var(--warn);
   }
 </style>

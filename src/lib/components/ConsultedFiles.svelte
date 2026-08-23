@@ -74,7 +74,7 @@
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     border: 1px solid var(--border, #4a4a4a);
   }
   .c-list {
@@ -112,7 +112,7 @@
     line-height: 16px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     border: 1px solid var(--border, #4a4a4a);
   }
   .c-name {

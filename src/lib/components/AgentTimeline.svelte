@@ -1311,14 +1311,14 @@
   /* CPE-405: a read is the weakest signal — a hollow, muted badge, visually subordinate to changes. */
   .tl-badge.read {
     background: transparent;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     border: 1px solid var(--border, #4a4a4a);
   }
   /* CPE-1111: a reconstructed entry the fold seeded from the baseline snapshot (pre-existing, never
      itself an agent action this session) — same hollow/muted treatment as a read. */
   .tl-badge.baseline {
     background: transparent;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     border: 1px solid var(--border, #4a4a4a);
   }
   .tl-name {
@@ -1503,12 +1503,12 @@
      "outside the recorded window" rather than a normal in-window checkpoint. */
   .rp-marker.out {
     background: var(--surface-alt, #2a2a2a);
-    border-color: var(--text-muted, #9a9a9a);
+    border-color: var(--text-muted);
     box-shadow: none;
     opacity: 0.75;
   }
   .rp-marker.out:hover {
-    background: color-mix(in srgb, var(--text-muted, #9a9a9a) 30%, var(--surface-alt, #2a2a2a));
+    background: color-mix(in srgb, var(--text-muted) 30%, var(--surface-alt, #2a2a2a));
   }
   .rp-clock {
     padding: 2px 10px 8px;
@@ -1582,7 +1582,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
   }
   .cp-restore-close {
     flex: 0 0 auto;
@@ -1614,7 +1614,7 @@
     margin-left: 6px;
     font-size: 10.5px;
     font-weight: 400;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
   }
   .cp-restore-empty {
     padding: 6px 0;
@@ -1645,7 +1645,7 @@
     border-radius: 999px;
     border: 1px solid var(--border, #3a3a3a);
     background: var(--surface, transparent);
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     font-size: 10.5px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
@@ -1673,7 +1673,7 @@
   .cp-drift-item {
     padding: 1px 0;
     font-size: 11px;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1772,7 +1772,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
   }
   .rp-recon-path {
     flex: 1 1 auto;
@@ -1796,7 +1796,7 @@
     margin-left: auto;
     font-size: 10.5px;
     font-weight: 600;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     cursor: pointer;
     white-space: nowrap;
   }
@@ -1829,7 +1829,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     border-top: 1px solid var(--border, #3a3a3a);
     flex: 0 0 auto;
   }
@@ -1841,7 +1841,7 @@
     border-radius: 5px;
     background: var(--surface-alt, transparent);
     border: 1px solid var(--border, #3a3a3a);
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     font-size: 10.5px;
     line-height: 1.4;
     flex: 0 0 auto;
@@ -1902,7 +1902,7 @@
     font-size: 12px;
   }
   .cl-label {
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
   }
   .cl-value {
     color: var(--text, inherit);
@@ -1970,7 +1970,7 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
   }
   .rd-kind-badge {
     flex: 0 0 auto;
@@ -2018,7 +2018,7 @@
   }
   .hd-stat-label {
     font-size: 10px;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     white-space: nowrap;
   }
   .hd-stat-value {
@@ -2036,7 +2036,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
   }
   .hd-section-title-row {
     display: flex;
@@ -2081,7 +2081,7 @@
     text-align: left;
   }
   .hd-table th {
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     font-weight: 600;
     font-size: 10px;
     text-transform: uppercase;

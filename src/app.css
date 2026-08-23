@@ -47,6 +47,20 @@
   --pal-red-700: #a82419;
   --pal-green-600: #3a9d4a;
 
+  /* CPE-1821: --accent-2 backs a single call site — BackupDashboard's `.mirror.auto` pill, a
+     solid-fill background under literal white text (`.mirror { color: #fff }`, inherited). No
+     foreground/text-role consumer exists anywhere, so unlike --danger/--warn this token never needs
+     a themed value that ALSO satisfies a body-text contrast floor — its only constraint is WCAG
+     1.4.11's 3:1 white-on-fill UI floor, which depends purely on the colour's own luminance
+     (relative luminance <=0.30), not on which theme's --surface/--bg it happens to render near.
+     That constraint is theme-independent, so one value serves every theme — light, dark, hc-light,
+     hc-dark alike — rather than needing four re-derived hexes the way --danger/--warn do. #209764 is
+     the exact value that was already accidentally rendering everywhere (the pre-CPE-1821 undefined-
+     token fallback), and CPE-1632 already computed it clears the bar: white-on-#209764 = 3.70:1.
+     Making it a real token keeps today's rendered colour identical in every theme — zero visual
+     change — while finally making it a real, themeable value instead of a phantom fallback. */
+  --pal-accent2-fill: #209764;
+
   /* Okabe-Ito colour-blind-safe set — backs the conflict-radar agent palette below. Original values
      against white designed for larger chart-style marks, not the thin swatch/dot/legend use this
      app makes of them: `--pal-okabe-orange` (2.25:1) and `--pal-okabe-sky-blue` (2.31:1) both sat
@@ -164,6 +178,38 @@
   --warn: var(--pal-amber-700);
   --warn-fill: var(--warn);
 
+  /* CPE-1821: --text-muted, --accent-2, --bg-dim were referenced (22 call sites across
+     AgentTimeline/ConsultedFiles/FileList/BackupDashboard/SidecarManager) as
+     `var(--token, <fallback-hex>)` but never defined anywhere in this file — the fallback hex was
+     never a fallback at all, it was the ONLY value that ever rendered, in every theme including
+     dark and both high-contrast themes. Same defect class CPE-1810 fixed for --warn. */
+
+  /* --text-muted: every one of its 20 call sites is a small (10-11.5px) uppercase label, badge
+     border/fill, or table-header — foreground/border/tint use only, the exact same "de-emphasised
+     secondary text" role --text-faint already serves elsewhere (TRACE badge, gutter line numbers).
+     Rather than pick a fourth grey, this resolves to the SAME --pal-* primitive --text-faint uses
+     per theme — call sites keep their own name (they already called it --text-muted before ever
+     being tokenized), but the value is the identical, already-WCAG-verified one
+     src/app.css.light-contrast.test.ts / dark-contrast.test.ts assert for --text-faint (>=4.5:1
+     body-text floor). The OLD fallback, #9a9a9a, was picked for a dark surface (per the ticket) and
+     measures only 2.81:1 against light's white --surface — this value fixes that, it doesn't carry
+     the old grey over. */
+  --text-muted: var(--pal-gray-600);
+  /* --accent-2: solid-fill-only (no foreground-text role anywhere) — see --pal-accent2-fill above
+     for why one value serves every theme. */
+  --accent-2: var(--pal-accent2-fill);
+  /* --bg-dim: SidecarManager's `.logs` console pane's only consumer (`background: var(--bg-dim,
+     <hex>)`), whose old #0f0f0f fallback rendered a near-black box in EVERY theme including light,
+     because nothing could ever override it (see CPE-1810 round 3 and CPE-1821's own ticket for the
+     history). Resolves to the SAME palette primitive that already backs --surface in each theme —
+     not a new, unverified value — so (a) the log console now follows the surrounding UI's real
+     panel colour per theme instead of a theme-invariant near-black box, and (b) --danger/--warn's
+     ALREADY-asserted vs-`--surface` contrast numbers (light-contrast.test.ts / dark-contrast.test.ts
+     / hc-contrast.test.ts) apply to this pane's real background unchanged, which is what finally
+     lets `.log-error`/`.log-warn` retokenize onto `var(--danger)`/`var(--warn)` below without
+     reintroducing the exact regression CPE-1810 round 3 caught and reverted. */
+  --bg-dim: var(--surface);
+
   /* Syntax highlighting (CPE-1631) — backs the `.hljs-*` rules near the end of this file. See
      --pal-hljs-* above for the WCAG AA contrast measurements. */
   --hljs-keyword: var(--pal-hljs-keyword);
@@ -246,6 +292,9 @@
   --log-warn: var(--pal-amber-700);
   --warn: var(--pal-amber-700);  /* CPE-1810 — see the bare :root block's comment above */
   --warn-fill: var(--warn);
+  --text-muted: var(--pal-gray-600);  /* CPE-1821 — see the bare :root block's comment above */
+  --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
+  --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
 
   --hljs-keyword: var(--pal-hljs-keyword);
   --hljs-title: var(--pal-hljs-title);
@@ -423,6 +472,9 @@
   --log-warn: var(--pal-dark-amber-300);
   --warn: var(--pal-dark-amber-500);  /* CPE-1810 — see the dark palette block's comment above */
   --warn-fill: var(--warn);
+  --text-muted: var(--pal-dark-gray-300);  /* CPE-1821 — see the bare :root block's comment above */
+  --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
+  --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
 
   --hljs-keyword: var(--pal-dark-hljs-keyword);
   --hljs-title: var(--pal-dark-hljs-title);
@@ -647,6 +699,11 @@
                                      measure 10.01:1/7.79:1, both comfortably clear) */
   --warn: var(--pal-hc-light-amber-900);  /* CPE-1810 — see that palette entry's comment above */
   --warn-fill: var(--warn);
+  --text-muted: var(--pal-hc-light-gray-600);  /* CPE-1821 — see the bare :root block's comment
+                                                    above; 10.37:1 vs --surface, comfortably clears
+                                                    even the AAA-inspired 7:1 bar */
+  --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
+  --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
 
   --hljs-keyword: var(--pal-hc-light-hljs-keyword);
   --hljs-title: var(--pal-hc-light-hljs-title);
@@ -712,6 +769,11 @@
   --danger-fill: var(--pal-hc-dark-red-fill);
   --warn: var(--pal-hc-dark-amber-300);  /* CPE-1810 — see that palette entry's comment above */
   --warn-fill: var(--pal-hc-dark-amber-fill);  /* same negative-window split as --danger-fill above */
+  --text-muted: var(--pal-hc-dark-gray-600);  /* CPE-1821 — see the bare :root block's comment
+                                                   above; 10.57:1 vs --surface, comfortably clears
+                                                   even the AAA-inspired 7:1 bar */
+  --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
+  --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
 
   --hljs-keyword: var(--pal-hc-dark-hljs-keyword);
   --hljs-title: var(--pal-hc-dark-hljs-title);

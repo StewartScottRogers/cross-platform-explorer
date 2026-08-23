@@ -929,7 +929,7 @@
   /* CPE-405: a read is a consult, not a change — a muted, hollow badge. */
   .agent-badge.read {
     background: transparent;
-    color: var(--text-muted, #9a9a9a);
+    color: var(--text-muted);
     border: 1px solid var(--border, #5a5a5a);
   }
   /* A folder whose subtree the agent is changing — a soft accent so you can follow it down
