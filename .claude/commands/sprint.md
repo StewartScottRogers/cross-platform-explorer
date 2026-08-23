@@ -152,6 +152,50 @@ briefing regardless of how routine the ticket looks — the failure mode above h
 exotic ones. It applies unchanged inside a batched run (`/sprint-batched`): a stalled sub-agent there
 doesn't just cost a round-trip, it stalls the batch counter along with it.
 
+### Shared machine state — a tool install is a shared-resource change, not local setup (CPE-1856)
+
+Worktrees isolate the **filesystem**. They do not isolate the **machine**. Every concurrent agent shares
+one PATH, one user profile, one tool store, one `%TEMP%`, one global git config, one cargo registry
+cache. Measured on 2026-08-21: a worker on CPE-1842 `dotnet tool install --tool-path`'d PowerShell 7 into
+`~/.dotnet/tools`, took its measurement, and correctly **uninstalled it** on the way out. A sibling worker
+on CPE-1841 had been running its suite against that same shim — green at 22:05/22:08/22:10/22:12, **red
+at 22:14:04**, exactly inside the removal window (`~/.dotnet/tools` mtime 22:14:12). Every run from
+22:15:30 onward was green again, **silently on Windows PowerShell 5.1** instead of PowerShell 7, because
+the harness's host probe fell back without saying so. Two hours were then lost blaming Defender and a
+vitest timeout before the real cause — a concurrent uninstall — was reconstructed from directory mtimes.
+Full incident and timeline: ticket CPE-1856.
+
+So, every Worker/Reviewer/UAT dispatch prompt also includes, verbatim or in substance:
+
+> Installing, uninstalling, or upgrading anything **machine-global** — `dotnet tool`, `winget`, `choco`,
+> `npm -g`, `cargo install`, a PATH edit, a global git config value, a shared port, the cargo registry
+> cache, anything written under `%TEMP%` outside your own worktree — affects **every other agent running
+> on this machine right now**, not just you. Treat it as a shared-resource change: if you need a tool
+> another agent might also be using, prefer a fixture fully inside your own worktree over installing it
+> machine-wide, and if you must install one machine-wide, **leave it installed and say so in your Work
+> Log** rather than uninstalling it on your way out — removal, not install, is the harmful half, because
+> it can pull the floor out from under a sibling agent's run that is currently green on it.
+
+And, orthogonally: **any measurement or benchmark claim records which host/tool version produced it and
+how that was determined** (a printed probe result, a version string in the log — not "whatever was on
+PATH"), so a later reader can tell "measured on X" from "measured on whatever happened to resolve." A
+provenance note per claim is the shape; see CPE-1841's round-2 Work Log for a worked example of the
+correction this prevents.
+
+**Harness tool probes must not fall through silently.** Where a script or test suite probes for an
+external tool (e.g. `findPowerShellHost()` in `src/lib/releaseVersionBump.test.ts`), resolve it **once**,
+pin it for the whole run, and **announce the resolved host and version in the run's own output** — never
+resolve-and-fall-back-per-call without saying which implementation won. A pinned host that then vanishes
+mid-run must fail loudly (the spawn errors, the run reds) rather than the harness quietly retrying a
+different implementation; that is a property of spawning the literal pinned name once, not of adding a
+retry loop.
+
+**Sweep, not just the tool-install case** — other machine-global state agents on this crew touch or could
+touch: environment variables set for the session, global git config (`git config --global`), listening
+ports a dev server or test harness binds, the cargo registry/build cache under `~/.cargo`, and anything
+written to `%TEMP%` (`$env:TEMP`) rather than a path inside the agent's own worktree. None of these are
+isolated by a worktree either; treat a change to any of them the same way as a tool install above.
+
 ## Shift kickoff — the Foreman introduces the crew, then starts
 
 Before announcing, the Foreman **reads the tail of `.claude/sprint-metrics/history.md`** to seed this
