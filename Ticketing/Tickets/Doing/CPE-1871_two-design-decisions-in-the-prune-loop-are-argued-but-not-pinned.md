@@ -3,7 +3,7 @@ id: CPE-1871
 title: two design decisions in the prune loop are argued at length and pinned by nothing
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-23

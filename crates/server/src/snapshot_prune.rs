@@ -342,7 +342,17 @@ pub fn apply(
                 let Some(id) = candidates.next() else {
                     break ByteCapOutcome::StoppedAtFloor;
                 };
-                bytes_freed += snapshot_capture::prune(store_dir, id)?;
+                // CPE-1871 — **both of the choices this block makes are argued above and pinned by
+                // `cpe_1871_an_undeletable_blobs_freed_bytes_still_count_as_progress`.** That test stages
+                // a blob whose last namer is this very eviction but whose FILE cannot be removed (the
+                // OS holds it open / its directory is read-only), so `prune`'s own `freed_now` reads 0
+                // while the re-measured store footprint genuinely falls. Swapping either line below for
+                // its rejected alternative — `let progressed = freed_now > 0;` (CPE-1863's rejected
+                // form) or `let after = total.saturating_sub(freed_now);` (CPE-1844's, in place of the
+                // `store_total_bytes` re-measure) — reds that test with `StoppedNoProgress` where the cap
+                // was in fact met. Before CPE-1871 neither swap was caught by anything in this suite.
+                let freed_now = snapshot_capture::prune(store_dir, id)?;
+                bytes_freed += freed_now;
                 let after = snapshot_capture::store_total_bytes(store_dir)?;
                 kept.retain(|k| k != id);
                 pruned.push(id.clone());
@@ -1457,6 +1467,203 @@ mod tests {
             "CPE-1861's pinned blob is still part of the measured footprint"
         );
 
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    // ---- CPE-1871: pin the two argued-but-undefended design decisions -----------------------------
+
+    /// RAII guard staging CPE-1871's fixture: makes `path` — a blob file directly under `blobs_dir`
+    /// (`<store>/blobs/`) — impossible for `fs::remove_file` to remove, while leaving its bytes fully
+    /// readable (`fs::metadata`/`fs::read_dir` inside `prune`/`store_total_bytes` are unaffected). This
+    /// is `snapshot_capture.rs:741`'s `if fs::remove_file(&path).is_ok()` failing on purpose, so `prune`
+    /// credits the blob 0 bytes freed while `store_total_bytes`'s witness — which re-scans `manifests/`,
+    /// not `blobs/` alone — still excludes it the moment its last namer is pruned. That gap between
+    /// "`prune`'s own return value" and "the re-measured reachable footprint" is exactly what the two
+    /// design decisions on the byte-cap loop turn on.
+    ///
+    /// One mechanism per OS the 3-way CI matrix runs, per the ticket's own portability notes:
+    ///
+    /// - **Windows**: an open handle without `FILE_SHARE_DELETE` — "the ordinary cause in the field".
+    ///   `std::fs::File::open` cannot stage this; it always adds `FILE_SHARE_DELETE` (see `fsutil.rs`'s
+    ///   `cpe_1739_windows_a_foreign_share_read_write_handle_still_blocks_the_save`, which measures the
+    ///   same construction against a save instead of a delete). `DeleteFileW` — what `remove_file` goes
+    ///   through — needs to open the target for delete access, and that open fails with a sharing
+    ///   violation while this handle is outstanding.
+    /// - **Unix (Linux/macOS)**: the containing `blobs/` directory loses its write bit. POSIX `unlink`
+    ///   is a mutation of the *directory entry*, so it needs write+execute on the PARENT, never on the
+    ///   target file itself — a read-only directory blocks the delete while every read this fixture
+    ///   still needs (`fs::metadata`, `fs::read_dir`) keeps working, because those only need read+execute
+    ///   on the directory. This is the ticket's "read-only parent directory" leg, deliberately chosen
+    ///   over `chattr +i`/`chflags uchg` — no elevated capability or root is required, so it stages the
+    ///   same way in an ordinary CI runner as it does on a developer machine.
+    ///
+    /// `stage` returns `None` if the mechanism could not be constructed; callers MUST route that through
+    /// [`crate::fsutil::require_staged`] rather than skipping silently — every OS this module's tests run
+    /// under is one where this is supposed to work.
+    struct Undeletable {
+        #[cfg(windows)]
+        handle: windows::Win32::Foundation::HANDLE,
+        #[cfg(unix)]
+        dir: std::path::PathBuf,
+    }
+
+    impl Undeletable {
+        #[cfg(windows)]
+        fn stage(path: &std::path::Path, _blobs_dir: &std::path::Path) -> Option<Self> {
+            use windows::core::PCWSTR;
+            use windows::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            };
+            fn wide(p: &std::path::Path) -> Vec<u16> {
+                use std::os::windows::ffi::OsStrExt;
+                p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+            }
+            let handle = unsafe {
+                CreateFileW(
+                    PCWSTR(wide(path).as_ptr()),
+                    0x8000_0000, // GENERIC_READ
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, // deliberately NOT FILE_SHARE_DELETE
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    None,
+                )
+            }
+            .ok()?;
+            Some(Self { handle })
+        }
+
+        #[cfg(unix)]
+        fn stage(_path: &std::path::Path, blobs_dir: &std::path::Path) -> Option<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(blobs_dir, std::fs::Permissions::from_mode(0o555)).ok()?;
+            Some(Self { dir: blobs_dir.to_path_buf() })
+        }
+
+        #[cfg(not(any(windows, unix)))]
+        fn stage(_path: &std::path::Path, _blobs_dir: &std::path::Path) -> Option<Self> {
+            None
+        }
+    }
+
+    impl Drop for Undeletable {
+        fn drop(&mut self) {
+            #[cfg(windows)]
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Restore write+execute so the scratch dir can be torn down afterwards.
+                let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    /// **CPE-1871's headline fixture, and the one test both design decisions on the byte-cap loop turn
+    /// on.** Three distinct 200-byte captures, no sharing, so the GFS pass keeps all three and only the
+    /// byte cap can evict anything. The oldest checkpoint's blob is staged undeletable ([`Undeletable`])
+    /// before the cap runs.
+    ///
+    /// `prune` still deletes the oldest MANIFEST — that `fs::remove_file` is a different file, at a
+    /// different point-of-no-return earlier in `prune`, and nothing here touches it — so the eviction
+    /// genuinely happens and the blob genuinely loses its only namer. But the blob's own file cannot be
+    /// removed, so `prune` returns `freed_now == 0` for this eviction: `snapshot_capture.rs`'s
+    /// `if fs::remove_file(&path).is_ok() { freed = freed.saturating_add(size); }` never adds anything.
+    ///
+    /// `store_total_bytes`, re-measured immediately after, tells a different story: it re-scans
+    /// `manifests/` for who still names each blob on disk, and with the oldest manifest gone nothing
+    /// names this one any more — so it is excluded from the reachable footprint regardless of whether its
+    /// file was actually removed. The real, re-measured total genuinely falls by 200 even though `prune`
+    /// credited the eviction nothing.
+    ///
+    /// **This is the exact shape both decisions defend.** The current loop reads progress off the
+    /// re-measured total (`let progressed = after < total;` fed by `store_total_bytes`), so it sees the
+    /// genuine fall and reports the cap `Met`. Either rejected alternative — reading progress off
+    /// `freed_now` (CPE-1863) or reconstructing `after` by subtracting `freed_now` instead of
+    /// re-measuring (CPE-1844) — sees `freed_now == 0`, concludes nothing happened, and stops the loop
+    /// with `StoppedNoProgress` one eviction short of a cap that was, in fact, met.
+    #[test]
+    fn cpe_1871_an_undeletable_blobs_freed_bytes_still_count_as_progress() {
+        let src = scratch("1871-src");
+        let store = scratch("1871-store");
+        let store_s = store.to_string_lossy().to_string();
+
+        let mut ids = Vec::new();
+        for i in 0..3u64 {
+            fs::write(src.join("a.txt"), vec![b'a' + i as u8; 200]).unwrap();
+            ids.push(capture_at(&src, &store, 1_700_000_000 + i * 86_400));
+        }
+        let policy = RetentionPolicy { hourly: 0, daily: 100, weekly: 0, monthly: 0 };
+        assert_eq!(live_cap_fixture(&store, &policy, 3), 600, "LIVE: the fixture is not 3 x 200 bytes");
+
+        // The blob about to be orphaned: the oldest checkpoint's own unique content.
+        let hash0 = snapshot_capture::manifest_snapshot(&store_s, &ids[0])
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .hash
+            .clone();
+        let blobs_dir = store.join("blobs");
+        let blob0_path = blobs_dir.join(&hash0);
+        assert!(blob0_path.exists(), "LIVE: the oldest checkpoint's blob is not where this test expects");
+
+        let guard = Undeletable::stage(&blob0_path, &blobs_dir);
+        assert!(
+            crate::fsutil::require_staged("cpe_1871_undeletable_blob", true, guard.is_some()),
+            "could not stage an undeletable blob on this platform"
+        );
+
+        // Cap 500: satisfiable by one eviction of the (nominally) 200-byte oldest checkpoint — but only
+        // if the loop trusts the re-measured footprint over `prune`'s own bytes_freed.
+        let applied = apply(&store_s, &policy, Some(500)).unwrap();
+
+        // HARM/LIVE FIRST, on disk, before the Result is trusted at all.
+        assert!(
+            !store.join("manifests").join(format!("{}.json", ids[0])).exists(),
+            "LIVE: prune's point-of-no-return manifest delete did not happen — this fixture never reached \
+             the blob-delete step at all"
+        );
+        assert!(
+            blob0_path.exists(),
+            "LIVE: the blob file was removed anyway — this fixture did not stage an undeletable blob, so \
+             it proves nothing about the divergence it exists to test"
+        );
+        assert_eq!(
+            applied.pruned,
+            vec![ids[0].clone()],
+            "LIVE: the byte cap did not evict the oldest checkpoint at all"
+        );
+        assert_eq!(
+            applied.bytes_freed, 0,
+            "LIVE: prune's own remove_file must have failed for this hash — bytes_freed should read 0, \
+             not the blob's nominal size"
+        );
+        let real_after = snapshot_capture::store_total_bytes(&store_s).unwrap();
+        assert_eq!(
+            real_after, 400,
+            "LIVE: the re-measured footprint did not genuinely fall by the orphaned blob's size"
+        );
+
+        // THE PIN. Current code: Met. `freed_now > 0` (CPE-1863's rejected form) or
+        // `total.saturating_sub(freed_now)` in place of the re-measure (CPE-1844's rejected form): both
+        // read this eviction as having made no progress and stop at StoppedNoProgress instead — even
+        // though the cap genuinely was met.
+        assert_eq!(
+            applied.byte_cap,
+            ByteCapOutcome::Met,
+            "CPE-1871: a prune that reports bytes_freed == 0 must still count as progress when the \
+             re-measured store footprint genuinely fell — got {:?}",
+            applied.byte_cap
+        );
+        assert!(!applied.byte_cap.cap_missed());
+        assert_eq!(applied.kept.len(), 2, "HARM: the cap evicted more than the one checkpoint it needed to");
+        assert_kept_ids_all_restore(&store, &applied.kept, "1871");
+
+        drop(guard);
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
     }
