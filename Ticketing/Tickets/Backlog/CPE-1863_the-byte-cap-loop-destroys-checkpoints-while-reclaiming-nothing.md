@@ -191,11 +191,18 @@ All against the finished tree. Baseline `cargo test --lib snapshot_prune`: 20 pa
 | 5 | headline fixture | capture loop line writes `vec![b'a' + i as u8; 400]` per iteration | **1 red** — `LIVE: 6 blob files for 6 checkpoints — nothing is shared, so a prune WOULD free bytes and this fixture does not test no-progress` |
 | 6 | headline fixture | `daily: 100` → `daily: 1` | **1 red** — `LIVE: the GFS pass wants to prune on its own, so this fixture does not isolate the byte cap` |
 
-5 and 6 are the **liveness** proofs, and they are proofs of the *helpers*: both messages come from
-`live_cap_fixture` / `assert_blobs_are_shared`, which every CPE-1863 test routes through. Folded into two
-helpers rather than written out per test on CPE-1844's evidence, where per-test liveness checks let a
-decoy-sibling trap invert a claim from 2-passed/9-failed to 9-passed/2-failed with three tests certifying
-nothing. One helper cannot rot in three places.
+5 and 6 are the **liveness** proofs, and they are proofs of the *helpers*: both die inside
+`live_cap_fixture` / `assert_blobs_are_shared`, not in a test body. Folded into helpers rather than
+written out per test on CPE-1844's evidence, where per-test liveness checks let a decoy-sibling trap
+invert a claim from 2-passed/9-failed to 9-passed/2-failed with three tests certifying nothing. One
+helper cannot rot in three places.
+
+**Coverage stated exactly, correcting an over-reach in the first draft of this log** ("every CPE-1863
+test routes through" them): `live_cap_fixture` is used by **4 of 5** and `assert_blobs_are_shared` by
+**1 of 5**. `cpe_1863_a_pass_with_no_cap_reports_no_cap` correctly cannot use either — its whole point is
+a pass where the GFS policy *does* prune and no cap is given, which is the opposite of what
+`live_cap_fixture` asserts — so it carries its own liveness (`planner_view` count, plus asserting the GFS
+pass really pruned `m1` before reading `byte_cap`).
 
 ### Gates
 
@@ -223,6 +230,67 @@ six for nothing), the new stop-and-say-so, and both practical notes — that one
 first, and that a stray record file holding the space is fixed by deleting that file, not by more cleanup.
 No new `Section`, so `sectionDocs.ts` is untouched.
 
+### Review round 2 — three prose corrections, and two findings filed rather than fixed
+
+The independent Reviewer approved and reproduced all six red-proofs, including both halves of RP2
+(`cpe_1844_the_byte_cap_still_thins_a_store_that_is_genuinely_over_it` is **absent** from its failure
+list, staying green because its fixture needs only one eviction — so the multi-eviction pin was
+necessary), and confirmed 5 and 6 die inside the helpers rather than the test bodies. It also verified the
+no-progress argument **by construction** rather than by trusting the prose: `snapshot_capture.rs:738-744`
+credits `freed` only inside `if fs::remove_file(&path).is_ok()`; `:1177-1198` counts only blobs a
+surviving manifest names; `:671` removes the manifest file *before* the blob-delete loop. So a blob whose
+last namer was pruned and whose file could not be deleted is credited 0 **and** simultaneously leaves
+`total`. The divergence is produced by this module's own best-effort delete, not hypothesised.
+
+Three prose defects, all fixed here — every one an over-claim rather than a wrong mechanism:
+
+1. **`bytes_freed`'s doc stated something this design makes false**: "when the byte cap drove it,
+   `byte_cap` names it as `StoppedNoProgress`". In precisely the divergence case above, the loop keeps
+   going and can finish at `Met` or `StoppedAtFloor` with `bytes_freed == 0` and a non-empty `pruned`.
+   False in the one case the rule was written for. Rewritten to say the two fields are measured in
+   different currencies and neither derives the other.
+2. **Cost #2's per-pass half existed only in this ticket and the PR.** Grepping the source for "per
+   pass" / "no state across" / "repeating schedule" / "erode" returned zero hits, so the caveat lived
+   nowhere a maintainer of the loop would look. `"at most one, and it is reported"` is honest **per
+   invocation**; across a repeating schedule with a cap wired up the headline fixture still ends at the
+   floor — five evictions over five passes instead of five at once. Now stated on the loop itself, with
+   why remembering the last pass is not the fix (a stale memory suppressing a *needed* eviction is worse
+   than a slow erosion).
+3. **`16-checkpoints.md` described the definition this ticket rejected** — "stops as soon as a deletion
+   frees nothing" is the `freed == 0` rule — and "That is one, not all of them" read as a per-store
+   guarantee the per-pass rule cannot make. Both rewritten in plain language, including the slow-erosion
+   shape and what to fix instead.
+
+Two findings the Reviewer **filed rather than asked for**, because they close together with one fixture
+that needs OS-specific staging:
+
+- **The choice of definition is unpinned.** Replacing the progress line with the rejected
+  `let progressed = freed_now > 0;` leaves the lib suite at **2361 passed, 0 failed** — all five new
+  tests pass under the definition the longest comment in the file argues against. A future reader who
+  "simplifies" it gets a green board.
+- **CPE-1844's re-measure is still not independently red-proofable**, and is now load-bearing for two
+  tickets: the pre-CPE-1844 accounting in this loop's shape (`let after = total.saturating_sub(freed_now);`)
+  also leaves 2361 passing. CPE-1844 recorded exactly this and could only red it as a *pair* regression.
+
+One fixture holding an **undeletable blob file** closes both at once. It could not be staged on Windows
+here: Rust's `fs::remove_file` clears `FILE_ATTRIBUTE_READONLY` and retries, and `icacls /deny <user>:(D)`
+did not block the delete in the scratch location. Recorded as unpinned rather than claimed as pinned.
+
+Also corrected: the `StoppedAtFloor` arm on the out-of-candidates branch is **structurally unreachable**
+(`oldest_first` is a clone of `kept`, and the loop breaks at `kept.len() <= 1`, so one candidate is always
+left unconsumed). Kept as defence, but its comment no longer presents "ran out of candidates" as a real
+outcome — only an internal inconsistency could reach it, which is a bug in the function rather than a
+store that ran out of snapshots.
+
+Confirmed rather than merely accepted, recorded because they were checked: declining `OpOutcome` is right
+(mapping a missed cap onto `SkippedByPlan`/`HeldBackByCheckpoint` would report a hold-back for deletions
+that were *performed*); `cap_missed()` genuinely mirrors `OpOutcome::retryable()` including the
+"convenience, never the discriminant" framing; the pass-2 fixture is armed by its own outcome rather than
+only by a LIVE line (without the planted copy the loop would prune m1 *then* m2 and end at the floor, so
+`pruned == [ids[0]]` with `bytes_freed == 0` can only hold if the copy really pinned the blob); and
+shipping the discriminant with no consumer is right, because the alternative leaves the loop's verdict
+inexpressible until CPE-1862 builds the UI — which is the silent success this ticket deletes.
+
 ### Not verified
 
 - **Reachability is unchanged: still not reachable from the app.** `snapshot_run_due` passes `None` and no
@@ -233,4 +301,8 @@ No new `Section`, so `sectionDocs.ts` is untouched.
   (`400`, `4 x 200`) rather than absolute filesystem sizes, which is the shape that has broken on the
   Linux/macOS legs before.
 - The predictor described above is *not* implemented, so "no checkpoint is destroyed for nothing" is not
-  claimed — only "at most one, and it is reported".
+  claimed — only "at most one **per pass**, and it is reported".
+- **The definition of progress is unpinned by any test**, and so is CPE-1844's re-measure that it reads.
+  Both need a fixture holding an undeletable blob file, which could not be staged on Windows here. Stated
+  as a gap rather than papered over: the argument for the definition is verified by reading the code, not
+  by a red board.

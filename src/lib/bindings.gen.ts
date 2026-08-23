@@ -4002,8 +4002,9 @@ export type ByteCapOutcome =
  */
 "stopped_no_progress" | 
 /**
- * **The cap was not met.** Only one snapshot is left (a store is never thinned to zero), or the
- * survivor list was exhausted, and the footprint is still over the cap.
+ * **The cap was not met.** Only one snapshot is left — a store is never thinned to zero — and the
+ * footprint is still over the cap. Also the safe label on [`apply`]'s structurally unreachable
+ * out-of-candidates arm; see the comment there before reading that as a second real cause.
  */
 "stopped_at_floor"
 /**
@@ -5774,9 +5775,17 @@ pruned: string[];
  * removed (CPE-1844), not the sizes `index.json` recorded for them.
  * 
  * `bytes_freed == 0` with a **non-empty `pruned`** is the anomaly CPE-1863 is about: checkpoints
- * were destroyed and nothing was reclaimed. When the byte cap drove it, [`Self::byte_cap`] names it
- * as [`ByteCapOutcome::StoppedNoProgress`]; when the GFS policy alone drove it, it is not an anomaly
+ * were destroyed and nothing was reclaimed. When the GFS policy alone drove it, it is not an anomaly
  * at all — the user asked for fewer checkpoints, not for fewer bytes.
+ * 
+ * **It does not imply [`ByteCapOutcome::StoppedNoProgress`], and an earlier draft of this comment
+ * said it did.** The two are measured in different currencies on purpose (see the no-progress rule
+ * on [`apply`]): `bytes_freed` counts blob *files removed*, `byte_cap` turns on the *re-measured
+ * footprint*. In precisely the divergence case the rule exists to serve — a blob whose last namer
+ * was pruned and whose file could not be deleted — `prune` credits 0 while `total` falls, so the
+ * loop correctly keeps going and can finish at [`ByteCapOutcome::Met`] or
+ * [`ByteCapOutcome::StoppedAtFloor`] with `bytes_freed == 0` and a non-empty `pruned`. Read the two
+ * fields together; neither derives the other.
  */
 bytes_freed: number; 
 /**

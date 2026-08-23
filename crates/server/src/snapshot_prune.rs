@@ -73,8 +73,9 @@ pub enum ByteCapOutcome {
     /// fall — so the loop stopped rather than keep deleting checkpoints that cannot help. See the
     /// no-progress rule on [`apply`].
     StoppedNoProgress,
-    /// **The cap was not met.** Only one snapshot is left (a store is never thinned to zero), or the
-    /// survivor list was exhausted, and the footprint is still over the cap.
+    /// **The cap was not met.** Only one snapshot is left — a store is never thinned to zero — and the
+    /// footprint is still over the cap. Also the safe label on [`apply`]'s structurally unreachable
+    /// out-of-candidates arm; see the comment there before reading that as a second real cause.
     StoppedAtFloor,
 }
 
@@ -103,9 +104,17 @@ pub struct RetentionApplyResult {
     /// removed (CPE-1844), not the sizes `index.json` recorded for them.
     ///
     /// `bytes_freed == 0` with a **non-empty `pruned`** is the anomaly CPE-1863 is about: checkpoints
-    /// were destroyed and nothing was reclaimed. When the byte cap drove it, [`Self::byte_cap`] names it
-    /// as [`ByteCapOutcome::StoppedNoProgress`]; when the GFS policy alone drove it, it is not an anomaly
+    /// were destroyed and nothing was reclaimed. When the GFS policy alone drove it, it is not an anomaly
     /// at all — the user asked for fewer checkpoints, not for fewer bytes.
+    ///
+    /// **It does not imply [`ByteCapOutcome::StoppedNoProgress`], and an earlier draft of this comment
+    /// said it did.** The two are measured in different currencies on purpose (see the no-progress rule
+    /// on [`apply`]): `bytes_freed` counts blob *files removed*, `byte_cap` turns on the *re-measured
+    /// footprint*. In precisely the divergence case the rule exists to serve — a blob whose last namer
+    /// was pruned and whose file could not be deleted — `prune` credits 0 while `total` falls, so the
+    /// loop correctly keeps going and can finish at [`ByteCapOutcome::Met`] or
+    /// [`ByteCapOutcome::StoppedAtFloor`] with `bytes_freed == 0` and a non-empty `pruned`. Read the two
+    /// fields together; neither derives the other.
     pub bytes_freed: u64,
     /// What became of the byte cap (CPE-1863). [`ByteCapOutcome::NotRequested`] whenever no cap was
     /// passed, which is every caller in the app today.
@@ -291,6 +300,18 @@ pub fn apply(
             // which case continuing destroys the lot for nothing. Reporting honestly costs the user a
             // decision; guessing costs them their checkpoints.
             //
+            // **The rule is PER PASS. It holds no state across invocations, and that bounds what
+            // "at most one checkpoint" is honestly a claim about.** Per invocation it is exact. Across a
+            // *repeating schedule* with a cap wired up, each pass is entitled to its own fruitless
+            // eviction, so the six-identical-captures fixture above still ends at the floor — five
+            // evictions over five passes instead of five in one. Materially weaker than the headline
+            // framing, and written here rather than only in the ticket because this loop is where a
+            // maintainer will look. `cpe_1863_an_invisible_manifest_pinning_blobs_stops_the_cap_without_
+            // stalling_it` pins the two-pass shape deliberately. Removing the erosion needs the predictor
+            // above, not more state: remembering "this store made no progress last time" would have to be
+            // invalidated by every capture, and a stale memory that suppresses a *needed* eviction is a
+            // worse failure than a slow one.
+            //
             // **Interaction with CPE-1861's accepted leak, checked because that ticket's residual makes
             // `freed == 0` the *expected* outcome.** A manifest file `list_manifests` refuses — an
             // Explorer "- Copy.json", a 122-byte witness that is invisible and permanent — still counts
@@ -306,11 +327,18 @@ pub fn apply(
                 if total <= cap {
                     break ByteCapOutcome::Met;
                 }
-                // The floor: a policy is never allowed to prune a store down to zero snapshots. Running
-                // out of candidates is the same answer — there is nothing left this loop may evict.
+                // The floor: a policy is never allowed to prune a store down to zero snapshots.
                 if kept.len() <= 1 {
                     break ByteCapOutcome::StoppedAtFloor;
                 }
+                // **Structurally unreachable, and kept as defence rather than as a case.** `oldest_first`
+                // is a clone of `kept`, and the arm above breaks at `kept.len() <= 1`, so one candidate is
+                // always left unconsumed. Only an internal inconsistency between the two — `kept` holding
+                // an id `oldest_first` never did, or a future edit that stops them being the same set —
+                // could arrive here, which is a bug in this function, not a store that ran out of
+                // snapshots. `StoppedAtFloor` is the safe *label* for it (it is the honest "nothing left
+                // to evict" answer and never reports a cap as met) but it is the wrong *diagnosis*: do
+                // not read this arm as evidence that running out of candidates is a real outcome.
                 let Some(id) = candidates.next() else {
                     break ByteCapOutcome::StoppedAtFloor;
                 };
