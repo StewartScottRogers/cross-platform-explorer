@@ -1289,13 +1289,13 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
 /// # `!facts.is_dir` is load-bearing, and leaving it out reddened two of the three CI legs
 ///
 /// **On Unix every directory has `nlink >= 2` by construction** — its own `.` entry plus the entry the
-/// parent holds for it, plus one more per subdirectory. On Windows `nNumberOfLinks` for a directory is
-/// 1. So a link-count rule without this clause refuses **every** directory on Linux and macOS and **no**
-/// directory on Windows — precisely the shape that passes a Windows-only local run and reds the matrix.
-/// Measured: `cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure` went red on
-/// `ubuntu-latest` and `macos-latest` and green on `windows-latest` from exactly this, turning a tar
-/// link entry's "cannot displace a DIRECTORY, that is the write failing" **abort** into a hard-link
-/// **skip**.
+/// parent holds for it, plus one more per subdirectory. On Windows a directory's `nNumberOfLinks` is
+/// just one. So a link-count rule without this clause refuses **every** directory on Linux and macOS
+/// and **no** directory on Windows — precisely the shape that passes a Windows-only local run and reds
+/// the matrix. Measured: `cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure`
+/// went red on `ubuntu-latest` and `macos-latest` and green on `windows-latest` from exactly this,
+/// turning a tar link entry's "cannot displace a DIRECTORY, that is the write failing" **abort** into a
+/// hard-link **skip**.
 ///
 /// Excluding directories costs nothing this exists for: a directory is not something a file's bytes can
 /// be written into, and every caller refuses one on its own terms already. This function's job is only
