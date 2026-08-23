@@ -3,11 +3,11 @@ id: CPE-1871
 title: two design decisions in the prune loop are argued at length and pinned by nothing
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-23
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
@@ -100,8 +100,12 @@ then makes the OLDEST checkpoint's blob file undeletable before `apply(cap = 500
   as on a dev machine.
 - The guard is gated through `crate::fsutil::require_staged("cpe_1871_undeletable_blob", true, ...)` — the
   existing CPE-1717 convention: `supported_here = true` because the mechanism is expected to work on every
-  CI OS, so a staging failure goes RED under CI (`$CI` set) rather than a silent/quiet skip, and is only a
-  loud local skip off CI. Verified the fixture passes as written: `cargo test --lib snapshot_prune` → 21
+  CI OS, so a staging failure goes RED under CI (`$CI` set) rather than a silent/quiet skip. **Correction
+  (Foreman, on merge):** this Work Log originally said a staging failure was "only a loud local skip off
+  CI". The independent UAT found that is not what the test does — the call is wrapped in
+  `assert!(require_staged(...), "could not stage an undeletable blob on this platform")`, so a
+  `LegitimateSkip` return panics too. Staging failure is **fail-loud in every mode**, which is stricter
+  than the convention, not weaker. Corrected here rather than left as a false claim about the code. Verified the fixture passes as written: `cargo test --lib snapshot_prune` → 21
   passed, 0 failed (this repo's Windows dev box; the mechanism itself, and `require_staged`'s own strict/CI
   behaviour, is exercised identically by the existing CPE-1717 guard-neutralisation CI steps).
 

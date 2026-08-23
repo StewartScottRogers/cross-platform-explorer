@@ -3,11 +3,11 @@ id: CPE-1848
 title: workers stall waiting on background notifications they can never receive
 type: task
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-21
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem

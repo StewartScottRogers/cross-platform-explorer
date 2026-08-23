@@ -3,11 +3,11 @@ id: CPE-1868
 title: gh run view --log truncates silently, and a worker drew a conclusion from the cut
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
