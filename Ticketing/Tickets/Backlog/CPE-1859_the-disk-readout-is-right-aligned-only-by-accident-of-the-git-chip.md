@@ -305,3 +305,30 @@ and converted with `awk`, never `sed -i`. This Work Log was appended with the Ed
   new anchor interacts with the shrink-priority system at the app's 600px floor belongs to CPE-1836 and
   was not exercised.
 - **Light/dark was not re-checked** — this change touches no colour.
+
+### CI, including one red that was chased rather than waved through
+
+PR **#999**, head **fc15379**. Everything green on the second attempt; recording the first attempt
+because "re-ran it and it passed" is only honest with the evidence attached.
+
+**GUI smoke shard 3 failed on the first run** (job 97110095901). It matters here more than usual: this
+change adds a 60s `setInterval` to the running app, so "my change destabilised the GUI suite" was a live
+hypothesis and not one to dismiss by reflex. What the evidence actually says:
+
+- The failing step was the **ratchet**, not a spec: `failed to parse wdio-shard-3-of-4-0-7.json as JSON:
+  Unexpected end of JSON input` — a truncated reporter file for a worker that never finished writing.
+- Specs 0-0…0-4 all `PASSED`; the suite log then stops mid-spec `0-5` (`open-dir.smoke.ts`) and specs
+  0-6…0-9 produced no result at all. The job ran 6m55s against shard 2's 14m1s in the same run — the
+  wdio process ended early rather than a case going red.
+- The repo's own classifier (CPE-1728) called it: **"0 AssertionError occurrence(s), 102
+  environment-signature occurrence(s)… the signature of a renderer that did not paint/settle in time
+  under CI, not of a broken assertion."**
+- Re-ran the failed jobs on the **same SHA**, no code change: shard 3 **pass, 7m3s**, all four shards
+  pass, cross-shard verdict pass.
+
+Same SHA, opposite outcome, and no assertion ever fired — so the red was the runner, not the diff. Worth
+noting that `cpe-1858-shard-balance` was in flight on this repo at the same time, i.e. shard timing is a
+known live concern rather than a surprise.
+
+**Final: 19 checks, all pass.** Frontend type-check and test, Backend × 3 OSes, Server crates × 3,
+Sidecar platform × 3, Network E2E, all four GUI smoke shards + the cross-shard verdict.
