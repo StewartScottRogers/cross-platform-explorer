@@ -3,11 +3,11 @@ id: CPE-1858
 title: gui-smoke shard 2 takes twice as long as the other three, on every run
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-22
 ---
 
 ## Problem
