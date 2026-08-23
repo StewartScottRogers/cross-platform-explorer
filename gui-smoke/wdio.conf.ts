@@ -986,6 +986,25 @@ function killTauriDriver() {
   tauriDriver?.kill();
 }
 
+// --- CPE-1866: phase-breakdown timing, measurement-only ----------------------------------------
+// CPE-1858 measured the ~29.5 s/spec session overhead as ONE number (`span - sum(test durations)`).
+// Nobody has measured what it is actually spent on. This logs a labelled, millisecond-resolution
+// timestamp at each phase boundary of a worker's lifecycle — driver-process start, app-launch/session-
+// create, test execution, and teardown — so a real CI run's log can be diffed into a breakdown instead
+// of treated as one opaque constant. Every worker is its own child process (a fresh import of this file
+// per spec file — see the CPE-1772/1832 comments on `beforeSession` below for why), so `specLabel` is
+// read fresh in each one from the args WDIO's hooks are called with, not from `SHARD_SPECS` above (which
+// is this worker's WHOLE shard assignment, not the one file it is currently running).
+function logPhase(label: string, specLabel: string): void {
+  // eslint-disable-next-line no-console
+  console.log(`[gui-smoke][timing] ${new Date().toISOString()} spec=${specLabel} phase=${label}`);
+}
+
+function specLabelFrom(specs: readonly string[] | undefined): string {
+  if (!specs || specs.length === 0) return "(unknown)";
+  return specs.map((s) => path.basename(s)).join(",");
+}
+
 export const config: WebdriverIO.Config = {
   runner: "local",
   hostname: "127.0.0.1",
@@ -1294,7 +1313,9 @@ export const config: WebdriverIO.Config = {
   // WHOLE proxy chain, not just its front door, is actually ready. Each wait is a real, bounded TCP
   // poll (see `waitForPort`'s own comment) with a labelled, distinguishing error on timeout — a genuine
   // tauri-driver crash still fails loud and fast, it just no longer gets misread as a slow start.
-  beforeSession: async () => {
+  beforeSession: async (_config, _capabilities, specs) => {
+    const specLabel = specLabelFrom(specs as readonly string[] | undefined);
+    logPhase("beforeSession:start", specLabel);
     tauriDriver = spawn(
       TAURI_DRIVER_BIN,
       ["--port", String(TAURI_DRIVER_PORT), "--native-port", String(NATIVE_DRIVER_PORT)],
@@ -1312,6 +1333,7 @@ export const config: WebdriverIO.Config = {
     });
     // Front door first (fast: a bare TCP bind) — see the CPE-1772 half of the comment above.
     await waitForPort("127.0.0.1", TAURI_DRIVER_PORT, 10_000, "tauri-driver");
+    logPhase("beforeSession:frontDoorReady", specLabel);
     // Back door second (slower: a whole other driver binary has to start) — see the CPE-1832 half of
     // the comment above. This is the actual fix for the observed "Connection refused" evidence.
     await waitForPort(
@@ -1320,12 +1342,43 @@ export const config: WebdriverIO.Config = {
       20_000,
       "the native WebDriver (WebKitWebDriver/msedgedriver, spawned by tauri-driver)",
     );
+    // CPE-1866: everything from `beforeSession:start` to here is the driver-process phase — spawning
+    // tauri-driver and waiting for both its front door (bare TCP bind) and back door (the native
+    // WebKitWebDriver/msedgedriver binary actually starting) to accept connections. NONE of this has
+    // launched the app under test yet — that happens next, when WDIO issues its first `POST /session`
+    // and the native driver spawns APP_BINARY.
+    logPhase("beforeSession:driverReady", specLabel);
+  },
+
+  // CPE-1866: fires once per worker (= once per spec file, see the CPE-1772/1832 comment above), AFTER
+  // WDIO's `POST /session` has returned — i.e. after the native driver has launched the real app
+  // process and the session is live. The gap between this and `beforeSession:driverReady` above is the
+  // app-launch/session-create phase: the actual Tauri/WebView2/WebKitGTK cold start, not the driver
+  // plumbing around it.
+  before: (_capabilities, specs) => {
+    logPhase("before:sessionReady", specLabelFrom(specs as readonly string[] | undefined));
+  },
+
+  // CPE-1866: fires once per worker, after every `it()` in this spec file has run and BEFORE
+  // `afterSession` tears the session down. The gap between `before:sessionReady` and this is real test
+  // execution time — already known per-file from CPE-1858's `wdio-*.json` start/end — logged here too
+  // so it can be cross-checked against this run's own breakdown rather than assumed to transfer.
+  after: (_result, _capabilities, specs) => {
+    logPhase("after:testsDone", specLabelFrom(specs as readonly string[] | undefined));
   },
 
   // Note: afterSession might not run if the session fails to start, so onComplete (below) also
   // kills tauri-driver — same belt-and-braces pattern as the official Tauri WebDriver example.
-  afterSession: () => {
+  afterSession: (_config, _capabilities, specs) => {
+    const specLabel = specLabelFrom(specs as readonly string[] | undefined);
+    logPhase("afterSession:start", specLabel);
     killTauriDriver();
+    // CPE-1866: this fires the instant `.kill()` is called, not when the process has actually exited
+    // (SIGTERM delivery + the child's own shutdown are async) — it bounds "how long this hook itself
+    // took to run", not the full teardown. Real process-exit timing is in `tauriDriver`'s own "exit"
+    // handler above if that ever needs measuring; it isn't part of the worker's own wall-clock budget
+    // since WDIO does not wait on it before moving to the next spec file.
+    logPhase("afterSession:killIssued", specLabel);
   },
 
   onComplete: () => {
