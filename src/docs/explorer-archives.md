@@ -81,7 +81,7 @@ valid (if incomplete) archive rather than leaving a corrupt file.
 
 ## Safety limits
 
-Three independent protections apply automatically — you don't opt into any of them:
+Four independent protections apply automatically — you don't opt into any of them:
 
 - **A symlink at the destination is refused, never written through.** Creating a file at a symlink's name
   doesn't replace the link: it writes *through* it, into whatever the link points at, and reports success
@@ -92,6 +92,13 @@ Three independent protections apply automatically — you don't opt into any of 
   and 7-Zip alike: an entry that would land on an existing link in the destination folder is **skipped**
   and the rest of the archive still extracts. Overwriting an ordinary existing file is unaffected — that
   stays allowed, because it's a thing you can reasonably mean.
+- **An entry that would land on a file with more than one name is skipped too.** Some tools give one
+  file several names at once so it takes up space only once — deduplicating backup programs, package
+  managers and a few sync clients all do it. These are not shortcuts: every name is the file, equally,
+  and no amount of checking the *path* can reveal that a second name exists or where it lives. Writing
+  an entry onto one of them would change what you see at all of them, including any sitting outside the
+  folder you picked. So that entry is skipped and listed with its reason, and the rest of the archive
+  still extracts. Overwriting an ordinary file with a single name is unaffected.
 - **Nothing an extraction writes can end up outside the folder you picked — including via a folder
   shortcut.** This is a second, separate check from the one above, and it covers the case a name-only
   check cannot see: if the destination already contains a **folder** shortcut (a symlink, or on Windows a
