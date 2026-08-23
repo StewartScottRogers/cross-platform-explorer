@@ -2,7 +2,7 @@
 id: CPE-1859
 title: the disk readout is right-aligned only by accident of the git chip preceding it
 type: bug
-priority: Low
+priority: Medium
 status: Backlog
 tags: ready
 estimate: S
@@ -18,13 +18,29 @@ right edge purely because `.git` precedes it carrying `margin-left: auto`.
 So when the git chip is absent while the disk figure is present, the free-space text renders
 **left-adjacent to the item count** instead of at the right edge.
 
-That window is short but real, and CPE-1854 created a path that exposes it. Leaving an archive back into
-a git repository refetches both readouts independently; `disk_space` is fast and `forge_repo_status` is
-slow on a large repository or a network share. So the sequence is: disk lands and renders in the wrong
-place, then the chip lands and the disk figure **jumps** to the right edge.
+> **CORRECTED WHILE FIXING — this section's original framing was wrong, and the correction is the main
+> finding of the ticket.** Everything below the line was written as a *sub-second race*: two readouts
+> refetching independently, `disk_space` landing before a slow `forge_repo_status`, the figure visibly
+> **jumping** right when the chip arrives. That describes a real sequence, but it badly understates the
+> defect, and a reader going top-down would take the small version away.
+>
+> **It is not a race. It is the steady state of every non-repo folder.** `{#if git && git.is_repo}`
+> removes the chip in *any* folder that is not a git repository, while `{#if diskLabel}` renders the
+> free-space figure in *every* ordinary folder — so the two gates disagree permanently, not momentarily.
+> In `C:\Windows`, in Documents, in Downloads, the free-space text has been sitting next to the item
+> count since CPE-403 shipped it in July. Measured at a 764px viewport with the chip off: `.disk` at
+> `left=84.9 right=216.0` against a content edge of `750.0` — **534.0px adrift**, 26.0px from the item
+> count. The CPE-1854 race is one narrow instance of a defect that was already the **majority** case.
+>
+> `priority` raised Low → **Medium** for the same reason: this was filed as a rare transient and is
+> in fact a permanently mis-placed element in most of the app's folders.
 
-Sub-second, and pre-existing in the CSS rather than introduced by CPE-1854 — but before that ticket the
-chip was never cleared on entering those views, so the path did not exist.
+The original race framing, kept for the record because CPE-1854 created that specific path: leaving an
+archive back into a git repository refetches both readouts independently; `disk_space` is fast and
+`forge_repo_status` is slow on a large repository or a network share, so disk lands and renders in the
+wrong place and then the figure **jumps** right when the chip arrives. Sub-second, and pre-existing in
+the CSS rather than introduced by CPE-1854 — but before that ticket the chip was never cleared on
+entering those views, so that particular path did not exist. All true; just not the whole defect.
 
 ## A second, related staleness
 
@@ -140,6 +156,15 @@ rule deleted, i.e. the pre-ticket state):
 | Pre-ticket state (12px, no sibling rule) | `diskRightGap` 0.0 → **534.0px**, `diskFromItemCount` 26.0px | `StatusBar.diskAnchor` **3 failed / 2 passed** |
 | The naive fix (auto on `.disk`, no sibling rule) | `.git` `left=501.3` → **293.1** in the both-present case | **1 failed / 4 passed** — exactly the sibling-rule test |
 | Restore | back to 0.0px / `left=501.3`; file md5 `f8b3c3a5…` matched the pre-mutation copy | 5/5 green |
+
+**Independently reproduced.** The Reviewer re-ran the measurements on its own headless-Chrome sessions
+rather than accepting the table, and got them **byte-for-byte**: `.git` `501.3 → 293.1` under the naive
+fix at 764px, and `361.1` on the nose at 900px. It also checked that the harness measures what it claims
+— `contentRight` is read **live** from `getComputedStyle(bar).paddingRight`, so a padding change cannot
+launder a regression into a passing number — and confirmed the pair survives into the compiled production
+CSS. One detail it added: in the shipped stylesheet the sibling rule **wins twice over**, being both
+higher-specificity (0-4-0 vs 0-3-0) **and** later in source order. The component comment claims only the
+specificity half, which is the half that is guaranteed rather than incidental, so it is left as written.
 
 ### The row, enumerated — every child, not just `.disk`
 
@@ -302,10 +327,50 @@ and converted with `awk`, never `sed -i`. This Work Log was appended with the Ed
 - **`disk_space` against a genuinely disconnected mapped network drive was not measured.** The in-flight
   guard is reasoned from that risk and pinned by a synthetic held probe, not by a real dead share. The
   QNAP on the LAN would be the honest way to check it.
-- **Narrow-width behaviour was not re-checked.** All measurements are at a comfortable width; whether the
-  new anchor interacts with the shrink-priority system at the app's 600px floor belongs to CPE-1836 and
-  was not exercised.
+- ~~**Narrow-width behaviour was not re-checked.**~~ **CLOSED by the independent Reviewer**, which
+  measured it rather than leaving it open — using the outer iframe shell, which exists precisely to
+  control the CSS viewport width. At **600px and 500px, with a long notice, chip on and off** (four
+  combinations): `.statusbar` stays exactly **26.0px** — no vertical growth — `diskRightGap = 0.0` in all
+  four, and the CPE-1780 shrink-priority system still narrows the right-hand cluster (`.git` 91.7 → 66.6,
+  `.disk` 131.0 → 95.3) rather than overflowing. **The new anchor does not misbehave at or below the app's
+  600px floor.** An `auto` margin only consumes *positive* free space, so it is inert once the row is
+  over-constrained — but that is now measured, not just reasoned. CPE-1836 still owns the row's narrow
+  layout generally.
 - **Light/dark was not re-checked** — this change touches no colour.
+
+### Recorded, deliberately not fixed here
+
+Four limits found in review. None is a defect in this change; each is a claim narrower than it might
+otherwise read, so it is written down rather than left for the next reader to rediscover.
+
+1. **`refreshDriveUsage`'s guard is narrower than "never two probes at once."** `driveUsageInFlight`
+   guards only the path *through `refreshDriveUsage`*. `loadDriveUsage` is also called directly by
+   `applyDriveList` (`App.svelte:1644`) and by the mount block (`:6319`), and neither consults the flag.
+   A focus event that *also* changes the drive set therefore runs both paths concurrently. Harmless —
+   `loadDriveUsage` reassigns `driveUsage` per drive and both paths write the same values — and the
+   guard still does the job it exists for (stopping a **dead network share** accumulating one probe per
+   tick, which is a repeat of the *same* path). But the honest statement is "no two timer/focus probes
+   overlap", not "no two probes overlap", and the tests only pin the former.
+2. **`loadDriveUsage` never evicts a failing drive** (`App.svelte:1615-1627`). Its `catch` deliberately
+   skips a drive it cannot stat, and the write only happens on success — so a drive that starts failing
+   keeps its **last-good bar on screen indefinitely**, with no indication the figure is stale. That is
+   pre-existing behaviour and the right call at mount (a transient failure should not blank the bar),
+   but this change now re-enters that code every 60 seconds, so the "last good value, forever" window is
+   entered far more often than before. Not widened into this diff; a fix would need a decision about what
+   a drive whose probe is failing should actually *show*, which is a design question, not a bug fix.
+3. **One assertion in the in-flight test is vacuous.** `App.sidebarDriveUsage.test.ts`'s last case closes
+   with `getByText("7.0 GB free")` after releasing the held probe — but `driveFree` was never changed in
+   that test, so the value was always going to be `7.0`. It is a "did the app survive the release" check
+   at best. The load-bearing assertion in that case is `expect(driveProbes).toBe(2)`, which is the one
+   the mutation table reds (`expected 4 to be 2`). Left in place rather than deleted so the test ends on
+   a rendered state, but it proves nothing on its own and should not be counted as coverage.
+4. **The sweep covered status-bar rows, not the app.** Roughly 30 other components own a
+   `margin-left: auto`. The shape this ticket fixes — a right-anchoring `auto` margin living on a
+   **conditionally rendered** element, with a sibling depending on it — is **not proven absent
+   app-wide**. `ContextBar.svelte:64` was spot-checked (unconditional and last in its row, so safe).
+   Recorded as a known-unbounded surface, deliberately **not** chased here: an app-wide audit is its own
+   ticket, and widening this diff to cover it would be exactly the over-reach the row enumeration above
+   was scoped to avoid.
 
 ### CI, including one red that was chased rather than waved through
 
@@ -314,22 +379,68 @@ because "re-ran it and it passed" is only honest with the evidence attached.
 
 **GUI smoke shard 3 failed on the first run** (job 97110095901). It matters here more than usual: this
 change adds a 60s `setInterval` to the running app, so "my change destabilised the GUI suite" was a live
-hypothesis and not one to dismiss by reflex. What the evidence actually says:
+hypothesis and not one to dismiss by reflex.
 
-- The failing step was the **ratchet**, not a spec: `failed to parse wdio-shard-3-of-4-0-7.json as JSON:
-  Unexpected end of JSON input` — a truncated reporter file for a worker that never finished writing.
-- Specs 0-0…0-4 all `PASSED`; the suite log then stops mid-spec `0-5` (`open-dir.smoke.ts`) and specs
-  0-6…0-9 produced no result at all. The job ran 6m55s against shard 2's 14m1s in the same run — the
-  wdio process ended early rather than a case going red.
-- The repo's own classifier (CPE-1728) called it: **"0 AssertionError occurrence(s), 102
-  environment-signature occurrence(s)… the signature of a renderer that did not paint/settle in time
-  under CI, not of a broken assertion."**
-- Re-ran the failed jobs on the **same SHA**, no code change: shard 3 **pass, 7m3s**, all four shards
-  pass, cross-shard verdict pass.
+**First, a correction to this log's own first draft, which described the failure wrongly.** That draft
+said specs 0-0…0-4 passed, the log "stops mid-spec 0-5 (`open-dir.smoke.ts`)", 0-6…0-9 produced no
+result, and therefore "no assertion ever fired — the wdio process ended early rather than a case going
+red." **All four of those claims are false.** They came from a `gh run view --job … --log` fetch that was
+silently **truncated at ~4,100 of the job's 13,676 lines**, and the truncation point was read as the end
+of the run. Nothing warned; the output simply stopped. Re-fetched the complete attempt-1 archive
+(`gh api repos/…/actions/runs/32605082699/attempts/1/logs`, unzipped) and re-derived it:
 
-Same SHA, opposite outcome, and no assertion ever fired — so the red was the runner, not the diff. Worth
-noting that `cpe-1858-shard-balance` was in flight on this repo at the same time, i.e. shard timing is a
-known live concern rather than a surprise.
+| Worker | Spec | Verdict |
+|---|---|---|
+| 0-0…0-4 | batch-media, cost-history, file-health, macro-in-menu, native-tags | PASSED |
+| 0-5 | `open-dir.smoke.ts` | **PASSED** |
+| 0-6 | `preview-pane.smoke.ts` | **PASSED** |
+| **0-7** | **`saved-search.smoke.ts`** | **FAILED** |
+| 0-8, 0-9 | snapshot-schedule-settings, transfer-panel | PASSED |
+
+So **a case genuinely went red**, and the truncated `wdio-shard-3-of-4-0-7.json` the ratchet choked on is
+**the failing worker's own reporter file**, not a file from a worker that never ran. The ratchet error was
+a symptom of the red, not a substitute for one.
+
+**What actually happened in 0-7,** read from the complete log: the session initialised at 23:40:04.580;
+`saved-search`'s `waitUntil` polled `.fav-title`, **found all five section headers**, and got an **empty
+string from every one of the five `getText()` calls on the very first poll** at 23:40:37.07; it kept
+polling to 23:40:47.06 (the 10s timeout) with the same result, and the session then collapsed at
+23:40:47.82 with `UND_ERR_SOCKET` on the `DELETE /session` teardown. Five pre-existing sidebar headers all
+reporting empty text is **a sidebar that never painted** — the CPE-1728 signature — not a saved-search
+defect. The classifier agreed: **"0 AssertionError occurrence(s), 102 environment-signature
+occurrence(s)."**
+
+**Quoting the classifier honestly, since the first draft softened it:** it says *"this line only tells you
+what KIND of red you're looking at, **it does not excuse it**."* An environment signature is not a pass.
+
+### Ruling out my own timer — the uncomfortable coincidence, named
+
+The failing spec polls the **sidebar**, and this is the PR that adds a timer mutating **sidebar** state.
+That coincidence deserved to be stated and eliminated, not left for a reviewer to notice. Three
+independent reasons it is not `refreshDriveUsage`:
+
+1. **The timer cannot have fired.** The 0-7 session lived 23:40:04.580 → 23:40:47.822 = **43.2 seconds**,
+   end to end. A 60s `setInterval` armed in `onMount` has no tick inside that window — not one.
+2. **The text was empty from the very first poll**, before any elapsed time could matter, and the five
+   elements reporting empty are **section headers that exist independently of anything this diff
+   touches**. `refreshDriveUsage` only ever reassigns `driveUsage`, which feeds the per-drive bars —
+   it cannot blank a `.fav-title`.
+3. **The identical code has since passed shard 3 three times**: the attempt-2 rerun (job 97112118134,
+   7m3s), run `32607884019` (job 97117090444, 7m3s), and run `32609818065` on SHA `832c93df` — all green,
+   no code change between them and the red.
+
+**And the same failure exists on `main`, on code that predates this branch.** Run `32581818620`
+(branch `main`, SHA `34a72926` — `CPE-1849`, verified an ancestor of this branch's HEAD, i.e. it contains
+none of this work) failed **the same spec on the same shard in the same worker slot with the same
+classifier counts**: `shard 3 [0-7] saved-search.smoke.ts FAILED`, `0 AssertionError occurrence(s), 102
+environment-signature occurrence(s)`. That run also lost `shard 4 [0-5] organize.smoke.ts` (0/64) and
+`shard 1 [0-5] network.smoke.ts` (0/59). This is a standing environmental flake in the suite, reproduced
+on code this PR cannot have influenced — which is a far stronger statement than "re-ran it and it passed."
+
+`cpe-1858-shard-balance` was in flight on this repo at the same time, so shard timing is a known live
+concern rather than a surprise.
+
+Attribution stands; the account of the log did not, and is corrected above.
 
 **Final: 19 checks, all pass.** Frontend type-check and test, Backend × 3 OSes, Server crates × 3,
 Sidecar platform × 3, Network E2E, all four GUI smoke shards + the cross-shard verdict.
