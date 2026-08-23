@@ -3,11 +3,11 @@ id: CPE-1846
 title: restore can close the final-component link swap with the NOFOLLOW pattern the crate already ships
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-21
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
