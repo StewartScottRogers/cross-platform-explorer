@@ -13,7 +13,9 @@
 //
 // THE DESIGN, in one paragraph. `gui-smoke.yml` builds the app ONCE (`gui-smoke-linux-build`), then fans
 // out to a matrix of shard jobs that each run a DISJOINT subset of `specs/*.smoke.ts` chosen by
-// `assignShardSpecs` below, then joins on a single `gui-smoke-linux-verdict` job that merges every
+// `assignShardSpecs` below (CPE-1858: by MEASURED cost, not by count — see "THE COST MODEL" further
+// down for why round-robin could not balance this suite), then joins on a single
+// `gui-smoke-linux-verdict` job that merges every
 // shard's `.results/` and runs the ratchet over the WHOLE set. Each shard also runs the ratchet over its
 // OWN subset for fast, local feedback — both gate, neither can mask the other.
 //
@@ -167,24 +169,192 @@ function assertShardId({ shardIndex, shardTotal }: ShardId): void {
   }
 }
 
+// ===================================================================================================
+// CPE-1858 — THE COST MODEL. Read this before touching `MEASURED_SPEC_RUNTIME_MS`.
+//
+// CPE-1753 partitioned by round-robin over the sorted names, explicitly "balance without a cost model".
+// That is the right default when every unit costs about the same. It is not this suite. MEASURED, from
+// the `@wdio/json-reporter` chunks of three consecutive green runs (32585350872, 32589428833,
+// 32592641384 — download `gui-smoke-results-ubuntu-shard-<n>`, each `wdio-*.json`'s top-level
+// `start`/`end` is one spec file's in-session wall time):
+//
+//   samples.smoke.ts        479.3 s   (479.5 / 479.7 / 478.8 — n=3, spread 0.9 s)
+//   preview-pane.smoke.ts    18.2 s
+//   network.smoke.ts         16.2 s
+//   saved-search.smoke.ts    12.0 s
+//   ...the other 37          1.3-4.0 s
+//   ------------------------------------------------------------------------------
+//   all 41 spec files       611.5 s, of which ONE spec file is 78%.
+//
+// Round-robin therefore cannot balance this suite at any shard count: whichever shard draws
+// `samples.smoke.ts` runs ~8 minutes of test before it starts on its share of the other 2.2 minutes.
+// That is the whole of the CPE-1858 observation — shard 2 at ~14 min against ~6-7 min for the other
+// three, on three consecutive runs, with nothing causal in any diff. Shard 2 held `samples.smoke.ts`.
+//
+// THE SECOND MEASURED NUMBER, which is why the cost model is as coarse as it is. Each spec file costs a
+// fixed ~29.5 s of session setup/teardown on top of its own runtime (per shard, `span - sum(spec
+// durations)` over `n` specs: 29.9 / 29.0 / 30.6 / 29.0 s — run 32592641384). For 40 of the 41 specs
+// that fixed cost DWARFS the spec's own work (29.5 s vs a 1.3-18.2 s spread), so counting them is
+// already the correct cost model and a per-spec measured table would buy nothing while rotting 41 ways.
+//
+// That 29.5 is a BRACKET, not a constant, and the CPE-1858 review is why this now says so. Re-derived
+// independently it lands at 26.1-27.5 s if you divide the artifact spans and 29.5-31.9 s if you divide
+// the workflow STEP duration (which also carries per-step setup the artifacts never see). Both are
+// defensible definitions of the same quantity and the number below sits at the boundary. It does not
+// matter to the design: under EITHER bracket the fixed cost still exceeds every non-`samples` spec's own
+// runtime by 1.5x to 20x, which is the only thing the coarse model rests on.
+//
+// THE INCLUSION RULE, stated so the table cannot grow by taste: a spec earns an entry only when its
+// measured runtime EXCEEDS the per-spec session overhead — i.e. when the spec's own work, not the
+// session it runs in, is the dominant term. Exactly one spec qualifies today (479.3 s vs 29.5 s); the
+// runner-up, `preview-pane.smoke.ts` at 18.2 s, does not, and adding it would move a shard by less than
+// half of one session's overhead.
+//
+// WHAT HAPPENS WHEN A RUNTIME CHANGES — i.e. how this rots, stated plainly rather than wished away.
+// No self-correcting proxy over a spec's own SOURCE is available: `it()` count, line count and byte
+// count were all measured against the durations above and all three FAIL. `samples.smoke.ts` is 3
+// top-level `it()` blocks and 186 lines — mid-pack on every static measure — because it generates one
+// case per file in the repo's `samples/` tree at spec-load time. `preview-pane.smoke.ts` has the MOST
+// `it()` blocks (8) and is 26x faster.
+//
+// That claim is scoped to SOURCE-based proxies on purpose (CPE-1858 review). A proxy does exist off the
+// source: `samples.smoke.ts`'s case count IS the file count under `samples/` (48 files, less READMEs and
+// the separately-run `malformed.pdf` = 46 cases, 479.3 / 46 = 10.4 s each), so counting that tree would
+// track its dominant term self-correctingly. It is NOT adopted, and the reason is design rather than
+// ignorance: it would put filesystem I/O into a module that is deliberately pure and no-I/O so it can be
+// unit-tested without a fixture tree, and it would hard-code a per-spec special case ("this one spec is
+// costed by walking a directory two levels up") into the one function every job must agree on. A weight
+// this module cannot compute from its inputs alone is a weight four runners could disagree about. If the
+// hand-maintenance below ever becomes the real cost, that is the door to reopen — with the I/O in
+// `specFiles.ts` and the result passed IN, never read from here.
+//
+// So the table is measured, and it is hand-maintained. The failure modes:
+//   - a table entry goes stale (samples gets faster/slower): balance degrades toward what round-robin
+//     would have given. Correctness is untouched — the partition is still a bijection. NOTHING CATCHES
+//     THIS. `shard.test.ts`'s balance assertion computes the loads AND the bound it checks them against
+//     from `specWeightMs`, so it is the model checked against itself: it reds on a regression in the
+//     PARTITIONING ALGORITHM and is blind, by construction, to the TABLE drifting from reality. Only a
+//     re-measurement (recipe below) closes that loop. Read the balance test as "the packer still packs",
+//     never as "the shards are still balanced in CI".
+//   - a NEW spec becomes heavy and is not listed: it is costed as ordinary, lands on some shard, and
+//     that shard grows. Again balance only, and again unwatched.
+//   - an entry names a spec that was renamed or deleted: caught LOUDLY by a test in `shard.test.ts`,
+//     because that is the one rot a static check CAN see.
+//
+// WHERE THE NEXT IMBALANCE WILL COME FROM, since the table cannot see it. The three runner-up specs
+// (`preview-pane`, `network`, `saved-search` — 18.2 + 16.2 + 12.0 s) all land on ONE shard, shard 4,
+// which finishes only ~28 s of in-session time (~40 s of job time) behind the long pole. That margin is
+// thin: if those three roughly double, shard 4 becomes the long pole and neither this table nor any test
+// notices — the leg just gets slower. Re-measure when any of them grows, not only when `samples` does.
+//
+// The floor is set by the heaviest single spec no matter what: no partition and no shard count can put
+// `samples.smoke.ts` in two places. If ~8.5 min ever stops being acceptable, the lever is SPLITTING
+// that spec file (or trimming `samples/`), not editing this table.
+//
+// RE-MEASURING is a five-minute job and is how this table should be updated, never by argument:
+//   gh run download <run-id> -n gui-smoke-results-ubuntu-shard-<n> -D shard<n>   # for n in 1..4
+//   then, per `wdio-*.json`: basename(specs[0]) -> Date.parse(end) - Date.parse(start).
+// ===================================================================================================
+
+/** Fixed per-spec-file cost of the session the spec runs in (app launch, driver session, teardown),
+ *  in milliseconds. MEASURED at 29.0-30.6 s across the four shards of run 32592641384. Every spec pays
+ *  it, so it is the floor of any spec's weight — and for 40 of 41 specs it IS essentially the weight,
+ *  which is why counting is already the right cost model for everything not in the table below. */
+export const SPEC_SESSION_OVERHEAD_MS = 29_500;
+
+/** Weight for a spec with no measured entry, in milliseconds: the mean in-session runtime of the 40
+ *  non-`samples` specs (132.2 s / 40 = 3.3 s). Deliberately a single flat number — the real spread
+ *  (1.3-18.2 s) is smaller than half of `SPEC_SESSION_OVERHEAD_MS`, so pretending to know it per spec
+ *  would be false precision with a maintenance bill attached. */
+export const DEFAULT_SPEC_RUNTIME_MS = 3_300;
+
+/** Measured in-session runtimes, in milliseconds, for the specs whose OWN work dominates their session
+ *  overhead. See the block comment above for the measurement, the inclusion rule and the rot analysis.
+ *  Integers, not seconds-as-floats, so the bin-packing arithmetic below is exact rather than merely
+ *  reproducible — a partition that differed by one ULP between two runners would be a real bug. */
+export const MEASURED_SPEC_RUNTIME_MS: Readonly<Record<string, number>> = {
+  // 479.5 / 479.7 / 478.8 s over runs 32585350872 / 32589428833 / 32592641384. Generates one case per
+  // file under `samples/`, so it grows with the fixture tree rather than with its own source.
+  "samples.smoke.ts": 479_300,
+};
+
+/** What one spec file costs a shard: its session overhead plus its measured (or defaulted) runtime.
+ *  Total milliseconds, always a positive integer, and a pure function of the BASENAME alone — no clock,
+ *  no filesystem, no iteration order. That purity is what lets four independent runner processes agree. */
+export function specWeightMs(basename: string): number {
+  const runtime = Object.prototype.hasOwnProperty.call(MEASURED_SPEC_RUNTIME_MS, basename)
+    ? MEASURED_SPEC_RUNTIME_MS[basename]
+    : DEFAULT_SPEC_RUNTIME_MS;
+  return SPEC_SESSION_OVERHEAD_MS + runtime;
+}
+
 /**
- * Picks the spec files this shard owns, deterministically, from the full sorted list.
+ * The WHOLE partition — every shard's spec list, in shard order — computed the same way by every job.
  *
- * Round-robin over a code-unit-sorted copy (`i % shardTotal === shardIndex - 1`), not contiguous blocks.
- * The reason is balance without a cost model: contiguous blocks would put every alphabetically-adjacent
- * heavy spec in the same shard. Adding one spec file changes each shard's SIZE by at most one — but do
- * not mistake that for stability of the assignment: measured, inserting one spec into the middle of the
- * sorted list moves 23 of 41 specs to a different shard, where contiguous blocks would move 3. (An
- * earlier version of this comment claimed the opposite, and the CPE-1753 review measured it.) That churn
- * is harmless here because nothing is cached per shard and the verdict is reassembled from all of them
- * every run; it would stop being harmless the moment anything memoises a spec-to-shard mapping.
- * Sorted with a plain code-unit comparison rather
- * than `localeCompare` so the partition is byte-identical on every runner and locale — a partition that
- * differed between the shard job and the verdict job would put a spec in two shards or none, and "none"
- * is the dangerous direction.
+ * Longest-processing-time-first (LPT) greedy bin-packing: cost every spec with `specWeightMs`, sort
+ * heaviest-first, and hand each one to the currently-lightest shard. Classic, and its 4/3-of-optimal
+ * bound is far more than this suite needs — with one spec at 78% of the total, LPT simply gives that
+ * spec a shard of its own and deals the rest evenly, which IS the optimum here.
+ *
+ * DETERMINISM, which matters more than balance and is the property most easily broken by a rebalance.
+ * Four shard jobs run this in four separate processes on four separate runners; the verdict job joins
+ * their manifests. If two processes disagreed about the partition, a spec would run twice (wasteful but
+ * visible) or run NOWHERE while every job reported green (invisible, and the exact silent-coverage-hole
+ * shape CPE-1728/CPE-1753 exist to eliminate). So every input is pinned:
+ *   - the spec list is re-sorted here with `compareSpecNames`, a plain code-unit comparison, so neither
+ *     `readdir` order nor the runner's locale can reach the result (`localeCompare` would);
+ *   - weights are integer milliseconds from a committed constant, so the load comparison is exact
+ *     integer arithmetic — no float, no ULP, no ordering surprise;
+ *   - the heaviest-first sort breaks weight ties by NAME, never by input position;
+ *   - the "lightest shard" search breaks load ties by LOWEST INDEX (strict `<`), never by anything
+ *     ambient;
+ *   - and there is no `Date`, no `Math.random`, no `process.*`, no `for...in` over an object anywhere
+ *     in the path.
+ * `lib/shard.test.ts` pins this by running the REAL `scripts/write-shard-manifest.ts` in four separate
+ * child processes and asserting the union of the four manifests is exactly the spec set, once each —
+ * deliberately not by calling this function twice in one process, which would pass even if the answer
+ * depended on the clock.
  *
  * Every spec appears in EXACTLY one shard, and the union is the whole list — a property `lib/ratchet.ts`
  * clause 9 re-checks at the join against the live-globbed `specs/` directory rather than trusting it.
+ *
+ * ASSIGNMENT CHURN is unchanged in kind from CPE-1753's round-robin: adding a spec can move others
+ * between shards. Harmless because nothing is cached per shard and the verdict is reassembled from all
+ * of them every run; it would stop being harmless the moment anything memoises a spec-to-shard mapping.
+ */
+export function partitionSpecs(allSpecs: string[], shardTotal: number): string[][] {
+  assertShardId({ shardIndex: 1, shardTotal });
+  const buckets: string[][] = Array.from({ length: shardTotal }, () => []);
+  const loadMs: number[] = new Array(shardTotal).fill(0);
+
+  // Heaviest first, ties by name. Sorting by name FIRST and then by weight would rely on sort stability
+  // for the tie-break; doing both in one comparator makes the total order explicit instead.
+  const heaviestFirst = [...allSpecs].sort((a, b) => {
+    const byWeight = specWeightMs(b) - specWeightMs(a);
+    return byWeight !== 0 ? byWeight : compareSpecNames(a, b);
+  });
+
+  for (const spec of heaviestFirst) {
+    // argmin over `loadMs`, strict `<` so an exact tie keeps the LOWEST index. With all-equal weights
+    // this degenerates to plain round-robin, which is why an unweighted suite behaves exactly as it did
+    // before CPE-1858.
+    let target = 0;
+    for (let i = 1; i < shardTotal; i += 1) {
+      if (loadMs[i] < loadMs[target]) target = i;
+    }
+    buckets[target].push(spec);
+    loadMs[target] += specWeightMs(spec);
+  }
+
+  // Name order within a shard: the manifest, the log line and `known-failing.json` are all read by
+  // humans, and bin-packing order is meaningless to them.
+  return buckets.map((bucket) => bucket.sort(compareSpecNames));
+}
+
+/**
+ * Picks the spec files this shard owns, deterministically. Thin slice of `partitionSpecs` — every job
+ * computes the WHOLE partition and keeps its own row, which is what makes the four rows provably
+ * disjoint rather than four independent guesses that happen to agree.
  *
  * A shard with MORE shards than spec files legitimately gets an empty list; that is not an error here
  * (the run is still complete overall), and the verdict job's coverage check is what would catch a real
@@ -193,8 +363,7 @@ function assertShardId({ shardIndex, shardTotal }: ShardId): void {
  */
 export function assignShardSpecs(allSpecs: string[], id: ShardId): string[] {
   assertShardId(id);
-  const sorted = [...allSpecs].sort(compareSpecNames);
-  return sorted.filter((_, i) => i % id.shardTotal === id.shardIndex - 1);
+  return partitionSpecs(allSpecs, id.shardTotal)[id.shardIndex - 1];
 }
 
 /** Locale-independent ordering — see `assignShardSpecs`'s note on why `localeCompare` is not used. */

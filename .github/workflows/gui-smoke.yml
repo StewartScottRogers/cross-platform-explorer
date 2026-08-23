@@ -344,6 +344,41 @@ jobs:
   # (16.22) and the 30-minute shard cap absorbs roughly 30-76 more spec files; in the adversarial case
   # where every new spec is heavy AND lands on the long-pole shard, about 7. Before this change the same
   # margin was 2-4 spec files, full stop.
+  #
+  # ---------------------------------------------------------------------------------------------------
+  # CPE-1858 — THE LONG POLE WAS HALF INHERENT. The block above is correct that no shard count gets below
+  # `samples.smoke.ts`'s own ~8 minutes. It was wrong to leave the rest there: under round-robin the shard
+  # that drew that file carried it ON TOP OF a full ninth of everything else, so it ran ~14 min against
+  # ~6-7 for its siblings on EVERY run — three consecutive sightings (this workflow's own runs
+  # 32585350872 / 32589428833 / 32592641384: 12.67 / 12.67 / 12.70 min of in-session suite against
+  # 4.7-5.7 for the other three) with nothing causal in any diff.
+  #
+  # MEASURED per spec file, from those three runs' `gui-smoke-results-ubuntu-shard-<n>` artifacts (each
+  # `wdio-*.json`'s top-level start/end is one spec file's in-session wall time), mean of 3:
+  #   samples.smoke.ts       479.3 s  (479.5 / 479.7 / 478.8 — n=3, spread 0.9 s)
+  #   preview-pane.smoke.ts   18.2 s
+  #   network.smoke.ts        16.2 s
+  #   saved-search.smoke.ts   12.0 s
+  #   the other 37         1.3-4.0 s
+  #   ALL 41                 611.5 s  <- ONE spec file is 78% of it
+  # plus a fixed ~29.5 s of session setup/teardown per spec file (`span - sum(durations)` per shard:
+  # 29.9 / 29.0 / 30.6 / 29.0 s), which for 40 of the 41 specs DWARFS the spec's own work.
+  #
+  # So `lib/shard.ts#assignShardSpecs` now cost-weights (session overhead + measured-or-default runtime)
+  # and longest-processing-time-first bin-packs onto the least-loaded shard, instead of dealing round-
+  # robin. That gives `samples.smoke.ts` a shard of its own and spreads the other 40 evenly. PREDICTED
+  # in-session, against the three runs above:
+  #                        before (measured)        after (predicted)
+  #   shard 1                   5.62                    8.48   <- samples.smoke.ts alone; the real floor
+  #   shard 2                  12.67                    7.65
+  #   shard 3                   5.45                    7.11
+  #   shard 4                   4.78                    7.11
+  #   LONG POLE                12.67                    8.48   (job time ~14.0 -> ~9.8, +1.33 min setup)
+  # Four shards is still right: with the heaviest file isolated, adding shards only shrinks the other
+  # three, which are already BELOW the floor it sets. Read `gui-smoke/lib/shard.ts`'s "THE COST MODEL"
+  # block for the inclusion rule, the rot analysis (there is NO self-correcting static proxy — `it()`
+  # count, lines and bytes were all measured and all fail) and the re-measurement recipe.
+  # ---------------------------------------------------------------------------------------------------
   gui-smoke-linux-build:
     name: GUI smoke (ubuntu-latest) — build once for every shard (CPE-1753)
     runs-on: ubuntu-latest
@@ -546,6 +581,14 @@ jobs:
         # 46-case spec file cannot be split across shards; it would only shave the already-cheap three
         # while multiplying runner slots consumed per push. Four it stays until `samples.smoke.ts` itself
         # is split.
+        #
+        # CPE-1858 re-derived that conclusion from per-spec measurements and it survives, for a slightly
+        # different reason. The cost-weighted split now gives `samples.smoke.ts` a shard of its OWN
+        # (~8.48 min predicted) and deals the other 40 specs across the remaining three (~7.1-7.7 min
+        # each). Those three are already BELOW the floor the isolated heavy spec sets, so adding a fifth
+        # shard shortens only jobs that are not the long pole — it cannot move the leg's wall clock at
+        # all, and would buy that nothing at the price of another runner slot per push. Still four; still
+        # until `samples.smoke.ts` itself is split.
         shard: [1, 2, 3, 4]
     # CPE-1753: was 45 for the whole unsharded suite, which a green run had crept to 41.70 of. Measured
     # across two green sharded runs the shards ran 6.28-16.22 min, so 30 is ~1.85x the WORSE observed LONG
