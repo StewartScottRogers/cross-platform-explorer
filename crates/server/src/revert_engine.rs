@@ -2116,10 +2116,19 @@ mod tests {
     //     `read_link` — structurally, never by reading *through* the link, which would race the very
     //     write under test and could mis-file a successful escape as "not a live plant".
     //
-    // `#[ignore]`d, and that is deliberate rather than shyness: it takes tens of seconds, it needs the
-    // symlink privilege, and it is a **probabilistic attack, not a pin**. The deterministic pins for
-    // this property are the `cpe_1846_*` tests; this is the instrument that says how hard they were
-    // pushed. Run it with
+    // `#[ignore]`d, and that is deliberate rather than shyness. It takes tens of seconds and it is a
+    // **probabilistic attack, not a pin** — but the decisive reason is narrower than "it needs the
+    // symlink privilege" (CPE-1870 review): `cpe1870_verdict` FAILS on `live_plants == 0`, by design,
+    // so that a run which raced nothing cannot report a comfortable zero. A GitHub Windows runner
+    // without Developer Mode or admin **cannot create a symlink at all**, so un-`#[ignore]`ing these
+    // would turn that job red for a reason with nothing to do with the code under test. The assertion
+    // that makes the harness honest locally is the same one that makes it unusable in CI.
+    //
+    // Two things keep that tolerable rather than merely accepted. `clippy --all-targets` and
+    // `cargo test` both **compile** these tests on all three OSes, so they cannot silently bit-rot
+    // behind the attribute. And the refusals they probe are pinned deterministically by the
+    // `cpe_1846_*` tests, which DO run everywhere. This is the instrument that says how hard those
+    // pins were pushed, not the pin itself. Run it with
     // `cargo test --release -- --ignored --nocapture cpe_1870_triggered_race`.
     //
     // **Its positive control is a manual sabotage, and a zero from it is worthless without one.**
@@ -2192,9 +2201,12 @@ mod tests {
                     // hundred writes — a strong-looking attack that mostly never enters the window it
                     // is aiming at. Withdrawing the link again (an unlink, never a write of content)
                     // keeps the names writable, so the restore keeps writing, and each plant becomes a
-                    // brief hostile pulse exactly where the check-then-write window is. It only ever
-                    // removes a name it has just confirmed holds its OWN link, so a legitimately
-                    // restored file is never deleted out from under the denominator.
+                    // brief hostile pulse exactly where the check-then-write window is. The guard
+                    // before the removal is `file_type().is_symlink()` — it checks that the name holds
+                    // *a* link, not that the link is the one this racer just planted (CPE-1870 review;
+                    // an earlier wording claimed the stronger check). That is sound here because
+                    // nothing else in the test creates links, and it is what keeps a legitimately
+                    // restored regular file from being deleted out from under the denominator.
                     if fs::symlink_metadata(at).is_ok_and(|m| m.file_type().is_symlink()) {
                         let _ = fs::remove_file(at);
                     }

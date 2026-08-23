@@ -923,6 +923,13 @@ fn carry_file_times(_src: &std::fs::Metadata, _dst: &std::fs::File) {}
 /// 500 x 256 KiB  overwrite     245 ms      389 ms  (1.45x)         315 ms  (1.29x)
 /// ```
 ///
+/// **Two of those three columns are what the committed test prints; the middle one is not** (CPE-1870
+/// review). `cpe_1870_copy_cost_by_shape` measures `fs::copy` and *whatever this crate currently does*.
+/// To reproduce the "flat 1 MiB" column you must first put the flat buffer back — change
+/// `size_hint.clamp(1, COPY_CHUNK as u64) as usize` in [`stream_bytes`] to `COPY_CHUNK` — and re-run.
+/// Said explicitly because a reader who follows the instruction as it first stood gets two columns and
+/// no way to tell which one is missing.
+///
 /// So the many-small-files restore lands within ~5% of the `fs::copy` baseline it was measured against,
 /// while keeping every handle-pinning property CPE-1846 exists for. Nothing about the large-file case
 /// changes: at or above 1 MiB the clamp returns this constant and the loop is byte-for-byte what it
@@ -1169,10 +1176,20 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 ///
 /// ```text
 /// route                                     3,000 x 19 B overwrite   what it costs
-/// this function (sized buffer)                 0.306 ms/file          —
+/// this function, sized buffer (SHIPPED)        0.377 ms/file          the baseline for the column right
+/// this function, flat 1 MiB (CPE-1846)         0.555 ms/file          — (what the ratios were vs before)
 /// sibling + CopyFileExW + rename               0.529 ms/file          DESTROYS the destination's ACL
-/// sibling + CopyFileExW + ReplaceFileW         7.476 ms/file          16x slower than doing nothing
+/// sibling + CopyFileExW + ReplaceFileW         7.476 ms/file          ~20x the shipped code (~13x the old)
 /// ```
+///
+/// **Which baseline, named, because an earlier draft of this table did not name one and got the ratio
+/// wrong** (CPE-1870 review). The two `this function` rows come from the committed
+/// `cpe_1870_copy_cost_by_shape` (1,132 ms and 1,665 ms over 3,000 files; an independent reviewer
+/// measured 1,127 ms for the shipped row on its own machine). The two `sibling` rows come from a
+/// separate throwaway harness that is not in the tree, whose reading for the in-place route in the same
+/// run was 0.306 ms/file — so the sibling ratios above are quoted against the committed figure and are
+/// if anything *understated*. The draft that said "16x slower than doing nothing" was quoting neither:
+/// 16x is 7.476 against roughly 0.47, a number from no row of this table.
 ///
 /// - **`rename` onto the target does not follow a link** (verified: the victim was untouched and the
 ///   link was replaced), and it would even close the hard-link write-through this function still has.
@@ -7974,6 +7991,19 @@ mod tests {
     /// filesystem that reports `len() == 0` for readable content (Linux `procfs`), and for any short
     /// read. The hint is asserted here at its two worst values, **1** and **0**, against a source far
     /// larger than either.
+    ///
+    /// # This test PASSES TRIVIALLY on Linux, so a green ubuntu leg is not evidence for the loop
+    ///
+    /// Stated because the opposite is easy to assume from a green board (CPE-1870 review). On
+    /// Linux/Android [`stream_bytes`] keeps [`std::io::copy`] and names its parameter `_size_hint`:
+    /// there is no buffer, so there is nothing for a bad hint to get wrong, and this test cannot fail
+    /// there for the reason it exists. **CI's `Server crates (ubuntu-latest)` leg therefore says
+    /// nothing about the sized loop.**
+    ///
+    /// The converse is worth having too, and is stronger than "not verified off Windows": **macOS takes
+    /// the sized loop**, and CI's `Server crates (macos-latest)` leg runs this test and its two siblings
+    /// green. So the *correctness* of the sizing is covered on a second platform; only its *timing* is
+    /// Windows-only.
     #[test]
     fn cpe_1870_a_size_hint_shorter_than_the_source_still_copies_every_byte() {
         let d = scratch("cpe1870_short_hint");
