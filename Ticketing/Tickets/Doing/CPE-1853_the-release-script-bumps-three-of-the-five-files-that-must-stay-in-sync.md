@@ -289,3 +289,138 @@ the resolved bytes.**
   that reads the script's text, not by running it. **No release was cut.**
 - **A BOM'd real lockfile** — the BOM-preserve path is exercised on the fixtures (all five), not on a
   real 122KB/258KB lockfile; none carries a BOM today.
+
+---
+
+## Work Log — round 2 (Reviewer APPROVED; two guards made honest)
+
+PR #998 was **APPROVED** by the independent Reviewer, which reproduced everything and then strengthened
+two of the claims beyond what I had measured. Round 2 fixes the two items it raised. Both are about a
+**guard being honest**, not about the fix — the bump itself was green everywhere it attacked it.
+
+### What the Reviewer proved that I had only argued
+
+- **The depth-collision claim is not a rationalisation.** It ran a depth-3-only variant of the walk over
+  the **real** `package-lock.json` and got **248 hits** against this locator's 2. Depth alone is off by
+  246. It also attacked the key stack with a package literally named `""` nested deeper, a
+  `packages[""]` inside `packages[""]`, a `"packages"` object under a different root key both before and
+  after the root version, keys ending in an escaped backslash, a value carrying `{`/`}`/`\"`, a one-line
+  file, and the lockfileVersion-2 shape where both the root `packages` map and the legacy `dependencies`
+  tree carry their own `""` entry. **All returned exactly 2.**
+- **Last-offset-first splicing is load-bearing, not ordering luck.** Splicing FORWARD yields
+  `"version": "0.9.9.9` — the closing quote and comma eaten, i.e. broken JSON — and the post-splice
+  self-check rejects that independently. Defence in depth, both halves doing work.
+
+### 1. The CLAUDE.md ratchet depended on formatting, silently
+
+`releaseVersionBump.test.ts` read CLAUDE.md with `/^\d+\.\s+`([^`]+)`/gm`, which only sees list items
+whose path is **backticked**. A sixth entry written `6. the sidecar manifest` is invisible to it, and the
+ratchet stays green while the script bumps five of six — the same "passes because it never saw the thing"
+shape this run has been deleting.
+
+Now it takes **every** numbered item first (`/^\d+\.[ \t]+(.*)$/gm`), then insists each one starts with a
+backticked path, failing with the offending text if not. Also reds if the section's numbered list
+disappears entirely, and if a second ordered list appears in that section — correct, because the test
+would no longer know which list is the manifest list.
+
+**Red-proof:** added `6. the sidecar manifest` to CLAUDE.md's list and re-ran → **exactly 1 failed**,
+*"release.ps1 plans exactly the files CLAUDE.md's five-files-in-sync list names"*, with
+`expected [ 'the sidecar manifest' ] to deeply equal []`. Run against the **same** file, the old regex
+saw **5 items** and would have stayed green; the new parse sees **6** and names the unreadable one.
+CLAUDE.md restored and md5-verified byte-exact (`2e983f2c3aa736e9a2fa889f9b587b40`); it does not appear
+in this branch's diff.
+
+### 2. The two-hit guard said "two hits", not "one of each"
+
+`-ExpectedCount 2` is also satisfied by two duplicate root-level `"version"` keys with **no `packages`
+object at all** — the Reviewer verified it, and so did I: with the kind check removed the script
+**exits 0** on that file and bumps it. Unreachable from any npm output (npm never emits duplicate keys,
+and a real lockfile always has `packages`), so this is completeness rather than a live defect.
+
+`Find-NpmLockVersionValues` now tags each hit with its `Kind` (`root "version"` /
+`packages[""]."version"`), and `New-ManifestVersionPlan` gained `-ExpectedKinds`, asserted against the
+sorted kind signature **both** on the hits as read and on the post-splice re-scan. An untagged hit
+renders as `(untagged)`, so asking for kinds from a locator that does not tag fails loudly rather than
+matching an empty expectation. The other four files pass no kinds and are unchanged.
+
+New message when the count is right and the shape is not:
+
+```
+release.ps1: expected the app "version" keys in <path> to be exactly [packages[""]."version" + root
+"version"], found [root "version" + root "version"]. No manifest was written -- the right NUMBER of
+version values is not the same as the right ONES, ...
+```
+
+**Red-proof:** removed `-ExpectedKinds` from the plan call and re-ran → **exactly 1 failed**, *"exits
+non-zero on TWO hits of the WRONG KIND (duplicate root keys, no packages object)"*, with
+`AssertionError: release.ps1 exit=0` — the Reviewer's finding reproduced verbatim. Restored;
+`scripts/release.ps1` md5 `3804ce4fd10d821e2dc679be0c8a4521`.
+
+The new test asserts the **kind** message fires and the **count** message does not
+(`not.toMatch(/found 2\./)`), so it cannot pass for the wrong reason.
+
+### 3. The datum that completes the `--locked` story
+
+The Reviewer added the piece both of us were missing, and I re-measured it here (npm 10.9.8) rather than
+take it on trust — **`npm install` on the same stale state exits 0 and SILENTLY REPAIRS both fields**:
+
+| command | package.json | lock before | exit | lock after |
+|---|---|---|---|---|
+| `npm ci` | `0.2.0` | `0.1.0` ×2 | 0 | `0.1.0` ×2 — **neither fails nor fixes** |
+| `npm install` | `0.2.0` | `0.1.0` ×2 | 0 | `0.2.0` ×2 — **silently repaired** |
+| `cargo build` | `0.2.0` | `0.1.0` | 0 | `0.2.0` — silently repaired |
+| `cargo build --locked` | `0.2.0` | `0.1.0` | **101** | unchanged — **loud** |
+
+So the full mechanism, which is a better explanation than either of us had on its own: **CI's `npm ci`
+neither fails nor fixes; a developer's `npm install` fixes it without telling anyone; and the repair
+surfaces only as a dirty tree that reads as noise** — and gets discarded along with real work, putting
+the file straight back where it was. That is precisely how `package-lock.json` sat three releases behind
+through green CI. It also sharpens the recommendation: the drift is not merely undetected, it is
+*repeatedly and invisibly repaired-then-discarded*, so nothing accumulates evidence of it.
+
+### 4. The line-ending finding, confirmed against the tree the script actually runs in
+
+The Reviewer went further than I did: rather than a fresh-checkout copy set, it ran the real script
+against copies of the **live main-worktree bytes** (mixed LF/CRLF). I reproduced that here. Before, and
+byte-identical after:
+
+| file | loneLF before | loneLF after | BOM | tail |
+|---|---|---|---|---|
+| `package.json` | **49** | **49** | none | `}\n` |
+| `src-tauri/tauri.conf.json` | 0 | 0 | none | `\r\n` |
+| `src-tauri/Cargo.toml` | 0 | 0 | none | `\r\n` |
+| `package-lock.json` | 0 | 0 | none | `\r\n` |
+| `src-tauri/Cargo.lock` | **10802** | **10802** | none | `]\n` |
+
+with the same numstat table (`2  2` for package-lock.json, `1  1` for the other four). The Reviewer's
+conclusion, worth quoting because it is stronger than how I put it: **in the tree where `release.ps1`
+actually runs, two of the five files are LF, so a CRLF-assuming bump would have corrupted them
+silently.** It is not a hypothetical property of a fresh checkout.
+
+### Recorded, no action (the Reviewer's three, agreed and left)
+
+- **The `Invoke-Git add` guard is a text read of the script, not a git run.** It closes the
+  bumped-but-unstaged defect at the level a text assertion can reach; a broken `Invoke-Git` itself would
+  still ship green. Exercising it needs a real repo and a real commit, which is the half of this script
+  deliberately never run under test.
+- **The suite stages fixtures into `os.tmpdir()`**, outside the project — inherited from CPE-1841's
+  harness (which copied `mojibakeGuard.test.ts`'s pattern) and against the standing keep-FS-work-inside-
+  the-project rule. Not changed here: it is a whole-file harness move, it would touch every one of the
+  59 tests, and it is orthogonal to both items this round is scoped to. Note that **my own** measurement
+  scratch dirs were all inside the worktree and are deleted.
+- **`release.ps1:236` does `$Text.Substring($sectionStart)` inside a loop over 996 headers** — O(n²) on
+  the Cargo.lock scan. Measured by the Reviewer at **152 ms** for Cargo.lock and **47 ms** for
+  package-lock. Irrelevant at this size on a script run a few times a month; would matter around 10x.
+
+### Round-2 gates (local, Windows PowerShell 5.1 — still no `pwsh` on this machine)
+
+- `npx vitest run` (full): **325 files / 4366 tests passed**, 0 failed (was 4365; +1 wrong-kind test).
+- `npm run check`: **0 errors, 0 warnings**.
+- `src/lib/releaseVersionBump.test.ts` alone: **59 passed** (was 58).
+- `releaseVersionBump` + `mojibakeGuard` together: **121 passed**.
+- Real-file numstat re-measured after the script edit, on the **live mixed-EOL** bytes: `2  2` for
+  `package-lock.json`, `1  1` for the other four; line endings, BOM absence and trailing bytes all
+  preserved exactly as staged (table above).
+- Both edited files after every edit: `loneLF=0`, `rawESC=0`, no BOM, trailing `\r\n` intact; the test
+  file still carries **zero** non-ASCII bytes.
+- `CLAUDE.md` untouched by this branch — md5-verified byte-exact after the red-proof.

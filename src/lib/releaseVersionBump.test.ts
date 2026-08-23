@@ -915,6 +915,22 @@ describe("release.ps1 fails loudly on a lockfile it cannot locate (CPE-1853)", (
     expect(r.text.lock, "package-lock.json was written despite the abort").toBe(crlf(halfLock));
   });
 
+  it("exits non-zero on TWO hits of the WRONG KIND (duplicate root keys, no packages object)", () => {
+    // Found by the independent Reviewer: a total-of-two guard is also satisfied by two duplicate
+    // root-level "version" keys with no `packages` object at all. Unreachable from npm (it never emits
+    // duplicate keys, and a real lockfile always has `packages`), so this is the guard being made to
+    // say what it means -- one of EACH kind -- rather than a live defect being closed.
+    const twoRoots = `{\n  "name": "demo",\n  "version": "${OLD}",\n  "version": "${OLD}",\n  "lockfileVersion": 3\n}\n`;
+    const r = runBump({ ...ALL_DECOYS, lock: twoRoots }, NEW);
+    expect(r.status, ctx(r)).not.toBe(0);
+    const out = flat(r.stderr + r.stdout);
+    // The COUNT is right, so the count message must not be what fires -- the kind check must.
+    expect(out, out).not.toMatch(/found 2\./);
+    expect(out, out).toMatch(/expected the app "version" keys .* to be exactly \[/s);
+    expect(out, out).toMatch(/packages\[""\]/);
+    expect(r.text.lock, "package-lock.json was written despite the abort").toBe(crlf(twoRoots));
+  });
+
   it("exits non-zero when package-lock.json has no app version at all", () => {
     const noVersion = `{\n  "name": "demo",\n  "lockfileVersion": 3,\n  "packages": {\n    "": { "name": "demo" }\n  }\n}\n`;
     const r = runBump({ ...ALL_DECOYS, lock: noVersion }, NEW);
@@ -1011,7 +1027,23 @@ describe("all five version-synchronised files stay in sync (CPE-1853)", () => {
     const claudeMd = readFileSync(join(ROOT, "CLAUDE.md"), "utf8");
     const section = /^## Versioning[^\n]*\n([\s\S]*?)\n## /m.exec(claudeMd);
     expect(section, "CLAUDE.md no longer has a '## Versioning' section for this test to read").not.toBeNull();
-    const listed = [...section![1].matchAll(/^\d+\.\s+`([^`]+)`/gm)].map((m) => m[1]);
+
+    // Take EVERY numbered list item first, then insist each one yields a backticked path. Matching
+    // `^\d+\.\s+\`([^\`]+)\`` directly would simply not see an item written without backticks -- so a
+    // sixth entry added as "6. the sidecar manifest" would be invisible and this ratchet would stay
+    // green while the script bumped four of five. A guard that passes because it never saw the thing
+    // is the failure shape this whole sequence of tickets exists to delete, so an unparseable item is
+    // a loud red instead. (It also reds on a SECOND ordered list appearing in this section, which is
+    // correct: this test would no longer know which list is the manifest list.)
+    const items = [...section![1].matchAll(/^\d+\.[ \t]+(.*)$/gm)].map((m) => m[1].trim());
+    expect(items.length, "CLAUDE.md's Versioning section has no numbered list for this test to read").toBeGreaterThan(0);
+    const unparseable = items.filter((line) => !/^`[^`]+`/.test(line));
+    expect(
+      unparseable,
+      "CLAUDE.md numbered item(s) this test cannot read: each must START with the file path in " +
+        "backticks, e.g. '6. `path/to/file` -- note'. An item it cannot parse would be silently skipped.",
+    ).toEqual([]);
+    const listed = items.map((line) => /^`([^`]+)`/.exec(line)![1]);
 
     const script = readFileSync(RELEASE_PS1, "utf8");
     const planned = [...script.matchAll(/New-ManifestVersionPlan -Path \(Join-Path \$repo "([^"]+)"\)/g)].map((m) => m[1]);

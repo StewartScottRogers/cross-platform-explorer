@@ -213,6 +213,14 @@ function Find-NpmLockVersionValues {
       $isRootVersion = $depth -eq 1 -and $name -eq 'version'
       $isLockRootPackageVersion = $depth -eq 3 -and $name -eq 'version' -and $keys[1] -eq 'packages' -and $keys[2] -eq ''
       if ($isRootVersion -or $isLockRootPackageVersion) {
+        # Each hit is TAGGED with which of the two fields it is, so the caller can insist on one of
+        # EACH rather than on a total of two. "Two hits" is also satisfied by two duplicate root-level
+        # "version" keys and no `packages` object at all -- measured: count=2, and a total-only guard
+        # passes. Unreachable from any npm output (npm never emits duplicate keys, and a real lockfile
+        # always has `packages`), so tagging is the guard saying what it means rather than a defect
+        # being fixed.
+        $kind = if ($isRootVersion) { 'root "version"' } else { 'packages[""]."version"' }
+
         # ... and the value must be a double-quoted string. `"lockfileVersion": 3` is a number and is
         # not a version of the app in any case; a non-string value here means the file is not the shape
         # this script understands, and dropping the hit makes the count fail loudly.
@@ -226,7 +234,7 @@ function Find-NpmLockVersionValues {
             if ($Text[$k] -eq '"') { break }
             $k++
           }
-          if ($k -lt $n) { $hits += , @{ Start = $valStart; Length = $k - $valStart } }
+          if ($k -lt $n) { $hits += , @{ Start = $valStart; Length = $k - $valStart; Kind = $kind } }
         }
       }
       continue
@@ -284,6 +292,16 @@ function Find-CargoLockPackageVersionValue {
   return $hits
 }
 
+# The sorted, printable signature of a hit set's `Kind` tags, for the -ExpectedKinds guard below. A
+# locator that does not tag its hits (all of them except Find-NpmLockVersionValues, which are
+# single-hit and need no kinds) yields '(untagged)' -- so asking for kinds from an untagged locator
+# fails loudly rather than matching an empty expectation.
+function Get-HitKindSignature {
+  param([Parameter(Mandatory = $true)][AllowEmptyCollection()][array]$Hits)
+
+  return ((@($Hits | ForEach-Object { if ($null -eq $_.Kind) { '(untagged)' } else { $_.Kind } }) | Sort-Object) -join ' + ')
+}
+
 # Phase 1 of the bump: read, validate and compute -- never write. Returns a plan (a hashtable of
 # Path / Old / New / Text / Encoding) that the caller hands to Write-ManifestVersionPlan once EVERY
 # manifest has produced one. Any failure throws here, with nothing on disk touched by any manifest.
@@ -302,7 +320,11 @@ function New-ManifestVersionPlan {
     # for Cargo.lock's `[[package]]` entry; TWO for package-lock.json, which carries it at the root and
     # again in `packages[""]`. Declared per file rather than inferred, so "the locator found fewer than
     # this file is supposed to have" is a loud failure instead of a half-bumped lockfile.
-    [int]$ExpectedCount = 1
+    [int]$ExpectedCount = 1,
+    # CPE-1853 (Reviewer): WHICH values, not just how many. A count of 2 on package-lock.json is also
+    # satisfied by two duplicate root-level "version" keys and no `packages` object -- measured, and a
+    # total-only guard passes it. Naming the kinds makes the guard say what it means. Empty = count only.
+    [string[]]$ExpectedKinds = @()
   )
 
   if (-not (Test-Path -LiteralPath $Path)) {
@@ -340,6 +362,14 @@ function New-ManifestVersionPlan {
       "that no longer matches must fail the release loudly, not be written back unchanged and reported as bumped."
   }
 
+  # ... and, where the caller named them, ONE OF EACH KIND rather than N of anything.
+  $wantKindSignature = ((@($ExpectedKinds) | Sort-Object) -join ' + ')
+  if ($ExpectedKinds.Count -gt 0 -and (Get-HitKindSignature -Hits $hits) -ne $wantKindSignature) {
+    throw ("release.ps1: expected the {0} in {1} to be exactly [{2}], found [{3}]. No manifest was " -f $What, $Path, $wantKindSignature, (Get-HitKindSignature -Hits $hits)) +
+      "written -- the right NUMBER of version values is not the same as the right ONES, and a lockfile " +
+      "that no longer has the shape this script understands must fail the release loudly."
+  }
+
   # Splice from the LAST hit backwards: an earlier splice would shift every later offset, and the
   # replacement is not the same length as what it replaces. Old values are read off the ORIGINAL text
   # first, in source order, so the reported `old -> new` is what the file actually said.
@@ -361,6 +391,7 @@ function New-ManifestVersionPlan {
   # hits, and any future locator change that stops agreeing with itself.
   $check = @(& $Locator $updated)
   $spliceFailed = $check.Count -ne $ExpectedCount
+  if ($ExpectedKinds.Count -gt 0 -and (Get-HitKindSignature -Hits $check) -ne $wantKindSignature) { $spliceFailed = $true }
   foreach ($c in $check) {
     if ($updated.Substring($c.Start, $c.Length) -ne $NewVersion) { $spliceFailed = $true }
   }
@@ -421,7 +452,7 @@ $plans = @(
   New-ManifestVersionPlan -Path (Join-Path $repo "package.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
   New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/tauri.conf.json") -NewVersion $Version -Locator 'Find-JsonTopLevelVersionValue' -What 'top-level "version" key'
   New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/Cargo.toml") -NewVersion $Version -Locator 'Find-TomlPackageVersionValue' -What 'version key inside [package]'
-  New-ManifestVersionPlan -Path (Join-Path $repo "package-lock.json") -NewVersion $Version -Locator 'Find-NpmLockVersionValues' -What 'app "version" key (the root object''s and packages[""]''s)' -ExpectedCount 2
+  New-ManifestVersionPlan -Path (Join-Path $repo "package-lock.json") -NewVersion $Version -Locator 'Find-NpmLockVersionValues' -What 'app "version" keys' -ExpectedCount 2 -ExpectedKinds 'root "version"', 'packages[""]."version"'
   New-ManifestVersionPlan -Path (Join-Path $repo "src-tauri/Cargo.lock") -NewVersion $Version -Locator 'Find-CargoLockPackageVersionValue' -What 'version key in the [[package]] entry named cross-platform-explorer'
 )
 
