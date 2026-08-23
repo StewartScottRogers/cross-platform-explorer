@@ -1097,10 +1097,11 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// caller's own shape.
 ///
 /// Closing it means getting `CopyFileExW`'s throughput without its "resolve the destination by path"
-/// semantics — a real piece of work with its own trade-offs, so it is a follow-up rather than a tweak
+/// semantics — a real piece of work with its own trade-offs, so it is **CPE-1870** rather than a tweak
 /// here. The security property this function exists for is not negotiable against it: the baseline it
 /// replaced was measured putting **63** checkpoint payloads on files outside the reverted tree across
-/// 10 rounds, with the revert reporting complete success.
+/// 10 rounds, with the revert reporting complete success. Speed is the thing to buy back; the
+/// path-resolving write is not.
 ///
 /// # Creation mode, and why it is deliberately *not* narrowed
 ///
@@ -1140,13 +1141,28 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a
 /// restore is *believed*, so a silently skipped entry is the CPE-1803/1804/1805/1816 defect again.
 pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
-    let mut r = std::fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
+    // only production caller is `revert_engine::apply_write`, whose refusal text is rendered in the
+    // revert panel — and `src` there is a path inside the app's private checkpoint store. CPE-1845
+    // removed exactly that leak from this call site's previous `fs::copy` error and replaced it with the
+    // blob's already-hex-validated hash; a source path smuggled back in through this string would undo
+    // it. The caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below:
+    // that is the user's own tree, which is the half they need to see.
+    let mut r = std::fs::File::open(src).map_err(|e| format!("the source could not be opened: {e}"))?;
     // Read from the OPEN HANDLE, not from a path stat that a swap could have invalidated — the same
     // authority `copy_file_into_claimed_slot` uses, and the reason a FIFO or directory substituted at
     // `src` after this open still cannot make this function write nonsense.
-    let meta = r.metadata().map_err(|e| format!("{}: {e}", src.display()))?;
+    let meta = r.metadata().map_err(|e| format!("the source could not be described: {e}"))?;
     if !meta.is_file() {
-        return Err(not_a_regular_file(src));
+        // Deliberately NOT `not_a_regular_file`, which names the source path — see the comment above.
+        // That helper is shared with `copy_file_into_claimed_slot`, whose text does not reach a dialog,
+        // so it is left exactly as it is rather than weakened for every caller to suit this one.
+        return Err(
+            "the source is not a regular file, so it was not copied — only ordinary files are copied \
+             by value (a device, socket, FIFO or directory would either block the copy or fill the \
+             destination volume)"
+                .to_string(),
+        );
     }
 
     let (mut w, created) = crate::batch_media::open_no_follow(dst)

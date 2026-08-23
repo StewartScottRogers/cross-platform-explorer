@@ -338,4 +338,160 @@ describe("CheckpointDialog (CPE-1125)", () => {
       expect(screen.queryAllByTestId(/^cpf-/).length).toBe(0);
     });
   });
+
+  /**
+   * CPE-1845 — the docs promised the user is told which cleanups did not happen AND WHY; no screen
+   * rendered a single reason. These assert the reason and the next step now reach the DOM, and that the
+   * two hold-back kinds do not get the same advice.
+   *
+   * **Limit, stated rather than papered over:** jsdom applies no component CSS under this project's
+   * vitest config, so nothing here can check layout, ordering on screen, colour, or whether the panel is
+   * visible. Text presence/absence only.
+   */
+  describe("held-back reasons on screen (CPE-1845)", () => {
+    const HELD = {
+      applied: 1,
+      skipped: [
+        { path: "added-1.txt", ok: false, error: "", outcome: "held_back_by_checkpoint" },
+        { path: "added-2.txt", ok: false, error: "", outcome: "held_back_by_checkpoint" },
+      ],
+      held_back: {
+        outcome: "held_back_by_checkpoint",
+        count: 2,
+        reason: "THE-ONE-REASON this checkpoint records no files at all",
+        next_step: "THE-NEXT-STEP delete these files yourself",
+        retryable: false,
+      },
+    };
+
+    async function revertWith(outcome: unknown) {
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_revert") return outcome;
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        return null;
+      });
+      await fireEvent.click(screen.getByTestId("revert-btn-m-2"));
+      await screen.findByTestId("confirm-revert");
+      await fireEvent.click(screen.getByTestId("confirm-yes-btn"));
+      return await screen.findByTestId("outcome-panel");
+    }
+
+    it("renders the one shared reason and the next step, plus the held-back path names", async () => {
+      const panel = await revertWith(HELD);
+      expect(panel.textContent).toContain("THE-ONE-REASON");
+      expect(panel.textContent).toContain("THE-NEXT-STEP");
+      expect(panel.textContent).toContain("added-1.txt");
+      expect(panel.textContent).toContain("added-2.txt");
+      // Held back is counted as held back, not lumped in with failures.
+      expect(panel.textContent).toContain("2 deletions held back");
+      expect(panel.textContent).not.toContain("failed");
+    });
+
+    it("prints the reason ONCE for the whole group, not once per path", async () => {
+      const many = {
+        ...HELD,
+        skipped: Array.from({ length: 50 }, (_, i) => ({
+          path: `added-${i}.txt`,
+          ok: false,
+          error: "",
+          outcome: "held_back_by_checkpoint",
+        })),
+        held_back: { ...HELD.held_back, count: 50 },
+      };
+      const panel = await revertWith(many);
+      const copies = (panel.textContent ?? "").split("THE-ONE-REASON").length - 1;
+      expect(copies).toBe(1);
+      expect(panel.textContent).toContain("and 42 more"); // 50 - MAX_LISTED(8)
+    });
+
+    it("does not tell the user to re-run when the backend says re-running cannot help", async () => {
+      const panel = await revertWith(HELD);
+      // The advice is the backend's, whatever it is — the screen must not compose its own "re-run".
+      expect(panel.textContent).toContain("THE-NEXT-STEP");
+      expect(panel.textContent?.toLowerCase()).not.toContain("re-run after fixing");
+    });
+
+    it("escapes the bidi/format characters a failure reason carries from a filename", async () => {
+      // `apply_delete`/`apply_write` format their reason as `"{target}: {os error}"`, so a
+      // user-controlled FILENAME rides inside `f.error`. It was rendered raw while `f.path` beside it
+      // went through displaySafePath (CPE-1845 UAT). U+202E flips the text that follows it.
+      const panel = await revertWith({
+        applied: 0,
+        skipped: [
+          {
+            path: "C:/w/invoice‮gnp.exe",
+            ok: false,
+            error: "C:/w/invoice‮gnp.exe: Access is denied. (os error 5)",
+            outcome: "failed",
+          },
+        ],
+        held_back: null,
+      });
+      const text = panel.textContent ?? "";
+      expect(text).not.toContain("‮");
+      // Escaped to its bracketed tag, the same treatment the adjacent path already got.
+      expect(text).toContain("[RLO]");
+    });
+
+    it("names the checkpoint entry a collided path belongs to, per path", async () => {
+      const panel = await revertWith({
+        applied: 0,
+        skipped: [
+          {
+            path: "A.txt",
+            ok: false,
+            error: 'same file as checkpoint entry "a.txt"',
+            outcome: "held_back_by_checkpoint",
+          },
+        ],
+        held_back: {
+          outcome: "held_back_by_checkpoint",
+          count: 1,
+          reason: "THE-ONE-REASON these paths resolve to the same files",
+          next_step: "THE-NEXT-STEP nothing needs doing",
+          retryable: false,
+        },
+      });
+      expect(panel.textContent).toContain('same file as checkpoint entry "a.txt"');
+    });
+
+    it("keeps the leading verb on the note at the top of the dialog, which is detached from the panel", async () => {
+      await revertWith(HELD);
+      // `note` renders in the shared slot with "Checkpoint … captured", so a bare "Applied 1 change"
+      // does not say what was applied.
+      expect(await screen.findByText(/^Revert — applied 1 change/)).toBeTruthy();
+    });
+
+    it("REGRESSION: a healthy checkpoint renders one line and no hold-back box at all", async () => {
+      const panel = await revertWith({ applied: 2, skipped: [], held_back: null });
+      expect(panel.textContent?.trim()).toBe("Reverted — applied 2 changes.");
+      expect(screen.queryByTestId("outcome-held-back")).toBeNull();
+      expect(screen.queryByTestId("outcome-held-paths")).toBeNull();
+      expect(screen.queryByTestId("outcome-failures")).toBeNull();
+    });
+
+    it("shows a genuine failure separately from a hold-back, in the same result", async () => {
+      const panel = await revertWith({
+        applied: 0,
+        skipped: [
+          { path: "locked.txt", ok: false, error: "FAILURE-DETAIL the file is locked", outcome: "failed" },
+          { path: "added-1.txt", ok: false, error: "", outcome: "skipped_by_plan" },
+        ],
+        held_back: {
+          outcome: "skipped_by_plan",
+          count: 1,
+          reason: "RETRYABLE-REASON one entry could not be restored this time",
+          next_step: "RETRYABLE-STEP run the revert again",
+          retryable: true,
+        },
+      });
+      expect(panel.textContent).toContain("1 failed");
+      expect(panel.textContent).toContain("1 deletion held back");
+      expect(panel.textContent).toContain("FAILURE-DETAIL");
+      expect(panel.textContent).toContain("RETRYABLE-REASON");
+      expect(panel.textContent).toContain("RETRYABLE-STEP");
+    });
+  });
 });

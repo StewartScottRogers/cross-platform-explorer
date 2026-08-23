@@ -302,11 +302,11 @@ entire bill. **I reused that benchmark's conclusion for a shape it does not cove
 `copy_file_onto_no_follow`'s doc next to the mechanism, with the numbers.
 
 The security property is not traded against it: the baseline being replaced was measured putting 63
-checkpoint payloads outside the reverted tree. A follow-up owns the speed (getting `CopyFileExW`
+checkpoint payloads outside the reverted tree. **CPE-1870** owns the speed (getting `CopyFileExW`
 throughput without its resolve-the-destination-by-path semantics is real work, not a tweak). **Deliberately
 NOT written into `src/docs/16-checkpoints.md`**: a user-facing "reverts are slow now" sentence would be
-stale the moment that follow-up lands, and the docs already carry the two behaviour changes that are
-durable (link refusal, Mark-of-the-Web).
+stale the moment CPE-1870 lands, and the docs already carry the two behaviour changes that are durable
+(link refusal, Mark-of-the-Web).
 
 ### The one sentence that was wrong: the ADS door is closed, not locked
 
@@ -360,4 +360,65 @@ asserted byte-pristine immediately before the call as a hard panic. That is the 
 was not committed because it runs ~35 s, needs the symlink privilege, and wins on baseline only ~50% of
 runs — a flaky pin, which is why the deterministic tests carry the property instead. Recorded as an
 acknowledged gap: a committed harness built the Auditor's way (assert-pristine-then-call, racer never
-writes) would be worth having, and belongs with the follow-up rather than in this merge.
+writes) would be worth having, and belongs with CPE-1870 rather than in this merge.
+
+### The records push found a CONFLICT, and resolving it was a real decision — not a textual merge
+
+Pushing the two records produced **no CI run at all** on `5c46285c`: the check-run `total_count` stayed
+**0** for eight minutes. Not a queue backlog — the PR had gone **CONFLICTING**, and GitHub cannot build
+the merge commit a `pull_request` workflow runs against, so it schedules nothing. *A green board and an
+empty board look identical to a poller that only counts pending jobs.* The loop now reads `total_count`
+too and treats `total=0` as "not started", never as "all complete".
+
+**CPE-1845 had merged underneath, and it touched all three of my files** (`revert_engine.rs`,
+`snapshot_capture.rs`, `src/docs/16-checkpoints.md`). `snapshot_capture` auto-merged; the other two
+conflicted, and both conflicts were substantive.
+
+**Conflict 1 — `apply_write`, the more important of the two.** CPE-1845 replaced the flat `String` refusal
+with a `Refused` carrying **transient** ("fix the cause and re-running works") versus **permanent**
+("nothing about re-running changes this"), and rewrote this exact line's message to name the blob by its
+**hash** rather than by its absolute path inside the app's private store — a dialog must not leak the
+store's layout. CPE-1846 replaced the same line with `copy_file_onto_no_follow`. So the merge had to answer
+a question neither ticket asked:
+
+- **A link or a directory at the destination is PERMANENT.** A planted link does not stop being a link
+  because the user runs the revert again. Classifying it transient would print *"This one is temporary:
+  close whatever is holding those files … and run the revert again"* over a refusal that recurs forever —
+  CPE-1845's own defect, arriving through a door CPE-1845 could not have known about.
+- **Decided by asking the filesystem, never by parsing our own message.** A string match on our wording
+  breaks silently the first time someone improves a sentence. Re-resolving the destination by path is safe
+  *here and only here*: the write has already happened or already been refused, so it chooses **wording**
+  and can no longer choose where a byte goes — the very property that made the same call unsafe before the
+  copy.
+- **The store-path leak had to be closed from `copy_file_onto_no_follow`'s side too.** Its source-side
+  messages interpolated `src.display()`, which for the shipping caller *is* a path inside the checkpoint
+  store, so CPE-1845's redaction would have been undone through my string. Those two messages (and the
+  non-regular-file one) no longer name the source; the destination still is named, because that is the
+  user's own tree and the half they need. `not_a_regular_file` is deliberately left alone — it is shared
+  with `copy_file_into_claimed_slot`, whose text does not reach a dialog, and weakening a shared helper to
+  suit one caller is how the next caller loses its diagnostics.
+
+Pinned by a new test, `cpe_1846_a_link_at_the_destination_is_reported_permanent_not_as_run_it_again`,
+which builds the plan by hand as `Overwrite` on purpose: a scan run *after* the link is planted would not
+see `a.txt` as a file, the plan would say `Create`, and the Create-premise rule would fire first — a
+different (also permanent) rule, so the test would pass while covering nothing.
+
+**Conflict 2 — `src/docs/16-checkpoints.md`.** CPE-1845 rewrote the held-back list into permanent versus
+temporary cases and added the case-alias bullet. Took its version whole and re-added the link bullet *in
+its vocabulary* — held back and named, permanent **until you act**, remove or rename the link and it
+restores — positioned among the other permanent cases so CPE-1845's closing "if the same revert also hit
+one of the permanent cases above" still refers to something. The Mark-of-the-Web paragraph carried over
+unchanged.
+
+**Red-proofs for the merge resolution** (each one line, observed red, then reverted):
+
+| What | Line broken | Observed |
+|---|---|---|
+| permanent classification | `if name_is_taken_by_a_link_or_dir {` → `if false && …` | `HeldBack { outcome: SkippedByPlan, … next_step: "This one is temporary: close whatever is holding those files … and run the revert again" }` over a planted link — the wrong advice, verbatim |
+| store-path redaction | `format!("the source could not be opened: {e}")` → `format!("{}: {e}", src.display())` | **CPE-1845's own guard test** went red, not mine: `a reason shown to the user must not expose the private blob-store layout: … \blobs\11111111: The system cannot find the file specified.` The redaction was required, not optional |
+
+**Post-merge gates.** `crates/server`: clippy `--all-targets -- -D warnings` → **0**; `cargo test` →
+**2356 lib** (4 ignored) + 21 + 22 + 2 + 1 + 1 + 45 + 16 + 32 + 0, **0 failed** — 2348 + CPE-1845's 7 +
+this merge's 1 new test. `src-tauri` both modes: clippy **0** / **0**; tests **214** / **269**, unchanged.
+The frontend was **not** run locally: this worktree has no `node_modules`, and my only frontend change is
+prose inside an existing docs page (no frontmatter, no slug), so CI's `Frontend` job is its verification.

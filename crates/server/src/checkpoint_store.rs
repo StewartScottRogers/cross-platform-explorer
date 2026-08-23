@@ -29,7 +29,9 @@
 //!
 //! Std + serde only — no new dependencies, not feature-gated (like the engines it drives). The revert
 //! path preserves the engine's skip-on-error guarantee: a single unreadable/locked file is reported in
-//! [`RevertOutcome::skipped`], not fatal to the rest of the revert.
+//! [`RevertOutcome::skipped`], not fatal to the rest of the revert. Since CPE-1845 each such entry also
+//! carries an [`OpOutcome`] saying whether it FAILED or was deliberately HELD BACK (and, if held back,
+//! whether re-running can help), with the shared explanation stated once in [`RevertOutcome::held_back`].
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -39,7 +41,7 @@ use std::time::SystemTime;
 use crate::audit_journal;
 use crate::ctx::ServerCtx;
 use crate::fsutil::to_epoch_ms;
-use crate::model::OpResult;
+use crate::model::{OpOutcome, OpResult};
 use crate::restore_plan::{self, plan_restore, summarize_plan, RestoreAction};
 use crate::revert_attribution;
 use crate::revert_engine::{execute_restore, safe_target, RestoreReport};
@@ -144,28 +146,71 @@ pub struct RevertPreview {
 }
 
 /// Outcome of a revert — an `OpResult`-style summary: how many actions applied, plus the ones that were
-/// skipped (each carried as a failed [`OpResult`] with the skip reason), preserving the engine's
-/// skip-on-error guarantee.
+/// not, preserving the engine's skip-on-error guarantee.
+///
+/// **CPE-1845.** Two things live in `skipped` that are not the same thing: an action that was *attempted
+/// and failed*, and a delete the engine *deliberately declined to perform* because it could not trust the
+/// checkpoint. Every entry now carries [`cpe_server::model::OpOutcome`](crate::model::OpOutcome) saying
+/// which, so a consumer branches on a field rather than on the wording of `error`; and the explanation
+/// shared by a whole group of hold-backs is stated **once**, in [`RevertOutcome::held_back`], instead of
+/// being copied onto every path.
 #[derive(Debug, serde::Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct RevertOutcome {
     /// Actions applied successfully.
     pub applied: u32,
-    /// Actions skipped (missing blob, locked/permission-denied, path-safety refusal): `ok:false` +
-    /// `error` = the reason. Never fatal to the rest of the revert.
+    /// Actions that did not apply — genuine failures **and** deliberate hold-backs, in that order.
+    /// Read each entry's `outcome` to tell them apart; `error` carries only what is specific to that
+    /// path (empty for most hold-backs — their shared explanation is in
+    /// [`held_back`](RevertOutcome::held_back)). Never fatal to the rest of the revert.
     pub skipped: Vec<OpResult>,
+    /// Present when the revert deliberately held its deletions back: the single explanation, the count,
+    /// and a next step honest about whether re-running can help. `None` when nothing was held back.
+    pub held_back: Option<HeldBackSummary>,
+}
+
+/// The one statement behind a whole group of held-back deletes (CPE-1845), so 500 hold-backs cost one
+/// paragraph rather than 500 copies of it (~185 KB, measured in CPE-1847).
+#[derive(Debug, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct HeldBackSummary {
+    /// Which hold-back this is — `skipped_by_plan` (retryable) or `held_back_by_checkpoint` (not
+    /// retryable on this platform). The same discriminant every entry in `skipped` carries.
+    pub outcome: OpOutcome,
+    /// How many deletes this covers. Pair it with `reason` for the "one statement plus a count" the UI
+    /// renders instead of N identical rows.
+    pub count: u32,
+    /// The shared explanation, stated once.
+    pub reason: String,
+    /// What the user can actually do next. For `held_back_by_checkpoint` this states that re-running
+    /// cannot help and gives the alternative; it never says "re-run".
+    pub next_step: String,
+    /// Convenience mirror of [`OpOutcome::retryable`] so a template can branch without re-deriving it.
+    pub retryable: bool,
 }
 
 impl RevertOutcome {
     fn from_report(report: RestoreReport) -> Self {
-        Self {
-            applied: report.applied as u32,
-            skipped: report
-                .skipped
-                .into_iter()
-                .map(|(path, error)| OpResult { path, ok: false, error })
-                .collect(),
-        }
+        // Genuine failures first, then the hold-backs, so `skipped.len()` keeps meaning "actions that
+        // did not happen" for every existing caller while the *kind* of each is now readable.
+        let mut skipped: Vec<OpResult> = report
+            .skipped
+            .into_iter()
+            .map(|(path, error)| OpResult::err(std::path::Path::new(&path), error))
+            .collect();
+        let held_back = report.held_back.map(|group| {
+            for (path, detail) in &group.paths {
+                skipped.push(OpResult::held_back(path, group.outcome, detail.clone()));
+            }
+            HeldBackSummary {
+                outcome: group.outcome.as_outcome(),
+                count: group.paths.len() as u32,
+                reason: group.reason,
+                next_step: group.next_step,
+                retryable: group.outcome.retryable(),
+            }
+        });
+        Self { applied: report.applied as u32, skipped, held_back }
     }
 }
 
@@ -1335,20 +1380,221 @@ mod tests {
                 expected_held,
                 "every delete must be held back and named, never silently dropped: {outcome:?}"
             );
+            // CPE-1845 made this structural. Was: every entry had to *start with* the prose
+            // `"not deleted:"`, and the count had to be findable inside that same prose — repeated
+            // verbatim on all five. Now the state is a typed field on each entry and the shared
+            // explanation is a single summary carrying the count as a number.
             for op in &outcome.skipped {
-                assert!(
-                    op.error.starts_with("not deleted:"),
-                    "a held-back delete must use the one hold-back channel the UI can match on \
-                     (CPE-1845 owns making that structural): {op:?}"
+                assert_eq!(
+                    op.outcome,
+                    OpOutcome::HeldBackByCheckpoint,
+                    "a held-back delete must be flagged structurally, and an empty checkpoint is the \
+                     NOT-retryable kind — its bytes read the same on every re-run: {op:?}"
                 );
-                assert!(
-                    op.error.contains(&format!("{expected_held} file")),
-                    "the reason must carry the count of what would have been deleted: {op:?}"
-                );
+                assert!(!op.ok, "a hold-back is not an applied action: {op:?}");
             }
+            let summary = outcome
+                .held_back
+                .as_ref()
+                .expect("a revert that held deletes back must carry the one-statement summary");
+            assert_eq!(summary.outcome, OpOutcome::HeldBackByCheckpoint);
+            assert!(!summary.retryable, "an empty checkpoint cannot be fixed by re-running: {summary:?}");
+            assert_eq!(
+                summary.count as usize, expected_held,
+                "the summary must carry the count of what would have been deleted: {summary:?}"
+            );
+            assert!(
+                summary.reason.contains(&format!("{expected_held} file")),
+                "the one statement must still say how many: {summary:?}"
+            );
+            assert!(
+                !summary.next_step.is_empty() && !summary.next_step.contains("run the revert again"),
+                "a non-retryable hold-back must offer a real next step and must NOT say re-run: \
+                 {summary:?}"
+            );
 
             let _ = fs::remove_dir_all(&root);
             let _ = fs::remove_dir_all(&app);
+        }
+    }
+
+    /// **CPE-1845 — the acceptance test: a consumer separates all four states with every message
+    /// string erased.**
+    ///
+    /// Before this ticket the only way to tell a deliberate hold-back from a genuine failure was
+    /// `error.starts_with("not deleted:")`, and the two *kinds* of hold-back — one retryable, one
+    /// permanently unfixable on this platform — were the same string channel with different prose. So
+    /// this test blanks **every** human-readable field on the wire shape (`error`, `reason`,
+    /// `next_step`) and then asks a consumer to classify. If the discriminant is real, erasing the prose
+    /// costs nothing; if any two states share one discriminant, the buckets collapse and this goes red.
+    ///
+    /// The four states come from three real runs of the production [`execute_restore`], mapped to the
+    /// wire by the production [`RevertOutcome::from_report`] — nothing here is hand-built.
+    #[test]
+    fn cpe_1845_a_consumer_tells_the_four_states_apart_with_every_message_erased() {
+        use crate::restore_plan::{FileState, RestoreOp, Snapshot};
+
+        let store = scratch("1845-store");
+        let blobs = store.join("blobs");
+        fs::create_dir_all(&blobs).unwrap();
+        // One real blob (so a write can succeed) and one hash with NO blob (so a write must fail).
+        let present = "1845aaaa";
+        let missing = "1845bbbb";
+        fs::write(blobs.join(present), b"restored bytes").unwrap();
+        assert!(
+            !blobs.join(missing).exists(),
+            "fixture is inert: the missing-blob hash must NOT exist, or the failure leg never fails \
+             and this test certifies nothing"
+        );
+
+        // --- run 1: everything works → Applied, and nothing else. ---
+        let root_ok = scratch("1845-ok");
+        let mut cp_ok = Snapshot::new();
+        cp_ok.insert("restored.txt".to_string(), FileState::new(present, 14));
+        let applied_run = RevertOutcome::from_report(execute_restore(
+            &[RestoreAction { path: "restored.txt".to_string(), op: RestoreOp::Create }],
+            &root_ok.to_string_lossy(),
+            &store.to_string_lossy(),
+            &cp_ok,
+        ));
+        assert_eq!(applied_run.applied, 1, "fixture is inert: run 1 applied nothing: {applied_run:?}");
+
+        // --- run 2: a write whose blob is gone, WITH a delete in the plan → Failed (the write) and
+        // SkippedByPlan (the delete, held back because the write's failure makes its premise unproven).
+        let root_mixed = scratch("1845-mixed");
+        fs::write(root_mixed.join("added.txt"), b"user file").unwrap();
+        let mut cp_mixed = Snapshot::new();
+        cp_mixed.insert("gone.txt".to_string(), FileState::new(missing, 9));
+        let mixed_run = RevertOutcome::from_report(execute_restore(
+            &[
+                RestoreAction { path: "gone.txt".to_string(), op: RestoreOp::Create },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root_mixed.to_string_lossy(),
+            &store.to_string_lossy(),
+            &cp_mixed,
+        ));
+        assert!(
+            root_mixed.join("added.txt").exists(),
+            "fixture is inert: run 2's delete actually ran, so nothing was held back: {mixed_run:?}"
+        );
+
+        // --- run 3: an empty checkpoint with a delete planned → HeldBackByCheckpoint (permanent). ---
+        let root_empty = scratch("1845-empty");
+        fs::write(root_empty.join("added.txt"), b"user file").unwrap();
+        let held_run = RevertOutcome::from_report(execute_restore(
+            &[RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete }],
+            &root_empty.to_string_lossy(),
+            &store.to_string_lossy(),
+            &Snapshot::new(),
+        ));
+        assert!(
+            root_empty.join("added.txt").exists(),
+            "fixture is inert: run 3's delete actually ran: {held_run:?}"
+        );
+
+        // ---- ERASE EVERY MESSAGE. From here on there is no prose left to match. ----
+        let mut runs = vec![applied_run, mixed_run, held_run];
+        for run in &mut runs {
+            for op in &mut run.skipped {
+                op.error = String::new();
+            }
+            if let Some(h) = run.held_back.as_mut() {
+                h.reason = String::new();
+                h.next_step = String::new();
+            }
+        }
+
+        /// A consumer of the wire shape, written the way a UI must be: it reads `outcome` and nothing
+        /// else. Returns every state present in this outcome.
+        fn states_seen(o: &RevertOutcome) -> std::collections::BTreeSet<String> {
+            let mut seen = std::collections::BTreeSet::new();
+            if o.applied > 0 {
+                seen.insert(format!("{:?}", OpOutcome::Applied));
+            }
+            for op in &o.skipped {
+                seen.insert(format!("{:?}", op.outcome));
+            }
+            seen
+        }
+
+        let applied_states = states_seen(&runs[0]);
+        let mixed_states = states_seen(&runs[1]);
+        let held_states = states_seen(&runs[2]);
+
+        assert_eq!(
+            applied_states,
+            ["Applied"].map(String::from).into_iter().collect(),
+            "run 1 must read as applied-only with no prose: {:?}",
+            runs[0]
+        );
+        assert_eq!(
+            mixed_states,
+            ["Failed", "SkippedByPlan"].map(String::from).into_iter().collect(),
+            "run 2 must separate the genuine failure from the retryable hold-back with no prose: {:?}",
+            runs[1]
+        );
+        assert_eq!(
+            held_states,
+            ["HeldBackByCheckpoint"].map(String::from).into_iter().collect(),
+            "run 3 must read as the NON-retryable hold-back with no prose: {:?}",
+            runs[2]
+        );
+
+        // All four states seen, all four distinct — this is the claim the ticket makes.
+        let all: std::collections::BTreeSet<String> =
+            applied_states.union(&mixed_states).cloned().collect::<std::collections::BTreeSet<_>>()
+                .union(&held_states).cloned().collect();
+        assert_eq!(
+            all.len(),
+            4,
+            "the four states must be four discriminants, not two states sharing one: {all:?}"
+        );
+
+        // And the retryable/non-retryable split — the second half of the ticket — is also structural,
+        // and is the one the "re-run after fixing" wording depends on.
+        assert!(
+            runs[1].held_back.as_ref().is_some_and(|h| h.retryable),
+            "a locked/missing-blob hold-back IS retryable: {:?}",
+            runs[1]
+        );
+        assert!(
+            runs[2].held_back.as_ref().is_some_and(|h| !h.retryable),
+            "an empty-checkpoint hold-back is NOT retryable on this platform: {:?}",
+            runs[2]
+        );
+
+        // Finally, the volume claim: one statement for the whole group, never one copy per path.
+        let big_root = scratch("1845-volume");
+        let mut plan = Vec::new();
+        for i in 0..200 {
+            let name = format!("added-{i}.txt");
+            fs::write(big_root.join(&name), b"x").unwrap();
+            plan.push(RestoreAction { path: name, op: RestoreOp::Delete });
+        }
+        let big = RevertOutcome::from_report(execute_restore(
+            &plan,
+            &big_root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &Snapshot::new(),
+        ));
+        assert_eq!(big.skipped.len(), 200, "all 200 deletes must be accounted for: {:?}", big.held_back);
+        let prose: usize = big.skipped.iter().map(|o| o.error.len()).sum();
+        assert_eq!(
+            prose, 0,
+            "the shared explanation must NOT be copied onto each path — that is the ~185 KB CPE-1847 \
+             measured; {prose} bytes of per-path prose found"
+        );
+        let summary = big.held_back.as_ref().expect("200 hold-backs must carry one summary");
+        assert_eq!(summary.count, 200, "one statement plus a count: {summary:?}");
+        assert!(
+            summary.reason.len() < 1024,
+            "the one statement must be one statement: {} bytes",
+            summary.reason.len()
+        );
+
+        for d in [store, root_ok, root_mixed, root_empty, big_root] {
+            let _ = fs::remove_dir_all(&d);
         }
     }
 
@@ -1854,7 +2100,7 @@ mod tests {
     ///
     /// ```text
     /// checkpoint_create        -> Ok, a checkpoint recorded; blobs/<hash> still absent
-    /// checkpoint_revert(it)    -> Ok(applied: 0, skipped: [a.txt: blobs/<hash>: cannot find the file])
+    /// checkpoint_revert(it)    -> Ok(applied: 0, skipped: [a.txt: stored copy (blob <hash>) could not be read])
     /// a.txt still reads "damaged"
     /// ```
     #[test]

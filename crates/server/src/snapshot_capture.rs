@@ -178,7 +178,7 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
     // ```text
     // blobs/<hash> deleted, index.json's entry for <hash> left in place
     //   checkpoint_create        -> Ok, "second" checkpoint recorded, blob file still absent
-    //   checkpoint_revert(second)-> Ok(applied: 0, skipped: [a.txt: blobs/<hash>: cannot find the file])
+    //   checkpoint_revert(second)-> Ok(applied: 0, skipped: [a.txt: stored copy (blob <hash>) could not be read])
     //   a.txt still reads "damaged"
     // ```
     //
@@ -573,15 +573,14 @@ pub(crate) fn blob_source(blobs_dir: &Path, hash: &str) -> Result<PathBuf, Strin
     // or half-deleted store, and reporting that as "does not resolve inside the blob store" reads as
     // tampering and sends the user hunting for an attack that isn't there. `confined_to` fails closed on
     // an unresolvable root (correctly), so without this the two causes are indistinguishable.
+    // The message names no path: since CPE-1845 these reasons are rendered in the revert panel, and the
+    // checkpoint store's on-disk layout is the app's private business, not something to put in a dialog.
     if let Err(e) = std::fs::metadata(blobs_dir) {
-        return Err(format!("the blob store {} could not be opened: {e}", blobs_dir.display()));
+        return Err(format!("this checkpoint's blob store could not be opened: {e}"));
     }
     let blob = blobs_dir.join(hash);
     if !crate::fsutil::confined_to(&blob, blobs_dir) {
-        return Err(format!(
-            "blob {hash:?} does not resolve inside the blob store {}",
-            blobs_dir.display()
-        ));
+        return Err(format!("blob {hash:?} does not resolve inside this checkpoint's blob store"));
     }
     Ok(blob)
 }

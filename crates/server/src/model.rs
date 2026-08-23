@@ -62,15 +62,114 @@ pub struct ListDirResult {
     pub unreadable: usize,
 }
 
+/// **Why** a bulk-operation entry ended up where it did — the structural discriminant a consumer reads
+/// instead of string-matching [`OpResult::error`] (CPE-1845).
+///
+/// Before this existed, `OpResult` said only `ok: bool`, so a **deliberate, correct, fail-safe
+/// hold-back** and a **genuine failure** arrived through the same field carrying the same shape, and the
+/// only way to tell them apart was to match the prose prefix `"not deleted:"`. Measured on a staged
+/// checkpoint (CPE-1823 round-4 review): `applied=1 skipped=201`, of which **200 were deliberate
+/// hold-backs** and one was a real failure. A UI reading `ok` alone reports 201 problems.
+///
+/// The four states are deliberately the ones a *user-facing decision* turns on:
+///
+/// | variant | what happened | what the user can do |
+/// |---|---|---|
+/// | [`Applied`](OpOutcome::Applied) | the operation was performed | nothing |
+/// | [`Failed`](OpOutcome::Failed) | it was attempted and it failed | fix the named cause, try again |
+/// | [`SkippedByPlan`](OpOutcome::SkippedByPlan) | not attempted — something else in the same run failed, so this one's premise is unproven | fix that, **re-run**: this one then applies |
+/// | [`HeldBackByCheckpoint`](OpOutcome::HeldBackByCheckpoint) | not attempted — the *input* cannot be trusted on this platform | **re-running here can never help**; see [`OpOutcome::retryable`] |
+///
+/// The last two are both "held back", and collapsing them is exactly the bug this type exists to stop:
+/// the recorded UI wording *"held back, re-run after fixing"* is right for `SkippedByPlan` and **wrong**
+/// for `HeldBackByCheckpoint`, where a Linux capture holding one colon-named file will never
+/// delete-clean on Windows no matter how many times it is re-run.
+///
+/// Serialised `snake_case` so the TS side reads `"applied" | "failed" | "skipped_by_plan" |
+/// "held_back_by_checkpoint"` — a discriminated union, not a prefix.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum OpOutcome {
+    /// The operation was performed.
+    Applied,
+    /// The operation was attempted and failed (locked file, permission denied, source gone, a
+    /// path-safety refusal of *this* item). Retrying after fixing the named cause is meaningful.
+    Failed,
+    /// **Deliberately not attempted, retryable.** Something else in the same run failed, so this item's
+    /// premise is unproven — fixing that and re-running performs it.
+    SkippedByPlan,
+    /// **Deliberately not attempted, NOT retryable on this platform.** The checkpoint/manifest driving
+    /// the run cannot be read correctly here, and nothing about re-running on this machine changes that.
+    /// A consumer must not tell the user to "re-run"; see the accompanying next step.
+    HeldBackByCheckpoint,
+}
+
+impl OpOutcome {
+    /// Of the operations that did **not** happen: can running this again, on this machine, make it
+    /// happen? [`HeldBackByCheckpoint`](OpOutcome::HeldBackByCheckpoint) is the one where it cannot —
+    /// the whole reason the variant is separate from [`SkippedByPlan`](OpOutcome::SkippedByPlan), and
+    /// the reason a consumer must not print "re-run after fixing" for it.
+    ///
+    /// [`Applied`](OpOutcome::Applied) answers `false` because it already happened and there is nothing
+    /// to retry — this is a convenience for phrasing the *unfinished* entries, not the discriminant.
+    /// The discriminant is the variant itself; never infer state from this bool alone.
+    pub fn retryable(self) -> bool {
+        matches!(self, OpOutcome::Failed | OpOutcome::SkippedByPlan)
+    }
+    /// `true` for the two states that mean "we chose not to do this", as opposed to "we tried and could
+    /// not". A held-back item is a *safety* outcome, never an error.
+    pub fn is_held_back(self) -> bool {
+        matches!(self, OpOutcome::SkippedByPlan | OpOutcome::HeldBackByCheckpoint)
+    }
+}
+
+/// The subset of [`OpOutcome`] that means "deliberately not attempted" — the only thing
+/// [`OpResult::held_back`] accepts.
+///
+/// This is a type rather than a `debug_assert!` because a `debug_assert!` is compiled out of release
+/// (review round 2): `held_back(p, OpOutcome::Applied, …)` would have SHIPPED `ok: false` alongside
+/// `outcome: Applied`, with the derivation test passing in CI and the inconsistency reaching users. Now
+/// it does not compile.
+///
+/// Deliberately NOT serialised and NOT a `specta::Type`: it is a constructor parameter, and adding a
+/// second enum to the wire for something the wire never carries would be noise in `bindings.gen.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldBackOutcome {
+    /// Retryable — see [`OpOutcome::SkippedByPlan`].
+    SkippedByPlan,
+    /// Not retryable on this platform — see [`OpOutcome::HeldBackByCheckpoint`].
+    HeldBackByCheckpoint,
+}
+
+impl HeldBackOutcome {
+    /// Widen to the wire enum. Total and infallible in this direction, which is the whole point.
+    pub fn as_outcome(self) -> OpOutcome {
+        match self {
+            HeldBackOutcome::SkippedByPlan => OpOutcome::SkippedByPlan,
+            HeldBackOutcome::HeldBackByCheckpoint => OpOutcome::HeldBackByCheckpoint,
+        }
+    }
+    /// Mirrors [`OpOutcome::retryable`] without the widening round trip.
+    pub fn retryable(self) -> bool {
+        self.as_outcome().retryable()
+    }
+}
+
 /// Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not
 /// abort on the first failure: if 9 of 10 files copy and one is locked, the user needs to know exactly
 /// which one failed.
+///
+/// `outcome` (CPE-1845) is the field to branch on. `ok` is kept as the one-bit summary every existing
+/// caller already reads, and is exactly `outcome == Applied` — it is derived, never set independently.
 #[derive(Serialize, Debug)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct OpResult {
     pub path: String,
     pub ok: bool,
     pub error: String,
+    /// Structural discriminant (CPE-1845). Branch on this, **never** on `error`'s wording.
+    pub outcome: OpOutcome,
 }
 
 impl OpResult {
@@ -79,6 +178,7 @@ impl OpResult {
             path: path.to_string_lossy().to_string(),
             ok: true,
             error: String::new(),
+            outcome: OpOutcome::Applied,
         }
     }
     pub fn err(path: &Path, e: impl std::fmt::Display) -> Self {
@@ -86,6 +186,18 @@ impl OpResult {
             path: path.to_string_lossy().to_string(),
             ok: false,
             error: e.to_string(),
+            outcome: OpOutcome::Failed,
+        }
+    }
+    /// A deliberate hold-back: not attempted, and **not** a failure. `error` carries only what is
+    /// specific to *this* path (often empty) — the shared explanation is stated once by the caller's
+    /// summary rather than copied per path, which is what CPE-1847 measured at ~185 KB for 500 deletes.
+    pub fn held_back(path: &str, outcome: HeldBackOutcome, detail: impl Into<String>) -> Self {
+        Self {
+            path: path.to_string(),
+            ok: false,
+            error: detail.into(),
+            outcome: outcome.as_outcome(),
         }
     }
 }
@@ -488,8 +600,77 @@ mod tests {
     fn op_result_constructors() {
         let ok = OpResult::ok(Path::new("/x/y.txt"));
         assert!(ok.ok && ok.error.is_empty());
+        assert_eq!(ok.outcome, OpOutcome::Applied);
         let err = OpResult::err(Path::new("/x/y.txt"), "locked");
         assert!(!err.ok && err.error == "locked");
+        assert_eq!(err.outcome, OpOutcome::Failed);
+    }
+
+    /// CPE-1845 — `ok` must stay exactly `outcome == Applied`, on every variant. It is the one-bit
+    /// summary the whole codebase already reads, and if the two ever disagree a caller reading `ok`
+    /// and a caller reading `outcome` describe the same run differently.
+    #[test]
+    fn ok_is_derived_from_outcome_and_never_set_independently() {
+        for (r, expect) in [
+            (OpResult::ok(Path::new("/x")), OpOutcome::Applied),
+            (OpResult::err(Path::new("/x"), "e"), OpOutcome::Failed),
+            (
+                OpResult::held_back("/x", HeldBackOutcome::SkippedByPlan, ""),
+                OpOutcome::SkippedByPlan,
+            ),
+            (
+                OpResult::held_back("/x", HeldBackOutcome::HeldBackByCheckpoint, ""),
+                OpOutcome::HeldBackByCheckpoint,
+            ),
+        ] {
+            assert_eq!(r.outcome, expect);
+            assert_eq!(r.ok, r.outcome == OpOutcome::Applied, "ok disagrees with outcome: {r:?}");
+        }
+    }
+
+    /// CPE-1845 — the whole point of the split: **only** `HeldBackByCheckpoint` is non-retryable, and a
+    /// hold-back is never a failure. A UI decides between "re-run after fixing" and "re-running cannot
+    /// help" off `retryable()` alone.
+    #[test]
+    fn only_the_checkpoint_hold_back_is_non_retryable() {
+        // Applied is `false` because it already happened — see the method's own doc. The claim under
+        // test is about the two hold-backs: one is retryable and one is not.
+        assert!(!OpOutcome::Applied.retryable());
+        assert!(OpOutcome::Failed.retryable());
+        assert!(OpOutcome::SkippedByPlan.retryable());
+        assert!(!OpOutcome::HeldBackByCheckpoint.retryable());
+
+        assert!(!OpOutcome::Applied.is_held_back());
+        assert!(!OpOutcome::Failed.is_held_back());
+        assert!(OpOutcome::SkippedByPlan.is_held_back());
+        assert!(OpOutcome::HeldBackByCheckpoint.is_held_back());
+    }
+
+    /// CPE-1845 — the four states must be four distinct **wire** tokens. A consumer written against the
+    /// JSON (the TS bindings, `bindings.gen.ts`) sees only these strings; if two variants serialised the
+    /// same, the discriminant would be a discriminant in Rust and a prefix-match everywhere else.
+    #[test]
+    fn the_four_outcomes_serialise_to_four_distinct_tokens() {
+        let tokens: Vec<String> = [
+            OpOutcome::Applied,
+            OpOutcome::Failed,
+            OpOutcome::SkippedByPlan,
+            OpOutcome::HeldBackByCheckpoint,
+        ]
+        .iter()
+        .map(|o| serde_json::to_string(o).unwrap())
+        .collect();
+        assert_eq!(
+            tokens,
+            vec![
+                "\"applied\"",
+                "\"failed\"",
+                "\"skipped_by_plan\"",
+                "\"held_back_by_checkpoint\""
+            ]
+        );
+        let unique: std::collections::HashSet<&String> = tokens.iter().collect();
+        assert_eq!(unique.len(), 4, "two outcomes collapsed onto one wire token: {tokens:?}");
     }
 
     #[test]

@@ -321,7 +321,9 @@ describe("undoFire (CPE-1666) — re-stats a recorded delete before acting", () 
     const bindings = await import("./bindings.gen");
     vi.mocked(bindings.commands.deletePermanent).mockResolvedValueOnce({
       status: "ok",
-      data: [{ path: copyPath, ok: false, error: "permission denied" }],
+      // CPE-1845: `outcome` is the structural discriminant every OpResult now carries; a genuine
+      // failure is `"failed"`, distinct from the deliberate-hold-back states.
+      data: [{ path: copyPath, ok: false, error: "permission denied", outcome: "failed" }],
     });
 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
