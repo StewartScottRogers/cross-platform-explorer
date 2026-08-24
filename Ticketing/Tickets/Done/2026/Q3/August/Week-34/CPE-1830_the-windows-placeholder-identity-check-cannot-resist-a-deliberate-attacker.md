@@ -3,11 +3,11 @@ id: CPE-1830
 title: the Windows placeholder identity check cannot resist a deliberate attacker, and is itself TOCTOU
 type: task
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
