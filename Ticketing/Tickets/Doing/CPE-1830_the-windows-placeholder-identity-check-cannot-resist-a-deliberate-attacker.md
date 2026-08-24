@@ -225,3 +225,85 @@ just cosmetic):
 `cargo test --lib`: 2368 passed, 0 failed, 8 ignored (pre-existing/unrelated) — one more test than round 1
 (the new A14 regression test). All synchronous, no background polling, per Foreman's instruction that they
 own CI for this PR.
+
+**2026-08-23 — Worker (fsutil.rs), round 3: Security Auditor re-audit of `3b697737` (PR #1018, gauntlet attempt 3)**
+
+The Security Auditor re-ran the full 14-attack battery against the shipped POSIX-semantics fix (not a
+prototype): 14/14 denied, including the 400-iteration race. Confirmed the same-handle guarantee holds in
+fact (both the Ex and legacy calls act on `current`; the Ex-failure path opens no second handle;
+`CloseHandle` runs exactly once on every path). Two findings landed in this round, plus one live network
+measurement worth keeping as a documented fact about this codebase rather than only in an agent transcript.
+
+**Finding 1 (attack A15) — the Ex flags omitted `IGNORE_READONLY_ATTRIBUTE`, a measured regression.** One
+unprivileged `SetFileAttributes` (`std::fs::set_permissions(..).set_readonly(true)`) on the placeholder
+between `stake` and `Drop` — no race window, no attacker capability beyond seeing the file — made both the
+Ex and legacy disposition calls refuse it, leaking the placeholder every time:
+
+```
+main            : readonly placeholder still present after drop = false   (removed)
+branch 3b697737 : readonly placeholder still present after drop = true    (leaked)
+```
+
+`std::fs::remove_file`'s own Windows `posix_delete()` sets `FILE_DISPOSITION_FLAG_DELETE |
+POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE` together, deliberately. Added the third flag (already
+exported by the vendored `windows` 0.56 crate — no new dependency) to the same `FILE_DISPOSITION_INFO_EX`
+this fix already builds. New test `cpe_1830_a_readonly_placeholder_is_still_removed_on_drop`, red-proofed
+by inserting it into the previously-pushed `3b697737`:
+
+*Before:*
+```
+[CPE-1830 A15] readonly placeholder still present after drop = true
+test fsutil::tests::cpe_1830_a_readonly_placeholder_is_still_removed_on_drop ... FAILED
+```
+*After:*
+```
+[CPE-1830 A15] readonly placeholder still present after drop = false
+test fsutil::tests::cpe_1830_a_readonly_placeholder_is_still_removed_on_drop ... ok
+```
+
+**Finding 2 — three doc sentences were false; corrected, not the code (parity, not a regression).**
+
+**The SMB redirector refuses `FileDispositionInfoEx` outright — measured live against a real network
+share.** The auditor issued the class by hand on each volume:
+
+```
+[local NTFS]            FileDispositionInfoEx: ACCEPTED  -> POSIX path
+[\STEWART-NAS\Public]  FileDispositionInfoEx: REFUSED — The parameter is incorrect. (0x80070057)
+[\STEWART-NAS\Public]  legacy FileDispositionInfo:      ACCEPTED (deferred unlink)
+```
+
+So the legacy fallback in `remove_placeholder_by_handle_identity` is not an antique-OS path, it is the
+**network-share path** on a fully-patched Windows 11 host — reached on every move to a network
+destination, one of the three this module's own docs already name (C:→D:, USB, network share), and the
+A14 deferred-unlink exposure (a third party's handle open across the drop) persists there. This is
+**parity with `main`, not a regression**: `std::fs::remove_file` gets the identical
+`ERROR_INVALID_PARAMETER` refusal on the same share and falls back to nothing better. FAT/exFAT is very
+likely the same (FastFAT does not implement the Ex class either) but was not tested, so the doc states
+that as a likelihood, not a claim. No code change follows from this — the fallback already exists and is
+correct; only what the comments claimed about *when* it is reached was wrong, now corrected at
+`fsutil.rs` (the `remove_placeholder_by_handle_identity` doc block, and the `FileDispositionInfoEx`
+version note — the `SetFileInformationByHandle` information class is Windows 10 **1709**, not 1607, which
+is the unrelated NT-level `FILE_DISPOSITION_INFORMATION_EX` structure).
+
+**The "exactly the fallback `std::fs::remove_file` itself takes" claim was also false**, verified against
+the std source shipped with this toolchain: Windows `unlink` calls `DeleteFileW` first and only opens a
+DELETE handle for `posix_delete()` after an `ERROR_ACCESS_DENIED`; its own legacy `win32_delete()` is
+`#[allow(unused)]` dead code, never called, and a `DeleteFileW` failure is returned as-is with no second
+attempt. `std` has no legacy fallback at all — neither the order nor the existence matched. The comment
+now states plainly that falling back to legacy `FileDispositionInfo` here is this module's own choice,
+not something modeled on `std`.
+
+**`SlotClaim::stake`'s round-2 correction also overclaimed**, asserting unconditionally that the fix
+preserves "exactly the same 'name free again immediately' property" — true only on local NTFS/ReFS; on a
+network share neither this process's removal nor a third party's ordinary `remove_file` frees the name
+immediately (per the SMB measurement above), so the underlying measurement in that doc block is now noted
+as NTFS/local-disk-only.
+
+Corrections (b) and (c) from round 2 were checked line-by-line by the auditor against the shipped code and
+every factual claim held, including the QNAP result and the seam-injection behaviour — no change needed
+there.
+
+**Re-verification:** `cargo clippy --all-targets -- -D warnings` clean (default and `--features index`);
+`cargo test --lib`: 2369 passed, 0 failed, 8 ignored (pre-existing/unrelated) — one more than round 2 (the
+new A15 regression test). All synchronous, no background polling, per Foreman's instruction that they own
+CI for this PR (attempt 3 of 3).

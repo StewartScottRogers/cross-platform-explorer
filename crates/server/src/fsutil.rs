@@ -1451,14 +1451,17 @@ impl SlotClaim {
     /// create_new(same name)                 = Ok(())     <- the name is free again immediately
     /// ```
     ///
-    /// so there is no platform where holding it substitutes for checking. **This measurement is about an
-    /// unrelated caller's `remove_file`, not about how `Drop` removes its own placeholder** — since
-    /// CPE-1830 that is [`remove_placeholder_by_handle_identity`] on Windows, which does not call
-    /// `std::fs::remove_file` at all (it unlinks through `SetFileInformationByHandle` on the handle it
-    /// just verified identity from) but is written to preserve exactly the same "name free again
-    /// immediately" property this measurement demonstrates, via `FileDispositionInfoEx`'s
-    /// `POSIX_SEMANTICS` flag — see that function's doc for why the deferred-unlink legacy call alone was
-    /// not good enough.
+    /// so there is no platform where holding it substitutes for checking. **This measurement (NTFS,
+    /// local disk) is about an unrelated caller's `remove_file`, not about how `Drop` removes its own
+    /// placeholder** — since CPE-1830 that is [`remove_placeholder_by_handle_identity`] on Windows, which
+    /// does not call `std::fs::remove_file` at all (it unlinks through `SetFileInformationByHandle` on the
+    /// handle it just verified identity from) and is written to preserve the same "name free again
+    /// immediately" property on **local NTFS/ReFS**, via `FileDispositionInfoEx`'s `POSIX_SEMANTICS` flag
+    /// — but not everywhere: on a network share (SMB refuses the Ex class, measured) neither this
+    /// process's removal nor a third party's ordinary `remove_file` frees the name immediately, so the
+    /// property demonstrated above does not generalize past local disks either. See that function's doc
+    /// for the measurement and for why the deferred-unlink legacy call still matters rather than being
+    /// dead code.
     pub fn stake(target: &Path, is_dir: bool) -> Result<Self, String> {
         let handle = if is_dir {
             claim_dir_slot(target)?;
@@ -1601,8 +1604,20 @@ fn placeholder_is_still_ours(handle: &std::fs::File, path: &Path) -> bool {
 /// deferred unlink silently breaks that contract without an attacker in the picture at all. POSIX
 /// semantics unlinks the name right away regardless of other open handles — the exact behaviour
 /// `std::fs::remove_file` itself gets on Windows — while still running on the one handle the verdict was
-/// read from. The legacy fallback exists only for a filesystem or OS build predating `FileDispositionInfoEx`
-/// (Windows 10 1607+); deferred-but-on-the-same-handle is still strictly better than not removing at all.
+/// read from.
+///
+/// **The legacy fallback is not an antique-OS path — it is the network-share path, measured.** Issuing
+/// `FileDispositionInfoEx` by hand against a real SMB share (a QNAP NAS on the LAN) got
+/// `ERROR_INVALID_PARAMETER` (`0x80070057`): the redirector refuses the Ex class outright on a
+/// fully-patched Windows 11 host, on local NTFS/ReFS the same call is accepted and takes the POSIX path
+/// above. So a network destination — one of the three this module's docs already name (C: to D:, a USB
+/// stick, **a network share**) — silently falls back to the legacy, deferred-unlink call every time, and
+/// the third-party-handle exposure this fallback exists to close persists there. That is **parity with
+/// `main`, not a regression**: `std::fs::remove_file` gets the identical `ERROR_INVALID_PARAMETER` refusal
+/// on the same share and is no better off. FAT/exFAT is very likely the same story — FastFAT does not
+/// implement the Ex class either — but that was not tested here, so it is left as a likelihood, not a
+/// claim. Deferred-but-on-the-same-handle is still strictly better than not removing at all, which is why
+/// the fallback stays rather than being deleted.
 ///
 /// This is `CreateFileW` + `GetFileInformationByHandle`, the exact route the ticket names and the same
 /// calls `crate::batch_media::probe_no_follow`/[`crate::batch_media::handle_facts`] already make (reused
@@ -1658,10 +1673,10 @@ fn remove_placeholder_by_handle_identity(handle: &std::fs::File, path: &Path) {
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
         DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
-        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
-        FILE_DISPOSITION_INFO_EX_FLAGS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, FileDispositionInfo,
-        FileDispositionInfoEx,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING, FileDispositionInfo, FileDispositionInfoEx,
     };
 
     // This process's own identity, read from the handle it has held open since `stake` — never from a
@@ -1720,13 +1735,21 @@ fn remove_placeholder_by_handle_identity(handle: &std::fs::File, path: &Path) {
         // the bug this ticket fixes: no attacker is needed, and CPE-1765's cross-volume-move fallback
         // (`SlotClaim::stake`'s caller, `src-tauri`'s `resolve_conflict`) depends on the name being free
         // again immediately, not eventually. `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` unlinks the name
-        // right away regardless of other open handles — matching `remove_file`'s own behaviour — and
-        // `FILE_DISPOSITION_FLAG_DELETE` is the class's equivalent of legacy `DeleteFile: TRUE`.
+        // right away regardless of other open handles — matching `remove_file`'s own behaviour —
+        // `FILE_DISPOSITION_FLAG_DELETE` is the class's equivalent of legacy `DeleteFile: TRUE` — and
+        // `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE` matters because a placeholder is a plain file
+        // anyone who can see it can also flip read-only on with one unprivileged `SetFileAttributes` call
+        // (CPE-1830 round-3 finding, attack A15, measured): without this flag the disposition call itself
+        // refuses a read-only object and the placeholder leaks, exactly the deferred-unlink failure mode
+        // above but reachable with zero race window. `std::fs::remove_file`'s own Windows `posix_delete()`
+        // sets all three flags together for the same reason.
         let posix = FILE_DISPOSITION_INFO_EX {
             // No `BitOr` impl on `FILE_DISPOSITION_INFO_EX_FLAGS` in the vendored crate (plain
             // newtype, unlike `FILE_ACCESS_RIGHTS`), so the flag bits are combined by hand.
             Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
-                FILE_DISPOSITION_FLAG_DELETE.0 | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0,
+                FILE_DISPOSITION_FLAG_DELETE.0
+                    | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
+                    | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
             ),
         };
         // SAFETY: `current` was opened with `DELETE` access above and is still open; `posix` is a valid,
@@ -1742,10 +1765,20 @@ fn remove_placeholder_by_handle_identity(handle: &std::fs::File, path: &Path) {
         }
         .is_ok();
         if !posix_ok {
-            // `FileDispositionInfoEx` was added in Windows 10 1607; a filesystem or OS build that
-            // predates it (or otherwise refuses the Ex class) falls back to legacy `FileDispositionInfo`
-            // — deferred-unlink, but still on this same handle, still strictly better than not removing
-            // the placeholder at all. Exactly the fallback `std::fs::remove_file` itself takes.
+            // `FileDispositionInfoEx` as a `SetFileInformationByHandle` information class is documented
+            // Windows 10 **1709** (1607 is the unrelated NT-level `FILE_DISPOSITION_INFORMATION_EX`
+            // structure, not this API). Measured, not merely versioned: local NTFS/ReFS accepts the Ex
+            // call, but the SMB redirector refuses it outright — `ERROR_INVALID_PARAMETER` (0x80070057),
+            // measured against a real network share — so this fallback is reached on every network
+            // destination, not just an old OS. That is parity with `main`, not a regression:
+            // `std::fs::remove_file` gets the identical refusal on the same share. This is **not**,
+            // however, the fallback `std::fs::remove_file` itself takes — verified against the std source
+            // shipped with this toolchain, its Windows `unlink` calls `DeleteFileW` first and only opens a
+            // DELETE handle for `posix_delete()` after an `ERROR_ACCESS_DENIED`; its own legacy
+            // `win32_delete()` is `#[allow(unused)]` dead code, never called, and a `DeleteFileW` failure
+            // is returned as-is with no second attempt. Falling back to legacy `FileDispositionInfo` here
+            // is this module's own choice — deferred-unlink, but still on this same handle, still strictly
+            // better than not removing the placeholder at all — not something being matched to `std`.
             let legacy = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
             // SAFETY: `current` still has `DELETE` access and is still open; `legacy` is a valid,
             // correctly-sized input buffer for the `FileDispositionInfo` class.
@@ -8415,6 +8448,41 @@ mod tests {
             assert!(reclaim.is_ok(), "{reclaim_msg}");
             // `_outsider` closes here, at end of scope — after both assertions, so it genuinely tests
             // "while still open", not "after it happened to close".
+        }
+    }
+
+    /// **CPE-1830, Security Auditor round-3 finding (attack A15).** One unprivileged `SetFileAttributes`
+    /// on a placeholder anyone who can see it can already reach — no race window, no other handle needed —
+    /// sets `FILE_ATTRIBUTE_READONLY` between `stake` and `Drop`. Without
+    /// `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE` the disposition call itself refuses a read-only
+    /// object on **both** the Ex and legacy arms, so the placeholder leaks every time — a cheap, repeatable
+    /// denial of the cross-volume-move fallback, distinct from and cheaper than the A14 race. `main`'s
+    /// `std::fs::remove_file` handles this deliberately (its `posix_delete()` sets all three flags
+    /// together), so this is the parity bar, not an invention.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1830_a_readonly_placeholder_is_still_removed_on_drop() {
+        let d = scratch("cpe1830_readonly_attribute");
+        let picked = d.path().join("victim.txt");
+        {
+            let claim = SlotClaim::stake(&picked, false).expect("a free name must stake");
+            // The attack: one unprivileged attribute flip on our own placeholder, nothing more.
+            let mut perms = std::fs::metadata(&picked).expect("must stat our own placeholder").permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&picked, perms).expect("setting read-only is unprivileged");
+            assert!(
+                std::fs::metadata(&picked).unwrap().permissions().readonly(),
+                "fixture: the read-only attribute must actually take"
+            );
+
+            drop(claim);
+
+            let present_after_drop = picked.try_exists().unwrap_or(true);
+            eprintln!("[CPE-1830 A15] readonly placeholder still present after drop = {present_after_drop}");
+            assert!(
+                !present_after_drop,
+                "a read-only placeholder must still be removed on drop -- FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE exists exactly for this, and std::fs::remove_file sets it for the same reason"
+            );
         }
     }
 
