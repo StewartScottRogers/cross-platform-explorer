@@ -1442,15 +1442,23 @@ impl SlotClaim {
     ///
     /// The file handle is **kept** (PR #968 audit, F3): [`Drop`] needs it to tell its own placeholder
     /// apart from whatever else may be sitting at the path by then. It is not held for exclusivity —
-    /// measured on Windows, an open handle does **not** reserve the name, because `std`'s `remove_file`
-    /// deletes with POSIX semantics:
+    /// measured on Windows, an open handle does **not** reserve the name, because a **third party's**
+    /// ordinary `std::fs::remove_file` against the picked name deletes with POSIX semantics regardless of
+    /// this process's own open handle:
     ///
     /// ```text
     /// remove_file(while our handle is open) = Ok(())
     /// create_new(same name)                 = Ok(())     <- the name is free again immediately
     /// ```
     ///
-    /// so there is no platform where holding it substitutes for checking.
+    /// so there is no platform where holding it substitutes for checking. **This measurement is about an
+    /// unrelated caller's `remove_file`, not about how `Drop` removes its own placeholder** — since
+    /// CPE-1830 that is [`remove_placeholder_by_handle_identity`] on Windows, which does not call
+    /// `std::fs::remove_file` at all (it unlinks through `SetFileInformationByHandle` on the handle it
+    /// just verified identity from) but is written to preserve exactly the same "name free again
+    /// immediately" property this measurement demonstrates, via `FileDispositionInfoEx`'s
+    /// `POSIX_SEMANTICS` flag — see that function's doc for why the deferred-unlink legacy call alone was
+    /// not good enough.
     pub fn stake(target: &Path, is_dir: bool) -> Result<Self, String> {
         let handle = if is_dir {
             claim_dir_slot(target)?;
@@ -1478,13 +1486,21 @@ impl Drop for SlotClaim {
     /// quarantine, a sync client) and a **real file** written at the name, and the drop then deleted the
     /// real file. The audit measured it.
     ///
-    /// So the verdict is [`placeholder_is_still_ours`] on Unix, and [`remove_placeholder_by_handle_identity`]
-    /// on Windows (see its doc for why the two platforms need genuinely different mechanisms, not just
-    /// different comparisons) — and **every uncertainty leaves the file alone**: a stat/open that fails, a
-    /// shape that does not match, an identity that cannot be read. Leaving a stray zero-byte file behind is
-    /// strictly better than deleting a stranger's data, and the caller's fallback re-claims atomically
-    /// anyway — so the worst case of not removing is a loud refusal, while the worst case of removing
-    /// wrongly is silent data loss.
+    /// **This paragraph, and the identity-then-remove mechanism it describes, is the FILE arm only**
+    /// (`self.is_dir == false`, below). The directory arm is unchanged by CPE-1830: it still reads
+    /// `symlink_metadata(&self.path).is_dir()` and, if true, calls `remove_dir(&self.path)`, both by path,
+    /// with no handle and no identity comparison — see the `is_dir` branch in `drop` for what bounds it
+    /// instead (PR #968 audit finding 6: `remove_dir` refuses a non-empty directory and unlinks a link at
+    /// the name without following it, never destroying the link's target).
+    ///
+    /// For the file arm: the verdict is [`placeholder_is_still_ours`] on Unix, and
+    /// [`remove_placeholder_by_handle_identity`] on Windows (see its doc for why the two platforms need
+    /// genuinely different mechanisms, not just different comparisons) — and **every uncertainty leaves
+    /// the file alone**: a stat/open that fails, a shape that does not match, an identity that cannot be
+    /// read (including a *degenerate* one on Windows — see that function's doc). Leaving a stray zero-byte
+    /// file behind is strictly better than deleting a stranger's data, and the caller's fallback re-claims
+    /// atomically anyway — so the worst case of not removing is a loud refusal, while the worst case of
+    /// removing wrongly is silent data loss.
     fn drop(&mut self) {
         if !self.live {
             return;
@@ -1569,15 +1585,29 @@ fn placeholder_is_still_ours(handle: &std::fs::File, path: &Path) -> bool {
 /// (`windows_by_handle` is still unstable, rust-lang/rust#63010) — plus length and attributes. If, and only
 /// if, that identity matches `handle`'s own (also read via `GetFileInformationByHandle`, never via a path),
 /// the object is zero-length, and it is a plain file (no `FILE_ATTRIBUTE_DIRECTORY`, no
-/// `FILE_ATTRIBUTE_REPARSE_POINT`), the removal runs on **that same handle**:
-/// `SetFileInformationByHandle(FileDispositionInfo, DeleteFile: TRUE)`, then the handle is closed. No path
-/// is resolved a second time anywhere in the removal step — the object marked for deletion is exactly the
-/// object identity was just read from.
+/// `FILE_ATTRIBUTE_REPARSE_POINT`), the removal runs on **that same handle**, then the handle is closed. No
+/// path is resolved a second time anywhere in the removal step — the object marked for deletion is exactly
+/// the object identity was just read from.
+///
+/// **The removal itself is `SetFileInformationByHandle(FileDispositionInfoEx, DELETE | POSIX_SEMANTICS)`,
+/// falling back to legacy `FileDispositionInfo` only if that call fails** — not legacy alone, which a
+/// round-3 Security Auditor pass caught as a regression: legacy disposition only marks a name
+/// `DELETE_PENDING`, unlinked once the *last* open handle against the object closes, so a third party with
+/// its own handle open across this drop — Defender's real-time scan, Windows Search indexing, Explorer's
+/// thumbnailer, a sync client, another agent, no attacker required — leaves the name undeletable
+/// (`ERROR_ACCESS_DENIED` on every subsequent open) until that unrelated handle closes. The
+/// cross-volume-move fallback this placeholder exists for depends on the name being free **immediately**
+/// after the drop, not eventually (see `SlotClaim::stake`'s doc and `src-tauri`'s `resolve_conflict`), so
+/// deferred unlink silently breaks that contract without an attacker in the picture at all. POSIX
+/// semantics unlinks the name right away regardless of other open handles — the exact behaviour
+/// `std::fs::remove_file` itself gets on Windows — while still running on the one handle the verdict was
+/// read from. The legacy fallback exists only for a filesystem or OS build predating `FileDispositionInfoEx`
+/// (Windows 10 1607+); deferred-but-on-the-same-handle is still strictly better than not removing at all.
 ///
 /// This is `CreateFileW` + `GetFileInformationByHandle`, the exact route the ticket names and the same
 /// calls `crate::batch_media::probe_no_follow`/[`crate::batch_media::handle_facts`] already make (reused
 /// for `handle`'s own identity below), plus `SetFileInformationByHandle` for the handle-relative unlink,
-/// which is new to this module. All three come from the `windows` crate already vendored for this crate
+/// which is new to this module. All symbols come from the `windows` crate already vendored for this crate
 /// (`Win32_Storage_FileSystem`, see `Cargo.toml`) — **no new dependency**, and no hand-rolled `extern
 /// "system"` declaration, so there is no new signature to get wrong.
 ///
@@ -1593,18 +1623,45 @@ fn placeholder_is_still_ours(handle: &std::fs::File, path: &Path) -> bool {
 /// name of, and the pre-existing zero-length check is what refuses it (unchanged by this ticket, and
 /// exactly the case CPE-1765 round 1 measured: "a real file written at the name").
 ///
-/// A "leave alone" outcome here is always safe: `path` unreadable, identity mismatched, non-zero length, a
-/// directory, or a reparse point all fall through to "do nothing", leaving the placeholder — or whatever is
-/// now at the name — untouched.
+/// **A degenerate identity deletes nothing, including this process's own placeholder — a deliberate
+/// trade, not an oversight.** [`crate::batch_media::FileIdentity::is_degenerate`] refuses a zero volume or
+/// file index, which is documented Win32 behaviour on filesystems that do not report a usable file index
+/// (some network redirectors — see CPE-1642 finding F2). On such a share this function cannot tell its own
+/// placeholder apart from anything else at the name, so it leaves *everything* alone, including the
+/// ordinary, untampered case — the cross-volume-move fallback then finds the name still taken and refuses
+/// with the slot-taken message rather than reclaiming it, where pre-CPE-1830 it would have succeeded.
+/// Fail-closed is the right side to be wrong on for a deletion primitive: the cost is a stub the *next*
+/// attempt still cannot reclaim by that name, never a wrong deletion. Measured live against a real network
+/// redirector (a QNAP NAS on the LAN): identity was *not* degenerate there, and cleanup worked normally —
+/// the fail-closed path is a documented Win32 possibility, not something every, or even most, network
+/// shares trigger. One further bound worth stating: `is_degenerate` only catches *zero* in either half; a
+/// hypothetical redirector reporting some constant *non-zero* index for every object would still collide
+/// two unrelated files' identities, exactly as a zero index does — but the blast radius does not grow past
+/// what CPE-1765 already bounded (`remove_file`, one file, never `remove_dir_all`), so it is the same
+/// residual under a different trigger, not a new one.
+///
+/// A "leave alone" outcome here is always safe: `path` unreadable, identity mismatched or degenerate,
+/// non-zero length, a directory, or a reparse point all fall through to "do nothing", leaving the
+/// placeholder — or whatever is now at the name — untouched.
+///
+/// **Scope note: this function is the file arm only.** [`SlotClaim`]'s `Drop` directory arm
+/// (`self.is_dir`) is unchanged by CPE-1830 and is not covered by anything above — it reads
+/// `symlink_metadata(&self.path).is_dir()` and, if true, calls `remove_dir(&self.path)`, both by path, with
+/// no handle and no identity comparison at all. That gap was already bounded before this ticket
+/// (`remove_dir` refuses a non-empty directory and never follows a link at the name — PR #968 audit
+/// finding 6) and is deliberately out of this ticket's scope, which is titled and scoped to the **file**
+/// identity check; it is not fixed by, and should not be assumed fixed by, anything below.
 #[cfg(windows)]
 fn remove_placeholder_by_handle_identity(handle: &std::fs::File, path: &Path) {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, BOOLEAN, HANDLE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING, FileDispositionInfo,
+        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+        FILE_DISPOSITION_INFO_EX_FLAGS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, FileDispositionInfo,
+        FileDispositionInfoEx,
     };
 
     // This process's own identity, read from the handle it has held open since `stake` — never from a
@@ -1654,18 +1711,53 @@ fn remove_placeholder_by_handle_identity(handle: &std::fs::File, path: &Path) {
         && ((u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow)) == ours.id.index;
 
     if is_ours {
-        let disposition = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
-        // SAFETY: `current` was opened with `DELETE` access above and is still open; `disposition` is a
-        // valid, correctly-sized input buffer for the `FileDispositionInfo` class. The removal acts on
-        // exactly the handle the verdict above was just read from — no path is resolved again.
-        let _ = unsafe {
+        // POSIX semantics first — this is what `std::fs::remove_file` itself does on Windows, and the
+        // reason it is required here rather than optional: the legacy `FileDispositionInfo` class only
+        // marks the name `DELETE_PENDING`, unlinked when the *last* handle closes, so a third party with
+        // its own handle open across this drop (Defender's real-time scan, Search indexing, Explorer's
+        // thumbnailer, a sync client, another agent) leaves the name undeletable — every open against it
+        // answers `ERROR_ACCESS_DENIED` — until that unrelated handle closes. That is strictly worse than
+        // the bug this ticket fixes: no attacker is needed, and CPE-1765's cross-volume-move fallback
+        // (`SlotClaim::stake`'s caller, `src-tauri`'s `resolve_conflict`) depends on the name being free
+        // again immediately, not eventually. `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` unlinks the name
+        // right away regardless of other open handles — matching `remove_file`'s own behaviour — and
+        // `FILE_DISPOSITION_FLAG_DELETE` is the class's equivalent of legacy `DeleteFile: TRUE`.
+        let posix = FILE_DISPOSITION_INFO_EX {
+            // No `BitOr` impl on `FILE_DISPOSITION_INFO_EX_FLAGS` in the vendored crate (plain
+            // newtype, unlike `FILE_ACCESS_RIGHTS`), so the flag bits are combined by hand.
+            Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
+                FILE_DISPOSITION_FLAG_DELETE.0 | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0,
+            ),
+        };
+        // SAFETY: `current` was opened with `DELETE` access above and is still open; `posix` is a valid,
+        // correctly-sized input buffer for the `FileDispositionInfoEx` class. The removal acts on exactly
+        // the handle the verdict above was just read from — no path is resolved again.
+        let posix_ok = unsafe {
             SetFileInformationByHandle(
                 current,
-                FileDispositionInfo,
-                std::ptr::from_ref(&disposition).cast(),
-                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>()).unwrap_or(0),
+                FileDispositionInfoEx,
+                std::ptr::from_ref(&posix).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>()).unwrap_or(0),
             )
-        };
+        }
+        .is_ok();
+        if !posix_ok {
+            // `FileDispositionInfoEx` was added in Windows 10 1607; a filesystem or OS build that
+            // predates it (or otherwise refuses the Ex class) falls back to legacy `FileDispositionInfo`
+            // — deferred-unlink, but still on this same handle, still strictly better than not removing
+            // the placeholder at all. Exactly the fallback `std::fs::remove_file` itself takes.
+            let legacy = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
+            // SAFETY: `current` still has `DELETE` access and is still open; `legacy` is a valid,
+            // correctly-sized input buffer for the `FileDispositionInfo` class.
+            let _ = unsafe {
+                SetFileInformationByHandle(
+                    current,
+                    FileDispositionInfo,
+                    std::ptr::from_ref(&legacy).cast(),
+                    u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>()).unwrap_or(0),
+                )
+            };
+        }
     }
     // SAFETY: `current` was opened by this function above and is not closed anywhere else.
     let _ = unsafe { CloseHandle(current) };
@@ -8284,6 +8376,46 @@ mod tests {
              refuse it on handle identity, which a delete-and-recreate always changes, regardless of what \
              the impostor's timestamps were forged to say"
         );
+    }
+
+    /// **CPE-1830, Security Auditor round-3 finding (attack A14).** Legacy `SetFileInformationByHandle
+    /// (FileDispositionInfo, DeleteFile: TRUE)` alone — this test's own regression target — only marks a
+    /// name `DELETE_PENDING`; the actual unlink waits for the *last* open handle on the object to close.
+    /// No attacker is needed to trigger it: Defender's real-time scan, Windows Search indexing, Explorer's
+    /// thumbnailer, a sync client, or another agent can all hold a read handle on the placeholder for the
+    /// microseconds between `stake` and `Drop`. This reproduces that with an ordinary read-only "outsider"
+    /// handle opened on the picked name (default `std` sharing, same as any of those real processes would
+    /// use) and held open **across** the drop, then asserts the two things
+    /// `write_move_into_picked_slot`'s cross-volume fallback (`src-tauri`) actually depends on: the name
+    /// is free **immediately**, not eventually, and a fresh claim on it succeeds right away.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1830_a_third_party_handle_open_across_the_drop_does_not_leave_the_name_undeletable() {
+        let d = scratch("cpe1830_posix_semantics");
+        let picked = d.path().join("victim.txt");
+        {
+            let claim = SlotClaim::stake(&picked, false).expect("a free name must stake");
+            // The outsider: default `std` sharing (read+write+delete), exactly what a third-party reader
+            // gets, held open THROUGH the drop below — this is the whole point of the test.
+            let _outsider = std::fs::File::open(&picked).expect("an outsider must be able to open it too");
+            drop(claim);
+
+            let present_after_drop = picked.try_exists().unwrap_or(true);
+            let reclaim = std::fs::OpenOptions::new().write(true).create_new(true).open(&picked);
+            eprintln!("[CPE-1830 A14] name present after drop = {present_after_drop} ; fallback create_new = {reclaim:?}");
+            let deferred_unlink_msg = "the name must be free immediately after the drop, even with a \
+                third party's handle still open -- legacy FileDispositionInfo alone defers the unlink \
+                until that handle closes, which breaks the cross-volume-move fallback's contract with no \
+                attacker involved";
+            assert!(!present_after_drop, "{deferred_unlink_msg}");
+            let reclaim_msg = "the cross-volume-move fallback re-claims the name right after the drop \
+                (write_move_into_picked_slot's documented contract: the fallback finds the name as it \
+                left it and re-claims it atomically) -- deferred unlink turns this into \
+                ERROR_ACCESS_DENIED";
+            assert!(reclaim.is_ok(), "{reclaim_msg}");
+            // `_outsider` closes here, at end of scope — after both assertions, so it genuinely tests
+            // "while still open", not "after it happened to close".
+        }
     }
 
     /// **PR #968 review.** Nothing pinned the drop under an UNWIND, only under a normal return — and the

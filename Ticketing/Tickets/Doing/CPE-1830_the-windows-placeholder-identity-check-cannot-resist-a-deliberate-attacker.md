@@ -150,3 +150,78 @@ m.file_type().is_dir())`, unaffected by anything this ticket measured).
 index`); `cargo test` (default features) green, `crates/server` only — `fsutil` module: 89 passed, 0
 failed, 1 ignored (pre-existing, unrelated). `src-tauri` untouched by this change (no call site there
 needed edits).
+
+**2026-08-23 — Worker (fsutil.rs), round 2: Security Auditor finding (PR #1018, gauntlet attempt 2)**
+
+The Security Auditor ran a 14-attack battery against the handle-identity fix above and found zero
+bypasses (forged timestamps, hard link, file symlink, directory junction to `id_rsa`, planted directory,
+ADS stash, shared-write byte injection, rename-away-with-hard-link-back, and a 400-iteration
+delete-and-recreate race — attacker's `create_new` won 400/400, still refused). It also verified the
+`unsafe` block against the vendored `windows` 0.56 source (signatures, NUL-termination, single-close,
+struct size) and confirmed PR #1016 merges onto this branch clean, no conflict.
+
+**Blocking finding: the removal itself changed deletion semantics from `main`.** `main` removed the
+placeholder with `std::fs::remove_file`, which on Windows uses `FileDispositionInfoEx` with
+`FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` — unlinked immediately, even with other handles open. My
+handle-identity fix used legacy `SetFileInformationByHandle(FileDispositionInfo, DeleteFile: TRUE)`,
+whose unlink is deferred until the *last* handle closes. Any third party holding the placeholder open
+across the drop — Defender's real-time scan, Windows Search indexing, Explorer's thumbnailer, a sync
+client, another agent, **no attacker required** — left the name `DELETE_PENDING`: every open against it
+answered `ERROR_ACCESS_DENIED`, breaking the cross-volume-move fallback's documented contract ("the
+fallback finds the name as it left it and re-claims it atomically", `src-tauri/src/lib.rs`) on every
+C:→D:, USB, and network-share move a third party happened to touch mid-flight.
+
+**Fix:** `remove_placeholder_by_handle_identity` now tries `SetFileInformationByHandle(
+FileDispositionInfoEx, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS)` first —
+immediate unlink regardless of other open handles, matching `remove_file`'s own Windows behaviour — and
+falls back to the legacy `FileDispositionInfo` call only if that fails (a pre-1607 OS/filesystem). Both
+calls still run on the one handle the identity verdict was just read from — the same-handle guarantee is
+unchanged. `FILE_DISPOSITION_INFO_EX_FLAGS` has no `BitOr` impl in the vendored `windows` 0.56 crate
+(unlike `FILE_ACCESS_RIGHTS`), so the two flag bits are combined via their raw `.0` values.
+
+New test `cpe_1830_a_third_party_handle_open_across_the_drop_does_not_leave_the_name_undeletable`:
+stakes a placeholder, opens a second ordinary read handle on it (the "outsider"), holds it open across
+`drop(claim)`, then asserts the name is gone immediately and a fresh `create_new` reclaims it.
+
+*Before (legacy `FileDispositionInfo` only — the code this same test was inserted into from the
+previously-pushed commit `f7c54edb`):*
+```
+[CPE-1830 A14] name present after drop = true ; fallback create_new = Err(Os { code: 5, kind:
+PermissionDenied, message: "Access is denied." })
+test fsutil::tests::cpe_1830_a_third_party_handle_open_across_the_drop_does_not_leave_the_name_undeletable ... FAILED
+test result: FAILED. 0 passed; 1 failed
+```
+
+*After (POSIX-semantics-first, this fix):*
+```
+[CPE-1830 A14] name present after drop = false ; fallback create_new = Ok(File { handle: 0x1a4, path: ... })
+test fsutil::tests::cpe_1830_a_third_party_handle_open_across_the_drop_does_not_leave_the_name_undeletable ... ok
+test result: ok. 1 passed; 0 failed
+```
+
+**Three documentation defects fixed in the same pass** (all flagged by the auditor as reader-facing, not
+just cosmetic):
+
+1. `SlotClaim::stake`'s doc measured `std::fs::remove_file` while our own handle is open, to show holding
+   a handle does not confer exclusivity. That measurement is still true, but is now about an *unrelated
+   third party's* `remove_file`, not about how `Drop` removes its own placeholder (which no longer calls
+   `remove_file` at all on Windows) — the doc now says so explicitly and cross-references
+   `remove_placeholder_by_handle_identity` for what `Drop` actually does and why it still achieves "free
+   again immediately".
+2. `Drop`'s doc read as if it covered the whole removal, but the **directory arm is unchanged** — still
+   `symlink_metadata(path).is_dir()` then `remove_dir(path)`, by path, no handle, no identity. The doc now
+   states plainly that the identity-then-remove mechanism is the file arm only, with the directory arm's
+   own (pre-existing, unaffected) bound spelled out alongside it.
+3. **Undisclosed behaviour change:** a degenerate identity (zero volume or file index — some network
+   redirectors, CPE-1642 F2) now means the function deletes nothing, including its own untampered
+   placeholder, where pre-fix it would have succeeded (identity was never being compared before). Stated
+   explicitly in the "What is NOT closed" section as a deliberate fail-closed trade, not an oversight: the
+   cost is a reclaim-refusing stub on such a share, never a wrong deletion. Also noted per the auditor: the
+   real QNAP NAS test target is *not* degenerate (cleanup verified working there), and `is_degenerate` only
+   catches *zero* — a hypothetical redirector reporting a constant non-zero index for every object would
+   still collide, but the blast radius does not grow past CPE-1765's existing one-file bound.
+
+**Re-verification:** `cargo clippy --all-targets -- -D warnings` clean (default and `--features index`);
+`cargo test --lib`: 2368 passed, 0 failed, 8 ignored (pre-existing/unrelated) — one more test than round 1
+(the new A14 regression test). All synchronous, no background polling, per Foreman's instruction that they
+own CI for this PR.
