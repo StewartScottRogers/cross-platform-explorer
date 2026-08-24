@@ -2,24 +2,6 @@
   "$comment": "CPE-1594 ratchet, made CASE-granular by CPE-1677. Each entry is ONE test case (`spec` = the spec file's basename, `test` = the it() title, verbatim) that is ALLOWED to fail today. Any OTHER case failing reds the job — including a case inside a spec file that already has entries here, which is exactly the hole CPE-1677 closed (whole-file exemptions meant the other 24 cases in samples.smoke.ts guarded nothing). Removing an entry is one-way: once a listed case passes, the ratchet FAILS until its entry is deleted. A listed `test` that matches NO case in the run also FAILS (titles drift; a rename must not silently drop both the exemption and the coverage). Entries are exact titles, never patterns — a pattern would re-create the blanket exemption this replaced. An entry with \"intermittent\": true is a case PROVEN to both pass and fail on unchanged code (cite the runs in its reason): it is exempt in both directions, because a coin-flip case would otherwise red every run one way or the other — but it must still exist, and the ratchet prints it with its observed status on every run so it stays visible until it is fixed and deleted. See gui-smoke/README.md 'The ratchet' for the retire procedure.",
   "cases": [
     {
-      "spec": "open-dir.smoke.ts",
-      "test": "selecting a code file renders the code-intelligence preview (CPE-1096)",
-      "reason": "CPE-1866 (session-per-shard): deterministic on shard 3's real spec ordering — reproduced identically across 3 consecutive CI reruns of the same code (runs ending 32672263270/32677728663/32680942379), always 'element click intercepted' on the fixture row's click, always paired with the two populated-whitespace.smoke.ts entries below in the same run. open-dir.smoke.ts is now the 8th file in a shared session (shard 3), not a fresh app launch, and something upstream in that sequence (near-duplicates.smoke.ts is the file immediately before it) leaves an interceptor in place that CPE-1866's reset (Escape, the app-wide Close-button convention, and — as of this same investigation — a direct `.backdrop` click for an orphaned dialog scrim) did not clear. Not yet root-caused to a specific element: the backdrop fix was a strong, evidenced candidate (60 dialogs share that exact scrim, and NearDuplicatesDialog's own close button is clicked without awaiting its close) but did not clear this on the 3rd rerun, so something else is still standing between the two. Left listed rather than chased further under this ticket's own time-box; a follow-up (CPE-1866's own filed continuation) should re-attempt with a live DOM dump at the failure point.",
-      "ticket": "CPE-1866"
-    },
-    {
-      "spec": "populated-whitespace.smoke.ts",
-      "test": "CPE-1155: real right-click in an EMPTY folder opens the app menu (not native) without moving the OS cursor",
-      "reason": "CPE-1866 (session-per-shard) — see the open-dir.smoke.ts entry immediately above for the full investigation; this is the same shard-3 sequence, same deterministic reproduction across 3 reruns, same not-yet-identified interceptor. populated-whitespace.smoke.ts is the file immediately after open-dir.smoke.ts in shard 3.",
-      "ticket": "CPE-1866"
-    },
-    {
-      "spec": "populated-whitespace.smoke.ts",
-      "test": "CPE-1157: on-item right-click still opens the item menu (regression guard for the fix)",
-      "reason": "CPE-1866 (session-per-shard) — see the open-dir.smoke.ts entry above for the full investigation; same shard-3 sequence, same deterministic reproduction across 3 reruns. This one was ALSO given a 3-attempt retry-with-fresh-lookup (matching this suite's own CPE-1481 idiom) in case it were a momentary WebKitGTK miss rather than a leak — it still failed after 3 attempts every rerun, which is itself evidence AGAINST a simple momentary-timing explanation and FOR a genuinely persistent interceptor.",
-      "ticket": "CPE-1866"
-    },
-    {
       "spec": "network.smoke.ts",
       "test": "clicking the entry point opens the add-connection popover with its expected fields, and Escape closes it",
       "reason": "Cascades from this spec's other listed case (the section-header one): with the Network section never confirmed rendered, the entry-point click lands on whatever is on top and WebKitGTK returns 'element click intercepted' (run 31602466829). Expected to clear at the same time as the CPE-1595 getText() quirk — retire both entries together.",

@@ -112,6 +112,46 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
     }
     expect(fixtureRow, `expected a file row containing "${FIXTURE_NAME}"`).to.not.equal(undefined);
 
+    // CPE-1866 diagnostic (temporary, until the shard-3 "element click intercepted" regression is
+    // root-caused — see the ticket's Work Log): dump exactly what `document.elementFromPoint` sees at
+    // the row's own center BEFORE clicking, and walk up its ancestor chain, so a real CI run's log
+    // names the actual interceptor instead of leaving it to guesswork. Removed once the cause is fixed.
+    // eslint-disable-next-line no-console
+    console.log(
+      "[CPE-1866 diag]",
+      JSON.stringify(
+        await browser.execute((sel) => {
+          const rows = Array.from(document.querySelectorAll(".row"));
+          const row = rows.find((r) => (r.textContent || "").includes(sel));
+          if (!row) return { error: "row not found in live re-query" };
+          const rect = row.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const top = document.elementFromPoint(cx, cy);
+          const chain: unknown[] = [];
+          let el: Element | null = top;
+          while (el) {
+            const cs = window.getComputedStyle(el);
+            chain.push({
+              tag: el.tagName,
+              class: (el.className || "").toString(),
+              id: (el as HTMLElement).id || undefined,
+              zIndex: cs.zIndex,
+              position: cs.position,
+              pointerEvents: cs.pointerEvents,
+              opacity: cs.opacity,
+              display: cs.display,
+              visibility: cs.visibility,
+            });
+            el = el.parentElement;
+          }
+          return { rowRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, point: { cx, cy }, topSameAsRow: top === row, chain };
+        }, FIXTURE_NAME),
+        null,
+        2,
+      ),
+    );
+
     // A plain click (no ctrl/shift) single-selects the row, which feeds PreviewPane's `entry` prop
     // and triggers the codeIntel fetch (PreviewPane.svelte's `loadCodeIntelFor`).
     await fixtureRow!.click();
