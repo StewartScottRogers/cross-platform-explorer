@@ -91,3 +91,23 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   Three separate agents converged on this today from different directions: the CPE-1833/1836 worker
   built the harness, PR #1019's reviewer proved it never reaches CI and found the mis-referenced AC,
   and the CPE-1827 worker independently lost hours to the driver mismatch this route sidesteps.
+
+- **2026-08-23 (CPE-1884 worker)** — A third concrete red-proof case for item 3 (alongside CPE-1836's
+  status bar and CPE-1827's Trash titlebar): CPE-1884 (the Drop Stack handle floating over the
+  Sidebar's bottom rows) is the same class of bug — `.drop-stack-handle` (`position: fixed`) painting
+  over Sidebar.svelte content — and I built a standalone version of exactly this harness while fixing
+  it, since this ticket hadn't landed yet: `scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs`
+  (`npm run harness:sidebar-drop-stack-overlap`). Same approach this ticket already specifies — plain
+  `chrome.exe --headless=new` + raw CDP (`Runtime.evaluate`/`Emulation.setDeviceMetricsOverride`), no
+  WebDriver, no npm deps — but spins up its own `vite` dev server and drives the REAL app rather than a
+  purpose-built stand-in page, and asserts a structural containment invariant
+  (`.navigation-pane`'s own rendered box never extends into `.drop-stack-handle`'s y-range) rather than
+  per-pixel overlap pairs. Red-proofed twice by deliberately reverting the CPE-1884 fix — worth reading
+  before generalising: v1 of my probe (checking the handle's own corners) never failed, because
+  `elementFromPoint` at an element's own rect trivially returns that element (it wins the paint order
+  there by definition — checking the WRONG side's corners can never observe this class of bug); v2
+  (checking every row's own click-center) produced false positives for rows simply scrolled outside
+  the container's own clip, unrelated to the actual defect. Not wired into CI — left for this ticket.
+  See CPE-1884's Work Log for the full writeup (repro screenshots, before/after evidence, the fix
+  itself) and `gui-smoke/known-failing.json`'s four `trash-titlebar.smoke.ts` entries (tag `CPE-1822`)
+  it could not itself clear (same msedgedriver/WebKitGTK gap this ticket exists to route around).

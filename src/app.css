@@ -1209,6 +1209,20 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   border-right: 1px solid var(--border);
   background: var(--surface);
   min-height: 0;
+  /* CPE-1884: reserves room below the pane's own scroll box for the Drop Stack's `position: fixed`
+     handle (DropStackPanel.svelte's `.drop-stack-handle`, always mounted at `left: 14px;
+     bottom: 14px;` with a ~28px-tall button). `.navigation-pane` gets `flex: 1 1 auto` from its
+     `.pane-col` parent (below), which is `overflow: hidden` with a fixed height — so, unlike inner
+     bottom PADDING (tried first; it only grows the scrollable area past the last row without moving
+     already-visible rows, since the box's own rendered height doesn't depend on its content or
+     padding here), a bottom MARGIN genuinely shrinks the box itself, raising its visible/scrollable
+     bottom edge 50px above the window bottom. That is the actual fix: the pane can never paint
+     anything at the handle's y-range, at any window height, so nothing in it — Trash, "Reset section
+     order" (always last via their fixed order:900/1000, so this is a class of bug, not a one-off),
+     or any section a user drags to the end — can ever be the thing under the handle. 50px matches
+     `.drop-stack-panel`'s own `bottom: 50px` below, the same "clear the handle" offset already
+     established elsewhere in this file (14px handle offset + 28px handle height + a small gap). */
+  margin-bottom: 50px;
   /* CPE-1520: a flex column so each section's CSS `order` (driven by the persisted sidebarOrder store)
      controls its visual position — the section markup below stays in its original document order,
      only the paint order is reassigned. Items default to align-items:stretch, so widths are unchanged
