@@ -85,12 +85,24 @@ fi
 not yet merged as of this writing)** — another worker wrote that file the same day specifically to
 avoid this exact defect, and its comment block cites CPE-1794 by name. Read it via
 `git show origin/cpe-1872-fix-release-updater-verify:.github/workflows/release-pipeline-watchdog.yml`.
-One deliberate deviation from it, per the Foreman's brief: that file redirects the lookup's stdout and
+One deliberate deviation from it, per the Foreman's brief: that file redirected the lookup's stdout and
 stderr into the SAME captured value (`> "$list_output" 2>&1`), which means a `gh` warning on an
 otherwise-successful call folds into `$existing` and makes the issue number non-numeric. This fix keeps
 stdout and stderr in **separate** temp files (`list_output` / `list_err`) so a warning never corrupts
 the parsed issue number — proven in transcript branch 4 below (issue #456 parses correctly even though
 the stub `gh` also wrote a stderr warning on that call).
+
+**Correction (Foreman, applied on merge — reviewer finding).** The paragraph above is written in the
+present tense and is **no longer true of the sibling file**. `release-pipeline-watchdog.yml` was
+corrected in its own CPE-1872 round 2 (`9fcfd163`, 15:35) — four minutes before this branch's commit
+(`68f71c65`, 15:39) — and no longer uses `2>&1`. So both workflows now keep a warning out of
+`$existing`; they simply do it differently. The watchdog leaves stderr unredirected, so it reaches the
+job log on its own; this file captures it separately so the failure path can print a clean, scoped
+diagnostic rather than the whole job's stderr. Both choices are defensible and the code here needed no
+change — only the stated reason did. The reviewer caught that the false claim had been baked into a
+committed code comment, which is precisely the anti-pattern CPE-1824 exists to name: a wrong reason
+left in place because its conclusion looks right. The comment in the workflow has been corrected in
+the same pass.
 
 **Assumption:** the ticket's "Match the existing 'inconclusive' vocabulary" instruction was read as
 "read the same way" (both are `::error::`-driven fail-loud paths with a clear named reason), not as a

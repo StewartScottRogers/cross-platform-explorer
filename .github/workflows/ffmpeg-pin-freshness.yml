@@ -567,9 +567,16 @@ jobs:
           # DUPLICATE instead of failing loud. Mirrors release-pipeline-watchdog.yml's dedupe (CPE-
           # 1872), which was written specifically to avoid this defect: capture the lookup's exit
           # status separately from its output, and on failure stop before creating or commenting
-          # anything. Unlike that file, stdout and stderr are captured to SEPARATE temp files here --
-          # merging them (`2>&1` into the same capture) would fold a `gh` warning on an otherwise-
-          # successful call into $existing, making the issue number non-numeric.
+          # Both files keep a `gh` warning on an otherwise-successful call out of $existing, which
+          # would otherwise make the issue number non-numeric -- they just do it differently. The
+          # watchdog leaves stderr unredirected, so it reaches the job log on its own; this file
+          # captures it to a separate temp file so the failure path can print a clean, scoped
+          # diagnostic (`cat "$list_err"`) instead of the whole job's stderr. Neither uses `2>&1`.
+          # (Historical note: the watchdog DID use `2>&1` when this comment was first drafted, and
+          # was corrected in its own round 2 four minutes before this commit landed. The original
+          # wording here claimed that file still had the defect. It does not -- CPE-1824's standing
+          # lesson is about exactly this: a wrong reason left in place because its conclusion looks
+          # right.)
           list_output="$(mktemp)"
           list_err="$(mktemp)"
           if gh issue list --state open --label "$label" --json number --jq '.[0].number' \
