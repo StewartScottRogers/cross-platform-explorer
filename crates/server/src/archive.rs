@@ -6141,6 +6141,140 @@ mod tests {
         }
     }
 
+    /// **CPE-1812: the leaf-link guard, independently pinned from the containment guard beside it.**
+    ///
+    /// `entry_sink_action` asks two different questions in order — "is a link already sitting at this
+    /// name?" (the LEAF half, [`entry_slot_action`]) and, only if that passes, "does the resolved path
+    /// stay inside `dest`?" (the CONTAINMENT half, [`crate::fsutil::confined_to`]). Every existing live-link
+    /// fixture in this file — `rows_21_and_22` above, `rows_15_and_16`,
+    /// `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically` — points its link's target
+    /// **outside** `dest`. `confined_to` alone already refuses that shape (a live symlink's target is
+    /// followed by `canonicalize`, and an outside target never resolves under `real_root`), so the LEAF
+    /// half can be deleted from tar's dispatch and the whole suite still passes — found by PR #958's UAT,
+    /// which applied the precise mutation (`tar_entry_refusal`'s `_ => entry_sink_action(dest, &out)`
+    /// swapped for `_ => entry_dir_action(dest, &out)`) and observed **zero** new reds, on Linux as much
+    /// as on Windows. The existing message-content assertions (`contains("is a link")`) do not catch it
+    /// either: [`escaped_dest_message`]'s own prose happens to contain that exact substring too ("a folder
+    /// on the way there **is a link**"), so the wording check the UAT trusted was never discriminating in
+    /// the first place.
+    ///
+    /// **This leg isolates the leaf half by construction, not by wording.** The live symlink sits at the
+    /// entry's own name exactly as the existing legs do, but its TARGET is a file already **inside**
+    /// `dest` — so `confined_to` resolves it as contained. Under the guard-intact code the leaf check
+    /// still fires first and refuses it regardless of where the target points (the leaf question is asked
+    /// — and short-circuits — before containment is ever consulted), so the behaviour is unchanged: the
+    /// entry is skipped, and the pre-existing link survives untouched. Remove the leaf half and
+    /// containment alone ADMITS this entry — measured (not assumed): tar's own `create_new`-then-
+    /// `remove_file`-and-retry unpack path (the CPE-1759 section comment above) unlinks the user's live
+    /// link and writes an ordinary file in its place, so the leg reds on "the link itself must survive",
+    /// not on the target's content — the link, not the file it pointed at, is what this hazard destroys
+    /// for tar specifically. That loss, not a string, is what this leg checks.
+    ///
+    /// **Both tar and zip legs, one-shot and streamed** (four total): `entry_sink_action` is the SAME
+    /// function all three sinks (tar, zip, 7z) call, but tar reaches it through a `match` with a default
+    /// arm — the exact shape the UAT's mutation exploited — while zip calls it directly. A regression at
+    /// either call site, or inside the function itself, should turn its own leg red independently.
+    ///
+    /// **Red-proof (stated so the claim is checked, not just made; re-run 2026-08-23):** reverting
+    /// `tar_entry_refusal`'s `_ => entry_sink_action(dest, &out)` to `_ => entry_dir_action(dest, &out)`
+    /// turned the "tar one-shot" leg here red (`the link itself must survive untouched (outcome was
+    /// Ok([]))`) while `rows_21_and_22_tar_refuse_a_link_at_an_entry_name_and_still_extract_the_rest`
+    /// above — the existing outside-pointing leg — stayed green, exactly the discrimination the ticket
+    /// asked for. (The "tar streamed" leg goes through the identical mutated dispatch and was not reached
+    /// only because the harness aborts a `#[test]` fn on its first panic, not because it is unaffected.)
+    /// The ZIP legs are unaffected by that specific mutation (zip's call site is untouched by it), so
+    /// verified separately: commenting out `entry_sink_action`'s leaf-check block entirely (isolating the
+    /// zip legs by temporarily removing the tar ones, since the harness stops at the first panic) turned
+    /// "zip one-shot" red on the OTHER assertion — the victim's bytes, measured `[65, 82, 67, 72, 73, 86,
+    /// 69, 68, 32, 65]` ("ARCHIVED A") where `"VICTIM ORIGINAL"` was expected — confirming zip's mechanism
+    /// really is write-THROUGH (not tar's unlink-and-replace), and that `entry_sink_action`'s leaf half is
+    /// what stops it on both sinks that share the function.
+    #[test]
+    fn cpe1812_the_leaf_link_guard_is_pinned_independently_of_containment() {
+        // (label, extension, run) — tar and zip, one-shot and streamed.
+        type Run = fn(&Path, &Path) -> Result<Vec<String>, String>;
+        let legs: &[(&str, &str, Run)] = &[
+            ("tar one-shot", "tar.gz", |archive: &Path, dest: &Path| {
+                extract_archive(&archive.to_string_lossy(), &dest.to_string_lossy())
+                    .map(|o| o.report.errors)
+            }),
+            ("tar streamed", "tar.gz", |archive: &Path, dest: &Path| {
+                let cancel = AtomicBool::new(false);
+                extract_archive_streamed(&archive.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {})
+                    .map(|r| r.errors)
+            }),
+            ("zip one-shot", "zip", |archive: &Path, dest: &Path| {
+                extract_archive(&archive.to_string_lossy(), &dest.to_string_lossy())
+                    .map(|o| o.report.errors)
+            }),
+            ("zip streamed", "zip", |archive: &Path, dest: &Path| {
+                let cancel = AtomicBool::new(false);
+                extract_archive_streamed(&archive.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {})
+                    .map(|r| r.errors)
+            }),
+        ];
+
+        for (label, ext, run) in legs {
+            let d = scratch("cpe1812_leaf_inside");
+            let archive = d.join(format!("in.{ext}"));
+            if *ext == "tar.gz" {
+                compress_to_targz(&two_source_files(&d), &archive.to_string_lossy()).unwrap();
+            } else {
+                compress_to_zip(&two_source_files(&d), &archive.to_string_lossy()).unwrap();
+            }
+            let dest = d.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            // The victim lives INSIDE `dest` — the whole point of this leg. Containment alone would
+            // admit this target; only the leaf-link guard can refuse it.
+            let victim = dest.join("victim-inside-dest.bin");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+            let link = dest.join("a.txt");
+            if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
+                crate::skip_notice!(
+                    "[CPE-1812] SKIPPED the leaf-guard discrimination leg ({label}): could not stage a \
+                     live link at {}. The leaf-vs-containment split was NOT independently checked on this \
+                     run.",
+                    link.display()
+                );
+                let _ = fs::remove_dir_all(&d);
+                // CPE-1809: `continue`, not `return` — each leg stages its own link fresh, so a failure
+                // on one must not abandon the rest of the table.
+                continue;
+            }
+
+            let outcome = run(&archive, &dest);
+
+            // ---- the harm, before the Result ----
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "{label}: the entry's bytes went THROUGH the link into {}, a file INSIDE the user's own \
+                 destination that the archive never named. Containment alone cannot catch this — the \
+                 target resolves inside `dest` — so only the LEAF-link guard protects it \
+                 (outcome was {outcome:?})",
+                victim.display()
+            );
+            assert!(
+                fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "{label}: the link itself must survive untouched (outcome was {outcome:?})"
+            );
+
+            let errors = outcome.unwrap_or_else(|e| {
+                panic!("{label}: one refused entry must not abort the run: {e}")
+            });
+            assert!(
+                errors.iter().any(|e| e.contains("a.txt") && e.contains("is a link")),
+                "{label}: the skip must be recorded as OUR link refusal — got {errors:?}"
+            );
+            assert_eq!(
+                fs::read(dest.join("b.txt")).unwrap(),
+                b"ARCHIVED B".to_vec(),
+                "{label}: a refusal must cost ONE entry — the rest of the archive still extracts"
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
     /// `src/a.txt` + `src/b.txt` + `src/c.txt`, in that archive order. **`b.txt` is the poisoned one, and
     /// its position in the middle is the whole design** — see
     /// `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically`.
