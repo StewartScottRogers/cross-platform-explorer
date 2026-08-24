@@ -3,11 +3,11 @@ id: CPE-1872
 title: the plain Release workflow has failed on every platform for 27 days and nothing told anyone
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
