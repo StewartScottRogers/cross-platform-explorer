@@ -385,7 +385,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     // this one (en, es, de, fr, it -- Portuguese's own block gets the same line too, but further down,
     // after this line, so it doesn't shift it). English's carries a 4-line explanatory comment, so that's
     // 9 lines total (en's 5 + es/de/fr/it's 1 apiece), not 9 blocks. Same story, re-anchored on `contains`.
-    line: 5366,
+    // 5366 -> 5379: CPE-1827 added `trash.moreActions` + `trash.docs` (2 lines apiece) to en/es/de/fr/it's
+    // locale blocks, all of which sit above this Portuguese line -- Portuguese's own pair of new lines
+    // lands after `trash.refresh`, further down than this one, so it doesn't shift it (same shape as the
+    // CPE-1816 note above). Same story, re-anchored on `contains`.
+    line: 5379,
     kind: "mojibake",
     reason:
       'Legitimate Portuguese "NÃO" (N + A-tilde + O) -- Ã followed by the ASCII letter "O", not a CP1252 ' +

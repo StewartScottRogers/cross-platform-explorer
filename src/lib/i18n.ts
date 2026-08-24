@@ -940,6 +940,11 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Empty Trash",
     "trash.restoreFailed": "Couldn't restore {name}: {error}",
     "trash.refresh": "Refresh",
+    // CPE-1827: the titlebar's "…" overflow menu (holds every toolbar action except Close) — the
+    // trigger's title/aria-label, and its Docs row (replacing the standalone HelpButton chip that used
+    // to sit in the toolbar directly).
+    "trash.moreActions": "More actions",
+    "trash.docs": "Docs",
 
     // showNotice() i18n pass (CPE-1627): every hardcoded-English notice literal in App.svelte routed
     // through $t(). Grouped here (rather than scattered into each string's nearest existing namespace)
@@ -1922,6 +1927,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Vaciar Papelera",
     "trash.restoreFailed": "No se pudo restaurar {name}: {error}",
     "trash.refresh": "Actualizar",
+    "trash.moreActions": "Más acciones",
+    "trash.docs": "Documentación",
 
     "notice.macroLoadFailed": "No se pudo cargar la macro: {error}",
     "notice.browserWindowFailed": "No se pudo abrir la ventana del navegador.",
@@ -2895,6 +2902,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Papierkorb leeren",
     "trash.restoreFailed": "{name} konnte nicht wiederhergestellt werden: {error}",
     "trash.refresh": "Aktualisieren",
+    "trash.moreActions": "Weitere Aktionen",
+    "trash.docs": "Dokumentation",
 
     "notice.macroLoadFailed": "Das Makro konnte nicht geladen werden: {error}",
     "notice.browserWindowFailed": "Das Browserfenster konnte nicht geöffnet werden.",
@@ -3868,6 +3877,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Vider la Corbeille",
     "trash.restoreFailed": "Impossible de restaurer {name} : {error}",
     "trash.refresh": "Actualiser",
+    "trash.moreActions": "Plus d'actions",
+    "trash.docs": "Documentation",
 
     "notice.macroLoadFailed": "Impossible de charger la macro : {error}",
     "notice.browserWindowFailed": "Impossible d'ouvrir la fenêtre du navigateur.",
@@ -4831,6 +4842,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Svuota Cestino",
     "trash.restoreFailed": "Impossibile ripristinare {name}: {error}",
     "trash.refresh": "Aggiorna",
+    "trash.moreActions": "Altre azioni",
+    "trash.docs": "Documentazione",
 
     "notice.macroLoadFailed": "Impossibile caricare la macro: {error}",
     "notice.browserWindowFailed": "Impossibile aprire la finestra del browser.",
@@ -5794,6 +5807,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Esvaziar Lixeira",
     "trash.restoreFailed": "Não foi possível restaurar {name}: {error}",
     "trash.refresh": "Atualizar",
+    "trash.moreActions": "Mais ações",
+    "trash.docs": "Documentação",
 
     "notice.macroLoadFailed": "Não foi possível carregar a macro: {error}",
     "notice.browserWindowFailed": "Não foi possível abrir a janela do navegador.",
@@ -6757,6 +6772,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Prullenbak legen",
     "trash.restoreFailed": "Kan {name} niet herstellen: {error}",
     "trash.refresh": "Vernieuwen",
+    "trash.moreActions": "Meer acties",
+    "trash.docs": "Documentatie",
 
     "notice.macroLoadFailed": "Kan de macro niet laden: {error}",
     "notice.browserWindowFailed": "Kan het browservenster niet openen.",
@@ -7720,6 +7737,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Opróżnij Kosz",
     "trash.restoreFailed": "Nie można przywrócić {name}: {error}",
     "trash.refresh": "Odśwież",
+    "trash.moreActions": "Więcej akcji",
+    "trash.docs": "Dokumentacja",
 
     "notice.macroLoadFailed": "Nie można wczytać makra: {error}",
     "notice.browserWindowFailed": "Nie można otworzyć okna przeglądarki.",
@@ -8683,6 +8702,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "Очистить корзину",
     "trash.restoreFailed": "Не удалось восстановить {name}: {error}",
     "trash.refresh": "Обновить",
+    "trash.moreActions": "Другие действия",
+    "trash.docs": "Документация",
 
     "notice.macroLoadFailed": "Не удалось загрузить макрос: {error}",
     "notice.browserWindowFailed": "Не удалось открыть окно браузера.",
@@ -9646,6 +9667,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "清空回收站",
     "trash.restoreFailed": "无法还原 {name}：{error}",
     "trash.refresh": "刷新",
+    "trash.moreActions": "更多操作",
+    "trash.docs": "文档",
 
     "notice.macroLoadFailed": "无法加载该宏：{error}",
     "notice.browserWindowFailed": "无法打开浏览器窗口。",
@@ -10609,6 +10632,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "ごみ箱を空にする",
     "trash.restoreFailed": "{name} を復元できませんでした: {error}",
     "trash.refresh": "更新",
+    "trash.moreActions": "その他の操作",
+    "trash.docs": "ドキュメント",
 
     "notice.macroLoadFailed": "マクロを読み込めませんでした: {error}",
     "notice.browserWindowFailed": "ブラウザーウィンドウを開けませんでした。",
@@ -11572,6 +11597,8 @@ const messages: Record<Locale, Record<string, string>> = {
     "trash.emptyConfirmButton": "휴지통 비우기",
     "trash.restoreFailed": "{name}을(를) 복원할 수 없습니다: {error}",
     "trash.refresh": "새로고침",
+    "trash.moreActions": "추가 작업",
+    "trash.docs": "문서",
 
     "notice.macroLoadFailed": "매크로를 불러올 수 없습니다: {error}",
     "notice.browserWindowFailed": "브라우저 창을 열 수 없습니다.",

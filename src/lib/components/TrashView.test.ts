@@ -71,6 +71,18 @@ beforeEach(() => {
   invokeImpl = () => Promise.reject(new Error("unhandled"));
 });
 
+/** CPE-1827: every toolbar action except Close now lives behind the titlebar's "…" overflow menu (see
+ *  TrashView.svelte's titlebar markup) — opens it the same way a user would, by clicking the trigger.
+ *  Row checkboxes carry their own `on:click|stopPropagation` (pre-existing, for a different reason —
+ *  keeping a checkbox click from double-firing the row's own click-to-select handler), which as a side
+ *  effect also keeps them from bubbling to the `<svelte:window on:click>` listener that closes this
+ *  menu on an outside click — so selecting rows while the menu is open never closes it out from under a
+ *  test (or a real user). */
+async function openMenu() {
+  await fireEvent.click(screen.getByTitle("More actions"));
+  await settle();
+}
+
 describe("TrashView — streamed listing (CPE-1560)", () => {
   it("shows a loading state, then paints rows as batches arrive", async () => {
     render(TrashView);
@@ -300,7 +312,8 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     await settle();
     expect(screen.getByText("1 item")).toBeTruthy();
 
-    await fireEvent.click(screen.getByTitle("Refresh"));
+    await openMenu();
+    await fireEvent.click(screen.getByText("Refresh"));
     await settle();
     // The new stream (call index 1) delivers a batch but is deliberately left unresolved.
     deliver([entry({ id: "b", name: "b.txt" })], 1);
@@ -361,7 +374,8 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     await settle();
     expect(screen.getByText("4 items in the Trash couldn't be read and aren't shown")).toBeTruthy();
 
-    await fireEvent.click(screen.getByTitle("Refresh"));
+    await openMenu();
+    await fireEvent.click(screen.getByText("Refresh"));
     await settle();
     finishStream(0, false, 0, 1);
     await settle();
@@ -390,7 +404,8 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     await settle();
     expect(screen.getByText("a.txt")).toBeTruthy();
 
-    await fireEvent.click(screen.getByTitle("Refresh"));
+    await openMenu();
+    await fireEvent.click(screen.getByText("Refresh"));
     await settle();
     expect(streamCalls).toHaveLength(2);
     // The list is cleared immediately on refresh, even before the new stream sends anything.
@@ -438,6 +453,7 @@ describe("TrashView — Restore (CPE-1560)", () => {
 
   it("Restore selected is disabled until something is checked", async () => {
     await renderWithTwoEntries();
+    await openMenu();
     const restoreBtn = screen.getByText("Restore selected").closest("button") as HTMLButtonElement;
     expect(restoreBtn.disabled).toBe(true);
 
@@ -455,6 +471,7 @@ describe("TrashView — Restore (CPE-1560)", () => {
     await renderWithTwoEntries();
 
     await fireEvent.click(screen.getByLabelText("gone.txt"));
+    await openMenu();
     await fireEvent.click(screen.getByText("Restore selected"));
     await settle();
 
@@ -477,6 +494,7 @@ describe("TrashView — Restore (CPE-1560)", () => {
 
     await fireEvent.click(screen.getByLabelText("keep.txt"));
     await fireEvent.click(screen.getByLabelText("gone.txt"));
+    await openMenu();
     await fireEvent.click(screen.getByText("Restore selected"));
     await settle();
 
@@ -505,6 +523,7 @@ describe("TrashView — Restore (CPE-1560)", () => {
     // Deliberately no `finishStream` — the pass is still in flight when the user acts.
 
     await fireEvent.click(screen.getByLabelText("a.txt"));
+    await openMenu();
     await fireEvent.click(screen.getByText("Restore selected"));
     await settle();
 
@@ -533,6 +552,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     invokeImpl = () => Promise.reject(new Error("empty_trash must not be called before confirming"));
     await renderWithTwoEntries();
 
+    await openMenu();
     await fireEvent.click(screen.getByText("Empty Trash"));
     await settle();
 
@@ -544,6 +564,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     invokeImpl = (cmd) => (cmd === "empty_trash" ? Promise.resolve(null) : Promise.reject(new Error(cmd)));
     await renderWithTwoEntries();
 
+    await openMenu();
     await fireEvent.click(screen.getByText("Empty Trash"));
     await settle();
     // The dialog's own primary button carries the same confirm label.
@@ -561,6 +582,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     invokeImpl = () => Promise.reject(new Error("empty_trash must not be called"));
     await renderWithTwoEntries();
 
+    await openMenu();
     await fireEvent.click(screen.getByText("Empty Trash"));
     await settle();
     await fireEvent.click(screen.getByText("Cancel"));
@@ -576,6 +598,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     await renderWithTwoEntries();
 
     await fireEvent.click(screen.getByLabelText("a.txt"));
+    await openMenu();
     await fireEvent.click(screen.getByText("Delete selected permanently"));
     await settle();
 
@@ -591,6 +614,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
 
   it("Delete selected permanently is disabled with nothing checked", async () => {
     await renderWithTwoEntries();
+    await openMenu();
     const btn = screen.getByText("Delete selected permanently").closest("button") as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
   });
@@ -605,6 +629,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     await settle();
     // Deliberately no `finishStream` — the pass is still in flight when the user acts.
 
+    await openMenu();
     await fireEvent.click(screen.getByText("Empty Trash"));
     await settle();
     const dialog = screen.getByText("Empty Trash?").closest(".dialog") as HTMLElement;

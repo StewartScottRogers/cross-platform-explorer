@@ -77,6 +77,8 @@ describe("TrashView — tooltip, aria-label, AND the original-location column (C
     await waitFor(() => expect(container.querySelector(".tv-row")).toBeTruthy());
 
     await fireEvent.click(container.querySelector(".tv-check input") as HTMLInputElement);
+    // CPE-1827: "Restore selected" now lives behind the titlebar's "…" overflow menu — open it first.
+    await fireEvent.click(screen.getByTitle("More actions"));
     await fireEvent.click(screen.getByText("Restore selected"));
 
     await waitFor(() => expect(container.textContent).toContain("Couldn't restore"));

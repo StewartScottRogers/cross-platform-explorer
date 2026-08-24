@@ -150,6 +150,30 @@
       "test": "saves a search from the palette, shows it in the sidebar, and opens the filtered view",
       "reason": "CPE-1507: the Saved Searches sidebar header never resolves on Linux — `.fav-title` getText() returns empty for the whole wait window on WebKitGTK/Xvfb (same quirk as network.smoke.ts, CPE-1595).",
       "ticket": "CPE-1507"
+    },
+    {
+      "spec": "trash-titlebar.smoke.ts",
+      "test": "opens the Trash from the Sidebar and selects the real, natively-seeded deleted entry",
+      "reason": "ENVIRONMENTAL, not a code defect in the spec or in TrashView.svelte's titlebar fix (CPE-1827): clicking the Sidebar's Open-Trash row never returned a WebDriver result and the session log showed 'Timed out receiving message from renderer' — the CPE-1827 Foreman confirmed this is the known msedgedriver-150-vs-Edge-151 version mismatch already reproduced on the repo's OWN STOCK open-dir.smoke.ts (tracked in .claude/qa-architecture/MANUAL-TEST-BURNDOWN.md), not anything specific to this spec or to `list_trash_stream`. A separate, real observation from the same debugging session — this dev machine's actual Recycle Bin held 843 items (Shell.Application COM probe) which could independently slow `list_trash_stream` — is filed as its own PR-body note, not the cause recorded here; which of the two dominates was not determined. Expected to clear automatically the moment a clean CI run (matched driver/browser versions) proves this case passing — the ratchet forces this entry's removal at that point, not a manual retire. See CPE-1822 (owns full Trash gui-smoke coverage) for anything beyond the driver-mismatch fix itself.",
+      "ticket": "CPE-1822"
+    },
+    {
+      "spec": "trash-titlebar.smoke.ts",
+      "test": "survives a resize sweep down to the 600×400 floor — the close button is always present and hit-testable, never clipped",
+      "reason": "Cascades from this spec's first case above (the same msedgedriver-150-vs-Edge-151 environmental hang, NOT a code defect — see that entry's reason in full): this case depends on the Trash panel already being open, which the first case never reaches while the version mismatch is unresolved.",
+      "ticket": "CPE-1822"
+    },
+    {
+      "spec": "trash-titlebar.smoke.ts",
+      "test": "at the 600×400 floor, the overflow menu itself is never clipped by .tv-panel's overflow:hidden",
+      "reason": "Cascades from this spec's first case above — same msedgedriver-150-vs-Edge-151 environmental cause, not a code defect; see that entry's reason in full.",
+      "ticket": "CPE-1822"
+    },
+    {
+      "spec": "trash-titlebar.smoke.ts",
+      "test": "Escape closes the view — the new keyboard fallback this ticket adds (there was none before)",
+      "reason": "Cascades from this spec's first case above — same msedgedriver-150-vs-Edge-151 environmental cause, not a code defect; see that entry's reason in full.",
+      "ticket": "CPE-1822"
     }
   ]
 }
