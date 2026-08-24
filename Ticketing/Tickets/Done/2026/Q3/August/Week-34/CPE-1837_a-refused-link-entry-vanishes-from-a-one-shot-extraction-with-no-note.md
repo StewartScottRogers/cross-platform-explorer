@@ -3,11 +3,11 @@ id: CPE-1837
 title: a refused link entry vanishes from a one-shot extraction with no note to the user
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem

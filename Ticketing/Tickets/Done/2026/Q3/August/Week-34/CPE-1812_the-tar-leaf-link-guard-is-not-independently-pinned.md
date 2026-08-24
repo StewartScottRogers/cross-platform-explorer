@@ -3,11 +3,11 @@ id: CPE-1812
 title: the tar leaf-link guard is not independently pinned, so removing it leaves the whole suite green
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem

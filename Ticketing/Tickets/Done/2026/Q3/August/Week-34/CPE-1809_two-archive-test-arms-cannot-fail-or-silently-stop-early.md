@@ -3,11 +3,11 @@ id: CPE-1809
 title: an archive test assertion cannot fail, and a staging failure returns where it should continue
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
