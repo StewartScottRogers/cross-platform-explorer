@@ -49,6 +49,22 @@ const CLOSE_BUTTON_SELECTOR = 'button[title="Close"], button[aria-label="Close"]
  *  most two levels). */
 const MAX_CLOSE_ROUNDS = 5;
 
+/** The Operations panel (`TransferPanel.svelte`) is idle-hidden — `{#if $transfers.length > 0}` — and
+ *  every row's own dismiss/cancel button is `title="Dismiss"`/`title="Cancel"`, NOT `title="Close"`, so
+ *  {@link CLOSE_BUTTON_SELECTOR} does not reach it (deliberately kept separate rather than widened to
+ *  match "Cancel" everywhere — a generic "Cancel" can mean something else entirely elsewhere in the app,
+ *  e.g. a wizard step, and conflating the two would make this loop's intent unclear). Found the same way
+ *  as the Agent Watch drawer leak: `specs/transfer-panel.smoke.ts` line 130 already asserted
+ *  `expect(await $(".ops").isExisting()).to.equal(false)` with the comment "The panel must not already
+ *  show a leftover row from an earlier spec" — written when every spec DID get its own session, so it
+ *  was always true for free; under a shared session it is exactly the assertion that catches THIS leak,
+ *  and did, in CI, on the second real run under session-per-shard (this ticket's Work Log). Both button
+ *  kinds are handled the same way here: a finished transfer is dismissed, and a still-running one
+ *  (unlikely at reset time, but not impossible) is cancelled — either is the correct "get back to no
+ *  leftover rows" outcome for the next spec. */
+const OPS_PANEL_SELECTOR = ".ops";
+const OPS_ROW_BUTTON_SELECTOR = ".ops .x";
+
 /** Presses Escape, then clicks the first visible explicit "Close" button if one remains, up to
  *  {@link MAX_CLOSE_ROUNDS} times — closing whatever a prior spec left open regardless of whether it
  *  happens to be a `*Dialog.svelte` (closes on Escape) or a drawer/panel like `AgentTimeline.svelte`
@@ -66,6 +82,23 @@ async function closeAnyOpenOverlay(): Promise<void> {
       await closeButtons[0]!.click();
     } catch {
       // best-effort — see this function's doc comment.
+    }
+  }
+}
+
+/** Dismisses/cancels every row in the Operations panel (see {@link OPS_PANEL_SELECTOR}'s comment for
+ *  why this needs its own loop, separate from {@link closeAnyOpenOverlay}), bounded the same way and for
+ *  the same reason. */
+async function clearOperationsPanel(): Promise<void> {
+  for (let round = 0; round < MAX_CLOSE_ROUNDS; round++) {
+    const panel = await $$(OPS_PANEL_SELECTOR);
+    if ((await panel.length) === 0) return;
+    const rowButtons = await $$(OPS_ROW_BUTTON_SELECTOR);
+    if ((await rowButtons.length) === 0) return;
+    try {
+      await rowButtons[0]!.click();
+    } catch {
+      // best-effort — see closeAnyOpenOverlay's doc comment for the same reasoning.
     }
   }
 }
@@ -94,6 +127,7 @@ export async function resetAppState(rootDir: string): Promise<void> {
       .__CPE_TEST_CLEAR_AGENT_SESSIONS__;
     hook?.();
   });
+  await clearOperationsPanel();
   await closeAnyOpenOverlay();
   await navigateTo(rootDir);
 }
