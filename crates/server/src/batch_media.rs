@@ -1301,18 +1301,160 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
 /// be written into, and every caller refuses one on its own terms already. This function's job is only
 /// the *hard link* question, which is a question about files.
 pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
-    matches!(probe_no_follow(path), Probe::Real(facts) if !facts.is_dir && facts.links > 1)
+    matches!(name_links(path), NameLinks::Many(_))
+}
+
+/// How many names the object at `path` has — the **three-valued** form of the CPE-1857 question, for the
+/// callers that decide a write with it rather than a wording.
+///
+/// # Why three values, and why the three call sites answer `Unknown` differently
+///
+/// [`name_is_multiply_linked`] above collapses this to a `bool` and treats `Unknown` as "no". That is
+/// right at its **one** caller, `revert_engine::apply_write`'s refusal *classifier*: the write there is
+/// already settled, so an unknown answer picks `transient` — the classification that path had for every
+/// refusal before CPE-1857 — and degrades to the previous behaviour rather than to a new wrong one.
+///
+/// It is **wrong** at a caller that is deciding whether bytes move, and CPE-1857's Security Auditor
+/// found exactly that: `archive::entry_sink_action` and `transfer::download_tree` are *gates*, and a
+/// gate that answers "no" when it cannot tell fails **open** — the guard is present, silent, and the
+/// write proceeds. Compare `resolve_output_containment`, which maps [`Probe::Unreadable`] to
+/// `Containment::Unverifiable` and refuses. Both gates now refuse on [`NameLinks::Unknown`], on the same
+/// terms they already refuse an unreadable *link* verdict (`archive` aborts, matching
+/// `entry_slot_action`'s `Unknown` arm and `cpe1759_an_unreadable_slot_aborts_both_tar_paths…`;
+/// `transfer` records it in `undelivered`, matching `LeafProbe::Uninspectable`).
+///
+/// **`Unknown` is now rare on purpose, which is what makes failing closed on it payable.** Before the
+/// [`probe_no_follow`] / [`probe_facts_no_follow`] split, a degenerate identity — every object on some
+/// network redirectors — produced `Unreadable`, so failing closed here would have refused *every* entry
+/// extracted to a network share. Reading `links` off the ungated facts answers those correctly, and
+/// leaves `Unknown` for what it should always have meant: the probe genuinely could not read the name.
+pub(crate) enum NameLinks {
+    /// Provably exactly one name: nothing here for this rule to refuse.
+    One,
+    /// Provably more than one name — the count, so the refusal can say it.
+    Many(u64),
+    /// Nothing at this name, or it is a link, or it is a directory. **On Unix a directory's `nlink` is
+    /// `>= 2` by construction** (its own `.`, the parent's entry, one per subdirectory) while on Windows
+    /// it is 1, so a rule that did not fold directories in here refused every directory on two of the
+    /// three CI legs and none on the third — measured, see this module's `cpe_1857_…` test.
+    NoFileHere,
+    /// Something is there and its link count could **not** be read. Never "no" at a gate.
+    Unknown(&'static str),
+}
+
+pub(crate) fn name_links(path: &std::path::Path) -> NameLinks {
+    // `probe_facts_no_follow`, NOT `probe_no_follow`: the degeneracy gate answers an identity question
+    // and this is not one. See `probe_no_follow`'s doc for the fail-open that caused.
+    match probe_facts_no_follow(path) {
+        Probe::Real(facts) if facts.is_dir => NameLinks::NoFileHere,
+        Probe::Real(facts) if facts.links > 1 => NameLinks::Many(facts.links),
+        Probe::Real(_) => NameLinks::One,
+        Probe::Absent | Probe::Link => NameLinks::NoFileHere,
+        Probe::Unreadable(why) => NameLinks::Unknown(why),
+    }
+}
+
+/// Probe a path **without following links**, then gate the result on
+/// [`FileIdentity::is_degenerate`] — the identity question every *containment* caller asks.
+///
+/// **Split from [`probe_facts_no_follow`] by CPE-1857, and the split is the whole of that finding.**
+/// The gate below throws the ENTIRE probe away when the identity is degenerate, because a containment
+/// decision that compares identities cannot be made from an identity that identifies nothing. But
+/// `FileFacts::links` is *not* an identity: on the network redirectors [`FileIdentity::is_degenerate`]
+/// exists for, `GetFileInformationByHandle` succeeds and `nNumberOfLinks` is present and correct while
+/// the file index is zero. Funnelling the link-count question through this gate discarded a good answer
+/// and returned [`Probe::Unreadable`] — which [`name_links`]'s first cut then treated as "not multiply
+/// linked", so on **a network share, a first-class destination for this app**, extraction and download
+/// wrote through a pre-existing hard link exactly as before, with the guard present and silent.
+///
+/// So: identity questions come through here; the link-count question goes to [`name_links`], which reads
+/// [`probe_facts_no_follow`] directly. Nothing else changed — every existing caller still gets the gate.
+fn probe_no_follow(path: &std::path::Path) -> Probe {
+    match probe_facts_no_follow(path) {
+        Probe::Real(facts) => facts_or_unreadable(facts),
+        other => other,
+    }
+}
+
+/// Wrap freshly-probed facts as [`Probe::Real`] — the one place [`probe_facts_no_follow`]'s two
+/// `#[cfg]` arms converge, so the test seam below applies identically on both.
+fn real_facts(facts: FileFacts) -> Probe {
+    #[cfg(test)]
+    match PROBE_INJECTION.with(|c| c.get()) {
+        Some(ProbeInjection::DegenerateIdentity) => {
+            return Probe::Real(FileFacts { id: FileIdentity { volume: 0, index: 0 }, ..facts })
+        }
+        Some(ProbeInjection::Unreadable) => return Probe::Unreadable(WHY_PROBE_FAILED),
+        None => {}
+    }
+    Probe::Real(facts)
+}
+
+/// What [`set_probe_injection_for_test`] can make a probe pretend to be.
+///
+/// **Both shapes exist because neither can be staged on CI or on a developer's box**, and CPE-1857's
+/// Security Auditor found a live fail-open in the first of them. A real SMB/NFS redirector that returns a
+/// zero file index is not something a test can conjure, and the auditor tried a denied
+/// `FILE_READ_ATTRIBUTES` ACE for the second and it does not reach this path on Windows. A fail-open no
+/// test can reach is one that comes back, so the seam is the instrument that makes both reachable.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeInjection {
+    /// Succeed, with a link count and directoriness that are correct, and an identity that identifies
+    /// nothing — the documented behaviour of several network redirectors ([`FileIdentity::is_degenerate`]).
+    DegenerateIdentity,
+    /// Fail to establish anything about the name at all.
+    Unreadable,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Thread-local for [`CENSUS_CAP_OVERRIDE`]'s reason: the default harness runs each `#[test]` on its
+    /// own thread.
+    static PROBE_INJECTION: std::cell::Cell<Option<ProbeInjection>> = const { std::cell::Cell::new(None) };
+}
+
+/// `pub(crate)` so [`crate::archive`]'s and [`crate::transfer`]'s tests can drive both shapes through
+/// their **real** entry points rather than through this module's internals — which is the whole point,
+/// since CPE-1857's finding 1 was in how those two call sites read this module's answer, not in the
+/// answer itself.
+///
+/// Set it back to `None` before the test returns; the [`ProbeReset`] guard does that even on a panic.
+#[cfg(test)]
+pub(crate) fn set_probe_injection_for_test(v: Option<ProbeInjection>) {
+    PROBE_INJECTION.with(|c| c.set(v));
+}
+
+/// RAII reset for [`set_probe_injection_for_test`] — an injected probe that outlives its test would
+/// silently corrupt every later test on the same thread, which is a far worse failure than the one it
+/// is there to find.
+#[cfg(test)]
+pub(crate) struct ProbeReset;
+
+#[cfg(test)]
+impl ProbeReset {
+    pub(crate) fn arm(v: ProbeInjection) -> Self {
+        set_probe_injection_for_test(Some(v));
+        ProbeReset
+    }
+}
+
+#[cfg(test)]
+impl Drop for ProbeReset {
+    fn drop(&mut self) {
+        set_probe_injection_for_test(None);
+    }
 }
 
 /// Probe a path's identity **without following links** — Unix reads it straight off the one
 /// `symlink_metadata` call this module already made before CPE-1642 (`dev`/`ino`/`nlink` are all on
 /// `MetadataExt`, no extra syscall).
 #[cfg(unix)]
-fn probe_no_follow(path: &std::path::Path) -> Probe {
+fn probe_facts_no_follow(path: &std::path::Path) -> Probe {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Probe::Link,
-        Ok(meta) => facts_or_unreadable(FileFacts {
+        Ok(meta) => real_facts(FileFacts {
             id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
             links: meta.nlink(),
             is_dir: meta.is_dir(),
@@ -1356,7 +1498,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
 /// past `MAX_PATH`, while a raw `CreateFileW` is capped at it. That mismatch made an over-`MAX_PATH` output
 /// fail to open with `ERROR_PATH_NOT_FOUND`, classify as [`Probe::Absent`], and fail OPEN.
 #[cfg(windows)]
-fn probe_no_follow(path: &std::path::Path) -> Probe {
+fn probe_facts_no_follow(path: &std::path::Path) -> Probe {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -1412,7 +1554,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
                 ReparseKind::NotReparse | ReparseKind::OpaqueData => {}
             }
         }
-        facts_or_unreadable(FileFacts {
+        real_facts(FileFacts {
             id: FileIdentity {
                 volume: u64::from(info.dwVolumeSerialNumber),
                 index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),

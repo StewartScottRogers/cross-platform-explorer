@@ -753,13 +753,37 @@ pub fn download_tree(
                     // hard-linked leaf is a per-entry *policy* skip, and one collided name must not cost
                     // the user every other file in the tree. The first cut of this did use `undelivered`
                     // and its own test reddened on it — see the test's doc for the measurement.
-                    if crate::batch_media::name_is_multiply_linked(&local) {
-                        eprintln!(
-                            "transfer: skipped entry whose local path is a pre-existing hard link \
-                             (a second name for a file that may live outside the download folder): {}",
-                            entry.path
-                        );
-                        return;
+                    //
+                    // **CPE-1857 Security-Auditor finding 1: this is a GATE, so `Unknown` must refuse.**
+                    // The `bool` form of this question folds "could not tell" into "no" — right at the
+                    // revert engine's refusal *classifier*, where the write is already settled, and a
+                    // fail-open here, where the bytes have not moved yet. `Unknown` therefore goes down
+                    // the same route `LeafProbe::Uninspectable` already takes: recorded in
+                    // `undelivered`, so the transfer cannot report `Ok(n)` for a tree it did not deliver.
+                    match crate::batch_media::name_links(&local) {
+                        crate::batch_media::NameLinks::Many(names) => {
+                            eprintln!(
+                                "transfer: skipped entry whose local path already has {names} names (a \
+                                 hard link, whose other names may live outside the download folder): {}",
+                                entry.path
+                            );
+                            return;
+                        }
+                        crate::batch_media::NameLinks::Unknown(why) => {
+                            let why = format!(
+                                "{}: could not check how many names the local path \"{}\" has, so \
+                                 nothing was written for it — refusing to guess rather than risk \
+                                 writing through a hard link into a file outside the download folder: \
+                                 {why}",
+                                entry.path,
+                                local.display()
+                            );
+                            eprintln!("transfer: FAILED to deliver {why}");
+                            undelivered.push(why);
+                            return;
+                        }
+                        crate::batch_media::NameLinks::One
+                        | crate::batch_media::NameLinks::NoFileHere => {}
                     }
                 }
                 LeafProbe::PreExistingSymlink => {
@@ -1481,6 +1505,77 @@ mod tests {
              outside the download root that the user never named"
         );
         assert_eq!(n, 0, "the hard-linked leaf must be skipped, not counted as delivered");
+    }
+
+    /// **CPE-1857 Security-Auditor finding 1, at the transfer gate.** Both halves, from one fixture.
+    ///
+    /// - A **degenerate identity** (a network redirector's zero file index) used to discard a perfectly
+    ///   readable link count and answer "not multiply linked", so a download to a share wrote through a
+    ///   pre-existing hard link with the guard present and silent.
+    /// - A genuinely **unreadable** probe must refuse, not pass. Folding "could not tell" into "no" is
+    ///   right at the revert engine's refusal classifier, where the write is already settled; here the
+    ///   bytes have not moved, so it fails open. It goes into `undelivered`, the route
+    ///   `LeafProbe::Uninspectable` already takes, so the transfer cannot report `Ok(n)` for a tree it
+    ///   did not deliver.
+    #[test]
+    fn cpe_1857_the_transfer_gate_refuses_when_it_cannot_read_the_link_count() {
+        let d = crate::fsutil::scratch_dir("cpe-transfer-1857-blind");
+        let root = d.join("root");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, b"placeholder").unwrap();
+        if std::fs::hard_link(&victim, root.join("target.txt")).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1857_the_transfer_gate_refuses_when_it_cannot_read_the_link_count: no \
+                 hard-link support here — NOTHING on this run covered either fail-open"
+            );
+            return;
+        }
+        std::fs::write(&victim, b"original").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("target.txt")).ok().as_deref(),
+            Some(&b"original"[..]),
+            "fixture is inert: the leaf and the outside file are not one object"
+        );
+
+        // Leg 1 — degenerate identity: the count is readable and must be used.
+        let cancel = AtomicBool::new(false);
+        let n = {
+            let _reset = crate::batch_media::ProbeReset::arm(
+                crate::batch_media::ProbeInjection::DegenerateIdentity,
+            );
+            download_tree(&OneFile, "", &root, &cancel).expect("a hard-linked leaf is a skip, not a failure")
+        };
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(&b"original"[..]),
+            "HARM: on a volume whose identity is degenerate — a network share — the download wrote the \
+             remote server's bytes through a hard link into a file outside the download root. The link \
+             COUNT was readable throughout; an identity gate that has nothing to do with this question \
+             threw it away"
+        );
+        assert_eq!(n, 0, "the hard-linked leaf must be skipped, not counted as delivered");
+
+        // Leg 2 — the probe genuinely cannot answer: refuse, and say so in `undelivered`.
+        let err = {
+            let _reset =
+                crate::batch_media::ProbeReset::arm(crate::batch_media::ProbeInjection::Unreadable);
+            download_tree(&OneFile, "", &root, &cancel).expect_err(
+                "a leaf whose link count could not be read must be recorded as undelivered, not written \
+                 and not silently dropped",
+            )
+        };
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(&b"original"[..]),
+            "HARM: the gate could not read how many names the leaf has and wrote through it anyway"
+        );
+        assert!(
+            err.contains("could not check how many names"),
+            "and it must be THIS guard's wording, not an incidental failure from elsewhere: {err}"
+        );
     }
 
     #[cfg(unix)]
