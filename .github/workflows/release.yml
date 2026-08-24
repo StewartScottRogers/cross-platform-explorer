@@ -121,6 +121,18 @@ jobs:
           [System.IO.File]::WriteAllText($confPath, ($j | ConvertTo-Json -Depth 40), $utf8NoBom)
           Write-Host "Windows self-signed signing enabled (thumbprint $($cert.Thumbprint))."
 
+      # CPE-1872 round-2 security-audit finding 3: latest.json has no .gitignore rule and nothing
+      # forbids committing one at the repo root. tauri-action writes latest.json to its own cwd
+      # (resolve(process.cwd(), 'latest.json') — see the comment on the verify job below) and SKIPS
+      # writing one at all when it finds no updater .sig artifacts ("Signature not found for the
+      # updater JSON. Skipping upload..."), which today is fail-closed — no manifest, nothing to
+      # (falsely) trust. A stray committed latest.json at the repo root would survive actions/checkout
+      # and turn that fail-closed behavior into a silent pass over a file nobody just built. Removing
+      # any pre-existing copy immediately before tauri-action runs guarantees whatever tauri-action
+      # itself writes (or doesn't) is the only thing anything downstream can ever see.
+      - name: Remove any stray latest.json before the build writes its own (CPE-1872)
+        run: rm -f latest.json
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -165,14 +177,65 @@ jobs:
           # Emit the updater manifest consumed by tauri.conf.json endpoints.
           includeUpdaterJson: true
 
-      # CPE-1058 — verify the updater manifest we just built, before it ships. Reads pubkey + version from
-      # tauri.conf.json, locates this runner's freshly-built latest.json + updater artifacts under
-      # src-tauri/target, and re-checks each platform's minisign signature against the configured pubkey
-      # over the real artifact bytes — the same check the runtime plugin performs. Fails the release on a
-      # bad manifest (wrong signature / version mismatch / malformed). Guarded by the signing-key secret so
-      # it SKIPS (never fails) when updater signing isn't configured, mirroring the catalog job below and
-      # the OS-code-signing pattern above, keeping fork/PR builds green. The verify crate is standalone and
-      # NOT linked into the app (its minisign dep never enters the shipped binary).
+  # CPE-1058, redesigned by CPE-1872's round-2 security audit — verify the PUBLISHED updater manifest,
+  # once, after the whole release matrix finishes, instead of each matrix leg checking its own local
+  # build output.
+  #
+  # Why a per-leg check couldn't be trusted (finding 1, HIGH): tauri-action's own upload-version-json.ts
+  # downloads the EXISTING latest.json release asset and seeds versionContent.platforms from it before
+  # merging in what THIS runner built — so the manifest that actually ships is the UNION of all three
+  # matrix legs' platforms, and no single leg's local src-tauri/target ever contains every platform the
+  # manifest names. The old per-leg step's "skip verification for any platform I don't have locally, then
+  # declare success once at least one signature checked" is exactly the hole a smuggled platform entry
+  # (an honest platform plus a bogus one pointing at an attacker-controlled URL, signed by a different
+  # key) walked straight through — independently reproduced at EXIT=0 by the security auditor and, again,
+  # locally against this repo's own fixtures (see crates/updater-verify/tests/release_guard.rs,
+  # smuggled_extra_platform_is_rejected). lib.rs's verify_update_manifest now hard-fails any platform it
+  # can't fetch rather than skipping it, which makes a partial, per-leg view of the manifest USELESS for
+  # anything but a false negative — so this job checks the real thing instead of a fragment of it.
+  #
+  # This is option (a) of the two the ticket allowed ("a post-matrix job that downloads the draft's
+  # latest.json plus every asset it references and verifies all platforms" vs. "--expect-platforms driven
+  # from the matrix leg"). Chosen over (b) because it verifies the actual bytes a real updater will fetch
+  # — the manifest AS PUBLISHED, from the release itself — rather than trusting each leg's belief about
+  # which platforms the eventual union will contain, which is exactly the belief that was wrong before.
+  # It also closes finding 2 (basename collisions in a dirty --search dir) as a side effect: every asset
+  # is downloaded fresh into an empty directory, so there is nothing stale for a basename to collide with.
+  #
+  # CPE-1872 round 3, Finding A (HIGH) — `needs: release` with no job-level `if:` used to mean this job
+  # is SKIPPED, not failed, the moment any one matrix leg fails. `release` is `fail-fast: false`, so the
+  # surviving legs run to completion and tauri-action has ALREADY uploaded their installers + a merged
+  # latest.json to the draft before the failure registers — net effect, on a partial matrix failure the
+  # draft was fully populated and nothing in the pipeline verified a single signature: worse than round 1,
+  # where each surviving leg at least checked its own artifacts. `if: ${{ !cancelled() }}` makes this job
+  # run regardless of `release`'s outcome (only an actual workflow cancellation skips it), so an
+  # incomplete matrix now produces a RED gate — this job will legitimately fail to fetch/verify whatever
+  # a broken matrix left behind — instead of no gate at all. See also `.claude/commands/run.md` step 1b,
+  # updated in the same commit to require this job's success before publishing a draft.
+  #
+  # Note: this job deliberately does NOT declare its own `permissions:` block, so it inherits the
+  # workflow-level `contents: write` above. That is load-bearing, not an oversight — `gh release
+  # download`/`gh release view` against a DRAFT release 404s on the plain `GET /releases/tags/{tag}`
+  # lookup unauthenticated readers get, and `gh` falls back to a listing call that requires push access.
+  # A future "tighten this job to `contents: read`" edit would silently break draft access here.
+  verify-published-manifest:
+    needs: release
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./crates/updater-verify -> target"
+
+      # Guarded by the signing-key secret, mirroring the OS-code-signing/catalog pattern elsewhere in
+      # this file, so fork/PR runs (and any run where updater signing isn't configured) stay green
+      # instead of failing on a manifest that was never signed in the first place.
       - name: Detect updater signing key
         id: sig
         shell: bash
@@ -181,14 +244,59 @@ jobs:
         run: |
           if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Verify updater manifest + signatures (CPE-1058)
+      # Download the manifest that is ACTUALLY on the draft release, plus every asset any platform
+      # entry's `url` names — not `--pattern '*'` (which would silently succeed on a manifest naming an
+      # asset that was somehow never uploaded); downloading each referenced name individually makes a
+      # missing asset a loud `gh` failure here rather than a quietly-smaller verified set downstream.
+      - name: Download the published manifest + every asset it references
         if: steps.sig.outputs.has == 'true'
-        working-directory: crates/updater-verify
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          cargo run --release --bin verify-release-artifacts -- \
-            --conf ../../src-tauri/tauri.conf.json \
-            --search ../../src-tauri/target
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$TAG" --pattern 'latest.json' --dir release-assets --clobber
+          names=$(jq -r '.platforms[].url' release-assets/latest.json | sed 's#.*/##' | sort -u)
+          if [ -z "$names" ]; then
+            echo "::error::latest.json on the draft release names no platform urls -- nothing to verify"
+            exit 1
+          fi
+          echo "assets referenced by the published manifest:"
+          echo "$names"
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            gh release download "$TAG" --pattern "$name" --dir release-assets --clobber
+          done <<< "$names"
+
+      # Requires EVERY platform the published manifest names to fetch and verify, per lib.rs's stricter
+      # (CPE-1872) semantics — `verify-release-artifacts` cannot report success on a partial check
+      # anymore, so there is no separate "--require-all-platforms" flag to remember to pass.
+      #
+      # CPE-1872 round 3, Finding B (MEDIUM) — the crypto check above only ever proves the ARTIFACT
+      # BYTES behind a `url` are genuine; it never looks at the url's host or path, because both this
+      # step and the download step above match purely by basename. A manifest can carry a perfectly
+      # real, correctly-signed artifact under a `url` pointing at a foreign host, or at the right repo
+      # but the wrong release tag, and pass clean while shipping every real updater client
+      # infrastructure this release never checked — demonstrated (`n1_foreign_host_same_basename`,
+      # `n2_wrong_tag_same_basename` in crates/updater-verify/tests/release_guard.rs) at EXIT=0 without
+      # this flag. `--expect-url-prefix` requires every platform's `url` to start with this repo's real
+      # `.../releases/download/<tag>/` prefix, enforced at the same site as the crypto check (in the
+      # Rust binary, covered by its own test suite) rather than as a separate shell-level grep here that
+      # a future refactor of the download step above could silently drop.
+      - name: Verify the published manifest + signatures (CPE-1058)
+        if: steps.sig.outputs.has == 'true'
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          cargo run --manifest-path crates/updater-verify/Cargo.toml --release --bin verify-release-artifacts -- \
+            --conf src-tauri/tauri.conf.json \
+            --manifest release-assets/latest.json \
+            --search release-assets \
+            --expect-url-prefix "https://github.com/${REPO}/releases/download/${TAG}/"
 
   # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
   # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by

@@ -1,0 +1,111 @@
+name: release pipeline watchdog
+
+# CPE-1872 — the plain `Release` workflow (release.yml) failed on every platform for 27 days / six
+# version tags (2026-08-04 to 2026-08-23) and nothing told anyone, because the workflow that actually
+# ships the installed app is release-sidecar.yml ([[always-install-sidecar-build]]), not this one, so
+# nobody watches release.yml's own Actions tab. Same "fails-by-succeeding" shape this repo keeps closing
+# (CPE-1806, CPE-1814, CPE-1815, CPE-1780, and the ffmpeg pin CPE-1762/1763 fixed the same way): the
+# absence of an alarm reads as the absence of a problem.
+#
+# Mechanism, and why it's the cheap option: react to `workflow_run` completion instead of polling on a
+# schedule. Both release workflows only run on a version-tag push — a scheduled canary (ffmpeg-pin-
+# freshness.yml's shape) could still go weeks between tags without ever re-checking, which is close to
+# the exact blind spot being closed here. Reacting to the run itself means the FIRST failed release
+# attempt is the one that gets reported, not the sixth. Watches both release workflows (their `name:`
+# fields, "Release" and "Release (sidecar-enabled)") — release-sidecar.yml is green today, but the
+# whole point of this ticket is that "currently green" is not a reason to leave a release pipeline
+# unwatched.
+#
+# Signal shape mirrors ffmpeg-pin-freshness.yml (CPE-1763): a deduped GitHub issue (the signal a human
+# actually sees) plus this run staying red as a backstop for as long as the underlying workflow is red.
+#
+# Dedupe deliberately does NOT copy ffmpeg-pin-freshness.yml's `existing=$(gh issue list ... || true)`
+# line verbatim: CPE-1794 found that shape swallows a transient `gh` failure (rate limit / 5xx / network
+# blip) into "no matching issue," which then creates a DUPLICATE instead of failing loud — the same
+# confident-and-wrong failure mode this whole workflow family exists to close, just one level down in
+# the dedupe step itself. Below, the lookup's exit status is captured separately from its output: a
+# failed lookup fails this step loudly and creates nothing, rather than guessing.
+
+on:
+  workflow_run:
+    workflows: ["Release", "Release (sidecar-enabled)"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  notify-on-failure:
+    # CPE-1872 round-2 security-audit finding 4: `== 'failure'` misses the three most likely ways a
+    # pipeline goes dark WITHOUT a visible red X on the workflow itself -- a workflow that fails to
+    # start at all reports `startup_failure`, a leg killed at its own timeout reports `timed_out`, and
+    # a cancelled run reports `cancelled`. None of those satisfied the old condition, so none of them
+    # would have filed an issue or gone red here either -- exactly the blind spot this workflow exists
+    # to close. `!= 'success'` catches all of those plus `failure` itself, and only excludes the one
+    # conclusion that means nothing is wrong.
+    #
+    # Known accepted noise: this also fires on a DELIBERATELY cancelled release (someone realizes a run
+    # is broken mid-flight and cancels it themselves) -- that files/dedupes an issue same as a genuine
+    # failure would. Deliberate, not a bug: a human watching the run already knows why it stopped, but
+    # anyone who only sees the resulting issue does not, and a deliberate cancellation is rare enough
+    # that the extra issue (closeable on sight) is worth it against the alternative of silently missing
+    # a REAL cancellation-shaped failure (e.g. a runner dying mid-job, which GitHub also reports as
+    # `cancelled`) that nobody deliberately triggered.
+    if: github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: File or update the tracking issue (deduped)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -uo pipefail
+          label="release-pipeline-red"
+          gh label create "$label" \
+            --color b60205 \
+            --description "A release workflow (release.yml / release-sidecar.yml) failed and needs attention" \
+            2>/dev/null || true # already exists -- fine
+
+          body_file="$(mktemp)"
+          {
+            printf '%s\n\n' "\`${WORKFLOW_NAME}\` failed on run [${RUN_ID}](${RUN_URL}), tag/branch \`${HEAD_BRANCH}\` (${HEAD_SHA})."
+            printf '%s\n' "release-pipeline-watchdog.yml (CPE-1872) exists specifically because a release workflow going red can otherwise sit unnoticed for weeks -- the workflow that actually ships the installed app is release-sidecar.yml ([[always-install-sidecar-build]]), so nobody routinely watches the other one's Actions tab."
+            printf '\n%s\n' "Filed automatically by CPE-1872. Please convert to a CPE-NNN ticket on triage (see Ticketing/wiki.md, \"External findings\")."
+          } > "$body_file"
+
+          # CPE-1794 lesson: do NOT let a transient `gh` failure read as "no existing issue" and file a
+          # duplicate. Capture the lookup's exit status separately from its output instead of the
+          # `... || true` shape that swallowed it in ffmpeg-pin-freshness.yml's sibling dedupe step.
+          # Deliberately NOT `2>&1` (CPE-1872 round-2 nit): merging stderr into the captured stdout
+          # means a `gh` WARNING on an otherwise-successful call (exit 0) would land inside `existing`
+          # and make it non-numeric, breaking the `gh issue comment` call below on the success path.
+          # stderr is left alone here, so it still reaches the job log directly on its own either way.
+          list_output="$(mktemp)"
+          if gh issue list --state open --label "$label" --json number --jq '.[0].number' > "$list_output"; then
+            existing="$(cat "$list_output")"
+          else
+            echo "::error::could not query existing issues (gh issue list failed -- see its own output above). Not filing a new issue: a lookup failure is not evidence there is no existing one, and creating on that guess is exactly the CPE-1794 defect this workflow avoids."
+            exit 1
+          fi
+
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            echo "an open issue already tracks this (#$existing) -- commenting with this run's details instead of filing a duplicate"
+            gh issue comment "$existing" --body-file "$body_file"
+          else
+            gh issue create \
+              --title "Release pipeline failed: ${WORKFLOW_NAME}" \
+              --label "$label" \
+              --body-file "$body_file"
+          fi
+
+          # The issue is the primary signal; this run staying red for as long as the watched workflow
+          # is red is the backstop for anyone who isn't watching Issues either (mirrors
+          # ffmpeg-pin-freshness.yml's convention).
+          echo "::error::${WORKFLOW_NAME} run ${RUN_ID} failed -- see the filed/updated issue above."
+          exit 1

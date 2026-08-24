@@ -39,6 +39,48 @@ empty or is missing an installer for the current OS:
 - If the run **failed**, STOP, report it, and point at `gh run view --log-failed`.
 - Either way, do NOT publish, and do NOT install.
 
+**1b-ii. Confirm the manifest was verified before publishing (CPE-1872).** Having installer assets is
+not the same as those assets being SAFE to publish — the `verify-published-manifest` job (`release.yml`)
+re-checks the manifest exactly as it now sits on the draft: every platform's minisign signature against
+the configured pubkey, AND that every platform's `url` actually points at this repo's own release
+rather than a foreign host or the wrong tag serving a same-named asset. Publishing without checking this
+job's result would let an unverified (or url-spoofed) `latest.json` go live to the real auto-updater.
+
+```powershell
+$runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=release.yml `
+  --json databaseId,headBranch --jq ".[] | select(.headBranch==\"<TAG>\") | .databaseId" | Select-Object -First 1
+if (-not $runId) { throw "no release.yml run found for tag <TAG> -- do not publish" }
+
+$verifyJobJson = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
+  --jq '.jobs[] | select(.name=="verify-published-manifest")'
+if (-not $verifyJobJson) { throw "no verify-published-manifest job found on run $runId -- do not publish" }
+$verifyJob = $verifyJobJson | ConvertFrom-Json
+
+# ONLY `success` may proceed to 1c. Anything else -- `failure`, `cancelled`, `skipped`, or the job
+# missing entirely -- means STOP.
+#
+# An earlier draft of this check also accepted `skipped`, on the reasoning that a missing
+# TAURI_SIGNING_PRIVATE_KEY makes the job skip itself the way the OS-code-signing steps do. The
+# round-3 security audit showed that reasoning is wrong twice over, and the second way is dangerous:
+#
+#   1. The signing-key guard is at STEP level (`if: steps.sig.outputs.has == 'true'`), not job level.
+#      With no key the job still runs checkout/toolchain/cache/detect, its two gated steps skip, and
+#      the JOB conclusion is `success` -- never `skipped`.
+#   2. So the only way this job reports `skipped` is its job-level `if: ${{ !cancelled() }}` being
+#      false -- i.e. THE RUN WAS CANCELLED. And a run cancelled mid-matrix is precisely the case
+#      where completed legs have already uploaded installers and a merged latest.json to the draft
+#      while the verify gate never ran. Accepting `skipped` therefore let the publish through in the
+#      exact scenario the gate exists to catch.
+if ($verifyJob.conclusion -ne "success") {
+  throw "verify-published-manifest did not pass (conclusion: $($verifyJob.conclusion)) -- STOP, do not publish this draft"
+}
+"verify-published-manifest: $($verifyJob.conclusion) -- OK to publish"
+```
+
+If this check throws, STOP — report it plainly and do NOT run 1c. This is exactly the gap CPE-1872's
+round-3 security audit found: a partial matrix failure could leave a fully-populated, unverified draft,
+and nothing upstream of this step would have caught it.
+
 **1c. Publish the draft:**
 ```powershell
 gh release edit <TAG> --repo StewartScottRogers/cross-platform-explorer --draft=false
