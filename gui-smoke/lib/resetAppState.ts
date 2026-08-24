@@ -44,6 +44,18 @@ const DEFAULT_WINDOW_HEIGHT = 700;
  *  expected (see this ticket's Work Log for the pasted evidence and the fix). */
 const CLOSE_BUTTON_SELECTOR = 'button[title="Close"], button[aria-label="Close"]';
 
+/** The full-screen dialog scrim — `position: fixed; inset: 0; z-index: 200`, `on:click={() =>
+ *  dispatch("close")}` — independently used by 60 `src/lib/components/*.svelte` dialogs (verified: every
+ *  one greps for `class="backdrop"`). Checked and clicked BEFORE the Close-button loop below, not after:
+ *  clicking the backdrop itself closes the dialog whether or not its own Close button can be located, so
+ *  it also recovers from an ORPHANED backdrop — one whose dialog content already unmounted (e.g. the
+ *  Close-button click handler ran) but whose backdrop element, for whatever reason, did not — which would
+ *  otherwise present as a full-viewport click-interceptor with no discoverable button inside it at all,
+ *  reproducible CI evidence of exactly that shape being this ticket's Work Log (`element click
+ *  intercepted`, deterministic across reruns, on the spec file immediately following one that opens a
+ *  backdrop-style dialog and explicitly closes it before its test function returns). */
+const BACKDROP_SELECTOR = ".backdrop";
+
 /** Bounded — a genuinely stuck overlay must not hang the reset forever; 5 rounds is generous headroom
  *  over the deepest nesting any spec in this suite produces (a dialog opened from within a drawer, at
  *  most two levels). */
@@ -76,6 +88,15 @@ const OPS_ROW_BUTTON_SELECTOR = ".ops .x";
 async function closeAnyOpenOverlay(): Promise<void> {
   for (let round = 0; round < MAX_CLOSE_ROUNDS; round++) {
     await browser.keys(["Escape"]);
+    const backdrops = await $$(BACKDROP_SELECTOR);
+    if ((await backdrops.length) > 0) {
+      try {
+        await backdrops[0]!.click();
+      } catch {
+        // best-effort — see this function's doc comment.
+      }
+      continue;
+    }
     const closeButtons = await $$(CLOSE_BUTTON_SELECTOR);
     if ((await closeButtons.length) === 0) return;
     try {
