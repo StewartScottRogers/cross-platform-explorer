@@ -1,23 +1,29 @@
 //! Slice B — the real-release guard (CPE-1058).
 //!
-//! Runs on a release runner *after* `tauri-action` has built the installers + the updater `latest.json`.
-//! Reads the `pubkey` + `version` straight from `tauri.conf.json`, locates the just-built `latest.json`
-//! and updater artifacts on disk, and runs [`cpe_updater_verify::verify_update_manifest`] over the real
-//! bytes — the same signature check the runtime plugin performs. Exits non-zero on a manifest that
-//! wouldn't verify, so a botched signing / version bump / manifest fails the release before it ships.
+//! Runs *once, after the whole release matrix completes* (CPE-1872 round 2), against the manifest as
+//! actually published on the draft release, plus every asset it references, downloaded fresh into
+//! `--search`. Reads the `pubkey` + `version` straight from `tauri.conf.json` and runs
+//! [`cpe_updater_verify::verify_update_manifest`] over the real bytes — the same signature check the
+//! runtime plugin performs. Exits non-zero on a manifest that wouldn't verify, so a botched signing /
+//! version bump / manifest fails the release before it ships.
 //!
-//! It verifies only the platforms whose artifacts are present on *this* runner (the release job is a
-//! per-OS matrix; each leg builds a slice of the platforms and merges into a shared `latest.json`). Other
-//! platforms are skipped here and verified on their own runner. If the manifest names platforms but *none*
-//! matched a local artifact, that is treated as a failure — a run that verified nothing is not a pass.
+//! Requires EVERY platform the manifest names to be fetched and verified (CPE-1872 round 2) — a
+//! platform this run can't fetch is a hard failure, never a skip, because the manifest is the union of
+//! the whole release matrix and no partial view of it is trustworthy. If `--expect-url-prefix` is given
+//! (CPE-1872 round 3), every platform's `url` must additionally start with that prefix — the crypto
+//! check alone only proves the artifact BYTES are genuine, not that the `url` a real updater will fetch
+//! points at this repo's own release rather than a foreign host or the wrong tag serving an
+//! identically-named asset.
 //!
 //! Usage:
 //! ```text
-//! verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>]
+//! verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>]
 //! ```
 //! Defaults: `--conf src-tauri/tauri.conf.json`, `--search src-tauri/target`, and the newest `latest.json`
-//! found under the search dirs. Skipping when signing secrets are absent is handled in `release.yml`
-//! (the step only runs when `TAURI_SIGNING_PRIVATE_KEY` is set), so this binary always expects real artifacts.
+//! found under the search dirs; `--expect-url-prefix` is unset (no URL-binding check) by default so ad
+//! hoc/test invocations without a real GitHub release context keep working. Skipping when signing
+//! secrets are absent is handled in `release.yml` (the step only runs when `TAURI_SIGNING_PRIVATE_KEY`
+//! is set), so this binary always expects real artifacts when it runs at all.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -31,6 +37,7 @@ fn main() -> ExitCode {
     let mut conf = PathBuf::from("src-tauri/tauri.conf.json");
     let mut manifest_path: Option<PathBuf> = None;
     let mut search_dirs: Vec<PathBuf> = Vec::new();
+    let mut expect_url_prefix: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -47,9 +54,13 @@ fn main() -> ExitCode {
                 Some(v) => search_dirs.push(PathBuf::from(v)),
                 None => return fail("--search needs a path"),
             },
+            "--expect-url-prefix" => match it.next() {
+                Some(v) => expect_url_prefix = Some(v.clone()),
+                None => return fail("--expect-url-prefix needs a value"),
+            },
             "-h" | "--help" => {
                 println!(
-                    "verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>]"
+                    "verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>]"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -138,11 +149,41 @@ fn main() -> ExitCode {
         Err(e) => return fail(&format!("cannot read {}: {e}", manifest_path.display())),
     };
 
+    // CPE-1872 round 3 (security-audit finding B): the crypto check below only ever proves the ARTIFACT
+    // BYTES behind a `url` are genuine -- it never looks at the url's host or path, because the loader
+    // matches purely by basename. A manifest can carry a perfectly-signed artifact under a `url` that
+    // points at a foreign host, or at the right repo but the wrong release tag, and pass clean while
+    // shipping real updater clients infrastructure this release never checked (demonstrated:
+    // `n1_foreign_host_same_basename`, `n2_wrong_tag_same_basename`, both EXIT=0 before this check).
+    // Enforced HERE, at the same site as the crypto check, rather than as a separate shell-level grep
+    // over the manifest in release.yml: this way the binding can never be silently dropped by a future
+    // refactor of the download step, and it is covered by this crate's own test suite like every other
+    // manifest invariant. Opt-in via `--expect-url-prefix` (unset by default) so ad hoc/test invocations
+    // that don't have a real GitHub release context keep working unchanged.
+    if let Some(prefix) = &expect_url_prefix {
+        let offenders = cpe_updater_verify::platforms_with_url_outside_prefix(&manifest, prefix);
+        if !offenders.is_empty() {
+            let detail = offenders
+                .iter()
+                .map(|(name, url)| format!("{name} -> {url}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return fail(&format!(
+                "manifest platform url(s) do not start with the expected prefix '{prefix}' -- refusing \
+                 to trust a manifest that could point real updater clients at unexpected infrastructure \
+                 even though the artifact bytes/signatures may check out: {detail}"
+            ));
+        }
+    }
+
     println!("verify-release-artifacts (CPE-1058)");
     println!("  config     : {}", conf.display());
     println!("  version    : {version}");
     println!("  manifest   : {}", manifest_path.display());
     println!("  search dirs: {}", search_dirs.len());
+    if let Some(prefix) = &expect_url_prefix {
+        println!("  url prefix : {prefix} (enforced)");
+    }
 
     // --- Verify. The loader resolves a platform `url` to a local file by basename; it counts how many
     //     artifacts it actually served so we can reject a run that verified nothing. ---

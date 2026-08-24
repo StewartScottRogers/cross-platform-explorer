@@ -201,8 +201,26 @@ jobs:
   # which platforms the eventual union will contain, which is exactly the belief that was wrong before.
   # It also closes finding 2 (basename collisions in a dirty --search dir) as a side effect: every asset
   # is downloaded fresh into an empty directory, so there is nothing stale for a basename to collide with.
+  #
+  # CPE-1872 round 3, Finding A (HIGH) — `needs: release` with no job-level `if:` used to mean this job
+  # is SKIPPED, not failed, the moment any one matrix leg fails. `release` is `fail-fast: false`, so the
+  # surviving legs run to completion and tauri-action has ALREADY uploaded their installers + a merged
+  # latest.json to the draft before the failure registers — net effect, on a partial matrix failure the
+  # draft was fully populated and nothing in the pipeline verified a single signature: worse than round 1,
+  # where each surviving leg at least checked its own artifacts. `if: ${{ !cancelled() }}` makes this job
+  # run regardless of `release`'s outcome (only an actual workflow cancellation skips it), so an
+  # incomplete matrix now produces a RED gate — this job will legitimately fail to fetch/verify whatever
+  # a broken matrix left behind — instead of no gate at all. See also `.claude/commands/run.md` step 1b,
+  # updated in the same commit to require this job's success before publishing a draft.
+  #
+  # Note: this job deliberately does NOT declare its own `permissions:` block, so it inherits the
+  # workflow-level `contents: write` above. That is load-bearing, not an oversight — `gh release
+  # download`/`gh release view` against a DRAFT release 404s on the plain `GET /releases/tags/{tag}`
+  # lookup unauthenticated readers get, and `gh` falls back to a listing call that requires push access.
+  # A future "tighten this job to `contents: read`" edit would silently break draft access here.
   verify-published-manifest:
     needs: release
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -255,14 +273,30 @@ jobs:
       # Requires EVERY platform the published manifest names to fetch and verify, per lib.rs's stricter
       # (CPE-1872) semantics — `verify-release-artifacts` cannot report success on a partial check
       # anymore, so there is no separate "--require-all-platforms" flag to remember to pass.
+      #
+      # CPE-1872 round 3, Finding B (MEDIUM) — the crypto check above only ever proves the ARTIFACT
+      # BYTES behind a `url` are genuine; it never looks at the url's host or path, because both this
+      # step and the download step above match purely by basename. A manifest can carry a perfectly
+      # real, correctly-signed artifact under a `url` pointing at a foreign host, or at the right repo
+      # but the wrong release tag, and pass clean while shipping every real updater client
+      # infrastructure this release never checked — demonstrated (`n1_foreign_host_same_basename`,
+      # `n2_wrong_tag_same_basename` in crates/updater-verify/tests/release_guard.rs) at EXIT=0 without
+      # this flag. `--expect-url-prefix` requires every platform's `url` to start with this repo's real
+      # `.../releases/download/<tag>/` prefix, enforced at the same site as the crypto check (in the
+      # Rust binary, covered by its own test suite) rather than as a separate shell-level grep here that
+      # a future refactor of the download step above could silently drop.
       - name: Verify the published manifest + signatures (CPE-1058)
         if: steps.sig.outputs.has == 'true'
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           cargo run --manifest-path crates/updater-verify/Cargo.toml --release --bin verify-release-artifacts -- \
             --conf src-tauri/tauri.conf.json \
             --manifest release-assets/latest.json \
-            --search release-assets
+            --search release-assets \
+            --expect-url-prefix "https://github.com/${REPO}/releases/download/${TAG}/"
 
   # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
   # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by

@@ -344,3 +344,105 @@ Two consequences, in order of severity:
   that release's matrix built, i.e. 3 today) rather than any earlier failure message; `catalog` running
   (not skipped); and, if anything about that run or a later one goes red, a `release-pipeline-red`
   issue appearing within minutes via `release-pipeline-watchdog.yml`.
+
+- **2026-08-23 (Worker, CPE-1872 round 3 — final two audit findings, attempt 3 of 3)** — Same worktree/
+  branch. The re-audit at `9fcfd163` confirmed round 2's fixes correct (both original vacuous passes
+  closed, all eleven original fixtures + 7 vacuous-pass-route probes now non-zero/correct, Findings 1/3/4
+  closed and verified closed). Two findings remained, both in the round-2 redesign itself, both fixed
+  here.
+
+  **FINDING A (HIGH) — the gate vanished on a partial matrix failure.** Root cause:
+  `verify-published-manifest` had `needs: release` and no job-level `if:`. Default GitHub Actions
+  semantics for `needs` run the dependent job only when EVERY needed job's result is `success` —
+  anything else (including `failure`) makes the dependent job `skipped`, not itself failed. `release` is
+  a `fail-fast: false` matrix; on a partial failure the surviving legs still run tauri-action to
+  completion and upload their installers + a merged `latest.json` to the draft BEFORE the overall
+  `release` job result registers as `failure`. Net effect: a partial matrix failure produced a fully
+  populated, entirely unverified draft, and the verify job silently never ran at all — worse than round
+  1, where each surviving leg at least checked its own local artifacts. Confirmed by reading GitHub's own
+  `needs`-skip semantics; no fixture needed to demonstrate a YAML conditional's documented behavior.
+
+  Fix: `.github/workflows/release.yml` — added `if: ${{ !cancelled() }}` at the `verify-published-
+  manifest` job level (only an actual workflow cancellation skips it now; `release` succeeding, failing,
+  or partially failing all cause this job to run and attempt to verify whatever the matrix left behind —
+  which will legitimately fail loud if the draft is incomplete/unverifiable, turning "no gate" into "red
+  gate"). Also documented, per the Foreman's note, why this job deliberately does NOT declare its own
+  `permissions:` block (it needs the inherited workflow-level `contents: write` — a draft release 404s on
+  the unauthenticated `GET /releases/tags/{tag}` lookup, and `gh` falls back to a listing call that needs
+  push access; a later "narrow this job's permissions" edit would silently break draft access).
+
+  Downstream half (explicitly called out as ours to fix too): `.claude/commands/run.md` step 1b published
+  a draft after checking only that it had installer assets — no check that verification passed. Added a
+  new **1b-ii** between the existing asset check (1b) and publish (1c): looks up the `release.yml` run for
+  the tag, reads the `verify-published-manifest` job's `conclusion` via `gh run view --json jobs`, and
+  requires `success` or `skipped` (the legitimate no-signing-key case) before allowing 1c to run at all —
+  `failure`/`cancelled`/a missing job throws and stops the publish.
+
+  **FINDING B (MEDIUM) — the round-2 fix closed the local-collision half of the url problem, not the
+  binding half.** Root cause: both the download step (`jq -r '.platforms[].url' | sed 's#.*/##'`) and the
+  verifier (`basename(url)` → local index lookup) reduce every platform `url` to its LAST path segment —
+  the host and every path segment before the basename (repo, release tag) are compared against nothing.
+  A manifest can carry a real, correctly-signed artifact under a `url` pointing at a foreign host, or at
+  the right repo but the wrong tag, and this pipeline verifies it clean: the bytes are genuine (`gh
+  release download` only ever pulls from THIS repo's THIS tag, regardless of what the manifest's `url`
+  claims), but the manifest that ships tells every real updater client to fetch from wherever that url
+  actually points. Reproduced exactly per the auditor's fixtures:
+  - RED: `n1_foreign_host_same_basename` (url = `https://evil.example/pwn/<basename>`) — `EXIT=0`,
+    `OK: verified 1 of 1 platform signature(s)...`.
+  - RED: `n2_wrong_tag_same_basename` (url = right repo, tag `v0.0.1` instead of the real one) —
+    `EXIT=0`, same false-pass message.
+
+  **(binary vs. shell-grep) reasoning, logged as instructed:** implemented the binding check as a new
+  `--expect-url-prefix <prefix>` flag on `verify-release-artifacts` (lib.rs gained `pub fn
+  platforms_with_url_outside_prefix(manifest_json, expected_prefix) -> Vec<(platform, url)>`), enforced
+  in the SAME binary that does the crypto check, rather than a `grep`/prefix-check inline in the download
+  step's bash. Reasoning: (1) it lives at the exact site the ticket's own invariant names — "the
+  signatures are checked over the bytes that actually ship" — extended to "and the url that ships with
+  them points where we say it does"; (2) it is covered by this crate's own test suite (5 new lib unit
+  tests + 5 new integration tests) the same way every other manifest invariant already is, rather than
+  being an untested shell one-liner a future edit to the download step could silently drop; (3) it keeps
+  the download step's job (fetch what the manifest already names, individually, failing loud on a
+  missing asset) separate from the verify step's job (decide whether what was fetched — and what it
+  claims — can be trusted), which is the same separation of concerns the round-2 redesign already used
+  between "download" and "verify".
+
+  Fix: `crates/updater-verify/src/lib.rs` — new `platforms_with_url_outside_prefix`.
+  `crates/updater-verify/src/bin/verify-release-artifacts.rs` — new `--expect-url-prefix` CLI flag,
+  checked immediately after the manifest is read (before the crypto pass), failing loud and listing every
+  offending platform + its url if any `url` doesn't start with the given prefix. `release.yml`'s "Verify
+  the published manifest + signatures" step now always passes `--expect-url-prefix
+  "https://github.com/${REPO}/releases/download/${TAG}/"` (`REPO`/`TAG` from `github.repository` /
+  `github.ref_name`, already in scope). GREEN re-run of both fixtures with the flag now set: `EXIT=1`,
+  `manifest platform url(s) do not start with the expected prefix '...' -- refusing to trust a manifest
+  that could point real updater clients at unexpected infrastructure even though the artifact
+  bytes/signatures may check out: windows-x86_64 -> https://evil.example/...` (and the wrong-tag
+  equivalent). Control test (`matching_prefix_url_still_passes_with_url_prefix_check_enforced`) confirms
+  a genuine matching-prefix url still passes with the check turned on — the fix doesn't just fail
+  everything.
+
+  **Watchdog note (not a finding, logged as asked).** `.github/workflows/release-pipeline-watchdog.yml`:
+  added a comment acknowledging that the round-2 `!= 'success'` widening also fires on a deliberately
+  cancelled release (a human cancelling a run they already know is broken) — accepted noise, not a bug;
+  the alternative (narrowing back to catch fewer `cancelled` cases) risks missing a REAL
+  runner-died-mid-job cancellation nobody triggered on purpose, which is exactly the blind spot Finding 4
+  closed.
+
+  **Verification.** `cargo test --release` in `crates/updater-verify`: **34/34 pass** (19 lib + 15
+  integration — 5 new lib tests for `platforms_with_url_outside_prefix`, 5 new integration tests
+  reproducing `n1`/`n2` RED-then-GREEN plus a matching-prefix control). `cargo clippy --all-targets --
+  -D warnings` clean. `.github/workflows/release.yml` and `release-pipeline-watchdog.yml` both parse
+  under `yaml.safe_load`; every non-PowerShell `run:` block (11 in `release.yml`, 1 in the watchdog)
+  passes `bash -n`. Dedupe-logic fake-`gh` harness was NOT re-run this round (no dedupe-logic changes in
+  round 3) — round 2's three-scenario proof stands unchanged.
+
+  **Environment note.** The Bash tool remained intermittently slow/unresponsive through this round too
+  (short timeouts still hit occasionally; longer ones and PowerShell were reliable). Used PowerShell +
+  `Read`/`Edit` tools for all file changes and verification, consistent with round 2. No real `gh`
+  command reached the repo this round — the dedupe harness from round 2 was not re-invoked since nothing
+  in round 3 touched its logic.
+
+  **What still can't be proven pre-tag.** Unchanged: no version tag pushed. The next tagged release must
+  additionally show `verify-published-manifest` running (not skipped) even in the face of any partial
+  matrix trouble, and — if a future release ever legitimately needs a foreign/relocated download host —
+  that `--expect-url-prefix` would need a deliberate, reviewed change here rather than silently accepting
+  it; that is by design, not a gap.

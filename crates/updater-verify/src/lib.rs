@@ -284,6 +284,37 @@ pub fn manifest_platform_count(manifest_json: &str) -> Option<usize> {
     Some(collect_platforms(&value).len())
 }
 
+/// CPE-1872 round 3 (security-audit finding B): the basename-matching download/verify pipeline reduces
+/// every platform `url` to its LAST path segment to find a local file to check bytes against -- which
+/// means the host and every path segment *before* the basename (the repo, and the release tag) are
+/// never checked against anything. A manifest can carry a perfectly genuine, correctly-signed artifact
+/// under a `url` that points at `https://evil.example/...same-basename` or at the right repo but the
+/// WRONG release tag, and this pipeline verifies it clean -- the bytes are real, but every real updater
+/// client that trusts this manifest is pointed at infrastructure the release process never checked
+/// (demonstrated: `n1_foreign_host_same_basename`, `n2_wrong_tag_same_basename`, both `EXIT=0` before
+/// this check). This closes the binding side of that gap: every platform's `url` must start with
+/// `expected_prefix` (the real `https://github.com/{repo}/releases/download/{tag}/` this release
+/// actually publishes under), or its platform name is returned as an offender. An unparseable manifest
+/// returns no offenders -- that failure is already reported elsewhere (shape errors, not a binding
+/// check); a platform with a missing/non-string `url` is reported as an offender with an empty url,
+/// which trivially fails the prefix check like any other malformed entry.
+pub fn platforms_with_url_outside_prefix(manifest_json: &str, expected_prefix: &str) -> Vec<(String, String)> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+        return Vec::new();
+    };
+    collect_platforms(&value)
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            let url = entry.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+            if url.starts_with(expected_prefix) {
+                None
+            } else {
+                Some((name, url))
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +543,81 @@ mod tests {
         assert_eq!(manifest_platform_count(&two_platform_manifest), Some(2));
 
         assert_eq!(manifest_platform_count("{ not json "), None);
+    }
+
+    const REAL_PREFIX: &str = "https://github.com/StewartScottRogers/cross-platform-explorer/releases/download/v1.2.3/";
+
+    #[test]
+    fn url_matching_prefix_is_not_an_offender() {
+        let sig = "irrelevant-for-this-check";
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": {
+                "windows-x86_64": { "signature": sig, "url": format!("{REAL_PREFIX}app_1.2.3_x64-setup.nsis.zip") }
+            }
+        })
+        .to_string();
+        assert_eq!(platforms_with_url_outside_prefix(&m, REAL_PREFIX), Vec::<(String, String)>::new());
+    }
+
+    /// CPE-1872 Finding B, `n1_foreign_host_same_basename`: a foreign host serving the exact same
+    /// basename a genuine artifact would have. The bytes behind that basename are never fetched from
+    /// the foreign host by this pipeline (gh release download only ever pulls from OUR release), but the
+    /// manifest ships this url to real updater clients regardless -- must be flagged.
+    #[test]
+    fn foreign_host_same_basename_is_an_offender() {
+        let sig = "irrelevant-for-this-check";
+        let evil_url = "https://evil.example/pwn/app_1.2.3_x64-setup.nsis.zip";
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": {
+                "windows-x86_64": { "signature": sig, "url": evil_url }
+            }
+        })
+        .to_string();
+        assert_eq!(
+            platforms_with_url_outside_prefix(&m, REAL_PREFIX),
+            vec![("windows-x86_64".to_string(), evil_url.to_string())]
+        );
+    }
+
+    /// CPE-1872 Finding B, `n2_wrong_tag_same_basename`: right host and repo, WRONG release tag. Same
+    /// class of problem -- points a real updater at a release line the current signing/verify pass never
+    /// checked -- and must be flagged just like a foreign host.
+    #[test]
+    fn wrong_tag_same_basename_is_an_offender() {
+        let sig = "irrelevant-for-this-check";
+        let wrong_tag_url =
+            "https://github.com/StewartScottRogers/cross-platform-explorer/releases/download/v0.0.1/app_1.2.3_x64-setup.nsis.zip";
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": {
+                "windows-x86_64": { "signature": sig, "url": wrong_tag_url }
+            }
+        })
+        .to_string();
+        assert_eq!(
+            platforms_with_url_outside_prefix(&m, REAL_PREFIX),
+            vec![("windows-x86_64".to_string(), wrong_tag_url.to_string())]
+        );
+    }
+
+    #[test]
+    fn unparseable_manifest_has_no_url_prefix_offenders() {
+        // Reported elsewhere (as Unparseable) -- this check has nothing to add on top of that.
+        assert_eq!(platforms_with_url_outside_prefix("{ not json ", REAL_PREFIX), Vec::new());
+    }
+
+    #[test]
+    fn missing_url_field_is_an_offender_with_empty_url() {
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": { "windows-x86_64": { "signature": "sig-only-no-url" } }
+        })
+        .to_string();
+        assert_eq!(
+            platforms_with_url_outside_prefix(&m, REAL_PREFIX),
+            vec![("windows-x86_64".to_string(), String::new())]
+        );
     }
 }

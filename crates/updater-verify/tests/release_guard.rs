@@ -418,3 +418,162 @@ fn basename_decoy_is_rejected() {
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous"));
 }
+
+// -- CPE-1872 round 3: Finding B (the url-binding gap the round-2 redesign left open) --------------
+//
+// The download step resolves every platform `url` to its LAST path segment and fetches that basename
+// from OUR release; the verifier matches a `url` back to a local file the same way. Neither step ever
+// looks at the url's host or the path segments before the basename -- so a manifest can carry a
+// perfectly genuine, correctly-signed artifact under a url that points real updater clients at a
+// foreign host, or at the right repo but the wrong tag, and this pipeline verified it clean. The
+// auditor's `n1_foreign_host_same_basename` / `n2_wrong_tag_same_basename` fixtures below reproduce
+// that exactly (EXIT=0 without `--expect-url-prefix`) and prove `--expect-url-prefix` -- now always
+// passed by release.yml's verify step -- closes it (EXIT!=0).
+
+/// Same shape as `scaffold`, but the manifest platform's `url` is caller-supplied instead of the
+/// hard-coded example.com one -- lets a fixture put a genuine, correctly-signed artifact behind an
+/// arbitrary url (foreign host / wrong tag / anything else) while the LOCAL file is still indexed and
+/// read by its basename, exactly like the real download step would leave it.
+fn scaffold_with_url(signed_bytes: &[u8], url: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
+    let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
+
+    let sig = minisign::sign(
+        Some(&kp.pk),
+        &kp.sk,
+        std::io::Cursor::new(signed_bytes),
+        Some("trusted"),
+        Some("untrusted"),
+    )
+    .expect("sign");
+    let signature_field = B64.encode(sig.into_string().as_bytes());
+
+    std::fs::write(root.join(ARTIFACT_NAME), signed_bytes).expect("write artifact");
+
+    let manifest = serde_json::json!({
+        "version": VERSION,
+        "platforms": {
+            "windows-x86_64": { "signature": signature_field, "url": url }
+        }
+    });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "plugins": { "updater": { "pubkey": pubkey_config } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    dir
+}
+
+fn run_with_optional_url_prefix(dir: &std::path::Path, prefix: Option<&str>) -> std::process::Output {
+    let mut cmd = Command::new(BIN);
+    cmd.args(["--conf", dir.join("tauri.conf.json").to_str().unwrap(), "--search", dir.to_str().unwrap()]);
+    if let Some(p) = prefix {
+        cmd.args(["--expect-url-prefix", p]);
+    }
+    cmd.output().expect("run verify-release-artifacts")
+}
+
+fn real_release_url_prefix() -> String {
+    format!("https://github.com/StewartScottRogers/cross-platform-explorer/releases/download/v{VERSION}/")
+}
+
+/// CPE-1872 Finding B, auditor's `n1_foreign_host_same_basename`, RED half: without
+/// `--expect-url-prefix` (the shape of every invocation before this fix), a foreign host serving the
+/// identical basename to a genuine, correctly-signed artifact passes clean. Documents that the gap is
+/// real and that the crypto check alone can never close it -- the artifact bytes genuinely are what was
+/// signed, the url just lies about where to get them.
+#[test]
+fn n1_foreign_host_same_basename_passes_without_url_prefix_check() {
+    let bytes = b"the real installer bytes";
+    let evil_url = format!("https://evil.example/pwn/{ARTIFACT_NAME}");
+    let dir = scaffold_with_url(bytes, &evil_url);
+    let out = run_with_optional_url_prefix(dir.path(), None);
+    assert!(
+        out.status.success(),
+        "documents the pre-fix gap: without --expect-url-prefix a foreign host must still pass here; \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// CPE-1872 Finding B, `n1_foreign_host_same_basename`, GREEN half: the exact same fixture, but invoked
+/// the way release.yml's verify step now always invokes it -- with `--expect-url-prefix` set to this
+/// repo's real release-download prefix. Must now fail.
+#[test]
+fn n1_foreign_host_same_basename_is_rejected_with_url_prefix_check() {
+    let bytes = b"the real installer bytes";
+    let evil_url = format!("https://evil.example/pwn/{ARTIFACT_NAME}");
+    let dir = scaffold_with_url(bytes, &evil_url);
+    let prefix = real_release_url_prefix();
+    let out = run_with_optional_url_prefix(dir.path(), Some(&prefix));
+    assert!(
+        !out.status.success(),
+        "a foreign-host url must fail once --expect-url-prefix is enforced; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("do not start with the expected prefix"));
+}
+
+/// CPE-1872 Finding B, auditor's `n2_wrong_tag_same_basename`, RED half: right host and repo, WRONG
+/// release tag, same basename as a genuine artifact. Same class of gap as n1 -- must pass pre-fix.
+#[test]
+fn n2_wrong_tag_same_basename_passes_without_url_prefix_check() {
+    let bytes = b"the real installer bytes";
+    let wrong_tag_url = format!(
+        "https://github.com/StewartScottRogers/cross-platform-explorer/releases/download/v0.0.1/{ARTIFACT_NAME}"
+    );
+    let dir = scaffold_with_url(bytes, &wrong_tag_url);
+    let out = run_with_optional_url_prefix(dir.path(), None);
+    assert!(
+        out.status.success(),
+        "documents the pre-fix gap: without --expect-url-prefix a wrong-tag url must still pass here; \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// CPE-1872 Finding B, `n2_wrong_tag_same_basename`, GREEN half: must now fail once
+/// `--expect-url-prefix` (release.yml's real prefix) is enforced.
+#[test]
+fn n2_wrong_tag_same_basename_is_rejected_with_url_prefix_check() {
+    let bytes = b"the real installer bytes";
+    let wrong_tag_url = format!(
+        "https://github.com/StewartScottRogers/cross-platform-explorer/releases/download/v0.0.1/{ARTIFACT_NAME}"
+    );
+    let dir = scaffold_with_url(bytes, &wrong_tag_url);
+    let prefix = real_release_url_prefix();
+    let out = run_with_optional_url_prefix(dir.path(), Some(&prefix));
+    assert!(
+        !out.status.success(),
+        "a wrong-tag url must fail once --expect-url-prefix is enforced; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("do not start with the expected prefix"));
+}
+
+/// Control: a genuine url that DOES match the expected prefix must still pass once
+/// `--expect-url-prefix` is enforced -- proves the check doesn't just fail everything.
+#[test]
+fn matching_prefix_url_still_passes_with_url_prefix_check_enforced() {
+    let bytes = b"the real installer bytes";
+    let good_url = format!("{}{ARTIFACT_NAME}", real_release_url_prefix());
+    let dir = scaffold_with_url(bytes, &good_url);
+    let prefix = real_release_url_prefix();
+    let out = run_with_optional_url_prefix(dir.path(), Some(&prefix));
+    assert!(
+        out.status.success(),
+        "a genuine matching-prefix url must still pass with the check enforced; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

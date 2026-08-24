@@ -44,6 +44,14 @@ jobs:
     # would have filed an issue or gone red here either -- exactly the blind spot this workflow exists
     # to close. `!= 'success'` catches all of those plus `failure` itself, and only excludes the one
     # conclusion that means nothing is wrong.
+    #
+    # Known accepted noise: this also fires on a DELIBERATELY cancelled release (someone realizes a run
+    # is broken mid-flight and cancels it themselves) -- that files/dedupes an issue same as a genuine
+    # failure would. Deliberate, not a bug: a human watching the run already knows why it stopped, but
+    # anyone who only sees the resulting issue does not, and a deliberate cancellation is rare enough
+    # that the extra issue (closeable on sight) is worth it against the alternative of silently missing
+    # a REAL cancellation-shaped failure (e.g. a runner dying mid-job, which GitHub also reports as
+    # `cancelled`) that nobody deliberately triggered.
     if: github.event.workflow_run.conclusion != 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
