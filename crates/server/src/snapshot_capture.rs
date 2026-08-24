@@ -805,11 +805,54 @@ fn manifests_naming(store_dir: &Path, wanted: &BTreeSet<String>) -> BTreeSet<Str
 /// wrong here. A single `read_dir` closes the window outright rather than narrowing it: there is no
 /// second call left for the race to land in. See the `cpe_1867_*` test below for the harness and the
 /// worst-`Ok` figure measured against this fix.
+///
+/// **Compared case-INsensitively against `wanted` (CPE-1864).** Windows and macOS open
+/// `blobs/05c2…b8` and `blobs/05C2…B8` as the same file; `validate_blob_name` accepts uppercase hex on
+/// purpose (see its own doc comment — nothing in this app ever *writes* one, but refusing the format
+/// would break restoring a store that already contains one, from an import, a sync, or a hand edit). A
+/// manifest is exactly that kind of trusted-but-external input — CPE-1861 already documents a plain file
+/// copy as a legitimate second namer of a blob — so a survivor manifest that happens to spell its hash in
+/// a different case than the candidate set was, before this fix, invisible to this witness: `f.hash ==`
+/// (or `wanted.contains`) compared byte-for-byte, uppercase against lowercase never matched, and the blob
+/// that survivor still needed could be freed out from under it by pruning any other manifest sharing that
+/// content. Measured by the independent Security Auditor: `keeper restores AFTER the prune:
+/// Err("...\blobs\05C200FE…B8: cannot find the file")`.
+///
+/// **What was decided about `validate_blob_name`, and why the fix is here instead.** Tightening
+/// `validate_blob_name` to refuse uppercase would not close this hole — the mismatch is between two hash
+/// *strings*, not about whether either one is individually well-formed — and it would open a worse one:
+/// `blob_source` (the read half `restore` uses) calls the same validator, so refusing uppercase would
+/// make `restore` fail a manifest that legitimately names an existing uppercase-spelled blob, on the
+/// store shapes the ticket calls out (an imported store, a different capture tool, a hand-recovered
+/// manifest) — turning a working restore into a refused one. Left permissive; the comparison is fixed
+/// instead.
+///
+/// **The return value is normalised back to `wanted`'s own spelling, not the disk manifest's.** Every
+/// caller does `BTreeSet` algebra (`difference`, `contains`) between this return value and a set built in
+/// `wanted`'s casing (`prune`'s `hashes`, `store_total_bytes`'s on-disk filenames — both always lowercase,
+/// since capture only ever writes lowercase). Matching case-insensitively but returning the disk
+/// manifest's own spelling would just move the exact-string mismatch one call further up instead of
+/// closing it — `hashes.difference(&still_named)` would fail to cancel out the shared hash again, only
+/// now because the two sides disagree in case rather than because one side never matched at all.
+///
+/// Every other hash comparison in this module was checked against this same shape and needs no change:
+/// `contains`/`get`/`release` on [`BlobStore`] and the delete loop in [`prune`] all key off hashes that
+/// are either this function's own (now-normalised) return value or drawn straight from `index.json`,
+/// which only this app's own capture ever writes (always lowercase) — there is no second place an
+/// externally-supplied spelling reaches a case-sensitive lookup.
 fn manifests_naming_strict(store_dir: &Path, wanted: &BTreeSet<String>) -> std::io::Result<BTreeSet<String>> {
     let mut found = BTreeSet::new();
     if wanted.is_empty() {
         return Ok(found);
     }
+    // Lowercase spelling -> `wanted`'s own original member, so a disk manifest's hash is matched
+    // case-insensitively but `found` still holds exactly `wanted`'s spelling (see the case-insensitivity
+    // note above for why that direction matters). If `wanted` itself somehow held two case-variant
+    // spellings of the same hash (only possible on a case-sensitive filesystem carrying two distinct blob
+    // files that differ only by case — not a shape this store ever produces), the later one in sorted
+    // order wins; harmless, because on such a filesystem the two are genuinely different files and this
+    // witness's case-insensitive matching is not what distinguishes them.
+    let by_lower: BTreeMap<String, &String> = wanted.iter().map(|h| (h.to_ascii_lowercase(), h)).collect();
     let dir = manifests_dir(store_dir);
     let entries = fs::read_dir(&dir)?;
     for entry in entries.flatten() {
@@ -820,8 +863,8 @@ fn manifests_naming_strict(store_dir: &Path, wanted: &BTreeSet<String>) -> std::
         let Ok(data) = fs::read_to_string(&path) else { continue };
         let Ok(m) = serde_json::from_str::<PersistedManifest>(&data) else { continue };
         for f in m.files.values() {
-            if wanted.contains(&f.hash) {
-                found.insert(f.hash.clone());
+            if let Some(&orig) = by_lower.get(&f.hash.to_ascii_lowercase()) {
+                found.insert(orig.clone());
             }
         }
         if found.len() == wanted.len() {
@@ -3171,6 +3214,82 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
+    /// CPE-1864 — **the witness compared hashes byte-for-byte, so a survivor spelling its hash in a
+    /// different case than the victim's own manifest was invisible to it.** Same shape as
+    /// `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` (a second manifest file
+    /// naming the same content is a legitimate namer this witness must see) — except here the second
+    /// namer's hash is the SAME content hash, merely re-spelled uppercase, which `validate_blob_name`
+    /// accepts and which Windows/macOS resolve to the identical `blobs/<hash>` file. The bug this guards
+    /// needs no case-insensitive filesystem to fail: the blob is a real `fs::remove_file`, gone entirely,
+    /// not merely mis-spelled — so this test is deterministic on every platform in the 3-OS matrix.
+    ///
+    /// **What the user loses today, stated plainly (per the ticket).** This is a false "blob missing"
+    /// from the witness's point of view — the dangerous direction, because it is the direction that
+    /// deletes content a live checkpoint still names. `prune` reports success and frees bytes; the harm
+    /// is silent until the survivor's own restore later fails to find a file that should still be there.
+    /// The opposite mistake — a false "blob present" — is not this bug's shape: nothing here makes an
+    /// absent blob look present, so it never causes `restore` to hand back content that silently
+    /// resolves to the wrong bytes.
+    #[test]
+    fn cpe_1864_a_survivor_spelling_its_hash_uppercase_still_protects_the_shared_blob() {
+        let src = scratch("1864-src");
+        let store = scratch("1864-store");
+        fs::write(src.join("a.txt"), b"irreplaceable, byte for byte").unwrap();
+        let victim =
+            capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        let victim_id = victim.manifest_id.clone();
+
+        // The survivor: a second manifest file naming the SAME content, but with its hash re-spelled
+        // uppercase — "editing the survivor's own manifest", the ticket's own threat model, and the same
+        // plant-a-copy shape CPE-1861's own `-backup` test uses for a legitimate second namer.
+        let mdir = manifests_dir(&store);
+        let survivor_id = format!("{victim_id}-upper");
+        let doc_path = mdir.join(format!("{victim_id}.json"));
+        let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&doc_path).unwrap()).unwrap();
+        doc["id"] = serde_json::json!(survivor_id);
+        let lower_hash = doc["files"]["a.txt"]["hash"].as_str().unwrap().to_string();
+        let upper_hash = lower_hash.to_ascii_uppercase();
+        doc["files"]["a.txt"]["hash"] = serde_json::json!(upper_hash);
+        fs::write(mdir.join(format!("{survivor_id}.json")), serde_json::to_string_pretty(&doc).unwrap())
+            .unwrap();
+
+        // FIXTURE LIVENESS — the uppercase spelling really reached disk, really differs from the lowercase
+        // spelling the actual blob file is named after, and the blob really is on disk under that
+        // lowercase name.
+        assert_ne!(upper_hash, lower_hash, "LIVE: sanity — the case flip must actually change the string");
+        assert!(
+            upper_hash.chars().any(|c| c.is_ascii_uppercase()),
+            "LIVE: the plant is not actually uppercase"
+        );
+        let on_disk = load_manifest(&store, &survivor_id).unwrap().files["a.txt"].hash.clone();
+        assert_eq!(on_disk, upper_hash, "LIVE: the uppercase spelling did not survive the round trip to disk");
+        assert!(blobs_dir(&store).join(&lower_hash).exists(), "LIVE: the shared blob must exist on disk");
+
+        // Prune the victim. The survivor's own manifest still names the exact same content — merely
+        // spelled differently — so the blob must survive.
+        prune(&store.to_string_lossy(), &victim_id).unwrap();
+
+        assert!(
+            blobs_dir(&store).join(&lower_hash).exists(),
+            "HARM: pruning the victim deleted a blob the survivor's manifest still names (uppercase \
+             spelling) — a false \"blob missing\" from the witness deleted content a live checkpoint \
+             still needs"
+        );
+
+        let dest = scratch("1864-dest");
+        restore(&store.to_string_lossy(), &survivor_id, &dest.to_string_lossy())
+            .unwrap_or_else(|e| panic!("HARM: the surviving checkpoint can no longer restore: {e}"));
+        assert_eq!(
+            fs::read(dest.join("a.txt")).unwrap(),
+            b"irreplaceable, byte for byte",
+            "HARM: the survivor did not restore byte-for-byte"
+        );
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
     /// CPE-1861's invariant, as a property over a store carrying every tamper shape at once: **every id
     /// `list_manifests` hands out is one `load_manifest` accepts.** Its only caller feeds those ids
     /// straight to `prune` and propagates the error with `?`, so an id that cannot be loaded does not
@@ -3693,6 +3812,11 @@ mod tests {
             let (mdir, away, stop, toggles) =
                 (mdir.clone(), away.clone(), Arc::clone(&stop), Arc::clone(&toggles));
             std::thread::spawn(move || {
+                // Test-only race harness, not a production write: `disallowed_methods` exists to keep an
+                // unguarded destructive rename out of real call paths, and this rename's whole job here IS
+                // to be destructive-and-unguarded, on a throwaway scratch directory, to prove the
+                // production code survives it.
+                #[allow(clippy::disallowed_methods)]
                 while !stop.load(Ordering::Relaxed) {
                     if fs::rename(&mdir, &away).is_ok() {
                         toggles.fetch_add(1, Ordering::Relaxed);
