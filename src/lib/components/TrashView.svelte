@@ -111,6 +111,11 @@
       node.style.top = `${top}px`;
     };
     place();
+    // MENUS.md: "The container is focused on open so keyboard users land in it" — same call as the two
+    // precedents this action models (`AgentMenu.svelte`'s and `ContextMenu.svelte`'s own `onMount`),
+    // missing from the first version of this file's own copy. Node.focus() after placement so the tab
+    // order and any Escape/arrow-key handling the menu grows later start from a real focus target.
+    node.focus();
     return { destroy() {} };
   }
 

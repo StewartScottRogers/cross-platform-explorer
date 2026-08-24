@@ -100,37 +100,44 @@ remaining at a 600px window (minus ~28px panel padding) goes entirely to the tit
 rather than clips. I could not get a real-browser screenshot sweep to confirm this pixel-for-pixel (see
 below) — flagging that plainly rather than implying it was checked.
 
-**gui-smoke: attempted, root-caused a real blocker, did not land green.** Built the real release binary
-(`npm run build && npm run tauri build -- --no-bundle`, ~9 min) and wrote
+**gui-smoke: attempted locally, blocked; the REAL CI failure has a confirmed, different root cause.**
+Built the real release binary (`npm run build && npm run tauri build -- --no-bundle`, ~9 min) and wrote
 `gui-smoke/specs/trash-titlebar.smoke.ts` (opens Trash from the Sidebar with one real seeded-and-deleted
 entry selected, sweeps the window through 880px/700px/600×400, hit-tests `.tv-x` and the overflow menu
-at each stop, snaps screenshots, then proves Escape closes the view). First attempt drove the delete
-through the app's own UI (right-click → the quickrow "Delete (Del)" icon); that click hung indefinitely
-(no WebDriver result at all, CDP or classic). Moved the seed to a NATIVE, pre-launch OS call instead
-(`Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(..., SendToRecycleBin)` via PowerShell in
-`wdio.conf.ts#seedTrashTitlebarFixture`, `gio trash` on Linux) to rule out the app's delete flow as the
-cause — the SAME hang reproduced anyway, this time on the Sidebar's plain "Open Trash" click, with the
-session log showing "Timed out receiving message from renderer". **Confirmed by the Foreman as a known,
-already-tracked environmental issue**: `~/.cargo/bin`'s `msedgedriver` is v150 against the machine's
-Edge v151, which hangs sessions partway with exactly that message — another agent reproduced the
-identical hang on the repo's OWN STOCK `open-dir.smoke.ts` the same day (see
-`.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md`), so this is not specific to `trash-titlebar.smoke.ts`
-or to `list_trash_stream`, and not a defect in this ticket's titlebar fix. Separately, and NOT
-determined to be the (or a) dominant cause: a `Shell.Application` COM probe run during the same
-debugging session found this dev machine's actual Windows Recycle Bin holds **843 items** (a mix of the
-user's own real files and prior sprint-run debris — confirmed by sampling its contents; did NOT empty
-it, since it holds real user files), which could independently slow `list_trash_stream`'s real
-enumeration; filed as its own observation in the PR body per the Foreman rather than chased further
-here. Left the spec checked in (well-formed, should pass once the driver/browser versions match) but
-listed its 4 cases in `gui-smoke/known-failing.json` under CPE-1822, each reason stating the driver-
-mismatch cause explicitly (not just a ticket number) so it can't be misread as "the feature is broken" —
-the ratchet forces those entries' removal automatically the moment a real CI run (matched versions)
-proves them passing.
+at each stop, snaps screenshots, then proves Escape closes the view). Locally (Windows dev machine) every
+attempt hung on ordinary clicks with no WebDriver result and "Timed out receiving message from renderer"
+— a real, separate issue on that one machine (`~/.cargo/bin`'s `msedgedriver` v150 vs. the machine's Edge
+v151), reproduced independently the same day on the repo's own stock `open-dir.smoke.ts`. **That
+diagnosis does NOT apply to the failure that actually gates this PR**: CI's `windows-latest` GUI-smoke
+job (the only leg that touches `msedgedriver`) shows `skipping` on every run of this PR — it never ran.
+The leg that ran and failed is `ubuntu-latest` / WebKitWebDriver, a completely different driver stack.
 
-**Screenshots for the Visual Critic: none captured.** The one real screenshot obtained
-(`trash-titlebar-fail.png`, from the failed run's `afterEach` handler, ~4 minutes after the click) shows
-the app still sitting on the seeded folder listing — the Trash view never opened in that run, so there is
-nothing to hand the Visual Critic from this pass. Saying this plainly rather than implying otherwise, per
+Pulled the real job log (`gh api repos/.../actions/jobs/97288403795/logs`, run 32676997154 shard 4) and
+its screenshot artifact to find the ACTUAL cause: `element click intercepted` clicking the Sidebar's
+Open-Trash row. The button's own rect at click time was `{x:20, y:644, width:193, height:30}` in the
+test's 1000×700 window (`getWindowRect` confirmed in the log). Cross-referencing
+`DropStackPanel.svelte`: its `.drop-stack-handle` toggle button is `position: fixed; left: 14px; bottom:
+14px; z-index: 149` and, critically, is rendered **unconditionally** — only the *expanded* panel sits
+behind the `{#if open}`, the handle itself is always on screen. At a 700px window height that places it
+at y≈658–686, x≈14–125 — a real, measured rectangular overlap with the Open-Trash row's rect, not a
+coincidence. **Root cause confirmed**: `Sidebar.svelte`'s Trash section (`order: 900`, near the bottom of
+a fully-expanded sidebar) can render its rows underneath `DropStackPanel`'s always-floating handle
+whenever the sidebar is tall enough to push them into that band — a pre-existing bug in two files this
+ticket never touches, not a defect in the titlebar fix. Left the spec checked in (it correctly exercises
+the real bug — its 4 cascading cases are exactly what a real user hitting this overlap would see) but
+listed its 4 cases in `gui-smoke/known-failing.json` under CPE-1822 with the confirmed cause spelled out
+(corrected from an earlier, wrong pass at this entry that cited the Windows-only driver mismatch — that
+was my mistake, caught in review). This does NOT auto-clear via the driver-version fix; it needs its own
+fix to `Sidebar.svelte`/`DropStackPanel.svelte` (e.g. reserving bottom padding in the sidebar's scroll
+region, or giving the floating handle a narrower hit target) — flagged for the Foreman to file as its own
+ticket rather than patched here under time pressure on two shared, unrelated files.
+
+**Screenshots for the Visual Critic: none usable captured.** `snap()`/`snapFailure()` write to the SAME
+filename per spec (`trash-titlebar-fail.png`), so with all 4 of this spec's cases failing in sequence,
+each `afterEach` overwrote the previous one — the artifact that survived is case 4's ("Escape closes the
+view"), which is a 600×400 shot of the still-unopened file listing (case 4 runs after case 3's own
+`setWindowSize(600, 400)`), not a shot of the actual Trash titlebar. There is nothing usable to hand the
+Visual Critic from either the local or the CI attempt. Saying this plainly rather than implying otherwise, per
 the sprint DoD.
 
 **Assumption logged:** the overflow menu's item ordering/wording reuses the exact labels the old always-
@@ -141,6 +148,8 @@ speaker, machine-translated to match the existing catalog's quality bar for the 
 locales). `HelpButton.svelte` is no longer used by `TrashView` (its dispatch is now inlined so the Docs
 row can be a proper `.row` menu item rather than the chip-styled button) — did not touch `HelpButton`
 itself, which is still used elsewhere.
+
+Reviewer follow-up (2026-08-23): added `node.focus()` at the end of `clampToAnchor` (TrashView.svelte) after placement, matching `AgentMenu.svelte`/`ContextMenu.svelte`'s own `onMount` — MENUS.md requires the container take focus on open so Escape/arrow-key handling works; the first version of this file's own copy missed that one line despite citing both precedents. Also corrected the `known-failing.json` reasons for `trash-titlebar.smoke.ts`'s 4 cases: the CI failure they're exempting is a CONFIRMED `DropStackPanel.svelte`/`Sidebar.svelte` click-interception overlap (see the gui-smoke paragraph above), not the Windows-only driver-version mismatch an earlier pass at those reasons wrongly cited.
 
 Also fixed two now-stale line-number pins this change shifted: `bidiEscape.guard.test.ts`'s
 `TrashView.svelte` REGISTRY entry (recomputed via the real `findUnsafeRenderLines` scan) and
