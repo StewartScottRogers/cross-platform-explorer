@@ -104,7 +104,7 @@ describe("filtered-hidden status-bar note (CPE-1708)", () => {
     await navigateIntoDrive();
     await waitFor(() =>
       expect(
-        screen.getByText("2 entries were hidden because their names could not be shown safely"),
+        screen.getByText("2 entries were hidden because their names could not be shown safely", { selector: ".filtered-hidden" }),
       ).toBeTruthy(),
     );
     // Never implies the LISTING failed — it succeeded; "ok.txt" is right there on screen too.
@@ -122,7 +122,7 @@ describe("filtered-hidden status-bar note (CPE-1708)", () => {
     await navigateIntoDrive();
     await waitFor(() =>
       expect(
-        screen.getByText("2 entries were hidden because their names could not be shown safely"),
+        screen.getByText("2 entries were hidden because their names could not be shown safely", { selector: ".filtered-hidden" }),
       ).toBeTruthy(),
     );
 
@@ -143,7 +143,7 @@ describe("unreadable-entries status-bar note (CPE-1780)", () => {
   it("shows the honest, person-facing note on the VERY FIRST paint of a listing with an unreadable row — not only after a later cache revalidation", async () => {
     unreadable = 3;
     await navigateIntoDrive();
-    await waitFor(() => expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" })).toBeTruthy());
     // Never implies the LISTING failed — it succeeded; "ok.txt" is right there on screen too.
     expect(screen.queryByText(/fail|error|could not load/i)).toBeNull();
   });
@@ -154,7 +154,7 @@ describe("unreadable-entries status-bar note (CPE-1780)", () => {
   it("clears the note on Ctrl+T (new tab lands on Home, which has no listing at all)", async () => {
     unreadable = 3;
     await navigateIntoDrive();
-    await waitFor(() => expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" })).toBeTruthy());
 
     await fireEvent.keyDown(window, { key: "t", ctrlKey: true });
 
@@ -170,9 +170,9 @@ describe("unreadable-entries status-bar note (CPE-1780)", () => {
     await navigateIntoDrive();
     await waitFor(() =>
       expect(
-        screen.getByText("2 entries were hidden because their names could not be shown safely"),
+        screen.getByText("2 entries were hidden because their names could not be shown safely", { selector: ".filtered-hidden" }),
       ).toBeTruthy(),
     );
-    expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy();
+    expect(screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" })).toBeTruthy();
   });
 });

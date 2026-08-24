@@ -42,15 +42,22 @@ describe("StatusBar filtered-hidden note (CPE-1708)", () => {
 
   it("says N entries were hidden, for a person, when the count is non-zero", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 3 });
+    // CPE-1833: `{ selector: ".filtered-hidden" }` scopes to the VISIBLE pill — the same sentence is
+    // now ALSO present, verbatim, in the persistent `.sr-only` live-region announcer (see
+    // `StatusBar.a11y.test.ts`), so an unscoped `getByText` matches two elements.
     expect(
-      screen.getByText("3 entries were hidden because their names could not be shown safely"),
+      screen.getByText("3 entries were hidden because their names could not be shown safely", {
+        selector: ".filtered-hidden",
+      }),
     ).toBeTruthy();
   });
 
   it("uses the singular for exactly one", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 1 });
     expect(
-      screen.getByText("1 entry was hidden because its name could not be shown safely"),
+      screen.getByText("1 entry was hidden because its name could not be shown safely", {
+        selector: ".filtered-hidden",
+      }),
     ).toBeTruthy();
   });
 
@@ -66,7 +73,9 @@ describe("StatusBar filtered-hidden note (CPE-1708)", () => {
   // reassurance.
   it("puts the full sentence — plus the loaded-successfully reassurance — in the title tooltip, not a different fixed string", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 3 });
-    const note = screen.getByText("3 entries were hidden because their names could not be shown safely");
+    const note = screen.getByText("3 entries were hidden because their names could not be shown safely", {
+      selector: ".filtered-hidden",
+    });
     expect(note.getAttribute("title")).toContain(
       "3 entries were hidden because their names could not be shown safely",
     );
@@ -82,17 +91,18 @@ describe("StatusBar unreadable-entry note (CPE-1780)", () => {
 
   it("says it couldn't read N entries, for a person, when the count is non-zero", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 3 });
-    expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy();
+    // CPE-1833: scoped to the VISIBLE pill — see the comment on the filteredHidden test above.
+    expect(screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" })).toBeTruthy();
   });
 
   it("uses the singular for exactly one", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 1 });
-    expect(screen.getByText("Couldn't read 1 entry")).toBeTruthy();
+    expect(screen.getByText("Couldn't read 1 entry", { selector: ".unreadable" })).toBeTruthy();
   });
 
   it("puts the full sentence — plus the rest-loaded-successfully reassurance — in the title tooltip", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, unreadableCount: 3 });
-    const note = screen.getByText("Couldn't read 3 entries");
+    const note = screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" });
     expect(note.getAttribute("title")).toContain("Couldn't read 3 entries");
     expect(note.getAttribute("title")).toContain("loaded successfully");
   });
@@ -102,8 +112,10 @@ describe("StatusBar unreadable-entry note (CPE-1780)", () => {
   // distinctly from `filteredHiddenText` at a glance, not just that the two counts differ.
   it("leads with a different word than filteredHidden's note, so a fast skim can't read them as one count", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 2, unreadableCount: 3 });
-    const filtered = screen.getByText("2 entries were hidden because their names could not be shown safely");
-    const unreadable = screen.getByText("Couldn't read 3 entries");
+    const filtered = screen.getByText("2 entries were hidden because their names could not be shown safely", {
+      selector: ".filtered-hidden",
+    });
+    const unreadable = screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" });
     expect(filtered.textContent?.trim().split(/\s+/)[0]).not.toBe(unreadable.textContent?.trim().split(/\s+/)[0]);
   });
 
@@ -114,11 +126,21 @@ describe("StatusBar unreadable-entry note (CPE-1780)", () => {
   it("renders alongside filteredHidden as two DISTINCT notes, never merged into one count or sentence", () => {
     render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 2, unreadableCount: 3 });
     expect(
-      screen.getByText("2 entries were hidden because their names could not be shown safely"),
+      screen.getByText("2 entries were hidden because their names could not be shown safely", {
+        selector: ".filtered-hidden",
+      }),
     ).toBeTruthy();
-    expect(screen.getByText("Couldn't read 3 entries")).toBeTruthy();
-    // Neither note's wording is a superset of the other's fact.
-    expect(screen.queryByText(/5 entries|hidden.*couldn.t read|couldn.t read.*hidden/i)).toBeNull();
+    expect(screen.getByText("Couldn't read 3 entries", { selector: ".unreadable" })).toBeTruthy();
+    // Neither note's wording is a superset of the other's fact. Scoped to VISIBLE pills only
+    // (`:not(.sr-only)`) — CPE-1833's persistent announcer legitimately concatenates both sentences
+    // into one text node FOR SCREEN READERS (so a simultaneous change announces as one coherent
+    // sentence — see `StatusBar.a11y.test.ts`), which is not the "merged/conflated" defect this
+    // assertion guards against; it would otherwise false-positive on that announcer's own text.
+    expect(
+      screen.queryByText(/5 entries|hidden.*couldn.t read|couldn.t read.*hidden/i, {
+        selector: ":not(.sr-only)",
+      }),
+    ).toBeNull();
   });
 });
 

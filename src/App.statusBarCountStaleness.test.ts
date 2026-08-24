@@ -196,7 +196,7 @@ describe("a cache-served paint never inherits the previous folder's counts (CPE-
 
     await intoDrive();
     await intoPhotos();
-    await waitFor(() => expect(screen.getByText(FILTERED_NOTE)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(FILTERED_NOTE, { selector: ".filtered-hidden" })).toBeTruthy());
 
     await backToDrive();
     expect(screen.queryByText(FILTERED_NOTE)).toBeNull();
@@ -215,7 +215,7 @@ describe("a cache-served paint never inherits the previous folder's counts (CPE-
 
     await intoDrive();
     await intoPhotos();
-    await waitFor(() => expect(screen.getByText(UNREADABLE_NOTE)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(UNREADABLE_NOTE, { selector: ".unreadable" })).toBeTruthy());
 
     await backToDrive();
     expect(screen.queryByText(UNREADABLE_NOTE)).toBeNull();
@@ -238,7 +238,7 @@ describe("the background revalidation refreshes both counts (CPE-1840)", () => {
     expect(screen.queryByText(FILTERED_NOTE)).toBeNull(); // cache-served: 0 (unknown) for now
 
     await waitFor(
-      () => expect(screen.getByText("4 entries were hidden because their names could not be shown safely")).toBeTruthy(),
+      () => expect(screen.getByText("4 entries were hidden because their names could not be shown safely", { selector: ".filtered-hidden" })).toBeTruthy(),
       { timeout: 3000 },
     );
   });
@@ -253,7 +253,7 @@ describe("the background revalidation refreshes both counts (CPE-1840)", () => {
     await backToDrive();
     expect(screen.queryByText(UNREADABLE_NOTE)).toBeNull();
 
-    await waitFor(() => expect(screen.getByText("Couldn't read 6 entries")).toBeTruthy(), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByText("Couldn't read 6 entries", { selector: ".unreadable" })).toBeTruthy(), { timeout: 3000 });
   });
 });
 
@@ -270,8 +270,8 @@ describe("the <StatusBar> gate, pinned per arm (CPE-1840)", () => {
     countPhotos(2, 3);
     await intoDrive();
     await intoPhotos();
-    await waitFor(() => expect(screen.getByText(FILTERED_NOTE)).toBeTruthy());
-    expect(screen.getByText(UNREADABLE_NOTE)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(FILTERED_NOTE, { selector: ".filtered-hidden" })).toBeTruthy());
+    expect(screen.getByText(UNREADABLE_NOTE, { selector: ".unreadable" })).toBeTruthy();
   }
 
   // isHome arm. Mirrors App.filteredHiddenNote.test.ts's Ctrl+T cases; kept here so all four arms of the
