@@ -234,7 +234,11 @@ const REGISTRY: Record<string, string[]> = {
   // UI text this engine can't prove safe (numbers, i18n-free plain labels) — none of it is a filesystem
   // name/path, and `notice`/`filteredHiddenText`/`filteredHiddenTitle` (already escaped at the source
   // that builds them, see CPE-1708) do not appear here, proving the fix.
-  "StatusBar.svelte": ["96:itemCount","96:totalCount","98:itemCount","98:itemCount === 1 ? \"\" : \"s\"","104:selectedCount","104:selectedSize > 0 ? ` — ${formatSize(selectedSize)}` : \"\"","117:filteredHiddenTitle","118:filteredHiddenText","126:unreadableTitle","127:unreadableText","136:git.upstream ? `Tracking ${git.upstream}` : \"No upstream branch\"","137:git.branch || \"detached\"","138:git.behind","139:git.ahead","153:diskLabel"],
+  // CPE-1833: line numbers shifted (the accessible-announcement fix added script/markup above these),
+  // and `advisoryAnnouncement` (168) is a NEW entry — it is built purely from `filteredHiddenText`/
+  // `unreadableText` (both already in this list, both counts + fixed phrases, never a filesystem
+  // name/path), so it is exactly as safe as the two it concatenates.
+  "StatusBar.svelte": ["115:itemCount","115:totalCount","117:itemCount","117:itemCount === 1 ? \"\" : \"s\"","123:selectedCount","123:selectedSize > 0 ? ` — ${formatSize(selectedSize)}` : \"\"","145:filteredHiddenTitle","146:filteredHiddenText","156:unreadableTitle","157:unreadableText","168:advisoryAnnouncement","176:git.upstream ? `Tracking ${git.upstream}` : \"No upstream branch\"","177:git.branch || \"detached\"","178:git.behind","179:git.ahead","193:diskLabel"],
 
   // --- CPE-1798 sibling audit: AgentMenu's `sessionLabel` prop is built by its one real caller
   // (Sidebar.svelte:436, `${s.agentName || s.agentId || "Agent"}${model ? " · " + model : ""}`) from an

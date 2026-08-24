@@ -10,11 +10,13 @@ const notice = noticeParam === "long" ? "long" : noticeParam === "none" ? "none"
 // CPE-1859: forwarded verbatim to the inner document; see inner-main.ts for what they toggle.
 const git = params.get("git") === "off" ? "off" : "on";
 const disk = params.get("disk") === "off" ? "off" : "on";
+// CPE-1836: forwarded verbatim — the compound busy-row scenario.
+const busy = params.get("busy") === "1" ? "1" : "0";
 
 const frame = document.getElementById("stage-frame") as HTMLIFrameElement;
 frame.style.width = `${width}px`;
-frame.style.height = "120px";
-frame.src = `./inner.html?notice=${notice}&git=${git}&disk=${disk}`;
+frame.style.height = "160px";
+frame.src = `./inner.html?notice=${notice}&git=${git}&disk=${disk}&busy=${busy}`;
 
 type Rect = { left: number; right: number; width: number };
 type Diag = {
@@ -25,6 +27,14 @@ type Diag = {
   itemCount?: Rect | null;
   git?: Rect | null;
   disk?: Rect | null;
+  // CPE-1836: the full per-child sweep computed inside the iframe (see inner-main.ts) — forwarded
+  // verbatim so the OUTER readout (what `--dump-dom` on index.html actually captures) is itself the
+  // complete, self-checking record, not just the four legacy fields above.
+  allRects?: Record<string, Rect | null>;
+  overlapPairs?: string[];
+  spillOutside?: string[];
+  gitChildOverhangPx?: Record<string, number>;
+  gitOverflowPaintProbe?: { x: number; y: number; hitClass: string | null; hitIsGitDescendant: boolean } | null;
 };
 
 function readDiag(): Diag | undefined {
@@ -64,6 +74,22 @@ function render(diag: Diag | undefined) {
         );
       }
     }
+  }
+  // CPE-1836: print every measured child plus the two derived checks. Both arrays must be empty for a
+  // clean render — `overlapPairs` catches a sibling painting over a sibling, `spillOutside` catches a
+  // child escaping `.statusbar`'s own padding box (the resize-grip is EXPECTED to sit at the padding
+  // edge / slightly past it by design — see its own `right: 0; bottom: 0;` CSS — so it is excluded from
+  // the "must stay inside padding" spill check by the inner document's own selector set intentionally
+  // measuring it, but reported here unfiltered so a human reviewing the dump sees the raw number).
+  if (diag.allRects) {
+    lines.push("--- all children ---");
+    for (const [label, r] of Object.entries(diag.allRects)) {
+      lines.push(`${label.padEnd(14)} ${diag.allRects && r ? `left=${r.left.toFixed(1)} right=${r.right.toFixed(1)} w=${r.width.toFixed(1)}` : "ABSENT"}`);
+    }
+    lines.push(`overlapPairs=${JSON.stringify(diag.overlapPairs ?? [])}`);
+    lines.push(`spillOutside=${JSON.stringify(diag.spillOutside ?? [])}`);
+    lines.push(`gitChildOverhangPx=${JSON.stringify(diag.gitChildOverhangPx ?? {})}`);
+    lines.push(`gitOverflowPaintProbe=${JSON.stringify(diag.gitOverflowPaintProbe ?? null)}`);
   }
   readout.textContent = lines.join("\n");
   (window as unknown as { __harnessDiag?: Diag }).__harnessDiag = diag;

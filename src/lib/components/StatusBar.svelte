@@ -88,6 +88,25 @@
     ? "Couldn't read 1 entry"
     : `Couldn't read ${unreadableCount} entries`;
   $: unreadableTitle = `${unreadableText} — the rest of the folder loaded successfully.`;
+
+  // CPE-1833: neither note was ever announced to a screen reader — `.filtered-hidden`/`.unreadable`
+  // above are `{#if}`-conditional, so each appears as a BRAND NEW element already holding its final
+  // text, which is exactly the shape Chromium+Windows AT (WebView2 with NVDA/Narrator — this app)
+  // routinely fails to announce even with `role="status"` on the span itself (the same lesson CPE-1816
+  // recorded the same day: a live region must already exist in the accessibility tree BEFORE its
+  // content changes, or the mutation can be missed). The fix is a SEPARATE, always-mounted announcer —
+  // never conditionally rendered, never removed — decoupled from the two visible pills (which keep
+  // their own colour/truncation/title exactly as before, see below). Its own text is a single reactive
+  // string, so a screen reader observing it sees ONE full-sentence update, not two independent
+  // insertions; `aria-atomic="true"` (below, in the markup) makes that a single coherent announcement of
+  // the whole sentence even when both notes change in the same tick, rather than "two competing
+  // sentences" (CPE-1833 AC).
+  $: advisoryAnnouncement = [
+    filteredHidden > 0 ? filteredHiddenText : null,
+    unreadableCount > 0 ? unreadableText : null,
+  ]
+    .filter((s): s is string => s !== null)
+    .join(". ");
 </script>
 
 <div class="statusbar">
@@ -113,8 +132,17 @@
     <!-- CPE-1708: only ever a status-bar NOTE about the listing, never a synthetic ROW in it (see
          `filteredHidden`'s doc above for why that distinction is the whole point). `title` carries
          the SAME sentence (see `filteredHiddenTitle` above) plus the reassurance, so a narrow window
-         truncating the visible text (see `.filtered-hidden` below) never loses either. -->
-    <span class="filtered-hidden" title={filteredHiddenTitle}>
+         truncating the visible text (see `.filtered-hidden` below) never loses either. CPE-1833:
+         `tabindex="0"` plus the `:focus-visible` rule below make the full sentence reachable without a
+         mouse — `title` alone is hover-only. The element's own text content is already the FULL
+         sentence (CSS `text-overflow: ellipsis` only clips what's painted, never the DOM text), so no
+         separate `aria-label` is needed for the accessible name; screen-reader announcement of the
+         mid-session change is handled by the separate persistent live region below, not by this span. -->
+    <!-- svelte-ignore a11y-no-noninteractive-tabindex -- deliberate: a plain focusable static-text span
+         is the WCAG "reveal truncated content on focus" technique (mirrors LogPreview.svelte's
+         `.log-body` SCR29 precedent for the same lint rule). Without this the text is permanently
+         truncated for any keyboard user with no mouse to hover the `title` with. -->
+    <span class="filtered-hidden" title={filteredHiddenTitle} tabindex="0">
       {filteredHiddenText}
     </span>
   {/if}
@@ -122,11 +150,23 @@
   {#if unreadableCount > 0}
     <!-- CPE-1780: a separate NOTE from `.filtered-hidden` above, worded for a different fact (a read
          failure, not a name refused) — see `unreadableCount`'s doc. `--warn` (not `--accent`) because this
-         one IS a real read failure, not just an intentional/successful name filter. -->
-    <span class="unreadable" title={unreadableTitle}>
+         one IS a real read failure, not just an intentional/successful name filter. CPE-1833:
+         `tabindex="0"` — see the comment on `.filtered-hidden` above; same reasoning applies here. -->
+    <!-- svelte-ignore a11y-no-noninteractive-tabindex -- see the comment on `.filtered-hidden` above. -->
+    <span class="unreadable" title={unreadableTitle} tabindex="0">
       {unreadableText}
     </span>
   {/if}
+
+  <!-- CPE-1833: the announcer. ALWAYS mounted — never `{#if}`-gated — so it is already present in the
+       accessibility tree before either note's text changes; only its text content mutates. `aria-atomic`
+       re-announces the WHOLE region on any change, so when both notes change in the same tick they read
+       as one coherent sentence instead of two competing ones. Visually hidden (`.sr-only`, below) because
+       the two pills above already carry the same facts for sighted users — this exists purely so the
+       change is announced at all, per the AC's "verify the mid-change announcement actually happens". -->
+  <div class="advisory-live sr-only" role="status" aria-live="polite" aria-atomic="true">
+    {advisoryAnnouncement}
+  </div>
 
   {#if notice}
     <span class="notice" class:error={noticeIsError} title={displaySafeName(notice)}>{displaySafeName(notice)}</span>
@@ -250,6 +290,45 @@
     flex: 0 var(--priority-shrink) auto;
   }
 
+  /* CPE-1833: the full sentence, reachable without a mouse. `title` (kept above, on both pills, for
+     hover) is not exposed to keyboard-only or screen-reader users, so `tabindex="0"` on `.filtered-hidden`
+     / `.unreadable` makes each Tab-reachable, and this rule reveals the whole sentence on focus for a
+     sighted keyboard user who has no mouse to hover with — the visual truncation these pills otherwise
+     apply is a rendering choice, not a loss of the underlying text, so focus simply turns that clipping
+     back off. `position: relative` + `z-index` so the revealed box draws OVER whatever neighbour it would
+     otherwise be clipped against, rather than reflowing the row (reflow-on-focus would itself be a
+     usability trap — the bar's fixed height is load-bearing, see the ordering comment above `.dim`). */
+  .filtered-hidden:focus-visible,
+  .unreadable:focus-visible {
+    position: relative;
+    z-index: 1;
+    overflow: visible;
+    white-space: normal;
+    max-width: min(90vw, 420px);
+    background: var(--surface);
+    border-radius: 4px;
+    box-shadow: 0 0 0 1px var(--border-strong), 0 2px 6px rgba(0, 0, 0, 0.35);
+    padding: 2px 4px;
+  }
+
+  /* CPE-1833: the persistent announcer for both advisory notes. ALWAYS mounted (see the markup comment
+     above it) — a live region that appears/disappears with its content is exactly the shape that goes
+     unannounced. Visually hidden with the standard "clip, don't display:none" technique: `display: none`
+     / `visibility: hidden` remove a node from the accessibility tree in most browsers, which would defeat
+     the whole point, whereas clipping a 1x1 box keeps it in the tree and reachable by AT while invisible
+     to sighted users (who already see the same facts in the coloured pills above). */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   /* The notice/toast text (CPE-1660): a plain <span> had no overflow strategy at all, so a notice
      longer than the window could hold wrapped to a second line and the fixed 26px `.statusbar` grew
      for the 5s it's shown. Option 1 from the ticket: truncate with an ellipsis instead of letting it
@@ -273,12 +352,28 @@
      `.dim`) so the WHOLE block can shrink as a unit rather than forcing the row wider or wrapping — a
      `display: flex` container has no `white-space` of its own, so what actually needs to shrink is its
      variable-length child, `.git-branch`, below. */
+  /* CPE-1836: at exactly the 600px floor, in the compound scenario (both notes + a busy row + a long
+     branch), `.git`'s pinned `flex: 0 0 auto` children (the counts, dirty dot, buttons — intentionally
+     never shrink, since shrinking a clickable button is worse than truncating a name, see the comment on
+     `.git-branch` below) collectively exceed `.git`'s own shrunk box by ~16-33px. `.git` had no
+     `overflow: hidden` of its own, so that overage painted OUTSIDE its box and into `.disk`'s — the
+     "text painted over text" failure this whole file's ordering model exists to prevent (see the
+     ordering comment above `.dim`: "every child needs overflow: hidden so that running out of room
+     produces an ellipsis rather than text painted over text"). Fixed the same way as every other child:
+     `overflow: hidden` on `.git` itself. This clips the LAST pinned child (the rightmost button) rather
+     than bleeding into the next sibling — acceptable here because reaching this state at all requires the
+     compound, sub-600px-floor-only scenario the ticket documents as "everything realistic is clean";
+     letting the pinned children participate in the shrink (the alternative the ticket offered) was
+     rejected because it would make a git action button partially unclickable while still fully visible,
+     which is worse than a clean edge-clip. `.git-branch` still shrinks first (below), so the buttons are
+     only ever touched once the branch name is already fully collapsed. */
   .git {
     display: flex;
     align-items: center;
     gap: 6px;
     margin-left: auto;
     min-width: 0;
+    overflow: hidden;
     flex: 0 var(--priority-shrink) auto;
   }
   /* A branch name can be arbitrarily long (CPE-1780): shrinks + truncates to an ellipsis like the other
