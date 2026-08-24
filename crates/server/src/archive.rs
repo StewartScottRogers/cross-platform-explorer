@@ -2440,25 +2440,26 @@ pub fn compress_to_zip_encrypted(paths: &[String], dest: &str, password: &str) -
 ///   `zip` crate does not encrypt (only the entry's *content* stream is AES-protected); the streamed
 ///   encrypted extractor already proved the guard fires on real ciphertext, since it already routed
 ///   through this loop.
-/// - **User-visible consequence of that widening — documented here, not fixed (filed as CPE-1837):**
-///   an entry the old loop always wrote as a readable text file — including one whose target
-///   escapes `dest` — can now instead vanish with no note when [`link_target_action`] refuses it, because
-///   this signature predates [`ArchiveReport`] and still has nowhere to put one. A successful-looking
-///   extraction quietly missing a file is exactly the hazard shape this module reports everywhere else it
-///   can; on this one-shot path it still cannot.
+/// - **User-visible consequence of that widening — fixed by CPE-1837, documented here rather than
+///   re-derived:** an entry the old loop always wrote as a readable text file — including one whose
+///   target escapes `dest` — can now instead be refused by [`link_target_action`]. Before CPE-1837 that
+///   refusal vanished with no note, because this signature predated [`ArchiveReport`] and had nowhere to
+///   put one — a successful-looking extraction quietly missing a file, exactly the hazard shape this
+///   module reports everywhere else it can. It now returns [`ArchiveExtractOutcome`], whose `report`
+///   carries the same `skipped`/`errors` the streamed path already surfaced, so this path can too.
 /// - **Newly gained: unix permission-bit restoration.** Same metadata reasoning — `unix_mode()` is
 ///   central-directory data, unaffected by AES encryption of the content stream.
 /// - **Nothing password-specific is lost.** `password` is threaded straight into the loop's own
 ///   `archive.by_index_decrypt(i, pw.as_bytes())` call (see [`extract_zip_archive_stream`]) — the
 ///   identical call this function used to make itself, at the identical point in the per-entry sequence —
 ///   so decryption happens exactly where and how it did before the merge.
-pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<String, String> {
+pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<ArchiveExtractOutcome, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let never = AtomicBool::new(false);
-    extract_zip_archive_stream(&mut archive, dest_path, Some(password), &never, &mut |_| {})?;
-    Ok(dest.to_string())
+    let report = extract_zip_archive_stream(&mut archive, dest_path, Some(password), &never, &mut |_| {})?;
+    Ok(ArchiveExtractOutcome { dest: dest.to_string(), report })
 }
 
 /// The one refusal message for an entry name this module will not write, so the tar sinks and the zip
@@ -2674,9 +2675,10 @@ fn tar_entry_kind<'a>(entry_type: tar::EntryType, link_target: Option<&'a Path>)
 /// applied before its children are written. Dropping that second pass would have been a silent
 /// permissions regression on POSIX, which is why it is here rather than "simplified away".
 ///
-/// The skip is **silent** on this one-shot path, for row 15's reason: this signature predates
-/// [`ArchiveReport`] and has nowhere to record a per-entry note. Its streamed sibling
-/// ([`extract_tar_stream`]) records both the count and the reason.
+/// **CPE-1837: the skip is recorded, not silent.** This used to return `Result<(), String>` with nowhere
+/// to put a per-entry note — [`extract_archive`], the only caller, discarded it. It now returns the same
+/// [`ArchiveReport`] the streamed sibling ([`extract_tar_stream`]) already builds; the skip-and-continue
+/// behaviour itself is unchanged.
 ///
 /// **A link entry's `unpack_in` failure is translated, not just propagated (CPE-1813).** `tar_entry_refusal`
 /// only answers the containment questions asked *before* the write; if the write itself fails because
@@ -2687,7 +2689,7 @@ fn tar_entry_kind<'a>(entry_type: tar::EntryType, link_target: Option<&'a Path>)
 ///
 /// A thin wrapper over [`tar_unpack_with`], which does the real work parameterised over how a single
 /// entry gets unpacked — see that function's doc for why (CPE-1813 review round 2, blocker 3).
-fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
+fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<ArchiveReport, String> {
     tar_unpack_with(reader, dest, |entry, root| entry.unpack_in(root))
 }
 
@@ -2712,13 +2714,14 @@ fn tar_unpack_with<R: std::io::Read>(
     reader: R,
     dest: &Path,
     mut unpack_entry: impl FnMut(&mut tar::Entry<'_, R>, &Path) -> std::io::Result<bool>,
-) -> Result<(), String> {
+) -> Result<ArchiveReport, String> {
     let mut archive = tar::Archive::new(reader);
     if fs::symlink_metadata(dest).is_err() {
         fs::create_dir_all(dest).map_err(|e| extraction_dest_error(dest, &e))?;
     }
     let root = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
     let mut directories = Vec::new();
+    let mut report = ArchiveReport::default();
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let name = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
@@ -2727,24 +2730,36 @@ fn tar_unpack_with<R: std::io::Read>(
         let is_dir = entry_type.is_dir();
         match tar_entry_refusal(&root, &name, tar_entry_kind(entry_type, link.as_deref())) {
             EntrySlotAction::Write => {}
-            EntrySlotAction::Skip(_) => continue,
+            // CPE-1837: recorded, not merely skipped — this used to be a bare `continue`.
+            EntrySlotAction::Skip(reason) => {
+                report.skip(&name, &reason);
+                continue;
+            }
             // Not skippable: an unreadable slot is an I/O failure, and silently dropping the entry
             // would report success about a file that is missing (UAT finding 6) — same as row 15.
             EntrySlotAction::Abort(e) => return Err(e),
         }
         if is_dir {
             directories.push(entry);
-        } else if let Err(e) = unpack_entry(&mut entry, &root) {
-            match &link {
-                // CPE-1813: this volume may simply not support links at all — a refusal, not a failure.
-                // Refused (`Ok(Some(_))`) or the practically-unreachable `Ok(None)` both fall through
-                // and skip silently, this path's own reason above; only `Err` aborts.
-                Some(target) => {
-                    let marker =
-                        if entry_type.is_hard_link() { TAR_HARDLINK_MARKER } else { TAR_SYMLINK_MARKER };
-                    tar_link_creation_outcome(target, &root.join(&name), &e, marker)?;
-                }
-                None => return Err(e.to_string()),
+        } else {
+            match unpack_entry(&mut entry, &root) {
+                Ok(true) => report.done += 1,
+                // `unpack_in`'s own traversal refusal (`../evil`), which never reaches our guard because
+                // `entry_name_is_safe` rejects those first — kept as the belt it always was, and now
+                // recorded like every other refusal on this path (CPE-1837; previously silently ignored).
+                Ok(false) => report.skip(&name, UNSAFE_NAME_SKIP),
+                Err(e) => match &link {
+                    // CPE-1813: this volume may simply not support links at all — a refusal, not a
+                    // failure. CPE-1837: the refusal reason is now recorded instead of discarded.
+                    Some(target) => {
+                        let marker =
+                            if entry_type.is_hard_link() { TAR_HARDLINK_MARKER } else { TAR_SYMLINK_MARKER };
+                        if let Some(reason) = tar_link_creation_outcome(target, &root.join(&name), &e, marker)? {
+                            report.skip(&name, &reason);
+                        }
+                    }
+                    None => return Err(e.to_string()),
+                },
             }
         }
     }
@@ -2752,7 +2767,7 @@ fn tar_unpack_with<R: std::io::Read>(
     for mut dir in directories {
         unpack_entry(&mut dir, &root).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(report)
 }
 
 /// True if an archive entry name is a plain relative path that cannot escape the extraction root — the
@@ -2907,33 +2922,44 @@ fn sevenz_entry_slot_action(
 ///
 /// **Row 19 of the CPE-1733 table** (CPE-1746): it also refuses a **link** already sitting at the entry's
 /// final name, via [`sevenz_entry_slot_action`] — see there for the decision and for why the abort arm is
-/// a captured message. The skip is **silent** here for row 15's reason: this signature predates
-/// `ArchiveReport` and has nowhere to record it. The streamed twin (row 20) records it.
-fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
+/// a captured message. **CPE-1837: the skip is recorded, not silent** — this used to return
+/// `Result<(), String>` with nowhere to put it; it now returns the same [`ArchiveReport`] the streamed
+/// twin (row 20, [`extract_7z_stream`]) already builds.
+fn extract_7z_safe(src: &Path, dest: &Path) -> Result<ArchiveReport, String> {
     let mut abort: Option<String> = None;
+    let mut report = ArchiveReport::default();
     catch_sevenz_panic(|| {
         sevenz_rust::decompress_file_with_extract_fn(src, dest, |entry, reader, entry_dest| {
             if abort.is_some() {
                 return Ok(false); // the latch — see `sevenz_entry_slot_action`
             }
-            if !entry_name_is_safe(entry.name()) {
+            let name = entry.name().to_string();
+            if !entry_name_is_safe(&name) {
+                report.skip(&name, UNSAFE_NAME_SKIP);
                 return Ok(true); // skip the unsafe entry; keep extracting the rest
             }
             match sevenz_entry_slot_action(entry, entry_dest, dest) {
                 EntrySlotAction::Write => {}
-                EntrySlotAction::Skip(_) => return Ok(true), // skip this entry; keep extracting the rest
+                EntrySlotAction::Skip(e) => {
+                    report.skip(&name, &e);
+                    return Ok(true); // skip this entry; keep extracting the rest
+                }
                 EntrySlotAction::Abort(e) => {
                     abort = Some(e);
                     return Ok(false);
                 }
             }
-            sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
+            let outcome = sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest);
+            if outcome.is_ok() {
+                report.done += 1;
+            }
+            outcome
         })
         .map_err(|e| e.to_string())
     })?;
     match abort {
         Some(e) => Err(e),
-        None => Ok(()),
+        None => Ok(report),
     }
 }
 
@@ -2973,36 +2999,40 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
 ///    CPE-1775 supplied its precondition on the streamed path by making refusals *counted*
 ///    (`ArchiveReport::skipped`), not merely logged.
 ///
-/// **What this does NOT fix, stated plainly rather than implied away.** This function returns
-/// `Result<String, String>`; it has nowhere to put a per-entry note, so its skips are **silent** — the
-/// same limitation rows 15, 19 and 21 already carry and the table above already records. Skip does not
-/// make the one-shot path *informative*; it makes it *consistent*, which is what the ticket asked for.
-/// The silence is a property of the signature, and `extract_archive` is a registered Tauri command with
-/// no Svelte caller (every user-facing extraction goes through [`extract_archive_streamed`], which does
-/// report), so changing the signature is a bindings change owed to whoever wires it up, not to this fix.
-/// After this change, whoever does wire it up gets **exactly** the streamed path's behaviour, which was
-/// the trap worth closing.
+/// **What this used to NOT fix — closed by CPE-1837, stated here rather than re-derived.** This function
+/// returned `Result<String, String>`, which had nowhere to put a per-entry note, so its skips were
+/// **silent** — the same limitation rows 15, 19 and 21 carried and the table above records. Skip alone
+/// did not make the one-shot path *informative*; it made it *consistent*, which is what CPE-1759 asked
+/// for. `extract_archive` is a registered Tauri command with no Svelte caller today (every user-facing
+/// extraction goes through [`extract_archive_streamed`], which already reports) — verified by grepping
+/// `src/` for `extractArchive(`/`extractZipEncrypted(` outside `bindings.gen.ts` and finding nothing —
+/// but a signature that cannot carry a refusal is a trap for whoever wires it up next, and it is also
+/// reachable today from any IPC caller that is not the shipped Svelte frontend. It now returns
+/// [`ArchiveExtractOutcome`], carrying exactly the [`ArchiveReport`] the streamed path already builds, so
+/// a caller — present or future — gets the same information either path already had internally.
 ///
 /// **And it is not the downgrade CPE-1744 measured it as.** That ticket declined the merge because
 /// `ZipArchive::extract` restores unix permission bits and materialises symlink entries while our loop
 /// did neither — true, and re-measured here (`[M4] good_link is symlink = Ok(false) content =
 /// Ok("ok.txt")`). Both now live in [`extract_zip_archive_stream`] (see [`create_entry_symlink`]), so
 /// the capability moved *up* to the streamed path rather than down from the one-shot one.
-pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
+pub fn extract_archive(path: &str, dest: &str) -> Result<ArchiveExtractOutcome, String> {
     // Row 17 of the CPE-1733 table — a folder the user pointed at, so a live link there is still followed
     // on purpose; CPE-1744 reworded only the dangling case (`extraction_dest_error`).
     let dest_path = Path::new(dest);
     fs::create_dir_all(dest).map_err(|e| extraction_dest_error(dest_path, &e))?;
     let lower = path.to_lowercase();
 
-    if lower.ends_with(".tar") {
+    let report = if lower.ends_with(".tar") {
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
-        tar_unpack(file, dest_path)?;
+        tar_unpack(file, dest_path)?
     } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
-        tar_unpack(flate2::read::GzDecoder::new(file), dest_path)?;
+        tar_unpack(flate2::read::GzDecoder::new(file), dest_path)?
     } else if lower.ends_with(".gz") {
-        // A bare .gz holds a single file; its name is the archive name minus .gz.
+        // A bare .gz holds a single file; its name is the archive name minus .gz. No skip semantics here
+        // — a refusal at the leaf (row 13, below) is a genuine `Err` via `refuse_link_at_new_file`, not a
+        // per-entry skip, so there is nothing an `ArchiveReport` would add.
         let stem = Path::new(path)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -3015,17 +3045,18 @@ pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
         let mut decoder = flate2::read::GzDecoder::new(file);
         let mut out = fs::File::create(&leaf).map_err(|e| e.to_string())?;
         std::io::copy(&mut decoder, &mut out).map_err(|e| e.to_string())?;
+        ArchiveReport { done: 1, ..ArchiveReport::default() }
     } else if lower.ends_with(".7z") {
-        extract_7z_safe(Path::new(path), dest_path)?;
+        extract_7z_safe(Path::new(path), dest_path)?
     } else {
         // zip family — **CPE-1759**: the same loop the streamed path uses, with a cancel flag that is
         // never set and a progress sink that discards. See this function's doc for why skip won.
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let never = AtomicBool::new(false);
-        extract_zip_archive_stream(&mut archive, dest_path, None, &never, &mut |_| {})?;
-    }
-    Ok(dest.to_string())
+        extract_zip_archive_stream(&mut archive, dest_path, None, &never, &mut |_| {})?
+    };
+    Ok(ArchiveExtractOutcome { dest: dest.to_string(), report })
 }
 
 // ---------------------------------------------------------------------------
@@ -3074,7 +3105,13 @@ pub struct ArchiveProgress {
 /// halves of one record — the count is what the headline notice reads, the string is the reason behind
 /// it — and `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` fails if any skip
 /// site grows one without the other.
-#[derive(Clone, Debug, Default)]
+///
+/// **CPE-1837: also the report the one-shot extractors return, not only the streamed ones.**
+/// `Serialize`/`specta::Type` so it can cross the IPC boundary directly as an
+/// [`ArchiveExtractOutcome`] field rather than only ever being flattened into `TransferReport` for a
+/// `transfer://done` event.
+#[derive(Clone, Debug, Default, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ArchiveReport {
     pub done: u64,
     pub failed: u64,
@@ -3091,6 +3128,21 @@ impl ArchiveReport {
         self.skipped += 1;
         self.errors.push(format!("{name}: {reason}"));
     }
+}
+
+/// **CPE-1837**: what a one-shot extraction (`extract_archive`/`extract_zip_encrypted`) returns on
+/// success — the destination path the caller already got, plus the [`ArchiveReport`] the streamed
+/// variants always had. Before this type existed, a one-shot extraction's `Result<String, String>` had
+/// nowhere to put a per-entry refusal: the loop still skipped the entry (CPE-1759 settled that a
+/// one-shot extraction must not abort over a single bad entry, same as the streamed path), but the
+/// caller had no way to learn it happened — a successful-looking `Ok(dest)` with a file quietly missing.
+/// The skip-and-continue *behaviour* is unchanged by this ticket; only the return type stopped discarding
+/// the report that was already being built.
+#[derive(Clone, Debug, Default, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct ArchiveExtractOutcome {
+    pub dest: String,
+    pub report: ArchiveReport,
 }
 
 /// One item queued for an archive write — either a directory placeholder or a file with known size,
@@ -5736,10 +5788,11 @@ mod tests {
     /// Row 15: `extract_zip_encrypted` **skips** an entry whose name lands on a link and keeps extracting.
     ///
     /// The refusal shape differs from rows 6–14 on purpose — the name is the archive's, not the caller's,
-    /// so one poisoned entry must not abort a legitimate extraction. That makes the `Result` useless as a
-    /// witness (it is `Ok` either way when the guard works), which is exactly why the assertions are on
-    /// the filesystem: the link's target must not have been created, the link must survive, and the
-    /// *other* entry must still be there.
+    /// so one poisoned entry must not abort a legitimate extraction. The `Result` alone used to be
+    /// useless as a witness (it was `Ok` either way when the guard worked), which is why the filesystem
+    /// assertions below matter regardless — but **CPE-1837** gave the `Ok` value somewhere to put the
+    /// refusal too, so this test now also pins that `report.errors` names the entry, exactly like row 16
+    /// already does.
     #[test]
     fn row15_extract_zip_encrypted_skips_an_entry_that_lands_on_a_link() {
         let d = scratch("cpe1733_row15");
@@ -5779,7 +5832,13 @@ mod tests {
             fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
             "row 15: the link must survive (outcome was {outcome:?})"
         );
-        outcome.expect("row 15: one skipped entry must not abort the extraction");
+        let outcome = outcome.expect("row 15: one skipped entry must not abort the extraction");
+        assert!(
+            outcome.report.errors.iter().any(|e| e.contains("a.txt") && e.contains("is a link")),
+            "row 15 (CPE-1837): the skip must be RECORDED on the one-shot path too, not merely survived —
+             got {:?}",
+            outcome.report.errors
+        );
         assert_eq!(
             fs::read(dest.join("b.txt")).unwrap(),
             b"ARCHIVED B".to_vec(),
@@ -5904,9 +5963,11 @@ mod tests {
                     let zip = d.join("enc.zip");
                     compress_to_zip_encrypted(&two_source_files(d), &zip.to_string_lossy(), "hunter2")?;
                     extract_zip_encrypted(&zip.to_string_lossy(), &dest.to_string_lossy(), "hunter2")
-                        .map(|_| Vec::new())
+                        .map(|outcome| outcome.report.errors)
                 },
-                false, // predates `ArchiveReport`; the skip is silent, and the table says so
+                // CPE-1837: `ArchiveExtractOutcome` now carries the same `ArchiveReport` the streamed
+                // path does, so this leg can record the skip too — no longer the exception in the table.
+                true,
             ),
             (
                 16,
@@ -5999,9 +6060,11 @@ mod tests {
             (
                 "row 21 one-shot extract_archive",
                 |tgz: &Path, dest: &Path| {
-                    extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new())
+                    extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy())
+                        .map(|outcome| outcome.report.errors)
                 },
-                false, // predates `ArchiveReport`; the skip is silent, and the table says so
+                // CPE-1837: `ArchiveExtractOutcome` now carries the report, so this leg records too.
+                true,
             ),
             (
                 "row 22 extract_archive_streamed",
@@ -6124,9 +6187,11 @@ mod tests {
             (
                 "one-shot extract_archive",
                 |zip: &Path, dest: &Path| {
-                    extract_archive(&zip.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new())
+                    extract_archive(&zip.to_string_lossy(), &dest.to_string_lossy())
+                        .map(|outcome| outcome.report.errors)
                 },
-                false,
+                // CPE-1837: `ArchiveExtractOutcome` now carries the report, so this leg records too.
+                true,
             ),
             (
                 "extract_archive_streamed",
@@ -7157,7 +7222,7 @@ mod tests {
                 )
                 .map(|r| format!("{r:?}"))
             } else {
-                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy())
+                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|o| format!("{o:?}"))
             };
 
             let err = outcome.expect_err(
@@ -7271,9 +7336,11 @@ mod tests {
                 19,
                 "extract_7z_safe via one-shot extract_archive",
                 |sevenz: &Path, dest: &Path| {
-                    extract_archive(&sevenz.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new())
+                    extract_archive(&sevenz.to_string_lossy(), &dest.to_string_lossy())
+                        .map(|outcome| outcome.report.errors)
                 },
-                false, // returns `Result<String, String>`; the skip is silent, exactly as at row 15
+                // CPE-1837: `ArchiveExtractOutcome` now carries the report, so this leg records too.
+                true,
             ),
             (
                 20,
@@ -7535,9 +7602,11 @@ mod tests {
                 "extract_zip_encrypted",
                 "encrypted",
                 |a: &Path, dest: &Path| {
-                    extract_zip_encrypted(&a.to_string_lossy(), &dest.to_string_lossy(), "hunter2").map(|_| Vec::new())
+                    extract_zip_encrypted(&a.to_string_lossy(), &dest.to_string_lossy(), "hunter2")
+                        .map(|outcome| outcome.report.errors)
                 },
-                false, // predates `ArchiveReport`; the skip is silent, exactly as for the link case
+                // CPE-1837: `ArchiveExtractOutcome` now carries the report, so this leg records too.
+                true,
             ),
             (
                 16,
@@ -7560,8 +7629,12 @@ mod tests {
                 19,
                 "extract_7z_safe via one-shot extract_archive",
                 "7z",
-                |a: &Path, dest: &Path| extract_archive(&a.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new()),
-                false,
+                |a: &Path, dest: &Path| {
+                    extract_archive(&a.to_string_lossy(), &dest.to_string_lossy())
+                        .map(|outcome| outcome.report.errors)
+                },
+                // CPE-1837: `ArchiveExtractOutcome` now carries the report, so this leg records too.
+                true,
             ),
             (
                 20,
@@ -8154,7 +8227,9 @@ mod tests {
         type Run = fn(&Path, &Path) -> Result<Option<ArchiveReport>, String>;
         let legs: &[(&str, Run)] = &[
             ("one-shot", |ap: &Path, dest: &Path| {
-                extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|_| None)
+                // CPE-1837: the one-shot path now carries a report too, so this leg checks it like the
+                // streamed one instead of opting out with `None`.
+                extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|o| Some(o.report))
             }),
             ("streamed", |ap: &Path, dest: &Path| {
                 extract_archive_streamed(
@@ -8216,14 +8291,14 @@ mod tests {
                 if let Some(report) = report {
                     assert_eq!(
                         report.skipped, 1,
-                        "{label}: the streamed path must COUNT the refusal (CPE-1775); got {report:?}"
+                        "{label} {leg}: the refusal must be COUNTED (CPE-1775); got {report:?}"
                     );
                     assert!(
                         report.errors.iter().any(|e| {
                             e.starts_with("evil_link: ") && e.contains("outside the extraction folder")
                         }),
-                        "{label}: and record WHICH entry and WHY — an `is_err()`/`is_ok()` check would \
-                         stay green through a straight revert of the guard; got {:?}",
+                        "{label} {leg}: and record WHICH entry and WHY — an `is_err()`/`is_ok()` check \
+                         would stay green through a straight revert of the guard; got {:?}",
                         report.errors
                     );
                 }
@@ -8278,9 +8353,18 @@ mod tests {
                 "SECRET",
                 "{label} encrypted: the victim itself must be untouched"
             );
-            outcome.unwrap_or_else(|e| {
+            let outcome = outcome.unwrap_or_else(|e| {
                 panic!("{label} encrypted: a refused link entry is a SKIP, never an abort: {e}")
             });
+            // CPE-1837: the one-shot path now records the refusal too.
+            assert!(
+                outcome.report.errors.iter().any(|e| {
+                    e.starts_with("evil_link: ") && e.contains("outside the extraction folder")
+                }),
+                "{label} encrypted: the skip must be RECORDED on the one-shot path, naming the entry and \
+                 why; got {:?}",
+                outcome.report.errors
+            );
             assert_eq!(
                 fs::read(dest.join("ok.txt")).unwrap(),
                 b"ORDINARY".to_vec(),
@@ -8766,7 +8850,8 @@ mod tests {
                     )
                     .map(Some)
                 } else {
-                    extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|_| None)
+                    // CPE-1837: the one-shot path now carries a report too.
+                    extract_archive(&ap.to_string_lossy(), &dest.to_string_lossy()).map(|o| Some(o.report))
                 };
 
                 // ---- the harm, before the Result, on every leg ----

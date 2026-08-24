@@ -2786,8 +2786,16 @@ async compressToZip(paths: string[], dest: string) : Promise<Result<string, stri
 /**
  * Extract an archive into `dest` (CPE-252), guarded against zip-slip for every format. Model lives in
  * `cpe_server::archive` (CPE-822); thin dispatcher.
+ * 
+ * **CPE-1837: returns [`cpe_server::archive::ArchiveExtractOutcome`], not a bare path.** A refused
+ * entry — a link whose target escapes the extraction folder, say — used to vanish with the call still
+ * reporting plain success; the `report` field is the same `skipped`/`errors` the streamed extraction
+ * (`start_archive_extract`) already surfaces, now carried here too. This command has no Svelte caller
+ * today (every user-facing extraction goes through `start_archive_extract`), but it is still a reachable
+ * Tauri command, and a signature that cannot say "something was skipped" is a trap for whoever wires it
+ * up next.
  */
-async extractArchive(path: string, dest: string) : Promise<Result<string, string>> {
+async extractArchive(path: string, dest: string) : Promise<Result<ArchiveExtractOutcome, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("extract_archive", { path, dest }) };
 } catch (e) {
@@ -2822,8 +2830,10 @@ async compressToZipEncrypted(paths: string[], dest: string, password: string) : 
 /**
  * Extract a password-protected `.zip` at `path` into `dest` with `password` (CPE-909/1141). Model
  * lives in `cpe_server::archive` (CPE-822); thin dispatcher.
+ * 
+ * **CPE-1837: returns [`cpe_server::archive::ArchiveExtractOutcome`], see `extract_archive`'s doc.**
  */
-async extractZipEncrypted(path: string, dest: string, password: string) : Promise<Result<string, string>> {
+async extractZipEncrypted(path: string, dest: string, password: string) : Promise<Result<ArchiveExtractOutcome, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("extract_zip_encrypted", { path, dest, password }) };
 } catch (e) {
@@ -3690,6 +3700,46 @@ span_ms: number }
  * One entry inside an archive, for the archive preview.
  */
 export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
+/**
+ * **CPE-1837**: what a one-shot extraction (`extract_archive`/`extract_zip_encrypted`) returns on
+ * success — the destination path the caller already got, plus the [`ArchiveReport`] the streamed
+ * variants always had. Before this type existed, a one-shot extraction's `Result<String, String>` had
+ * nowhere to put a per-entry refusal: the loop still skipped the entry (CPE-1759 settled that a
+ * one-shot extraction must not abort over a single bad entry, same as the streamed path), but the
+ * caller had no way to learn it happened — a successful-looking `Ok(dest)` with a file quietly missing.
+ * The skip-and-continue *behaviour* is unchanged by this ticket; only the return type stopped discarding
+ * the report that was already being built.
+ */
+export type ArchiveExtractOutcome = { dest: string; report: ArchiveReport }
+/**
+ * The final outcome of a compress/extract run. `done` counts entries actually written; `failed` stays
+ * 0 unless the whole run aborted with an error (compress/extract are otherwise all-or-nothing, same as
+ * the one-shot functions).
+ * 
+ * **`skipped` is CPE-1775's addition, and it is the count the UI was missing.** An entry refused by a
+ * guard — an unsafe name, a link sitting at the destination, a destination that escapes the extraction
+ * folder, a link entry whose target escapes it — is neither `done` nor `failed`. Before this field, the
+ * only trace was a line in `errors`, which the frontend read **only when `failed > 0`**: a refused entry
+ * produced a plain "N items extracted" success toast with N quietly one lower than the archive's
+ * contents. `failed` could not be reused for it (nothing failed, and a genuine failure must stay
+ * distinguishable), so the honest shape is a third count, carried through `TransferReport` to the
+ * `transfer://done` event.
+ * 
+ * **Invariant: every push to `errors` from a per-entry skip also increments `skipped`.** They are two
+ * halves of one record — the count is what the headline notice reads, the string is the reason behind
+ * it — and `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` fails if any skip
+ * site grows one without the other.
+ * 
+ * **CPE-1837: also the report the one-shot extractors return, not only the streamed ones.**
+ * `Serialize`/`specta::Type` so it can cross the IPC boundary directly as an
+ * [`ArchiveExtractOutcome`] field rather than only ever being flattened into `TransferReport` for a
+ * `transfer://done` event.
+ */
+export type ArchiveReport = { done: number; failed: number; 
+/**
+ * Entries a guard refused. Neither written nor failed — see the type doc.
+ */
+skipped: number; cancelled: boolean; errors: string[] }
 /**
  * The result of scanning a real archive for zip-bomb risk: the pure ratio scoring plus scan bookkeeping
  * (how many entries were actually considered, and whether [`MAX_ENTRIES`] truncated the scan).

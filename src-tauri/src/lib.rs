@@ -8848,9 +8848,21 @@ async fn compress_to_zip(paths: Vec<String>, dest: String) -> Result<String, Str
 
 /// Extract an archive into `dest` (CPE-252), guarded against zip-slip for every format. Model lives in
 /// `cpe_server::archive` (CPE-822); thin dispatcher.
+///
+/// **CPE-1837: returns [`cpe_server::archive::ArchiveExtractOutcome`], not a bare path.** A refused
+/// entry — a link whose target escapes the extraction folder, say — used to vanish with the call still
+/// reporting plain success; the `report` field is the same `skipped`/`errors` the streamed extraction
+/// (`start_archive_extract`) already surfaces, now carried here too. This command has no Svelte caller
+/// today (every user-facing extraction goes through `start_archive_extract`), but it is still a reachable
+/// Tauri command, and a signature that cannot say "something was skipped" is a trap for whoever wires it
+/// up next.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn extract_archive(app: tauri::AppHandle, path: String, dest: String) -> Result<String, String> {
+async fn extract_archive(
+    app: tauri::AppHandle,
+    path: String,
+    dest: String,
+) -> Result<cpe_server::archive::ArchiveExtractOutcome, String> {
     // Coarse best-effort record (CPE-1102): the individual extracted entry paths aren't known until the
     // archive is actually read, so record just the `dest` root (which `extract_archive` itself
     // `create_dir_all`s first) rather than trying to enumerate every member up front.
@@ -8879,9 +8891,16 @@ async fn compress_to_zip_encrypted(paths: Vec<String>, dest: String, password: S
 
 /// Extract a password-protected `.zip` at `path` into `dest` with `password` (CPE-909/1141). Model
 /// lives in `cpe_server::archive` (CPE-822); thin dispatcher.
+///
+/// **CPE-1837: returns [`cpe_server::archive::ArchiveExtractOutcome`], see `extract_archive`'s doc.**
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn extract_zip_encrypted(app: tauri::AppHandle, path: String, dest: String, password: String) -> Result<String, String> {
+async fn extract_zip_encrypted(
+    app: tauri::AppHandle,
+    path: String,
+    dest: String,
+    password: String,
+) -> Result<cpe_server::archive::ArchiveExtractOutcome, String> {
     // Coarse best-effort record (CPE-1102), mirroring `extract_archive`: record just the `dest` root.
     note_app_op(&app, || vec![dest.clone()]);
     tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_zip_encrypted(&path, &dest, &password))
