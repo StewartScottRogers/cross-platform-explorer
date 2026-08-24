@@ -849,6 +849,68 @@ function seedVaultCreateFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(src, "notes", "CPE-1250-more.txt"), "nested plaintext\n", "utf-8");
 }
 
+// --- CPE-1827: Trash titlebar overflow-menu fixture -------------------------------------------
+// trash-titlebar.smoke.ts needs ONE genuine entry sitting in the real OS Recycle Bin/Trash before the
+// app even launches — `list_trash_stream` reads whatever is actually there, so there is no
+// lower-level seam to inject a fake entry through. An earlier version of this fixture wrote a plain
+// file into the listing and had the SPEC delete it via the app's own UI (right-click -> the quickrow
+// "Delete (Del)" icon button); that hung indefinitely on this machine (WebDriver never returned a
+// result for the click, CDP or classic) with no diagnostic pointing at a cause. Whether that is a
+// genuine issue with this app's delete flow or an environment quirk of automating a native
+// Recycle-Bin move against an off-screen `--test-mode` window is exactly the kind of question CPE-1822
+// (this ticket's own "no gui-smoke coverage of Trash at all" prerequisite) should chase down with time
+// to spare — not a blocker for CPE-1827, which is about the TITLEBAR, not the delete flow. Moving the
+// seed to a native, pre-launch OS call sidesteps the hang entirely while still exercising the real
+// thing this spec actually needs: a genuine `list_trash_stream` entry.
+//
+// Windows: `Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(..., OnlyErrorDialogs,
+// SendToRecycleBin)` — the standard silent (no "are you sure?" prompt) recycle-bin move, run
+// synchronously via PowerShell before the app process starts.
+// Linux: `gio trash` (GNOME's freedesktop.org-Trash-spec-compliant CLI, the same mechanism the `trash`
+// crate itself targets there) if present on PATH; best-effort, like `seedThumbnailFormatsFixture`'s
+// ffmpeg check above — returns `supported: false` rather than throwing when unavailable so the spec
+// can skip cleanly instead of failing the whole suite over missing CI tooling.
+// macOS: TrashView never mounts there (`canBrowseTrash` gates it off, per TrashView.svelte's own
+// header) — not attempted.
+export const TRASH_TITLEBAR_DIR_NAME = "CPE-1827-trash-titlebar"; // nested inside SHRED_DIR_NAME
+export const TRASH_TITLEBAR_FILE_NAME = "CPE-1827-fixture.txt";
+
+function seedTrashTitlebarFixture(tmpDir: string): boolean {
+  const dir = path.join(tmpDir, SHRED_DIR_NAME, TRASH_TITLEBAR_DIR_NAME);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, TRASH_TITLEBAR_FILE_NAME);
+  fs.writeFileSync(
+    filePath,
+    "CPE-1827 throwaway gui-smoke fixture — moved to the real OS Trash before the app launches.\n",
+    "utf-8",
+  );
+
+  if (process.platform === "win32") {
+    const psCommand =
+      "Add-Type -AssemblyName Microsoft.VisualBasic; " +
+      "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(" +
+      `'${filePath.replace(/'/g, "''")}', ` +
+      "[Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, " +
+      "[Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)";
+    // CPE-1827: measured well over 30s on the dev machine for this exact call (the VB.NET FileIO
+    // Recycle-Bin move appears to do real work — AV scan of the target, COM/shell init, or similar —
+    // before returning, even though it completes with no visible UI and no error). A generous 2-minute
+    // budget here costs nothing but one-time `onPrepare` latency; too short would report a false
+    // `supported: false` and silently skip this spec's own coverage.
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCommand], {
+      timeout: 120_000,
+    });
+    return result.status === 0 && !fs.existsSync(filePath);
+  }
+
+  if (process.platform === "linux") {
+    const result = spawnSync("gio", ["trash", filePath], { timeout: 30_000 });
+    return result.status === 0 && !fs.existsSync(filePath);
+  }
+
+  return false;
+}
+
 // --- File-Health GUI verification fixture (sprint QA, epic CPE-1002) -------------------------
 // Seeds the 3 findings the File-Health panel's `mismatch`/`orphan`/`empty` tabs need for an
 // end-to-end proof over a REAL Tauri ipc::Channel (the `dangling` tab's finding already exists —
@@ -1226,6 +1288,12 @@ export const config: WebdriverIO.Config = {
     // above for why it is NOT a new top-level folder) for the "Create encrypted vault…" flow.
     seedVaultCreateFixture(tmpDir);
 
+    // CPE-1827: seed a dedicated throwaway file (nested inside the CPE-1241 shred folder, same
+    // reasoning) and move it to the real OS Trash BEFORE the app launches (see the block above for why
+    // it's done natively here rather than by the spec driving the app's own delete UI) — best-effort;
+    // the spec checks `trashTitlebarFixture.supported`.
+    const trashTitlebarSupported = seedTrashTitlebarFixture(tmpDir);
+
     // File-Health GUI verification (sprint QA, epic CPE-1002): seed the mismatch/orphan/empty
     // findings for file-health.smoke.ts's 4-tab end-to-end pass (see block above).
     seedFileHealthFixture(tmpDir);
@@ -1251,6 +1319,7 @@ export const config: WebdriverIO.Config = {
         tmpDir,
         linkBadgeFixture: { supported: linkBadgeSupported },
         thumbFormatsFixture,
+        trashTitlebarFixture: { supported: trashTitlebarSupported },
       }),
       "utf-8",
     );

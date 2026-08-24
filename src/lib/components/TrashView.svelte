@@ -15,18 +15,19 @@
   import { commands } from "../bindings.gen";
   import type { TrashEntry, TrashStreamSummary } from "../bindings.gen";
   import Icon from "./Icon.svelte";
-  import HelpButton from "./HelpButton.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import { t } from "../i18n";
   import { formatDate } from "../datetime";
   import { formatSize } from "../format";
   import { iconFor } from "../filetypes";
   import { displaySafeName, displaySafePath } from "../filename";
+  import type { Section } from "../sectionDocs";
 
-  // "help" isn't in this dispatcher type — it's never dispatched directly, only forwarded verbatim from
-  // HelpButton's own typed `Section` event via the bare `on:help` in the markup below (same convention
-  // as WorkbenchView.svelte).
-  const dispatch = createEventDispatcher<{ close: void }>();
+  // CPE-1827: "help" is dispatched directly from the overflow menu's Docs row below (the same `Section`
+  // payload `HelpButton` would have dispatched) — the titlebar overflow menu replaced the standalone
+  // `HelpButton` chip, which didn't fit the `.row`/`MENUS.md` menu-item shape, so this component now owns
+  // the dispatch itself instead of forwarding `HelpButton`'s own event verbatim.
+  const dispatch = createEventDispatcher<{ close: void; help: Section }>();
 
   let entries: TrashEntry[] = [];
   let loading = true;
@@ -72,6 +73,51 @@
   /** Per-item restore failures from the last `restoreSelected()` call, surfaced as a dismissible banner
    *  rather than aborting the rest of the selection (mirrors `restore_trash_items`'s per-item results). */
   let restoreErrors: { name: string; error: string }[] = [];
+
+  /** CPE-1827: the titlebar's "…" overflow menu (docs/design/MENUS.md dropdown pattern) — holds every
+   *  toolbar action except Close, so the titlebar itself never needs more than two fixed-size controls
+   *  (this trigger + the × ) regardless of listing state or locale. See the titlebar markup + its CSS
+   *  comment for the full rationale. */
+  let overflowOpen = false;
+  /** The overflow trigger button, bound so `clampToAnchor` (below) can read its on-screen position when
+   *  the menu opens. */
+  let overflowBtnEl: HTMLButtonElement;
+
+  /** CPE-1827: positions the overflow menu at `position: fixed` (MENUS.md's container spec), anchored
+   *  to the trigger button's own on-screen rect and clamped fully into the viewport — the same
+   *  clamp-on-open shape `AgentMenu.svelte`/`ContextMenu.svelte` use for their `.ctx` menus, adapted
+   *  from "clamp around a cursor point" to "clamp around a trigger element". `position: fixed` is
+   *  deliberate, not just MENUS.md-conformant: `.tv-panel` is `overflow: hidden`, and this ticket exists
+   *  BECAUSE that rule silently clips anything that overflows it — a `position: absolute` menu (the
+   *  `.menu-wrap`/`.menu` shape CommandBar/MenuBar use for their left-edge-anchored dropdowns) stays a
+   *  normal descendant for clipping purposes and would still be cut off by `.tv-panel` at the 600px
+   *  floor with a tall menu (Select all/Restore/Empty selected/Empty Trash/Refresh/Docs can add up to
+   *  ~210px, taller than the panel's own ~368px height at the app's 600×400 minimum window). `position:
+   *  fixed` escapes that clip (no transformed/filtered ancestor between here and the viewport establishes
+   *  a new containing block for it), so clamping against `window.innerWidth/innerHeight` here is the
+   *  real, sufficient guarantee — not `.tv-panel`'s bounds. Right-anchored (menu's right edge lines up
+   *  with the trigger's right edge, growing leftward) because the trigger sits near the panel's own right
+   *  edge, just left of Close; anchoring left, like CommandBar's dropdowns do, would grow the menu
+   *  rightward off the panel at any width this ticket cares about. */
+  function clampToAnchor(node: HTMLElement, anchor: HTMLElement) {
+    const place = () => {
+      const a = anchor.getBoundingClientRect();
+      const pad = 6;
+      let left = a.right - node.offsetWidth;
+      let top = a.bottom + 4;
+      left = Math.max(pad, Math.min(left, window.innerWidth - node.offsetWidth - pad));
+      top = Math.max(pad, Math.min(top, window.innerHeight - node.offsetHeight - pad));
+      node.style.left = `${left}px`;
+      node.style.top = `${top}px`;
+    };
+    place();
+    // MENUS.md: "The container is focused on open so keyboard users land in it" — same call as the two
+    // precedents this action models (`AgentMenu.svelte`'s and `ContextMenu.svelte`'s own `onMount`),
+    // missing from the first version of this file's own copy. Node.focus() after placement so the tab
+    // order and any Escape/arrow-key handling the menu grows later start from a real focus target.
+    node.focus();
+    return { destroy() {} };
+  }
 
   let loadGen = 0;
 
@@ -221,6 +267,37 @@
         : $t("trash.emptyConfirmMessageMany", { count: selected.size });
 </script>
 
+<!-- CPE-1827: no Escape handler existed before this ticket — once the toolbar's overflow-heavy layout
+     clipped the × below ~684px, the ONLY way out was the ~2vw backdrop sliver `.tv-overlay`'s
+     `on:click|self` catches (a modal trap). Matches the other full-panel overlays' own convention
+     (DiskSpaceView.svelte, ArchiveSafetyDialog.svelte, RepairLinkDialog.svelte: a bare
+     `<svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />`), with two additions
+     of this component's own:
+       - the overflow menu (below) takes Escape FIRST when open — matching MENUS.md's "Escape closes [the
+         menu]" convention for every other dropdown in the app (CommandBar/MenuBar) — rather than closing
+         the whole view out from under an open menu.
+       - `confirmEmpty` (the nested `ConfirmDialog`, rendered as a sibling below) owns Escape while IT is
+         open: that dialog already has its own `<svelte:window on:keydown>` (ConfirmDialog.svelte) that
+         dispatches `cancel` — without this guard, the same keypress would ALSO bubble into this handler
+         and close the entire Trash view out from under the confirm, which is a bigger, more surprising
+         jump than the "quiet no-op, dialog handles its own Escape" every other host of a nested
+         ConfirmDialog in this app relies on.
+     Click-outside-closes-the-menu (MENUS.md) reuses the same `overflowOpen` state via the window click
+     listener; the trigger button and the menu itself both `stopPropagation` so opening/clicking inside
+     never immediately re-closes it (same shape as CommandBar's `.menu`). -->
+<svelte:window
+  on:click={() => (overflowOpen = false)}
+  on:keydown={(e) => {
+    if (e.key !== "Escape") return;
+    if (overflowOpen) {
+      overflowOpen = false;
+      return;
+    }
+    if (confirmEmpty) return; // ConfirmDialog is open — it owns this Escape via its own listener
+    dispatch("close");
+  }}
+/>
+
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="tv-overlay" on:click|self={() => dispatch("close")}>
   <div class="tv-panel">
@@ -271,25 +348,72 @@
           {/if}
         </span>
       </span>
+      <!-- CPE-1827: the whole action set collapses into ONE overflow menu (the Visual Critic's
+           recommendation over the two alternatives — icon-only buttons below a breakpoint, or letting
+           the bar wrap — because it's the only option that keeps the × on the first line at EVERY
+           supported width, not just above some breakpoint). `.tv-tools` now holds exactly two
+           fixed-size controls regardless of listing state, selection, or locale: this trigger and ×. -->
       <div class="tv-tools">
-        {#if entries.length > 0}
-          <button class="tv-btn" on:click={toggleSelectAll}>
-            {allSelected ? $t("trash.deselectAll") : $t("trash.selectAll")}
-          </button>
-          <button class="tv-btn" disabled={selected.size === 0} on:click={restoreSelected}>
-            {$t("trash.restoreSelected")}
-          </button>
-          <button class="tv-btn" disabled={selected.size === 0} on:click={() => requestEmpty("selected")}>
-            {$t("trash.emptySelected")}
-          </button>
-          <button class="tv-btn danger-text" on:click={() => requestEmpty("all")}>
-            {$t("trash.emptyAll")}
-          </button>
-        {/if}
-        <button class="tv-btn" on:click={load} title={$t("trash.refresh")}>
-          <Icon name="refresh" size={13} />
+        <button
+          class="tv-btn tv-overflow-btn"
+          bind:this={overflowBtnEl}
+          title={$t("trash.moreActions")}
+          aria-label={$t("trash.moreActions")}
+          aria-haspopup="menu"
+          aria-expanded={overflowOpen}
+          on:click|stopPropagation={() => (overflowOpen = !overflowOpen)}
+        >
+          <Icon name="more" size={15} />
         </button>
-        <HelpButton section="trash" on:help />
+        {#if overflowOpen}
+          <!-- svelte-ignore a11y-no-noninteractive-element-interactions a11y-click-events-have-key-events -->
+          <div
+            class="menu tv-overflow-menu"
+            role="menu"
+            tabindex="-1"
+            use:clampToAnchor={overflowBtnEl}
+            on:click|stopPropagation
+          >
+            {#if entries.length > 0}
+              <button role="menuitem" on:click={() => { toggleSelectAll(); overflowOpen = false; }}>
+                <Icon name="check" size={15} />
+                {allSelected ? $t("trash.deselectAll") : $t("trash.selectAll")}
+              </button>
+              <button
+                role="menuitem"
+                disabled={selected.size === 0}
+                on:click={() => { restoreSelected(); overflowOpen = false; }}
+              >
+                <Icon name="back" size={15} />
+                {$t("trash.restoreSelected")}
+              </button>
+              <button
+                role="menuitem"
+                disabled={selected.size === 0}
+                on:click={() => { requestEmpty("selected"); overflowOpen = false; }}
+              >
+                <Icon name="delete" size={15} />
+                {$t("trash.emptySelected")}
+              </button>
+              <!-- Wording conveys destructiveness; text stays var(--text) via the shared `.menu button`
+                   rule per MENUS.md — never red (the one place red belongs is ConfirmDialog's own
+                   primary button, reached via `requestEmpty` below). -->
+              <button role="menuitem" on:click={() => { requestEmpty("all"); overflowOpen = false; }}>
+                <Icon name="delete" size={15} />
+                {$t("trash.emptyAll")}
+              </button>
+              <div class="menu-sep" role="separator" />
+            {/if}
+            <button role="menuitem" on:click={() => { load(); overflowOpen = false; }}>
+              <Icon name="refresh" size={15} />
+              {$t("trash.refresh")}
+            </button>
+            <button role="menuitem" on:click={() => { dispatch("help", "trash"); overflowOpen = false; }}>
+              <Icon name="book" size={15} />
+              {$t("trash.docs")}
+            </button>
+          </div>
+        {/if}
         <button class="tv-x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
       </div>
     </div>
@@ -470,46 +594,28 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
-  /* CPE-1816 review round 2 (finding 5) / round 3 (BLOCKING 1) / round 4 (converging fix): a bare flex
-     child grows to its content width and can force the row to wrap / the toolbar to jump at a narrow
-     window width — that's what round 2's plain `min-width: 0` was for. Round 2 shipped it WITHOUT a
-     floor, and paired with `.tv-tools` never shrinking (no `min-width: 0` of its own, so its content
-     width was an effective hard minimum), 100% of every width deficit landed on `.tv-title`, collapsing
-     it — and the caveat inside it — to a few px at the app's permitted minimum window (600px). Round 3
-     tried to fix that with a reasoned `min-width: 34ch` floor on `.tv-title` plus `min-width: 0` on
-     `.tv-tools` (to make the toolbar share the shrink) — but `.tv-tools`'s BUTTONS kept their own default
-     `min-width: auto`, so the box shrank while its content stayed ~608px wide and spilled out under
-     `overflow: visible`, silently clipped by `.tv-panel`'s `overflow: hidden`. That pushed round 3's own
-     regression onto the toolbar instead: Refresh, Docs, and the Close button became unreachable in a
-     ~700-880px band that was fully fine before this ticket (and had no Escape-key fallback), which is a
-     worse defect than the one this ticket exists to fix.
-     Round 4 removes BOTH `min-width` overrides (`.tv-title`'s floor and `.tv-tools`'s `min-width: 0`)
-     rather than continuing to patch the toolbar side. No floor is needed at all: real-browser sweeps
-     across every width 520-1200px, all three listing states, and all 12 shipped locales confirm the
-     caveat is never clipped and never lost with `.tv-title` left to its own default sizing — instead,
-     text that doesn't fit wraps the titlebar onto a second line (this component's original, pre-CPE-1816
-     behaviour) rather than being cut off. `.tv-tools` reverts to its own default sizing too, restoring
-     its pre-this-ticket toolbar layout exactly, so the ~700-880px close-button regression is gone, not
-     relocated. The remaining cost — the titlebar wrapping (taller) at <=800px, worse with a row selected
-     — is CPE-1816's own round-2/3 changes making an ALREADY-KNOWN issue (finding 5, ranked lowest of five
-     visual findings, present before this ticket) marginally more visible; it needs a toolbar-density
-     decision (icon-only buttons under a breakpoint, an overflow menu, or accepting the wrap), not another
-     CSS-only patch here, so it is intentionally left as-is and tracked in a follow-up ticket rather than
-     addressed in this one.
-     `text-overflow: ellipsis` stays removed (round 3): it never worked here regardless of any floor.
-     Ellipsis truncates ONE block-level box's own text; `.tv-title` is the flex CONTAINER holding three
-     separate flex items (the icon, an anonymous text item for "Trash", and the `.tv-count` span), and a
-     flex container's `ellipsis` does not summarize its children's combined overflow — the round-2 comment
-     claiming otherwise was wrong, and the round-2 render showed a literal hard mid-word cut ("Tr"), never
-     a "…". Without a floor, this component now wraps rather than clips when it runs out of room, so
-     there's nothing left for an ellipsis to truncate in the first place. */
+  /* CPE-1827 (supersedes the CPE-1816 round 2/3/4 history that used to sit here — same finding-5
+     symptom, now actually fixed rather than shuffled between the title and the toolbar): the real
+     cause was density, not a `min-width` value on either side, per the ticket. The toolbar-density
+     decision round 4 deferred is made here — an overflow "…" menu holds every action except Close, so
+     `.tv-tools` (below) is now a FIXED two-control width (trigger + ×) at every listing state and every
+     locale, never the wide, content-driven row that forced this fight in the first place. That frees
+     `.tv-title` to take the make-or-break variable-width role safely: `flex: 1 1 auto; min-width: 0`
+     lets it shrink below its own content width (the thing round 2's bare `min-width: 0` got right),
+     and `flex-wrap: wrap` (replacing the old `white-space: nowrap; overflow: hidden`, which pinned
+     `.tv-title`'s own min-content width to its full rendered width and reintroduced the exact silent
+     clip this ticket exists to fix) lets its three children — icon, "Trash" text, the `.tv-count` span
+     — wrap onto their own line inside `.tv-title` when they don't fit, growing `.tv-titlebar`'s height
+     rather than ever being cut off. `.tv-tools` stays `flex: 0 0 auto` so it never participates in the
+     shrink/wrap at all — Close must never move. */
   .tv-title {
     display: flex;
     align-items: center;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 4px 8px;
     font-weight: 600;
-    overflow: hidden;
-    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
   }
   .tv-count { font-size: 12px; font-weight: 400; opacity: 0.7; }
   /* CPE-1816: the mid-stream caveat, sharing the title bar's item-count slot rather than a separate
@@ -517,13 +623,10 @@
      "provisional status text" from the plain count/selection text this same slot shows once resolved,
      without a second colour (the slot is already dim via `.tv-count`'s opacity). */
   .tv-count-loading { font-style: italic; }
-  /* CPE-1816 review round 3 tried `min-width: 0` here so `.tv-tools` would share the shrink with
-     `.tv-title`, paired with that round's floor there. It backfired (see `.tv-title`'s comment above):
-     the buttons inside kept their own default sizing, so the BOX shrank while its CONTENT stayed the
-     same width and spilled out silently clipped by `.tv-panel`. Round 4 removes it — `.tv-tools` is back
-     to flexbox's default `min-width: auto` (its full button-row content width, same as this component's
-     original pre-CPE-1816 behaviour), which is what keeps every button, including Close, reachable. */
-  .tv-tools { display: flex; align-items: center; gap: 8px; }
+  /* CPE-1827: fixed-width and non-shrinking — see `.tv-title`'s comment above. Holds exactly the
+     overflow-menu trigger and Close, in that order, so Close is always the last, rightmost, and never
+     the widest-varying element in the titlebar. */
+  .tv-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
   .tv-btn {
     font: inherit;
     font-size: 12px;
@@ -537,9 +640,19 @@
   }
   .tv-btn:hover:not(:disabled) { background: rgba(128, 128, 128, 0.14); }
   .tv-btn:disabled { opacity: 0.5; cursor: default; }
-  /* Wording conveys destructiveness ("Empty Trash…"); text stays var(--text) per MENUS.md — never red.
-     The one place red belongs is the ConfirmDialog's own primary button (danger). */
-  .tv-btn.danger-text { color: var(--text); }
+  /* CPE-1827: the overflow trigger is a square icon button (reuses `.tv-btn`'s chrome, just narrower
+     padding so the 15px "more" glyph isn't crowded by 12px of horizontal padding meant for text). */
+  .tv-overflow-btn { padding: 0 7px; }
+  /* CPE-1827: `position: fixed` (not the global `.menu-wrap`/`.menu`'s `position: absolute`) — see
+     `clampToAnchor`'s doc comment above for why. Reuses the global `.menu` class for its chrome
+     (background/border/radius/shadow/padding, `app.css`) and only overrides positioning; `left`/`top`
+     are set per-open by `clampToAnchor`, computed and clamped fully into the viewport, so the static
+     `left: 0` / `top: calc(100% + 4px)` the global class ships (meant for a `position: relative`
+     `.menu-wrap` ancestor, which this menu deliberately has none of) never applies. `z-index: 100`
+     matches MENUS.md's container spec (and `AgentMenu`/`ContextMenu`'s `.ctx`) rather than the global
+     `.menu`'s `z-index: 20`, which was tuned for menus still nested inside their trigger's own stacking
+     context. */
+  .tv-overflow-menu { position: fixed; left: 0; top: 0; z-index: 100; }
   .tv-x {
     border: 0;
     background: transparent;
