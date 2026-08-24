@@ -3,7 +3,7 @@ id: CPE-1879
 title: backup.rs::copy_one_verified writes to a user-named destination with no link guard at all — not even for symlinks
 type: bug
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-23
@@ -67,11 +67,11 @@ failure message states the asymmetry.
 
 ## Acceptance criteria
 
-- [ ] The write-through reproduced on today's code and shown closed — both pasted.
-- [ ] Symlink/reparse refusal present, matching the sibling write paths.
-- [ ] The hard-link decision recorded with its reasoning, whichever way it goes.
-- [ ] The directory-nlink asymmetry handled and pinned on all three OSes.
-- [ ] Any refusal is reported to the user, per file — never a silent skip.
+- [x] The write-through reproduced on today's code and shown closed — both pasted.
+- [x] Symlink/reparse refusal present, matching the sibling write paths.
+- [x] The hard-link decision recorded with its reasoning, whichever way it goes.
+- [x] The directory-nlink asymmetry handled and pinned on all three OSes.
+- [x] Any refusal is reported to the user, per file — never a silent skip.
 
 ## Work Log
 
@@ -79,3 +79,37 @@ failure message states the asymmetry.
   from CPE-1857's worker's own sweep. It fixed the three untrusted-name sites in its scope, gave
   reasons for the sites it deliberately left alone, and flagged this one as out of scope rather than
   quietly widening its diff. That is the right call and it is why this ticket exists.
+- **2026-08-23 (Worker)** — Fixed. `copy_one_verified` now calls
+  `fsutil::copy_file_onto_no_follow` (CPE-1857's mechanism) instead of a bare `std::fs::copy`, so it
+  inherits the symlink/reparse refusal and the `!is_dir && links > 1` hard-link refusal at zero extra
+  syscalls, read off the same open handle the write goes through.
+  - **Reproduced live before the fix**: an out-of-tree `outside/victim.txt` hard-linked to the backup
+    destination `dst/h.txt`, then `copy_one_verified` run against it — `victim.txt`'s bytes changed to
+    the backup source's content (`cargo test` panic on the HARM assertion, pasted in the PR/report).
+    Same reproduction for a symlinked destination. A third test proved the silent-write shape at the
+    `apply_backup_plan` level: the OpResult for the linked entry came back `ok: true`, no error, no
+    signal anything was wrong. All three now pass after the fix (refused, per-file, victim untouched).
+  - **Hard-link decision: refuse, same as CPE-1857's restore writer** — deliberately re-derived, not
+    copied across. This backup engine implements no dedup of its own: `copy_one_verified` only ever
+    executes a flat copy/update plan computed by comparing two trees; it never decides "link instead of
+    copy". A real dedup backup tool (rsync `--link-dest`, Time Machine) creates its *own* hard links as
+    a deliberate step and would never subsequently `fs::copy` onto one. So a pre-existing multiply-linked
+    name at a plan-chosen destination is not this tool's own structure — it is either an accident (backup
+    pointed at a store some other tool manages) or a planted link — and writing through it is corruption
+    either way. Refusing, per entry, with the rest of the run continuing (already how
+    `apply_backup_plan_walk` treats every `copy_one_verified` error) transfers CPE-1857's answer for the
+    same reason it applied there.
+  - Symlink refusal added unconditionally — no legitimate counter-case for a backup destination being a
+    link.
+  - Reporting: no plumbing change needed — `apply_backup_plan_walk` already converts any
+    `copy_one_verified` error into `OpResult::err(&dst, e)` and continues the loop, so the refusal was
+    already wired to reach the caller per file; only the refusal itself was missing. Pinned by
+    `apply_backup_plan_reports_a_hard_link_refusal_per_file_not_silently`.
+  - Directory/nlink asymmetry: inherited from `copy_file_onto_no_follow`, which orders the `is_dir`
+    refusal ahead of the `links > 1` check, so a directory can never reach the hard-link branch on any
+    platform — no new asymmetry introduced.
+  - `cargo test` (crates/server): 2383 passed, 0 failed, 8 ignored. `cargo clippy --all-targets` and
+    `cargo clippy --all-targets --features index`, both `-D warnings`: clean.
+  - New doc bullet in `src/docs/safety-undo.md` explains the refusal in plain language alongside the
+    existing Windows-odd-name refusal bullet.
+  - Security-relevant: flagging for the Security Auditor leg.

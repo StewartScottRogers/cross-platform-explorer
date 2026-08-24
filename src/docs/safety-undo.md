@@ -66,6 +66,16 @@ Three details are worth knowing, because they are deliberate:
     distinct file there and nothing is ambiguous, so it is copied, moved, and mirror-deleted like any
     other file.
 
+- **A backup job refuses to write onto a link, or onto a file that has more than one name** (CPE-1879).
+  A backup copies bytes onto whatever the destination name points at; if that name is a shortcut/symlink,
+  or a second name for a file that lives somewhere else entirely (some dedup tools and sync clients give
+  one file several names, as [Checkpoints & Rollback](16-checkpoints) also explains), writing there would
+  change that *other* place instead of the file the backup job is supposed to be writing. Neither case
+  can be told apart from an ordinary file by its path alone, so the job refuses that one entry, names it,
+  and continues with the rest of the run — never a silent skip. The remedy is the same as for a
+  checkpoint revert: give the destination its own name (copy the file over itself to drop the link) and
+  run the backup again.
+
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you
   to click past it, which is worse than no prompt at all.
