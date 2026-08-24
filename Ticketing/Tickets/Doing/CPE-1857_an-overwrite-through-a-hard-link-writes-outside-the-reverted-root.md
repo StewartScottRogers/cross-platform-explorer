@@ -239,3 +239,111 @@ out in the failure message; absent name: no) plus the positive leg with its live
 every platform, but only the Unix legs can red on the directory row — stated in the test rather than left
 for the next person to rediscover, since a Windows-only local run cannot reproduce this class at all.
 
+### 2026-08-23 (round-trip 2/3) — Security Auditor finding 1: the gate failed OPEN
+
+**The finding.** `name_is_multiply_linked` read its answer through `probe_no_follow`, which funnels every
+probe through `facts_or_unreadable` and downgrades to `Probe::Unreadable` whenever
+`FileIdentity::is_degenerate()` — a zero volume serial or zero file index. This repo already documents
+(CPE-1642 finding F2, on `is_degenerate` itself) that `GetFileInformationByHandle` **succeeds and hands
+back a zero index** on several network redirectors. In that case `nNumberOfLinks` is present and correct
+**and was thrown away**; the function answered `false`; the write proceeded. On any destination whose
+volume reports a degenerate identity — **a network share, a first-class destination for this app** —
+extraction and download wrote through a pre-existing hard link exactly as before, with the guard present
+and silent.
+
+**Two changes, because the finding has two halves and each is independently load-bearing.**
+
+1. **Decouple the link count from the identity gate.** `probe_no_follow` (identity questions, still
+   gated) is now a thin wrapper over `probe_facts_no_follow` (ungated facts). `name_links` reads the
+   latter directly. A link count is **not** an identity — the degeneracy gate answers "can I compare this
+   object with another one", which is a question nobody asked here — so gating it discarded a good
+   answer. This is also what makes change 2 payable: before the split, a degenerate identity produced
+   `Unreadable` for *every object on the volume*, so failing closed would have refused every entry
+   extracted to a share. Afterwards `Unknown` means only "the probe genuinely could not read the name".
+
+2. **Three-valued `NameLinks` (`One` / `Many(u64)` / `NoFileHere` / `Unknown`), and the two PRE-WRITE
+   gates refuse on `Unknown`.** `archive::entry_sink_action` **aborts**, on exactly the terms
+   `entry_slot_action`'s own `Unknown` arm already aborts an unreadable *link* verdict — same condition,
+   same answer, and `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped` already
+   pins the shape. `transfer::download_tree` records it in **`undelivered`**, the route
+   `LeafProbe::Uninspectable` already takes, so the transfer cannot report `Ok(n)` for a tree it did not
+   deliver.
+
+**Why the three sites differ — the reasoning the Foreman asked to have written down.**
+
+| site | kind | answer to `Unknown` | why |
+|---|---|---|---|
+| `revert_engine::apply_write`'s refusal mapper | **classifier** | fold into "no" (`name_is_multiply_linked`) | The write is already settled — refused or done — so this chooses WORDING and can no longer choose where a byte goes. An unknown answer picks `transient`, the classification that path had for **every** refusal before CPE-1857, so it degrades to the previous behaviour rather than to a new wrong one. |
+| `archive::entry_sink_action` | **gate** | abort | The bytes have not moved. A gate that answers "no" when it cannot tell is a guard that is not there. `resolve_output_containment` is the in-repo precedent for the other direction (`Probe::Unreadable → Containment::Unverifiable`, refuse). |
+| `transfer::download_tree`'s leaf | **gate** | record in `undelivered` | Same reason; the `undelivered` route rather than abort because that is what this function already does for an uninspectable leaf, and it keeps the count honest. |
+
+The **restore writer was never affected**: `copy_file_onto_no_follow` reads `HandleFacts` from
+`handle_facts`, which does not gate on degeneracy at all. Verified by reading it, not assumed.
+
+**Red-then-green, and each half proved separately so neither can be carried by the other.**
+
+*Sabotage A — the exact shape at HEAD `d13715db` (gated probe **and** the bool fold at both gates):*
+
+```text
+cpe_1857_a_degenerate_identity_must_not_silently_disable_the_hard_link_guard   FAILED
+  HARM: on a volume whose identity is degenerate - a network share - the extraction wrote an
+  archive entry's bytes through a hard link into a file outside the extraction folder. The
+  link COUNT was readable the whole time; it was discarded by an identity gate that has
+  nothing to do with this question: Ok("...\out")
+  left:  Some([65,82,67,72,73,86,69,32,80,65,89,76,79,65,68])   "ARCHIVE PAYLOAD"
+  right: Some([79,85,84,83,73,68,69,32,67,79,78,84,69,78,84])   "OUTSIDE CONTENT"
+
+cpe_1857_the_transfer_gate_refuses_when_it_cannot_read_the_link_count          FAILED
+  HARM: ... the download wrote the remote server's bytes through a hard link into a file
+  outside the download root.
+  left:  Some([112,119,110])                          "pwn"
+  right: Some([111,114,105,103,105,110,97,108])        "original"
+
+cpe_1857_an_unreadable_probe_refuses_the_entry_rather_than_writing_it          FAILED
+  HARM: the gate could not read how many names this file has and wrote the entry anyway - a
+  guard that answers "no" when it cannot tell is a guard that is not there: Ok("...\out")
+  left:  Some([65,82,67,72,73,86,69,32,80,65,89,76,79,65,68])   "ARCHIVE PAYLOAD"
+  right: Some([65,76,82,69,65,68,89,32,72,69,82,69])            "ALREADY HERE"
+
+test result: FAILED. 5 passed; 3 failed
+```
+
+*Sabotage B — the probe split kept, only the gates folding `Unknown` into "no":* the two degenerate legs
+go **green from the split alone**, and only the two unreadable legs red. `test result: FAILED. 6 passed;
+2 failed`. So change 1 closes the network-share half and change 2 closes the unreadable half, and neither
+is redundant.
+
+*Green, both restored:* `test result: ok. 8 passed; 0 failed` for the `cpe_1857` set; **2372 passed / 0
+failed** for the whole lib.
+
+**The seam, and why it exists.** Neither shape can be staged on CI or a developer's box: a real SMB/NFS
+redirector that zeroes the file index cannot be conjured, and the auditor confirmed a denied
+`FILE_READ_ATTRIBUTES` ACE does not reach this path on this host. `ProbeInjection` +
+`ProbeReset::arm(..)` (thread-local, RAII-reset even on a panic, `#[cfg(test)]` only, `pub(crate)` so
+`archive` and `transfer` drive it through their **real** entry points) is the only instrument that can
+drive this fail-open red at all — and a fail-open no test can reach is one that comes back.
+
+**Finding 2 (docs).** `copy_file_onto_no_follow`'s residual section is now a numbered list of **four**
+ways past the rule, replacing a sentence that claimed it "cannot be defeated by a path swap" — true, and
+narrower than it read:
+
+1. a **new** name created for the held object mid-write (the irreducible window, out of the manifest
+   threat model);
+2. a platform with **no** identity model, where there is no count to read — explicitly narrowed to a
+   *missing* count, which is what this row used to be read as also covering and does not;
+3. a filesystem that reports `nlink == 1` **inaccurately** (some FUSE/network mounts) — the rule silently
+   does not fire and nothing reports that it could not answer, because as far as every layer is concerned
+   it *did*. No portable way to ask a filesystem whether its count is trustworthy, so recorded rather than
+   defended against — and it is exactly why `NameLinks::Unknown` matters at a gate: an honest "I cannot
+   tell" is recoverable and a confident wrong number is not;
+4. a Linux **bind mount** at the destination (`mount --bind /outside/victim /root/h.txt`) — `st_nlink`
+   stays 1 and `canonicalize` resolves the in-tree name to itself, so nothing fires. Needs mount
+   privilege, so recorded and deliberately not defended against.
+
+**Out of scope, confirmed not touched:** CPE-1879 (`backup.rs::copy_one_verified` unguarded) and
+CPE-1881 (the 420-byte-per-entry revert refusal, and `download_tree`'s `eprintln`-only skip leaving the
+user a silently lower count). Both real; neither widened into here.
+
+**Verification.** `cargo clippy --all-targets -- -D warnings` and `--features index` both clean;
+`cargo test --lib` 2372 passed / 0 failed; `checkpoint_roundtrip` 21, `archive_panic_safety` 2,
+`sample_fixtures` 16 — all green.

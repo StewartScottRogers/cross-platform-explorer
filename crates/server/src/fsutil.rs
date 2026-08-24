@@ -1300,15 +1300,35 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// depends on the order the engine happened to apply them in. "All names inside" would license an
 /// ambiguous restore rather than a safe one.
 ///
-/// **The residual, recorded rather than implied away.** The count is read from the handle before the
-/// write, so an actor who creates a *new* name for the very object we hold, in the window between that
-/// read and the last byte, still gets the write — the same irreducible window
-/// [`crate::batch_media::open_output_verified`] records for its own census. It is out of this ticket's
-/// threat model, which is a **planted manifest**: a manifest can only aim at a link that already
-/// exists, it cannot create one. And on a platform where [`crate::batch_media::handle_facts`] returns
-/// `None` there is no count to read and this rule does not fire — the same tolerance the reparse-point
-/// and directory checks above already have, and for the same reason: failing closed there would stop
-/// restore working entirely on a platform, rather than protect anything on the two this ships on.
+/// # The residuals, recorded rather than implied away
+///
+/// An earlier draft of this section said the rule "cannot be defeated by a path swap". True, and
+/// narrower than it reads — a swap is not the only way past it. All four ways are listed, because a
+/// security claim that lists only the attacks it stops is the wrong shape.
+///
+/// 1. **A new name created mid-write.** The count is read from the handle before the write, so an actor
+///    who creates a *new* name for the very object we hold, between that read and the last byte, still
+///    gets the write — the same irreducible window [`crate::batch_media::open_output_verified`] records
+///    for its own census. Out of this ticket's threat model, which is a **planted manifest**: a manifest
+///    can only aim at a link that already exists, it cannot create one.
+/// 2. **A platform with no identity model.** Where [`crate::batch_media::handle_facts`] returns `None`
+///    there is no count to read and this rule does not fire — the same tolerance the reparse-point and
+///    directory checks above already have, and for the same reason: failing closed there would stop
+///    restore working entirely on a platform rather than protect anything on the two this ships on.
+///    **This is about a MISSING count. Row 3 is about a count that is present and wrong**, which this
+///    row used to be read as covering and does not.
+/// 3. **A filesystem that reports `nlink == 1` inaccurately.** Some FUSE and network mounts do. The rule
+///    then silently does not fire, and — unlike row 2 — nothing anywhere reports that it could not
+///    answer, because as far as every layer here is concerned it *did* answer. There is no portable way
+///    to ask a filesystem whether its link count is trustworthy, so this is recorded, not defended
+///    against. It is the reason [`crate::batch_media::name_links`]'s `Unknown` arm matters so much at a
+///    gate: an honest "I cannot tell" is recoverable, and a confident wrong number is not.
+/// 4. **A Linux bind mount at the destination.** `mount --bind /outside/victim /root/h.txt` leaves
+///    `st_nlink == 1` — a bind mount is not a link and adds no name to the inode — while `canonicalize`
+///    resolves the in-tree name to itself, so every path check passes and this rule never fires.
+///    Deliberately **not** defended against: it needs mount privilege, and an actor holding that has
+///    strictly better options than aiming a checkpoint blob at a file. Recorded so the next auditor
+///    finds it here rather than re-deriving it.
 ///
 /// # Errors
 ///
