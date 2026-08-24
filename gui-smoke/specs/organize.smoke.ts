@@ -142,9 +142,13 @@ describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a groupe
     // inline: the afterEach runs only after the Cancel click below dismisses the dialog.
     await snap("organize-dialog");
 
-    // Non-destructive: never click Apply — dismiss via Cancel instead, for a clean end state (each
-    // spec file gets its own fresh app launch/session in this harness, so this isn't required for
-    // isolation from other specs, just tidy).
+    // Non-destructive: never click Apply — dismiss via Cancel instead, for a clean end state.
+    // CPE-1866 CORRECTION: this used to say "each spec file gets its own fresh app launch/session in
+    // this harness, so this isn't required for isolation... just tidy" — true before CPE-1866, no
+    // longer true. gui-smoke now shares ONE app process across a whole shard (session-per-shard), so
+    // this dialog staying open WOULD leak into the next spec file's run if this click were ever
+    // removed. It already happens to be here (this spec was written tidy, not lazy), so no behavior
+    // change was needed — only the stale reasoning.
     const cancelBtn = await $('[data-testid="cancel-btn"]');
     await cancelBtn.click();
   });

@@ -8,7 +8,9 @@
 // relaunch — current folder, selection, an open dialog/drawer, window size, and (CPE-1866's own red-proof
 // below) synthetic Agent Watch sessions injected via the `__CPE_TEST_INGEST_*` test-mode hooks — now
 // carries over between spec files unless something puts it back. This is that something: called once per
-// spec file, from wdio.conf.ts's `beforeSuite` hook, BEFORE that file's own `before()`/`it()`s run.
+// spec file, from wdio.conf.ts's `handleRunnableStart` (see that file's comment for why it is
+// `beforeTest`/`beforeHook`, not the config-level `beforeSuite`/`afterSuite` hooks the first version of
+// this fix wrongly used), BEFORE that file's own `before()`/`it()`s run.
 //
 // What this does NOT do, and does not need to: touch anything on DISK. `onPrepare` seeds every fixture
 // ONCE and `onComplete` cleans up ONCE at the very end of the whole run — on-disk state under the seeded
@@ -17,6 +19,20 @@
 // perturbs any other spec's fixtures" comment in wdio.conf.ts already assumes exactly that. The NEW
 // risk surface this ticket introduces is narrowly in-memory state (UI + the Agent Watch test-mode
 // stores), so that is all this resets.
+//
+// WHAT THIS DELIBERATELY DOES NOT COVER — named explicitly (reviewer finding) so the next contributor
+// self-cleans the way `specs/preview-pane.smoke.ts` already does for theme/pane-width (its own
+// `afterEach`, written BEFORE this ticket existed, defensively, for exactly this shared-session shape —
+// the model to copy, not a coincidence): sort order/column config, view mode (list/grid/gallery),
+// filter/search text, sidebar section expansion, the open-tab set (dual-pane / tab strip), scroll
+// position within the file list, and OS/system clipboard contents. None of these has caused an observed
+// failure as of this ticket — this suite happens not to have two specs that collide on them today — but
+// none is reset here either, so a future spec that sets one and assumes a fresh-launch baseline should
+// clean up after itself (`afterEach`) rather than rely on this file growing a matching reset for
+// everything the app can accumulate. Backend/server-side state is a SEPARATE, larger gap: this file only
+// ever touches the FRONTEND (WebDriver commands + test-mode hooks into the Svelte stores) — it has no
+// mechanism to reset backend-resident state like `IndexService` (see `specs/instant-search.smoke.ts`'s
+// own corrected header comment for the concrete, currently-dormant case this creates).
 import { $$, browser } from "@wdio/globals";
 import { navigateTo } from "./samplesNav.js";
 
@@ -129,18 +145,34 @@ async function clearOperationsPanel(): Promise<void> {
  *   1. Window size back to the app's real default — see the constants' comment above.
  *   2. `__CPE_TEST_CLEAR_AGENT_SESSIONS__` — a test-mode-only hook (App.svelte, CPE-1866, mirroring the
  *      existing `__CPE_TEST_INGEST_SESSION__`/`__CPE_TEST_INGEST_ACTIVITY__`/`__CPE_TEST_INGEST_COST__`
- *      convention) that wipes every synthetic Agent Watch session those hooks seed. Needed because
- *      `checkpoint-restore.smoke.ts`/`cost-history.smoke.ts`/`cost-ledger.smoke.ts`/`radar.smoke.ts`/
- *      `replay.smoke.ts` all inject a synthetic session and none of them ever tears it down — every one
- *      was written assuming (correctly, before this ticket) that the session would die with the app
- *      process at the end of its OWN spec file. Clearing `$agentSessions` also closes the drawer as a
- *      side effect, via App.svelte's own `$: if (!activeWatchCwd) showTimeline = false;` — the SAME
- *      real lifecycle path a genuine session-end event drives, not a special case invented here.
+ *      convention). PRECISELY what it does (reviewer correction — the previous wording overstated this):
+ *      it calls `clearAgentSessions()`, which empties `$agentSessions` DIRECTLY and SYNCHRONOUSLY
+ *      (`store.set([])`). It does NOT directly touch the activity (`$fsActivity`)/cost (`$agentCost`)
+ *      stores those OTHER two ingest hooks feed — those clear INDIRECTLY, as a side effect of
+ *      App.svelte's existing `$: reconcileAgentWatch($agentSessions, currentPath);` reactive statement
+ *      noticing `$agentSessions` is now empty and tearing down the same way a real session's `ended`
+ *      event would (the exact mechanism `closeAllConsoles()` already relies on for the same cleanup, so
+ *      the PATTERN is trusted — it is not a new invention here). Clearing `$agentSessions` also closes
+ *      the Agent Watch drawer as a side effect, via `$: if (!activeWatchCwd) showTimeline = false;` —
+ *      again the same real lifecycle path a genuine session-end event drives. What this function does
+ *      NOT do: explicitly AWAIT that reactive teardown settling. Svelte's own reactivity flush and the
+ *      `reconcileAgentWatch` chain it triggers are not exposed as an awaitable promise from here, so
+ *      there is no direct handle to wait on; the WebDriver round trips `clearOperationsPanel`/
+ *      `closeAnyOpenOverlay`/`navigateTo` make immediately afterward are the de facto settle time in
+ *      practice, but this is not a guarantee. Needed because `checkpoint-restore.smoke.ts`/
+ *      `cost-history.smoke.ts`/`cost-ledger.smoke.ts`/`radar.smoke.ts`/`replay.smoke.ts` all inject a
+ *      synthetic session and none of them ever tears it down — every one was written assuming
+ *      (correctly, before this ticket) that the session would die with the app process at the end of
+ *      its OWN spec file.
  *   3. {@link closeAnyOpenOverlay} — Escape + explicit Close-button clicks for whatever that missed.
  *   4. `navigateTo(rootDir)` — the SAME address-bar navigation primitive `samples.smoke.ts` already uses
  *      to hop between dozens of folders in one continuous session (CPE-1358), re-used here to return to
  *      the seeded tmpDir root and reconfirm via the breadcrumb that navigation actually landed, rather
- *      than assuming steps 2-3 alone left the app somewhere sane. */
+ *      than assuming steps 2-3 alone left the app somewhere sane.
+ *
+ *  See this file's header comment for what this function deliberately does NOT reset (sort order, view
+ *  mode, filter text, sidebar expansion, tab set, scroll position, clipboard, and any backend-resident
+ *  state such as `IndexService`). */
 export async function resetAppState(rootDir: string): Promise<void> {
   await browser.setWindowSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
   await browser.execute(() => {
