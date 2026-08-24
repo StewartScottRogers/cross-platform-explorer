@@ -778,13 +778,40 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
 /// which is exactly the situation this ticket creates: ~1.6 s, inside `spawn_blocking`, unattended.
 /// That is a considered deferral rather than a hope. If a store ever does get big enough for it to
 /// bite, the fix is to hoist the scan out of the per-manifest call — not to weaken it.
+///
+/// Generous on an unreadable `manifests/` — see [`manifests_naming_strict`], which carries the actual
+/// scan and is the only thing that opens the directory. This wrapper is [`prune`]'s policy: a directory
+/// it cannot open answers "all of them are still named" (keep the blobs, leak rather than destroy).
+/// [`store_total_bytes`] needs the opposite policy and calls the strict variant directly instead — see
+/// its own doc comment (CPE-1867) for why the same predicate needs two callers standing on opposite
+/// sides of this failure branch.
 fn manifests_naming(store_dir: &Path, wanted: &BTreeSet<String>) -> BTreeSet<String> {
+    manifests_naming_strict(store_dir, wanted).unwrap_or_else(|_| wanted.clone())
+}
+
+/// [`manifests_naming`]'s scan, minus its generous fallback: an unreadable `manifests/` is returned as
+/// the `read_dir` error instead of being silently answered "all of them are still named". The *only*
+/// `read_dir` of `manifests/` in this predicate lives here — [`manifests_naming`] wraps it rather than
+/// re-checking readability itself first, and [`store_total_bytes`] calls this directly rather than
+/// probing readability and then calling [`manifests_naming`] (CPE-1867).
+///
+/// **Why the two-open shape was a real, measured window and not a theoretical one.** The round-2 audit
+/// raced a thread renaming `manifests/` away and back against `store_total_bytes`'s old check-then-call
+/// pair — a probing `read_dir` to confirm readability, then a second, independent `read_dir` inside
+/// `manifests_naming` to do the scan — and out of 30,000 calls landed the rename in the gap between
+/// them: `worst Ok value under the race = 2000000000, errs = 0`, the full pre-witness directory sum. The
+/// pre-check answered "readable" honestly; the directory was gone by the time the second call ran, so
+/// `manifests_naming`'s own fallback fired and answered "all of them are named" — safe for `prune`,
+/// wrong here. A single `read_dir` closes the window outright rather than narrowing it: there is no
+/// second call left for the race to land in. See the `cpe_1867_*` test below for the harness and the
+/// worst-`Ok` figure measured against this fix.
+fn manifests_naming_strict(store_dir: &Path, wanted: &BTreeSet<String>) -> std::io::Result<BTreeSet<String>> {
     let mut found = BTreeSet::new();
     if wanted.is_empty() {
-        return found;
+        return Ok(found);
     }
     let dir = manifests_dir(store_dir);
-    let Ok(entries) = fs::read_dir(&dir) else { return wanted.clone() };
+    let entries = fs::read_dir(&dir)?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -801,7 +828,7 @@ fn manifests_naming(store_dir: &Path, wanted: &BTreeSet<String>) -> BTreeSet<Str
             break; // every candidate already accounted for
         }
     }
-    found
+    Ok(found)
 }
 
 /// Load the checkpoint [`Snapshot`] (`path → FileState`) recorded in manifest `manifest_id` from the
@@ -1174,23 +1201,30 @@ pub fn list_manifests(store_dir: &str) -> Result<Vec<ManifestSummary>, String> {
 /// corrupt — `preview` succeeds (it has no other reader of that file) while `apply` refuses inside
 /// [`prune`]. Before this change both refused. Non-destructive in both directions, and the honest
 /// preview is the more useful half, but it is a new asymmetry rather than an intended design.
+///
+/// **`manifests/` is opened exactly once (CPE-1867).** This used to probe readability with its own
+/// `read_dir`, then hand the question to [`manifests_naming`], whose *own* `read_dir` did the actual
+/// scan — two opens with a window between them for `manifests/` to change. It now calls
+/// [`manifests_naming_strict`] directly: that function's single `read_dir` is both the readability check
+/// and the scan, so there is no second open left for a race to land in. See that function's doc comment
+/// for the measured race this closes.
 pub fn store_total_bytes(store_dir: &str) -> Result<u64, String> {
     let store_path = Path::new(store_dir);
     let present = blob_files_on_disk(&blobs_dir(store_path))?;
     if present.is_empty() {
         return Ok(0);
     }
-    // The witness must be *readable* before it is asked: `manifests_naming` answers "all of them" for a
-    // directory it cannot open, which is the right answer for `prune` and the wrong one here. See the
-    // failure-directions note above.
-    let mdir = manifests_dir(store_path);
-    match fs::read_dir(&mdir) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(format!("{}: {e}", mdir.display())),
-    }
     let candidates: BTreeSet<String> = present.keys().cloned().collect();
-    let named = manifests_naming(store_path, &candidates);
+    let named = match manifests_naming_strict(store_path, &candidates) {
+        Ok(named) => named,
+        // An absent `manifests/` means nothing is named yet (a store that has never captured, or one
+        // whose only manifests were already pruned) — `Ok(0)`, same as `manifests_naming`'s caller-facing
+        // behaviour elsewhere. Any other failure to read it is refused rather than handed to the generous
+        // fallback: see the failure-directions note above for why "all of them are named" is the wrong
+        // answer at this call site.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("{}: {e}", manifests_dir(store_path).display())),
+    };
     Ok(present
         .iter()
         .filter(|(hash, _)| named.contains(*hash))
@@ -3606,6 +3640,111 @@ mod tests {
              checkpoints"
         );
         assert!(got.is_err(), "an unreadable witness must refuse: {got:?}");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// CPE-1867 — **the racing-rename harness, against the single-open fix.** The round-2 audit ran this
+    /// same shape against the old two-open `store_total_bytes` (a probing `read_dir`, then
+    /// `manifests_naming`'s own separate `read_dir`): a thread renaming `manifests/` away and back landed
+    /// in the gap between the two calls and hit the generous fallback — `worst Ok value under the race =
+    /// 2000000000, errs = 0` out of 30,000 calls, the full directory sum including an unnamed decoy blob.
+    ///
+    /// The fix removes the second open rather than narrowing the gap: `store_total_bytes` now calls
+    /// [`manifests_naming_strict`] directly, and that function's own single `read_dir` is the ONLY place
+    /// this call asks whether `manifests/` is readable. There is no second call left for a racer to land
+    /// in — either the one `read_dir` sees the directory (scan proceeds normally) or it doesn't (`Ok(0)`
+    /// or `Err`, both handled explicitly by `store_total_bytes`), never "readable, then not, so count
+    /// everything".
+    ///
+    /// A big, unnamed decoy blob makes the harm visible (same shape as
+    /// `cpe_1844_an_unreadable_manifests_dir_refuses_instead_of_counting_everything`): if the race is ever
+    /// won by the generous path, the reported total jumps by the decoy's size. `Ok(0)` results — proof
+    /// the rename actually landed mid-call and was handled honestly rather than generously — are counted
+    /// as the run's liveness evidence instead of a separate single-shot race.
+    #[test]
+    fn cpe_1867_a_racing_rename_of_manifests_never_returns_the_generous_directory_sum() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let src = scratch("1867-race-src");
+        let store = scratch("1867-race-store");
+        fs::write(src.join("a.txt"), b"twenty-nine bytes of content!").unwrap();
+        capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::UNLIMITED).unwrap();
+        let honest = store_total_bytes(&store.to_string_lossy()).unwrap();
+        assert!(honest > 0, "LIVE: capture must have produced a named, counted blob");
+
+        // A decoy nothing names, big enough that "counted everything" cannot be mistaken for the honest
+        // figure.
+        let decoy = std::fs::File::create(blobs_dir(&store).join("d".repeat(64))).unwrap();
+        decoy.set_len(2_000_000_000).unwrap();
+        drop(decoy);
+        let dir_sum: u64 = blob_files_on_disk(&blobs_dir(&store)).unwrap().values().sum();
+        assert!(dir_sum > 2_000_000_000, "LIVE: the decoy never reached the measurement — {dir_sum}");
+        assert_ne!(dir_sum, honest, "LIVE: the decoy must not already be named");
+
+        let mdir = manifests_dir(&store);
+        let away = store.join("manifests-away");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let toggles = Arc::new(AtomicU64::new(0));
+        let racer = {
+            let (mdir, away, stop, toggles) =
+                (mdir.clone(), away.clone(), Arc::clone(&stop), Arc::clone(&toggles));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if fs::rename(&mdir, &away).is_ok() {
+                        toggles.fetch_add(1, Ordering::Relaxed);
+                        let _ = fs::rename(&away, &mdir);
+                    }
+                }
+            })
+        };
+
+        const ITERS: u32 = 20_000;
+        let mut worst_ok = 0u64;
+        let mut errs = 0u32;
+        let mut zeros = 0u32; // Ok(0): the race landed and was handled honestly, not generously
+        for _ in 0..ITERS {
+            match store_total_bytes(&store.to_string_lossy()) {
+                Ok(v) => {
+                    worst_ok = worst_ok.max(v);
+                    if v == 0 {
+                        zeros += 1;
+                    }
+                    assert_ne!(
+                        v,
+                        dir_sum,
+                        "HARM: a racing rename of manifests/ made store_total_bytes count every blob \
+                         file (the generous fallback), which is the figure that deletes checkpoints"
+                    );
+                }
+                Err(_) => errs += 1,
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        racer.join().unwrap();
+
+        eprintln!(
+            "[CPE-1867] {ITERS} calls under a racing rename: worst Ok = {worst_ok}, errs = {errs}, \
+             Ok(0)-from-a-landed-race = {zeros}, toggles observed = {}",
+            toggles.load(Ordering::Relaxed)
+        );
+
+        assert!(
+            toggles.load(Ordering::Relaxed) > 0,
+            "LIVE: the racer thread never won a single rename — the test never actually raced anything"
+        );
+        assert!(
+            zeros > 0,
+            "LIVE: not one call observed manifests/ actually missing — the race pressure never reached \
+             store_total_bytes, so the harm assertion above proves nothing"
+        );
+        assert_eq!(
+            worst_ok, honest,
+            "the single-open fix must never inflate the total beyond the honest, fully-witnessed figure"
+        );
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);
