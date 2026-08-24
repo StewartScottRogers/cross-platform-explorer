@@ -3,7 +3,7 @@ id: CPE-1809
 title: an archive test assertion cannot fail, and a staging failure returns where it should continue
 type: bug
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-20
@@ -46,3 +46,40 @@ Filed by the Foreman from the independent review of PR #958, 2026-08-20. Both pr
 left out of that PR rather than widening it.
 
 Related: **CPE-1759**, and the Evidence Rules in `Ticketing/wiki.md`.
+
+## Work Log
+
+2026-08-23 — Located both defects by content (the ticket's line numbers, 7237/5605, were from PR #958's
+branch state at review time — 2026-08-20 06:13, between the first CPE-1759 commit and its round-2 review
+— not the final merged file, and ~40 batches of unrelated tickets have landed in this file since).
+Defect 1 = `cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails`'s
+`err.contains("hard")`. Defect 2 = `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically`'s
+`return;` inside its `for (label, run, records) in legs` loop.
+2026-08-23 — Defect 1 fix: renamed the test's scratch dir from `cpe1759_hardlink` to
+`cpe1759_tar_link_escape` (no "hard" substring anywhere in the path) and strengthened the assertion to
+`err.contains("could not create the link") && err.contains("hard")` — the wrapper phrase is
+`tar_link_creation_outcome`'s own fixed text, never suppliable by a fixture or entry name. Red-proofed by
+replacing that wrapper's text with `"boom: {e}"`: the test went red, and the panic message itself proved
+the OLD assertion (`contains("hard")` alone) would NOT have caught it — the entry's own name ("hard") is
+still the final path component even under the broken wording. Evidence in the PR body.
+2026-08-23 — Defect 2 fix: `return` → `continue` in `one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically`.
+2026-08-23 — Swept the whole file for both shapes per the ticket's ask. Found the SAME return-vs-continue
+shape in six more places, all "for loop over independent legs/rows, each staging its own link, `return`
+on the first staging failure" — fixed all seven to `continue`:
+`every_guarded_row_refuses_a_live_link_without_touching_its_target` (loses 8 of 9 `GUARDED_ROWS` on one
+bad stage — the worst instance found), `rows_15_and_16_refuse_a_live_link_and_still_extract_the_rest`,
+`rows_21_and_22_tar_refuse_a_link_at_an_entry_name_and_still_extract_the_rest`,
+`one_shot_and_streamed_zip_answer_a_link_at_an_entry_name_identically` (the named defect),
+`rows_15_to_20_refuse_a_file_entry_addressed_through_a_symlinked_intermediate_directory` and
+`row18_refuses_a_directory_entry_that_would_be_created_outside_the_extraction_folder` (both via
+`stage_intermediate_dir_escape`'s `let-else`), and
+`row17_a_dangling_link_at_the_extraction_destination_is_reported_as_a_link`. Left `assert_row_refuses_a_dangling_link`,
+`cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure`'s up-front probe, and the
+other single-scenario `return`s alone — each stages once for its ONE test, not for a table of independent
+legs, so there is nothing a `return` there could silently abandon. No other `contains`-on-fixture-naming
+shape found beyond the one fixed (checked every scratch-dir name against its own assertions).
+2026-08-23 — This coverage-loss defect (unlike defect 1) has no clean assertion-level red state to
+demonstrate — a `return` firing on a legitimate skip does not fail the test, it just silently tests less,
+which is the whole danger. Evidence offered instead: the mechanism is stated in each fix's inline comment,
+and `cargo test` stayed green after all seven conversions (no coverage regression from the change itself).
+2026-08-23 — Status: Doing → ready to close alongside CPE-1837/CPE-1812 in one PR.

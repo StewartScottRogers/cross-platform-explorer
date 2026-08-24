@@ -5759,7 +5759,10 @@ mod tests {
                     link.display()
                 );
                 let _ = fs::remove_dir_all(&d);
-                return;
+                // CPE-1809: `continue`, not `return` — a staging hiccup on ONE row of `GUARDED_ROWS` must
+                // not abandon testing the other eight; a `return` here made a bad run for row 6 silently
+                // skip rows 7–14 too, with nothing saying so.
+                continue;
             }
 
             let outcome = run(&d);
@@ -5998,7 +6001,9 @@ mod tests {
                     link.display()
                 );
                 let _ = fs::remove_dir_all(&d);
-                return;
+                // CPE-1809: `continue`, not `return` — the two rows stage independently, so a failure on
+                // row 15 must not silently abandon row 16 too.
+                continue;
             }
 
             let outcome = run(&d, &dest);
@@ -6096,7 +6101,9 @@ mod tests {
                     link.display()
                 );
                 let _ = fs::remove_dir_all(&d);
-                return;
+                // CPE-1809: `continue`, not `return` — the two legs stage independently, so a failure on
+                // the one-shot leg must not silently abandon the streamed leg too.
+                continue;
             }
 
             let outcome = run(&tgz, &dest);
@@ -6358,7 +6365,9 @@ mod tests {
                     link.display()
                 );
                 let _ = fs::remove_dir_all(&d);
-                return;
+                // CPE-1809: `continue`, not `return` — the two legs stage independently in their own
+                // scratch directory, so a failure on one must not silently abandon the other.
+                continue;
             }
 
             let outcome = run(&zip, &dest);
@@ -7787,7 +7796,9 @@ mod tests {
             let Some((d, archive, dest, outside)) =
                 stage_intermediate_dir_escape(&format!("cpe1744_row{n}_{kind}"), kind, false)
             else {
-                return;
+                // CPE-1809: `continue`, not `return` — each sink stages its own directory link fresh, so
+                // a failure on one row must not silently abandon the rest of the table.
+                continue;
             };
 
             let outcome = run(&archive, &dest);
@@ -7865,7 +7876,9 @@ mod tests {
             let Some((d, archive, dest, outside)) =
                 stage_intermediate_dir_escape(&format!("cpe1744_row{n}_dir_{kind}"), kind, true)
             else {
-                return;
+                // CPE-1809: `continue`, not `return` — each sink stages its own directory link fresh, so
+                // a failure on one row must not silently abandon the rest of the table.
+                continue;
             };
 
             let outcome = run(&archive, &dest);
@@ -7944,7 +7957,9 @@ mod tests {
                     dest.display()
                 );
                 let _ = fs::remove_dir_all(&d);
-                return;
+                // CPE-1809: `continue`, not `return` — all four legs stage independently, so a failure on
+                // one must not silently abandon the other three.
+                continue;
             }
             let target = crate::fsutil::dangling_link_target(&dest);
 
@@ -8948,9 +8963,25 @@ mod tests {
     /// unpredictable without attempting it, and the same treatment a `File::create` or `io::copy` failure
     /// gets at rows 15/16/19/20. If someone later converts that to a skip, this leg says so out loud
     /// instead of letting "refusals skip, failures abort" quietly stop being the rule.
+    ///
+    /// **CPE-1809: the failure-message assertion below pins OUR wrapper wording, not the bare word
+    /// "hard".** The scratch directory this test used to run in was named `cpe1759_hardlink`, and every
+    /// path this test touches lives under it — so `err.contains("hard")` was true from the *directory
+    /// name* alone, before the error text said anything about the entry at all. Renamed to
+    /// `cpe1759_tar_link_escape` (no "hard" substring anywhere in the path) and the assertion now also
+    /// checks for [`tar_link_creation_outcome`]'s own fixed wrapper phrase `"could not create the link"`,
+    /// which the fixture's naming can never supply.
+    ///
+    /// **Red-proof (re-run 2026-08-23):** replacing that wrapper's text with `format!("boom: {e}")` turned
+    /// this test red — `...the failure must be OUR link-creation wrapper naming the entry it failed on...
+    /// got boom: failed to unpack \`...\dst_missing-target-inside_false\hard\`` — and the panic message
+    /// itself proves the OLD assertion would NOT have caught it: the entry's own name ("hard") is still
+    /// the final path component even under the broken wording, so `err.contains("hard")` alone stays
+    /// `true` on "boom: ..." too. Renaming the fixture closes the accidental match from the directory
+    /// name; requiring the wrapper phrase closes the coincidental match from the entry's own name.
     #[test]
     fn cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails() {
-        let d = scratch("cpe1759_hardlink");
+        let d = scratch("cpe1759_tar_link_escape");
         let outside = d.join("outside");
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
@@ -9007,9 +9038,16 @@ mod tests {
                          failures abort\" needs rewriting with it",
                     );
                     assert!(
-                        err.contains("hard"),
-                        "{label} streamed={streamed}: and the failure must name the entry it failed on, \
-                         not merely be some error — got {err}"
+                        // CPE-1809: `err.contains("hard")` alone cannot fail — every path in this test
+                        // lives under the `cpe1759_hardlink` scratch directory (renamed above), AND the
+                        // entry's own name is literally "hard", so the substring was present in ANY error
+                        // this test could produce, including a wrong one — see the red-proof on this
+                        // function's doc. Pinned instead on `tar_link_creation_outcome`'s own fixed
+                        // wrapper phrase (never supplied by a fixture or an entry name) together with the
+                        // entry name.
+                        err.contains("could not create the link") && err.contains("hard"),
+                        "{label} streamed={streamed}: and the failure must be OUR link-creation wrapper \
+                         naming the entry it failed on, not merely be some error — got {err}"
                     );
                     continue;
                 }
