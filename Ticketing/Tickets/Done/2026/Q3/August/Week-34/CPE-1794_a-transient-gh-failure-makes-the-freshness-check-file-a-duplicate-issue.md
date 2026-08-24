@@ -3,11 +3,11 @@ id: CPE-1794
 title: a transient gh failure makes the freshness check file a duplicate issue instead of failing loud
 type: bug
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
