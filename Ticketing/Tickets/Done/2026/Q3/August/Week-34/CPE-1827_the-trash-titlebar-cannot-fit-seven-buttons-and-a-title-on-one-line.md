@@ -3,11 +3,11 @@ id: CPE-1827
 title: the Trash titlebar cannot fit seven buttons and a title on one line at supported widths
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
