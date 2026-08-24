@@ -3,11 +3,11 @@ id: CPE-1836
 title: the status bar's git block bleeds into the disk label at the 600px floor when the row is full
 type: bug
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem

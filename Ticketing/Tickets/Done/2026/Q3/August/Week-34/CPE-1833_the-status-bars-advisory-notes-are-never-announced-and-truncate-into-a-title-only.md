@@ -3,11 +3,11 @@ id: CPE-1833
 title: the status bar's advisory notes are never announced, and truncate into a title attribute only
 type: bug
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-23
 ---
 
 ## Problem
