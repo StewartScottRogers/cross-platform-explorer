@@ -306,10 +306,24 @@ pub fn platforms_with_url_outside_prefix(manifest_json: &str, expected_prefix: &
         .into_iter()
         .filter_map(|(name, entry)| {
             let url = entry.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-            if url.starts_with(expected_prefix) {
-                None
-            } else {
+            // A bare `starts_with` is NOT enough, and the audit proved it: a url may satisfy the
+            // prefix and then climb straight back out of it with dot-segments --
+            //   .../releases/download/v1.2.3/../../../../../attacker/evil-repo/releases/download/v1/x.zip
+            // resolves, under RFC 3986 / WHATWG dot-segment removal, to a repo any GitHub user can
+            // create. Percent-encoding the dots (`%2e%2e/`) is the same bypass wearing a hat.
+            //
+            // So after the prefix matches, the REMAINDER must be a bare filename: no `/` at all.
+            // That kills raw `..`, `%2e%2e`, and every future encoding trick in one stroke, and it
+            // costs nothing, because the download step already reduces the url to its last segment
+            // and would not have fetched anything else anyway.
+            let escapes = match url.strip_prefix(expected_prefix) {
+                Some(rest) => rest.contains('/'),
+                None => true,
+            };
+            if escapes {
                 Some((name, url))
+            } else {
+                None
             }
         })
         .collect()
@@ -578,6 +592,69 @@ mod tests {
         assert_eq!(
             platforms_with_url_outside_prefix(&m, REAL_PREFIX),
             vec![("windows-x86_64".to_string(), evil_url.to_string())]
+        );
+    }
+
+    /// CPE-1872 Finding C1 (round-3 audit): a url may SATISFY the expected prefix and then climb
+    /// straight back out of it with dot-segments. Under RFC 3986 / WHATWG dot-segment removal the
+    /// url below resolves to `github.com/attacker/evil-repo/...` -- a repo any GitHub user can
+    /// create -- while a bare `starts_with` check waves it through. The audit demonstrated this
+    /// bypassing the shipped check at EXIT=0 with `OK: verified 1 of 1`.
+    ///
+    /// Delete the `rest.contains('/')` clause in `platforms_with_url_outside_prefix` and this test
+    /// goes red. That is the point of it.
+    #[test]
+    fn a_url_that_escapes_the_prefix_with_dot_segments_is_an_offender() {
+        let sig = "irrelevant-for-this-check";
+        let escaping = format!(
+            "{REAL_PREFIX}../../../../../attacker/evil-repo/releases/download/v1/app_1.2.3_x64-setup.nsis.zip"
+        );
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": { "windows-x86_64": { "signature": sig, "url": escaping } }
+        })
+        .to_string();
+        assert_eq!(
+            platforms_with_url_outside_prefix(&m, REAL_PREFIX),
+            vec![("windows-x86_64".to_string(), escaping)],
+            "a url that satisfies the prefix and then climbs out of it with `..` must be flagged"
+        );
+    }
+
+    /// Percent-encoding the dots is the same bypass wearing a hat -- and it is why the fix rejects
+    /// ANY `/` in the remainder rather than pattern-matching `..`: a rule that hunts for specific
+    /// escape spellings loses to the next encoding, while "the remainder must be a bare filename"
+    /// does not.
+    #[test]
+    fn a_percent_encoded_escape_is_also_an_offender() {
+        let sig = "irrelevant-for-this-check";
+        let escaping =
+            format!("{REAL_PREFIX}%2e%2e/%2e%2e/attacker/app_1.2.3_x64-setup.nsis.zip");
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": { "windows-x86_64": { "signature": sig, "url": escaping } }
+        })
+        .to_string();
+        assert_eq!(
+            platforms_with_url_outside_prefix(&m, REAL_PREFIX),
+            vec![("windows-x86_64".to_string(), escaping)]
+        );
+    }
+
+    /// The control the two tests above need: a genuine url -- prefix plus a bare filename, no
+    /// separators -- must still pass. A refusal that rejects everything is not a fix.
+    #[test]
+    fn a_genuine_bare_filename_url_is_not_an_offender() {
+        let sig = "irrelevant-for-this-check";
+        let good = format!("{REAL_PREFIX}app_1.2.3_x64-setup.nsis.zip");
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": { "windows-x86_64": { "signature": sig, "url": good } }
+        })
+        .to_string();
+        assert_eq!(
+            platforms_with_url_outside_prefix(&m, REAL_PREFIX),
+            Vec::<(String, String)>::new()
         );
     }
 

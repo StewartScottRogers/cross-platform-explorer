@@ -56,11 +56,22 @@ $verifyJobJson = gh run view $runId --repo StewartScottRogers/cross-platform-exp
 if (-not $verifyJobJson) { throw "no verify-published-manifest job found on run $runId -- do not publish" }
 $verifyJob = $verifyJobJson | ConvertFrom-Json
 
-# `skipped` is the LEGITIMATE case: no TAURI_SIGNING_PRIVATE_KEY configured (fork / unsigned local
-# build) -- the job's own signing-key guard skips it deliberately, same pattern as the OS-code-signing
-# steps elsewhere in release.yml. Only `success` or `skipped` may proceed to 1c; anything else
-# (`failure`, `cancelled`, or the job missing entirely) means STOP.
-if ($verifyJob.conclusion -ne "success" -and $verifyJob.conclusion -ne "skipped") {
+# ONLY `success` may proceed to 1c. Anything else -- `failure`, `cancelled`, `skipped`, or the job
+# missing entirely -- means STOP.
+#
+# An earlier draft of this check also accepted `skipped`, on the reasoning that a missing
+# TAURI_SIGNING_PRIVATE_KEY makes the job skip itself the way the OS-code-signing steps do. The
+# round-3 security audit showed that reasoning is wrong twice over, and the second way is dangerous:
+#
+#   1. The signing-key guard is at STEP level (`if: steps.sig.outputs.has == 'true'`), not job level.
+#      With no key the job still runs checkout/toolchain/cache/detect, its two gated steps skip, and
+#      the JOB conclusion is `success` -- never `skipped`.
+#   2. So the only way this job reports `skipped` is its job-level `if: ${{ !cancelled() }}` being
+#      false -- i.e. THE RUN WAS CANCELLED. And a run cancelled mid-matrix is precisely the case
+#      where completed legs have already uploaded installers and a merged latest.json to the draft
+#      while the verify gate never ran. Accepting `skipped` therefore let the publish through in the
+#      exact scenario the gate exists to catch.
+if ($verifyJob.conclusion -ne "success") {
   throw "verify-published-manifest did not pass (conclusion: $($verifyJob.conclusion)) -- STOP, do not publish this draft"
 }
 "verify-published-manifest: $($verifyJob.conclusion) -- OK to publish"
