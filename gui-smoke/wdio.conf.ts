@@ -1011,11 +1011,19 @@ let currentSpecFile: string | undefined;
 // (this file's `specs` comment) means the built-in "json" reporter can no longer tell which spec file a
 // suite/test came from. `beforeTest`/`beforeHook`/`afterTest`/`afterHook` below all carry `test.file`
 // correctly (see `currentSpecFile`'s comment above for why those, not `beforeSuite`/`afterSuite`), so
-// results accumulate per FILE in this map as tests/hooks complete, and the WORKER-level `after` hook
-// (fires once, at the very end — genuinely once-per-worker is correct there, unlike the suite hooks)
-// flushes every file's own `RawResultChunk`-shaped JSON in one pass. `RESULTS_DIR` matches the built-in
-// reporter's old `outputDir` so `scripts/run-ratchet.ts`'s existing `.results/*.json` glob picks these up
-// unchanged.
+// results accumulate per FILE in this map as tests/hooks complete.
+//
+// CPE-1866 review finding: this used to batch every file's results in memory and flush them ALL in one
+// pass from the WORKER-level `after` hook, at the very end. The ratchet still reds correctly on a
+// mid-shard crash via its "SUITE DID NOT COMPLETE" clause (`scripts/run-ratchet.ts` tolerates a missing
+// `.results/` entirely), so that was never a GATE hole — but it destroyed the FORENSIC trail exactly
+// when it matters most: every already-completed file in the shard would lose its own result too, taking
+// down the evidence for files that ran cleanly along with whatever actually crashed. Fixed by flushing
+// each file's own chunk to disk as SOON as that file's runnables finish — i.e. the moment
+// `handleRunnableStart` detects the NEXT file starting — via `flushFileResult`, with the WORKER-level
+// `after` hook below now only responsible for flushing the LAST file (nothing else has a "next file"
+// transition to trigger it). `RESULTS_DIR` matches the built-in reporter's old `outputDir` so
+// `scripts/run-ratchet.ts`'s existing `.results/*.json` glob picks these up unchanged either way.
 const RESULTS_DIR = path.resolve(__dirname, ".results");
 interface FileResultAccumulator {
   suiteName: string;
@@ -1041,22 +1049,71 @@ function accumulatorFor(file: string, suiteName: string): FileResultAccumulator 
   return acc;
 }
 
+/** Writes `file`'s accumulated result to disk NOW (if it has one — a file whose every runnable crashed
+ *  before `afterTest`/`afterHook` ever fired leaves nothing to flush, and that absence is itself the
+ *  honest signal the ratchet's completeness check reads) and removes it from {@link fileResults}, so a
+ *  file's evidence survives independently of whatever happens to the REST of the shard afterward. */
+function flushFileResult(file: string): void {
+  const acc = fileResults.get(file);
+  if (!acc) return;
+  fs.mkdirSync(RESULTS_DIR, { recursive: true });
+  const stem = path.basename(file).replace(/\.ts$/, "");
+  const outFile = path.join(RESULTS_DIR, `wdio-${shardResultFilePrefix(SHARD_ID)}${stem}.json`);
+  fs.writeFileSync(
+    outFile,
+    JSON.stringify({
+      specs: [file],
+      start: acc.start,
+      end: acc.end,
+      suites: [{ name: acc.suiteName, tests: acc.tests, hooks: acc.hooks }],
+    }),
+    "utf-8",
+  );
+  fileResults.delete(file);
+}
+
 /** Called from both `beforeTest` and `beforeHook` (see `currentSpecFile`'s comment for why both) with
  *  the `.file` of whichever runnable is about to run. A no-op unless `file` differs from the last one
  *  seen — i.e. this is the FIRST runnable (test or hook) of a spec file, the "once per spec file"
  *  boundary this whole mechanism exists to detect reliably in a grouped worker. Skips the reset on the
  *  very first file of the worker (see the `beforeTest`/`beforeHook` config hooks' own comment); resets
- *  on every one after that. */
+ *  on every one after that.
+ *
+ *  CPE-1866 review finding — containment. A shard is now ONE session for many spec files, so a genuine
+ *  hang/crash anywhere can in principle take out every file after it (architecturally impossible before
+ *  this ticket, when every file started its own cold process) — real CI evidence of exactly that shape
+ *  exists in this ticket's own history (a run where 13 of 14 files in a shard never reported, albeit from
+ *  a different bug, since fixed). `resetAppState` specifically is now guarded: if it throws, this
+ *  restarts the WHOLE session (`browser.reloadSession()` — the SAME capabilities, so a genuinely fresh
+ *  app launch, exactly what a crashed/wedged webview needs) and retries ONCE. If the retry also fails,
+ *  it is allowed to throw for real — this file's current test/hook fails loudly and attributably (not
+ *  silently swallowed into a false pass), and because this is scoped to `resetAppState`'s own call, mocha
+ *  still moves on to whatever comes after rather than the whole worker dying. This does not cover every
+ *  possible hang (a test's OWN code hanging mid-assertion is bounded only by `mochaOpts.timeout`, 90s,
+ *  same as before this ticket) — it specifically closes the "reset itself is what's broken" case, the
+ *  one new failure mode this ticket introduces. */
 async function handleRunnableStart(file: string): Promise<void> {
   if (file === currentSpecFile) return;
+  if (currentSpecFile !== undefined) flushFileResult(currentSpecFile);
   const label = path.basename(file);
   logPhase("handleRunnableStart:newFile", label);
   if (currentSpecFile === undefined) {
     logPhase("handleRunnableStart:firstFileSkipReset", label);
   } else {
     const { tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
-    await resetAppState(tmpDir);
-    logPhase("handleRunnableStart:resetDone", label);
+    try {
+      await resetAppState(tmpDir);
+      logPhase("handleRunnableStart:resetDone", label);
+    } catch (err) {
+      console.error(
+        `[gui-smoke] resetAppState failed before ${label} — restarting the session and retrying once:`,
+        err,
+      );
+      logPhase("handleRunnableStart:resetFailedRestartingSession", label);
+      await browser.reloadSession();
+      await resetAppState(tmpDir);
+      logPhase("handleRunnableStart:resetDoneAfterSessionRestart", label);
+    }
   }
   currentSpecFile = file;
 }
@@ -1496,31 +1553,15 @@ export const config: WebdriverIO.Config = {
 
   // CPE-1866: fires once per WORKER, after the LAST spec file's last runnable in this worker's whole
   // group has run and BEFORE `afterSession` tears the session down — genuinely once-per-worker is
-  // correct here (unlike the old `beforeSuite`/`afterSuite` attempt), so this is where every file
-  // accumulated in `fileResults` (see its declaration above `killTauriDriver`) gets flushed to its own
-  // `RawResultChunk`-shaped JSON file in one pass — replacing the "json" reporter (see the `reporters`
-  // option's own comment for why). `start`/`end` are extra fields `RawResultChunk` doesn't declare
-  // (TypeScript's structural typing means `run-ratchet.ts`'s `JSON.parse(...) as RawResultChunk` simply
-  // ignores them) — kept anyway because CPE-1858's own re-measurement recipe (this ticket's Work Log
-  // reuses it) reads exactly "each `wdio-*.json`'s top-level `start`/`end`" as one spec file's in-session
-  // wall time; dropping the "json" reporter must not also break that recipe for whoever re-measures next.
+  // correct here (unlike the old `beforeSuite`/`afterSuite` attempt). Every file EXCEPT the last one has
+  // already been flushed incrementally by `handleRunnableStart` the moment the NEXT file started (see
+  // `flushFileResult`'s own comment for why: a shard-end-only flush loses every already-completed file's
+  // evidence on a mid-shard crash, exactly when the forensic trail matters most) — this is only reachable
+  // for the LAST file, which has no "next file" transition to trigger its own flush. Replaces the "json"
+  // reporter (see the `reporters` option's own comment for why).
   after: (_result, _capabilities, specs) => {
     logPhase("after:testsDone", specLabelFrom(specs as readonly string[] | undefined));
-    fs.mkdirSync(RESULTS_DIR, { recursive: true });
-    for (const [file, acc] of fileResults) {
-      const stem = path.basename(file).replace(/\.ts$/, "");
-      const outFile = path.join(RESULTS_DIR, `wdio-${shardResultFilePrefix(SHARD_ID)}${stem}.json`);
-      fs.writeFileSync(
-        outFile,
-        JSON.stringify({
-          specs: [file],
-          start: acc.start,
-          end: acc.end,
-          suites: [{ name: acc.suiteName, tests: acc.tests, hooks: acc.hooks }],
-        }),
-        "utf-8",
-      );
-    }
+    if (currentSpecFile !== undefined) flushFileResult(currentSpecFile);
   },
 
   // Note: afterSession might not run if the session fails to start, so onComplete (below) also
