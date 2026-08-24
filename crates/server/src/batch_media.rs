@@ -1325,9 +1325,15 @@ pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
 ///
 /// **`Unknown` is now rare on purpose, which is what makes failing closed on it payable.** Before the
 /// [`probe_no_follow`] / [`probe_facts_no_follow`] split, a degenerate identity — every object on some
-/// network redirectors — produced `Unreadable`, so failing closed here would have refused *every* entry
-/// extracted to a network share. Reading `links` off the ungated facts answers those correctly, and
-/// leaves `Unknown` for what it should always have meant: the probe genuinely could not read the name.
+/// network redirectors — produced `Unreadable`, so failing closed here would have refused every entry
+/// landing on a name that **already exists** on such a share. Not literally every entry: `Probe::Absent`
+/// never passes through `real_facts`, so a first-time extraction into an empty folder would still have
+/// worked end to end. The damage was serious anyway, because the archive answer is an *abort* — the
+/// first pre-existing name kills the remainder of an overwrite-extraction. (Measured by the independent
+/// Security Auditor with the split reverted: a two-entry zip extracted `aaa.txt` normally and then
+/// refused and stopped on the pre-existing `note.txt`.) Reading `links` off the ungated facts answers
+/// those correctly, and leaves `Unknown` for what it should always have meant: the probe genuinely could
+/// not read the name.
 pub(crate) enum NameLinks {
     /// Provably exactly one name: nothing here for this rule to refuse.
     One,
