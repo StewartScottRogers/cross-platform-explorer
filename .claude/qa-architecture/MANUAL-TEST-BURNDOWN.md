@@ -425,3 +425,24 @@ machine cannot run `gui-smoke` at all, so every visual change ships judged only 
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
 | CPE-1821 | **Five colour tokens' rendered appearance in all four themes.** `--text-muted` (20 sites: `AgentTimeline`, `ConsultedFiles`, `FileList`), `--accent-2` (`BackupDashboard`), `--bg-dim` (`SidecarManager`) were undefined, so one hard-coded hex applied in light, dark AND both high-contrast themes. Now defined per theme. **`--bg-dim` was additionally retokenised to `var(--surface)`, which deliberately gives up the log console's distinct near-black backdrop** — a visible design change nobody has looked at | contrast ratios asserted numerically per theme in `app.css.{light,dark,hc}-contrast.test.ts`, plus a token-list-driven existence/fallback guard in `app.css.warn-token.test.ts` (red-proofed 3 ways). **Zero browser-level coverage**: no `snap()` of any of these five components exists | ⛰ manual | **CORRECTED 2026-08-23, same day.** The original entry said the drivers were absent. They are not: `tauri-driver.exe`, `msedgedriver.exe` and `msedgedriver-tool.exe` are all present in `~/.cargo/bin`, and PR #1009's independent UAT built the app and captured **20 real screenshots** across 5 surfaces × 4 themes with them. The CPE-1821 worker's claim that they were unavailable was wrong and I propagated it without checking — a claim about the tooling, stated more strongly than the evidence, which is the same defect class this whole burndown tracks. The **real** blocker is narrower and far more tractable: `msedgedriver` is version **150** against installed Edge **151**, and the mismatch hangs the session partway ("Timed out receiving message from renderer") on longer specs. The UAT reproduced the identical hang on the repo's own stock `open-dir.smoke.ts`, so it is environmental, not spec-specific. Needed: **pin msedgedriver to the installed Edge major version** (the `msedgedriver-tool` already sitting in `~/.cargo/bin` exists to do exactly this) and add a preflight that fails loudly on a mismatch instead of hanging. Then a `theme-tokens.smoke.ts` covering the two surfaces the UAT could not reach — `BackupDashboard` (`--accent-2`) and `SidecarManager` (`--bg-dim`) | 2026-08-23 |
+
+
+## Added 2026-08-23 (later the same day) — a local screenshot path that works TODAY
+
+The correction above says the blocker is `msedgedriver` 150 against Edge 151. That is true of the
+**WebdriverIO/tauri-driver** route. It is not the only route, and a Worker on CPE-1833/CPE-1836 found
+a working one without being asked to look:
+
+**Plain installed `chrome.exe --headless=new --screenshot`**, driving the repo's existing
+`scripts/dev-harness/statusbar-notice/` pages. No `msedgedriver`, no `tauri-driver`, no install, no
+machine-global change. It captured broken-vs-fixed evidence at 600px, and — more than screenshots — it
+ran **real layout probes** that jsdom structurally cannot: element rects, an `overlapPairs` list, and a
+`hitIsGitDescendant` paint probe that answers "does this button actually paint on top of that label".
+
+That is the missing capability, not the pictures. The reason the Visual Critic has been blind is that
+nothing local could answer a **layout** question; `npm run check` and jsdom can only assert that a CSS
+property is present in the source, never that the resulting pixels do not overlap.
+
+| Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
+|-----------|---------|--------------------------|--------|---------------------|--------|
+| CPE-1833 / CPE-1836 (mechanism, not one surface) | **Any layout/overflow/reflow claim, app-wide.** The status bar was the occasion; the gap is general — the pill/tick-tack reflow rule, the Trash titlebar at 600px (CPE-1827), every future "does it clip at this width" ticket | jsdom can pin that a CSS property exists in the source and nothing more. The `chrome --headless=new` harness in `scripts/dev-harness/statusbar-notice/` now answers real rect/overlap/paint questions at chosen widths — but it is **one bespoke harness for one component**, invoked by hand | ⛰ manual (but the hard part is built) | Generalise that harness into something any ticket can point at a component and a width list and get back rects + overlap pairs + paint probes, then run it in CI. This is a **much cheaper path to the same goal** than fixing the driver mismatch, because it needs no WebDriver at all. Fixing `msedgedriver` (see the correction above) is still worth doing for full-app flows, but it is no longer on the critical path for layout claims | 2026-08-23 |
