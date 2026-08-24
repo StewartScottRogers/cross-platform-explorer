@@ -561,7 +561,33 @@ jobs:
             printf '\n%s\n' "Filed automatically by CPE-1763. Please convert to a CPE-NNN ticket on triage (see Ticketing/wiki.md, \"External findings\")."
           } > "$body_file"
 
-          existing=$(gh issue list --state open --label "$label" --json number --jq '.[0].number' 2>/dev/null || true)
+          # CPE-1794: a transient `gh issue list` failure (rate limit / 5xx / network blip) must
+          # never read as "no existing issue" -- the earlier `... || true` shape swallowed the exit
+          # status into an empty $existing, which then fell into the create branch and filed a
+          # DUPLICATE instead of failing loud. Mirrors release-pipeline-watchdog.yml's dedupe (CPE-
+          # 1872), which was written specifically to avoid this defect: capture the lookup's exit
+          # status separately from its output, and on failure stop before creating or commenting
+          # Both files keep a `gh` warning on an otherwise-successful call out of $existing, which
+          # would otherwise make the issue number non-numeric -- they just do it differently. The
+          # watchdog leaves stderr unredirected, so it reaches the job log on its own; this file
+          # captures it to a separate temp file so the failure path can print a clean, scoped
+          # diagnostic (`cat "$list_err"`) instead of the whole job's stderr. Neither uses `2>&1`.
+          # (Historical note: the watchdog DID use `2>&1` when this comment was first drafted, and
+          # was corrected in its own round 2 four minutes before this commit landed. The original
+          # wording here claimed that file still had the defect. It does not -- CPE-1824's standing
+          # lesson is about exactly this: a wrong reason left in place because its conclusion looks
+          # right.)
+          list_output="$(mktemp)"
+          list_err="$(mktemp)"
+          if gh issue list --state open --label "$label" --json number --jq '.[0].number' \
+               > "$list_output" 2>"$list_err"; then
+            existing="$(cat "$list_output")"
+          else
+            echo "::error::could not query existing issues (gh issue list failed) -- see below. Not filing a new issue: a lookup failure is not evidence there is no existing one, and creating on that guess is exactly the CPE-1794 defect this workflow avoids." >&2
+            cat "$list_err" >&2
+            exit 1
+          fi
+
           if [ -n "$existing" ] && [ "$existing" != "null" ]; then
             # Comment with the CURRENT findings rather than silently doing nothing: the failure set
             # can change between runs (e.g. ffmpeg alone, then pdfium too), and a label-only dedupe
