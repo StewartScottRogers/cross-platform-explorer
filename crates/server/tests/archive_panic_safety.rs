@@ -527,7 +527,7 @@ fn gzip_extraction_streams_a_highly_compressible_payload_without_ballooning() {
     let dest = fresh_dest_dir();
     let dest_path = dest.path().to_str().unwrap().to_string();
     assert_no_panic("archive::extract_archive (.gz, compressible payload)", "4mib_of_zeros", || {
-        let out = extract_archive(&path, &dest_path).expect("a validly-built .gz must still extract");
+        let out = extract_archive(&path, &dest_path).expect("a validly-built .gz must still extract").dest;
         let extracted = std::fs::read(std::path::Path::new(&out).join("note")).ok().or_else(|| {
             // The extracted filename is the archive's own stem; discover it instead of assuming.
             std::fs::read_dir(&out).ok()?.next()?.ok().map(|e| std::fs::read(e.path()).unwrap())
