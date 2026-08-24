@@ -98,3 +98,70 @@ about the half of it that measurably did not hold.
 - **2026-08-23 16:50 USMST** — Filed by the Foreman during batched run `batched-2026-08-23-1124`,
   from five stalls observed in that run, with verbatim returns. Filed the same day CPE-1848 merged,
   which is the point: the fix and its refutation are hours apart.
+
+
+---
+
+## ROOT CAUSE FOUND — 2026-08-23 19:40, and it is structural, not behavioural
+
+The hypothesis above ("a model with a monitor tool will reach for it under uncertainty regardless of
+instruction") is **wrong**, or at best secondary. A worker on CPE-1857 — the only agent in the run to
+recover from the stall unaided — supplied the measurement that explains all seven cases:
+
+> **`gh run watch` cannot fit inside the harness's maximum tool timeout on this repo, so it is
+> auto-backgrounded every time, not occasionally.** The Bash tool caps at `timeout: 600000` (10 min).
+> Observed end-to-end CI here: **45 min** (run `32672218824` — 31 min queued + 14 min running) and
+> **72 min** (run `32677925708` — 19 min queued + 53 min running). Both `gh run watch` calls were
+> moved to background at exactly the 600 s mark (`bfr274ats`, `br86w951v`).
+
+So the agents were not choosing to wait. **The harness backgrounded the call on their behalf**, and
+they then did the only thing that follows from a backgrounded task: waited for it. Instructing them
+harder could never have worked, which is exactly what the evidence showed — three tellings, three
+stalls.
+
+**Two further findings that change what the fix must be:**
+
+1. **The obvious mitigation does not work.** A shell-level `timeout 570 gh run watch … | tail -6; …`
+   wrapper was still auto-backgrounded, apparently because the harness timer spans the whole compound
+   command rather than the wrapped process. **Do not document "just cap it below the tool limit"
+   without testing it first** — it is the fix everyone will reach for and it did not hold.
+
+2. **The recovery that does work** — worth shipping as the prescribed idiom, since it never parks and
+   always returns output:
+
+   ```bash
+   for i in $(seq 1 17); do
+     s=$(gh run view <id> --json status,conclusion -q '.status+" "+.conclusion')
+     echo "$(date -u +%H:%M:%SZ) CI: $s"
+     case "$s" in completed*) break;; esac
+     sleep 32
+   done
+   ```
+
+   Bounded to land under the cap, one timestamped line per tick (which also satisfies the
+   loop-timestamp convention), re-invoked as many times as needed. It took **six** invocations to
+   cover the 72-minute run — tedious, but it never stalls.
+
+**Queue depth is the aggravating factor, not the cause.** At one point 15 CI runs were in flight
+across seven sprint branches, which pushed queue time to 31 minutes on its own. A quieter repo would
+hide this bug rather than fix it.
+
+## What this means for the fix
+
+The **"Foreman owns CI"** option listed above is no longer one of three candidates — it is the
+indicated fix, and it was validated live during the run: the moment a stalled worker was told *"I own
+CI, do not watch it, hand me the report you already have"*, it returned a complete, high-quality
+report immediately. The worker never lacked the material; it lacked a way to stop waiting.
+
+Concretely:
+- Workers **push and report**. They must not be asked to establish CI outcomes at all.
+- The Foreman — the only participant that genuinely receives completion notifications — owns every
+  CI wait, and routes failures back.
+- If a worker must poll for some other reason, the bounded loop above is the idiom, never
+  `gh run watch`.
+- Consider whether the background/monitor tooling should simply be **unavailable** to sub-agents, so
+  the harness cannot background a call on their behalf in the first place.
+
+Note the run's own instructions already drifted toward this by accident: the later dispatch briefs say
+"the Foreman owns CI for this PR — do not watch, poll, or monitor it", and no worker briefed that way
+has stalled since.
