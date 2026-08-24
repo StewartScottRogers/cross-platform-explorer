@@ -24,9 +24,11 @@
 // self-cleans the way `specs/preview-pane.smoke.ts` already does for theme/pane-width (its own
 // `afterEach`, written BEFORE this ticket existed, defensively, for exactly this shared-session shape —
 // the model to copy, not a coincidence): sort order/column config, view mode (list/grid/gallery),
-// filter/search text, sidebar section expansion, the open-tab set (dual-pane / tab strip), scroll
-// position within the file list, and OS/system clipboard contents. None of these has caused an observed
-// failure as of this ticket — this suite happens not to have two specs that collide on them today — but
+// filter/search text, sidebar section expansion, the open-tab set (dual-pane / tab strip), and
+// OS/system clipboard contents. (Scroll position WAS on this list until CPE-1866's own gauntlet caught
+// it — see SCROLL_CONTAINER_SELECTOR's comment below; it is now reset, not merely named.) None of these
+// has caused an observed failure as of this ticket — this suite happens not to have two specs that
+// collide on them today — but
 // none is reset here either, so a future spec that sets one and assumes a fresh-launch baseline should
 // clean up after itself (`afterEach`) rather than rely on this file growing a matching reset for
 // everything the app can accumulate. Backend/server-side state is a SEPARATE, larger gap: this file only
@@ -93,6 +95,21 @@ const MAX_CLOSE_ROUNDS = 5;
 const OPS_PANEL_SELECTOR = ".ops";
 const OPS_ROW_BUTTON_SELECTOR = ".ops .x";
 
+/** `FileList.svelte`'s own scroll container — `scrollEl = rowsEl.closest(".filelist-pane")`. Reset
+ *  explicitly here because CPE-1866's own gauntlet caught a real leak `navigateTo(rootDir)` (step 5
+ *  below) does NOT reliably clear: `NavToolbar.svelte#commit()` reads `if (!value || value ===
+ *  currentPath) return;` BEFORE ever dispatching a `navigate` event — so when the app is ALREADY at
+ *  `rootDir` (the common case: most specs in a shard operate at or near the seeded root, so this is
+ *  true more often than not), `navigateTo`'s whole Ctrl+L/type/Enter sequence is a no-op from the
+ *  listing's own perspective — no re-fetch, no re-mount, no scroll reset — and whatever scrollTop an
+ *  EARLIER spec left on `.filelist-pane` carries straight through into the next file. Confirmed, not
+ *  guessed: a real CI run's `document.elementFromPoint` diagnostic (`specs/open-dir.smoke.ts`) named
+ *  the file pane's own `.toolbar` as the topmost element at a fixture row's click point
+ *  (`topSameAsRow: false`) — exactly the shape a scrolled list produces (a row's computed rect lands
+ *  where the toolbar sits, because the row itself scrolled up underneath it), not an overlay/backdrop
+ *  leak (the element chain was ordinary pane furniture, no dialog/drawer anywhere in it). */
+const SCROLL_CONTAINER_SELECTOR = ".filelist-pane";
+
 /** Presses Escape, then clicks the first visible explicit "Close" button if one remains, up to
  *  {@link MAX_CLOSE_ROUNDS} times — closing whatever a prior spec left open regardless of whether it
  *  happens to be a `*Dialog.svelte` (closes on Escape) or a drawer/panel like `AgentTimeline.svelte`
@@ -140,6 +157,24 @@ async function clearOperationsPanel(): Promise<void> {
   }
 }
 
+/** Zeroes {@link SCROLL_CONTAINER_SELECTOR}'s `scrollTop` directly via `browser.execute` (not via
+ *  navigation — see that constant's comment for why `navigateTo` cannot be trusted to do this itself),
+ *  logging the before/after value both times so a real CI run's log carries the evidence rather than
+ *  asking a reader to trust it. A no-op (still logged) if the pane isn't in the DOM at all, which
+ *  should not happen this late in the reset (`navigateTo` above already confirmed the breadcrumb) but
+ *  is handled rather than assumed. */
+async function resetFileListScroll(): Promise<void> {
+  const result = await browser.execute((sel) => {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) return { found: false, before: null, after: null };
+    const before = el.scrollTop;
+    el.scrollTop = 0;
+    return { found: true, before, after: el.scrollTop };
+  }, SCROLL_CONTAINER_SELECTOR);
+  // eslint-disable-next-line no-console
+  console.log(`[gui-smoke][resetFileListScroll] ${JSON.stringify(result)}`);
+}
+
 /** Restores the shared session to the same starting point a fresh app launch used to provide, before
  *  the next spec file's tests run:
  *   1. Window size back to the app's real default — see the constants' comment above.
@@ -169,11 +204,27 @@ async function clearOperationsPanel(): Promise<void> {
  *      to hop between dozens of folders in one continuous session (CPE-1358), re-used here to return to
  *      the seeded tmpDir root and reconfirm via the breadcrumb that navigation actually landed, rather
  *      than assuming steps 2-3 alone left the app somewhere sane.
+ *   5. {@link resetFileListScroll} — zeroes the file list's own scroll position directly. Deliberately
+ *      AFTER `navigateTo`, not before: `navigateTo` can itself trigger a real navigation (when the app
+ *      was NOT already at `rootDir`), which re-fetches/re-mounts the listing and would reset scroll on
+ *      its own — but when it does NOT (the app already at `rootDir`, the common case — see
+ *      `SCROLL_CONTAINER_SELECTOR`'s comment), nothing else in this function touches scroll at all, so
+ *      this step is not redundant insurance, it is load-bearing on its own.
  *
  *  See this file's header comment for what this function deliberately does NOT reset (sort order, view
- *  mode, filter text, sidebar expansion, tab set, scroll position, clipboard, and any backend-resident
- *  state such as `IndexService`). */
+ *  mode, filter text, sidebar expansion, tab set, clipboard, and any backend-resident state such as
+ *  `IndexService`) — scroll position used to be on that list; it no longer is, see step 5 above. */
 export async function resetAppState(rootDir: string): Promise<void> {
+  // CPE-1866: the scrollTop this spec file's PREDECESSOR actually left behind — captured before ANY
+  // reset step runs, so this number is the direct answer to "was the list scrolled walking in", not
+  // conflated with whatever `navigateTo` below may or may not have already changed by the time
+  // `resetFileListScroll` runs its own before/after pair.
+  const enteringScrollTop = await browser.execute((sel) => {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    return el ? el.scrollTop : null;
+  }, SCROLL_CONTAINER_SELECTOR);
+  // eslint-disable-next-line no-console
+  console.log(`[gui-smoke][resetAppState] entering scrollTop=${JSON.stringify(enteringScrollTop)}`);
   await browser.setWindowSize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
   await browser.execute(() => {
     const hook = (window as unknown as { __CPE_TEST_CLEAR_AGENT_SESSIONS__?: () => void })
@@ -183,4 +234,5 @@ export async function resetAppState(rootDir: string): Promise<void> {
   await clearOperationsPanel();
   await closeAnyOpenOverlay();
   await navigateTo(rootDir);
+  await resetFileListScroll();
 }

@@ -145,7 +145,8 @@ describe("CPE-1045 — headless GUI smoke: --open <dir> navigates", () => {
             });
             el = el.parentElement;
           }
-          return { rowRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, point: { cx, cy }, topSameAsRow: top === row, chain };
+          const pane = document.querySelector(".filelist-pane") as HTMLElement | null;
+          return { rowRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, point: { cx, cy }, topSameAsRow: top === row, chain, paneScrollTop: pane ? pane.scrollTop : null };
         }, FIXTURE_NAME),
         null,
         2,
