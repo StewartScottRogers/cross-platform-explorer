@@ -1229,15 +1229,238 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
     }
 }
 
+/// Does this **name** belong to an object that has more than one name? (CPE-1857)
+///
+/// `pub(crate)` so [`crate::revert_engine`] can *classify* a refusal
+/// [`crate::fsutil::copy_file_onto_no_follow`] has already issued — the engine splits refusals into
+/// transient ("fix the cause and re-running works") and permanent ("nothing about re-running changes
+/// this"), and a hard link is emphatically the second kind: a file does not stop having a second name
+/// because the user runs the revert again. Telling them to retry is precisely the loop CPE-1845 exists
+/// to stop sending people round.
+///
+/// **This is a PATH question and it is only ever safe to ask AFTER the write has been decided.** By the
+/// time the engine calls this the bytes have already been written or already been refused, so this
+/// chooses WORDING and can no longer choose where a byte goes. That is the one property that makes the
+/// same call unsafe before a write — see [`crate::fsutil::copy_file_onto_no_follow`], which reads the
+/// count off its open handle for exactly that reason and never from here.
+///
+/// Answers `false` for everything it cannot positively call multiply linked — an absent name, a link, an
+/// unreadable probe, a platform with no identity model. Failing "open" is right *here* and only here:
+/// the fallback is `transient`, which is the classification this path had for every refusal before
+/// CPE-1857, so an unknown answer degrades to the previous behaviour rather than to a new wrong one.
+/// # The crate-wide sweep, and the decision taken for every row (CPE-1857 AC2)
+///
+/// CPE-1857's acceptance criterion is that whatever is chosen applies to **every** writer in the crate,
+/// not just the revert path. Every production write site under `crates/server/src` that can land on a
+/// **pre-existing** name was enumerated (54 production sites from 68 raw `fs::copy` / `fs::write` /
+/// `File::create` / `OpenOptions` hits, with `#[cfg(test)]` and doc lines stripped) and given a verdict.
+/// The table is the record; **a partial sweep presented as complete is this repo's most-repeated
+/// defect**, so the rows that were deliberately left alone are listed as loudly as the rows that changed.
+///
+/// **The scoping rule, stated once.** A write can only be redirected through a hard link if it lands on
+/// a name that **already exists** — a name claimed with `create_new`/`O_EXCL`/`CREATE_NEW` has exactly
+/// one link, so every `create_exclusive` / `claim_file_slot` / `claim_dir_slot` /
+/// `copy_file_into_claimed_slot` / `create_empty_zip` / `save_manifest` / `split_join` site is
+/// **structurally immune** and appears nowhere below. Likewise every site guarded by `clobber_refusal`
+/// (`create_slot_refusal`, `rename_slot_refusal` — `folder_template::stamp_nodes`, `copilot`'s tree
+/// copy) refuses *any* occupant, so a hard link is already refused there as an occupant.
+///
+/// ## Refused (the rule below now applies)
+///
+/// | writer | destination chosen by | where |
+/// |---|---|---|
+/// | `fsutil::copy_file_onto_no_follow` — `revert_engine::apply_write` + `snapshot_capture::restore` | a **checkpoint manifest** | on the open handle, `facts.links > 1` |
+/// | `archive::entry_sink_action` — rows 16/19/20/21/22 of the CPE-1733 table (zip, 7z, tar sinks) | an **archive entry** | this function |
+/// | `transfer::download_tree`'s leaf | a **remote server** | this function |
+/// | `batch_media::open_output_verified` | the user, but audited per batch | already did, since CPE-1642 — a dir census, kinder than a flat refusal |
+///
+/// ## Accepted, explicitly — CPE-1857's third option, taken on purpose per row
+///
+/// | writer(s) | why the limit is accepted rather than closed |
+/// |---|---|
+/// | `archive`'s six compressors (`compress_to_zip{,_encrypted,_streamed,…}`, `compress_to_targz{,_streamed}`) and the two `.gz` extract leaves | the destination is a name **the human typed into a Save dialog** and confirmed overwriting. No untrusted input picks it, so the threat model this ticket is about does not reach them, and refusing a hard-linked archive destination would be a capability loss with nothing behind it. |
+/// | `backup.rs::copy_one_verified` (`fs::copy(src, dst)`, no guard of any kind) | user-named destination **root**, `rel` from our own scan of the source tree. Same reasoning — but this one has *no* link guard at all, not even for symlinks, and it deserves its own ticket rather than a line edited in passing here. **Flagged, not fixed.** |
+/// | `secure_shred::shred_file` | writing through the existing inode **is the operation**. A shred of a multiply-linked file destroying the data at every name is what a shred means. |
+/// | `native_meta`'s Windows ADS write | a hard link shares the inode and therefore shares the alternate data streams. That is inode semantics, not a redirected write. |
+/// | the private JSON stores and journals — `settings`, `tags`, `column_config`, `macro_store`, `snapshot_schedule`, `folder_template`'s catalog, `tray_quick`, `connections`, `audit_journal`, `checkpoint_store`, `metrics_journal`, `replay_baseline`, `index`, `semantic_index`, `vector_index`, `known_hosts`, `snapshot_capture::save_store`, `thumbnail`'s cache, `bin/ticket_mcp` | fixed names the app owns and rewrites, inside its own app-data directory. Planting a hard link at one needs local filesystem write access, which is outside a threat model whose whole premise is that a **planted manifest cannot create a link, only aim at one**. Refusing would break settings saving and journal appends for a hazard nothing in the model can stage. |
+/// | `snapshot_capture::capture`'s `fs::copy` into `blobs/<hash>` | already gated: `classify_target_slot(...) == Occupied → continue`, and a hard link is an ordinary existing file, so it reads `Occupied` and is skipped rather than written through. |
+/// | `provider::LocalProvider::write` (reached by `transfer::upload_tree`) | the "remote" path is the user's own chosen upload target, not server-chosen. `download_tree` is the direction untrusted data picks the name, and that is the direction that changed. |
+///
+/// # `!facts.is_dir` is load-bearing, and leaving it out reddened two of the three CI legs
+///
+/// **On Unix every directory has `nlink >= 2` by construction** — its own `.` entry plus the entry the
+/// parent holds for it, plus one more per subdirectory. On Windows a directory's `nNumberOfLinks` is
+/// just one. So a link-count rule without this clause refuses **every** directory on Linux and macOS
+/// and **no** directory on Windows — precisely the shape that passes a Windows-only local run and reds
+/// the matrix. Measured: `cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure`
+/// went red on `ubuntu-latest` and `macos-latest` and green on `windows-latest` from exactly this,
+/// turning a tar link entry's "cannot displace a DIRECTORY, that is the write failing" **abort** into a
+/// hard-link **skip**.
+///
+/// Excluding directories costs nothing this exists for: a directory is not something a file's bytes can
+/// be written into, and every caller refuses one on its own terms already. This function's job is only
+/// the *hard link* question, which is a question about files.
+pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
+    matches!(name_links(path), NameLinks::Many(_))
+}
+
+/// How many names the object at `path` has — the **three-valued** form of the CPE-1857 question, for the
+/// callers that decide a write with it rather than a wording.
+///
+/// # Why three values, and why the three call sites answer `Unknown` differently
+///
+/// [`name_is_multiply_linked`] above collapses this to a `bool` and treats `Unknown` as "no". That is
+/// right at its **one** caller, `revert_engine::apply_write`'s refusal *classifier*: the write there is
+/// already settled, so an unknown answer picks `transient` — the classification that path had for every
+/// refusal before CPE-1857 — and degrades to the previous behaviour rather than to a new wrong one.
+///
+/// It is **wrong** at a caller that is deciding whether bytes move, and CPE-1857's Security Auditor
+/// found exactly that: `archive::entry_sink_action` and `transfer::download_tree` are *gates*, and a
+/// gate that answers "no" when it cannot tell fails **open** — the guard is present, silent, and the
+/// write proceeds. Compare `resolve_output_containment`, which maps [`Probe::Unreadable`] to
+/// `Containment::Unverifiable` and refuses. Both gates now refuse on [`NameLinks::Unknown`], on the same
+/// terms they already refuse an unreadable *link* verdict (`archive` aborts, matching
+/// `entry_slot_action`'s `Unknown` arm and `cpe1759_an_unreadable_slot_aborts_both_tar_paths…`;
+/// `transfer` records it in `undelivered`, matching `LeafProbe::Uninspectable`).
+///
+/// **`Unknown` is now rare on purpose, which is what makes failing closed on it payable.** Before the
+/// [`probe_no_follow`] / [`probe_facts_no_follow`] split, a degenerate identity — every object on some
+/// network redirectors — produced `Unreadable`, so failing closed here would have refused every entry
+/// landing on a name that **already exists** on such a share. Not literally every entry: `Probe::Absent`
+/// never passes through `real_facts`, so a first-time extraction into an empty folder would still have
+/// worked end to end. The damage was serious anyway, because the archive answer is an *abort* — the
+/// first pre-existing name kills the remainder of an overwrite-extraction. (Measured by the independent
+/// Security Auditor with the split reverted: a two-entry zip extracted `aaa.txt` normally and then
+/// refused and stopped on the pre-existing `note.txt`.) Reading `links` off the ungated facts answers
+/// those correctly, and leaves `Unknown` for what it should always have meant: the probe genuinely could
+/// not read the name.
+pub(crate) enum NameLinks {
+    /// Provably exactly one name: nothing here for this rule to refuse.
+    One,
+    /// Provably more than one name — the count, so the refusal can say it.
+    Many(u64),
+    /// Nothing at this name, or it is a link, or it is a directory. **On Unix a directory's `nlink` is
+    /// `>= 2` by construction** (its own `.`, the parent's entry, one per subdirectory) while on Windows
+    /// it is 1, so a rule that did not fold directories in here refused every directory on two of the
+    /// three CI legs and none on the third — measured, see this module's `cpe_1857_…` test.
+    NoFileHere,
+    /// Something is there and its link count could **not** be read. Never "no" at a gate.
+    Unknown(&'static str),
+}
+
+pub(crate) fn name_links(path: &std::path::Path) -> NameLinks {
+    // `probe_facts_no_follow`, NOT `probe_no_follow`: the degeneracy gate answers an identity question
+    // and this is not one. See `probe_no_follow`'s doc for the fail-open that caused.
+    match probe_facts_no_follow(path) {
+        Probe::Real(facts) if facts.is_dir => NameLinks::NoFileHere,
+        Probe::Real(facts) if facts.links > 1 => NameLinks::Many(facts.links),
+        Probe::Real(_) => NameLinks::One,
+        Probe::Absent | Probe::Link => NameLinks::NoFileHere,
+        Probe::Unreadable(why) => NameLinks::Unknown(why),
+    }
+}
+
+/// Probe a path **without following links**, then gate the result on
+/// [`FileIdentity::is_degenerate`] — the identity question every *containment* caller asks.
+///
+/// **Split from [`probe_facts_no_follow`] by CPE-1857, and the split is the whole of that finding.**
+/// The gate below throws the ENTIRE probe away when the identity is degenerate, because a containment
+/// decision that compares identities cannot be made from an identity that identifies nothing. But
+/// `FileFacts::links` is *not* an identity: on the network redirectors [`FileIdentity::is_degenerate`]
+/// exists for, `GetFileInformationByHandle` succeeds and `nNumberOfLinks` is present and correct while
+/// the file index is zero. Funnelling the link-count question through this gate discarded a good answer
+/// and returned [`Probe::Unreadable`] — which [`name_links`]'s first cut then treated as "not multiply
+/// linked", so on **a network share, a first-class destination for this app**, extraction and download
+/// wrote through a pre-existing hard link exactly as before, with the guard present and silent.
+///
+/// So: identity questions come through here; the link-count question goes to [`name_links`], which reads
+/// [`probe_facts_no_follow`] directly. Nothing else changed — every existing caller still gets the gate.
+fn probe_no_follow(path: &std::path::Path) -> Probe {
+    match probe_facts_no_follow(path) {
+        Probe::Real(facts) => facts_or_unreadable(facts),
+        other => other,
+    }
+}
+
+/// Wrap freshly-probed facts as [`Probe::Real`] — the one place [`probe_facts_no_follow`]'s two
+/// `#[cfg]` arms converge, so the test seam below applies identically on both.
+fn real_facts(facts: FileFacts) -> Probe {
+    #[cfg(test)]
+    match PROBE_INJECTION.with(|c| c.get()) {
+        Some(ProbeInjection::DegenerateIdentity) => {
+            return Probe::Real(FileFacts { id: FileIdentity { volume: 0, index: 0 }, ..facts })
+        }
+        Some(ProbeInjection::Unreadable) => return Probe::Unreadable(WHY_PROBE_FAILED),
+        None => {}
+    }
+    Probe::Real(facts)
+}
+
+/// What [`set_probe_injection_for_test`] can make a probe pretend to be.
+///
+/// **Both shapes exist because neither can be staged on CI or on a developer's box**, and CPE-1857's
+/// Security Auditor found a live fail-open in the first of them. A real SMB/NFS redirector that returns a
+/// zero file index is not something a test can conjure, and the auditor tried a denied
+/// `FILE_READ_ATTRIBUTES` ACE for the second and it does not reach this path on Windows. A fail-open no
+/// test can reach is one that comes back, so the seam is the instrument that makes both reachable.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeInjection {
+    /// Succeed, with a link count and directoriness that are correct, and an identity that identifies
+    /// nothing — the documented behaviour of several network redirectors ([`FileIdentity::is_degenerate`]).
+    DegenerateIdentity,
+    /// Fail to establish anything about the name at all.
+    Unreadable,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Thread-local for [`CENSUS_CAP_OVERRIDE`]'s reason: the default harness runs each `#[test]` on its
+    /// own thread.
+    static PROBE_INJECTION: std::cell::Cell<Option<ProbeInjection>> = const { std::cell::Cell::new(None) };
+}
+
+/// `pub(crate)` so [`crate::archive`]'s and [`crate::transfer`]'s tests can drive both shapes through
+/// their **real** entry points rather than through this module's internals — which is the whole point,
+/// since CPE-1857's finding 1 was in how those two call sites read this module's answer, not in the
+/// answer itself.
+///
+/// Set it back to `None` before the test returns; the [`ProbeReset`] guard does that even on a panic.
+#[cfg(test)]
+pub(crate) fn set_probe_injection_for_test(v: Option<ProbeInjection>) {
+    PROBE_INJECTION.with(|c| c.set(v));
+}
+
+/// RAII reset for [`set_probe_injection_for_test`] — an injected probe that outlives its test would
+/// silently corrupt every later test on the same thread, which is a far worse failure than the one it
+/// is there to find.
+#[cfg(test)]
+pub(crate) struct ProbeReset;
+
+#[cfg(test)]
+impl ProbeReset {
+    pub(crate) fn arm(v: ProbeInjection) -> Self {
+        set_probe_injection_for_test(Some(v));
+        ProbeReset
+    }
+}
+
+#[cfg(test)]
+impl Drop for ProbeReset {
+    fn drop(&mut self) {
+        set_probe_injection_for_test(None);
+    }
+}
+
 /// Probe a path's identity **without following links** — Unix reads it straight off the one
 /// `symlink_metadata` call this module already made before CPE-1642 (`dev`/`ino`/`nlink` are all on
 /// `MetadataExt`, no extra syscall).
 #[cfg(unix)]
-fn probe_no_follow(path: &std::path::Path) -> Probe {
+fn probe_facts_no_follow(path: &std::path::Path) -> Probe {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Probe::Link,
-        Ok(meta) => facts_or_unreadable(FileFacts {
+        Ok(meta) => real_facts(FileFacts {
             id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
             links: meta.nlink(),
             is_dir: meta.is_dir(),
@@ -1281,7 +1504,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
 /// past `MAX_PATH`, while a raw `CreateFileW` is capped at it. That mismatch made an over-`MAX_PATH` output
 /// fail to open with `ERROR_PATH_NOT_FOUND`, classify as [`Probe::Absent`], and fail OPEN.
 #[cfg(windows)]
-fn probe_no_follow(path: &std::path::Path) -> Probe {
+fn probe_facts_no_follow(path: &std::path::Path) -> Probe {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -1337,7 +1560,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
                 ReparseKind::NotReparse | ReparseKind::OpaqueData => {}
             }
         }
-        facts_or_unreadable(FileFacts {
+        real_facts(FileFacts {
             id: FileIdentity {
                 volume: u64::from(info.dwVolumeSerialNumber),
                 index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
@@ -2334,6 +2557,49 @@ mod tests {
     /// drop) — mirrors `organize_apply.rs`'s test helper.
     fn scratch(tag: &str) -> tempfile::TempDir {
         tempfile::Builder::new().prefix(&format!("cpe-batchmedia-{tag}-")).tempdir().unwrap()
+    }
+
+    /// **CPE-1857 — the three answers [`name_is_multiply_linked`] must give, pinned in one test that
+    /// runs on every platform.** The middle row is the one that cost a red matrix: on Unix a directory
+    /// has `nlink >= 2` by construction, on Windows it has 1, so a rule that forgot `!is_dir` was green
+    /// locally on Windows and red on both Unix legs. Asserted here rather than only through the archive
+    /// sink, so the next reader meets the platform asymmetry at the rule itself.
+    #[test]
+    fn cpe_1857_the_link_count_rule_answers_no_for_a_plain_file_and_for_a_directory() {
+        let d = scratch("cpe1857-linkcount");
+        let plain = d.path().join("plain.txt");
+        std::fs::write(&plain, b"one name only").unwrap();
+        let dir = d.path().join("a-directory");
+        std::fs::create_dir_all(dir.join("with-a-child")).unwrap();
+
+        assert!(!name_is_multiply_linked(&plain), "a file with one name is not multiply linked");
+        assert!(
+            !name_is_multiply_linked(&dir),
+            "a DIRECTORY must answer no on every platform — on Unix its link count is >= 2 by \
+             construction (its own `.` plus the parent's entry plus one per subdirectory), and a rule \
+             that reads that as a hard link refuses every directory on Linux and macOS while passing a \
+             Windows-only local run"
+        );
+        assert!(!name_is_multiply_linked(&d.path().join("nothing-here")), "an absent name answers no");
+
+        let second = d.path().join("second-name.txt");
+        if std::fs::hard_link(&plain, &second).is_err() {
+            crate::skip_notice!(
+                "SKIPPING the positive leg of cpe_1857_the_link_count_rule_answers_no_for_a_plain_file_\
+                 and_for_a_directory: no hard-link support here. The negative legs above still ran."
+            );
+            return;
+        }
+        // Liveness: the two names really are one object, proved by writing through one and reading the
+        // other — not by trusting `hard_link`'s `Ok`.
+        std::fs::write(&second, b"written through the second name").unwrap();
+        assert_eq!(
+            std::fs::read(&plain).ok().as_deref(),
+            Some(&b"written through the second name"[..]),
+            "fixture is inert: the two names are not one object"
+        );
+        assert!(name_is_multiply_linked(&plain), "both names of one file must answer yes");
+        assert!(name_is_multiply_linked(&second), "both names of one file must answer yes");
     }
 
     // ---- CPE-1705: the PLANNER must not read a refused stat as a free output name -------------------

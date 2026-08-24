@@ -769,7 +769,59 @@ fn entry_sink_action(dest: &Path, out: &Path) -> EntrySlotAction {
     if !crate::fsutil::confined_to(out, dest) {
         return EntrySlotAction::Skip(escaped_dest_message(dest, out));
     }
+    // **CPE-1857 — the third question, and the only one no path can answer.** The two above ask what
+    // this NAME is and where it resolves; both pass a hard link, and both are *right* to — a hard link
+    // is not a reparse point, has no target, and `canonicalize` resolves it to itself, so the name
+    // really is inside `dest`. The bytes still come out at the object's other name, which may be
+    // anywhere. The entry's name is archive-controlled, so this is the untrusted half of the same
+    // shape CPE-1857 measured on a checkpoint manifest.
+    //
+    // A **Skip**, not an Abort, and for [`EntrySlotAction`]'s stated reason: this is a policy verdict
+    // about one entry, the rest of the archive still extracts, and the caller records the reason where
+    // it has somewhere to put it.
+    //
+    // **What it costs:** one extra name probe per *file* entry — a `symlink_metadata` on Unix, a
+    // `CreateFileW` with `FILE_READ_ATTRIBUTES` on Windows (see `batch_media::name_is_multiply_linked`).
+    // Both are attribute-only calls, against a loop that is already doing a `File::create` plus an
+    // `io::copy` of the entry's whole payload for every entry it accepts.
+    //
+    // **CPE-1857 Security-Auditor finding 1: this is a GATE, so `Unknown` must refuse.** The `bool` form
+    // of this question folds "could not tell" into "no", which is right at the revert engine's refusal
+    // *classifier* (the write is already settled there) and fails **open** here, where the bytes have
+    // not moved yet. `Unknown` therefore aborts, on exactly the terms `entry_slot_action`'s own
+    // `Unknown` arm already aborts an unreadable link verdict — same condition, same answer, and
+    // `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped` pins the shape.
+    match crate::batch_media::name_links(out) {
+        crate::batch_media::NameLinks::Many(names) => {
+            return EntrySlotAction::Skip(multiply_linked_message(out, names));
+        }
+        crate::batch_media::NameLinks::Unknown(why) => {
+            return EntrySlotAction::Abort(format!(
+                "could not check how many names \"{}\" has, so nothing was written for it — refusing \
+                 to guess rather than risk writing through a hard link into a file outside this \
+                 folder: {why}",
+                out.display()
+            ));
+        }
+        crate::batch_media::NameLinks::One | crate::batch_media::NameLinks::NoFileHere => {}
+    }
     EntrySlotAction::Write
+}
+
+/// The refusal wording for a slot that is a **hard link** — a second name for a file that may live
+/// anywhere (CPE-1857), in one place so the sinks that produce it cannot drift apart.
+///
+/// It does **not** try to name the other file, because it cannot: there is no way to walk from an inode
+/// back to its names without scanning a filesystem. So it names what the user can act on — this path,
+/// and the fact that it is shared.
+fn multiply_linked_message(out: &Path, names: u64) -> String {
+    format!(
+        "\"{}\" has {names} names (it is a hard link) — the others may live anywhere, including outside \
+         the extraction folder, which no path check can see because a hard link resolves to itself. \
+         Writing this entry would change that file's content too. Skipped; the rest of the archive \
+         still extracts",
+        out.display()
+    )
 }
 
 /// The **directory**-entry half of the same decision — row 18 (CPE-1744).
@@ -4103,6 +4155,171 @@ mod tests {
         let _ = extract_archive(&zip_path.to_string_lossy(), &dest.to_string_lossy());
         assert!(!d.join("escape.txt").exists(), "traversal entry escaped the extraction root");
         assert!(!dest.parent().unwrap().join("escape.txt").exists(), "traversal entry escaped the extraction root");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1857, the archive half.** The entry's name is chosen by the archive, so an archive can aim
+    /// an entry at any pre-existing name under the folder the user picked. If that name happens to be a
+    /// hard link — a second name for a file living anywhere, including outside the extraction folder —
+    /// `File::create` writes the entry's bytes into the **inode**, and they come out at the other name
+    /// too. `entry_name_is_safe`, the per-component containment walk and the leaf-link check all pass it,
+    /// and all three are *right*: a hard link has no target, so it resolves to itself and the name really
+    /// is inside `dest`.
+    ///
+    /// The fixture's liveness is proved before anything is asserted about the extractor, the only way a
+    /// hard link can be: content written through the OUTSIDE name, read back through the IN-TREE one.
+    #[test]
+    fn cpe_1857_a_zip_entry_aimed_at_a_hard_link_never_writes_the_outside_file() {
+        let d = scratch("cpe1857-zip-hardlink");
+        let dest = d.join("out");
+        let outside = d.join("elsewhere");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"placeholder").unwrap();
+        let slot = dest.join("note.txt");
+        if fs::hard_link(&victim, &slot).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1857_a_zip_entry_aimed_at_a_hard_link_never_writes_the_outside_file: no \
+                 hard-link support on this filesystem — NOTHING on this run covered the hard-link hole"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        fs::write(&victim, b"OUTSIDE CONTENT").unwrap();
+        assert_eq!(
+            fs::read(&slot).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "fixture is inert: the entry's slot and the outside file are not one object, so this run \
+             could not have tested writing through a hard link at all"
+        );
+
+        let zip_path = d.join("aimed.zip");
+        fs::write(&zip_path, craft_zip_with_entry_name("note.txt", b"ARCHIVE PAYLOAD")).unwrap();
+        let outcome = extract_archive(&zip_path.to_string_lossy(), &dest.to_string_lossy());
+
+        // HARM FIRST, on the filesystem, before any claim about what was reported.
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: the extraction put an archive entry's bytes on a file OUTSIDE the extraction folder, \
+             through a pre-existing hard link no path check can see: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(&slot).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: the slot was written too — the skip must land before any byte moves"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1857 Security-Auditor finding 1, half one — the guard was present and SILENT on a network
+    /// share.** `name_is_multiply_linked` read its answer through `probe_no_follow`, which funnels every
+    /// probe through `facts_or_unreadable` and discards the whole result when the identity is degenerate
+    /// (zero volume or zero file index). This repo already documents that
+    /// `GetFileInformationByHandle` *succeeds and hands back a zero index* on several network
+    /// redirectors — and in that case `nNumberOfLinks` **is present and correct, and was thrown away**.
+    /// The function then answered "not multiply linked", the gate let the entry through, and extraction
+    /// to a share wrote through a pre-existing hard link exactly as before the ticket.
+    ///
+    /// Driven through the injection seam because the condition cannot be staged: a real redirector that
+    /// zeroes the index is not something a test can conjure, and the auditor confirmed a denied
+    /// `FILE_READ_ATTRIBUTES` ACE does not reach this path on Windows.
+    #[test]
+    fn cpe_1857_a_degenerate_identity_must_not_silently_disable_the_hard_link_guard() {
+        let d = scratch("cpe1857-degenerate-id");
+        let dest = d.join("out");
+        let outside = d.join("elsewhere");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"placeholder").unwrap();
+        let slot = dest.join("note.txt");
+        if fs::hard_link(&victim, &slot).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1857_a_degenerate_identity_must_not_silently_disable_the_hard_link_guard: \
+                 no hard-link support here — NOTHING on this run covered the degenerate-identity fail-open"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        fs::write(&victim, b"OUTSIDE CONTENT").unwrap();
+        assert_eq!(
+            fs::read(&slot).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "fixture is inert: the slot and the outside file are not one object"
+        );
+
+        let zip_path = d.join("aimed.zip");
+        fs::write(&zip_path, craft_zip_with_entry_name("note.txt", b"ARCHIVE PAYLOAD")).unwrap();
+
+        // Every probe now reports a correct link count under an identity that identifies nothing.
+        let _reset = crate::batch_media::ProbeReset::arm(
+            crate::batch_media::ProbeInjection::DegenerateIdentity,
+        );
+        let outcome = extract_archive(&zip_path.to_string_lossy(), &dest.to_string_lossy());
+        drop(_reset);
+
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: on a volume whose identity is degenerate — a network share — the extraction wrote an \
+             archive entry's bytes through a hard link into a file outside the extraction folder. The \
+             link COUNT was readable the whole time; it was discarded by an identity gate that has \
+             nothing to do with this question: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(&slot).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: the slot was written too — the skip must land before any byte moves"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1857 Security-Auditor finding 1, half two — a gate that cannot tell must REFUSE.**
+    ///
+    /// `name_is_multiply_linked`'s `bool` folds "could not read the name" into "no". That is correct at
+    /// its one caller, `revert_engine::apply_write`'s refusal *classifier*, where the write is already
+    /// settled and the fallback is the `transient` classification that path always had. It is a
+    /// **fail-open** here, where the bytes have not moved: the guard runs, answers "no", and the entry is
+    /// written. `resolve_output_containment` is the in-repo precedent for the other direction — it maps
+    /// `Probe::Unreadable` to `Containment::Unverifiable` and refuses.
+    ///
+    /// An unreadable probe aborts, matching `entry_slot_action`'s own `Unknown` arm for an unreadable
+    /// *link* verdict, which `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`
+    /// already pins.
+    #[test]
+    fn cpe_1857_an_unreadable_probe_refuses_the_entry_rather_than_writing_it() {
+        let d = scratch("cpe1857-unreadable-probe");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let slot = dest.join("note.txt");
+        fs::write(&slot, b"ALREADY HERE").unwrap();
+        let zip_path = d.join("aimed.zip");
+        fs::write(&zip_path, craft_zip_with_entry_name("note.txt", b"ARCHIVE PAYLOAD")).unwrap();
+
+        let _reset =
+            crate::batch_media::ProbeReset::arm(crate::batch_media::ProbeInjection::Unreadable);
+        let outcome = extract_archive(&zip_path.to_string_lossy(), &dest.to_string_lossy());
+        drop(_reset);
+
+        // HARM FIRST: a name whose link count could not be read must not be written through.
+        assert_eq!(
+            fs::read(&slot).ok().as_deref(),
+            Some(&b"ALREADY HERE"[..]),
+            "HARM: the gate could not read how many names this file has and wrote the entry anyway — a \
+             guard that answers \"no\" when it cannot tell is a guard that is not there: {outcome:?}"
+        );
+        let err = outcome.expect_err(
+            "an unreadable slot at a GATE is a refusal, not a silent pass — this is the same condition \
+             `entry_slot_action`'s `Unknown` arm already aborts on",
+        );
+        assert!(
+            err.contains("could not check how many names"),
+            "and it must be THIS guard's wording, not an incidental failure from elsewhere in the run — \
+             those are the same red for opposite reasons and only the string tells them apart: {err}"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 

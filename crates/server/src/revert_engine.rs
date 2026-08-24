@@ -927,7 +927,14 @@ fn apply_write(
     crate::fsutil::copy_file_onto_no_follow(&blob, &target).map_err(|why| {
         let name_is_taken_by_a_link_or_dir = fs::symlink_metadata(&target)
             .is_ok_and(|m| m.file_type().is_symlink() || m.is_dir());
-        if name_is_taken_by_a_link_or_dir {
+        // **CPE-1857 — the third permanent shape, and it is invisible to the line above.** A hard link is
+        // not a symlink and not a directory: `symlink_metadata` reports an ordinary regular file, because
+        // that is exactly what it is. It has a second *name*, and the copier refuses it for that. A file
+        // does not shed its other names between runs, so "run the revert again" is the wrong advice —
+        // the same reason a planted link is permanent. Asked of the filesystem, never by matching our own
+        // wording, and asked only HERE, after the write is settled: see `name_is_multiply_linked`.
+        let name_has_other_names = crate::batch_media::name_is_multiply_linked(&target);
+        if name_is_taken_by_a_link_or_dir || name_has_other_names {
             Refused::permanent(why)
         } else {
             Refused::transient(format!(
@@ -1083,6 +1090,123 @@ mod tests {
 
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// **CPE-1857 — the exact shape the round-5 Security Auditor measured, through the engine.**
+    ///
+    /// An in-tree name is a pre-existing **hard link** to a file outside the reverted root. Every path
+    /// check in the crate passes it and every one of them is *right*: a hard link is not a reparse point
+    /// and has no target, so `canonicalize` resolves it to itself and the name really is inside the root.
+    /// `fs::copy` — and any truncate-and-write open — then lands the checkpoint's bytes in the **inode**,
+    /// which is to say at the other name too:
+    ///
+    /// ```text
+    /// CMD revert[hardlink out-of-tree]: applied=1 skipped=0
+    ///       h.txt   = Ok("CHECKPOINT-H")
+    ///       outside = Ok("CHECKPOINT-H")     <- outside the reverted root
+    /// ```
+    ///
+    /// A planted manifest cannot *create* the link, only aim at one that already exists — but the aiming
+    /// half is fully attacker-chosen: the manifest picks both the path and the blob hash, so any
+    /// pre-existing in-tree hard link becomes a slot for any blob in the store.
+    ///
+    /// The fixture's liveness is proved the only way a hard link can be — content written through the
+    /// OUTSIDE name and read back through the IN-TREE one — before anything is asserted about the engine.
+    #[test]
+    fn cpe_1857_an_overwrite_through_a_hard_link_never_reaches_the_outside_file() {
+        let d = scratch("1857-hardlink");
+        let root = d.join("root");
+        let outside = d.join("outside");
+        let store = scratch("1857-hardlink-store");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("1857aaaa"), b"CHECKPOINT-H").unwrap();
+
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"placeholder").unwrap();
+        let in_tree = root.join("h.txt");
+        if fs::hard_link(&victim, &in_tree).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1857_an_overwrite_through_a_hard_link_never_reaches_the_outside_file: no \
+                 hard-link support on this filesystem — NOTHING on this run covered the hard-link hole"
+            );
+            return;
+        }
+        fs::write(&victim, b"OUTSIDE CONTENT").unwrap();
+        assert_eq!(
+            fs::read(&in_tree).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "fixture is inert: the in-tree name and the outside file are not one object, so this run \
+             could not have tested writing through a hard link at all"
+        );
+        // A bystander in the same tree, so the test also proves the refusal is PER FILE and does not
+        // abort the revert — every other entry must still apply.
+        fs::write(root.join("plain.txt"), b"STALE").unwrap();
+        fs::write(root.join("added.txt"), b"user file").unwrap();
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("h.txt".to_string(), crate::restore_plan::FileState::new("1857aaaa", 12));
+        checkpoint.insert("plain.txt".to_string(), crate::restore_plan::FileState::new("1857aaaa", 12));
+        let report = execute_restore(
+            &[
+                RestoreAction { path: "h.txt".to_string(), op: RestoreOp::Overwrite },
+                RestoreAction { path: "plain.txt".to_string(), op: RestoreOp::Overwrite },
+                RestoreAction { path: "added.txt".to_string(), op: RestoreOp::Delete },
+            ],
+            &root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &checkpoint,
+        );
+
+        // HARM FIRST, on the filesystem, before any claim about what was reported.
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: the revert put a checkpoint blob on a file OUTSIDE the reverted root, through a \
+             pre-existing hard link no path check can see: {report:?}"
+        );
+        assert_eq!(
+            fs::read(&in_tree).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: the in-tree name was written too — the refusal must land before any byte moves"
+        );
+
+        // Refused per file, loudly, with a reason — never silently skipped (CPE-1803/1804/1805/1816).
+        assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
+        assert_eq!(report.skipped[0].0, "h.txt", "the wrong entry was refused: {report:?}");
+        assert!(
+            report.skipped[0].1.contains("hard-linked"),
+            "the refusal must name the cause the user has to act on: {report:?}"
+        );
+        assert!(
+            !report.skipped[0].1.contains("blobs"),
+            "a user-visible refusal must not name the app's private checkpoint store: {report:?}"
+        );
+        // …and the rest of the revert still ran. A whole-run abort would be a worse cure than the
+        // disease: one hard-linked file must not cost the user every other restored file.
+        assert_eq!(report.applied, 1, "the untouched sibling must still have been restored: {report:?}");
+        assert_eq!(
+            fs::read(root.join("plain.txt")).ok().as_deref(),
+            Some(&b"CHECKPOINT-H"[..]),
+            "the ordinary single-named file in the same tree must still be restored: {report:?}"
+        );
+
+        // PERMANENT, not "run the revert again": a file does not shed its other names between runs, so
+        // that advice sends the user round the loop CPE-1845 exists to stop.
+        let group = live_hold_back(&report);
+        assert_eq!(
+            group.outcome,
+            HeldBackOutcome::HeldBackByCheckpoint,
+            "a hard link is still a hard link on the next run — this is NOT retryable: {group:?}"
+        );
+        assert!(!group.outcome.retryable(), "{group:?}");
+        assert!(
+            !group.next_step.to_lowercase().contains("run the revert again"),
+            "telling the user to re-run produces the identical refusal forever: {group:?}"
+        );
+
+        let _ = fs::remove_dir_all(&store);
     }
 
     /// **CPE-1845 review round 2 — a permanent refusal must not be reported as "run it again".**

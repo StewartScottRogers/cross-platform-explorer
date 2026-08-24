@@ -94,6 +94,15 @@ The cases you may meet:
   the link is still a link. Remove or rename it and the entry restores. It applies only to the name at the
   very end of the path — a shortcut standing in for one of the *folders* above it is still followed, since
   that is an ordinary way to arrange a tree.
+- **A file that has more than one name.** Some tools give one file several names at once so it takes up
+  space only once — deduplicating backup programs, package managers and a few sync clients all do it.
+  These are not shortcuts: every name is the file, equally, and there is no way to tell by looking at a
+  path that a second name exists or where it lives. Writing to one of them changes what you see at all of
+  them, including any that sit outside the folder you are reverting, so that entry is held back and named
+  rather than written. This one is also permanent until you act: a file does not lose its other names by
+  your running the revert again. To restore it anyway, give it a name of its own first — copy the file to
+  a new name, delete the original, and rename the copy back — then run the revert again. Everything else
+  in the same revert still restores; only that entry waits.
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
   temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
   revert also hit one of the permanent cases above, running it again clears only the temporary half — the

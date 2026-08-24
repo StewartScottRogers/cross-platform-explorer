@@ -1045,12 +1045,15 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 ///   resolves the *directories* above the final component by path, and this function opens by path too,
 ///   so a directory link swapped into an interior component between that check and this open still
 ///   redirects the write. Closing that needs `openat`-relative resolution, which `std` does not expose.
-/// - **A hard link at the destination is written through, exactly as before.** A second name for the
-///   same object is not a link at the final component — there is nothing to refuse on the handle, and
-///   `canonicalize` cannot see it either. `fs::copy` behaved identically. Refusing multiply-linked
-///   destinations (what [`crate::batch_media::open_output_verified`] does) would refuse legitimate
+/// - ~~**A hard link at the destination is written through, exactly as before.**~~ **CLOSED by
+///   CPE-1857** — a destination whose handle reports more than one name is now refused. The paragraph
+///   that used to sit here declined the refusal on the grounds that it "would refuse legitimate
 ///   overwrites of ordinary hard-linked files in a user's own tree, which is the constraint that killed
-///   the `create_new` approach and must not be reintroduced by another route.
+///   the `create_new` approach". **That conflated two different constraints and it was measured wrong.**
+///   `create_new` refuses *every* name that already exists — i.e. every ordinary `Overwrite`, which is
+///   the common case and a categorical break. `links > 1` refuses only a destination that genuinely has
+///   a second name, which in an ordinary tree is **no files at all**. See this function's
+///   "Multiply-linked destinations" section below for the decision and what it costs.
 /// - **A link planted STRICTLY AFTER the open leaves the destination name holding the link while the
 ///   bytes land in the now-unlinked file object, and this returns `Ok`.** Measured by the CPE-1846
 ///   Security Auditor mid-copy of a 64 MiB blob: `Ok(67108864)`, victim untouched at 6 bytes — which is
@@ -1248,6 +1251,85 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// not.** Assert the class (refused, permanent, victim untouched) freely; gate any assertion on the
 /// sentence itself behind `cfg!(windows)`.
 ///
+/// # Multiply-linked destinations — the decision, and what it costs (CPE-1857)
+///
+/// **This is the one hole path validation cannot see.** A hard link is not a reparse point and has no
+/// target, so `canonicalize` resolves it to itself: `confined_to` and CPE-1823's `landing` both report
+/// the name as inside the reverted root, and both are *correct* — it **is** inside it. The bytes still
+/// come out at the object's other name. Measured by CPE-1823's round-5 Security Auditor through the
+/// registered command, against an in-tree name hard-linked to a file outside the reverted root:
+///
+/// ```text
+/// CMD revert[hardlink out-of-tree]: applied=1 skipped=0
+///       h.txt   = Ok("CHECKPOINT-H")
+///       outside = Ok("CHECKPOINT-H")     <- outside the reverted root
+/// ```
+///
+/// **Decided: refuse when the open handle reports more than one name.** `HandleFacts::links` is already
+/// read here — `nNumberOfLinks` off the `GetFileInformationByHandle` call the reparse-point check
+/// above already makes, `st_nlink` off the `fstat` the Unix arm already makes — so the rule costs **no
+/// extra syscall on any platform** and cannot be defeated by a path swap, because it is read from the
+/// handle the bytes are about to go through.
+///
+/// **What it costs, stated plainly rather than left for someone to discover.** A restore of a file that
+/// legitimately has a second name — a deduplicating backup (`rsync --link-dest`, Time Machine), a
+/// package manager's store, some sync clients — now **refuses that entry** instead of writing it. It is
+/// a per-file refusal with a reason, classified **permanent** by [`crate::revert_engine`], never a
+/// silent skip and never an aborted run: every other entry in the same revert still applies. The user's
+/// remedy is to break the link (copy the file over itself) and re-run. That is a real capability loss
+/// and it is the price of the property.
+///
+/// **Why "refuse" and not the two alternatives the ticket named.**
+/// - *Open with a flag that refuses to follow* does not exist for this. `O_NOFOLLOW` and
+///   `FILE_FLAG_OPEN_REPARSE_POINT` refuse a name that *stands in* for another object. A hard link does
+///   not stand in for anything — it **is** the object, on equal footing with every other name for it.
+///   There is no "following" to refuse.
+/// - *Break the link* (write a sibling, then place it onto the target) was built and measured by
+///   CPE-1870 and lost on correctness before it lost on speed: a plain `rename` silently reduces the
+///   destination's explicit ACL to the parent's inherited set, and `ReplaceFileW`, which preserves it,
+///   costs 7.5 ms per small file against this function's 0.39 ms. Both tables are above. Breaking a
+///   user's dedup link is also itself a change to their filesystem that nobody asked for.
+///
+/// **Why not [`crate::batch_media::open_output_verified`]'s census instead**, which is strictly kinder
+/// — it allows the write when *all* of the object's names are inside the allowed region. Two reasons,
+/// and the second is the decisive one. (1) That census scans **one directory**; a revert's allowed
+/// region is a whole **tree**, so proving containment costs an O(tree) walk per multiply-linked file,
+/// and taking the walk once and reusing it is exactly the memo-replay CPE-1667's audit finding 2 killed.
+/// (2) Even an all-inside answer is not clean here: `plan_restore` enumerated those names as separate
+/// entries with separate blobs, so writing through one clobbers the other's result and the outcome
+/// depends on the order the engine happened to apply them in. "All names inside" would license an
+/// ambiguous restore rather than a safe one.
+///
+/// # The residuals, recorded rather than implied away
+///
+/// An earlier draft of this section said the rule "cannot be defeated by a path swap". True, and
+/// narrower than it reads — a swap is not the only way past it. All four ways are listed, because a
+/// security claim that lists only the attacks it stops is the wrong shape.
+///
+/// 1. **A new name created mid-write.** The count is read from the handle before the write, so an actor
+///    who creates a *new* name for the very object we hold, between that read and the last byte, still
+///    gets the write — the same irreducible window [`crate::batch_media::open_output_verified`] records
+///    for its own census. Out of this ticket's threat model, which is a **planted manifest**: a manifest
+///    can only aim at a link that already exists, it cannot create one.
+/// 2. **A platform with no identity model.** Where [`crate::batch_media::handle_facts`] returns `None`
+///    there is no count to read and this rule does not fire — the same tolerance the reparse-point and
+///    directory checks above already have, and for the same reason: failing closed there would stop
+///    restore working entirely on a platform rather than protect anything on the two this ships on.
+///    **This is about a MISSING count. Row 3 is about a count that is present and wrong**, which this
+///    row used to be read as covering and does not.
+/// 3. **A filesystem that reports `nlink == 1` inaccurately.** Some FUSE and network mounts do. The rule
+///    then silently does not fire, and — unlike row 2 — nothing anywhere reports that it could not
+///    answer, because as far as every layer here is concerned it *did* answer. There is no portable way
+///    to ask a filesystem whether its link count is trustworthy, so this is recorded, not defended
+///    against. It is the reason [`crate::batch_media::name_links`]'s `Unknown` arm matters so much at a
+///    gate: an honest "I cannot tell" is recoverable, and a confident wrong number is not.
+/// 4. **A Linux bind mount at the destination.** `mount --bind /outside/victim /root/h.txt` leaves
+///    `st_nlink == 1` — a bind mount is not a link and adds no name to the inode — while `canonicalize`
+///    resolves the in-tree name to itself, so every path check passes and this rule never fires.
+///    Deliberately **not** defended against: it needs mount privilege, and an actor holding that has
+///    strictly better options than aiming a checkpoint blob at a file. Recorded so the next auditor
+///    finds it here rather than re-deriving it.
+///
 /// # Errors
 ///
 /// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a
@@ -1326,6 +1408,25 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
                 let _ = std::fs::remove_file(dst);
             }
             return Err(format!("{}: {why}. Nothing was written for this entry", dst.display()));
+        }
+        // CPE-1857 — the hard-link hole, refused on the handle. See the "Multiply-linked destinations"
+        // section above for the decision, its cost, and the two alternatives that were rejected.
+        //
+        // `created` is not special-cased and does not need to be: a name this call just claimed with
+        // `create_new` has exactly one link, so a fresh destination can never reach this branch. The
+        // count is read from `facts`, which came off the handle already opened — never a second path
+        // question, which is the property the rest of this function is built on.
+        if facts.links > 1 {
+            drop(w);
+            return Err(format!(
+                "{}: this file has {} names (it is hard-linked), and writing here would change the \
+                 content at every one of them — including any that live outside the folder being \
+                 restored, which no path check can see because a hard link resolves to itself. Break \
+                 the link first (copy the file over itself) and run this again. Nothing was written \
+                 for this entry",
+                dst.display(),
+                facts.links
+            ));
         }
     }
 
@@ -3086,6 +3187,14 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 /// - **It says nothing about what the primitive then does to a link at the final component.** A
 ///   contained path may still *be* a symlink whose target is contained but is written *through* rather
 ///   than replaced — CPE-1719's shape, pinned separately by CPE-1726's tests.
+/// - **It cannot see a HARD link, and that limit is unchanged by CPE-1857** — what changed is where the
+///   crate answers it. A hard link is not a reparse point and has no target, so `canonicalize` resolves
+///   it to itself and this function correctly answers "contained", because the name **is** contained.
+///   The bytes still come out at the object's other name, which may be anywhere. There is no path
+///   question that could have caught it: the answer lives at the *write*, on the count of names the
+///   destination handle reports — [`copy_file_onto_no_follow`] and
+///   [`crate::batch_media::open_output_verified`] both refuse there. **Do not add a hard-link check
+///   here**; a path cannot answer it, and a check that looks like it does is worse than none.
 /// - It answers only about `root`; the caller still decides whether the root **itself** is an
 ///   acceptable answer. It is allowed here, because a resolver must map `/` to the served root for
 ///   `LIST`/`PROPFIND`/`CWD` to work at all. "Not the root itself" is [`same_place`]'s question, and
@@ -7889,6 +7998,74 @@ mod tests {
         let fresh = d.path().join("fresh.txt");
         copy_file_onto_no_follow(&blob, &fresh).expect("a free name must also be writable");
         assert_eq!(std::fs::read(&fresh).ok().as_deref(), Some(&b"NEW"[..]));
+    }
+
+    /// **CPE-1857 — the write-through-a-hard-link hole, closed at the write.**
+    ///
+    /// `fs::copy` and every truncate-and-write open land bytes **in an inode**, and a hard link is a
+    /// second *name* for that same inode. It is not a reparse point and it has no target to resolve, so
+    /// `canonicalize` cannot see it and neither `confined_to` nor CPE-1823's `landing` can: both
+    /// correctly report the name as inside the reverted root, because it **is** inside it. The bytes
+    /// still come out at the other name, wherever that lives. Measured by CPE-1823's round-5 Security
+    /// Auditor through the registered command:
+    ///
+    /// ```text
+    /// CMD revert[hardlink out-of-tree]: applied=1 skipped=0
+    ///       h.txt   = Ok("CHECKPOINT-H")
+    ///       outside = Ok("CHECKPOINT-H")     <- outside the reverted root
+    /// ```
+    ///
+    /// **The fixture's liveness is proved before anything is asserted about the code under test**, and
+    /// proved the only way a hard link can be: content is written through ONE name and read back
+    /// through the OTHER. A test whose fixture is two unrelated files certifies nothing at all.
+    #[test]
+    fn cpe_1857_a_hard_linked_destination_is_never_written_through() {
+        let d = scratch("cpe1857-hardlink-dest");
+        let inside = d.path().join("inside");
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, b"placeholder").unwrap();
+        let dst = inside.join("h.txt");
+        if std::fs::hard_link(&victim, &dst).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1857_a_hard_linked_destination_is_never_written_through: no hard-link \
+                 support on this filesystem - this run verified NOTHING about the hard-link hole"
+            );
+            return;
+        }
+        // Liveness, the only way a hard link can be proved live: write through the OUTSIDE name and read
+        // it back through the INSIDE one. If these are two separate files this test certifies nothing.
+        std::fs::write(&victim, b"VICTIM CONTENT").unwrap();
+        assert_eq!(
+            std::fs::read(&dst).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "fixture is inert: the two names do not share one inode, so no write could have gone through"
+        );
+
+        let blob = d.path().join("blob");
+        std::fs::write(&blob, b"CHECKPOINT-H").unwrap();
+
+        let outcome = copy_file_onto_no_follow(&blob, &dst);
+
+        // HARM FIRST, on the filesystem, before the verdict is looked at - the ticket's own ordering.
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "HARM: the restore wrote the checkpoint's bytes through a hard link, into a file outside \
+             the reverted root that nothing in the plan ever named"
+        );
+        assert!(
+            outcome.is_err(),
+            "a destination with a second name must be refused, not written: {outcome:?}"
+        );
+        let why = outcome.unwrap_err();
+        assert!(
+            why.contains("2 names"),
+            "the refusal must say WHY, naming the link count the user has to act on: {why}"
+        );
     }
 
 
