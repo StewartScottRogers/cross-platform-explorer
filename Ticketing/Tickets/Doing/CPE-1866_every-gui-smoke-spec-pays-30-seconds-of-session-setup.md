@@ -169,3 +169,54 @@ this in detail, with the real before/after numbers, at `SPEC_SESSION_OVERHEAD_MS
 flight when this Work Log entry was written — the Foreman took over CI ownership for this PR partway
 through (see PR comments/session for the handoff). Final green/red state to be confirmed there, not
 asserted here.
+
+---
+
+**2026-08-24 — gauntlet UAT FAIL, attempt 2/3. Correction: the three shard-3 cases are a REGRESSION, not
+a pre-existing flake — exemption entries removed, not merged.**
+
+The Foreman's tester pulled shard 3's job log from two independent recent `main` runs (32681578981,
+32679721006): both 25/25 passed, all three of the cases this PR had exempted included, both on
+per-spec sessions. That means `known-failing.json`'s own contract — exemptions record KNOWN failures,
+never absorb a regression — was violated by the previous entry in this Work Log. **Corrected**: all
+three `CPE-1866` entries removed from `known-failing.json`. Shard 3 is expected to be RED again on the
+next real CI run until the actual cause is fixed — that is the honest, correct state, not a setback.
+
+**Structural finding, independently confirmed by the tester's own CI-history pull (run 32667516149, job
+97264357254): "SUITE DID NOT COMPLETE: expected 14 spec file(s) ... but only 1 reported."** Session-
+per-shard means a hang/crash anywhere in a shard can in principle take out every file after it — before
+this ticket that was architecturally impossible, since every file started a cold process. Addressed two
+ways: (1) `resetAppState`'s own call in `handleRunnableStart` (wdio.conf.ts) is now wrapped — a throw
+triggers `browser.reloadSession()` (verified via webdriverio's own source: does not touch the driver
+process or re-run `beforeSession`, just a genuinely fresh app launch against the already-running
+tauri-driver) and one retry; a second failure throws for real, failing that one file loudly rather than
+silently. (2) The per-file result writer used to batch every file in memory and flush once at shard end
+— fixed to flush each file's chunk to disk the moment the NEXT file starts, so a mid-shard crash no
+longer erases the forensic trail for every file that already finished cleanly.
+
+**Root-cause investigation, un-time-boxed per the Foreman's priority #1.** Traced as far as: WebdriverIO's
+OWN click-intercepted retry (scroll-into-view + pointer move + retry) also fails, on the SAME node, both
+attempts — a genuinely persistent screen-position interceptor, not a momentary one. It blocks BOTH a
+plain WebdriverIO `.click()` (open-dir.smoke.ts) AND the CDP/Actions-based `rightClick` helper
+(populated-whitespace.smoke.ts) — evidence against a client-library-specific quirk and for a real DOM
+overlay, which is what makes the reviewer's "this may be a real app defect, not a harness artifact"
+theory credible rather than speculative. The `.backdrop`-click fix that closed two EARLIER leaks in this
+same investigation (Agent Watch drawer, Operations panel) did not clear this one on a 3rd rerun, so
+`near-duplicates.smoke.ts` closing its own dialog without awaiting the close remains a plausible
+mechanism but is not confirmed. A temporary diagnostic (`document.elementFromPoint` + ancestor-chain
+dump, walking tag/class/id/z-index/position/pointer-events/opacity/display/visibility) is now in
+`open-dir.smoke.ts`'s failing test, pushed, and will name the actual interceptor in the next real CI
+run's log rather than leaving it to inference. **Not yet resolved** — the next CI run's diagnostic
+output is needed before this can be closed either as a harness-level spec fix or escalated as a
+real, user-facing app defect (the Foreman's instruction: file it separately with evidence if the latter).
+
+**Other review items addressed:** `resetAppState.ts`'s doc corrected — it does not directly clear
+Agent-Watch activity/cost stores (only sessions, directly; activity/cost clear indirectly via the
+existing `reconcileAgentWatch` reactive teardown, with no explicit await on that settling). Added an
+explicit "what this deliberately does not cover" list (sort order, view mode, filter text, sidebar
+expansion, tab set, scroll position, clipboard, backend-resident state) modeled on
+`preview-pane.smoke.ts`'s own pre-existing theme/pane-width `afterEach`. Three stale "fresh
+session/process" comments corrected without behavior change: `instant-search.smoke.ts` (an unguarded,
+currently-dormant assumption about backend `IndexService` state — flagged, not fixed, since nothing
+exercises it today), `organize.smoke.ts` and `batch-media.smoke.ts` (both already clicked Cancel to
+clean up; the comment claiming it was "just tidy" now correctly says it is load-bearing).
