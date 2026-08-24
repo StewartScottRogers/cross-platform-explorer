@@ -220,3 +220,36 @@ session/process" comments corrected without behavior change: `instant-search.smo
 currently-dormant assumption about backend `IndexService` state — flagged, not fixed, since nothing
 exercises it today), `organize.smoke.ts` and `batch-media.smoke.ts` (both already clicked Cancel to
 clean up; the comment claiming it was "just tidy" now correctly says it is load-bearing).
+
+---
+
+**2026-08-24 — root cause found and fixed: scroll position, missed by `navigateTo`'s own no-op path.**
+Foreman's diagnostic pull (shard 3, job `97312996322`, `open-dir.smoke.ts`) named it directly:
+`topSameAsRow: false`, topmost element at the fixture row's click point is the file pane's own
+`.toolbar` — ordinary layout furniture, no dialog/drawer/backdrop in the ancestor chain, which correctly
+downgrades the earlier "possible real app defect" theory in favour of "genuine isolation gap in the
+reset". Exactly the shape a scrolled list produces: the row's real screen position lands where the
+toolbar sits because the row itself scrolled up underneath it.
+
+Root mechanism confirmed by reading `NavToolbar.svelte`, not inferred: `commit()` is `if (!value ||
+value === currentPath) return;` BEFORE ever dispatching `navigate` — so `resetAppState`'s own
+`navigateTo(rootDir)` is a total no-op (no re-fetch, no re-mount, no scroll reset) whenever the app is
+ALREADY at `rootDir`, the common case for this shard. Whatever `scrollTop` an earlier spec left on
+`.filelist-pane` (`FileList.svelte`'s own scroll container) carried straight through into the next file
+untouched.
+
+Fixed: `resetAppState` now has a step 5, `resetFileListScroll`, that zeroes `.filelist-pane`'s
+`scrollTop` directly via `browser.execute`, unconditionally — not relying on `navigateTo` to do it as a
+side effect it does not reliably produce. Logs before/after both at entry to `resetAppState` (the value
+the PREVIOUS spec actually left) and around the explicit zero, so the log carries the evidence. Also
+added `scrollTop` to `open-dir.smoke.ts`'s existing diagnostic (left in place, per instruction, until
+confirmed). Removed "scroll position" from `resetAppState.ts`'s "deliberately not covered" list.
+
+Also this round: fixed `bidiEscape.guard.test.ts`'s stale App.svelte line-number registry (mechanical
++19 shift from the new `__CPE_TEST_CLEAR_AGENT_SESSIONS__` hook — same 31 expressions, same 2 basename
+calls, new addresses; 15/15 tests pass).
+
+**Not yet independently re-confirmed by a real CI run** — pushed, Foreman owns CI. The mechanism is
+verified by reading the actual production source (`NavToolbar.svelte#commit()`), not just inferred from
+the diagnostic, so confidence is high, but "fixed" here means "the identified mechanism is addressed",
+not yet "shard 3 observed green on this commit".
