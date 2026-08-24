@@ -95,6 +95,13 @@ describe("CPE-1329 — headless GUI smoke: Declutter dialog surfaces real organi
     // recursively) by double-clicking its row in the file list.
     const folderRow = await $("//*[contains(text(),'declutter-gui-verify')]");
     await folderRow.waitForExist({ timeout: 15_000, timeoutMsg: "expected the seeded declutter fixture folder to list" });
+    // CPE-1866: `waitForExist` only proves the row is IN THE DOM, not that it is actually clickable yet
+    // (a listing can still be settling/streaming in — see CLAUDE.md's "Streaming liveness" convention).
+    // Under session-per-shard this spec's session has already run several prior spec files' worth of
+    // real interaction by the time it starts, so a momentary not-yet-interactive row reads identically
+    // to a real regression without this — matches the same `waitForClickable`-before-click pattern
+    // already used elsewhere in this suite (e.g. cost-history.smoke.ts's `.agent-log-btn`).
+    await folderRow.waitForClickable({ timeout: 10_000 });
     await folderRow.doubleClick();
 
     // Ctrl+Shift+P opens the Command Palette (App.svelte's `handleKeydown`).
