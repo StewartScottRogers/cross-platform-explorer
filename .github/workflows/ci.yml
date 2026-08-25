@@ -1582,3 +1582,98 @@ jobs:
           set -euo pipefail
           echo "::notice::FFMPEG_BUILD_TAG_OVERRIDE_REASON is active on main -- dispatching ffmpeg-pin-freshness.yml now instead of waiting for its weekly schedule (CPE-1802), so the daily pin's ~14-day runway is actually watched."
           gh workflow run ffmpeg-pin-freshness.yml --ref "$REF_NAME"
+
+  # CPE-1855: a declared `rust-version` means nothing unless something actually tries to compile
+  # every manifest with EXACTLY that floor. `dtolnay/rust-toolchain@stable` everywhere else in this
+  # file always builds on whatever is current, so `rust-version` could say anything and nothing would
+  # notice it drifting from what the code actually needs -- which is exactly how it went stale: every
+  # manifest claimed 1.77.2 while `crates/server/src/fsutil.rs`'s `confined_to` (production code, not
+  # a test) already used `std::io::ErrorKind::NotADirectory`, stable since 1.83.0 (`io_error_a_bit_more`,
+  # confirmed against the installed toolchain's own `#[stable(since = "1.83.0")]` attribute, not
+  # guessed) -- and `crates/server/src/transfer.rs` used the same kind test-only. No other post-1.77.2
+  # API was found in a full-tree audit (`std::iter::repeat_n`, stable 1.82.0, is the next-newest hit,
+  # test-only in `fsutil.rs`, still under the 1.83.0 ceiling); `ErrorKind::FilesystemLoop` is
+  # deliberately NOT used anywhere in this tree (see the doc comments in `links.rs`/`split_join.rs`)
+  # because it is *still* unstable even in the newest available stable rustc, so it does not enter
+  # into this floor at all.
+  #
+  # Deliberately NOT a `rust-toolchain.toml`: that would make `rustup` auto-install/switch to this
+  # pinned version the moment ANY `cargo` command runs inside a checkout of this repo, including on a
+  # shared local dev machine -- exactly the machine-global toolchain change this repo's sprint workers
+  # are told never to make locally. Confining the pin to this ephemeral GitHub Actions runner gets the
+  # same enforcement with none of that blast radius.
+  #
+  # ubuntu-latest only (one OS is enough for an API-availability floor -- same reasoning the
+  # Typed-bindings drift guard above already uses) and default features only: checking every feature
+  # combination's OWN MSRV is out of scope for this ticket (Low priority, Small estimate) and is
+  # recorded as a known gap rather than silently treated as covered. Every one of the 17 real Cargo
+  # manifests in the tree (`crates/*`, `sidecar/*`, `src-tauri`) gets its own `cargo check`, not just
+  # the one that surfaced the problem -- a partial sweep here is this repo's most-repeated defect, one
+  # level up.
+  msrv:
+    name: MSRV (1.83.0) compiles on every manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.83.0 (the declared floor, not "stable")
+        uses: dtolnay/rust-toolchain@1.83.0
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./crates/contract -> target
+            ./crates/ftp -> target
+            ./crates/mdns -> target
+            ./crates/net -> target
+            ./crates/s3 -> target
+            ./crates/security -> target
+            ./crates/server -> target
+            ./crates/sftp -> target
+            ./crates/updater-verify -> target
+            ./crates/vfs -> target
+            ./crates/webdav -> target
+            ./sidecar/agent-board -> target
+            ./sidecar/ai-console -> target
+            ./sidecar/contract -> target
+            ./sidecar/host -> target
+            ./sidecar/repos -> target
+            ./src-tauri -> target
+
+      # src-tauri's `build.rs` (tauri_build) needs the frontend `dist/` to exist at compile time --
+      # same reason the `backend` job builds it first, above.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Build frontend (needed by src-tauri's build script)
+        run: |
+          npm ci
+          npm run build
+
+      # Every manifest that declares `rust-version` in this tree, checked with the exact toolchain
+      # that number promises. `cargo check --all-targets` (not `build`) is enough to catch an
+      # MSRV-violating API in library OR test code, and a dependency whose OWN floor is newer than
+      # 1.83.0 surfaces here the same way -- both are a compile error at this exact toolchain.
+      - name: cargo check every manifest at the declared floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for dir in \
+            crates/contract crates/ftp crates/mdns crates/net crates/s3 crates/security \
+            crates/server crates/sftp crates/updater-verify crates/vfs crates/webdav \
+            sidecar/agent-board sidecar/ai-console sidecar/contract sidecar/host sidecar/repos \
+            src-tauri \
+          ; do
+            echo "::group::cargo check --all-targets -- $dir"
+            if ! (cd "$dir" && cargo check --all-targets); then
+              echo "::error::$dir does not compile at the declared MSRV (rustc 1.83.0) -- either the code needs an API newer than that, or a dependency's own MSRV is newer than 1.83.0. Fix the code/dependency, or raise rust-version in $dir/Cargo.toml (and every other manifest in the tree, to keep one honest floor) and record why."
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail

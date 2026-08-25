@@ -2,7 +2,7 @@
 name = "cpe-mdns"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.83.0"
 description = "mDNS/DNS-SD LAN discovery for the Cross-Platform Explorer (CPE-1523, epic CPE-1517): the cross-platform complement to the Windows-native WNet discovery (CPE-1519) — finds smb/sftp/webdav/ftp/nfs hosts advertising over Bonjour/Avahi/mDNS on every OS, surfaced as `NetShare` rows in the same 'discovered' tier."
 license = "MIT"
 

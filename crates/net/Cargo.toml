@@ -2,7 +2,7 @@
 name = "cpe-net"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.83.0"
 description = "Headless network transport loop for the Cross-Platform Explorer: a Client(Rust) proxy + reference Server over the CPE-811 contract, guarded by the CPE-816 security chain (CPE-810/825)."
 license = "MIT"
 

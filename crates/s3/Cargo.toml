@@ -2,7 +2,7 @@
 name = "cpe-s3"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.83.0"
 description = "S3-compatible object-store backend for the Cross-Platform Explorer (epic CPE-1503). Foundation slice (CPE-1681): S3Config, path-style vs virtual-host endpoint addressing, and a hand-rolled AWS SigV4 signer. Sync, no async runtime, no AWS SDK."
 license = "MIT"
 

@@ -2,6 +2,7 @@
 name = "sidecar-host"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.83.0"
 description = "Host-side sidecar platform logic for Cross-Platform Explorer: manifest registry, negotiation, brokering (CPE-260)."
 license = "MIT"
 
