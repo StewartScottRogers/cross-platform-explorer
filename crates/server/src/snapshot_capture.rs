@@ -2395,6 +2395,18 @@ mod tests {
         scan_dir(&dir.to_string_lossy()).unwrap().into_keys().collect()
     }
 
+    /// Whether `dir`'s filesystem folds case (Windows, macOS-default) or not (Linux-default, and macOS
+    /// can be configured either way) — probed at runtime rather than assumed from `cfg!(windows)`,
+    /// because the CI matrix is the ground truth this repo cares about and a compile-time guess would be
+    /// wrong the day a runner's default changes. Used by CPE-1864's end-to-end test to assert the
+    /// platform-correct outcome instead of skipping the platforms where the naive assumption breaks.
+    fn filesystem_folds_case(dir: &Path) -> bool {
+        fs::write(dir.join("cpe1864-fold-probe"), b"x").unwrap();
+        let folded = fs::read(dir.join("CPE1864-FOLD-PROBE")).is_ok();
+        let _ = fs::remove_file(dir.join("cpe1864-fold-probe"));
+        folded
+    }
+
     /// The temp-directory name of a scratch dir, for building a `../<sibling>` escape that actually
     /// reaches it.
     fn dir_name(p: &Path) -> String {
@@ -3214,20 +3226,68 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// CPE-1864 — **the witness compared hashes byte-for-byte, so a survivor spelling its hash in a
-    /// different case than the victim's own manifest was invisible to it.** Same shape as
-    /// `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` (a second manifest file
-    /// naming the same content is a legitimate namer this witness must see) — except here the second
-    /// namer's hash is the SAME content hash, merely re-spelled uppercase, which `validate_blob_name`
-    /// accepts and which Windows/macOS resolve to the identical `blobs/<hash>` file. The bug this guards
-    /// needs no case-insensitive filesystem to fail: the blob is a real `fs::remove_file`, gone entirely,
-    /// not merely mis-spelled — so this test is deterministic on every platform in the 3-OS matrix.
+    /// CPE-1864 -- **the pure regression pin.** `manifests_naming_strict` (formerly `manifests_naming`)
+    /// compared a disk manifest's `hash` field against the candidate set with plain `==`. This asserts
+    /// the fixed predicate directly -- a `wanted` set holding a lowercase hash must still be recognised
+    /// when a manifest on disk spells the SAME content uppercase -- without routing through `restore`'s
+    /// real filesystem I/O. Deterministic on all three platforms in the CI matrix, including Linux, and
+    /// pins exactly the code CPE-1864 changed. See the end-to-end test below for what this bug costs a
+    /// live store, and for why an end-to-end **restore** assertion cannot be staged identically on a
+    /// case-sensitive filesystem.
+    #[test]
+    fn cpe_1864_manifests_naming_recognises_a_differently_cased_hash_spelling() {
+        let store = scratch("1864-unit-store");
+        let lower = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd";
+        let upper = lower.to_ascii_uppercase();
+        plant_manifest(&store, "survivor", &[("a.txt", upper.as_str())]);
+
+        // FIXTURE LIVENESS -- the plant really is uppercase and really differs from `lower`.
+        assert_ne!(upper, lower, "LIVE: sanity -- the case flip must actually change the string");
+        let on_disk = load_manifest(&store, "survivor").unwrap().files["a.txt"].hash.clone();
+        assert_eq!(on_disk, upper, "LIVE: the uppercase spelling did not survive the round trip to disk");
+
+        let wanted: BTreeSet<String> = [lower.to_string()].into_iter().collect();
+        let got = manifests_naming(&store, &wanted);
+
+        assert_eq!(
+            got, wanted,
+            "HARM: a manifest spelling its hash {upper:?} was not recognised as still naming the \
+             candidate {lower:?} -- an exact-string witness cannot see a case-differing manifest entry"
+        );
+
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// CPE-1864 -- **the end-to-end consequence, and what this fix does and does not buy a Linux user.**
+    /// Same shape as `cpe_1861_prune_never_frees_a_blob_another_manifest_file_still_names` (a second
+    /// manifest file naming the same content is a legitimate namer this witness must see) -- except here
+    /// the second namer's hash is the SAME content hash, merely re-spelled uppercase, which
+    /// `validate_blob_name` accepts and which Windows/macOS resolve to the identical `blobs/<hash>` file.
+    ///
+    /// **The blob-survives-prune assertion below is fully OS-independent and is the actual regression
+    /// pin for the shared-content scenario** (Linux failure on the original cut of this test was in the
+    /// RESTORE tail, never here): it checks existence at the one literal, lowercase path the blob was
+    /// actually written under, with no case-folding involved on either side.
+    ///
+    /// **The restore tail is NOT OS-independent, and pretending otherwise was this test's original bug.**
+    /// `blob_source` joins the manifest's literal hash spelling onto `blobs/`. On a case-folding volume
+    /// (Windows, macOS-default) `blobs/<UPPER>` and `blobs/<lower>` are the same file, so the survivor's
+    /// restore genuinely succeeds byte-for-byte. On a case-sensitive one (Linux-default) there is no file
+    /// named `<UPPER>` on disk -- only `<lower>`, capture's own spelling -- so restore must fail, and CI
+    /// caught exactly that: `.../blobs/<UPPER>: the source could not be opened: No such file or
+    /// directory (os error 2)`. **This is not a regression in the fix and CPE-1864 does not (and could
+    /// not, short of normalising every stored filename) make a case-sensitive filesystem resolve two
+    /// different byte sequences to one file.** What CPE-1864 fixes is `prune`'s witness -- the blob is
+    /// never wrongly deleted, on every platform, unconditionally -- recorded here as a real, permanent
+    /// limit rather than papered over: **an uppercase-spelled manifest entry can protect its blob from
+    /// deletion everywhere, but can only be restored back on a filesystem that folds case.** The tail
+    /// below asserts the platform-correct outcome on both kinds of filesystem rather than assuming one.
     ///
     /// **What the user loses today, stated plainly (per the ticket).** This is a false "blob missing"
-    /// from the witness's point of view — the dangerous direction, because it is the direction that
+    /// from the witness's point of view -- the dangerous direction, because it is the direction that
     /// deletes content a live checkpoint still names. `prune` reports success and frees bytes; the harm
     /// is silent until the survivor's own restore later fails to find a file that should still be there.
-    /// The opposite mistake — a false "blob present" — is not this bug's shape: nothing here makes an
+    /// The opposite mistake -- a false "blob present" -- is not this bug's shape: nothing here makes an
     /// absent blob look present, so it never causes `restore` to hand back content that silently
     /// resolves to the wrong bytes.
     #[test]
@@ -3240,7 +3300,7 @@ mod tests {
         let victim_id = victim.manifest_id.clone();
 
         // The survivor: a second manifest file naming the SAME content, but with its hash re-spelled
-        // uppercase — "editing the survivor's own manifest", the ticket's own threat model, and the same
+        // uppercase -- "editing the survivor's own manifest", the ticket's own threat model, and the same
         // plant-a-copy shape CPE-1861's own `-backup` test uses for a legitimate second namer.
         let mdir = manifests_dir(&store);
         let survivor_id = format!("{victim_id}-upper");
@@ -3253,10 +3313,10 @@ mod tests {
         fs::write(mdir.join(format!("{survivor_id}.json")), serde_json::to_string_pretty(&doc).unwrap())
             .unwrap();
 
-        // FIXTURE LIVENESS — the uppercase spelling really reached disk, really differs from the lowercase
+        // FIXTURE LIVENESS -- the uppercase spelling really reached disk, really differs from the lowercase
         // spelling the actual blob file is named after, and the blob really is on disk under that
         // lowercase name.
-        assert_ne!(upper_hash, lower_hash, "LIVE: sanity — the case flip must actually change the string");
+        assert_ne!(upper_hash, lower_hash, "LIVE: sanity -- the case flip must actually change the string");
         assert!(
             upper_hash.chars().any(|c| c.is_ascii_uppercase()),
             "LIVE: the plant is not actually uppercase"
@@ -3265,25 +3325,45 @@ mod tests {
         assert_eq!(on_disk, upper_hash, "LIVE: the uppercase spelling did not survive the round trip to disk");
         assert!(blobs_dir(&store).join(&lower_hash).exists(), "LIVE: the shared blob must exist on disk");
 
-        // Prune the victim. The survivor's own manifest still names the exact same content — merely
-        // spelled differently — so the blob must survive.
+        // Prune the victim. The survivor's own manifest still names the exact same content -- merely
+        // spelled differently -- so the blob must survive. OS-independent: this checks existence at the
+        // one literal path the blob is actually written under, no case-folding involved.
         prune(&store.to_string_lossy(), &victim_id).unwrap();
 
         assert!(
             blobs_dir(&store).join(&lower_hash).exists(),
             "HARM: pruning the victim deleted a blob the survivor's manifest still names (uppercase \
-             spelling) — a false \"blob missing\" from the witness deleted content a live checkpoint \
+             spelling) -- a false \"blob missing\" from the witness deleted content a live checkpoint \
              still needs"
         );
 
+        // The restore tail: platform-correct, not platform-optimistic. See this test's doc comment for
+        // why the two branches below are both real assertions and neither is a skip.
+        let case_folds = filesystem_folds_case(&store);
         let dest = scratch("1864-dest");
-        restore(&store.to_string_lossy(), &survivor_id, &dest.to_string_lossy())
-            .unwrap_or_else(|e| panic!("HARM: the surviving checkpoint can no longer restore: {e}"));
-        assert_eq!(
-            fs::read(dest.join("a.txt")).unwrap(),
-            b"irreplaceable, byte for byte",
-            "HARM: the survivor did not restore byte-for-byte"
-        );
+        let r = restore(&store.to_string_lossy(), &survivor_id, &dest.to_string_lossy());
+        if case_folds {
+            r.unwrap_or_else(|e| panic!("HARM: the surviving checkpoint can no longer restore: {e}"));
+            assert_eq!(
+                fs::read(dest.join("a.txt")).unwrap(),
+                b"irreplaceable, byte for byte",
+                "HARM: the survivor did not restore byte-for-byte"
+            );
+        } else {
+            // Recorded limitation, not a regression: on a case-sensitive filesystem an uppercase-spelled
+            // manifest entry cannot resolve to the actual (lowercase) blob file on disk, independent of
+            // whether CPE-1864's witness fix is in place. The failure must be loud and must write
+            // nothing -- never a silent success and never invented content.
+            let err = r.expect_err(
+                "on a case-sensitive filesystem restore must fail loudly for a manifest whose hash \
+                 spelling matches no file on disk, not silently succeed or invent content"
+            );
+            assert!(
+                err.contains("could not be opened") || err.to_ascii_lowercase().contains("no such file"),
+                "the refusal should be recognisable as a missing-source error, got: {err}"
+            );
+            assert!(files_under(&dest).is_empty(), "a failed restore must write nothing");
+        }
 
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&store);

@@ -119,9 +119,63 @@ unrelated) — includes CPE-1871's pin, CPE-1861's manifest-witness suite, CPE-1
 suite, and CPE-1867's racing-rename test, all still green; no guard weakened. `cargo clippy --all-targets
 -- -D warnings` clean in both default and `--features index` modes.
 
-The test needs no case-insensitive filesystem to fail (it is deterministic across the 3-OS CI matrix):
-the harm is a real `fs::remove_file` of the blob under its actual on-disk (lowercase) name, driven by the
-app's own string comparison, not by how any given OS resolves a path.
+**Correction, 2026-08-25 — the Foreman caught a fixture bug in CI on `ubuntu-latest`.** The claim above
+("this test needs no case-insensitive filesystem to fail") was right about the *witness bug* and wrong
+about the *fixture*. The end-to-end test's trailing `restore` assertion assumed byte-for-byte success on
+every platform; on Linux, `restore` genuinely failed with
+`.../blobs/<UPPER>: the source could not be opened: No such file or directory (os error 2)`, because
+`blob_source` joins the manifest's literal hash spelling onto `blobs/`, and on a case-sensitive filesystem
+there is no file named `<UPPER>` on disk — only `<lower>`, which is what capture actually wrote. That is
+true regardless of whether the CPE-1864 fix is applied; it is a property of the filesystem, not a
+regression. Windows and macOS pass because their filesystems fold case and silently resolve `<UPPER>` to
+the same file as `<lower>`.
+
+**What this fix does and does not buy a Linux user, stated plainly (the Foreman asked for this on the
+record).** CPE-1864 fixes `prune`'s witness so a blob a live checkpoint still names is never wrongly
+deleted — **on every platform, unconditionally.** It does not, and cannot, make a case-sensitive
+filesystem resolve two differently-cased byte sequences to one file; short of normalising every stored
+filename to a canonical case (a larger, separate design decision this ticket does not take), an
+uppercase-spelled manifest entry on Linux can be *protected* from deletion but cannot be *restored*
+through that spelling, because the physical file it needs was never written under that name. This is a
+real, permanent limit, recorded here rather than papered over.
+
+**Fixture fix.** Split the single end-to-end test into two:
+- `cpe_1864_manifests_naming_recognises_a_differently_cased_hash_spelling` — a pure, deterministic unit
+  test of `manifests_naming` itself (a `wanted` set holding a lowercase hash must still be recognised
+  against a disk manifest spelling the same content uppercase), with no filesystem I/O through `restore`
+  at all. This is the actual regression pin for the code CPE-1864 changed, and it is identical on all
+  three platforms.
+- `cpe_1864_a_survivor_spelling_its_hash_uppercase_still_protects_the_shared_blob` — kept as the
+  end-to-end story, but its `restore` tail now probes the store's own filesystem at runtime
+  (`filesystem_folds_case`, write-as-lowercase/read-as-uppercase) and asserts the platform-correct
+  outcome: byte-for-byte success where the filesystem folds case, or a loud, nothing-written failure
+  naming "the source could not be opened" / "no such file" where it does not. Neither branch is a skip —
+  both are real assertions, and the test still runs unconditionally on every OS (no `#[cfg]`, per the
+  Foreman's explicit instruction not to gate this away — the underlying string-comparison bug is reachable
+  on every platform even though its filesystem-visible consequence differs). The blob-survives-prune
+  assertion earlier in the same test was already fully OS-independent (checks existence at the one
+  literal, lowercase path the blob is actually written under) and needed no change — CI's Linux failure
+  was always in the restore tail, never there.
+
+Red-then-green repeated against the corrected fixture (temporarily reverted the comparison in
+`manifests_naming_strict` back to `wanted.contains(&f.hash)`):
+
+```
+RED (both tests, exact-string comparison reverted):
+  cpe_1864_manifests_naming_recognises_a_differently_cased_hash_spelling ... FAILED
+    HARM: a manifest spelling its hash "...ABCD" was not recognised as still naming "...abcd"
+  cpe_1864_a_survivor_spelling_its_hash_uppercase_still_protects_the_shared_blob ... FAILED
+    HARM: pruning the victim deleted a blob the survivor's manifest still names (uppercase spelling)
+
+GREEN (fix reapplied): both tests ... ok
+```
+
+Full `cargo test --lib` (crates/server, default features): 2383 passed, 0 failed, 8 ignored
+(pre-existing, unrelated). `cargo clippy --all-targets -- -D warnings` clean in both default and
+`--features index` modes. (A separate, unrelated integration test file, `archive_panic_safety.rs`
+— last touched by PR #1021, nothing to do with this ticket — showed one flaky sevenz-rust
+watchdog-timeout failure that passed cleanly on rerun; not caused by this change and not part of
+`--lib`.)
 
 ## Notes
 
