@@ -3,11 +3,11 @@ id: CPE-1884
 title: the Drop Stack handle floats permanently over the Sidebar's bottom rows and eats their clicks
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23
-closed:
+closed: 2026-08-25
 ---
 
 ## Problem
