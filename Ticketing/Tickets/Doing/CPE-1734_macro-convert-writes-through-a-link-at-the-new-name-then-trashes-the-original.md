@@ -128,8 +128,32 @@ outside the intended root; that is a separate, already-filed class. `create_excl
 `O_CREAT|O_EXCL`, not the handle-level `links`/reparse-point read `copy_file_onto_no_follow` uses, so
 this is the CPE-1718 create-site primitive, not the CPE-1857 hard-link-count primitive — appropriate
 here because `to` is a name being claimed, never an existing inode being overwritten, so there is no
-hard-link-count question to ask at this site. No alternate-data-stream / Mark-of-the-Web concern either,
-for the same reason: nothing is being copied onto an existing file.
+hard-link-count question to ask at this site.
+
+**Correction (Foreman, on merge — Security Auditor finding).** This Work Log originally went on to say
+there was "no alternate-data-stream / Mark-of-the-Web concern either, for the same reason: nothing is
+being copied onto an existing file." That answers the wrong question and is false. The ADS question at
+a *create* site is not whether an existing stream gets clobbered — it is whether MotW is **carried**
+from the source to the derived file. It is not. Measured:
+
+```
+[SEC-1025 MOTW] original's Zone.Identifier before =
+  Some("[ZoneTransfer]
+ZoneId=3
+HostUrl=https://example.invalid/photo.png
+")
+[SEC-1025 MOTW] convert result = Ok(())
+  converted file's Zone.Identifier after = None
+  original still at its old name = false
+```
+
+So a macro Convert takes an internet-downloaded, MotW-tagged file, produces an **untagged** derivative,
+and then trashes the tagged original — leaving the untagged copy as the only one. This is **CPE-1890**'s
+class landing on a path that additionally destroys the evidence. It is **not a regression** (the
+pre-fix bare `fs::write` did the same, and `stage_and_replace` carries attachments precisely because
+CPE-1739 decided this matters), and the practical exposure is low because the output is a re-encoded
+raster image. Recorded here as a stated limit rather than a denial, the same way the
+intermediate-junction limit (CPE-1889) is.
 
 ## Notes
 
