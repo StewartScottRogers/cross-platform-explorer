@@ -13,7 +13,11 @@
   import { displaySafePath } from "../filename";
 
   interface OpResult { path: string; ok: boolean; error: string; }
-  interface RunStatus { when: number; ok: number; failed: number; label: string; }
+  /** `firstError` (CPE-1879 review finding 3): the first refused entry's path + reason, so a refusal —
+   *  including the link-guard refusal CPE-1879 added — reaches the screen instead of collapsing into a
+   *  bare failure count. Optional: absent when `failed === 0`, or for history recorded before this
+   *  field existed. */
+  interface RunStatus { when: number; ok: number; failed: number; label: string; firstError?: { path: string; error: string }; }
 
   export let jobs: BackupJob[] = [];
   /** Per-job run history (CPE-798), newest first — App owns + persists it. */
@@ -102,8 +106,15 @@
         confirmed: true,
         onResult: channel,
       });
-      const failed = results.filter((r) => !r.ok).length;
-      const status = { when: Date.now(), ok: results.length - failed, failed, label: reverse ? "restore" : "backup" };
+      const failedResults = results.filter((r) => !r.ok);
+      const failed = failedResults.length;
+      // CPE-1879 review finding 3: surface the FIRST refusal's path + reason, not just the count — a
+      // hard-link/symlink refusal (or any other per-file error) used to be reported only as an OpResult
+      // that nothing ever rendered.
+      const status: RunStatus = {
+        when: Date.now(), ok: results.length - failed, failed, label: reverse ? "restore" : "backup",
+        firstError: failedResults[0] ? { path: failedResults[0].path, error: failedResults[0].error } : undefined,
+      };
       lastRun[job.id] = status;
       dispatch("run", { jobId: job.id, status });
     } catch (e) { error = String(e); } finally { busyId = ""; progress = 0; total = 0; }
@@ -137,9 +148,19 @@
             {#if busyId === job.id}
               <span class="status running" data-testid="job-progress">running… {progress}{total ? ` / ${total}` : ""}</span>
             {:else if lastRun[job.id]}
-              <span class="status" data-testid="job-status" class:bad={lastRun[job.id].failed > 0}>
-                {lastRun[job.id].label}: {lastRun[job.id].ok} ok{lastRun[job.id].failed ? `, ${lastRun[job.id].failed} failed` : ""} · {fmtTime(lastRun[job.id].when)}
+              {@const st = lastRun[job.id]}
+              <span class="status" data-testid="job-status" class:bad={st.failed > 0}>
+                {st.label}: {st.ok} ok{st.failed ? `, ${st.failed} failed` : ""} · {fmtTime(st.when)}
               </span>
+              <!-- CPE-1879 review finding 3: the first refusal's path + reason, not just the count — a
+                   backup destination pointed at a dedup store, or one hit by a planted link, used to
+                   report "N failed" with no way to see why or which file. -->
+              {#if st.firstError}
+                {@const fe = st.firstError}
+                <span class="status-detail" data-testid="job-status-detail" title={displaySafePath(fe.error)}>
+                  {displaySafePath(fe.path)}: {displaySafePath(fe.error)}
+                </span>
+              {/if}
             {/if}
             {#if (history[job.id]?.length ?? 0) > 0}
               <button class="hist-toggle" data-testid="history-toggle" on:click={() => (showHistory = showHistory === job.id ? "" : job.id)}>
@@ -149,7 +170,10 @@
             {#if showHistory === job.id}
               <div class="history" data-testid="job-history">
                 {#each history[job.id] as run (run.when)}
-                  <div class="hist-row" class:bad={run.failed > 0}>{run.label}: {run.ok} ok{run.failed ? `, ${run.failed} failed` : ""} · {fmtTime(run.when)}</div>
+                  <div class="hist-row" class:bad={run.failed > 0}>
+                    {run.label}: {run.ok} ok{run.failed ? `, ${run.failed} failed` : ""} · {fmtTime(run.when)}
+                    {#if run.firstError}<span class="hist-detail" title={displaySafePath(run.firstError.error)}> — {displaySafePath(run.firstError.path)}: {displaySafePath(run.firstError.error)}</span>{/if}
+                  </div>
                 {/each}
               </div>
             {/if}
@@ -201,10 +225,14 @@
   .status { font-size: 11.5px; color: #2e9e4f; }
   .status.bad { color: var(--danger); }
   .status.running { color: var(--accent); }
+  /* CPE-1879 review finding 3: the first refusal's path + reason, own line so it never crowds the
+     status pill; truncated with the full text in the native tooltip (`title`) rather than wrapped. */
+  .status-detail { flex-basis: 100%; font-size: 11px; color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hist-toggle { font-size: 11px; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-dim); }
   .history { flex-basis: 100%; margin-top: 4px; padding-left: 4px; }
-  .hist-row { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding: 1px 0; }
+  .hist-row { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hist-row.bad { color: var(--danger); }
+  .hist-detail { color: var(--danger); }
   .jbtns { flex: 0 0 auto; display: flex; gap: 6px; }
   .plan { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; background: var(--surface-alt); }
   .err { margin-top: 10px; padding: 8px 10px; color: var(--danger); font-size: 12.5px; }

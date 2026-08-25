@@ -628,7 +628,17 @@ export const saveBackupJobs = (v: BackupJob[]): void => write(KEYS.backupJobs, v
 
 // Per-job backup run history (CPE-798): a small ring of recent runs keyed by job id. Loosely validated —
 // a corrupt shape degrades to {}. Capped by the writer, not here.
-export interface BackupRunRecord { when: number; ok: number; failed: number; label: string; }
+export interface BackupRunRecord {
+  when: number;
+  ok: number;
+  failed: number;
+  label: string;
+  /** The first refused entry's path + reason, when `failed > 0` (CPE-1879 review finding 3): the
+   *  dashboard used to show only an `ok`/`failed` count, so a refusal — including the loud, deliberate
+   *  hard-link/symlink refusal CPE-1879 added — never actually reached the user. Optional and loosely
+   *  typed here on purpose: history saved before this field existed has none, and still validates below. */
+  firstError?: { path: string; error: string };
+}
 export const loadBackupHistory = (): Record<string, BackupRunRecord[]> => {
   const v = state[KEYS.backupHistory];
   if (!v || typeof v !== "object") return {};

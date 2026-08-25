@@ -110,11 +110,97 @@ pub const BACKUP_NOT_CONFIRMED: &str =
      or the drive-connect scheduler acting on a job the user ticked auto-run for, should ever set it)";
 
 /// Copy one file from `src` to `dst`, creating parent dirs, then optionally verify by sha256.
+///
+/// # The link guard (CPE-1879) — scoped to the final path component only
+///
+/// This used to be a bare `std::fs::copy(src, dst)` — **no** link guard of any kind, not even the
+/// symlink refusal every sibling untrusted-name writer already has
+/// ([`crate::fsutil::copy_file_onto_no_follow`] for restore, `archive::entry_sink_action` for
+/// extraction, `transfer::download_tree`'s leaf). `fs::copy` writes **through** whatever inode `dst`
+/// names. If that name is a symlink, or a second name (hard link) for a file that lives outside the
+/// backup root, the write lands there instead — and no path-containment check can see it, because a
+/// hard link has no target to resolve and the name genuinely *is* inside the root. Reproduced live
+/// (worked through in the CPE-1879 ticket): `h.txt` hard-linked to `outside/victim.txt`, backed up, and
+/// `victim.txt`'s content changed to the backup source's bytes — a file the backup was never pointed at.
+///
+/// Fixed, for the **final component** `dst` itself, by reusing CPE-1857's mechanism rather than
+/// inventing a second one: [`crate::fsutil::copy_file_onto_no_follow_with_wording`] already does
+/// exactly this, reading the reparse-point and link-count facts off the destination handle it opens for
+/// the write anyway — the *check itself* costs no additional syscall over that open. It is not free
+/// relative to the `fs::copy` it replaces, though: `fs::copy` is one OS-level call (`CopyFileExW` /
+/// `copy_file_range`/`sendfile`), while this path is an explicit open, read-loop, write, permissions
+/// set, and times set — roughly three to five syscalls per file, not zero. That cost was already
+/// accepted for the restore path by CPE-1870's measurement; it is not re-measured here, only carried,
+/// since correctness on a data-destroying path outweighs it.
+///
+/// **What this does NOT close (CPE-1879 review, finding 1): the parent-directory route.** The
+/// `create_dir_all(parent)` line above walks through a directory **junction** exactly like any other
+/// directory — Windows needs no privilege at all to create one, unlike the symlink leg below
+/// (`SeCreateSymbolicLinkPrivilege`) or the hard-link leg (a pre-existing second name at one exact
+/// filename). A junction at `dst.parent()`, or any ancestor of it, redirects the whole write **and every
+/// write beneath it** outside the backup root, and this guard — reading facts off `dst`'s own handle —
+/// cannot see it: the final component it opens is a perfectly ordinary file sitting in what is, from
+/// there, an entirely real (if redirected) directory. This is the **cheap** attack, not the exotic one,
+/// and a backup destination — a NAS share or external drive — is exactly the kind of directory tree
+/// least likely to be locked down. **Asymmetric with the mirror-delete side of this same file**:
+/// `apply_backup_plan_walk`'s delete loop asserts [`crate::fsutil::contained_under`] on the *resolved*
+/// path before `remove_dir_all`, so a junction on the delete side is refused; nothing equivalent runs
+/// before a write. Tracked in a follow-up ticket (parent-directory containment on the write side,
+/// flagged by the CPE-1879 Security Auditor review); not fixed here, so as not to bury a `create_dir_all`
+/// containment change inside a link-guard PR.
+///
+/// **Also not carried through this guard (CPE-1879 review, finding 2): Windows alternate data streams.**
+/// `fs::copy` (`CopyFileExW`) carries ADS, including the `Zone.Identifier` "Mark of the Web" Windows
+/// stamps on anything downloaded from the internet; this function's open → `set_len(0)` → byte-stream
+/// path carries none, and if `dst` already existed with its own `Zone.Identifier`, that stale stream
+/// **survives the overwrite** — measured on this branch: `Zone.Identifier present: false` after a
+/// backup copy where `fs::copy` on `main` shows `true`, and a stale mark surviving an overwrite where
+/// `fs::copy` clears it. So a backup copy of a file that carried a "downloaded, treat with caution" flag
+/// silently drops it: SmartScreen does not prompt and Office does not open the restored copy in
+/// Protected View. `crate::fsutil::copy_file_onto_no_follow`'s own doc comment excuses this ADS loss on
+/// the reasoning that the bytes are "the user's own captured content from a local store" and the
+/// direction is "toward keeping an existing warning" — **neither half of that reasoning holds here**:
+/// this call site's source is the user's arbitrary source tree, not app-captured content, and the
+/// direction is toward *dropping* a warning, not keeping one. Also unmeasured but likely: macOS
+/// `std::fs::copy` uses `fcopyfile(COPYFILE_ALL)`, which very probably carries `com.apple.quarantine`
+/// the same way; not asserted here because it was not measured. Tracked in a follow-up ticket by the
+/// Foreman; not fixed in this PR.
+///
+/// **Symlink: refuse. No legitimate counter-case here** — a backup destination that is itself a link is
+/// always a mistake or an attack, never a design the backup engine needs to honour.
+///
+/// **Hard link: refuse too, deliberately decided rather than copied across.** The ticket asks whether a
+/// backup target being a legitimate deduplicating store (`rsync --link-dest`, Time Machine) changes the
+/// answer — arguably it should matter *more* here than for CPE-1857's restore/archive/transfer sites,
+/// since a backup's whole purpose can be dedup. But **this engine does not implement dedup**: it never
+/// decides "link instead of copy" itself, it only ever executes `copy_one_verified` against a plan
+/// (`copy`/`update` lists) computed by `planBackup` from a **flat comparison of two trees**. A real
+/// link-based dedup tool creates its OWN hard links as a deliberate step and never subsequently `fs::copy`s
+/// onto them; if THIS engine ever finds a multiply-linked name sitting at a plan-chosen destination, that
+/// is not this tool's own dedup structure (it has none) — it is either an accident (the user pointed the
+/// backup at a store some *other* tool manages) or a planted link, and writing through it is corruption
+/// either way. So the CPE-1857 "refuse-per-entry-loudly, rest of the batch continues" answer transfers
+/// unchanged, for the *same* reason it applied to restore: this writer, like that one, does not create
+/// the link, so it has no business writing through one it finds. The cost is real and stated plainly, as
+/// CPE-1857 states it for restore: a backup run over someone else's dedup store now refuses every entry
+/// that already has a second name, per file, with a reason — never a silent skip, and the rest of the
+/// run still applies (see `apply_backup_plan_walk`, which already treats a `copy_one_verified` error as
+/// one more [`crate::model::OpResult::err`] and moves on to the next plan entry). Unlike
+/// [`crate::fsutil::LinkGuardWording::RESTORE`]'s remedy text, this call site's wording
+/// ([`crate::fsutil::LinkGuardWording::BACKUP`]) does **not** universally tell the user to break the
+/// link — see that constant's doc comment.
+///
+/// **The Restore direction (CPE-1879 review, finding 3):** `BackupDashboard`'s Restore button calls the
+/// same `apply_backup_plan_walk` with `source_root`/`dest_root` swapped, so `dst` here is then the
+/// user's **live tree**, not a fresh backup destination — and a live tree is far more likely to hold a
+/// pre-existing hard link (package manager stores, dedup sync clients) than an empty backup folder is.
+/// Everything above still applies in that direction; it is called out because the "backup destination is
+/// usually a fresh folder" severity argument in the ticket does **not** transfer to Restore.
 fn copy_one_verified(src: &Path, dst: &Path, verify: bool) -> Result<(), String> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::copy(src, dst).map_err(|e| e.to_string())?;
+    crate::fsutil::copy_file_onto_no_follow_with_wording(src, dst, crate::fsutil::LinkGuardWording::BACKUP)?;
     if verify {
         let a = sha256_file(src).map_err(|e| e.to_string())?;
         let b = sha256_file(dst).map_err(|e| e.to_string())?;
@@ -640,6 +726,167 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|r| r.ok));
         assert!(results.iter().any(|r| !r.ok));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1879. `copy_one_verified` was a bare `std::fs::copy(src, dst)` with **no link guard of any
+    /// kind** — not even the symlink refusal every sibling write path (`copy_file_onto_no_follow`,
+    /// `archive::entry_sink_action`, `transfer::download_tree`) already has. `fs::copy` writes through
+    /// whatever inode `dst` names; if that name is a **hard link** to a file outside the backup root, the
+    /// backup silently rewrites the other file — no path-containment check can see this, because a hard
+    /// link has no target to resolve and `dst` genuinely IS inside the backup root.
+    ///
+    /// **The fixture's liveness is proved before anything is asserted about the code under test**, the
+    /// only way a hard link can be proved live: write through the OUTSIDE name and read it back through
+    /// the INSIDE one. A fixture of two unrelated files would certify nothing.
+    #[test]
+    fn cpe_1879_a_hard_linked_backup_destination_is_never_written_through() {
+        let d = scratch("cpe1879-hardlink-dest");
+        let backup_root = d.join("dst");
+        let outside = d.join("outside");
+        fs::create_dir_all(&backup_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"placeholder").unwrap();
+        let dst = backup_root.join("h.txt");
+        if fs::hard_link(&victim, &dst).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1879_a_hard_linked_backup_destination_is_never_written_through: no \
+                 hard-link support on this filesystem - this run verified NOTHING about the hard-link \
+                 hole in the backup writer"
+            );
+            return;
+        }
+        // Liveness: write through the OUTSIDE name and read it back through the INSIDE one.
+        fs::write(&victim, b"VICTIM CONTENT").unwrap();
+        assert_eq!(
+            fs::read(&dst).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "fixture is inert: the two names do not share one inode, so no write could have gone through"
+        );
+
+        let src = d.join("src.txt");
+        fs::write(&src, b"BACKUP SOURCE").unwrap();
+
+        let outcome = copy_one_verified(&src, &dst, false);
+
+        // HARM FIRST, on the filesystem, before the verdict is looked at.
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "HARM: the backup wrote the source file's bytes through a hard link, into a file OUTSIDE \
+             the backup root that nothing in the plan ever named"
+        );
+        assert!(
+            outcome.is_err(),
+            "a backup destination with a second name must be refused, not written: {outcome:?}"
+        );
+        let why = outcome.unwrap_err();
+        assert!(
+            why.contains("2 names"),
+            "the refusal must say WHY, naming the link count the user has to act on: {why}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1879, the symlink half — cheaper to arrange than a hard link and with no legitimate
+    /// counter-case here, unlike the hard-link one (see the doc comment on [`copy_one_verified`]).
+    #[test]
+    fn cpe_1879_a_symlinked_backup_destination_is_never_written_through() {
+        let d = scratch("cpe1879-symlink-dest");
+        let backup_root = d.join("dst");
+        fs::create_dir_all(&backup_root).unwrap();
+
+        let victim = d.join("victim.txt");
+        fs::write(&victim, b"VICTIM CONTENT").unwrap();
+        let dst = backup_root.join("link.txt");
+        if !crate::fsutil::make_file_link(&victim, &dst) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1879_a_symlinked_backup_destination_is_never_written_through: no file \
+                 symlink privilege on this machine. NOTHING on this run covered the symlink hole in \
+                 the backup writer"
+            );
+            return;
+        }
+        assert_eq!(
+            fs::read(&dst).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "fixture is inert: the planted link does not lead to the victim's bytes"
+        );
+
+        let src = d.join("src.txt");
+        fs::write(&src, b"BACKUP SOURCE").unwrap();
+
+        let outcome = copy_one_verified(&src, &dst, false);
+
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"VICTIM CONTENT"[..]),
+            "HARM: the backup wrote the source file's bytes through a symlink, into a file outside \
+             anything the backup plan ever named"
+        );
+        assert!(
+            fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink()),
+            "the destination must still hold the link, not bytes written over it"
+        );
+        assert!(outcome.is_err(), "writing onto a link at the final component must be refused: {outcome:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1879 AC5: a refusal must reach the caller per-file through the normal [`OpResult`] channel,
+    /// never a silent skip — proved at the `apply_backup_plan_walk` level, not just on the private
+    /// helper, so a regression in the plumbing between them is caught too.
+    #[test]
+    fn apply_backup_plan_reports_a_hard_link_refusal_per_file_not_silently() {
+        let d = scratch("cpe1879-plan-report");
+        let src = d.join("src");
+        let dst = d.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        fs::write(src.join("ok.txt"), b"fine").unwrap();
+        fs::write(src.join("linked.txt"), b"new content").unwrap();
+
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"placeholder").unwrap();
+        if fs::hard_link(&victim, dst.join("linked.txt")).is_err() {
+            crate::skip_notice!(
+                "SKIPPING apply_backup_plan_reports_a_hard_link_refusal_per_file_not_silently: no \
+                 hard-link support on this filesystem"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &["ok.txt".into(), "linked.txt".into()],
+            &[],
+            &[],
+            false,
+            true, // confirmed
+        )
+        .expect("a confirmed plan runs");
+
+        assert_eq!(results.len(), 2, "one OpResult per plan entry — nothing silently dropped: {results:?}");
+        let ok = results.iter().find(|r| r.path.ends_with("ok.txt")).expect("ok.txt must be reported");
+        assert!(ok.ok, "the unrelated file must still copy: {ok:?}");
+        let linked =
+            results.iter().find(|r| r.path.ends_with("linked.txt")).expect("linked.txt must be reported");
+        assert!(!linked.ok, "the hard-linked entry must be reported as refused, not silently skipped: {linked:?}");
+        assert!(
+            linked.error.contains("hard-linked") || linked.error.contains("names"),
+            "the reported error must say why: {linked:?}"
+        );
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"placeholder"[..]),
+            "HARM: the plan-level run wrote through the hard link into the file outside the backup root"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 

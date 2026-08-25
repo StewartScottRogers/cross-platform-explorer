@@ -85,3 +85,75 @@ describe("BackupDashboard consent (CPE-1664)", () => {
     expect(backupCalls()).toHaveLength(0);
   });
 });
+
+/**
+ * CPE-1879 review, finding 3: a per-file refusal (the link-guard refusal CPE-1879 added, or any other
+ * `OpResult` error) reached `apply_backup_plan_walk`'s caller as an honest `ok: false`, but nothing in
+ * the dashboard ever rendered `OpResult.error` — a run with a refused hard-linked entry showed only
+ * "0 ok, 1 failed", with no filename and no reason. These cases pin that the first refusal's path and
+ * reason now reach the screen, in both the live status line and the persisted per-job history.
+ */
+describe("BackupDashboard surfaces the first refusal's reason (CPE-1879 review finding 3)", () => {
+  const HARM_MSG =
+    "D:\\backup\\linked.txt: this file has 2 names (it is hard-linked), and writing here would change " +
+    "the content at every one of them. Nothing was written for this entry";
+
+  it("shows the failed entry's path and error text after a run, not just the failure count", async () => {
+    rawInvokeMock.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+      if (cmd === "apply_backup_plan_stream") {
+        const channel = args.onResult as { onmessage: ((batch: unknown[]) => void) | null };
+        channel.onmessage?.([
+          { path: "D:\\backup\\ok.txt", ok: true, error: "" },
+          { path: "D:\\backup\\linked.txt", ok: false, error: HARM_MSG },
+        ]);
+      }
+      return 0;
+    });
+
+    render(BackupDashboard, { jobs: [job], history: {} });
+    await fireEvent.click(screen.getByTestId("run-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("job-status")).toBeTruthy());
+    expect(screen.getByTestId("job-status").textContent).toContain("1 failed");
+
+    const detail = await waitFor(() => screen.getByTestId("job-status-detail"));
+    expect(detail.textContent).toContain("linked.txt");
+    expect(detail.textContent).toContain("hard-linked");
+  });
+
+  it("carries the same detail into the dispatched run status for App.svelte's persisted history", async () => {
+    rawInvokeMock.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+      if (cmd === "apply_backup_plan_stream") {
+        const channel = args.onResult as { onmessage: ((batch: unknown[]) => void) | null };
+        channel.onmessage?.([{ path: "D:\\backup\\linked.txt", ok: false, error: HARM_MSG }]);
+      }
+      return 0;
+    });
+
+    const { component } = render(BackupDashboard, { jobs: [job], history: {} });
+    let dispatched: { jobId: string; status: { firstError?: { path: string; error: string } } } | undefined;
+    component.$on("run", (e) => { dispatched = e.detail; });
+
+    await fireEvent.click(screen.getByTestId("run-btn"));
+    await waitFor(() => expect(dispatched).toBeTruthy());
+
+    expect(dispatched!.status.firstError?.path).toBe("D:\\backup\\linked.txt");
+    expect(dispatched!.status.firstError?.error).toBe(HARM_MSG);
+  });
+
+  it("a fully-successful run carries no firstError", async () => {
+    rawInvokeMock.mockImplementation(async (cmd: string, args: Record<string, unknown>) => {
+      if (cmd === "apply_backup_plan_stream") {
+        const channel = args.onResult as { onmessage: ((batch: unknown[]) => void) | null };
+        channel.onmessage?.([{ path: "D:\\backup\\ok.txt", ok: true, error: "" }]);
+      }
+      return 0;
+    });
+
+    render(BackupDashboard, { jobs: [job], history: {} });
+    await fireEvent.click(screen.getByTestId("run-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("job-status")).toBeTruthy());
+    expect(screen.queryByTestId("job-status-detail")).toBeNull();
+  });
+});
