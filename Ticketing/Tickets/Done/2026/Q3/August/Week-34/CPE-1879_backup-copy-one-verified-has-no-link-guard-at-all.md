@@ -3,11 +3,11 @@ id: CPE-1879
 title: backup.rs::copy_one_verified writes to a user-named destination with no link guard at all — not even for symlinks
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-23
-closed:
+closed: 2026-08-25
 ---
 
 ## Problem
