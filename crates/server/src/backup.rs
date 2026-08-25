@@ -111,7 +111,7 @@ pub const BACKUP_NOT_CONFIRMED: &str =
 
 /// Copy one file from `src` to `dst`, creating parent dirs, then optionally verify by sha256.
 ///
-/// # The link guard (CPE-1879)
+/// # The link guard (CPE-1879) — scoped to the final path component only
 ///
 /// This used to be a bare `std::fs::copy(src, dst)` — **no** link guard of any kind, not even the
 /// symlink refusal every sibling untrusted-name writer already has
@@ -123,11 +123,48 @@ pub const BACKUP_NOT_CONFIRMED: &str =
 /// (worked through in the CPE-1879 ticket): `h.txt` hard-linked to `outside/victim.txt`, backed up, and
 /// `victim.txt`'s content changed to the backup source's bytes — a file the backup was never pointed at.
 ///
-/// Fixed by reusing CPE-1857's mechanism rather than inventing a second one:
-/// [`crate::fsutil::copy_file_onto_no_follow`] already does exactly this, reading the reparse-point and
-/// link-count facts off the destination handle it opens for the write anyway — zero extra syscalls,
-/// unforgeable by a path swap between check and write, because the check and the write share one open
-/// handle.
+/// Fixed, for the **final component** `dst` itself, by reusing CPE-1857's mechanism rather than
+/// inventing a second one: [`crate::fsutil::copy_file_onto_no_follow_with_wording`] already does
+/// exactly this, reading the reparse-point and link-count facts off the destination handle it opens for
+/// the write anyway — the *check itself* costs no additional syscall over that open. It is not free
+/// relative to the `fs::copy` it replaces, though: `fs::copy` is one OS-level call (`CopyFileExW` /
+/// `copy_file_range`/`sendfile`), while this path is an explicit open, read-loop, write, permissions
+/// set, and times set — roughly three to five syscalls per file, not zero. That cost was already
+/// accepted for the restore path by CPE-1870's measurement; it is not re-measured here, only carried,
+/// since correctness on a data-destroying path outweighs it.
+///
+/// **What this does NOT close (CPE-1879 review, finding 1): the parent-directory route.** The
+/// `create_dir_all(parent)` line above walks through a directory **junction** exactly like any other
+/// directory — Windows needs no privilege at all to create one, unlike the symlink leg below
+/// (`SeCreateSymbolicLinkPrivilege`) or the hard-link leg (a pre-existing second name at one exact
+/// filename). A junction at `dst.parent()`, or any ancestor of it, redirects the whole write **and every
+/// write beneath it** outside the backup root, and this guard — reading facts off `dst`'s own handle —
+/// cannot see it: the final component it opens is a perfectly ordinary file sitting in what is, from
+/// there, an entirely real (if redirected) directory. This is the **cheap** attack, not the exotic one,
+/// and a backup destination — a NAS share or external drive — is exactly the kind of directory tree
+/// least likely to be locked down. **Asymmetric with the mirror-delete side of this same file**:
+/// `apply_backup_plan_walk`'s delete loop asserts [`crate::fsutil::contained_under`] on the *resolved*
+/// path before `remove_dir_all`, so a junction on the delete side is refused; nothing equivalent runs
+/// before a write. Tracked in a follow-up ticket (parent-directory containment on the write side,
+/// flagged by the CPE-1879 Security Auditor review); not fixed here, so as not to bury a `create_dir_all`
+/// containment change inside a link-guard PR.
+///
+/// **Also not carried through this guard (CPE-1879 review, finding 2): Windows alternate data streams.**
+/// `fs::copy` (`CopyFileExW`) carries ADS, including the `Zone.Identifier` "Mark of the Web" Windows
+/// stamps on anything downloaded from the internet; this function's open → `set_len(0)` → byte-stream
+/// path carries none, and if `dst` already existed with its own `Zone.Identifier`, that stale stream
+/// **survives the overwrite** — measured on this branch: `Zone.Identifier present: false` after a
+/// backup copy where `fs::copy` on `main` shows `true`, and a stale mark surviving an overwrite where
+/// `fs::copy` clears it. So a backup copy of a file that carried a "downloaded, treat with caution" flag
+/// silently drops it: SmartScreen does not prompt and Office does not open the restored copy in
+/// Protected View. `crate::fsutil::copy_file_onto_no_follow`'s own doc comment excuses this ADS loss on
+/// the reasoning that the bytes are "the user's own captured content from a local store" and the
+/// direction is "toward keeping an existing warning" — **neither half of that reasoning holds here**:
+/// this call site's source is the user's arbitrary source tree, not app-captured content, and the
+/// direction is toward *dropping* a warning, not keeping one. Also unmeasured but likely: macOS
+/// `std::fs::copy` uses `fcopyfile(COPYFILE_ALL)`, which very probably carries `com.apple.quarantine`
+/// the same way; not asserted here because it was not measured. Tracked in a follow-up ticket by the
+/// Foreman; not fixed in this PR.
 ///
 /// **Symlink: refuse. No legitimate counter-case here** — a backup destination that is itself a link is
 /// always a mistake or an attack, never a design the backup engine needs to honour.
@@ -148,12 +185,22 @@ pub const BACKUP_NOT_CONFIRMED: &str =
 /// CPE-1857 states it for restore: a backup run over someone else's dedup store now refuses every entry
 /// that already has a second name, per file, with a reason — never a silent skip, and the rest of the
 /// run still applies (see `apply_backup_plan_walk`, which already treats a `copy_one_verified` error as
-/// one more [`crate::model::OpResult::err`] and moves on to the next plan entry).
+/// one more [`crate::model::OpResult::err`] and moves on to the next plan entry). Unlike
+/// [`crate::fsutil::LinkGuardWording::RESTORE`]'s remedy text, this call site's wording
+/// ([`crate::fsutil::LinkGuardWording::BACKUP`]) does **not** universally tell the user to break the
+/// link — see that constant's doc comment.
+///
+/// **The Restore direction (CPE-1879 review, finding 3):** `BackupDashboard`'s Restore button calls the
+/// same `apply_backup_plan_walk` with `source_root`/`dest_root` swapped, so `dst` here is then the
+/// user's **live tree**, not a fresh backup destination — and a live tree is far more likely to hold a
+/// pre-existing hard link (package manager stores, dedup sync clients) than an empty backup folder is.
+/// Everything above still applies in that direction; it is called out because the "backup destination is
+/// usually a fresh folder" severity argument in the ticket does **not** transfer to Restore.
 fn copy_one_verified(src: &Path, dst: &Path, verify: bool) -> Result<(), String> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    crate::fsutil::copy_file_onto_no_follow(src, dst)?;
+    crate::fsutil::copy_file_onto_no_follow_with_wording(src, dst, crate::fsutil::LinkGuardWording::BACKUP)?;
     if verify {
         let a = sha256_file(src).map_err(|e| e.to_string())?;
         let b = sha256_file(dst).map_err(|e| e.to_string())?;

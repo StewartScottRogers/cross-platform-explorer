@@ -1339,13 +1339,70 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a
 /// restore is *believed*, so a silently skipped entry is the CPE-1803/1804/1805/1816 defect again.
 pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
+    copy_file_onto_no_follow_with_wording(src, dst, LinkGuardWording::RESTORE)
+}
+
+/// Wording for the three link-guard refusals below, since one function now backs writers with
+/// different nouns (CPE-1879 review, finding: the refusal text hard-coded "a restore ... never writes
+/// through one" and "the folder being restored", which was simply wrong once `backup::copy_one_verified`
+/// started calling this function too, and the hard-link remedy ("Break the link first...") is actively bad
+/// advice for a backup destination that is a deliberate deduplicating store).
+///
+/// [`copy_file_onto_no_follow`] is the unparameterised entry point every existing caller and test in
+/// this module already uses -- it is unchanged, and defaults to [`LinkGuardWording::RESTORE`]. Only a
+/// caller that needs different wording (currently just `backup::copy_one_verified`) calls
+/// [`copy_file_onto_no_follow_with_wording`] directly.
+pub struct LinkGuardWording {
+    /// Fills "...and {verb} never writes through one".
+    pub verb: &'static str,
+    /// Fills "...that live outside {scope}, which no path check can see...".
+    pub scope: &'static str,
+    /// The full remedy sentence appended after the hard-link explanation. Not shared verbatim across
+    /// callers on purpose -- see [`LinkGuardWording::BACKUP`].
+    pub remedy: &'static str,
+}
+
+impl LinkGuardWording {
+    /// The original wording, unchanged since CPE-1845/1846/1857: `revert_engine::apply_write` and
+    /// `snapshot_capture::restore` both write the app's own checkpoint content back onto the user's tree.
+    pub const RESTORE: Self = Self {
+        verb: "a restore",
+        scope: "the folder being restored",
+        remedy: "Break the link first (copy the file over itself) and run this again.",
+    };
+
+    /// CPE-1879: `backup::copy_one_verified`. The remedy differs from [`Self::RESTORE`] on purpose -- a
+    /// backup destination hitting this rule is, unlike a checkpoint restore, plausibly a legitimate
+    /// deduplicating store (`rsync --link-dest`, Time Machine-style backups, a package manager's store),
+    /// and "break the link" is destructive, wrong advice to hand that user. See the reasoning on
+    /// `backup::copy_one_verified` for why the rule still refuses regardless.
+    pub const BACKUP: Self = Self {
+        verb: "a backup",
+        scope: "the backup root",
+        remedy: "If this destination is a deliberate deduplicating store (rsync --link-dest, a \
+                 Time-Machine-style backup, a package manager's store), this refusal is protecting it \
+                 on purpose -- leave the entry as it is. Otherwise, break the link (copy the file over \
+                 itself) and run the backup again.",
+    };
+}
+
+/// The parameterised form -- see [`LinkGuardWording`] for why this exists and [`copy_file_onto_no_follow`]
+/// for the default-wording entry point every other caller uses unchanged.
+pub fn copy_file_onto_no_follow_with_wording(
+    src: &Path,
+    dst: &Path,
+    wording: LinkGuardWording,
+) -> Result<u64, String> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
-    // only production caller is `revert_engine::apply_write`, whose refusal text is rendered in the
-    // revert panel — and `src` there is a path inside the app's private checkpoint store. CPE-1845
-    // removed exactly that leak from this call site's previous `fs::copy` error and replaced it with the
-    // blob's already-hex-validated hash; a source path smuggled back in through this string would undo
-    // it. The caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below:
-    // that is the user's own tree, which is the half they need to see.
+    // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
+    // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
+    // store -- CPE-1845 removed exactly that leak from this call site's previous `fs::copy` error and
+    // replaced it with the blob's already-hex-validated hash) and, since CPE-1879, `backup::copy_one_verified`
+    // (whose `src` is the user's own source tree, not private at all). The source stays unnamed uniformly
+    // regardless of caller -- nothing here special-cases that, since it is not the half of the picture that
+    // needs highlighting either way, and a single rule beats one that quietly depends on `wording`. The
+    // caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below: that is
+    // the user's own tree, which is the half they need to see.
     let mut r = std::fs::File::open(src).map_err(|e| format!("the source could not be opened: {e}"))?;
     // Read from the OPEN HANDLE, not from a path stat that a swap could have invalidated — the same
     // authority `copy_file_into_claimed_slot` uses, and the reason a FIFO or directory substituted at
@@ -1375,9 +1432,10 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
             let _ = std::fs::remove_file(dst);
         }
         return Err(format!(
-            "{}: this name is a link, and a restore never writes through one — a link's target can be \
+            "{}: this name is a link, and {} never writes through one — a link's target can be \
              re-pointed after any check. Nothing was written for this entry",
-            dst.display()
+            dst.display(),
+            wording.verb
         ));
     }
 
@@ -1397,12 +1455,13 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
     // is how the next platform gets none.
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         let why = if facts.is_reparse_point {
-            Some(
-                "this name is a reparse point (a link, junction or stand-in for another name), and a \
-                 restore never writes through one",
-            )
+            Some(format!(
+                "this name is a reparse point (a link, junction or stand-in for another name), and {} \
+                 never writes through one",
+                wording.verb
+            ))
         } else if facts.is_dir {
-            Some("this name is a directory, so there is nothing here a file's bytes could replace")
+            Some("this name is a directory, so there is nothing here a file's bytes could replace".to_string())
         } else {
             None
         };
@@ -1424,12 +1483,12 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
             drop(w);
             return Err(format!(
                 "{}: this file has {} names (it is hard-linked), and writing here would change the \
-                 content at every one of them — including any that live outside the folder being \
-                 restored, which no path check can see because a hard link resolves to itself. Break \
-                 the link first (copy the file over itself) and run this again. Nothing was written \
-                 for this entry",
+                 content at every one of them — including any that live outside {}, which no path check \
+                 can see because a hard link resolves to itself. {} Nothing was written for this entry",
                 dst.display(),
-                facts.links
+                facts.links,
+                wording.scope,
+                wording.remedy
             ));
         }
     }

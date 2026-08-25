@@ -113,3 +113,78 @@ failure message states the asymmetry.
   - New doc bullet in `src/docs/safety-undo.md` explains the refusal in plain language alongside the
     existing Windows-odd-name refusal bullet.
   - Security-relevant: flagging for the Security Auditor leg.
+- **2026-08-24 (Worker) — PR #1022 review round 1: Reviewer APPROVE, Security Auditor SEC FINDINGS,
+  three blocking findings, all addressed.** Auditor independently reproduced both refusals through the
+  public `apply_backup_plan` on the head commit (hard link: refused, victim intact; symlink: same),
+  confirmed the wide TOCTOU window is not exploitable (the guard reads the handle, not a path, so a link
+  planted between plan-computation and execution is still caught), confirmed no zero-byte debris on
+  refusal (`set_len(0)` runs strictly after every refusal), and structurally verified this call site
+  inherits CPE-1857's *fixed* shape (`handle_facts` has no `is_degenerate` filter, unlike the contrasting
+  site at `fsutil.rs:1789`, so a NAS reporting a zero file index still fires the guard).
+  - **Finding 1 (blocked on the claim, not the code) — the parent-directory route.**
+    `create_dir_all(parent)` walks through a directory junction with no guard at all, identical on `main`
+    and this branch; a junction needs no privilege on Windows (unlike the symlink/hard-link legs), and a
+    backup destination is typically the least-defended directory on the box. Not fixed here — the Foreman
+    is filing it as its own ticket (parent-directory containment on the write side), and burying that
+    inside a link-guard PR was the wrong shape. What changed: `copy_one_verified`'s doc comment now states
+    the guard is scoped to the **final component only**, names the junction bypass explicitly, and notes
+    the write/delete asymmetry (`apply_backup_plan_walk`'s delete loop already asserts `contained_under`
+    on the resolved path; nothing equivalent runs before a write). `src/docs/safety-undo.md` updated to
+    match — "the last step of the path only", plus a new bullet naming the gap in plain language.
+  - **Finding 2 (blocked on the claim; the behaviour is real and tracked separately) — Windows ADS /
+    `Zone.Identifier` loss.** `fs::copy` (`CopyFileExW`) carries alternate data streams; this function's
+    open → `set_len(0)` → byte-stream path carries none, and a stale `Zone.Identifier` on an overwritten
+    destination survives instead of being cleared. Measured by the Auditor: `main` preserves the mark,
+    this branch drops it, and a stale mark on the destination survives an overwrite it shouldn't. Not
+    fixed here (Foreman filing separately). What changed: `copy_one_verified`'s doc comment now states
+    this explicitly, notes that `copy_file_onto_no_follow`'s own accepted-cost reasoning ("the user's own
+    captured content", "toward keeping a warning") does **not** hold at this call site (arbitrary source
+    tree, direction is toward *dropping* a warning), and records — unmeasured — that macOS's
+    `fcopyfile(COPYFILE_ALL)` probably carries `com.apple.quarantine` the same way, without asserting it.
+    `src/docs/safety-undo.md` states the gap in plain language for users.
+  - **Finding 3 (blocked; fixed) — the refusal reached `apply_backup_plan_walk`'s caller but never a
+    screen.** `OpResult.error` was computed correctly but never rendered: `BackupDashboard.svelte` only
+    ever showed `{ok} ok, {failed} failed`, and the auto-run notice (`App.svelte::runBackupJobNow`) only
+    ever showed the same two counts. A dedup-store-backed job would refuse every entry, every run,
+    forever, with no reason on screen and a remedy telling the user to break their own store. Fixed:
+    - `RunStatus`/`BackupRunRecord` gained an optional `firstError: { path, error }`, populated from the
+      first `!ok` entry in the streamed results, in both `BackupDashboard.svelte::apply()` and
+      `App.svelte::runBackupJobNow`.
+    - `BackupDashboard.svelte` renders it: a `.status-detail` line under the live/last-run status pill
+      (`data-testid="job-status-detail"`) and inline in each history row (`.hist-detail`), both bidi-safe
+      via `displaySafePath` (backend error text can embed a filesystem path).
+    - The auto-run notice gets a second sentence via a new i18n key `notice.autoBackupFirstFailure`,
+      added to English plus the other 11 `COMPLETE_LOCALES` (es/de/fr/it/pt/nl/pl/ru/zh/ja/ko) to hold the
+      CPE-481 100%-coverage gate; the remaining offered locales fall back to English for it, same as any
+      other key.
+    - Remedy text ([`LinkGuardWording::BACKUP`] in `fsutil.rs`, replacing the shared restore-only wording
+      the reviewer separately flagged) no longer universally says "break the link" — it now names the
+      dedup-store case first and tells that owner to leave the refusal alone, then gives the break-the-
+      link remedy for everyone else.
+    - Noted per the Auditor's ask: the **Restore** direction reverses the roots, so `dst` there is the
+      user's live tree — more likely to hold a pre-existing hard link (package stores, dedup sync
+      clients) than a fresh backup destination is. Called out in `copy_one_verified`'s doc comment and in
+      `src/docs/safety-undo.md`.
+    - Three new `BackupDashboard.test.ts` cases pin: the status line shows the failed path + "hard-linked"
+      reason text; the dispatched `run` event's `status.firstError` matches the streamed `OpResult`; a
+      fully-successful run carries no `firstError`.
+  - **Reviewer's three cheap doc findings, fixed alongside:** the shared refusal text hard-coded "a
+    restore ... never writes through one" and "the folder being restored", wrong once this call site
+    started using the same function — `fsutil::copy_file_onto_no_follow` now takes a
+    `LinkGuardWording` (`RESTORE` default, unchanged for every existing caller/test; `BACKUP` for this
+    site) so the wording is accurate per caller. The stale "only production caller is
+    `revert_engine::apply_write`" comment is corrected to name all three current callers. The "zero extra
+    syscalls" claim in `copy_one_verified`'s doc comment is corrected to state plainly that the *guard
+    check itself* is free (reads facts off the handle already open for the write) but the function this
+    replaces `fs::copy` with is not — roughly three to five syscalls per file where `fs::copy` was one,
+    a cost already accepted for the restore path by CPE-1870's measurement and carried here, not
+    re-measured.
+  - Collateral from the App.svelte/i18n.ts edits: two line-number-pinned guard tests
+    (`bidiEscape.guard.test.ts`'s `APP_MARKUP_OFFENDERS`/`APP_SCRIPT_BASENAME_ALLOWLIST` and
+    `mojibakeGuard.test.ts`'s Portuguese "NÃO" allowlist entry) re-anchored to the new line numbers, plus
+    a genuinely new `BackupDashboard.svelte` bidi-guard registry entry removed by wrapping the two new
+    raw-error renders in `displaySafePath`.
+  - Verified again after all of the above: `cargo test` (crates/server) 2383 passed/0 failed/8 ignored;
+    `cargo clippy --all-targets` and `--features index`, both `-D warnings`, clean; `npx svelte-check`
+    0 errors/0 warnings; full frontend `vitest run` — 331 files, 4457 tests, all green.
+  - Pushed to `cpe-1879-backup-link-guard`; Foreman owns CI from here.
