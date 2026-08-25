@@ -15145,6 +15145,166 @@ mod tests {
         });
     }
 
+    // ---- CPE-1734: macro Convert's `to` is a name being CLAIMED, and must refuse a link or an ------
+    // ---- occupied name at it BEFORE the original is ever trashed -------------------------------------
+    //
+    // Before this ticket `macro_convert_in_place` was a bare `fs::write(to, converted)` with no slot
+    // guard: a link at `to` (live or dangling) was written through, the link survived, and
+    // `trash::delete(from)` then ran anyway because `fs::write` had reported `Ok`. All three tests below
+    // call the private fn directly rather than driving it through `macro_apply_run`/`macro_run::resolve`,
+    // because the guard now fires BEFORE `from` is even read — `from` never needs to hold real image
+    // bytes for a refused Convert, only for the success path CPE-1194's
+    // `macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash` (above) already exercises
+    // with a real PNG. Every assertion here is on the FILESYSTEM, never the returned `Result` alone.
+
+    /// The **dangling-link** leg. Runs on **every** runner: `make_dangling_link` falls back to a
+    /// privilege-free NTFS junction on an unprivileged Windows account (CPE-1717).
+    #[test]
+    fn cpe_1734_convert_refuses_a_dangling_link_at_to_and_never_reaches_the_trash_step() {
+        let d = scratch("cpe1734_dangling");
+        let from = d.join("photo.png");
+        fs::write(&from, b"ORIGINAL PNG BYTES").unwrap();
+        let to = d.join("photo.jpg");
+        if !cpe_server::fsutil::make_dangling_link(&to) {
+            cpe_server::skip_notice!(
+                "[CPE-1734] SKIPPED the dangling-link leg: this machine could not create a link at {}. \
+                 NOTHING in this test covered the write-through route on this run.",
+                to.display()
+            );
+            return;
+        }
+        // The helper's own derivation, not a hand-typed literal (CPE-1725, PR #904 review) — this is a
+        // negative assertion below, so a drifted copy would pass vacuously and cover nothing.
+        let target = cpe_server::fsutil::dangling_link_target(&to);
+
+        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg");
+
+        assert!(
+            !target.exists(),
+            "the link's target ({}) must not have been conjured — pre-fix `fs::write` followed the \
+             dangling link (`try_exists` reads it as free) and created it while reporting success \
+             (result was {r:?})",
+            target.display()
+        );
+        assert!(
+            fs::symlink_metadata(&to).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link at {} must survive the refusal (result was {r:?})",
+            to.display()
+        );
+        assert!(
+            from.exists(),
+            "the ORIGINAL must not be trashed when the write was refused — pre-fix `trash::delete(from)` \
+             ran regardless, because the misdirected write had already reported `Ok` (result was {r:?})"
+        );
+        assert_eq!(
+            fs::read(&from).unwrap(),
+            b"ORIGINAL PNG BYTES",
+            "and the original's bytes on disk must be exactly what they were before the refused Convert"
+        );
+
+        let e = r.expect_err("a dangling link at the new name has no free slot to claim");
+        assert!(e.contains("photo.jpg"), "the refusal must name the link: {e}");
+        assert!(e.contains("is a link"), "and say that it IS a link, not an ordinary I/O error: {e}");
+        assert!(
+            e.contains("writes THROUGH it") && e.contains("Nothing was written"),
+            "and use `create_slot_refusal`'s write-through wording — the bytes would land at the link's \
+             TARGET — not `rename_slot_refusal`'s destroys-the-link wording, which describes a different \
+             primitive's failure mode: {e}"
+        );
+    }
+
+    /// The **live-link** leg: the write must not reach the file the link actually points at, which is a
+    /// path the user never named. A live *file* symlink is the one construction that cannot be staged
+    /// without privilege on Windows (a junction is directory-only and classifies as dangling, and a hard
+    /// link is not `is_symlink`), so this is a loud, CPE-1717-routed skip there rather than a silent pass
+    /// — Unix and CI's `windows-latest` both stage it (matching the CPE-1725 precedent this pattern is
+    /// copied from), so `supported_here = true`.
+    #[test]
+    fn cpe_1734_convert_refuses_a_live_link_at_to_and_leaves_its_target_untouched() {
+        let d = scratch("cpe1734_live_link");
+        let from = d.join("photo.png");
+        fs::write(&from, b"ORIGINAL PNG BYTES").unwrap();
+        let victim = d.join("someone-elses-file.jpg");
+        fs::write(&victim, b"VICTIM BYTES, NEVER NAMED BY THE USER").unwrap();
+        let to = d.join("photo.jpg");
+
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&victim, &to).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&victim, &to).is_ok();
+
+        if !cpe_server::fsutil::require_staged("live_file_symlink", true, made) {
+            cpe_server::skip_notice!(
+                "[CPE-1734] SKIPPED the LIVE-link leg: this machine cannot create a file symlink at {} \
+                 (Windows without Developer Mode / admin). The dangling-link leg above and \
+                 `create_slot_link_refusal`'s own unit tests still cover the write-through decision on \
+                 this runner — the two link liveness states share one implementation \
+                 (`create_slot_link_refusal`'s doc comment).",
+                to.display()
+            );
+            return;
+        }
+
+        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg");
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"VICTIM BYTES, NEVER NAMED BY THE USER",
+            "the link's target — a file the user never named — must not receive the converted bytes \
+             (result was {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&to).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link must survive the refusal (result was {r:?})"
+        );
+        assert!(
+            from.exists(),
+            "the original must not be trashed when the write was refused (result was {r:?})"
+        );
+        assert_eq!(fs::read(&from).unwrap(), b"ORIGINAL PNG BYTES");
+
+        let e = r.expect_err("a live link at the new name must be refused, not written through");
+        assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        assert!(e.contains("writes THROUGH it"), "and use the write-through wording: {e}");
+    }
+
+    /// **The plain-clobber decision (AC3).** `to` is occupied by an ordinary file — no link involved —
+    /// and the answer this ticket records is **refuse**, matching the Batch-Media engine's existing
+    /// refusal of an unconfirmed in-place overwrite rather than inheriting `fs::write`'s silent
+    /// truncate-and-replace. Runs on every runner: no link, no privilege.
+    #[test]
+    fn cpe_1734_convert_refuses_a_plain_pre_existing_file_at_to_without_touching_it_or_trashing_the_original(
+    ) {
+        let d = scratch("cpe1734_clobber");
+        let from = d.join("photo.png");
+        fs::write(&from, b"ORIGINAL PNG BYTES").unwrap();
+        let to = d.join("photo.jpg");
+        fs::write(&to, b"SOMEONE ELSE'S JPG, NOT A LINK").unwrap();
+
+        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg");
+
+        assert_eq!(
+            fs::read(&to).unwrap(),
+            b"SOMEONE ELSE'S JPG, NOT A LINK",
+            "an existing file at the claimed name must not be silently overwritten (result was {r:?})"
+        );
+        assert!(
+            from.exists(),
+            "the original must not be trashed when the target name was already occupied \
+             (result was {r:?})"
+        );
+        assert_eq!(fs::read(&from).unwrap(), b"ORIGINAL PNG BYTES");
+
+        let e = r.expect_err("a macro Convert step must not clobber an existing file at the new name");
+        assert!(e.contains("photo.jpg"), "the refusal must name the occupied slot: {e}");
+        assert!(
+            e.contains("already exists") && !e.contains("is a link"),
+            "a plain occupied file must get the SITE's own clobber wording, not the link wording — that \
+             ordering (`create_slot_link_refusal` before `clobber_refusal`) is what keeps an ordinary \
+             collision from being misreported as a link: {e}"
+        );
+    }
+
     // list_dir + stream_dir_entries walker tests moved with the code to `cpe_server::listing` (CPE-815).
 
     // ---- CPE-1651: backend consent gate on the permanent-destruction primitives --------------------
