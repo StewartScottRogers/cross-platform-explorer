@@ -150,30 +150,6 @@
       "test": "saves a search from the palette, shows it in the sidebar, and opens the filtered view",
       "reason": "CPE-1507: the Saved Searches sidebar header never resolves on Linux — `.fav-title` getText() returns empty for the whole wait window on WebKitGTK/Xvfb (same quirk as network.smoke.ts, CPE-1595).",
       "ticket": "CPE-1507"
-    },
-    {
-      "spec": "trash-titlebar.smoke.ts",
-      "test": "opens the Trash from the Sidebar and selects the real, natively-seeded deleted entry",
-      "reason": "CONFIRMED root cause, via run 32676997154 / job 97288403795 (shard 4)'s raw log and its trash-titlebar-fail.png artifact: 'element click intercepted' clicking the Sidebar's Open-Trash row on ubuntu-latest/WebKitGTK, NOT the msedgedriver-150-vs-Edge-151 hang an earlier version of this entry wrongly cited (that mismatch is Windows-only — msedgedriver never runs on this ubuntu leg at all, and 'GUI smoke (windows-latest)' shows 'skipping' on this PR, so it never touched this failure). The button's own rect at click time was {x:20, y:644, width:193, height:30} in the test's 1000×700 window (getWindowRect confirmed). DropStackPanel.svelte's always-rendered '.drop-stack-handle' toggle (position: fixed; left: 14px; bottom: 14px; z-index: 149; a 28px-tall button, unconditional — only the EXPANDED panel is behind the open/closed `{#if}`) sits at y≈658–686, x≈14–125 in that same window — a real, measured rectangular overlap with the Open-Trash row's own rect, not a coincidence. This is a PRE-EXISTING bug in Sidebar.svelte/DropStackPanel.svelte (neither touched by CPE-1827): a tall enough expanded sidebar pushes bottom rows (Trash's 'Open Trash', and anything else in that band, e.g. the sidebar-reset-row) underneath the floating Drop Stack handle's real click-catching footprint. Out of CPE-1827's own scope (a titlebar-layout ticket) to fix inside that PR — flagged for its own follow-up ticket rather than patched here under time pressure on a shared, unrelated file. Will NOT clear on its own once that ticket lands unless it also changes the Sidebar/DropStackPanel test seams enough to move the Open-Trash row out of the overlap band — remove this entry once fixed and confirmed green, not automatically.",
-      "ticket": "CPE-1822"
-    },
-    {
-      "spec": "trash-titlebar.smoke.ts",
-      "test": "survives a resize sweep down to the 600×400 floor — the close button is always present and hit-testable, never clipped",
-      "reason": "Cascades from this spec's first case above (the CONFIRMED Sidebar/DropStackPanel click-interception overlap — see that entry's reason in full, NOT a driver-version issue): this case depends on the Trash panel already being open, which the first case never reaches while that overlap exists.",
-      "ticket": "CPE-1822"
-    },
-    {
-      "spec": "trash-titlebar.smoke.ts",
-      "test": "at the 600×400 floor, the overflow menu itself is never clipped by .tv-panel's overflow:hidden",
-      "reason": "Cascades from this spec's first case above — same confirmed Sidebar/DropStackPanel click-interception cause, not a driver-version issue; see that entry's reason in full.",
-      "ticket": "CPE-1822"
-    },
-    {
-      "spec": "trash-titlebar.smoke.ts",
-      "test": "Escape closes the view — the new keyboard fallback this ticket adds (there was none before)",
-      "reason": "Cascades from this spec's first case above — same confirmed Sidebar/DropStackPanel click-interception cause, not a driver-version issue; see that entry's reason in full.",
-      "ticket": "CPE-1822"
     }
   ]
 }
