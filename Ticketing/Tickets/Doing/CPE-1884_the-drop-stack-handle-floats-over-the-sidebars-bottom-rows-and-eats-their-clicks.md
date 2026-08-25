@@ -71,13 +71,20 @@ sidebar's content. Making the sidebar taller or scrolling it does not help.
 - [x] The Trash row responds to a click at every supported window size.
 - [x] Every other element the handle can cover is enumerated, and either fixed or explicitly accepted.
 - [x] A test that fails if the handle ever covers an interactive element again.
-- [ ] The three `known-failing.json` entries this unblocks are removed (they belong to CPE-1827 and
-      CPE-1866 and were deliberately not auto-clearing, because a driver-version fix could never
-      resolve them). **Left unchecked/entries left in place** — see Work Log: 4 entries (not 3) match,
-      all tagged CPE-1822, and I could not execute the actual WebdriverIO/WebKitGTK CI job that
-      produced them (msedgedriver is version-mismatched and hangs here per the Foreman's steer, and
-      there is no Linux/WebKitGTK available locally), so I have not *proven* they pass and won't remove
-      an entry I haven't proven.
+- [x] The `known-failing.json` entries this unblocks are removed. **Four**, not three (the ticket text
+      said three; all four are tagged CPE-1822). The worker left them in place — correctly, since it
+      could not execute the WebdriverIO/WebKitGTK CI job that produced them and would not retire an
+      exemption it had not proven passes. The Foreman then ran CI, and the ratchet answered for it:
+
+      ```
+      RATCHET: "trash-titlebar.smoke.ts :: at the 600×400 floor, the overflow menu itself is never
+      clipped by .tv-panel's overflow:hidden" now passes but is still listed in
+      gui-smoke/known-failing.json — delete its entry from that file.
+      ```
+
+      The same message for all four cases. Retired in commit `7f5c20f6`. This is the strongest
+      confirmation the root cause was right: the fix does not merely satisfy a local harness, it
+      unblocks the four real GUI cases that could not click the Trash row on CI.
 
 ## Work Log
 
