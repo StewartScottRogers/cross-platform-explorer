@@ -15,6 +15,7 @@
     "harness:checkpoint-narrow": "vite --config vite.harness.config.ts",
     "harness:hljs-theme": "vite --config vite.harness.hljs-theme.config.ts",
     "harness:statusbar-notice": "vite --config vite.harness.statusbar.config.ts",
+    "harness:sidebar-drop-stack-overlap": "node scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
