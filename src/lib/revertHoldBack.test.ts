@@ -28,7 +28,14 @@ describe("summarizeRevert (CPE-1845)", () => {
     const outcome: RevertOutcome = {
       applied: 1,
       skipped: [op("locked.txt", "failed"), op("added.txt", "skipped_by_plan")],
-      held_back: { outcome: "skipped_by_plan", count: 1, reason: "", next_step: "", retryable: true },
+      held_back: {
+        outcome: "skipped_by_plan",
+        count: 1,
+        reason: "",
+        next_step: "",
+        retryable: true,
+        advises_manual_delete: false,
+      },
     };
     const s = summarizeRevert(outcome);
     // Not "2 skipped". One failed, one held back — different things, counted separately.
@@ -49,6 +56,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         reason: "a blob is missing",
         next_step: "run the revert again",
         retryable: true,
+        advises_manual_delete: false,
       },
     });
     const permanent = summarizeRevert({
@@ -60,6 +68,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         reason: "this checkpoint records no files",
         next_step: "delete these files yourself",
         retryable: false,
+        advises_manual_delete: true,
       },
     });
     expect(retryable.retryable).toBe(true);
@@ -68,6 +77,10 @@ describe("summarizeRevert (CPE-1845)", () => {
     // exactly why the wording must come from `nextStep` rather than being composed here.
     expect(retryable.heldBack).toBe(permanent.heldBack);
     expect(retryable.nextStep).not.toBe(permanent.nextStep);
+    // CPE-1869: the copy-full-list affordance is gated on this field, read straight off the wire —
+    // never inferred from `nextStep`'s wording.
+    expect(retryable.advisesManualDelete).toBe(false);
+    expect(permanent.advisesManualDelete).toBe(true);
   });
 
   it("collapses 200 identical hold-backs to one statement plus a count", () => {
@@ -76,7 +89,14 @@ describe("summarizeRevert (CPE-1845)", () => {
     const s = summarizeRevert({
       applied: 1,
       skipped,
-      held_back: { outcome: "held_back_by_checkpoint", count: 200, reason, next_step: "n", retryable: false },
+      held_back: {
+        outcome: "held_back_by_checkpoint",
+        count: 200,
+        reason,
+        next_step: "n",
+        retryable: false,
+        advises_manual_delete: true,
+      },
     });
     expect(s.heldBack).toBe(200);
     // ONE copy of the paragraph reaches the screen, not 200 (which was ~185 KB).
@@ -85,6 +105,11 @@ describe("summarizeRevert (CPE-1845)", () => {
     expect(rendered).toBeLessThan(1000);
     expect(s.listed).toHaveLength(MAX_LISTED);
     expect(s.more).toBe(200 - MAX_LISTED);
+    // CPE-1869: the on-screen preview is capped, but the full 200 are still retrievable — this is the
+    // whole point of the ticket ("the held-back list tells you to delete files it will not show you").
+    expect(s.allHeldBackPaths).toHaveLength(200);
+    expect(s.allHeldBackPaths[0]).toBe("added-0.txt");
+    expect(s.allHeldBackPaths[199]).toBe("added-199.txt");
   });
 
   it("says nothing about a hold-back when there was none", () => {
@@ -94,6 +119,9 @@ describe("summarizeRevert (CPE-1845)", () => {
     expect(s.nextStep).toBe("");
     expect(s.retryable).toBe(false);
     expect(s.listed).toEqual([]);
+    // CPE-1869: no affordance and nothing to copy when nothing was held back.
+    expect(s.advisesManualDelete).toBe(false);
+    expect(s.allHeldBackPaths).toEqual([]);
   });
 
   it("carries the per-path detail the backend produces, and only when there is one", () => {
@@ -105,12 +133,22 @@ describe("summarizeRevert (CPE-1845)", () => {
         { path: "A.txt", ok: false, error: 'same file as checkpoint entry "a.txt"', outcome: "held_back_by_checkpoint" },
         { path: "B.txt", ok: false, error: "", outcome: "held_back_by_checkpoint" },
       ],
-      held_back: { outcome: "held_back_by_checkpoint", count: 2, reason: "r", next_step: "n", retryable: false },
+      held_back: {
+        outcome: "held_back_by_checkpoint",
+        count: 2,
+        reason: "r",
+        next_step: "n",
+        retryable: false,
+        // The alias/collision hold-back — CPE-1869's own "must not get the affordance" case.
+        advises_manual_delete: false,
+      },
     });
     expect(s.listed).toEqual([
       { path: "A.txt", detail: 'same file as checkpoint entry "a.txt"' },
       { path: "B.txt", detail: "" },
     ]);
+    // CPE-1869: this is the case a delete affordance must never appear on.
+    expect(s.advisesManualDelete).toBe(false);
   });
 
   it("never prints \"and 1 more\" — at one over the cap it lists the extra name instead", () => {
@@ -123,7 +161,14 @@ describe("summarizeRevert (CPE-1845)", () => {
           error: "",
           outcome: "held_back_by_checkpoint" as const,
         })),
-        held_back: { outcome: "held_back_by_checkpoint", count: n, reason: "r", next_step: "n", retryable: false },
+        held_back: {
+          outcome: "held_back_by_checkpoint",
+          count: n,
+          reason: "r",
+          next_step: "n",
+          retryable: false,
+          advises_manual_delete: true,
+        },
       });
 
     const exactly = held(MAX_LISTED);
@@ -152,7 +197,14 @@ describe("summarizeRevert (CPE-1845)", () => {
         op("p.txt", "skipped_by_plan", same),
         op("c.txt", "held_back_by_checkpoint", same),
       ],
-      held_back: { outcome: "held_back_by_checkpoint", count: 2, reason: same, next_step: same, retryable: false },
+      held_back: {
+        outcome: "held_back_by_checkpoint",
+        count: 2,
+        reason: same,
+        next_step: same,
+        retryable: false,
+        advises_manual_delete: true,
+      },
     });
     expect(s.applied).toBe(1);
     expect(s.failed).toBe(1);

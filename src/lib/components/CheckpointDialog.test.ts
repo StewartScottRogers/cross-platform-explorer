@@ -361,6 +361,7 @@ describe("CheckpointDialog (CPE-1125)", () => {
         reason: "THE-ONE-REASON this checkpoint records no files at all",
         next_step: "THE-NEXT-STEP delete these files yourself",
         retryable: false,
+        advises_manual_delete: true,
       },
     };
 
@@ -492,6 +493,79 @@ describe("CheckpointDialog (CPE-1125)", () => {
       expect(panel.textContent).toContain("FAILURE-DETAIL");
       expect(panel.textContent).toContain("RETRYABLE-REASON");
       expect(panel.textContent).toContain("RETRYABLE-STEP");
+    });
+
+    /**
+     * CPE-1869 — "the held-back list tells you to delete files it will not show you". The revert panel
+     * named up to 8 held-back paths, then told the permanent cases to "delete these files yourself",
+     * with no way to get the rest of the list without re-running the revert. This adds a copy-to-
+     * clipboard affordance for the untruncated set, gated on the backend's `advises_manual_delete` —
+     * never on the `held_back_by_checkpoint` discriminant alone, which the alias/collision hold-back
+     * also carries.
+     */
+    describe("copy-full-list affordance (CPE-1869)", () => {
+      function mockClipboard() {
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+        return writeText;
+      }
+
+      it("offers to copy every held-back path, as absolute paths under the reverted root, when the backend advises manual deletion", async () => {
+        const writeText = mockClipboard();
+        const panel = await revertWith(HELD);
+        const btn = await screen.findByTestId("outcome-copy-held-paths");
+        expect(btn.textContent).toContain("Copy all 2 held-back paths");
+
+        await fireEvent.click(btn);
+
+        // `/work/proj` is `initialPath` — CheckpointDialog's revert root — joined onto each
+        // `/`-relative held-back path, quoted one-per-line the way Explorer's "Copy as path" does.
+        expect(writeText).toHaveBeenCalledWith('"/work/proj/added-1.txt"\n"/work/proj/added-2.txt"');
+        expect(await screen.findByText("Copied")).toBeTruthy();
+      });
+
+      it("does NOT offer the copy affordance on the alias/collision hold-back", async () => {
+        mockClipboard();
+        await revertWith({
+          applied: 0,
+          skipped: [
+            {
+              path: "A.txt",
+              ok: false,
+              error: 'same file as checkpoint entry "a.txt"',
+              outcome: "held_back_by_checkpoint",
+            },
+          ],
+          held_back: {
+            outcome: "held_back_by_checkpoint",
+            count: 1,
+            reason: "these paths resolve to the same files",
+            next_step: "nothing needs doing",
+            retryable: false,
+            // This IS the acceptance criterion: these paths are the checkpoint's own content under
+            // another spelling, so a "go delete them" affordance would be the bug, not the fix.
+            advises_manual_delete: false,
+          },
+        });
+        expect(screen.queryByTestId("outcome-copy-held-paths")).toBeNull();
+      });
+
+      it("does NOT offer the copy affordance on the retryable hold-back", async () => {
+        mockClipboard();
+        await revertWith({
+          applied: 0,
+          skipped: [{ path: "added-1.txt", ok: false, error: "", outcome: "skipped_by_plan" }],
+          held_back: {
+            outcome: "skipped_by_plan",
+            count: 1,
+            reason: "one entry could not be restored this time",
+            next_step: "run the revert again",
+            retryable: true,
+            advises_manual_delete: false,
+          },
+        });
+        expect(screen.queryByTestId("outcome-copy-held-paths")).toBeNull();
+      });
     });
   });
 });

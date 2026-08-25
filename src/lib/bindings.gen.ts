@@ -4931,7 +4931,17 @@ next_step: string;
 /**
  * Convenience mirror of [`OpOutcome::retryable`] so a template can branch without re-deriving it.
  */
-retryable: boolean }
+retryable: boolean; 
+/**
+ * **CPE-1869.** `true` when `next_step` actually tells the user to go delete these paths themselves
+ * — mirrors [`crate::revert_engine::HeldBack::advises_manual_delete`], see its doc for why a consumer
+ * must read this field rather than infer it from `next_step`'s wording. A "copy every held-back path"
+ * affordance belongs behind this, not behind `outcome == held_back_by_checkpoint` alone: that
+ * discriminant is also true of the alias/collision hold-back, where the paths are the checkpoint's
+ * OWN content under another spelling and offering to delete them would be the bug this field exists
+ * to prevent.
+ */
+advises_manual_delete: boolean }
 /**
  * One decoded calendar component (`VEVENT` / `VTODO` / `VJOURNAL`), summarised for display. Every field
  * is best-effort — a component missing a property simply leaves it `None`/empty.

@@ -70,11 +70,31 @@ pub struct HeldBack {
     /// The held-back paths, in the order the plan reached them, each with the detail specific to that
     /// path (empty when the group [`reason`](HeldBack::reason) says everything).
     pub paths: Vec<(String, String)>,
+    /// **CPE-1869.** `true` when [`next_step`](HeldBack::next_step) actually tells the user to go delete
+    /// these paths themselves — as opposed to "nothing needs doing" (the alias/collision hold-back below,
+    /// where `paths` ARE the checkpoint's own content under another spelling — deleting them would destroy
+    /// it) or "run it again" (the retryable hold-back, where nothing needs deleting *yet*).
+    ///
+    /// Exists because a UI consumer must not infer this from `next_step`'s wording — `src/lib/revertHoldBack.ts`
+    /// (the frontend's `summarizeRevert`) reads `outcome` discriminants only, never `error`/`reason`/`next_step`
+    /// text, and that coupling is exactly what CPE-1845 removed from `outcome` itself. CPE-1869 found the
+    /// frontend had no structural way to tell "go delete these" from "nothing needs doing" apart from both
+    /// cases sharing the same [`HeldBackOutcome::HeldBackByCheckpoint`] discriminant and the same 8-path
+    /// preview. A "copy every held-back path" affordance gated on this field, rather than on the outcome
+    /// discriminant alone, is what keeps that affordance off the alias/collision hold-back — CPE-1869's own
+    /// acceptance criterion.
+    pub advises_manual_delete: bool,
 }
 
 impl HeldBack {
-    fn new(outcome: HeldBackOutcome, reason: String, next_step: &str) -> Self {
-        Self { outcome, reason, next_step: next_step.to_string(), paths: Vec::new() }
+    fn new(outcome: HeldBackOutcome, reason: String, next_step: &str, advises_manual_delete: bool) -> Self {
+        Self {
+            outcome,
+            reason,
+            next_step: next_step.to_string(),
+            paths: Vec::new(),
+            advises_manual_delete,
+        }
     }
 }
 
@@ -418,7 +438,9 @@ pub fn execute_restore(
             ),
             "Re-running will not change this — the checkpoint is empty on disk and will read the same \
              way every time. Delete these files yourself if that is what you meant, or pick a \
-             checkpoint that actually holds the content you want back.",
+             checkpoint that actually holds the content you want back. The full list is below — copy \
+             it to work through the files.",
+            true,
         ))
     } else if !unrestorable.is_empty() {
         let named: Vec<String> =
@@ -442,7 +464,8 @@ pub fn execute_restore(
                 "There is no fix for this on this computer: those names are stored in the checkpoint \
                  and this filesystem cannot write them, so re-running the revert will hold the same \
                  files back again. {} Delete these files yourself if you want them gone, or finish \
-                 the revert on the system the checkpoint was captured on.",
+                 the revert on the system the checkpoint was captured on. The full list is below — \
+                 copy it to work through the files.",
                 // **The completeness claim is CONDITIONAL, and that is not cosmetic** (CPE-1845 UAT):
                 // it is the PREMISE of the sentence after it. Both halves are reachable in one run — an
                 // unrestorable-name checkpoint AND a locked file or a missing blob, which is what an
@@ -457,6 +480,7 @@ pub fn execute_restore(
                      above first."
                 }
             ),
+            true,
         ))
     } else if !report.skipped.is_empty() {
         // **The branch that is NOT one branch** (CPE-1845 review round 2). Its first cut labelled every
@@ -491,7 +515,9 @@ pub fn execute_restore(
                  refused for what it IS, not for what happened this time, and this computer will \
                  refuse it the same way every run. Fix anything transient listed above if you can, \
                  then delete these files yourself if you want them gone — or finish the revert on the \
-                 system the checkpoint was captured on.",
+                 system the checkpoint was captured on. The full list is below — copy it to work \
+                 through the files.",
+                true,
             ))
         } else {
             // Every refusal was an attempt that failed. This is the one branch entitled to say "again".
@@ -503,6 +529,9 @@ pub fn execute_restore(
                 ),
                 "This one is temporary: close whatever is holding those files (or restore the missing \
                  stored content) and run the revert again — the held-back cleanups will then apply.",
+                // Retryable: there is nothing to go delete YET (a re-run may perform the cleanup itself),
+                // so this does not get the CPE-1869 copy-full-list affordance.
+                false,
             ))
         }
     } else {
@@ -582,6 +611,10 @@ pub fn execute_restore(
                             "Nothing needs doing and re-running will not change it: these files ARE \
                              the checkpoint's own content, reached under another spelling on this \
                              volume, so they are already in the state the revert was asking for.",
+                            // CPE-1869: NOT a "go delete these" hold-back — deleting them destroys the
+                            // checkpoint's own content, so this must never get the copy-full-list
+                            // affordance the other HeldBackByCheckpoint branches above get.
+                            false,
                         )
                     });
                     group
@@ -1273,6 +1306,13 @@ mod tests {
             !group.next_step.to_lowercase().contains("run the revert again"),
             "and it must not send the user round a loop that ends in the same place: {group:?}"
         );
+        // CPE-1869: this IS a "go delete these" branch (the added.txt delete is genuinely held back,
+        // not a checkpoint's own content under another spelling), so it must offer the affordance.
+        assert!(
+            group.advises_manual_delete,
+            "a permanent write-refusal hold-back tells the user to delete these files themselves, so it \
+             must carry the affordance flag that says so: {group:?}"
+        );
 
         // ---- leg 2: the same shape with a TRANSIENT refusal still says "again". ----
         let root2 = scratch("1845-transient-root");
@@ -1297,6 +1337,9 @@ mod tests {
             "an attempt that merely failed IS retryable — the split must cut both ways or it is just a              blanket rename: {group2:?}"
         );
         assert!(group2.next_step.contains("run the revert again"), "{group2:?}");
+        // CPE-1869: nothing needs deleting YET on the retryable branch — re-running may perform the
+        // cleanup itself — so it must not carry the delete-affordance flag either.
+        assert!(!group2.advises_manual_delete, "{group2:?}");
 
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&root);
@@ -1456,6 +1499,14 @@ mod tests {
                 permanent.next_step.to_lowercase().contains("delete these files yourself"),
                 "and it must offer a real next step, not just a refusal: {permanent:?}"
             );
+            // CPE-1869: both legs tell the user to go delete these files themselves, so both must carry
+            // the affordance flag a UI needs to offer "copy every held-back path" — reading it off the
+            // wording above is exactly the coupling CPE-1845 removed for `outcome`.
+            assert!(
+                permanent.advises_manual_delete,
+                "the {leg} hold-back advises manual deletion in its next step, so it must say so \
+                 structurally too: {permanent:?}"
+            );
             // Both legs here are the PURE case — nothing failed to restore. The unrestorable-key branch
             // is the only one that makes a completeness claim at all (the empty-checkpoint branch says
             // "restored none"), and with nothing failed that claim is true and must be present. The
@@ -1495,6 +1546,8 @@ mod tests {
             retryable.next_step.to_lowercase().contains("run the revert again"),
             "the RETRYABLE hold-back must keep the advice that actually works: {retryable:?}"
         );
+        // CPE-1869: retryable never advises manual deletion — re-running is the real next step.
+        assert!(!retryable.advises_manual_delete, "{retryable:?}");
 
         let _ = fs::remove_dir_all(&store);
         let _ = fs::remove_dir_all(&root_retryable);
@@ -2146,6 +2199,16 @@ mod tests {
             Some(OpOutcome::HeldBackByCheckpoint),
             "and the held-back delete must be reported with its reason, structurally (CPE-1845) — the \
              NOT-retryable kind, since the two spellings resolve to one file on every re-run: {report:?}"
+        );
+        // **CPE-1869.** `alias/f.txt` IS the checkpoint's own content — `sub/f.txt` — reached under
+        // another spelling. Offering "copy every held-back path so you can go delete them" here would be
+        // steering the user to destroy the very file the hold-back exists to protect. This is the
+        // acceptance criterion CPE-1869 names explicitly: the alias/collision case must not get the
+        // delete affordance the other `HeldBackByCheckpoint` branches get.
+        assert!(
+            !live_hold_back(&report).advises_manual_delete,
+            "an alias/collision hold-back must NOT advertise a delete affordance — these paths are the \
+             checkpoint's own content, deleting them destroys it: {report:?}"
         );
 
         let _ = fs::remove_dir_all(&root);

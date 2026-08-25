@@ -811,7 +811,7 @@
 
           {#if revertOutcome}
             <div class="cp-outcome" data-testid="checkpoint-outcome">
-              <RevertOutcomePanel outcome={revertOutcome} testid="checkpoint-outcome-panel" verb="Reverted" />
+              <RevertOutcomePanel outcome={revertOutcome} testid="checkpoint-outcome-panel" verb="Reverted" root={currentPath} />
             </div>
           {/if}
           {#if revertError}<div class="cp-restore-err">{revertError}</div>{/if}
