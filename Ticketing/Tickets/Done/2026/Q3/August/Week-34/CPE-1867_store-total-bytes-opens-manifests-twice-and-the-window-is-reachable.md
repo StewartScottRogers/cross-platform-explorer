@@ -3,11 +3,11 @@ id: CPE-1867
 title: store_total_bytes opens manifests/ twice, and the window between them is reachable
 type: bug
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-25
 ---
 
 ## Problem

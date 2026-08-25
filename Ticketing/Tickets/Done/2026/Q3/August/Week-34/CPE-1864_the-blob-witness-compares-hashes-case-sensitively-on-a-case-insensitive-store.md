@@ -3,11 +3,11 @@ id: CPE-1864
 title: the blob witness compares hashes case-sensitively on a case-insensitive filesystem
 type: bug
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22
-closed:
+closed: 2026-08-25
 ---
 
 ## Problem
