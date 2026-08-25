@@ -15150,12 +15150,22 @@ mod tests {
     //
     // Before this ticket `macro_convert_in_place` was a bare `fs::write(to, converted)` with no slot
     // guard: a link at `to` (live or dangling) was written through, the link survived, and
-    // `trash::delete(from)` then ran anyway because `fs::write` had reported `Ok`. All three tests below
-    // call the private fn directly rather than driving it through `macro_apply_run`/`macro_run::resolve`,
-    // because the guard now fires BEFORE `from` is even read — `from` never needs to hold real image
-    // bytes for a refused Convert, only for the success path CPE-1194's
-    // `macro_run_convert_step_then_undo_restores_the_original_bytes_via_trash` (above) already exercises
-    // with a real PNG. Every assertion here is on the FILESYSTEM, never the returned `Result` alone.
+    // `trash::delete(from)` then ran anyway because `fs::write` had reported `Ok`. `from` has to be a
+    // REAL, decodable PNG in every test below, even though the guard now refuses before the write —
+    // because on the pre-fix code path (proven by temporarily reverting the guard for this ticket's
+    // before/after measurement) execution still reaches `fs::read` + `apply_ops` first, and an
+    // undecodable fixture would fail there with "unrecognized image format" instead of demonstrating
+    // the write-through. Every assertion here is on the FILESYSTEM, never the returned `Result` alone.
+
+    /// A minimal valid PNG, built with the `image` crate (already a real dependency): `apply_ops` must
+    /// be able to decode `from` for these tests to measure the actual defect (a write-through / a
+    /// silent clobber) rather than an incidental decode failure.
+    fn cpe_1734_test_png_bytes() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(4, 4, image::Rgb([90u8, 100, 110]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
 
     /// The **dangling-link** leg. Runs on **every** runner: `make_dangling_link` falls back to a
     /// privilege-free NTFS junction on an unprivileged Windows account (CPE-1717).
@@ -15163,7 +15173,8 @@ mod tests {
     fn cpe_1734_convert_refuses_a_dangling_link_at_to_and_never_reaches_the_trash_step() {
         let d = scratch("cpe1734_dangling");
         let from = d.join("photo.png");
-        fs::write(&from, b"ORIGINAL PNG BYTES").unwrap();
+        let original_bytes = cpe_1734_test_png_bytes();
+        fs::write(&from, &original_bytes).unwrap();
         let to = d.join("photo.jpg");
         if !cpe_server::fsutil::make_dangling_link(&to) {
             cpe_server::skip_notice!(
@@ -15198,7 +15209,7 @@ mod tests {
         );
         assert_eq!(
             fs::read(&from).unwrap(),
-            b"ORIGINAL PNG BYTES",
+            original_bytes,
             "and the original's bytes on disk must be exactly what they were before the refused Convert"
         );
 
@@ -15223,7 +15234,8 @@ mod tests {
     fn cpe_1734_convert_refuses_a_live_link_at_to_and_leaves_its_target_untouched() {
         let d = scratch("cpe1734_live_link");
         let from = d.join("photo.png");
-        fs::write(&from, b"ORIGINAL PNG BYTES").unwrap();
+        let original_bytes = cpe_1734_test_png_bytes();
+        fs::write(&from, &original_bytes).unwrap();
         let victim = d.join("someone-elses-file.jpg");
         fs::write(&victim, b"VICTIM BYTES, NEVER NAMED BY THE USER").unwrap();
         let to = d.join("photo.jpg");
@@ -15261,7 +15273,7 @@ mod tests {
             from.exists(),
             "the original must not be trashed when the write was refused (result was {r:?})"
         );
-        assert_eq!(fs::read(&from).unwrap(), b"ORIGINAL PNG BYTES");
+        assert_eq!(fs::read(&from).unwrap(), original_bytes);
 
         let e = r.expect_err("a live link at the new name must be refused, not written through");
         assert!(e.contains("is a link"), "must say it IS a link: {e}");
@@ -15277,7 +15289,8 @@ mod tests {
     ) {
         let d = scratch("cpe1734_clobber");
         let from = d.join("photo.png");
-        fs::write(&from, b"ORIGINAL PNG BYTES").unwrap();
+        let original_bytes = cpe_1734_test_png_bytes();
+        fs::write(&from, &original_bytes).unwrap();
         let to = d.join("photo.jpg");
         fs::write(&to, b"SOMEONE ELSE'S JPG, NOT A LINK").unwrap();
 
@@ -15293,7 +15306,7 @@ mod tests {
             "the original must not be trashed when the target name was already occupied \
              (result was {r:?})"
         );
-        assert_eq!(fs::read(&from).unwrap(), b"ORIGINAL PNG BYTES");
+        assert_eq!(fs::read(&from).unwrap(), original_bytes);
 
         let e = r.expect_err("a macro Convert step must not clobber an existing file at the new name");
         assert!(e.contains("photo.jpg"), "the refusal must name the occupied slot: {e}");
