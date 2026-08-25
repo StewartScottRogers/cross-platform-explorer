@@ -189,9 +189,14 @@ describe("CPE-1144 — headless GUI smoke: Batch-Media dialog renders an op + pl
     // Cancel click below dismisses the dialog.
     await snap("batch-media-dialog");
 
-    // Non-destructive: never click Apply — dismiss via Cancel instead (each spec file gets its own
-    // fresh app launch/session in this harness, so this isn't required for isolation from other
-    // specs, just tidy, and it proves nothing in the dialog was left mid-flight).
+    // Non-destructive: never click Apply — dismiss via Cancel instead, and it proves nothing in the
+    // dialog was left mid-flight.
+    // CPE-1866 CORRECTION: this used to say "each spec file gets its own fresh app launch/session in
+    // this harness, so this isn't required for isolation... just tidy" — true before CPE-1866, no
+    // longer true. gui-smoke now shares ONE app process across a whole shard (session-per-shard), so
+    // this dialog staying open WOULD leak into the next spec file's run if this click were ever
+    // removed. It already happens to be here (this spec was written tidy, not lazy), so no behavior
+    // change was needed — only the stale reasoning.
     const cancelBtn = await $('[data-testid="cancel-btn"]');
     await cancelBtn.click();
   });

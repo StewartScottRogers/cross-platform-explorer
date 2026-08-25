@@ -5,13 +5,24 @@
 // The overlay's off-means-off design (InstantSearch.svelte, CPE-1137) means the reliable state to
 // pin is the "no resident index" affordance, NOT a populated result list: `index_status` reports
 // only volumes resident in the in-memory `IndexService` (crates/server/src/index_service.rs —
-// "resident_count 0 for a fresh service", no disk scan), and this harness launches a brand-new app
-// process per spec file, so `hasIndex` is guaranteed `false` on first paint regardless of whatever
-// `.idx` files a real user's machine happens to have on disk from earlier, unrelated sessions. That
-// makes the "Build index" affordance the one FALSIFIABLE, non-flaky assertion available headlessly
-// here — see the ticket's explicit guidance to keep it as the assertion that "stands alone" rather
-// than depending on an actual index crawl (which would also be slow/non-deterministic over a real
-// drive in CI).
+// "resident_count 0 for a fresh service", no disk scan). That makes the "Build index" affordance the
+// one FALSIFIABLE, non-flaky assertion available headlessly here — see the ticket's explicit guidance
+// to keep it as the assertion that "stands alone" rather than depending on an actual index crawl
+// (which would also be slow/non-deterministic over a real drive in CI).
+//
+// CPE-1866 CORRECTION: this comment used to say the harness "launches a brand-new app process per
+// spec file, so `hasIndex` is guaranteed `false`" — true before CPE-1866, no longer true in general.
+// gui-smoke now shares ONE app process across a whole shard (session-per-shard); `resetAppState`
+// (wdio.conf.ts) resets FRONTEND/test-mode state between spec files but never touches the backend
+// `IndexService` — there is no reset hook for it, and none is added by this comment. The assertion
+// below is DORMANT-SAFE today only because no other spec in this suite ever calls `build_index` (or
+// anything that resident-registers a volume) — grep confirms it — so `hasIndex` still happens to be
+// false when this spec runs. If a future spec ever builds a real index and shares this spec's shard,
+// this assertion would start failing (or, worse, silently pass for the wrong reason if it also
+// resident-registers THIS spec's own volume) — an unguarded assumption sitting directly on top of the
+// isolation model, not something this ticket fixed. Flagged rather than fixed: adding an
+// `IndexService`-clearing test-mode hook for a case nothing exercises today would be speculative
+// engineering; re-open this comment the day a spec needs one.
 import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";

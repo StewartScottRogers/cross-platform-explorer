@@ -289,11 +289,28 @@ describe("CPE-1155 + CPE-1157 — faithful non-grabbing right-click on populated
   it("CPE-1157: on-item right-click still opens the item menu (regression guard for the fix)", async () => {
     await ensurePopulatedRoot(tmpDir);
     await dismissMenu();
-    const p = await pointOfRow(MARKER_NAME);
-    expect(p, `row for ${MARKER_NAME}`).to.not.equal(null);
-    await rightClick(p!);
+    // CPE-1866: retried (up to 3 attempts, each with a FRESH `pointOfRow` lookup) rather than a single
+    // shot — under session-per-shard this test's session has already been through several prior spec
+    // files' worth of real mouse input by the time it runs, and a single stray miss on the W3C-Actions
+    // fallback (the documented Linux/WebKitWebDriver quirk class CPE-1481/CPE-1507 exist to work around
+    // in this exact file) reads identically to a real regression without this. Re-querying the row's
+    // point on each attempt (not reusing a stale one) matches `pointOfRow`'s own live-DOM contract.
+    let opened = false;
+    for (let attempt = 1; attempt <= 3 && !opened; attempt++) {
+      const p = await pointOfRow(MARKER_NAME);
+      expect(p, `row for ${MARKER_NAME}`).to.not.equal(null);
+      await rightClick(p!);
+      opened = await $(".ctx").isExisting();
+      if (!opened && attempt < 3) {
+        await dismissMenu();
+        await browser.pause(300);
+      }
+    }
     const ctx = await $(".ctx");
-    await ctx.waitForExist({ timeout: 10_000, timeoutMsg: "item menu did not open on a real right-click on a row" });
+    await ctx.waitForExist({
+      timeout: 10_000,
+      timeoutMsg: "item menu did not open on a real right-click on a row (after 3 attempts)",
+    });
     expect(await $(".ctx .quickrow").isExisting(), "on-item menu shows the quick-action row").to.equal(true);
   });
 

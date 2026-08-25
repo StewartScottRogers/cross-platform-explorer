@@ -256,10 +256,49 @@ function assertShardId({ shardIndex, shardTotal }: ShardId): void {
 //   then, per `wdio-*.json`: basename(specs[0]) -> Date.parse(end) - Date.parse(start).
 // ===================================================================================================
 
+// ===================================================================================================
+// CPE-1866 — THIS CONSTANT IS NOW STALE, DELIBERATELY LEFT UNCHANGED. Read before touching the packer.
+//
+// `wdio.conf.ts` no longer launches the app once per spec file — it groups every shard's whole
+// assignment into ONE WebDriver session (session-per-shard), because a real CI run's phase-timing log
+// showed the ~29.5 s this constant models is >99% app-launch/session-create (~30.4-32.6 s per spec,
+// measured directly, n=33) and <0.3 s driver-process spawn. Under session-per-shard that ~30 s cost is
+// paid ONCE per shard, not once per spec — so `specWeightMs`'s model (`SPEC_SESSION_OVERHEAD_MS` ADDED
+// TO EVERY SPEC) no longer reflects what a spec actually costs a shard. Measured, real, from clean CI
+// runs on the SAME shard assignment this table already produces (job wall-clock, before = per-spec-
+// session runs 32662946234/32672263270's early shards, after = session-per-shard runs 32676091372/
+// 32680942379's clean shards):
+//   shard 2 (14 specs, before/after): job 8m13s -> 5m13s
+//   shard 4 (13 specs, before/after): job 9m00s -> 2m30s
+//   shard 1 (samples.smoke.ts alone, before/after): ~9m27s -> ~9m27s, UNCHANGED — it was never
+//     overhead-bound; one spec's own 479s runtime already dominated it either way.
+// That is the real payoff this ticket exists to bank, and it required NO change to the packer below:
+// LPT bin-packing over the OLD per-spec-overhead weights still isolates `samples.smoke.ts` into its own
+// shard and still deals the other 40 out evenly, which is the only property that actually matters for
+// correctness (a bijection, every spec assigned exactly once) — see `assignShardSpecs`'s own comment.
+//
+// NOT changed here, and why, stated rather than silently deferred: rewriting `specWeightMs` to a
+// per-shard-overhead-plus-per-spec-runtime model would likely RESHUFFLE which specs land in which
+// shard (the relative weights collapse once the ~30s constant drops out, so LPT's greedy assignment can
+// pick a different partition) — and this ticket's own shard-3 investigation (see `known-failing.json`'s
+// three CPE-1866 entries) is tied to today's SPECIFIC ordering (near-duplicates.smoke.ts immediately
+// before open-dir.smoke.ts). Reshuffling the partition in the same PR that just spent real CI cycles
+// characterizing one specific ordering's failure mode would invalidate that evidence without re-
+// verifying a new one — a job-sized re-measurement this ticket's own time-box does not have room for.
+// Left as a named, evidenced follow-up rather than either silently doing nothing or destabilizing the
+// partition at the last minute: whoever picks it up next should re-run `assignShardSpecs` with a
+// per-shard (not per-spec) overhead term, confirm the balance test still holds under the NEW partition,
+// and re-verify shard 3's specific failure (or lack of one) under whatever new ordering results.
+// ===================================================================================================
+
 /** Fixed per-spec-file cost of the session the spec runs in (app launch, driver session, teardown),
  *  in milliseconds. MEASURED at 29.0-30.6 s across the four shards of run 32592641384. Every spec pays
  *  it, so it is the floor of any spec's weight — and for 40 of 41 specs it IS essentially the weight,
- *  which is why counting is already the right cost model for everything not in the table below. */
+ *  which is why counting is already the right cost model for everything not in the table below.
+ *
+ *  CPE-1866: this is the constant the block comment immediately above says is now stale — kept exactly
+ *  as measured under the PRE-session-per-shard architecture, and still used unchanged by `specWeightMs`
+ *  below, deliberately (see that comment for why changing it now would cost more than it buys). */
 export const SPEC_SESSION_OVERHEAD_MS = 29_500;
 
 /** Weight for a spec with no measured entry, in milliseconds: the mean in-session runtime of the 40
