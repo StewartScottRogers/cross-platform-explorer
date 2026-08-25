@@ -3,11 +3,11 @@ id: CPE-1866
 title: every gui-smoke spec pays ~30 seconds of session setup, which is now most of the suite
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-22
-closed:
+closed: 2026-08-25
 ---
 
 ## Problem
