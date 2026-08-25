@@ -81,7 +81,7 @@ jobs:
         run: |
           VERSION=$(date -u +%s)
           export SNAPSHOT_GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          cargo run --release --quiet \
+          cargo run --locked --release --quiet \
             --manifest-path sidecar/ai-console/Cargo.toml \
             --bin model-snapshot-sign -- \
             responses snapshot-out "$VERSION"

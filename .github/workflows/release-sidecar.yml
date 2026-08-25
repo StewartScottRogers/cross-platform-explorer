@@ -157,19 +157,19 @@ jobs:
       # exist before tauri-action packages the app. Native-arch per runner.
       - name: Build the AI Console sidecar
         working-directory: sidecar/ai-console
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # The Agent Board sidecar (CPE-854) — bundled next to the AI Console; the overlays reference its
       # release binary + manifest, so it must be built before tauri-action packages the app.
       - name: Build the Agent Board sidecar
         working-directory: sidecar/agent-board
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # The Repositories sidecar (CPE-863) — bundled alongside the others so it isn't a missing binary;
       # the overlays reference its release binary + manifest, so it must be built before packaging.
       - name: Build the Repositories sidecar
         working-directory: sidecar/repos
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # Stage a never-executed `.pristine` copy of each sidecar (CPE-867 L2): the overlays bundle it as
       # `sidecars/<id>.pristine`, and the host self-heals a missing/stale exe from it on startup. Because
@@ -199,7 +199,7 @@ jobs:
               # Touch the sources so cargo's fingerprint is stale and it MUST rebuild the pruned binary
               # (a plain `cargo build` would just report "Finished" again on a fresh fingerprint).
               find "sidecar/$s/src" -name '*.rs' -exec touch {} +
-              ( cd "sidecar/$s" && cargo build --release )
+              ( cd "sidecar/$s" && cargo build --locked --release )
               bin="$(bin_path "$s")"
             fi
             if [ -z "$bin" ]; then
@@ -522,6 +522,20 @@ jobs:
           $j.bundle.windows | Add-Member -NotePropertyName timestampUrl         -NotePropertyValue 'http://timestamp.digicert.com' -Force
           [System.IO.File]::WriteAllText($confPath, ($j | ConvertTo-Json -Depth 40), $utf8NoBom)
           Write-Host "Windows self-signed signing enabled (thumbprint $($cert.Thumbprint))."
+
+      # CPE-1865: tauri-action drives `tauri build`, which has no flag to pass `--locked` through to
+      # the `cargo build` it runs internally -- so this is a real, separate `cargo check --locked`
+      # against the SAME `src-tauri/Cargo.lock` the step below is about to build the shipped
+      # sidecar-enabled binary from, with the SAME `sidecar-platform` feature, run immediately before
+      # it. `npm run build` first because `src-tauri`'s `build.rs` needs `dist/` to exist at compile
+      # time and nothing earlier in this job has built it (tauri-action's own `beforeBuildCommand`
+      # builds it lazily, right before packaging) — running it again there is harmless and idempotent.
+      - name: Build frontend (needed for the Cargo.lock preflight check below)
+        run: npm run build
+
+      - name: Verify src-tauri/Cargo.lock is current before the real release build (CPE-1865)
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets --features sidecar-platform
 
       - name: Build and publish sidecar-enabled release
         uses: tauri-apps/tauri-action@v0

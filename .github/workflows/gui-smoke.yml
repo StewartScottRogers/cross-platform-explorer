@@ -178,6 +178,14 @@ jobs:
       # This is NOT a `--debug` build and NOT a bare `cargo build` — both of those would load the
       # dev server and make `--open` silently no-op, which is the exact regression this job exists
       # to catch.
+      # CPE-1865: `npm run tauri build` drives the Tauri CLI, which has no flag to pass `--locked`
+      # through to the `cargo build` it runs internally -- so this is a real, separate
+      # `cargo check --locked` against the SAME `src-tauri/Cargo.lock` the step below is about to
+      # build the real (not `tauri dev`) binary from, run immediately before it.
+      - name: Verify src-tauri/Cargo.lock is current before the real build (CPE-1865)
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+
       - name: Build release binary (tauri build --no-bundle)
         run: npm run tauri build -- --no-bundle
 
@@ -510,6 +518,14 @@ jobs:
       # installer packaging + signing, not the CLI `build` subcommand that embeds `frontendDist`
       # (see the CPE-1044 comment on the Windows step and in wdio.conf.ts). No display needed for a
       # build, so this step does not need `xvfb-run`.
+      # CPE-1865: `npm run tauri build` drives the Tauri CLI, which has no flag to pass `--locked`
+      # through to the `cargo build` it runs internally -- so this is a real, separate
+      # `cargo check --locked` against the SAME `src-tauri/Cargo.lock` the step below is about to
+      # build the real (not `tauri dev`) binary from, run immediately before it.
+      - name: Verify src-tauri/Cargo.lock is current before the real build (CPE-1865)
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+
       - name: Build release binary (tauri build --no-bundle)
         run: npm run tauri build -- --no-bundle
 

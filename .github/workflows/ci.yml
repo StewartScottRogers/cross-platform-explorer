@@ -233,15 +233,15 @@ jobs:
 
       - name: cargo check
         working-directory: src-tauri
-        run: cargo check --all-targets
+        run: cargo check --locked --all-targets
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
 
       # CPE-1717 — the same neutralisation guard the `crates` job runs, for the app adapter's own
       # staged legs (`cpe_1710_*`, `cpe_1705_*`, `cpe_1696_*` in `src-tauri/src/lib.rs`). Sabotage the
@@ -275,7 +275,7 @@ jobs:
           fail=0
 
           filter=cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name
-          if cargo test "$filter" > "$log" 2>&1; then
+          if cargo test --locked "$filter" > "$log" 2>&1; then
             echo "::error::CPE-1717 regression: '$filter' PASSED with staging sabotaged — a leg that staged nothing is reporting green. Check that cpe_server::fsutil::require_staged is still on this path."
             fail=1
           elif ! grep -q 'CPE-1717' "$log"; then
@@ -320,7 +320,7 @@ jobs:
               echo "OK: skipped on $RUNNER_OS — this test is #[cfg(target_os = \"linux\")], so it doesn't compile here at all; a filtered run would prove nothing."
               return 0
             fi
-            if cargo test "$name" > "$log" 2>&1; then
+            if cargo test --locked "$name" > "$log" 2>&1; then
               echo "::error::CPE-1806 regression: '$name' PASSED with staging sabotaged, on Linux — the ONLY platform this panic-boundary test ever runs on. A leg that staged nothing reported green; check require_staged_reason is still on this path."
               return 1
             elif grep -qF 'CPE-1717] `trash_roundtrip`' "$log"; then
@@ -346,7 +346,7 @@ jobs:
               echo "OK: skipped on macOS — none of the trash-roundtrip tests compile there (no cfg match), so a filtered run would prove nothing but a zero-match exit 0."
               return 0
             fi
-            if cargo test "$name" > "$log" 2>&1; then
+            if cargo test --locked "$name" > "$log" 2>&1; then
               if [ "$RUNNER_OS" = "Windows" ]; then
                 if grep -q 'CPE-1268' "$log"; then
                   echo "OK: on Windows this mechanism may legitimately not stage (a headless CI session can lack a working Recycle Bin), so it stayed a passing skip, and the log proves it took the documented notice path rather than matching nothing:"
@@ -427,7 +427,7 @@ jobs:
       # sidecar code. This proves the opt-in integration also compiles (CPE-272).
       - name: cargo check (sidecar-platform feature)
         working-directory: src-tauri
-        run: cargo clippy --all-targets --features sidecar-platform -- -D warnings
+        run: cargo clippy --locked --all-targets --features sidecar-platform -- -D warnings
 
       # Typed-bindings drift guard (CPE-813, epic CPE-810): regenerate the superset typed client and fail
       # if the committed `src/lib/bindings.gen.ts` differs — so the Rust contract and the TS bindings can
@@ -437,9 +437,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         run: |
-          cargo run --bin export_bindings --features "specta-bindings sidecar-platform"
+          cargo run --locked --bin export_bindings --features "specta-bindings sidecar-platform"
           git diff --exit-code ../src/lib/bindings.gen.ts \
-            || (echo "::error::bindings.gen.ts is stale — run: cargo run --bin export_bindings --features \"specta-bindings sidecar-platform\"" && exit 1)
+            || (echo "::error::bindings.gen.ts is stale — run: cargo run --locked --bin export_bindings --features \"specta-bindings sidecar-platform\"" && exit 1)
 
   crates:
     # The GUI↔Server "server-side" crates under crates/ (the Decoupled Server epic CPE-810):
@@ -713,35 +713,35 @@ jobs:
       - name: contract — clippy + test
         working-directory: crates/contract
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: security — clippy + test
         working-directory: crates/security
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
           # The opt-in JWT verifier (CPE-965) — lint + test it too; default build above stays crypto-free.
-          cargo clippy --all-targets --features jwt -- -D warnings
-          cargo test --features jwt
+          cargo clippy --locked --all-targets --features jwt -- -D warnings
+          cargo test --locked --features jwt
 
       - name: server — clippy + test
         working-directory: crates/server
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
           # The opt-in instant-search index engine (CPE-832) — lint + test it too; the default build
           # above stays indexer-free (the "small when off" delete-test).
-          cargo clippy --all-targets --features index -- -D warnings
-          cargo test --features index
+          cargo clippy --locked --all-targets --features index -- -D warnings
+          cargo test --locked --features index
           # The opt-in PDF (pdfium-render, CPE-1256) + video (bundled-ffmpeg shell-out, CPE-1257)
           # thumbnail extractors, shipped for real by CPE-1258, the opt-in DICOM medical-image reader
           # (dicom-object/dicom-pixeldata, CPE-1345), and the opt-in audio-waveform peak extractor
           # (same bundled-ffmpeg shell-out, CPE-1478) — lint + test all four together; the default
           # build above stays extractor-free (the "small when off" delete-test). The native deps
           # installed above let the real-render tests actually assert instead of skipping.
-          cargo clippy --all-targets --features pdf-thumb,video-thumb,waveform,dicom-thumb -- -D warnings
-          cargo test --features pdf-thumb,video-thumb,waveform,dicom-thumb
+          cargo clippy --locked --all-targets --features pdf-thumb,video-thumb,waveform,dicom-thumb -- -D warnings
+          cargo test --locked --features pdf-thumb,video-thumb,waveform,dicom-thumb
 
       # ─── CPE-1717 ────────────────────────────────────────────────────────────────────────────────
       # The skip-visibility guard, and it is a *neutralisation* step, not another test run.
@@ -786,7 +786,7 @@ jobs:
                         cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name \
                         text_stats_separates_a_read_failure_from_a_not_text_verdict; do
             echo "--- sabotaged run (strictness inherited from CI, NOT pinned): $filter"
-            if cargo test "$filter" > "$log" 2>&1; then
+            if cargo test --locked "$filter" > "$log" 2>&1; then
               echo "::error::CPE-1717 regression: '$filter' PASSED while staging was sabotaged. A leg that could not stage its condition is reporting green, which is the exact silent-coverage-loss this guard exists to stop. Check that fsutil::require_staged is still called on this path, and that staging_is_strict still follows CI when no override is set."
               fail=1
             elif grep -q 'CPE-1717' "$log"; then
@@ -805,7 +805,7 @@ jobs:
           # proof that strictness does not turn a legitimately-skipping leg into a false red — the
           # acceptance criterion this ticket could otherwise only assert.
           echo "--- sabotaged run of the platform-asymmetric mechanism: link_status (deny_dir_traversal)"
-          if cargo test link_status_does_not_report_broken_for_a_permission_denied_target_not_missing > "$log" 2>&1; then
+          if cargo test --locked link_status_does_not_report_broken_for_a_permission_denied_target_not_missing > "$log" 2>&1; then
             if [ "$RUNNER_OS" = "Windows" ]; then
               echo "OK: on Windows this mechanism cannot work, so it stayed a passing skip — no false red:"
               grep -m1 'SKIPPED' "$log" || true
@@ -830,7 +830,7 @@ jobs:
           # …and the documented escape hatch has to work, or every red above could just be an
           # always-strict constant. Same sabotage, `CPE_STAGING_STRICT=0`, must PASS as a loud skip.
           echo "--- sabotaged run with the escape hatch (CPE_STAGING_STRICT=0): must PASS"
-          if CPE_STAGING_STRICT=0 cargo test dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing > "$log" 2>&1; then
+          if CPE_STAGING_STRICT=0 cargo test --locked dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing > "$log" 2>&1; then
             echo "OK: the escape hatch still degrades to a loud skip:"
             grep -m1 'SKIPPED' "$log" || true
           else
@@ -845,8 +845,8 @@ jobs:
         # CPE-825): composes contract + server + security into a loopback client/server.
         working-directory: crates/net
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: mdns — clippy + test
         # The mDNS/DNS-SD LAN discovery crate (CPE-1523, epic CPE-1517): the cross-platform
@@ -867,8 +867,8 @@ jobs:
         # this step is what puts it in front of Linux + macOS for the first time.
         working-directory: crates/mdns
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: sftp — clippy + test
         # The SFTP FileSystemProvider (CPE-616): russh + host-key verification via
@@ -876,8 +876,8 @@ jobs:
         # and an in-process russh-sftp test server, so it runs on all three OSes with no Docker.
         working-directory: crates/sftp
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: webdav — clippy + test
         # The WebDAV FileSystemProvider (CPE-616): a 2nd remote backend over HTTP/WebDAV. Sync (ureq +
@@ -885,8 +885,8 @@ jobs:
         # on all three OSes with no Docker.
         working-directory: crates/webdav
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: ftp — clippy + test
         # The FTP/FTPS FileSystemProvider (CPE-1514, epic CPE-1502): the 3rd remote backend, and the
@@ -902,10 +902,10 @@ jobs:
         # safe if some job turns the feature on.
         working-directory: crates/ftp
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-          cargo clippy --all-targets --features e2e-extra-ca -- -D warnings
-          cargo test --features e2e-extra-ca
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo clippy --locked --all-targets --features e2e-extra-ca -- -D warnings
+          cargo test --locked --features e2e-extra-ca
 
       - name: s3 — clippy + test
         # The S3-compatible object-store backend (CPE-1681, epic CPE-1503): the 4th remote backend, and
@@ -922,8 +922,8 @@ jobs:
         # server these tests talk to is spawned inside the test process on loopback.
         working-directory: crates/s3
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: vfs — clippy + test
         # The scheme router (CPE-616/CPE-1502): open(connection, secret, …) -> boxed FileSystemProvider,
@@ -933,10 +933,10 @@ jobs:
         # gated build must be compiled and linted somewhere outside the Docker rig.
         working-directory: crates/vfs
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-          cargo clippy --all-targets --features e2e-extra-ca -- -D warnings
-          cargo test --features e2e-extra-ca
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo clippy --locked --all-targets --features e2e-extra-ca -- -D warnings
+          cargo test --locked --features e2e-extra-ca
 
       - name: updater-verify — clippy + test
         # The headless updater-manifest + minisign signature guard (CPE-1058): parses tauri-action's
@@ -947,8 +947,8 @@ jobs:
         # tests (valid / tampered / wrong-key / version-mismatch / malformed).
         working-directory: crates/updater-verify
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
   net-e2e:
     # CPE-1659 (epic CPE-1498), retiring MANUAL-TEST-BURNDOWN rows #7 and #13: every remote provider
@@ -1229,9 +1229,9 @@ jobs:
       - name: "Build the real cpe-server-ref binary (release) AND pre-build the vfs conformance test binary, in parallel (CPE-1673)"
         run: |
           set -euo pipefail
-          (cd crates/net && cargo build --release --bin cpe-server-ref) &
+          (cd crates/net && cargo build --locked --release --bin cpe-server-ref) &
           net_pid=$!
-          (cd crates/vfs && cargo test --no-run --features e2e-extra-ca --test real_server_conformance) &
+          (cd crates/vfs && cargo test --locked --no-run --features e2e-extra-ca --test real_server_conformance) &
           vfs_pid=$!
           fail=0
           wait "$net_pid" || { echo "::error::cpe-server-ref release build failed"; fail=1; }
@@ -1256,7 +1256,7 @@ jobs:
         working-directory: crates/vfs
         # `--features e2e-extra-ca` here too (CPE-1673), purely so every crates/vfs test invocation in
         # this job shares one fingerprint with the pre-build above — this test itself never touches FTPS.
-        run: cargo test --features e2e-extra-ca --test real_server_conformance sftp_host_key_tofu_first_contact_then_trusts_against_real_sshd -- --ignored --nocapture
+        run: cargo test --locked --features e2e-extra-ca --test real_server_conformance sftp_host_key_tofu_first_contact_then_trusts_against_real_sshd -- --ignored --nocapture
 
       - name: Recreate the SFTP container with a FRESH host key (CPE-1659 TOFU negative case)
         # Same static IP, no host-key volume mounted — atmoz/sftp generates brand-new ephemeral host
@@ -1290,7 +1290,7 @@ jobs:
       - name: "crates/vfs — SFTP host-key TOFU, part 2: a changed key is refused (real OpenSSH)"
         working-directory: crates/vfs
         # `--features e2e-extra-ca` here too (CPE-1673) — same fingerprint-consistency reason as part 1.
-        run: cargo test --features e2e-extra-ca --test real_server_conformance sftp_host_key_tofu_changed_key_is_refused_against_real_sshd -- --ignored --nocapture
+        run: cargo test --locked --features e2e-extra-ca --test real_server_conformance sftp_host_key_tofu_changed_key_is_refused_against_real_sshd -- --ignored --nocapture
 
       - name: crates/vfs — full conformance suite (sftp / webdav / ftp / ftps) against real servers, in parallel by scheme
         working-directory: crates/vfs
@@ -1313,15 +1313,15 @@ jobs:
           # TESTNAME before `--` and rejects a second (confirmed locally: "unexpected argument"). The FTP
           # group below therefore passes both filters to the harness, after `--`, not to cargo.
           set -euo pipefail
-          cargo test --features e2e-extra-ca --test real_server_conformance \
+          cargo test --locked --features e2e-extra-ca --test real_server_conformance \
             -- sftp_conformance_against_real_openssh --ignored --nocapture --test-threads=1 \
             > "$RUNNER_TEMP/e2e-sftp.log" 2>&1 &
           sftp_pid=$!
-          cargo test --features e2e-extra-ca --test real_server_conformance \
+          cargo test --locked --features e2e-extra-ca --test real_server_conformance \
             -- webdav_conformance_against_real_apache_moddav --ignored --nocapture --test-threads=1 \
             > "$RUNNER_TEMP/e2e-webdav.log" 2>&1 &
           webdav_pid=$!
-          cargo test --features e2e-extra-ca --test real_server_conformance \
+          cargo test --locked --features e2e-extra-ca --test real_server_conformance \
             -- ftp_conformance_against_real_vsftpd ftps_conformance_against_real_vsftpd_with_tls \
                --ignored --nocapture --test-threads=1 \
             > "$RUNNER_TEMP/e2e-ftp.log" 2>&1 &
@@ -1343,7 +1343,7 @@ jobs:
 
       - name: "crates/net — Slice 2: real client<->server E2E over a non-loopback container IP"
         working-directory: crates/net
-        run: cargo test --test real_server_e2e -- --ignored --nocapture
+        run: cargo test --locked --test real_server_e2e -- --ignored --nocapture
 
       - name: Dump real-server container logs (debug aid on failure)
         if: failure()
@@ -1417,14 +1417,14 @@ jobs:
       - name: contract — clippy + test
         working-directory: sidecar/contract
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: host — clippy + test
         working-directory: sidecar/host
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       # CPE-322: verify a REAL OS-keychain round-trip on each runner (Windows Credential Manager /
       # macOS Keychain / Linux Secret Service) — the hardware verification the ticket needs, run on
@@ -1447,30 +1447,30 @@ jobs:
             sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y gnome-keyring
             dbus-run-session -- bash -c '
               eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
-              cargo test --test keyring_roundtrip -- --ignored --nocapture
+              cargo test --locked --test keyring_roundtrip -- --ignored --nocapture
             '
           else
-            cargo test --test keyring_roundtrip -- --ignored --nocapture
+            cargo test --locked --test keyring_roundtrip -- --ignored --nocapture
           fi
 
       - name: ai-console — clippy + test
         working-directory: sidecar/ai-console
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: repos — clippy + test
         working-directory: sidecar/repos
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
       - name: agent-board — clippy + test
         # The Agent Board sidecar (CPE-851, epic CPE-850): out-of-process Kanban over Ticketing/.
         working-directory: sidecar/agent-board
         run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
   # CPE-1796: mechanical guard for the ffmpeg pin's SHAPE, not just its freshness.
   # ffmpeg-pin-freshness.yml (scheduled, weekly) only detects a pin that has ALREADY rotted — it has
@@ -1669,8 +1669,8 @@ jobs:
             sidecar/agent-board sidecar/ai-console sidecar/contract sidecar/host sidecar/repos \
             src-tauri \
           ; do
-            echo "::group::cargo check --all-targets -- $dir"
-            if ! (cd "$dir" && cargo check --all-targets); then
+            echo "::group::cargo check --locked --all-targets -- $dir"
+            if ! (cd "$dir" && cargo check --locked --all-targets); then
               echo "::error::$dir does not compile at the declared MSRV (rustc 1.83.0) -- either the code needs an API newer than that, or a dependency's own MSRV is newer than 1.83.0. Fix the code/dependency, or raise rust-version in $dir/Cargo.toml (and every other manifest in the tree, to keep one honest floor) and record why."
               fail=1
             fi
