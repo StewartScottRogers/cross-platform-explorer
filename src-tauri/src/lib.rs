@@ -1130,14 +1130,14 @@ async fn write_file_text(app: tauri::AppHandle, path: String, contents: String) 
 /// `src-tauri/src/lib.rs` (the four commands the ticket names) plus reading each write's own guard chain.
 /// It is **not** a claim about every write in the repo.
 ///
-/// - **`macro_convert_in_place`** (`fs::write(to, ..)`) — **different question, and it has no guard.** `to`
-///   is a *new* name derived by swapping the extension (`from != to` is enforced), so this is a create
-///   site, not an edit site: the primitive it wants is CPE-1718's
+/// - **`macro_convert_in_place`** (`fs::write(to, ..)`) — **different question, and at the time this list
+///   was written it had no guard.** `to` is a *new* name derived by swapping the extension (`from != to`
+///   is enforced), so this is a create site, not an edit site: the primitive it wants is CPE-1718's
 ///   [`cpe_server::fsutil::create_slot_refusal`] + [`cpe_server::fsutil::create_exclusive`], not this one —
-///   resolving a link would be actively wrong for a name being claimed. Today it has neither, so a link at
-///   `to` is written through and the original is then trashed. Not fixed here on purpose: it is a different
-///   guard, on a command with rollback semantics, and it needs image fixtures this test module does not
-///   have. Filed as **CPE-1734**; see the note at that function.
+///   resolving a link would be actively wrong for a name being claimed. Deliberately not fixed on this
+///   ticket: it is a different guard, on a command with rollback semantics, and it needed image fixtures
+///   this test module did not yet have. Filed and closed as **CPE-1734**, which gave it exactly that pair
+///   of primitives; see the note at that function for the fix and its tests.
 /// - **`batch_execute`'s in-place overwrite** — **the ticket's premise is wrong about this one, and it is
 ///   worth being wrong in the safe direction.** It does not use `fs::write` at all: it goes through
 ///   `batch_media::open_output_verified`, which opens with `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`,
@@ -7105,25 +7105,60 @@ fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to:
 /// `"restore_convert"` inverse (`macro_restore_converted`) can restore the exact original bytes from
 /// the trash on undo — a byte-exact restore, not a second lossy re-encode.
 ///
-/// **The `fs::write` below has no slot guard, and that is a known open bug, not a considered choice
-/// (CPE-1734).** CPE-1725 inventoried this site while settling the dangling-link question for the two
-/// whole-file *save* paths and deliberately left it alone: `to` is a name being **claimed** (an extension
-/// swap; `from != to` is enforced), so the guard it wants is CPE-1718's `create_slot_refusal` +
-/// `create_exclusive`, **not** CPE-1716's `replace_file_contents` — resolving a link is the right answer
-/// when editing a file the user opened and the wrong one when claiming a name. Today a link at `to` is
-/// followed (`fs::write` follows the final component, and a dangling one reads as a free name), the bytes
-/// land at the link's target, and `trash::delete` then removes the original anyway. Recorded here rather
-/// than fixed under a ticket about the other primitive; see CPE-1734 for the decision and its tests.
+/// **`to` is guarded before a byte is written, and the trash step is now unreachable when it isn't
+/// (CPE-1734, closing the bug this doc comment used to record).** CPE-1725 inventoried this site while
+/// settling the dangling-link question for the two whole-file *save* paths and deliberately left it
+/// alone: `to` is a name being **claimed** (an extension swap; `from != to` is enforced), so the guard
+/// it wants is CPE-1718's `create_slot_refusal` + `create_exclusive`, **not** CPE-1716's
+/// `replace_file_contents` — resolving a link is the right answer when editing a file the user opened
+/// and the wrong one when claiming a name. This function now calls `create_slot_refusal` first: a
+/// **live or dangling** link at `to` is refused with the write-through wording (bytes land at the
+/// link's target, not the rename-destroys wording), and — the plain-clobber question CPE-1734's AC3
+/// asked to be decided rather than inherited — a **plain pre-existing file** at `to` is refused too,
+/// matching the Batch-Media engine's own refusal of an unconfirmed in-place overwrite rather than
+/// silently truncating it the way bare `fs::write` did. The write itself then goes through
+/// `create_exclusive` (`O_CREAT|O_EXCL`), which is the atomic half behind the probe: even a link
+/// planted in the race window between the guard and the open fails the *open* rather than being
+/// followed.
+///
+/// **This is also what fixes "trashes the original", and it needed no separate conditional.**
+/// `trash::delete(from)` already sat behind the write's `?`, so it was never literally true that the
+/// original was trashed *after a failed write* — the real defect was that `fs::write` reported
+/// **success** for a write that had actually landed at the link's target, so the `?` never fired and
+/// the original was trashed out from under a file the user could no longer find at either name. Once
+/// the write-through case is a genuine `Err` (this commit), "only trash `from` once the bytes are
+/// really at `to`" falls out of the existing `?` chain rather than needing a new flag.
 fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), String> {
     if from == to {
         return Ok(());
+    }
+    use std::io::Write;
+    let to_path = Path::new(to);
+    // Guard BEFORE touching `from` at all: a refused Convert must cost nothing and leave nothing
+    // behind, and checking here also means an occupied/linked `to` never triggers the read + re-encode
+    // work below for a write that was never going to land.
+    if let Some(e) = cpe_server::fsutil::create_slot_refusal(
+        to_path,
+        &format!(
+            "{to}: already exists — a macro Convert step claims the new name rather than editing the \
+             file that is already there, so (matching the Batch-Media engine) it refuses an unconfirmed \
+             overwrite instead of silently replacing it"
+        ),
+    ) {
+        return Err(e);
     }
     let bytes = fs::read(from).map_err(|e| format!("could not read {from}: {e}"))?;
     let converted = cpe_server::batch_transform::apply_ops(
         &bytes,
         &[cpe_server::batch_media::MediaOp::Convert { to_ext: detail.to_string() }],
     )?;
-    fs::write(to, converted).map_err(|e| format!("could not write {to}: {e}"))?;
+    // `O_CREAT|O_EXCL`, not `fs::write`: the guard above is a probe-then-open and therefore TOCTOU by
+    // construction (CPE-1718's own doc comment on `create_exclusive`), so this is the belt behind it —
+    // it does not follow a link at the final component even if one appears in the race window.
+    let mut file =
+        cpe_server::fsutil::create_exclusive(to_path).map_err(|e| format!("could not write {to}: {e}"))?;
+    file.write_all(&converted).map_err(|e| format!("could not write {to}: {e}"))?;
+    drop(file);
     trash::delete(from).map_err(|e| format!("could not trash {from}: {e}"))?;
     Ok(())
 }
