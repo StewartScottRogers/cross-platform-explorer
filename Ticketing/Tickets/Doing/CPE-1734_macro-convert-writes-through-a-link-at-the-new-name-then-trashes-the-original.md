@@ -55,20 +55,86 @@ primitive is how the two-guards-look-alike mistakes in this family happened.
 
 ## Acceptance criteria
 
-- [ ] Decide whether a macro Convert may write through a link at `to` at all (expected: no) and record the
-      decision at the site.
-- [ ] Add `cpe_server::fsutil::create_slot_refusal` (and/or `create_exclusive`) so a live **and** dangling
+- [x] Decide whether a macro Convert may write through a link at `to` at all (expected: no) and record the
+      decision at the site. — Decided: no. Recorded in `macro_convert_in_place`'s doc comment.
+- [x] Add `cpe_server::fsutil::create_slot_refusal` (and/or `create_exclusive`) so a live **and** dangling
       link at `to` is refused before any byte is written, with the write-through wording, not the
-      rename-destroys wording.
-- [ ] Decide the plain-clobber question explicitly: does a Convert overwrite an existing `photo.jpg`?
-- [ ] The original must not be trashed on any path where the write was refused — assert on the
+      rename-destroys wording. — Both wired in, in that order (probe, then atomic open).
+- [x] Decide the plain-clobber question explicitly: does a Convert overwrite an existing `photo.jpg`? —
+      Decided: no, matching the Batch-Media engine's existing refusal of an unconfirmed overwrite.
+      `create_slot_refusal`'s occupancy half now covers this for free.
+- [x] The original must not be trashed on any path where the write was refused — assert on the
       **filesystem** (the source still there, the link still a link, the link's target not created), never
-      on the returned `Result`.
-- [ ] Test with `cpe_server::fsutil::make_dangling_link` (junction fallback, so it asserts for real on
-      every runner) and `require_staged` per CPE-1717.
+      on the returned `Result`. — All three new tests assert this way.
+- [x] Test with `cpe_server::fsutil::make_dangling_link` (junction fallback, so it asserts for real on
+      every runner) and `require_staged` per CPE-1717. — Both used.
+
+## Work Log
+
+**2026-08-25** — Fixed and closed.
+
+**Root cause.** `macro_convert_in_place` was a bare `fs::write(to, converted)` with no slot guard, even
+though `to` is a name being **claimed** (an extension swap; `from != to` is enforced above it), not a
+file being edited. A link at `to` — live or dangling — was written through: the bytes landed at the
+link's target (a path the user never named), `fs::write` reported `Ok`, and `trash::delete(from)` then
+ran unconditionally because it sat behind that `Ok`'s `?`. A plain pre-existing `photo.jpg` was also
+silently clobbered, with no confirmation.
+
+**Harm reproduced on today's (pre-fix) code**, by temporarily reverting the guard while keeping the new
+tests, then running them (`cargo test --lib cpe_1734_convert_refuses_a_dangling_link -- --nocapture`):
+
+```
+[EVIDENCE CPE-1734] result=Ok(()) target_conjured=true
+  target_bytes=Some([255, 216, 255, 224, 0, 16, 74, 70, 73, 70, ... <valid JPEG> ..., 255, 217])
+  original_still_here=false link_still_a_link=true
+thread '...cpe_1734_convert_refuses_a_dangling_link_at_to_and_never_reaches_the_trash_step' panicked:
+the link's target (...\photo.jpg-target-that-does-not-exist) must not have been conjured — pre-fix
+`fs::write` followed the dangling link (`try_exists` reads it as free) and created it while reporting
+success (result was Ok(()))
+```
+
+`result=Ok(())`, the link's target now holds the re-encoded JPEG bytes, the link itself is untouched, and
+`original_still_here=false` — the original was trashed even though the write landed at the wrong file.
+The live-link and plain-clobber legs reproduced the same shape (converted bytes landing in the victim
+file / the pre-existing `photo.jpg`, both under `Ok(())`).
+
+**Fix** (`src-tauri/src/lib.rs`, `macro_convert_in_place`): guard `to` with
+`cpe_server::fsutil::create_slot_refusal` **before** `from` is even read — refusing a live link, a
+dangling link, and now a plain occupied name too, with the write-through wording
+(`"...writes THROUGH it..."`), never the rename-destroys wording. The write itself moved from
+`fs::write` to `cpe_server::fsutil::create_exclusive` (`O_CREAT|O_EXCL`), which is the atomic half behind
+the probe and closes the TOCTOU gap between the check and the open. `trash::delete(from)` needed no new
+conditional: it already sat behind the write's `?`, so making the write-through case a genuine `Err`
+(instead of a misleading `Ok`) is what makes "only trash the original once the bytes are really at `to`"
+fall out of the existing `?` chain.
+
+**Tests added** (`src-tauri/src/lib.rs`, three new `#[test]` fns near the existing CPE-1194 macro-convert
+test): dangling link (runs on every runner via `make_dangling_link`'s junction fallback), live link
+(CPE-1717 loud-skip on an unprivileged Windows account, `require_staged`), and a plain pre-existing file.
+All assert on the filesystem — target not conjured / victim bytes untouched / occupied file untouched,
+original still present with its exact original bytes, link still a link — never on the `Result` alone.
+`from` uses a real, decodable PNG (`cpe_1734_test_png_bytes`, mirroring CPE-1194's
+`cpe_1194_test_png_bytes`) because the pre-fix code path still reaches `fs::read` + `apply_ops` before
+any write; an undecodable placeholder would have failed there with "unrecognized image format" instead
+of demonstrating the actual defect.
+
+**Verification.** `cargo clippy --all-targets -- -D warnings` clean in `src-tauri`, both default and
+`--features sidecar-platform`. `cargo test` from `crates/server`: 2383 passed, 0 failed, 8 ignored.
+`cargo test --lib` from `src-tauri`: 217 passed, 0 failed (214 pre-existing + 3 new).
+
+**Known limits, stated rather than overclaimed:** this guard, like CPE-1857/1879's, covers the **final
+path component only** — an intermediate directory junction inside the folder still lets a write land
+outside the intended root; that is a separate, already-filed class. `create_exclusive` uses ordinary
+`O_CREAT|O_EXCL`, not the handle-level `links`/reparse-point read `copy_file_onto_no_follow` uses, so
+this is the CPE-1718 create-site primitive, not the CPE-1857 hard-link-count primitive — appropriate
+here because `to` is a name being claimed, never an existing inode being overwritten, so there is no
+hard-link-count question to ask at this site. No alternate-data-stream / Mark-of-the-Web concern either,
+for the same reason: nothing is being copied onto an existing file.
 
 ## Notes
 
-Filed by CPE-1725, 2026-08-14. Related: **CPE-1718** (the create-slot refusal this wants), **CPE-1716**
-(the edit-site counterpart), **CPE-1194** (the trash-then-restore behaviour that makes the source deletion
-recoverable — worth confirming it still is when the write went to the wrong place).
+Filed by CPE-1725, 2026-08-14. Related: **CPE-1718** (the create-slot refusal this wanted, now wired in),
+**CPE-1716** (the edit-site counterpart), **CPE-1194** (the trash-then-restore behaviour that makes the
+source deletion recoverable — confirmed on the refused paths the source is never trashed at all, so
+nothing needs restoring; CPE-1194's own round-trip test above this one in `lib.rs` still covers the
+Recycle-Bin-and-back path when the write actually lands at `to`).
