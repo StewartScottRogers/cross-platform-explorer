@@ -3,7 +3,7 @@ id: CPE-1873
 title: nothing pins the updater pubkey, so anyone who can push a tag can rotate the app's root of trust and the release guard will bless it
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23
