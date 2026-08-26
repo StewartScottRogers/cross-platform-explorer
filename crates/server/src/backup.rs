@@ -206,6 +206,16 @@ fn parent_contained(parent: &Path, real_dst_root: &Path) -> Result<(), String> {
 ///    skipped in the common case (the parent already existed, `create_dir_all` was never called, and
 ///    the pre-check is already the last thing that happened before the write).
 ///
+/// **State plainly what check (2) is worth, because the sabotage probe measured it.** Deleting check
+/// (1) reddens all four CPE-1889 harm tests. Deleting check (2) alone reddens **nothing**, and that is
+/// not a gap in the tests — it is what check (2) *is*. A junction that is already sitting at the parent
+/// is caught by check (1); check (2) can only ever differ from check (1) if the tree changed **between
+/// them**, which is a race no deterministic test can stage. It is kept, rather than deleted as untested
+/// code, because `create_dir_all` is the part of this function that does real work while the window is
+/// open — potentially many `mkdir` round trips over a network share — and because the cost is amortised
+/// (it fires once per newly-created directory, not once per file). It is not kept on a claim that it
+/// closes anything, and a reader must not upgrade it to one.
+///
 /// **TOCTOU, stated honestly: the window is narrowed, not closed.** Between the last containment check
 /// and the destination `open` inside `copy_file_onto_no_follow_with_wording`, an attacker with write
 /// access to the destination tree can still swap a parent component for a junction, and the write
@@ -218,15 +228,30 @@ fn parent_contained(parent: &Path, real_dst_root: &Path) -> Result<(), String> {
 /// path-safe against an attacker racing it; read it as making the write refuse a junction that is
 /// *sitting there*, which is the shape that was measured.
 ///
-/// **Cost, since this is the backup engine's inner loop.** The root is canonicalised **once per run**,
-/// not per file. Per file the common case (parent directory already exists — every entry after the
-/// first in a given directory) adds one `metadata` and one `canonicalize` of the parent: two path
-/// resolutions on top of the three-to-five syscalls the link guard already costs. The first entry in a
-/// not-yet-existing directory adds the walk-up instead — one failed `canonicalize` plus one
-/// `symlink_metadata` per absent level, then the confirming `canonicalize` after `create_dir_all`. For
-/// a 100,000-file backup to a network destination that is on the order of 200,000 extra round trips
-/// spread over the run, and that is the price of the engine not writing outside the folder the user
-/// pointed it at. It is not free and this comment does not pretend it is.
+/// # Cost, since this is the backup engine's inner loop (CPE-1889 AC4)
+///
+/// **Syscall count — the durable number.** The root is canonicalised **once per run**, not per file.
+/// Per file the common case (parent directory already exists — every entry after the first in a given
+/// directory) adds one `metadata` and one `canonicalize` of the parent: two path resolutions on top of
+/// the three-to-five syscalls the link guard already costs. The first entry in a not-yet-existing
+/// directory adds the walk-up instead — one failed `canonicalize` plus one `symlink_metadata` per
+/// absent level — then one confirming `canonicalize` after `create_dir_all`. So for a 100,000-file
+/// backup: ~200,000 extra path resolutions, plus roughly two or three more per new directory.
+///
+/// **Wall clock — measured, and the measurement's honest answer is "too small to see here".**
+/// `cpe_1889_measure_the_guard_cost` A/Bs the guarded engine against the pre-fix shape in one process
+/// over 2,000 files. Four runs on a local NTFS volume gave deltas of +11.3, −67.0, −21.2 and
+/// +29.2 µs/file — **both signs, swamped by run-to-run variance** in the copy itself, which is an open,
+/// a read-loop, a write, a permissions set and a times set per file. The guard is not free; it is
+/// simply far below the noise floor of the thing it sits next to on local storage, and quoting the
+/// +11.3 µs figure alone (the first run, and the only positive one at the time) would have been picking
+/// the number that suited the argument.
+///
+/// **Where it will be visible: a network destination.** Each of those extra resolutions is a round trip
+/// to a SMB/NFS server, where the copy's own cost no longer hides them. That is the case to re-measure
+/// against a real share (the QNAP on the LAN is the standing test target) before anyone claims this is
+/// free everywhere. What is not in question is the trade: the alternative is an engine that writes
+/// outside the folder the user pointed it at and calls it a success.
 ///
 /// **The rest of the create-then-write class, swept (CPE-1889 item 4).** This was the last unguarded
 /// site of the shape, not the only one — every sibling already resolved the path before writing, which
@@ -1276,6 +1301,100 @@ mod tests {
              {results:?}"
         );
         assert!(results[0].ok, "…and must be reported as a success: {:?}", results[0]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1889 AC4 — **cost, measured rather than asserted**, because this guard sits on the backup
+    /// engine's inner loop and the ticket asks what it means for a 100,000-file run.
+    ///
+    /// `#[ignore]` on purpose: it is a measurement, not a property. Timings vary by machine,
+    /// filesystem and cache state, so making CI assert a number would produce a flaky red that says
+    /// nothing about correctness. Run it deliberately:
+    ///
+    /// ```text
+    /// cargo test --lib cpe_1889_measure_the_guard_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// The A/B is inside one binary and one process, so the two legs share every other cost: leg A is
+    /// the real guarded `apply_backup_plan`; leg B replays the **pre-fix** shape byte for byte
+    /// (`create_dir_all` then the same `copy_file_onto_no_follow_with_wording`) with the containment
+    /// calls removed. The difference is the guard and nothing else.
+    ///
+    /// **Expect a NEGATIVE delta about as often as a positive one, and do not report either as the
+    /// answer.** Four runs on a local NTFS volume gave +11.3, −67.0, −21.2 and +29.2 µs/file: the copy
+    /// itself (open, read-loop, write, permissions, times, per file) varies by far more than the two
+    /// extra path resolutions the guard adds, so on local storage this measures noise. It is still
+    /// worth running — a delta that ever came out *consistently* large would mean something changed —
+    /// but the number to quote for the guard's cost is the syscall count on [`copy_one_verified`], and
+    /// the machine to re-measure wall clock on is a **network** destination, where each resolution is a
+    /// round trip and no longer hides behind the copy.
+    #[test]
+    #[ignore = "measurement, not a property — see the doc comment; run with --ignored"]
+    fn cpe_1889_measure_the_guard_cost() {
+        const DIRS: usize = 20;
+        const PER_DIR: usize = 100;
+
+        let d = scratch("cpe1889-cost");
+        let src = d.join("src");
+        let mut rels: Vec<String> = Vec::with_capacity(DIRS * PER_DIR);
+        for dir in 0..DIRS {
+            fs::create_dir_all(src.join(format!("d{dir}"))).unwrap();
+            for f in 0..PER_DIR {
+                let rel = format!("d{dir}/f{f}.bin");
+                fs::write(src.join(&rel), vec![b'x'; 4096]).unwrap();
+                rels.push(rel);
+            }
+        }
+
+        // Leg B first, so leg A cannot be flattered by leg B having warmed the metadata cache.
+        let unguarded_dst = d.join("dst-unguarded");
+        fs::create_dir_all(&unguarded_dst).unwrap();
+        let t_unguarded = std::time::Instant::now();
+        for rel in &rels {
+            let (s, t) = (src.join(rel), unguarded_dst.join(rel));
+            if let Some(parent) = t.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            crate::fsutil::copy_file_onto_no_follow_with_wording(
+                &s,
+                &t,
+                crate::fsutil::LinkGuardWording::BACKUP,
+            )
+            .unwrap();
+        }
+        let unguarded = t_unguarded.elapsed();
+
+        let guarded_dst = d.join("dst-guarded");
+        fs::create_dir_all(&guarded_dst).unwrap();
+        let t_guarded = std::time::Instant::now();
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &guarded_dst.to_string_lossy(),
+            &rels,
+            &[],
+            &[],
+            false,
+            true, // confirmed
+        )
+        .expect("a confirmed plan runs");
+        let guarded = t_guarded.elapsed();
+
+        assert!(results.iter().all(|r| r.ok), "the measurement is only meaningful if every entry copied");
+        let n = rels.len() as f64;
+        let delta = guarded.as_secs_f64() - unguarded.as_secs_f64();
+        // stderr, not `println!`: libtest swallows the macros (see `require_staged`'s doc comment).
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "CPE-1889 guard cost over {} files ({DIRS} dirs x {PER_DIR}): guarded {:?}, pre-fix shape \
+             {:?}, delta {:.3} ms total = {:.1} us/file. Extrapolated to 100k files: {:.1} s.",
+            rels.len(),
+            guarded,
+            unguarded,
+            delta * 1000.0,
+            delta / n * 1_000_000.0,
+            delta / n * 100_000.0,
+        );
         let _ = fs::remove_dir_all(&d);
     }
 
