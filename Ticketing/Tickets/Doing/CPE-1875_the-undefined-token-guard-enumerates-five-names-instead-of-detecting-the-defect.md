@@ -83,3 +83,56 @@ the reasoning.
   unchanged since they carry extra meaning beyond coverage. Expect `--mono` (CPE-1876, ~24 call
   sites) to go red immediately; disposition an explicit dated allowlist pointing at CPE-1876 rather
   than fixing it here.
+- **2026-08-26 USMST (attempt 2/3)** — PR #1030 came back CHANGES REQUESTED from an independent
+  reviewer, plus a third finding from UAT. All three were real and fixed:
+  1. **Component-local exemption was forgeable.** `declaresItself` only checked that `token:`
+     appeared anywhere in the file, so `<div style="--newtok: #654321"><span style="color:
+     var(--newtok, #654321)"></span></div>` read as "a legitimate local variable" and was invisible
+     to every assertion — a masking literal in local-variable costume, functionally identical to the
+     CPE-1810/1821/1876 defect. Fixed: the exemption now requires the declared value to be
+     genuinely DYNAMIC (contain a `{` — a Svelte mustache or JS template interpolation); a
+     static-valued declaration no longer qualifies. `--indent`/`--sw` (both real computed values)
+     remain exempt; confirmed via full-suite green (59/59) both before and after the fix, with no
+     new failures for either.
+  2. **Comment stripper missed `//` line comments.** Only `/* */` and `<!-- -->` were stripped, so a
+     future `.ts` doc comment quoting the idiom by name (this file's own 41-line header uses `//`
+     throughout) would scan as a real call site and red CI for prose. Fixed with a quote-aware
+     `stripLineComments` scanner (tracks quote-string state with escape handling) so a `//` inside a
+     string — a `https://` URL, or plain in-string text — survives untouched while a real line
+     comment is removed before the token scanner runs.
+  3. **Remediation message was dead code.** `expect(undefined).toMatch(HEX_RE)` throws vitest's own
+     `TypeError: .toMatch() expects to receive a string, but got undefined` before the custom "add a
+     dated ALLOWLIST entry" message is ever used — so a failing developer only ever saw the test
+     title, never the advice. Fixed by asserting `toBeDefined()` (with the same message) before the
+     `toMatch()` check, in the two places this ticket introduced. The three pre-existing invariants
+     below this ticket's rewrite were confirmed byte-identical by the reviewer and were not touched.
+
+  **Red-proof evidence** (all three run against the real repo, confirmed RED/behaving as required,
+  then reverted — `git diff --stat` clean before and after each):
+  - (1) Added `<div style="--cpe1875-masking-probe: #654321">` + `var(--cpe1875-masking-probe,
+    #654321)` to `FileList.svelte` -> 5 failures (one per theme block), e.g.:
+    `--cpe1875-masking-probe (referenced from src/lib/components/FileList.svelte) did not resolve to
+    a hex in bare :root (default) — got raw value undefined. If this is known, pre-existing debt,
+    add a dated entry to ALLOWLIST above pointing at the ticket that owns it — do not fix the
+    underlying token here unless that IS the ticket this work is filed under.: expected undefined to
+    be defined` — proves both the masking-literal catch AND (see below) the remediation message
+    reaching output. Confirmed `--indent`/`--sw` (genuinely dynamic) remained exempt throughout
+    (59/59 still green after revert).
+  - (2) Added to `src/lib/colorRules.ts`: a real `//` comment quoting `var(--cpe1875-linecomment-
+    probe, #654321)` by name (must NOT be flagged), plus `"https://example.com/docs" + "
+    var(--cpe1875-urlline-probe, #654321)"` and `"not a url // just text" + "
+    var(--cpe1875-stringslash-probe, #654321)"` (both real call sites, each preceded by a `//`
+    inside a string, must survive). Result: `--cpe1875-urlline-probe` and
+    `--cpe1875-stringslash-probe` both failed correctly (5 failures each, all theme blocks) —
+    proving the URL and in-string-slash cases survived the stripper. A temporary diagnostic dump of
+    `discovered.keys()` confirmed `--cpe1875-linecomment-probe` was ABSENT from the discovered set:
+    `CPE1875_DISCOVERED_KEYS: ["--accent","--cpe1875-urlline-probe","--cpe1875-stringslash-probe",
+    "--surface","--text","--border","--surface-alt","--border-strong","--mono","--selection",
+    "--text-dim","--bg"]` — the real comment was correctly stripped and never scanned.
+  - (3) Demonstrated by probe (1)'s own output above: the full custom message ("...did not resolve
+    to a hex... If this is known, pre-existing debt, add a dated entry to ALLOWLIST above...")
+    appears verbatim in the `AssertionError`, not swallowed by vitest's `.toMatch()` TypeError.
+
+  Guardrails re-run clean after the fix: `npm run check` — 0 errors, 0 warnings. `npx vitest run` —
+  331 files / 4479 tests, all green. Rebased onto `main` (moved: CPE-1734, CPE-1869, CPE-1889) and
+  pushed attempt 2.
