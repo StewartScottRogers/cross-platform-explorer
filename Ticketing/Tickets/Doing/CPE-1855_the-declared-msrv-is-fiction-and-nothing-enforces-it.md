@@ -242,3 +242,21 @@ changed (`crates/server`, `crates/security --features jwt`, `crates/ftp --featur
 `src-tauri`) all green, and the typed-bindings drift guard re-run (`export_bindings`) confirmed
 byte-identical output — no drift. Pushed as `8133858f` and CI re-run; see PR #1027 for the live
 result at push time.
+
+**Follow-up, same day: the `msrv` job's OWN first real run found a job bug, not a wrong number.**
+Watched CI to conclusion this time (per this attempt's explicit instruction to watch, not "push and
+move on"). The `msrv` job reported `sidecar/host` and `src-tauri` as MSRV failures at 1.88.0 — but
+both were `libdbus-sys`/`glib-sys` build-script failures on a missing SYSTEM library (`dbus-1`,
+`glib-2.0` via pkg-config), nothing to do with the Rust toolchain. The `Backend (ubuntu-latest)` and
+`Sidecar platform (ubuntu-latest)` jobs already install exactly those packages before their own
+`cargo check`; the new `msrv` job just never got the same treatment. Added the union of both jobs'
+`apt-get install` lists (`libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+libdbus-1-dev pkg-config`) as one step in the `msrv` job, same ForceIPv4/retry/timeout hardening the
+other two jobs already carry. Pushed as `c3ccdcf7`.
+
+**CI watched to a real conclusion this time: GREEN.** 19 SUCCESS + 1 expected SKIPPED (`GUI smoke
+(windows-latest)`, an existing, unrelated skip), 0 failed, 0 pending, confirmed at SHA `c3ccdcf7` via
+`gh pr view 1027 --json headRefOid,mergeable,statusCheckRollup` (mergeable: MERGEABLE). The `MSRV
+(1.88.0) compiles on every manifest` job itself: pass, 13m59s. `Server crates (windows-latest)`, the
+long pole this repo's own CI comments document at ~55 minutes historically: pass, 28m45s this run.
+PR #1027 body updated with the full before/after story and the final green result.

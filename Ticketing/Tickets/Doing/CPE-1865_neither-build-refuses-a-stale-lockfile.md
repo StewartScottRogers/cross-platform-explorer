@@ -270,3 +270,10 @@ nothing about this probe disturbed the existing guard-test state.
 
 The GitHub Actions run itself: pushed as `8133858f` (this attempt's commit, combined with CPE-1855's
 MSRV floor correction above) and watched to conclusion this time — see PR #1027 for the live result.
+
+**Final result: CI GREEN at SHA `c3ccdcf7`** (a follow-up push fixing an unrelated `msrv`-job system-
+dependency gap CPE-1855's Work Log covers). 19 SUCCESS + 1 expected SKIPPED, 0 failed, 0 pending,
+`mergeable: MERGEABLE`. Every `--locked` site this ticket added — CI, release, release-sidecar,
+model-snapshot, plus the four `cargo check --locked` preflights ahead of `tauri-action`/`npm run
+tauri build` — ran for real in this CI run and passed, not just locally. PR #1027 body carries the
+final before/after summary.
