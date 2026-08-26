@@ -273,3 +273,87 @@ that is **not** CPE-1872's to fix — it predates that PR and is a different tru
   updated to pass `--skip-pin-check`). Frontend: `npx vitest run` (full suite) 331 files / 4463 tests
   pass; `npm run check` (svelte-check) 0 errors, 0 warnings. Both workflow YAMLs
   (`release-sidecar.yml`, `release.yml`) parse clean under `yaml.safe_load`.
+
+- **2026-08-26 (Worker) — attempt 3, PR #1028 (SHA `653fa838`) re-reviewed. Four of five original
+  findings CLOSED by execution (the auditor re-ran every attempt-1/2 attack and confirmed it stays
+  red/covered — overlay bypass, endpoints pin, `release-sidecar.yml`'s real gate, the tag path firing).
+  One NEW finding — finding 6 — is why this attempt exists.**
+
+  **Finding 6 (independent Security Auditor, BLOCKING, DEMONSTRATED) — a bypass that doesn't go
+  through `--config` at all.** Tauri's own `tauri-utils::config::parse::read_from` reads
+  `tauri.conf.json` and then AUTOMATICALLY looks for `tauri.macos.conf.json` /
+  `tauri.linux.conf.json` / `tauri.windows.conf.json` next to it and merges each via RFC 7396 — no
+  `--config` flag, no workflow involvement, unconditional on every build. None of the three files
+  exists in this repo and none was in `CONFIG_CHAIN` (which only lists overlays `release-sidecar.yml`
+  explicitly passes via `--config`). The auditor's proof: `src-tauri/tauri.windows.conf.json`
+  containing only `{ "plugins": { "updater": { "pubkey": "...", "endpoints": [...] } } }` left
+  `sidecarBundleResources.test.ts` 10/10 green, `crates/updater-verify`'s full suite 39/39 green, and
+  `verify-release-artifacts` passing the pin check outright (failing only later, on a missing
+  manifest path unrelated to trust). Every guard from rounds 1-2 was blind to it, on every Windows
+  build, plain channel and sidecar both — and it's better camouflage than the overlay attack, since
+  `tauri.windows.conf.json` is a normal, expected Tauri filename that reads as "Windows bundle tweak"
+  and can carry a genuine Windows setting right beside the `plugins.updater` block.
+
+  **What shipped, round 3 — the auditor's own recommended fix, an existence-only check (not a
+  merge/validate), applied on both sides:**
+  - `crates/updater-verify/tests/pinned_pubkey_guard.rs` — new
+    `no_automatic_per_platform_config_overrides_the_updater_pin`: for each of the three filenames,
+    either it doesn't exist (the expected state today) or, if it does, it must not carry a
+    `plugins.updater` key at all. Covers the base/tag path.
+  - `src/lib/sidecarBundleResources.test.ts` — matching `describe` block, same three filenames, same
+    existence-only check. Covers the sidecar path.
+  - Refactored `repo_tauri_conf_path()` in the Rust test file to build on a new shared
+    `repo_src_tauri_dir()` helper (needed the directory itself, not just the base config path).
+
+  **Two required doc corrections, both applied, both one clause as scoped:**
+  1. `pinned_pubkey.rs`'s and `sidecarBundleResources.test.ts`'s claim that the merged-overlay guard
+     computes "the FULL merged config" was false while finding 6 stood (it never saw the automatic
+     per-platform files). Corrected to scope the claim to "the full merged `--config` overlay chain"
+     with an explicit pointer to the new finding-6 check for the automatic path, plus a new paragraph
+     in `pinned_pubkey.rs`'s module doc describing finding 6 and where it's closed.
+  2. The PR body's threat model said the guard "fails the tag path before it signs or publishes
+     anything." True for `release-sidecar.yml` (its `verify-updater-pin` job gates `release-sidecar`
+     via `needs:` before any build/sign/publish step runs), **not** true for `release.yml` — there the
+     pin is DETECTIVE, not preventive: `verify-published-manifest` is `needs: release`, and by the
+     time it runs the `release` matrix has already built, signed, and uploaded installers plus
+     `latest.json` into the DRAFT release. Nothing reaches the public without the separate manual
+     publish gate (`/run`'s own asset-presence check), so the end outcome is still correct, but the
+     PR body is being corrected to say "detective" for the plain channel, "preventive" for the
+     sidecar channel, accurately, rather than claiming prevention for both.
+
+  **Red-proof, all three filenames, both sides, done for real (not just one and assumed three, per
+  explicit instruction):**
+  - `tauri.windows.conf.json` with the attacker block: vitest — `1 failed | 12 passed`, naming
+    `src-tauri/tauri.windows.conf.json exists and sets plugins.updater`; `cargo test --test
+    pinned_pubkey_guard` — `2 passed; 1 failed`, `SECURITY (CPE-1873 finding 6): ...tauri.windows.conf.json
+    exists and sets plugins.updater`, exit 101. Deleted, confirmed `git status --short` clean.
+  - `tauri.macos.conf.json`, identical block: same shape, vitest `1 failed | 12 passed` naming
+    `tauri.macos.conf.json`; Rust `SECURITY (CPE-1873 finding 6): ...tauri.macos.conf.json exists...`,
+    exit 101. Deleted, confirmed clean.
+  - `tauri.linux.conf.json`, identical block: same shape, vitest `1 failed | 12 passed` naming
+    `tauri.linux.conf.json`; Rust `SECURITY (CPE-1873 finding 6): ...tauri.linux.conf.json exists...`,
+    exit 101. Deleted, confirmed clean.
+  - Final state after all three probes: `cargo test` in `crates/updater-verify` 40/40 (22 lib + 3
+    pinned-pubkey [pubkey, endpoints, finding-6] + 15 release_guard); `npx vitest run
+    src/lib/sidecarBundleResources.test.ts` 13/13; `npm run check` clean; `git status --short` clean
+    (no attacker fixture left behind, no private key material ever generated for this round — the
+    attacker "pubkey" used is a plain non-minisign placeholder string, since finding 6's check never
+    parses it as a key, only checks for the JSON key's presence).
+
+  **Not in scope for this round, filed separately per the Foreman as CPE-1900 / CPE-1901, not
+  touched here:** `CONFIG_CHAIN` being a hand-maintained literal with nothing tying it to
+  `release-sidecar.yml`'s actual `--config` args; `--skip-pin-check` being a six-word kill switch on
+  the tag-path `cargo run` line.
+
+  **Rebased onto `main`** (moved since attempt 2 landed — CPE-1734, CPE-1869, CPE-1889 and others),
+  pushed. New head SHA recorded at the top of the final commit for this round.
+
+  **Verification, round 3.** `crates/updater-verify`: `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` 40/40. Frontend: `npx vitest run src/lib/sidecarBundleResources.test.ts` 13/13;
+  `npm run check` (svelte-check) 0 errors, 0 warnings.
+
+  **CI status: GitHub Actions was in a declared major outage during this round** (critical incident,
+  database primary failover, runs queued and not starting) — did not wait on or poll CI per explicit
+  instruction not to. All verification above is local. CI is genuinely pending on the pushed SHA, not
+  quietly green and not quietly broken; report to the Foreman states this explicitly rather than
+  claiming a result that wasn't observed.
