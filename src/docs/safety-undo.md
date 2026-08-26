@@ -66,8 +66,8 @@ Three details are worth knowing, because they are deliberate:
     distinct file there and nothing is ambiguous, so it is copied, moved, and mirror-deleted like any
     other file.
 
-- **A backup job refuses to write onto a link, or onto a file that has more than one name — the last
-  step of the path only** (CPE-1879). A backup copies bytes onto whatever the destination name points
+- **A backup job refuses to write onto a link, or onto a file that has more than one name**
+  (CPE-1879). A backup copies bytes onto whatever the destination name points
   at; if that final name is a shortcut/symlink, or a second name for a file that lives somewhere else
   entirely (some dedup tools and sync clients give one file several names, as
   [Checkpoints & Rollback](16-checkpoints) also explains), writing there would change that *other* place
@@ -81,13 +81,19 @@ Three details are worth knowing, because they are deliberate:
     `rsync --link-dest`-style folder, a Time Machine-shaped backup, a package manager's store — the
     refused entries are the store's *own* links doing their job, and breaking them would defeat the
     point of the store; leave those refusals alone.
-  - **This only covers the file's own name — not a folder above it.** A directory junction sitting
-    anywhere above the destination (on Windows, needing no special privilege to create) can still
-    redirect a write to a whole subtree outside the backup root; this guard cannot see that, because it
-    only inspects the file it is about to write, not the path leading to it. The mirror-delete side of a
-    backup job **is** protected against this (deletes check the resolved path first), so a backup job's
-    deletes and writes currently differ in how thoroughly they're guarded. Closing that gap is tracked
-    separately.
+  - **A folder above the file is now checked too** (CPE-1889). Until this was fixed, a *directory*
+    junction sitting anywhere above the destination — on Windows, creatable by anyone, no special
+    privilege needed — redirected a write to a whole subtree outside the backup folder, and the job
+    reported it as a **success**. Now, before each file is written, the app resolves the folder it is
+    about to write into and refuses the entry if that folder does not actually sit inside the backup
+    destination you chose. The write side and the mirror-delete side of a backup job are guarded the
+    same way at last; before, only deletes were.
+  - **What the folder check does and does not promise.** It refuses a redirect that is *already there*
+    when the job runs, which is the case that was measured. It cannot promise anything about someone
+    with write access to your backup destination who swaps a folder for a link at the exact instant the
+    file is being written — closing that needs an operating-system facility the app does not have on
+    all three platforms. If your backup destination is a shared network folder that other people can
+    write to, that residual risk is real and this guard does not remove it.
   - **Backup copies do not currently carry Windows' "downloaded from the internet" mark
     (`Zone.Identifier`).** A file copied by File Explorer keeps that mark, so Windows still warns before
     opening it after a restore; a file copied by a backup job in this app currently does not carry it
