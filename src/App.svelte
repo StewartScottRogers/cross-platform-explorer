@@ -639,9 +639,21 @@
       // this function `autoRun: true` jobs, so no test reaching it can distinguish the real value from a
       // constant. See that function for exactly what is and is not covered.
       await rawInvoke("apply_backup_plan_stream", { ...unattendedBackupArgs(job, p), onResult: channel });
-      const failed = results.filter((r) => !r.ok).length;
-      recordBackupRun(job.id, { when: Date.now(), ok: results.length - failed, failed, label: "auto" });
-      showNotice(failed ? $t("notice.autoBackupDoneWithFailures", { name: job.name, copied: results.length - failed, failed }) : $t("notice.autoBackupDone", { name: job.name, copied: results.length - failed }));
+      const failedResults = results.filter((r) => !r.ok);
+      const failed = failedResults.length;
+      // CPE-1879 review finding 3: the auto-run notice used to report only the ok/failed counts, so a
+      // per-file refusal (e.g. the link-guard refusal CPE-1879 added) never reached the user here either
+      // — the dashboard row wasn't even open to show it. Carry the first refusal's path + reason into
+      // both the persisted record (for the dashboard's own history view) and the toast itself.
+      const firstError = failedResults[0] ? { path: failedResults[0].path, error: failedResults[0].error } : undefined;
+      recordBackupRun(job.id, { when: Date.now(), ok: results.length - failed, failed, label: "auto", firstError });
+      const summary = failed
+        ? $t("notice.autoBackupDoneWithFailures", { name: job.name, copied: results.length - failed, failed })
+        : $t("notice.autoBackupDone", { name: job.name, copied: results.length - failed });
+      const detail = firstError
+        ? " " + $t("notice.autoBackupFirstFailure", { name: fileNameOf(firstError.path), reason: firstError.error })
+        : "";
+      showNotice(summary + detail);
     } catch (e) {
       showNotice($t("notice.autoBackupFailed", { name: job.name, error: String(e) }), true);
     }

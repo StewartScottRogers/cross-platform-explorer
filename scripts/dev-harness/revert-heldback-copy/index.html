@@ -1,0 +1,68 @@
+<!doctype html>
+<!--
+  CPE-1869 verification harness — "the held-back list tells you to delete files it will not show you".
+  Mounts the REAL `RevertOutcomePanel.svelte` directly (no iframe/narrow-width machinery needed here —
+  unlike CPE-1635/CPE-1660/CPE-1836, nothing under test depends on viewport width) with three canned
+  `RevertOutcome` fixtures side by side:
+
+    1. UNRESTORABLE-KEY  — a permanent hold-back that advises manual deletion. Must show the CPE-1869
+       "Copy all N held-back paths" affordance.
+    2. ALIAS/COLLISION   — same `held_back_by_checkpoint` discriminant, but the paths ARE the checkpoint's
+       own content under another spelling. Must NOT show the copy affordance (the ticket's own acceptance
+       criterion) — its next step already reads "nothing needs doing".
+    3. RETRYABLE         — `skipped_by_plan`, advises re-running. Must NOT show the copy affordance either
+       (nothing to delete yet).
+
+  Loads the app's real `src/app.css` so the panel renders with real theme tokens; `?theme=dark` flips
+  `documentElement.dataset.theme` the same way `src/lib/theme.ts` does in the real app.
+
+  Usage: load `index.html?theme=light` or `index.html?theme=dark`.
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1869 harness — RevertOutcomePanel copy-full-list affordance</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html, body { margin: 0; padding: 0; }
+      body { background: var(--bg); font-family: system-ui, sans-serif; padding: 16px; }
+      .case {
+        max-width: 520px;
+        margin-bottom: 20px;
+        padding: 12px;
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        background: var(--surface);
+      }
+      .case h2 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-dim);
+      }
+      #readout {
+        position: fixed; top: 8px; right: 8px; max-width: 380px;
+        background: #000; color: #0f0; font-size: 11px; padding: 6px 8px; white-space: pre-wrap;
+        font-family: monospace; z-index: 999;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="case">
+      <h2>1. Unrestorable-key hold-back (advises manual delete)</h2>
+      <div id="mount-unrestorable"></div>
+    </div>
+    <div class="case">
+      <h2>2. Alias/collision hold-back (must NOT get the affordance)</h2>
+      <div id="mount-alias"></div>
+    </div>
+    <div class="case">
+      <h2>3. Retryable hold-back (must NOT get the affordance)</h2>
+      <div id="mount-retryable"></div>
+    </div>
+    <pre id="readout">booting…</pre>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

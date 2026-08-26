@@ -312,7 +312,7 @@
 
     {#if outcome}
       <div class="outcome" data-testid="outcome-panel">
-        <RevertOutcomePanel {outcome} testid="outcome" verb="Reverted" />
+        <RevertOutcomePanel {outcome} testid="outcome" verb="Reverted" root={path} />
       </div>
     {/if}
 

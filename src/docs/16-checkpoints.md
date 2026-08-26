@@ -61,8 +61,13 @@ This is the **held back** count above — kept apart from **failed** on purpose,
 still being there is the safety net working rather than something going wrong.
 
 Held-back deletions come with the reason and a next step, shown once for the whole group rather than
-repeated for every file, followed by the file names (the first few, then a count). The next step is
-honest about whether trying again helps:
+repeated for every file, followed by the file names (the first few, then a count). Where the advice is to
+go delete the files yourself, a **Copy all N held-back paths** button sits above that list — it copies
+every held-back path (not just the few shown), one per line, ready to paste into a search box, a
+terminal, or a text editor, so you never have to re-run the revert just to see the rest of the names. It
+does not appear when there is nothing to delete (see "a file the checkpoint already holds" below) or when
+the advice is to run the revert again rather than delete anything. The next step is honest about whether
+trying again helps:
 
 - Where the cause is temporary — a locked file, or stored content that has gone missing — it says to fix
   that and run the revert again, and the held-back cleanups then apply.

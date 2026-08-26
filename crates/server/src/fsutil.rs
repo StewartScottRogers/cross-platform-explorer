@@ -1339,13 +1339,70 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a
 /// restore is *believed*, so a silently skipped entry is the CPE-1803/1804/1805/1816 defect again.
 pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
+    copy_file_onto_no_follow_with_wording(src, dst, LinkGuardWording::RESTORE)
+}
+
+/// Wording for the three link-guard refusals below, since one function now backs writers with
+/// different nouns (CPE-1879 review, finding: the refusal text hard-coded "a restore ... never writes
+/// through one" and "the folder being restored", which was simply wrong once `backup::copy_one_verified`
+/// started calling this function too, and the hard-link remedy ("Break the link first...") is actively bad
+/// advice for a backup destination that is a deliberate deduplicating store).
+///
+/// [`copy_file_onto_no_follow`] is the unparameterised entry point every existing caller and test in
+/// this module already uses -- it is unchanged, and defaults to [`LinkGuardWording::RESTORE`]. Only a
+/// caller that needs different wording (currently just `backup::copy_one_verified`) calls
+/// [`copy_file_onto_no_follow_with_wording`] directly.
+pub struct LinkGuardWording {
+    /// Fills "...and {verb} never writes through one".
+    pub verb: &'static str,
+    /// Fills "...that live outside {scope}, which no path check can see...".
+    pub scope: &'static str,
+    /// The full remedy sentence appended after the hard-link explanation. Not shared verbatim across
+    /// callers on purpose -- see [`LinkGuardWording::BACKUP`].
+    pub remedy: &'static str,
+}
+
+impl LinkGuardWording {
+    /// The original wording, unchanged since CPE-1845/1846/1857: `revert_engine::apply_write` and
+    /// `snapshot_capture::restore` both write the app's own checkpoint content back onto the user's tree.
+    pub const RESTORE: Self = Self {
+        verb: "a restore",
+        scope: "the folder being restored",
+        remedy: "Break the link first (copy the file over itself) and run this again.",
+    };
+
+    /// CPE-1879: `backup::copy_one_verified`. The remedy differs from [`Self::RESTORE`] on purpose -- a
+    /// backup destination hitting this rule is, unlike a checkpoint restore, plausibly a legitimate
+    /// deduplicating store (`rsync --link-dest`, Time Machine-style backups, a package manager's store),
+    /// and "break the link" is destructive, wrong advice to hand that user. See the reasoning on
+    /// `backup::copy_one_verified` for why the rule still refuses regardless.
+    pub const BACKUP: Self = Self {
+        verb: "a backup",
+        scope: "the backup root",
+        remedy: "If this destination is a deliberate deduplicating store (rsync --link-dest, a \
+                 Time-Machine-style backup, a package manager's store), this refusal is protecting it \
+                 on purpose -- leave the entry as it is. Otherwise, break the link (copy the file over \
+                 itself) and run the backup again.",
+    };
+}
+
+/// The parameterised form -- see [`LinkGuardWording`] for why this exists and [`copy_file_onto_no_follow`]
+/// for the default-wording entry point every other caller uses unchanged.
+pub fn copy_file_onto_no_follow_with_wording(
+    src: &Path,
+    dst: &Path,
+    wording: LinkGuardWording,
+) -> Result<u64, String> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
-    // only production caller is `revert_engine::apply_write`, whose refusal text is rendered in the
-    // revert panel — and `src` there is a path inside the app's private checkpoint store. CPE-1845
-    // removed exactly that leak from this call site's previous `fs::copy` error and replaced it with the
-    // blob's already-hex-validated hash; a source path smuggled back in through this string would undo
-    // it. The caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below:
-    // that is the user's own tree, which is the half they need to see.
+    // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
+    // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
+    // store -- CPE-1845 removed exactly that leak from this call site's previous `fs::copy` error and
+    // replaced it with the blob's already-hex-validated hash) and, since CPE-1879, `backup::copy_one_verified`
+    // (whose `src` is the user's own source tree, not private at all). The source stays unnamed uniformly
+    // regardless of caller -- nothing here special-cases that, since it is not the half of the picture that
+    // needs highlighting either way, and a single rule beats one that quietly depends on `wording`. The
+    // caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below: that is
+    // the user's own tree, which is the half they need to see.
     let mut r = std::fs::File::open(src).map_err(|e| format!("the source could not be opened: {e}"))?;
     // Read from the OPEN HANDLE, not from a path stat that a swap could have invalidated — the same
     // authority `copy_file_into_claimed_slot` uses, and the reason a FIFO or directory substituted at
@@ -1375,9 +1432,10 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
             let _ = std::fs::remove_file(dst);
         }
         return Err(format!(
-            "{}: this name is a link, and a restore never writes through one — a link's target can be \
+            "{}: this name is a link, and {} never writes through one — a link's target can be \
              re-pointed after any check. Nothing was written for this entry",
-            dst.display()
+            dst.display(),
+            wording.verb
         ));
     }
 
@@ -1397,12 +1455,13 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
     // is how the next platform gets none.
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         let why = if facts.is_reparse_point {
-            Some(
-                "this name is a reparse point (a link, junction or stand-in for another name), and a \
-                 restore never writes through one",
-            )
+            Some(format!(
+                "this name is a reparse point (a link, junction or stand-in for another name), and {} \
+                 never writes through one",
+                wording.verb
+            ))
         } else if facts.is_dir {
-            Some("this name is a directory, so there is nothing here a file's bytes could replace")
+            Some("this name is a directory, so there is nothing here a file's bytes could replace".to_string())
         } else {
             None
         };
@@ -1424,12 +1483,12 @@ pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
             drop(w);
             return Err(format!(
                 "{}: this file has {} names (it is hard-linked), and writing here would change the \
-                 content at every one of them — including any that live outside the folder being \
-                 restored, which no path check can see because a hard link resolves to itself. Break \
-                 the link first (copy the file over itself) and run this again. Nothing was written \
-                 for this entry",
+                 content at every one of them — including any that live outside {}, which no path check \
+                 can see because a hard link resolves to itself. {} Nothing was written for this entry",
                 dst.display(),
-                facts.links
+                facts.links,
+                wording.scope,
+                wording.remedy
             ));
         }
     }
@@ -3416,6 +3475,34 @@ pub fn confined_to(path: &Path, root: &Path) -> bool {
     let Ok(real_root) = std::fs::canonicalize(root) else {
         return false; // an unresolvable root confines nothing
     };
+    confined_to_resolved_root(path, &real_root)
+}
+
+/// [`confined_to`] with the root's `canonicalize` already done — the **same** walk, the **same**
+/// failure policy, hoisted out of a caller's inner loop (CPE-1889).
+///
+/// This is the "extend this, do not fork it" seam the doc above asks for: [`confined_to`] is now a
+/// two-line wrapper over this function, so there is still exactly one containment walk in the crate and
+/// a change to it cannot land in one copy and miss the other.
+///
+/// # Why it exists
+///
+/// `backup.rs`'s copy/update loop asks containment **once per file**, on the inner loop of an engine
+/// that may run over a 100,000-file tree to a network destination where every path resolution is a
+/// round trip. `canonicalize(root)` is the same answer every time — the destination root is fixed for
+/// the whole run — so paying for it per entry is pure waste. The caller resolves the root once, before
+/// the loop, and passes it here.
+///
+/// # Precondition — `real_root` must ALREADY be canonical
+///
+/// Obtain it from `std::fs::canonicalize`, once, and do not construct it by hand. The comparison below
+/// is `starts_with` against `real_root` verbatim: a `real_root` that still carries a symlinked
+/// component, a `.`/`..`, or (on Windows) a non-verbatim prefix will not match the canonical form the
+/// walk produces, so the verdict comes back `false`. That errs toward **refusing** — the safe direction
+/// for a guard on a path about to be written — but it is a wrong answer for a legitimate path, so the
+/// caller owes the one `canonicalize`. A root that will not canonicalize at all confines nothing and
+/// the caller must treat that as a refusal, exactly as [`confined_to`] does.
+pub fn confined_to_resolved_root(path: &Path, real_root: &Path) -> bool {
     // CPE-1742 review round 4 (containment regression, caught before merge): `path.to_path_buf()`
     // preserved a TRAILING SEPARATOR (`<root>/link_out/`) and a literal `.` verbatim. For an escaping
     // symlink specifically, that is not cosmetic: `canonicalize("<root>/link_out/")` fails
@@ -3441,7 +3528,7 @@ pub fn confined_to(path: &Path, root: &Path) -> bool {
         match std::fs::canonicalize(&probe) {
             // `starts_with` is component-wise, so `<root>2` does not start with `<root>`, and it is
             // true for `real_root` itself — the root is contained in itself, by design (see above).
-            Ok(real) => return real.starts_with(&real_root),
+            Ok(real) => return real.starts_with(real_root),
             // CPE-1742 review, cross-OS gate: `NotFound` alone is not the whole "nothing here yet,
             // keep walking up" class. A path whose PREFIX component exists but is a plain FILE, not a
             // directory (`<root>/a.txt/new.txt`), also cannot canonicalize — but POSIX `realpath(3)`
@@ -5299,6 +5386,72 @@ mod tests {
         // Target doesn't exist → allow (see the precondition: it cannot be destroyed, and the caller's
         // own remove reports it). This is sound ONLY for a remove target.
         assert!(contained_under(&root.join("never-existed.txt"), &root).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1889: [`confined_to_resolved_root`] must be the **same walk**, not a second one that can
+    /// drift. `confined_to` is a wrapper over it, so the two can only disagree if the wrapper's
+    /// `canonicalize(root)` disagrees with what a caller hoists out of its own loop — which is exactly
+    /// the mistake the seam invites. Driven over the full escape corpus, including the three shapes the
+    /// test below enumerates, so a future edit to either name has to keep them equal.
+    #[test]
+    fn confined_to_resolved_root_agrees_with_confined_to_on_every_shape() {
+        let d = scratch("confined-hoisted");
+        let root = d.join("root");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), b"y").unwrap();
+
+        // A live directory link OUT of the root — the shape backup.rs's junction case is made of. It
+        // may legitimately fail to stage on a filesystem with no link support; the other rows still run.
+        let escaping_dir_link = make_dir_link(&outside, &root.join("out"));
+
+        let real_root = std::fs::canonicalize(&root).unwrap();
+        let mut cases: Vec<std::path::PathBuf> = vec![
+            root.clone(),
+            root.join("nested"),
+            root.join("a.txt"),
+            root.join("does-not-exist-yet.txt"),
+            root.join("nested/deeper/still-absent.txt"),
+            root.join(".."),
+            root.join("../evil.txt"),
+            outside.join("victim.txt"),
+            d.join("no-such-root-at-all/x"),
+        ];
+        if escaping_dir_link {
+            cases.push(root.join("out"));
+            cases.push(root.join("out/victim.txt"));
+        }
+
+        for case in &cases {
+            assert_eq!(
+                confined_to(case, &root),
+                confined_to_resolved_root(case, &real_root),
+                "the hoisted-root form must give the SAME verdict as `confined_to` for {case:?} — a \
+                 disagreement means the wrapper and the walk have drifted apart and one of the two \
+                 callers is now unguarded"
+            );
+        }
+        // Not just "equal": equal to the RIGHT answer, or two identically-broken functions would pass.
+        assert!(confined_to_resolved_root(&root.join("a.txt"), &real_root), "an ordinary file is inside");
+        assert!(
+            !confined_to_resolved_root(&outside.join("victim.txt"), &real_root),
+            "a path plainly outside the root must be refused"
+        );
+        if escaping_dir_link {
+            assert!(
+                !confined_to_resolved_root(&root.join("out/victim.txt"), &real_root),
+                "a path THROUGH a directory link that leaves the root must be refused — this is the row \
+                 CPE-1889's backup fix depends on"
+            );
+        }
+
+        // An unresolvable root confines nothing. The hoisted form cannot be handed one (its caller
+        // canonicalises first), so the equivalent mistake is a root that is NOT canonical: it must fail
+        // toward refusing, never toward admitting.
+        assert!(!confined_to(&root.join("a.txt"), &d.join("no-such-root")), "an unresolvable root refuses");
         let _ = std::fs::remove_dir_all(&d);
     }
 
