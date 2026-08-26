@@ -70,3 +70,32 @@ independent of this sweep.
   job logs (fetched via the non-truncating `gh api .../logs` endpoint) that the artefacts and
   signatures were uploaded successfully in every failed run, which is what makes a retroactive check
   possible at all.
+
+## Correction — the window, measured 2026-08-26
+
+Earlier tickets and the prior run's checkpoint carry "broken for 27 days, since 2026-08-04". Both
+figures are wrong. Measured by CPE-1873's independent Security Auditor:
+
+- Last **successful** `release.yml` run: `v0.57.33`, **2026-07-25**.
+- Every run from `v0.57.35-sidecar` (**2026-07-26**) through `v0.57.69` / `v0.57.69-sidecar`
+  (2026-08-23) — roughly 15 tagged releases — failed on all three legs at the same step,
+  `Verify updater manifest + signatures (CPE-1058)`. Confirmed on runs `30219127836`,
+  `31133248284`, `32645894722`, `32645968177`.
+
+So the outage is **31 days from 2026-07-26**, and the count of releases that shipped unverified is
+larger than the six this ticket's title names. Re-title or restate the scope when this is picked up.
+
+Two further facts the same audit established, both of which change what "fix it" means here:
+
+1. **CPE-1872's redesigned `verify-published-manifest` job has never executed.** It merged
+   2026-08-24T03:27Z; the newest tag is 2026-08-23T14:35Z. Every failure listed above is the *old*
+   per-leg step. The replacement is entirely unexercised in production — do not assume it works.
+2. **`release-sidecar.yml` — the channel that actually ships, and per its own comment "IS the
+   auto-update channel (CPE-768)" — has no signature or manifest verification of any kind.**
+   Grepping it for `verify` / `latest.json` returns only ffmpeg-checksum and comment hits. So the
+   dead step is on the *plain* channel; the shipping channel never had the check at all. That is a
+   bigger hole than a broken job, and it is the one worth closing first.
+
+Related, both filed 2026-08-26 from the same audit: **CPE-1893** (the `catalog` job skipped behind
+this failing job for a month) and **CPE-1894** (`release.yml`'s `v*` pattern firing on `-sidecar`
+tags, mixing both builds' installers into one live manifest).
