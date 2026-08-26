@@ -39,10 +39,28 @@
 //! way it can override `bundle.resources` — the exact footgun CPE-1270/1271 already documented for
 //! that key, now independently demonstrated for this one (CPE-1873 attempt 2, Security Auditor: one
 //! added line in `tauri.sidecar.conf.json`, base file untouched, both checks above still green).
-//! `src/lib/sidecarBundleResources.test.ts` closes that: it computes the FULL merged config per
-//! shipped OS from the real overlay chain and asserts `plugins.updater.pubkey`/`.endpoints` still
-//! equal the pin. Keep its two literals in lockstep with the ones in this file — same value, same
-//! rotation procedure.
+//! `src/lib/sidecarBundleResources.test.ts` closes that: it computes the full merged config per
+//! shipped OS from the real `--config` overlay chain, **including Tauri's automatic per-platform
+//! config** (see next paragraph — that word matters, it used to just say "FULL" and that was false),
+//! and asserts `plugins.updater.pubkey`/`.endpoints` still equal the pin. Keep its two literals in
+//! lockstep with the ones in this file — same value, same rotation procedure.
+//!
+//! **A THIRD path, found independently of `--config` entirely (CPE-1873 attempt 3, Security Auditor,
+//! DEMONSTRATED):** Tauri merges a per-platform config file AUTOMATICALLY on every build, with no
+//! `--config` flag involved at all — `tauri-utils::config::parse::read_from` reads `tauri.conf.json`
+//! and then looks for `tauri.macos.conf.json` / `tauri.linux.conf.json` / `tauri.windows.conf.json`
+//! next to it and merges each via RFC 7396, unconditionally. None of the three exists in this repo
+//! today, and none was in `CONFIG_CHAIN` (which only lists overlays `release-sidecar.yml` explicitly
+//! passes via `--config`) — so a `src-tauri/tauri.windows.conf.json` carrying only a `plugins.updater`
+//! override left EVERY guard described above green (base pin, merged-overlay-chain pin, the
+//! `verify-release-artifacts` pin check) while shipping an attacker's root of trust on every Windows
+//! build, plain channel and sidecar both, because this mechanism has nothing to do with `--config` and
+//! fires on a plain `tauri.conf.json` read too. Closed two ways, one per language, same reasoning:
+//! `no_automatic_per_platform_config_overrides_the_updater_pin` in
+//! `tests/pinned_pubkey_guard.rs` (base/tag path) and a matching check in
+//! `sidecarBundleResources.test.ts` (sidecar path) — neither tries to merge/validate that file's
+//! content; both simply refuse its EXISTENCE with a `plugins.updater` key, since none of the three
+//! filenames is supposed to carry one right now.
 //!
 //! # What none of this proves
 //!
