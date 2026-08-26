@@ -3,7 +3,7 @@ id: CPE-1885
 title: key the bidi-escape guard's registry by expression text, not line number — it cost three round-trips in one day
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-23
