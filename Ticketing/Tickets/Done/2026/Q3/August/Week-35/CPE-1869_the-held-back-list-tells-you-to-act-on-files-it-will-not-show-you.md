@@ -3,7 +3,7 @@ id: CPE-1869
 title: the held-back list tells you to delete files it will not show you
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23
