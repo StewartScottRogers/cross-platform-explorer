@@ -91,6 +91,16 @@ than by what it says.
   Failure messages now name the component + bare expression first, addresses last. `npm run check`: 0
   errors, 0 warnings. `npx vitest run`: full suite green. Red-proofed for real (reformat stays green;
   delete goes red; new unregistered render goes red) — see the PR description for the exact commands and
-  captured output. PR #1026 (sibling, `RevertOutcomePanel.svelte`'s registry entry) was still OPEN at
-  push time, not yet merged — rebased onto current `origin/main` before opening the PR; will re-check for
-  its merge before calling this done.
+  captured output. Opened PR #1029. PR #1026 (sibling, `RevertOutcomePanel.svelte`'s registry entry) was
+  still OPEN at push time, not yet merged — rebased onto current `origin/main` before opening the PR.
+- **2026-08-26 USMST** — PR #1026 merged to `main` (5f91c852) while PR #1029's CI was running. Rebased
+  #1029 onto the new `origin/main` tip; resolved the one conflicting hunk by carrying #1026's
+  `RevertOutcomePanel.svelte` addition (the copy-full-list button's label) across into this ticket's
+  expression-only format rather than dropping it — confirmed with `git show origin/main:...` before and
+  `npx vitest run src/lib/bidiEscape.guard.test.ts` after (15/15 green). Force-pushed the rebase
+  (`git push --force-with-lease`); PR settled at SHA `5ef4dc09`, `mergeable: MERGEABLE`. Re-ran `npm run
+  check` (0/0) and the full `npx vitest run` (331 files / 4460 tests, +3 over the pre-rebase count from
+  #1026's new tests) — both green. Watched CI to a real conclusion on the rebased SHA: all 19 checks
+  passed (1 intentionally skipped — GUI smoke windows-latest), confirmed via `gh pr checks 1029
+  --json ... | grep pending` returning empty with a stable `total_count` of 19 across repeated reads.
+  PR ready for review/merge.
