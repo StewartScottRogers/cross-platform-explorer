@@ -18,3 +18,7 @@ samples/** -text
 # every checkout regardless of the user's autocrlf setting, the same way the .cmd/.bat
 # rule above pins the opposite direction for cmd.exe.
 scripts/*.mjs text eol=lf
+
+# CPE-1880 follow-up: `scripts/*.mjs` does not match subdirectories, so
+# `scripts/dev-harness/**/check.mjs` was left unpinned. Match nested scripts too.
+scripts/**/*.mjs text eol=lf

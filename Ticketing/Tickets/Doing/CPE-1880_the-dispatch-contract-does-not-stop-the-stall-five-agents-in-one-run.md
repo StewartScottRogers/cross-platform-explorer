@@ -281,7 +281,8 @@ test.
 
 `src/lib/sprintStallControls.test.ts` carries the five verbatim returns from run
 `batched-2026-08-23-1124` and the three phrasings CPE-1848 banned by name. All eight classify as stalls;
-the five all yield `re-invoke` on first offence and `take-over` on the second. **44 tests, all green.**
+the five all yield `re-invoke` on first offence and `take-over` on the second. **46 tests, all green**
+(this said 44 in the first draft — corrected).
 
 A benign corpus of eight must-not-trip cases runs alongside them, including the two that matter most:
 the *prescribed* return (`"CI still pending on 84d20517 — total_count=19 pending=4 mergeable=MERGEABLE.
@@ -294,7 +295,7 @@ either, the two controls would fight each other. It also covers the product's ow
 
 | Mutation | Result |
 |---|---|
-| every `severity: "hard"` → `"soft"` in `stall-check.mjs` | 5 of 44 red — a backgrounded watcher would be excused by a handoff line |
+| every `severity: "hard"` → `"soft"` in `stall-check.mjs` | 3 of 46 red — a backgrounded watcher would be excused by a handoff line (first draft said "5 of 44"; re-measured) |
 | `MAX_BUDGET_MS = HARNESS_TOOL_TIMEOUT_MS * 4` in `ci-poll.mjs` | red — the clamp assertions catch a re-widened budget |
 | restore `To watch CI: gh run watch <run-id> --interval 30` in `sprint.md` | 1 of 29 red in the CPE-1848 guard |
 
@@ -332,3 +333,132 @@ LF, so the pin changes only what lands on disk — zero content diff. A guard te
 `scripts/*.mjs`, not just this ticket's two, and it fired immediately on `organize-done.mjs`. Its
 reach is stated honestly in the test: if the unpinned file is one the suite imports, collection dies
 before any assertion runs; the value is naming an unpinned file nobody imports *yet*.
+
+
+### 2026-08-26, attempt 2 of 3 — CHANGES REQUESTED, addressed
+
+An independent opus reviewer re-derived the load-bearing measurement from scratch over its own window
+— 69 successful `ci.yml` runs, **0 inside 600 s**, min 28.6 min, median 61.5 min — and then removed
+queue time entirely (`startedAt → updatedAt`) to test whether the backlog was doing the work: median
+still 60.4 min, **1 of 69** under ten minutes. The claim survives with queue time stripped out. It also
+independently confirmed the guard-test inversion and both rejected alternatives, and its own two
+invented mutations (disabling the two-read branch; `total_count == 0 → done`) both red.
+
+Then it found that **my two controls disarmed each other**, which is the same defect this ticket is
+about, committed by the fix for it.
+
+#### B1 (blocking) — the contract's mandated tail excused the stalls it was meant to surface
+
+`stalled = hard || (matches.length > 0 && !handoff)`, and `HANDOFF_PATTERNS` includes
+`/\bCI still pending on\s+\S+/i` — the exact line the new contract **requires every worker to append**.
+So every compliant report carried the token that excused every soft match. With the mandated tail
+appended, recorded stalls **#1, #3 and #4 flipped from `re-invoke` to `accept`**. Three of five passed.
+
+And the replay tests never caught it because they replayed the returns **bare** — never in the only
+shape that occurs in production, which is with the contract's own required tail. Green test, broken
+guard. Exactly what I inverted CPE-1848's guard test for, one commit later.
+
+Fixed by promoting `awaiting-notification` from soft to **hard**: a wait keyed to a
+notification/monitor/event/wake-up is something a sub-agent structurally cannot receive, so nothing
+elsewhere in a report can excuse it. That recovered #3 but not #1 or #4, because:
+
+- **#1** defers via *"until the monitor notification arrives"* — the word "waiting" sits far outside the
+  50-character proximity window. Added the construction itself: `(monitor|background|harness|poll|watch)
+  notification` and `notification (arrives|lands|fires|…)`.
+- **#4** — *"Still in progress. Continuing to wait for completion."* — contains no notification keyword
+  at all. Split the old `open-ended-wait` family in two: **`continuing-to-wait` is now hard** (a
+  sub-agent has no loop to continue in and no signal to resume it, so the phrase is categorically a
+  stall), while **`no-further-action` stays soft** because *"the lockfile already matches, so no further
+  action is required"* is an ordinary, correct thing to report.
+
+Cost of the promotion, measured: **zero**. All eight benign corpus entries still `accept`, with and
+without the mandated tail — now asserted as a test rather than claimed.
+
+#### B2 (blocking) — the hard regex read only one English word order
+
+`background` had to sit immediately before the noun, so the adjective form was caught and the predicate
+form was invisible. All four of these classified `accept`, including the one closest to what the harness
+itself prints when it backgrounds a call:
+
+    "I've put the CI watch in the background and will pick it up once it finishes."
+    "The gh run watch call was moved to the background by the harness (task bfr274ats). Awaiting its result."
+    "A monitor task is running in the background; I'll circle back."
+    "Polling continues in a detached shell. Nothing further from me right now."
+
+The file claimed a deliberate over-flagging bias; on reversed word order it silently **under**-flagged.
+
+The naive alternation the review suggested tripped on the product's own vocabulary — *"Agent Watch
+streams filesystem events in the background"* — so the shipped pattern requires three things in the
+same sentence: a watcher noun, `in|to|into the background`, **and** a verb that means *parked it there*
+(`put|moved|left|kept|spawned|started|parked|backgrounded|running|is|was|…`). "Agent Watch streams …"
+has no such verb and stays clean; all four above match. Plus a `detached (shell|process|…)` family.
+
+#### B3 (blocking) — the `.gitattributes` guard would have redded every existing checkout
+
+Confirmed: git does not renormalize files it is not otherwise rewriting, so the pin leaves existing
+working trees untouched and the new test failed for anyone who already had the repo. Landed
+`git add --renormalize scripts/` (zero content diff — index bytes were already LF) and put the actual
+remedy in the failure message, verified to work on this box:
+
+    rm scripts/<path> && git checkout -- scripts/<path>
+
+#### S4 (required) — the guarantee was modelled, not enforced
+
+The clamp only ever governed `--budget`. `--interval` was unvalidated and drove the tick count, and
+`assertNotBackgroundable` modelled the outcome **once, up front**, with a hard-coded `ghCostMs = 5_000`.
+The tick loop never read the clock. So at shipped defaults a real `gh` call costing 15 s meant 690 s of
+wall clock — **backgrounded, by the script whose entire premise is that it cannot be.**
+
+Now `const deadline = started + opts.budgetMs`, checked every tick through an exported, unit-tested
+`shouldSleepAgain()`. Slow `gh` calls eat the budget instead of overrunning the cap, and `--interval`
+needs no floor: a long interval just means fewer ticks. The clamp's docstring said "no flag, env var, or
+argument raises the ceiling" — false as written for wall clock — and now says what it actually buys and
+points at the loop as the enforcement.
+
+#### S5 (required) — the pin and the guard both missed subdirectories
+
+`scripts/*.mjs` does not match nested paths and `readdirSync(dir)` is not recursive, so
+`scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs` sat unpinned and unseen. Widened to
+`scripts/**/*.mjs` and `{ recursive: true }`, with an assertion that the recursion actually reaches a
+subdirectory (or the fix would be untestable in the same way it was unnoticeable).
+
+#### S6 (required) — the blockquote exemption was wider than the thing it exempted
+
+`stripQuoted` dropped every `> ` line, so writing a status as a blockquote — a routine formatting
+choice — made **all five** recorded stalls classify `accept`. Now **fences only**: a fence is a
+deliberate "this is a verbatim artefact" marker, a blockquote is just prose. The dispatch contract now
+tells agents to quote banned phrasing in a code fence, and there is a test that every recorded stall
+re-written as a blockquote is still flagged.
+
+#### Two more
+
+- `decideFromReads` compared only `totalCount` across the two reads, so `[(19,1),(19,0)]` returned
+  done — a board that has *just* gone quiet, which is precisely when `gui-smoke` shards are about to
+  appear. Both reads must now be at `pending == 0`.
+- The Foreman-facing line prescribed `--pr <n>` with no budget: 480 s of blocked foreground per PR,
+  ~56 minutes per sweep at the seven-branch depth this ticket names — trading a stalled worker for a
+  stalled supervisor. Now `--budget 45`, sweep and cycle, with a guard assertion.
+
+#### Red-proof for attempt 2 — every fix reverted in turn, all measured
+
+| Reverted fix | Result |
+|---|---|
+| B1 `awaiting-notification` back to soft | **4 red of 68** |
+| B1 `continuing-to-wait` back to soft | **2 red of 68** |
+| B2 predicate word-order alternation removed | **4 red of 68** |
+| B3 a nested `scripts/**/*.mjs` left CRLF | **1 red of 68** |
+| S4 runtime deadline check removed | **3 red of 68** |
+| S6 blockquote stripping restored | **2 red of 68** |
+| two-read stability back to `totalCount` only | **1 red of 68** |
+
+Plus a 15-case classification matrix run through the real CLI (five recorded stalls **with** the
+mandated tail, four reversed word orders, a blockquoted stall, five benign): **all 15 as expected**.
+
+**Totals after attempt 2:** `sprintStallControls.test.ts` 68 · `sprintDispatchAndCiLogGuards.test.ts`
+31 · full suite **332 files / 4,548 tests green**, `npm run check` 0 errors. No Rust touched, no new
+dependencies.
+
+**Out of scope, filed as CPE-1906** (raised by the reviewer, agreed): a persistent `gh` failure burning
+the whole budget and reporting `pending` rather than an error; `assertNotBackgroundable` throwing as
+exit 1 ("CI failed") rather than 64; and `sprintDispatchAndCiLogGuards.test.ts`'s negative assertion
+being keyed to CPE-1848's exact sentence rather than to the command itself.

@@ -43,6 +43,7 @@ import {
   parseArgs,
   readFromRunJson,
   readFromPrJson,
+  shouldSleepAgain,
 } from "../../scripts/ci-poll.mjs";
 import { classifyReport, stripQuoted, STALL_PATTERNS } from "../../scripts/stall-check.mjs";
 
@@ -70,6 +71,47 @@ const CPE_1848_PHRASES = [
   "A monitor is armed on the CI run; I will pick it up from there.",
   "The background watch will report the outcome for PR #900.",
   "I'll wait for the notification and continue once it lands.",
+];
+
+// ── Reports that must NEVER be flagged. Hoisted to module scope so the B1 promotion of
+// `awaiting-notification` to HARD can be re-run against every one of them, with and without the
+// contract's mandated handoff tail — the cost of that promotion has to be measurably zero. ────────────
+const BENIGN_REPORTS: Array<[string, string]> = [
+  [
+    "the prescribed handoff return",
+    "PR #1031 pushed. CI still pending on 84d20517 — total_count=19 pending=4 mergeable=MERGEABLE. " +
+      "Handing CI to the Foreman.",
+  ],
+  [
+    "a completed bounded-poll report",
+    "Ran node scripts/ci-poll.mjs --run 32672218824 twice. CI VERDICT: completed success — " +
+      "total_count=19 pending=0 mergeable=MERGEABLE sha=84d20517 after 16 tick(s) / 480s. Merged.",
+  ],
+  [
+    "soft deferral WITH an explicit handoff (still pending, over to you)",
+    "Still waiting on the last two checks. CI still pending on 84d20517 — total_count=19 pending=2 " +
+      "mergeable=MERGEABLE. The Foreman owns CI from here.",
+  ],
+  [
+    "the product's own watcher vocabulary (Agent Watch)",
+    "Agent Watch renders a live view of the agent's filesystem activity; the watcher streams events to " +
+      "the UI as they happen, so the pane paints immediately.",
+  ],
+  ["a note about vitest watch mode", "npm run test:watch keeps vitest watching the suite while I iterate locally."],
+  [
+    "a future-tense report with no notification promise",
+    "The Performance Guard will report the size delta in the wrap, per PURPOSE.md's tiebreaker.",
+  ],
+  [
+    "an ordinary in-flight progress note",
+    "The Server crates (windows) job is still running at 41 minutes; two of nineteen checks have not " +
+      "reported. I will re-poll. CI still pending on 84d20517.",
+  ],
+  [
+    "a finished worker report",
+    "Implemented the fix in crates/server/src/backup.rs, added four unit tests, ran cargo clippy " +
+      "--all-targets -D warnings in both feature modes, opened PR #1031.",
+  ],
 ];
 
 describe("ci-poll's budget is structurally below the harness cap (CPE-1880)", () => {
@@ -214,6 +256,16 @@ describe("ci-poll mechanises the poll traps sprint.md states in prose (CPE-1880)
     expect(decideFromReads([allGreen as never, allGreen as never]).done).toBe(true);
   });
 
+  it("'stable across two reads' means the board sat QUIET twice, not that one number matched twice", () => {
+    // [(19,1),(19,0)] used to return done: `totalCount` matched, so the check passed. But a board that
+    // has only just reached pending=0 is exactly when the count is about to rise — `gui-smoke` shards do
+    // not exist until their build job finishes. Both reads must be at pending=0.
+    const seq = [read({ totalCount: 19, pending: 1 }), read({ totalCount: 19, pending: 0 })];
+    expect(decideFromReads(seq as never[]).done).toBe(false);
+    expect(decideFromReads(seq as never[]).reason).toMatch(/just reached 0/i);
+    expect(decideFromReads([...seq, read({ totalCount: 19, pending: 0 })] as never[]).done).toBe(true);
+  });
+
   it("requires a poll target — no argument means a loud usage error, not a silent no-op", () => {
     expect(() => parseArgs([])).toThrow(/--run|--pr/);
     expect(() => parseArgs(["--nope"])).toThrow(/unknown argument/);
@@ -248,6 +300,97 @@ describe("stall-check flags every recorded stall from run batched-2026-08-23-112
   });
 });
 
+describe("B1 RED-PROOF: the mandated handoff tail must not disarm the detector (CPE-1880)", () => {
+  // THE review's blocking finding, and the sharpest instance of this ticket's own theme. The contract
+  // shipped here REQUIRES every worker to append `CI still pending on <SHA>`. That string is a
+  // HANDOFF_PATTERN, and `stalled = hard || (matches.length > 0 && !handoff)`. So every COMPLIANT report
+  // carried the exact token that excused every soft match: recorded stalls #1, #3 and #4 flipped from
+  // `re-invoke` to `accept` the moment the mandated tail was present. The bare-text replays below were
+  // green the whole time — a test passing while the thing it guards is broken, which is precisely what
+  // this ticket inverted CPE-1848's guard test for.
+  //
+  // Fixed by promoting `awaiting-notification` from soft to HARD. These tests replay every recorded
+  // return in the ONLY shape that occurs in production: with the contract's own required tail attached.
+  const MANDATED_TAIL = " CI still pending on 4570cfe692ba99459a3fc317a8a21be95a870f61.";
+
+  for (const { label, text } of RECORDED_STALLS) {
+    it(`still flags ${label} WITH the mandated 'CI still pending on <SHA>' tail`, () => {
+      const v = classifyReport(text + MANDATED_TAIL);
+      expect(v.handoff, "the tail really is recognised as a handoff — otherwise this proves nothing").toBe(true);
+      expect(v.stalled, `${label} + mandated tail must still be a stall`).toBe(true);
+      expect(v.action).toBe("re-invoke");
+    });
+  }
+
+  it("the three that used to flip (#1, #3, #4) each carry a HARD finding now, not just soft ones", () => {
+    for (const i of [0, 2, 3]) {
+      const v = classifyReport(RECORDED_STALLS[i].text + MANDATED_TAIL);
+      expect(v.matches.some((m) => m.severity === "hard"), RECORDED_STALLS[i].label).toBe(true);
+    }
+  });
+
+  it("every CPE-1848 banned phrasing also survives the mandated tail", () => {
+    for (const phrase of CPE_1848_PHRASES) {
+      expect(classifyReport(phrase + MANDATED_TAIL).stalled, phrase).toBe(true);
+    }
+  });
+
+  it("and the benign corpus is unharmed by the promotion — no new false positives", () => {
+    // The whole cost of making `awaiting-notification` hard has to be zero on real reports, or the fix
+    // trades one disarmed control for an un-trustable one.
+    for (const [label, text] of BENIGN_REPORTS) {
+      expect(classifyReport(text).action, label).toBe("accept");
+      expect(classifyReport(text + MANDATED_TAIL).action, `${label} + tail`).toBe("accept");
+    }
+  });
+});
+
+describe("B2 RED-PROOF: the HARD pattern survives natural English word order (CPE-1880)", () => {
+  // The original regex required `background` IMMEDIATELY before the noun, so it caught the adjective
+  // form and missed the predicate form entirely. The file claimed a deliberate over-flagging bias; on
+  // reversed word order it silently under-flagged. The second string below is close to what the harness
+  // itself prints when it backgrounds a call, which makes it the highest-value string in the whole set.
+  const REVERSED: Array<[string, string]> = [
+    ["put … in the background", "I've put the CI watch in the background and will pick it up once it finishes."],
+    [
+      "the harness's own wording",
+      "The gh run watch call was moved to the background by the harness (task bfr274ats). Awaiting its result.",
+    ],
+    ["running in the background", "A monitor task is running in the background; I'll circle back."],
+    ["detached shell", "Polling continues in a detached shell. Nothing further from me right now."],
+  ];
+
+  for (const [label, text] of REVERSED) {
+    it(`flags "${label}"`, () => {
+      const v = classifyReport(text);
+      expect(v.stalled, text).toBe(true);
+      expect(v.matches.some((m) => m.severity === "hard"), "must be HARD — a handoff line must not excuse it").toBe(
+        true,
+      );
+    });
+  }
+
+  it("and each survives the mandated handoff tail too", () => {
+    for (const [label, text] of REVERSED) {
+      expect(classifyReport(`${text} CI still pending on 4570cfe6.`).stalled, label).toBe(true);
+    }
+  });
+
+  it("the word-order alternation does not start flagging ordinary background vocabulary", () => {
+    // The reason the original regex was narrow. Widening it must not swallow the product's own domain
+    // language or routine build talk.
+    const stillBenign = [
+      "Agent Watch streams filesystem events in the background so the pane paints immediately.",
+      "The indexer runs in the background thread pool; I measured it at 40ms.",
+      "cargo build put the artefacts in target/debug. Nothing detached from the shell.",
+      "I detached the fixture from the shared harness so the two suites stop colliding.",
+    ];
+    for (const text of stillBenign) {
+      expect(classifyReport(text).action, text).toBe("accept");
+    }
+  });
+});
+
 describe("stall-check bounds the loop rather than repeating the re-invoke (CPE-1880 AC 4)", () => {
   it("first stall-shaped return re-invokes the same agent", () => {
     expect(classifyReport(RECORDED_STALLS[0].text, { priorStalls: 0 }).action).toBe("re-invoke");
@@ -268,45 +411,8 @@ describe("stall-check bounds the loop rather than repeating the re-invoke (CPE-1
 });
 
 describe("stall-check does not trip on benign reports (CPE-1880)", () => {
-  const BENIGN: Array<[string, string]> = [
-    [
-      "the prescribed handoff return",
-      "PR #1031 pushed. CI still pending on 84d20517 — total_count=19 pending=4 mergeable=MERGEABLE. " +
-        "Handing CI to the Foreman.",
-    ],
-    [
-      "a completed bounded-poll report",
-      "Ran node scripts/ci-poll.mjs --run 32672218824 twice. CI VERDICT: completed success — " +
-        "total_count=19 pending=0 mergeable=MERGEABLE sha=84d20517 after 16 tick(s) / 480s. Merged.",
-    ],
-    [
-      "soft deferral WITH an explicit handoff (still pending, over to you)",
-      "Still waiting on the last two checks. CI still pending on 84d20517 — total_count=19 pending=2 " +
-        "mergeable=MERGEABLE. The Foreman owns CI from here.",
-    ],
-    [
-      "the product's own watcher vocabulary (Agent Watch)",
-      "Agent Watch renders a live view of the agent's filesystem activity; the watcher streams events to " +
-        "the UI as they happen, so the pane paints immediately.",
-    ],
-    ["a note about vitest watch mode", "npm run test:watch keeps vitest watching the suite while I iterate locally."],
-    [
-      "a future-tense report with no notification promise",
-      "The Performance Guard will report the size delta in the wrap, per PURPOSE.md's tiebreaker.",
-    ],
-    [
-      "an ordinary in-flight progress note",
-      "The Server crates (windows) job is still running at 41 minutes; two of nineteen checks have not " +
-        "reported. I will re-poll. CI still pending on 84d20517.",
-    ],
-    [
-      "a finished worker report",
-      "Implemented the fix in crates/server/src/backup.rs, added four unit tests, ran cargo clippy " +
-        "--all-targets -D warnings in both feature modes, opened PR #1031.",
-    ],
-  ];
 
-  for (const [label, text] of BENIGN) {
+  for (const [label, text] of BENIGN_REPORTS) {
     it(`accepts ${label}`, () => {
       const v = classifyReport(text);
       expect(v.action).toBe("accept");
@@ -324,16 +430,23 @@ describe("stall-check does not trip on benign reports (CPE-1880)", () => {
   });
 });
 
-describe("stall-check ignores QUOTED prohibitions, so documenting the rule is not committing the offence", () => {
-  it("strips fenced blocks and blockquote lines before matching", () => {
+describe("stall-check strips FENCES only — the blockquote exemption was too wide (CPE-1880, S6)", () => {
+  // The first version stripped `>` blockquote lines too, and the review measured the cost: writing your
+  // status as a blockquote — a routine formatting choice, not a deliberate "this is an artefact" marker
+  // — made ALL FIVE recorded stalls classify `accept`. The exemption was wider than the thing it was
+  // exempting. A fence is an explicit verbatim marker; a blockquote is just prose. So: fences only, and
+  // the dispatch contract tells agents to quote banned phrasing in a fence.
+  it("a fenced quote of the banned phrasing does not trip the detector", () => {
     const quoted =
       "The dispatch contract now reads:\n\n" +
-      "> never say a monitor is \"armed\" or that a background watch will report — that phrasing is the\n" +
-      "> exact defect this rule exists to prevent.\n\n" +
+      "```\n" +
+      "never say a monitor is \"armed\" or that a background watch will report — that phrasing is the\n" +
+      "exact defect this rule exists to prevent.\n" +
+      "```\n\n" +
       "```\n" +
       "A background monitor is now polling PR #1017 and will notify when both complete.\n" +
       "```\n\n" +
-      "I updated the guard test accordingly and opened the PR.";
+      "I updated the guard test accordingly and opened the PR. CI VERDICT: completed success.";
     expect(stripQuoted(quoted)).not.toMatch(/background monitor/i);
     expect(classifyReport(quoted).action).toBe("accept");
   });
@@ -344,12 +457,36 @@ describe("stall-check ignores QUOTED prohibitions, so documenting the rule is no
     ).toBe(true);
   });
 
-  it("this very test file's own subject matter would not trip the detector when quoted properly", () => {
-    // Guards the self-referential trap: the CPE-1880 report necessarily contains the banned phrases.
+  it("S6 RED-PROOF: every recorded stall written as a BLOCKQUOTE is still flagged", () => {
+    // This is the case the old stripQuoted swallowed whole. All five, one `> ` prefix away from
+    // invisible. If this ever goes green-by-accepting again, the detector has been disarmed.
+    for (const { label, text } of RECORDED_STALLS) {
+      const asBlockquote = text
+        .split(". ")
+        .map((sentence) => `> ${sentence}`)
+        .join("\n");
+      const v = classifyReport(asBlockquote);
+      expect(v.stalled, `${label} written as a blockquote must still be a stall`).toBe(true);
+    }
+  });
+
+  it("a stall indented as a blockquote inside an otherwise good report is still caught", () => {
+    const report =
+      "Pushed the branch and opened PR #1032. Status:\n\n" +
+      "> A background monitor is now polling the checks and will notify when they finish.\n\n" +
+      "Will pick it up from there.";
+    expect(classifyReport(report).stalled).toBe(true);
+  });
+
+  it("this ticket's own write-up does not trip its own detector — when fenced, as the contract says", () => {
+    // The self-referential trap is real: any honest report on CPE-1880 must contain the banned phrases.
+    // The escape hatch is a fence, and only a fence.
     const prBody =
       "Five agents stalled. Each returned something of this shape:\n\n" +
-      "> A background monitor is now polling PR #1017's two check suites every 30s and will notify when\n" +
-      "> both complete. Waiting for that event.\n\n" +
+      "```\n" +
+      "A background monitor is now polling PR #1017's two check suites every 30s and will notify when\n" +
+      "both complete. Waiting for that event.\n" +
+      "```\n\n" +
       "The cause is the 600 s harness cap, not defiance. CI VERDICT: completed success.";
     expect(classifyReport(prBody).action).toBe("accept");
   });
@@ -368,14 +505,76 @@ describe("the harness scripts stay importable from vitest (CPE-1880)", () => {
   // case: a script in `scripts/` that nobody imports yet (a future one, or `organize-done.mjs`) sitting
   // unpinned, where this names the file and points at `.gitattributes` instead of leaving the next
   // author to rediscover the whole thing. So it scans the directory rather than a hard-coded pair.
-  it("every scripts/*.mjs is checked out LF, not CRLF", () => {
+  it("every scripts/**/*.mjs is checked out LF, not CRLF", () => {
+    // RECURSIVE, and `.gitattributes` matches `scripts/**/*.mjs`, not `scripts/*.mjs`: the first
+    // version of both missed `scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs`, which was
+    // sitting unpinned and unseen. A guard that cannot see the file it guards is the failure mode this
+    // whole ticket is about.
     const dir = join(process.cwd(), "scripts");
-    const mjs = readdirSync(dir).filter((f) => f.endsWith(".mjs"));
-    expect(mjs.length).toBeGreaterThanOrEqual(3); // ci-poll, stall-check, organize-done
+    const mjs = readdirSync(dir, { recursive: true })
+      .map((f) => String(f).split("\\").join("/"))
+      .filter((f) => f.endsWith(".mjs"));
+    expect(mjs.length).toBeGreaterThanOrEqual(4); // ci-poll, stall-check, organize-done, dev-harness/check
+    expect(mjs.some((f) => f.includes("/"))).toBe(true); // the recursion actually reaches a subdirectory
     for (const rel of mjs) {
       const bytes = readFileSync(join(dir, rel));
-      expect(bytes.includes("\r\n"), `scripts/${rel} is checked out with CRLF — see .gitattributes`).toBe(false);
+      expect(
+        bytes.includes("\r\n"),
+        `scripts/${rel} is checked out with CRLF, which makes Vite's transform of it throw an ` +
+          `unlocatable SyntaxError. .gitattributes pins scripts/**/*.mjs to LF, but git does not ` +
+          `rewrite a working tree it is not otherwise touching, so an existing checkout keeps its CRLF ` +
+          `copy. Fix this checkout with:  rm scripts/${rel} && git checkout -- scripts/${rel}  ` +
+          `(the index bytes are already LF, so the checkout re-materialises it with the pin applied).`,
+      ).toBe(false);
     }
+  });
+});
+
+describe("S4 RED-PROOF: the no-backgrounding bound is ENFORCED at runtime, not modelled (CPE-1880)", () => {
+  // The review's sharpest non-blocking finding. The clamp only ever governed `--budget`. The interval is
+  // a separate, unvalidated input that drives the tick count, and `assertNotBackgroundable` modelled the
+  // result ONCE, up front, with a hard-coded 5 s `gh` cost guess. At shipped defaults a real `gh` call
+  // costing 15 s means 690 s of wall clock — backgrounded, by the very script whose entire premise is
+  // that it cannot be. The loop now reads the clock every tick; these pin that.
+  const INTERVAL = 30_000;
+
+  it("stops before a sleep that would cross the deadline, however much time the gh calls ate", () => {
+    const started = 1_000_000;
+    const deadline = started + 480_000;
+    // 400s elapsed, 30s interval — one more sleep fits.
+    expect(shouldSleepAgain(started + 400_000, INTERVAL, deadline, 3, 16)).toBe(true);
+    // 460s elapsed — the next sleep would land at 490s, past the 480s deadline. Stop.
+    expect(shouldSleepAgain(started + 460_000, INTERVAL, deadline, 3, 16)).toBe(false);
+  });
+
+  it("stops on the deadline even when the PLAN says plenty of ticks remain", () => {
+    // The exact shape of the bug: slow gh calls burn the budget while `tick` is still low, so the tick
+    // counter says "13 to go" and the clock says "stop now". The clock has to win.
+    const started = 1_000_000;
+    expect(shouldSleepAgain(started + 479_000, INTERVAL, started + 480_000, 2, 16)).toBe(false);
+  });
+
+  it("still stops at the last planned tick, so a fast run does not sleep pointlessly at the end", () => {
+    const started = 1_000_000;
+    expect(shouldSleepAgain(started, INTERVAL, started + 480_000, 15, 16)).toBe(false);
+  });
+
+  it("a hostile interval cannot argue the wall clock upward any more", () => {
+    // An interval of 17s was measured at worstCase 599s — inside the modelled cap by 1s, and wildly past
+    // it as soon as a gh call ran slow. With the deadline enforced, a long interval just means fewer
+    // ticks rather than a longer run.
+    const started = 1_000_000;
+    const deadline = started + 480_000;
+    expect(shouldSleepAgain(started + 400_000, 200_000, deadline, 0, 99)).toBe(false);
+    expect(parseArgs(["--run", "1", "--interval", "17"]).intervalMs).toBe(17_000);
+  });
+
+  it("the clamp's docstring no longer claims the wall clock is bounded by the budget alone", () => {
+    // The claim was false as written and the review called it out; the correction points at the loop.
+    const src = readFileSync(join(process.cwd(), "scripts", "ci-poll.mjs"), "utf8");
+    expect(src).toMatch(/deadline check is the enforcement/i);
+    expect(src).toMatch(/const deadline = started \+ opts\.budgetMs;/);
+    expect(src).toMatch(/Clamping the\s*\n?\s*\* BUDGET does not by itself bound the WALL CLOCK/);
   });
 });
 

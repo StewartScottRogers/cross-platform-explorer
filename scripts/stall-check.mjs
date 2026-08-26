@@ -32,10 +32,13 @@
 //   agent restates a report it already has). A false negative costs a hung agent, a stalled batch
 //   counter, and a full Foreman round-trip to recover. Those are not close.
 //
-// QUOTING
-//   Fenced code blocks and `>` blockquote lines are stripped before matching, so a report that QUOTES
-//   the dispatch contract (or this file) is not mistaken for one that is committing the offence. That is
-//   not a nicety — the report on CPE-1880 itself would otherwise trip its own detector.
+// QUOTING — fences only, and that boundary was moved deliberately
+//   FENCED CODE BLOCKS are stripped before matching, so a report that quotes the dispatch contract (or
+//   this file) verbatim is not mistaken for one committing the offence. `>` BLOCKQUOTES are NOT stripped
+//   any more: the review measured that exemption swallowing **all five** recorded stalls the moment a
+//   status was written as a blockquote, which is a routine formatting choice rather than a deliberate
+//   "this is an artefact" marker. To quote banned phrasing safely, put it in a fence — the dispatch
+//   contract says so.
 //
 // USAGE
 //   node scripts/stall-check.mjs report.txt            # classify a file
@@ -68,9 +71,16 @@ export const STALL_PATTERNS = [
   {
     id: "backgrounded-watcher",
     severity: "hard",
-    // "A background monitor is now polling…" · "the background watch will report" ·
-    // "a background poll I already resolved"
-    re: /\bbackground(ed)?\s+(monitor|watch(er)?|poll(er|ing)?|task|job|process)\b/i,
+    // Three word orders, because English supplies all three and the review found this file over-flagging
+    // on one while UNDER-flagging on the others:
+    //   adjective — "A background monitor is now polling…" · "a background poll I already resolved"
+    //   predicate — "put the CI watch in the background" · "was moved to the background by the harness"
+    //   detached  — "polling continues in a detached shell"
+    // The predicate form matters most: it is close to what the harness itself prints when it backgrounds
+    // a call ("moved to background, task bfr274ats"), so it is the single highest-value string in the
+    // set — and the original regex, which required `background` immediately before the noun, missed
+    // every instance of it.
+    re: /\bbackground(ed)?\s+(monitor|watch(er)?|poll(er|ing)?|task|job|process)\b|(?=[^.\n]*\b(monitor|watch|watcher|poll|poller|polling|task|job|process|call|command)\b)(?=[^.\n]*\b(in|to|into)\s+the\s+background\b)(?=[^.\n]*\b(put|move[ds]?|left|kept|spawned|started|parked|backgrounded|running|runs|continues?|continuing|is|are|was|were|been)\b)[^.\n]+|\bdetached\s+(shell|process|task|job|terminal)\b|\b(run(ning)?|continu(e|es|ing)|poll(ing)?|watch(ing)?)\b[^.\n]{0,30}\bdetached\b/i,
     why: "names a monitor/watch/poll running in the background — a sub-agent cannot be woken by one",
   },
   {
@@ -89,11 +99,22 @@ export const STALL_PATTERNS = [
   },
   {
     id: "awaiting-notification",
-    severity: "soft",
+    // HARD, and this was the review's blocking finding — the two controls were disarming each other.
+    // The contract this ships MANDATES that every worker append `CI still pending on <SHA>`, and that
+    // string is a HANDOFF_PATTERN. So every compliant report carried the exact token that excused every
+    // soft match, and recorded stalls #1, #3 and #4 flipped from `re-invoke` to `accept` the moment the
+    // mandated tail was appended. The bare-text tests were green while the thing they guard was broken
+    // — the same shape this ticket inverted CPE-1848's guard test for.
+    //
+    // A wait keyed to a notification/monitor/event/wake-up is something a sub-agent structurally cannot
+    // receive, so no amount of good write-up around it changes the outcome. Nothing excuses it. Verified
+    // against all eight benign corpus entries: zero trip, including "Still waiting on the last two
+    // checks. CI still pending on 84d20517…", which carries no such keyword.
+    severity: "hard",
     // "until the monitor notification arrives" · "Waiting for that event." ·
     // "Waiting for the next update from the monitor." · "I'll wait for the notification"
-    re: /\b(wait(ing)?|await(ing)?)\b[^.\n]{0,50}\b(notification|monitor|that event|the event|wake-?up|signal|the next update)\b/i,
-    why: "defers to a signal a sub-agent cannot receive",
+    re: /\b(wait(ing)?|await(ing)?)\b[^.\n]{0,50}\b(notification|monitor|that event|the event|wake-?up|signal|the next update)\b|\b(monitor|background|harness|poll|watch)\s+notification\b|\bnotification\s+(arrives|lands|fires|comes|returns|shows up)\b/i,
+    why: "defers to a signal a sub-agent cannot receive — nothing elsewhere in a report excuses it",
   },
   {
     id: "contentless-progress",
@@ -105,11 +126,26 @@ export const STALL_PATTERNS = [
     why: "reports progress with no result — the shape a stall takes once the agent has nothing left to do",
   },
   {
-    id: "open-ended-wait",
+    id: "continuing-to-wait",
+    // HARD. Recorded stall #4 — "Still in progress. Continuing to wait for completion." — contains no
+    // notification keyword at all, so promoting `awaiting-notification` did not reach it, and with the
+    // contract's mandated handoff tail appended it classified `accept`. A sub-agent cannot "continue to
+    // wait": it has no loop of its own to continue in and no signal to be resumed by. The phrase is
+    // categorically a stall, whatever else the report says.
+    severity: "hard",
+    // "Continuing to wait for completion." · "I'll continue waiting."
+    re: /\bcontinu(e|es|ing)\s+to\s+wait\b|\bcontinu(e|es|ing)\s+waiting\b|\bkeep\s+waiting\b/i,
+    why: "an unbounded wait with no exit condition the agent controls — it has no loop to continue in",
+  },
+  {
+    id: "no-further-action",
+    // Stays SOFT, deliberately: "the lockfile already matches, so no further action is needed" is an
+    // ordinary and correct thing for a worker to report. It is only damning next to a wait, and the
+    // hard families above already catch those.
     severity: "soft",
-    // "Continuing to wait for completion." · "no further action needed from me until…"
-    re: /\bcontinu(e|ing)\s+to\s+wait\b|\bno further action\s+(is\s+)?(needed|required)\b/i,
-    why: "an unbounded wait with no exit condition the agent controls",
+    // "no further action needed from me until…"
+    re: /\bno further action\s+(is\s+)?(needed|required)\b/i,
+    why: "declares itself finished without producing a result — suspicious beside any wait language",
   },
 ];
 
@@ -128,18 +164,24 @@ export const HANDOFF_PATTERNS = [
 ];
 
 /**
- * Remove fenced code blocks and blockquote lines, so QUOTING the banned phrasing is not itself an
- * offence. Everything else is kept verbatim.
+ * Remove FENCED CODE BLOCKS only, so quoting the banned phrasing verbatim is not itself an offence.
+ *
+ * It used to strip `>` blockquote lines too, and the review showed that was a hole big enough to drive
+ * the whole ticket through: writing your status as a blockquote — a completely routine formatting
+ * choice, and the shape a report quoting a prior message naturally takes — made **all five** recorded
+ * stalls classify `accept`. The exemption was wider than the thing it was exempting.
+ *
+ * A fence is a deliberate "this is a verbatim artefact, not my own words" marker; a blockquote is not,
+ * and agents reach for it to format ordinary prose. So the rule is now: **to quote banned phrasing
+ * without tripping the detector, put it in a code fence.** That is stated in the dispatch contract.
+ * Inline backtick quotes are NOT stripped and still trip — deliberately: a one-line inline quote is
+ * indistinguishable from committing the offence, and the bias here is toward flagging.
  *
  * @param {string} text
  * @returns {string}
  */
 export function stripQuoted(text) {
-  const withoutFences = text.replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[ \t]*$/gm, "\n");
-  return withoutFences
-    .split(/\r?\n/)
-    .filter((line) => !/^\s{0,3}>/.test(line))
-    .join("\n");
+  return text.replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[ \t]*$/gm, "\n");
 }
 
 /**

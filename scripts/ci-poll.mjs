@@ -74,9 +74,17 @@ export const DEFAULT_BUDGET_MS = MAX_BUDGET_MS;
 /**
  * Clamp a requested budget to something that cannot be auto-backgrounded.
  *
- * This is the structural guarantee: a caller may ask for LESS time, never more. There is no flag, env
- * var, or argument that raises the ceiling, so no future edit can reintroduce an unbounded wait by
- * configuration alone — it would take deleting this function.
+ * A caller may ask for LESS time, never more: no flag, env var, or argument raises this ceiling.
+ *
+ * But be precise about what that buys, because the first version of this comment was not. Clamping the
+ * BUDGET does not by itself bound the WALL CLOCK — the review's finding. `--interval` is a separate
+ * input, it drives the tick count, and `assertNotBackgroundable` only *models* the result once up front
+ * using a fixed `ghCostMs` guess. If a real `gh` call costs 15 s instead of the assumed 5 s, the shipped
+ * defaults run 690 s and the process is backgrounded regardless of what this function returned.
+ *
+ * So the clamp is the plan, and `main()`'s **deadline check is the enforcement**: the loop reads the
+ * clock every tick and stops when the next sleep would cross `started + budgetMs`. That is what makes
+ * the guarantee hold against a slow network, and it is also why `--interval` needs no floor of its own.
  *
  * @param {number} requestedMs
  * @returns {number}
@@ -147,6 +155,26 @@ export function assertNotBackgroundable(
 }
 
 /**
+ * Should the loop sleep for another interval, or has the wall-clock budget run out?
+ *
+ * Pulled out as a pure function purely so it can be tested — the bug the review found was that the
+ * bound existed only as an up-front *model* (`assertNotBackgroundable` with a hard-coded `ghCostMs`),
+ * never as a runtime check, so a `gh` call slower than the guess silently pushed the process past the
+ * harness cap. This is the runtime check.
+ *
+ * @param {number} nowMs
+ * @param {number} intervalMs
+ * @param {number} deadlineMs  `started + budgetMs`
+ * @param {number} tick        0-based index of the tick just completed
+ * @param {number} ticks       planned tick count
+ * @returns {boolean}
+ */
+export function shouldSleepAgain(nowMs, intervalMs, deadlineMs, tick, ticks) {
+  if (tick >= ticks - 1) return false;
+  return nowMs + intervalMs < deadlineMs;
+}
+
+/**
  * @typedef {object} CiRead One normalised observation of a run or a PR check rollup.
  * @property {boolean} terminal    the provider says the run/rollup has finished
  * @property {string|null} conclusion  success / failure / cancelled / …, once terminal
@@ -196,7 +224,20 @@ export function decideFromReads(reads) {
       reason: `pending=0 but total_count moved ${previous.totalCount}→${latest.totalCount} — jobs still scheduling`,
     };
   }
-  return { done: true, reason: `pending=0 with total_count stable at ${latest.totalCount} across two reads` };
+  // The previous read must ALSO have been at pending=0. Comparing only `totalCount` accepted the
+  // sequence [(19,1),(19,0)] — a board that has only just gone quiet, which is precisely the moment the
+  // count is about to rise, because `gui-smoke` shards do not exist until their build job finishes.
+  // "Stable" has to mean the whole board sat still, not that one number matched twice.
+  if (previous.pending !== 0) {
+    return {
+      done: false,
+      reason: `pending just reached 0 (was ${previous.pending}) — total_count=${latest.totalCount} has not yet held quiet for two reads`,
+    };
+  }
+  return {
+    done: true,
+    reason: `pending=0 with total_count stable at ${latest.totalCount} across two quiet reads`,
+  };
 }
 
 /**
@@ -347,10 +388,18 @@ async function main() {
     ),
   );
 
+  // THE enforcement of the whole premise. `ticks` is only a plan; this is the bound. Every sleep is
+  // gated on the real clock, so a slow `gh` call (or a slow network, or a machine under load from six
+  // sibling agents) eats into the budget instead of silently pushing the run past the harness cap. The
+  // modelled worst case above assumed a 5 s `gh` round-trip; at 15 s the shipped defaults would have run
+  // 690 s and been backgrounded — exactly the failure this script exists to make impossible.
+  const deadline = started + opts.budgetMs;
+
   /** @type {CiRead[]} */
   const reads = [];
   let decision = { done: false, reason: "no reads yet" };
   let tick = 0;
+  let stoppedOnDeadline = false;
   for (; tick < ticks; tick += 1) {
     /** @type {CiRead} */
     let read;
@@ -364,7 +413,12 @@ async function main() {
       }
     } catch (err) {
       console.log(stamp(`ci-poll: gh read failed — ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`));
-      if (tick < ticks - 1) sleepSync(opts.intervalMs);
+      if (!shouldSleepAgain(Date.now(), opts.intervalMs, deadline, tick, ticks)) {
+        stoppedOnDeadline = true;
+        tick += 1;
+        break;
+      }
+      sleepSync(opts.intervalMs);
       continue;
     }
     reads.push(read);
@@ -379,7 +433,15 @@ async function main() {
       tick += 1;
       break;
     }
-    if (tick < ticks - 1) sleepSync(opts.intervalMs);
+    if (!shouldSleepAgain(Date.now(), opts.intervalMs, deadline, tick, ticks)) {
+      stoppedOnDeadline = true;
+      tick += 1;
+      break;
+    }
+    sleepSync(opts.intervalMs);
+  }
+  if (stoppedOnDeadline) {
+    console.log(stamp(`ci-poll: wall-clock budget reached — stopping before the next tick would cross it`));
   }
 
   const latest = reads.length > 0 ? reads[reads.length - 1] : null;

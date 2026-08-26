@@ -182,6 +182,9 @@ report immediately. It never lacked the material; it lacked a way to stop waitin
 > **Never** return a stub that promises to report later, and never say a monitor is "armed" or "watching
 > in the background" — that phrasing is the exact defect this rule exists to prevent, and the Foreman
 > runs `node scripts/stall-check.mjs` over your report on arrival, so it is caught rather than believed.
+> If you need to QUOTE that phrasing (reporting on someone else's stall, or on this rule), put it in a
+> **code fence**. Fenced blocks are stripped before matching; `>` blockquotes are **not** — quoting by
+> blockquote used to hide every recorded stall, so that exemption was removed.
 
 This is a standing instruction, not a per-dispatch judgment call: include it in every Worker/Reviewer/UAT
 briefing regardless of how routine the ticket looks — the failure mode above hit ordinary tickets, not
@@ -191,11 +194,14 @@ doesn't just cost a round-trip, it stalls the batch counter along with it.
 **The Foreman's own side of the bargain (CPE-1880).** Because the contract now forbids workers from
 establishing CI outcomes, the Foreman must actually pick them up:
 
-- After a worker reports, the Foreman polls that PR itself — `node scripts/ci-poll.mjs --pr <n>`, or by
-  letting its own harness loop wake it — and routes failures back to the worker as a concrete fix
-  request, not as "go check CI." Re-check the current head by **SHA**, not PR number alone: a stale
-  PR-number check can pass against a superseded head, and `--watch` exits 0 when the branch moves under
-  it rather than only when checks pass.
+- After a worker reports, the Foreman polls that PR itself — **`node scripts/ci-poll.mjs --pr <n>
+  --budget 45`** — and routes failures back to the worker as a concrete fix request, not as "go check
+  CI." **Use a short budget and cycle**; do not take the 480 s default here. The default is sized for a
+  worker that has nothing else to do, whereas the Foreman polling seven branches at 480 s each would sit
+  blocked for ~56 minutes per sweep, unable to dispatch — which trades a stalled worker for a stalled
+  supervisor. Sweep the open PRs at 45 s apiece, dispatch in between, and come back round. Re-check the
+  current head by **SHA**, not PR number alone: a stale PR-number check can pass against a superseded
+  head, and `--watch` exits 0 when the branch moves under it rather than only when checks pass.
 - **Run the arrival check on every returned sub-agent report:** `node scripts/stall-check.mjs
   report.txt --prior <n>`, where `<n>` is how many stall-shaped reports that same agent has already
   returned. It exits `0` accept, `3` re-invoke, `4` take-over. This is mechanical on purpose — "a monitor
@@ -662,8 +668,11 @@ Workers implement the harnesses on their right-sized tier.
   contract above). The Foreman must not treat that as "in flight and fine." **Do not eyeball this — run
   it:** `node scripts/stall-check.mjs <report-file> --prior <n>` classifies the report mechanically
   (exit `0` accept · `3` re-invoke · `4` take-over), ignores the phrasing when it appears inside a
-  blockquote or code fence (so quoting the rule is not committing the offence), and treats a
-  backgrounded watcher as a hard finding that no amount of surrounding detail excuses. On `re-invoke`,
+  **code fence** (so quoting the rule is not committing the offence — `>` blockquotes are deliberately
+  NOT exempt, because that exemption hid all five recorded stalls behind one `> ` prefix), and treats a
+  backgrounded watcher, an armed monitor, a promised notification, a wait keyed to a signal the agent
+  cannot receive, or "continuing to wait" as **hard** findings that no amount of surrounding detail
+  excuses — including the `CI still pending on <SHA>` line this contract itself mandates. On `re-invoke`,
   `SendMessage` the same agent with the dispatch contract restated and an explicit "I own CI; report
   now, synchronously, with what you have." On `take-over` — the **second** stall-shaped report from that
   same agent — kill it and read its PR yourself; a third re-invoke is the loop CPE-1880 bounds, and

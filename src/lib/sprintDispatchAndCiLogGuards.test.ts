@@ -105,9 +105,27 @@ describe("sprint.md dispatch contract states the no-background-notifications rul
     expect(DISPATCH_CONTRACT).toMatch(/Do not re-invoke a\s*[\r\n]?\s*third time/i);
   });
 
+  it("tells agents to quote banned phrasing in a FENCE — blockquotes are not exempt (CPE-1880, S6)", () => {
+    // The detector's blockquote exemption hid all five recorded stalls behind one `> ` prefix and was
+    // removed. The contract has to say so, or agents will keep reaching for the blockquote.
+    expect(DISPATCH_CONTRACT).toMatch(/put it in a\s*[\r\n]?\s*>?\s*\*\*code fence\*\*/i);
+    expect(DISPATCH_CONTRACT).toMatch(/blockquotes are \*\*not\*\*/i);
+  });
+
+  it("gives the Foreman a SHORT poll budget, so its own sweep cannot block dispatch (CPE-1880)", () => {
+    // The mirror hazard: the fix moves every CI wait onto the Foreman, and at the 480s default across
+    // seven branches that is ~56 minutes per sweep during which the supervisor cannot dispatch —
+    // trading a stalled worker for a stalled supervisor.
+    expect(DISPATCH_CONTRACT).toContain("--budget 45");
+    expect(DISPATCH_CONTRACT).toMatch(/Use a short budget and cycle/i);
+  });
+
   it("mandates the mechanical arrival check rather than the Foreman's eye", () => {
     expect(DISPATCH_CONTRACT).toContain("node scripts/stall-check.mjs");
     expect(SPRINT_MD).toMatch(/Do not eyeball this — run\s*[\r\n]?\s*it:/i);
+    // …and names what counts as HARD, including the trap the review found: the contract's own mandated
+    // `CI still pending on <SHA>` tail must not excuse a stall.
+    expect(SPRINT_MD).toMatch(/including the `CI still pending on <SHA>` line this contract itself mandates/i);
   });
 
   it("preserves the re-check-by-SHA idiom, not PR number alone (the gh pr checks --watch trap)", () => {
