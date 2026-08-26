@@ -3,7 +3,7 @@ id: CPE-1855
 title: the declared MSRV is fiction and nothing enforces it
 type: task
 priority: Low
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-22

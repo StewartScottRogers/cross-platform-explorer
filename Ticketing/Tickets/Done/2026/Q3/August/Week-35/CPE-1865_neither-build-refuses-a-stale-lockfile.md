@@ -3,7 +3,7 @@ id: CPE-1865
 title: neither build refuses a stale lockfile, so version drift has no backstop
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-22
