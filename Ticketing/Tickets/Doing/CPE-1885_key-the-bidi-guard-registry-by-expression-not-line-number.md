@@ -150,3 +150,9 @@ than by what it says.
   `main` (moved several times since last rebase) before repushing; CI is in a confirmed GitHub Actions
   outage (30-40+ min queued runs org-wide) — not waiting on it, verified locally instead per the
   Foreman's explicit instruction, reporting `CI still pending on <SHA>`.
+  Rebase onto `origin/main` (tip `31a2de64`, 4 commits ahead of the last rebase's base — none touching
+  `src/lib/bidiEscape.guard.test.ts` or `src/lib/bidiRenderScan.ts`) was conflict-free. Re-ran the guard
+  test (16/16), `bidiRenderScan.test.ts` (69/69), `npm run check` (0/0), and the full suite (331 files /
+  4461 tests) on the rebased tree — all green. Force-pushed with `--force-with-lease`; PR #1029 settled
+  at SHA `09fc2078`. Per the CI-outage warning, did not poll — `mergeable` read back `UNKNOWN`
+  immediately after push (GitHub still computing under the outage). **CI still pending on `09fc2078`.**
