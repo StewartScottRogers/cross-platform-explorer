@@ -41,7 +41,9 @@
 //! added line in `tauri.sidecar.conf.json`, base file untouched, both checks above still green).
 //! `src/lib/sidecarBundleResources.test.ts` closes that: it computes the full merged config per
 //! shipped OS from the real `--config` overlay chain, **including Tauri's automatic per-platform
-//! config** (see next paragraph — that word matters, it used to just say "FULL" and that was false),
+//! `.json` config files** (see next paragraph). Note the qualifier: Tauri also auto-merges `.json5`
+//! and `Tauri.<os>.toml` variants, which these checks do NOT cover — see CPE-1903, where that gap is
+//! demonstrated against the shipped CLI,
 //! and asserts `plugins.updater.pubkey`/`.endpoints` still equal the pin. Keep its two literals in
 //! lockstep with the ones in this file — same value, same rotation procedure.
 //!
@@ -57,7 +59,8 @@
 //! build, plain channel and sidecar both, because this mechanism has nothing to do with `--config` and
 //! fires on a plain `tauri.conf.json` read too. Closed two ways, one per language, same reasoning:
 //! `no_automatic_per_platform_config_overrides_the_updater_pin` in
-//! `tests/pinned_pubkey_guard.rs` (base/tag path) and a matching check in
+//! `tests/pinned_pubkey_guard.rs` (PR/push path only — it is a `#[test]`, so like every other test
+//! in this file it does NOT run on the tag path; that gap is CPE-1903's second half) and a matching check in
 //! `sidecarBundleResources.test.ts` (sidecar path) — neither tries to merge/validate that file's
 //! content; both simply refuse its EXISTENCE with a `plugins.updater` key, since none of the three
 //! filenames is supposed to carry one right now.
