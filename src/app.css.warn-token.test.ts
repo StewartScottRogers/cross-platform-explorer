@@ -175,7 +175,48 @@ function walkTokenSources(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const stripAllComments = (s: string) => s.replace(/<!--[\s\S]*?-->/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+/** Strips `//` line comments, but ONLY outside a `'...'`/`"..."`/`` `...` `` string — a quote-aware
+ *  scan rather than a regex, so a `//` inside a string (a `https://` URL, or literal text) survives
+ *  untouched while a REAL line comment (this file's own header uses `//` throughout, and any future
+ *  doc comment quoting the `var(--token, <fallback>)` idiom by name — e.g.
+ *  `// example: var(--newFeatureToken, #fff)`) is removed before the scanner below ever sees it.
+ *  Without this, prose reds CI for non-code (CPE-1875 re-review finding 2). Escaped quote characters
+ *  (`\"`, `\'`, `` \` ``) inside a string are honoured so an escaped quote doesn't end the string
+ *  early. Runs AFTER stripBlockAndHtmlComments below; a block-comment or HTML-comment marker is
+ *  treated as ordinary text here (this scanner only understands `//` and quotes), which is harmless
+ *  because the whole block/HTML comment span is already gone by the time this runs. */
+function stripLineComments(s: string): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) {
+      out += c;
+      if (c === "\\" && i + 1 < s.length) {
+        out += s[i + 1];
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      quote = c;
+      out += c;
+      continue;
+    }
+    if (c === "/" && s[i + 1] === "/") {
+      while (i < s.length && s[i] !== "\n") i++;
+      i--; // let the loop's own i++ land back on the newline so it's preserved in `out`
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+const stripBlockAndHtmlComments = (s: string) => s.replace(/<!--[\s\S]*?-->/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+const stripAllComments = (s: string) => stripLineComments(stripBlockAndHtmlComments(s));
 
 /** Every top-level `var(--token, <fallback>)` 2-argument call in `content`, fully balanced-paren
  *  parsed so a fallback that itself contains parens (`var(--a, var(--b, #fff))`, `color-mix(...)`)
@@ -214,18 +255,36 @@ function scanFallbackCalls(content: string): { token: string; fallback: string }
 }
 
 /** True if `content` (already comment-stripped) DECLARES `token` itself — `--token: <value>` —
- *  anywhere outside of a `var(--token, ...)` read. Recognises a component-local custom property
- *  (one the component sets on itself, usually via an inline `style="--foo: ..."` attribute) rather
- *  than a global theme token expected to come from app.css's cascade. `--indent` (PreviewPane.svelte,
- *  set per-line from fold state, `0` fallback) and `--sw` (TagEditor.svelte, set per-swatch from a
- *  fixed label-colour list, `var(--surface-alt)` fallback) are the current instances — each a real,
- *  working, intentional local variable, not an instance of the CPE-1810/1821/1876 defect (an
- *  undefined GLOBAL token whose fallback silently wins in every theme). Requiring these to resolve
- *  in app.css would assert something false about code that isn't broken.
- */
+ *  with a value that is actually DYNAMIC (a Svelte template mustache or a JS template-literal
+ *  interpolation, both of which always contain a `{`), anywhere outside of a `var(--token, ...)`
+ *  read. Recognises a component-local custom property (one the component sets on itself, usually
+ *  via an inline `style="--foo: {expr}"` / `` style={`--foo: ${expr}`} `` attribute) rather than a
+ *  global theme token expected to come from app.css's cascade. `--indent` (PreviewPane.svelte, set
+ *  per-line from fold state — `style="--indent: {indent[i] ?? 0}"`) and `--sw` (TagEditor.svelte,
+ *  set per-swatch from a fixed label-colour list — `` `--sw: ${LABEL_COLORS[key]}` ``) are the
+ *  current instances — each a real, working, intentional local variable, not an instance of the
+ *  CPE-1810/1821/1876 defect (an undefined GLOBAL token whose fallback silently wins in every
+ *  theme). Requiring these to resolve in app.css would assert something false about code that
+ *  isn't broken.
+ *
+ *  Requiring the VALUE to be dynamic (not just the presence of a `token:` declaration anywhere in
+ *  the file) is deliberate and closes a real hole: a first version of this function only checked
+ *  for the declaration existing, which a masking-literal call site can trivially forge —
+ *  `<div style="--newtok: #654321"><span style="color: var(--newtok, #654321)"></span></div>` reads
+ *  as "locally declared" under that looser check even though the value is a permanent, non-themed
+ *  hex, functionally identical to the CPE-1810/1821/1876 defect (CPE-1875 re-review finding 1). A
+ *  value with no `{` in it — a bare hex, keyword, or number — is a static literal and is NOT exempt,
+ *  regardless of where it's written; only an interpolated (computed) value is. */
 function declaresItself(content: string, token: string): boolean {
   const esc = token.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-  return new RegExp(`${esc}\\s*:`).test(content);
+  const re = new RegExp(`${esc}\\s*:\\s*([^;"\`]*)`, "g");
+  let m: RegExpExecArray | null;
+  let sawDeclaration = false;
+  while ((m = re.exec(content)) !== null) {
+    sawDeclaration = true;
+    if (!m[1].includes("{")) return false; // a static-valued declaration disqualifies the exemption
+  }
+  return sawDeclaration;
 }
 
 /** True if `fallback` is (only) a nested `var(--otherToken ...)` reference and `otherToken` itself
@@ -314,7 +373,13 @@ describe("every var(--token, <fallback>) call site resolves to a real hex in eve
       if (ALLOWLISTED_TOKENS.has(token)) continue;
       it(`${label} defines ${token} as a concrete hex (referenced from ${files.join(", ")})`, () => {
         const hex = resolveHex(semanticDecls, token);
-        expect(hex, `${token} (referenced from ${files.join(", ")}) did not resolve to a hex in ${label} — got raw value ${JSON.stringify(semanticDecls.get(token))}. If this is known, pre-existing debt, add a dated entry to ALLOWLIST above pointing at the ticket that owns it — do not fix the underlying token here unless that IS the ticket this work is filed under.`).toMatch(HEX_RE);
+        // CPE-1875 re-review finding 3: `expect(undefined).toMatch(HEX_RE)` throws vitest's own
+        // "expects to receive a string, but got undefined" TypeError BEFORE this custom message is
+        // ever used — the remediation advice below was unreachable dead code. Asserting definedness
+        // FIRST (with the same message) means the failure that actually fires carries the message.
+        const msg = `${token} (referenced from ${files.join(", ")}) did not resolve to a hex in ${label} — got raw value ${JSON.stringify(semanticDecls.get(token))}. If this is known, pre-existing debt, add a dated entry to ALLOWLIST above pointing at the ticket that owns it — do not fix the underlying token here unless that IS the ticket this work is filed under.`;
+        expect(hex, msg).toBeDefined();
+        expect(hex, msg).toMatch(HEX_RE);
       });
     }
   }
@@ -330,7 +395,9 @@ describe("every var(--token, <fallback>) call site resolves to a real hex in eve
       const decls = semanticDeclsFor(label, sel);
       for (const token of GUARDED_TOKENS) {
         const hex = resolveHex(decls, token);
-        expect(hex, `${token} did not resolve to a hex in ${label} — got raw value ${JSON.stringify(decls.get(token))}`).toMatch(HEX_RE);
+        const msg = `${token} did not resolve to a hex in ${label} — got raw value ${JSON.stringify(decls.get(token))}`;
+        expect(hex, msg).toBeDefined();
+        expect(hex, msg).toMatch(HEX_RE);
       }
     }
   });
