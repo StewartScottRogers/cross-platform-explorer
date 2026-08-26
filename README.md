@@ -136,11 +136,24 @@ monitor** so the window is always visible; invalid values exit with an error. `c
 
 ### Auto-updates — one-time setup
 
-1. **Generate an updater signing key** (keep the private key secret):
+1. **Generate an updater signing key** (keep the private key secret). `tauri signer generate`
+   prompts interactively for a password by default, which hangs/panics in a non-interactive shell
+   (no TTY) — pass `-p`/`--password` (or `--ci` for an unencrypted key, matching what this repo's
+   own `updater.key` uses) to run it non-interactively:
 
    ```bash
+   # Interactive (prompts for a password to encrypt the private key):
    npm run tauri signer generate -- -w ./updater.key
+
+   # Non-interactive, password-protected:
+   npm run tauri signer generate -- -w ./updater.key -p "your-password-here"
+
+   # Non-interactive, unencrypted (fine for a CI secret — the secret itself is access-controlled):
+   npm run tauri signer generate -- -w ./updater.key --ci
    ```
+
+   This writes `updater.key` (private) and `updater.key.pub` (public) next to each other. Both are
+   already covered by `.gitignore` — **never `git add` either file.**
 
 2. Paste the printed **public key** into `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`.
 3. In the same file, set the `endpoints` URL to your repo, replacing `OWNER`.
@@ -149,12 +162,29 @@ monitor** so the window is always visible; invalid values exit with an error. `c
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password you chose (blank if none)
 5. **Never commit `updater.key`** — it is already covered by `.gitignore`.
 
-**Rotating the key later (CPE-1873):** the public key from step 2 is also pinned a second time, in
-`crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY`, so a lone edit to
-`tauri.conf.json`'s `pubkey` — accidental or malicious — fails CI (`cargo test -p cpe-updater-verify`,
-which `ci.yml` runs on every push/PR). A real rotation is one PR that updates **both** locations to the
-new public key together, rotates the `TAURI_SIGNING_PRIVATE_KEY*` secrets above, and states the reason
-in the PR description. See that file's module doc for the full procedure.
+**Rotating the key later (CPE-1873):** `plugins.updater.pubkey` (and `.endpoints`, so a rotation
+can't be undercut by silently repointing where the app fetches manifests from) are pinned in THREE
+places, all of which must move together in the same PR:
+
+- `crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY` /
+  `EXPECTED_TAURI_UPDATER_ENDPOINTS` — checked against the **base** `src-tauri/tauri.conf.json` by
+  `cargo test -p cpe-updater-verify` (`ci.yml`, every push/PR to `main`) **and** by the
+  `verify-release-artifacts` binary that `release.yml` runs on every tag push.
+- `src/lib/sidecarBundleResources.test.ts`'s pinned-updater-config assertions — checked against the
+  **fully merged** config (base + every `--config` overlay) for each shipped OS, because an overlay
+  file can silently override `plugins.updater.pubkey`/`.endpoints` the same way it can override
+  `bundle.resources` (the original CPE-1270/1271 footgun this file guards). This is what actually
+  runs before `release-sidecar.yml` — the build every install actually ships — is allowed to build.
+
+Update all three constants to the new value, rotate the `TAURI_SIGNING_PRIVATE_KEY*` secrets above,
+and state the reason in the PR description. See `pinned_pubkey.rs`'s module doc for the full
+walkthrough and — importantly — **what this does and does not prove**: every one of these checks
+compares two files read from the *same* commit/checkout. A rotation that updates the config and all
+three pins together is perfectly self-consistent and passes every one of them; nothing here consults
+a value that lives outside the tagged commit (a repo secret, an org variable, a previously published
+release). That stronger property — proving continuity with the key **users already trust**, not just
+internal agreement within one commit — is exactly what CPE-1873's ticket calls option 2 ("source the
+expected pubkey from outside the tree") and is not built yet.
 
 ### Agent catalog updates — one-time setup (optional)
 

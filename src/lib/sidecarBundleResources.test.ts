@@ -78,11 +78,22 @@ function mergeJson(base: unknown, overlay: unknown): unknown {
   return overlay;
 }
 
-/** Final `bundle.resources` value (array | object | undefined) after applying an OS's full overlay chain. */
-function mergedBundleResources(os: ShipOS): unknown {
+/** The FULL merged config (base + every `--config` overlay, in order) for a shipped OS — the config
+ *  that actually governs the release-sidecar.yml build for that OS. Shared by every guard in this
+ *  file that needs to know what a shipped install's config really ends up containing. */
+function mergedConfig(os: ShipOS): Record<string, unknown> {
   const configs = CONFIG_CHAIN[os].map(loadConfig);
   const merged = configs.reduce((acc, cfg) => mergeJson(acc, cfg));
-  return isPlainObject(merged) && isPlainObject(merged.bundle) ? merged.bundle.resources : undefined;
+  if (!isPlainObject(merged)) {
+    throw new Error(`${os}: merged tauri config chain did not produce a JSON object`);
+  }
+  return merged;
+}
+
+/** Final `bundle.resources` value (array | object | undefined) after applying an OS's full overlay chain. */
+function mergedBundleResources(os: ShipOS): unknown {
+  const merged = mergedConfig(os);
+  return isPlainObject(merged.bundle) ? merged.bundle.resources : undefined;
 }
 
 /**
@@ -173,5 +184,60 @@ describe("shipped sidecar bundle — every runtime-required resource is bundled 
     const base = { resources: ["a.png"] };
     const overlay = { resources: { "b.dll": "b.dll" } };
     expect(mergeJson(base, overlay)).toEqual({ resources: { "b.dll": "b.dll" } });
+  });
+});
+
+// CPE-1873 (round 2 — independent Security Auditor, DEMONSTRATED not inferred): the updater
+// root-of-trust pin in crates/updater-verify only ever reads the BASE `tauri.conf.json`. The build
+// every install actually ships is release-sidecar.yml's: base config + this file's own `CONFIG_CHAIN`
+// of `--config` overlays. Tauri's `--config` merge (RFC 7386 recursive object merge — the same
+// mechanism the guard above proves overrides `bundle.resources`, CPE-1270) lets any overlay in that
+// chain override `plugins.updater.pubkey` / `.endpoints` too. Proven: adding an updater override block
+// to `tauri.sidecar.conf.json` alone (base file untouched) left crates/updater-verify's entire test
+// suite green, including its base-config pin, while the actual shipped sidecar channel's root of trust
+// was attacker-controlled. This guard checks the FULL merged config instead, so an override anywhere in
+// the chain is caught regardless of which file introduced it.
+//
+// Keep these two literals in lockstep with crates/updater-verify/src/pinned_pubkey.rs's
+// EXPECTED_TAURI_UPDATER_PUBKEY / EXPECTED_TAURI_UPDATER_ENDPOINTS — same value, same rotation
+// procedure (documented in that file's module doc).
+const EXPECTED_UPDATER_PUBKEY =
+  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUyMUU1NzRGNjhFMjU2MUEKUldRYVZ1Sm9UMWNlVXYvc283NmRaeHVhYkQrNGpQKzZ5aitWL1ErWWRxUGFWRXlQdXJDTkNENG4K";
+const EXPECTED_UPDATER_ENDPOINTS = [
+  "https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/latest.json",
+];
+
+function mergedUpdaterConfig(os: ShipOS): { pubkey: unknown; endpoints: unknown } {
+  const merged = mergedConfig(os);
+  const plugins = isPlainObject(merged.plugins) ? merged.plugins : undefined;
+  const updater = plugins && isPlainObject(plugins.updater) ? plugins.updater : undefined;
+  return { pubkey: updater?.pubkey, endpoints: updater?.endpoints };
+}
+
+describe("shipped sidecar bundle — updater root of trust survives the FULL overlay merge (CPE-1873)", () => {
+  (["windows", "linux", "macos"] as const).forEach((os) => {
+    it(`${os}: merged plugins.updater.pubkey equals the pinned value (no overlay override)`, () => {
+      const { pubkey } = mergedUpdaterConfig(os);
+      expect(
+        pubkey,
+        `${os}: the FINAL merged config's plugins.updater.pubkey does not match the pinned value -- ` +
+          `some file in the overlay chain (${CONFIG_CHAIN[os].join(" -> ")}) overrides it. This IS the ` +
+          `shipped sidecar channel's actual root of trust; an override here is a live compromise, not a ` +
+          `lint nit. See crates/updater-verify/src/pinned_pubkey.rs (CPE-1873) for the rotation ` +
+          `procedure if this is deliberate -- update the pin there too, in the same commit.`,
+      ).toEqual(EXPECTED_UPDATER_PUBKEY);
+    });
+
+    it(`${os}: merged plugins.updater.endpoints equals the pinned value (no overlay override)`, () => {
+      const { endpoints } = mergedUpdaterConfig(os);
+      expect(
+        endpoints,
+        `${os}: the FINAL merged config's plugins.updater.endpoints does not match the pinned value -- ` +
+          `some file in the overlay chain (${CONFIG_CHAIN[os].join(" -> ")}) overrides it. A changed ` +
+          `endpoint can silently downgrade users to an older, genuinely-signed but vulnerable build ` +
+          `forever, even with the pubkey pin intact. See crates/updater-verify/src/pinned_pubkey.rs ` +
+          `(CPE-1873).`,
+      ).toEqual(EXPECTED_UPDATER_ENDPOINTS);
+    });
   });
 });
