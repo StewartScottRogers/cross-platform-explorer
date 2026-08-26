@@ -184,7 +184,7 @@ mod tests {
         body.extend_from_slice(b"data");
         body.extend_from_slice(&(audio.len() as u32).to_le_bytes());
         body.extend_from_slice(audio);
-        if audio.len() % 2 != 0 {
+        if !audio.len().is_multiple_of(2) {
             body.push(0);
         }
         let mut base = Vec::new();

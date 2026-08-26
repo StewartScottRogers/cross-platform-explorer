@@ -2,7 +2,7 @@
 name = "cpe-vfs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 description = "Scheme router for the Cross-Platform Explorer (epic CPE-616/CPE-1502): opens the right FileSystemProvider (local / SFTP / WebDAV / FTP) from a saved connection profile + its secret."
 license = "MIT"
 

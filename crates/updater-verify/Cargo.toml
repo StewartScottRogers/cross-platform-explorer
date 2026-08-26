@@ -2,7 +2,7 @@
 name = "cpe-updater-verify"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 description = "Standalone updater-manifest + minisign signature verification guard for Cross-Platform Explorer (CPE-1058): parses tauri-action's latest.json, checks its shape + version, and verifies each platform's minisign signature against the configured pubkey over the real artifact bytes — the same check the runtime updater plugin performs, but headless and app-free."
 license = "MIT"
 

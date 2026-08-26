@@ -199,9 +199,9 @@ mod tests {
         b.extend_from_slice(&0u32.to_be_bytes());
         b.extend_from_slice(&0u16.to_be_bytes());
         let plane = (width as usize) * (height as usize);
-        b.extend(std::iter::repeat(200u8).take(plane));
-        b.extend(std::iter::repeat(100u8).take(plane));
-        b.extend(std::iter::repeat(50u8).take(plane));
+        b.extend(std::iter::repeat_n(200u8, plane));
+        b.extend(std::iter::repeat_n(100u8, plane));
+        b.extend(std::iter::repeat_n(50u8, plane));
         b
     }
 

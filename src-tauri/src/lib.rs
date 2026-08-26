@@ -4941,7 +4941,7 @@ fn classify_drive_type_from_proc(
         if !is_prefix_mount {
             continue;
         }
-        if best.map_or(true, |(bm, _)| mount_point.len() > bm.len()) {
+        if best.is_none_or(|(bm, _)| mount_point.len() > bm.len()) {
             best = Some((mount_point, device));
         }
     }
@@ -18085,7 +18085,7 @@ overlay / overlay rw,relatime 0 0
         body.extend_from_slice(b"data");
         body.extend_from_slice(&(audio.len() as u32).to_le_bytes());
         body.extend_from_slice(audio);
-        if audio.len() % 2 != 0 {
+        if !audio.len().is_multiple_of(2) {
             body.push(0);
         }
         let mut out = Vec::new();

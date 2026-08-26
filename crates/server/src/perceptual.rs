@@ -160,7 +160,7 @@ mod tests {
         let mut img = RgbImage::new(n_blocks * block_px, h);
         for (x, _y, px) in img.enumerate_pixels_mut() {
             let block = x / block_px;
-            let is_black = (block % 2 == 0) == start_black;
+            let is_black = block.is_multiple_of(2) == start_black;
             let v = if is_black { 0 } else { 255 };
             *px = image::Rgb([v, v, v]);
         }

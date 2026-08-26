@@ -201,7 +201,7 @@ fn read_capped<R: Read>(r: R, cap: u64) -> Result<(Vec<u8>, bool), String> {
 /// span with zero samples in it (more buckets requested than samples available) repeats the previous
 /// bucket's value, or falls back to `(0.0, 0.0)` for the very first bucket.
 fn bucket_pcm_f32le(pcm: &[u8], buckets: usize) -> Vec<(f32, f32)> {
-    let samples: Vec<f32> = pcm.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let samples: Vec<f32> = pcm.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let total = samples.len() as u128;
     let buckets_u = buckets as u128;
 

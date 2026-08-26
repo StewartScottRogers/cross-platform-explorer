@@ -2,7 +2,7 @@
 name = "cpe-sftp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 description = "SFTP FileSystemProvider for the Cross-Platform Explorer (epic CPE-616): a remote backend over SSH/SFTP, with host-key verification via cpe-server::known_hosts. Async (russh) isolated here so the lean cpe-server core stays std-only + sync."
 license = "MIT"
 

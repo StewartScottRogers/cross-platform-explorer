@@ -133,6 +133,20 @@ jobs:
       - name: Remove any stray latest.json before the build writes its own (CPE-1872)
         run: rm -f latest.json
 
+      # CPE-1865: tauri-action drives `tauri build`, which has no flag to pass `--locked` through to
+      # the `cargo build` it runs internally -- so this is a real, separate `cargo check --locked`
+      # against the SAME `src-tauri/Cargo.lock` the step below is about to build the shipped binary
+      # from, run immediately before it. `npm run build` first because `src-tauri`'s `build.rs` needs
+      # `dist/` to exist at compile time (same reason CI's `backend` job builds the frontend before its
+      # own `cargo check`); tauri-action's own `beforeBuildCommand` will run it again below, which is
+      # harmless and idempotent.
+      - name: Build frontend (needed for the Cargo.lock preflight check below)
+        run: npm run build
+
+      - name: Verify src-tauri/Cargo.lock is current before the real release build (CPE-1865)
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -292,7 +306,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          cargo run --manifest-path crates/updater-verify/Cargo.toml --release --bin verify-release-artifacts -- \
+          cargo run --locked --manifest-path crates/updater-verify/Cargo.toml --release --bin verify-release-artifacts -- \
             --conf src-tauri/tauri.conf.json \
             --manifest release-assets/latest.json \
             --search release-assets \
@@ -338,7 +352,7 @@ jobs:
           CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
         run: |
           VERSION=$(date +%s)   # monotonic across releases → anti-rollback (CPE-372)
-          cargo run --release --quiet --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
+          cargo run --locked --release --quiet --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
             sidecar/ai-console/agents catalog-out "$VERSION"
 
       - name: Upload catalog assets to the release

@@ -223,7 +223,7 @@ fn decode_utf16_window(
     let body = &buf[body_start..];
 
     let code_units: Vec<u16> = body
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| match endianness {
             Utf16Endianness::Le => u16::from_le_bytes([pair[0], pair[1]]),
             Utf16Endianness::Be => u16::from_be_bytes([pair[0], pair[1]]),
@@ -661,7 +661,7 @@ mod tests {
         // Choose max_bytes so `file_len - max_bytes` (the raw window start before alignment) is ODD —
         // forcing the parity-skip path this test exists to exercise.
         let mut max_bytes = 20_000u64;
-        if (file_len - max_bytes) % 2 == 0 {
+        if (file_len - max_bytes).is_multiple_of(2) {
             max_bytes += 1;
         }
         assert_eq!((file_len - max_bytes) % 2, 1, "test setup: need an odd raw window start");

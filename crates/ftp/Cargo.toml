@@ -2,7 +2,7 @@
 name = "cpe-ftp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 description = "FTP/FTPS FileSystemProvider for the Cross-Platform Explorer (epic CPE-616/CPE-1502): a remote backend over FTP/FTPS via suppaftp (rustls-ring — pure Rust, no C build tooling, matching cpe-sftp's ring backend). Sync (no async runtime), like cpe-webdav."
 license = "MIT"
 

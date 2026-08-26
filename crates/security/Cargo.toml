@@ -2,7 +2,7 @@
 name = "cpe-security"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 description = "Pluggable, composable security core (Transport/AuthN/AuthZ planes + default-deny chain) at the Cross-Platform Explorer contract boundary (CPE-810/816)."
 license = "MIT"
 

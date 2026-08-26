@@ -926,7 +926,7 @@ fn parse_riff_chunks(bytes: &[u8]) -> Result<Vec<RiffChunk>, String> {
         let mut id = [0u8; 4];
         id.copy_from_slice(id_bytes);
         chunks.push(RiffChunk { id, data_start, data_end });
-        let padded_size = if size % 2 == 0 { size } else { size + 1 };
+        let padded_size = if size.is_multiple_of(2) { size } else { size + 1 };
         let next = data_start.checked_add(padded_size).ok_or("RIFF chunk padding overflow")?;
         pos = next;
     }
@@ -1535,7 +1535,7 @@ fn build_8bim_block(resource_id: u16, data: &[u8]) -> Vec<u8> {
     b.extend_from_slice(&[0u8, 0u8]); // empty Pascal-string name, padded to an even length
     b.extend_from_slice(&(data.len() as u32).to_be_bytes());
     b.extend_from_slice(data);
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         b.push(0); // pad the data to an even length (Photoshop IRB convention)
     }
     b
@@ -1560,7 +1560,7 @@ fn other_8bim_blocks(payload: &[u8]) -> Vec<u8> {
         pos += 2;
         let Some(&name_len) = payload.get(pos) else { break };
         let name_total = 1 + name_len as usize;
-        let name_padded = if name_total % 2 == 0 { name_total } else { name_total + 1 };
+        let name_padded = if name_total.is_multiple_of(2) { name_total } else { name_total + 1 };
         let Some(after_name) = pos.checked_add(name_padded) else { break };
         if after_name > payload.len() {
             break;
@@ -1569,7 +1569,7 @@ fn other_8bim_blocks(payload: &[u8]) -> Vec<u8> {
         let Some(size_bytes) = payload.get(pos..pos + 4) else { break };
         let data_size = u32::from_be_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]) as usize;
         pos += 4;
-        let data_padded = if data_size % 2 == 0 { data_size } else { data_size + 1 };
+        let data_padded = if data_size.is_multiple_of(2) { data_size } else { data_size + 1 };
         let Some(block_end) = pos.checked_add(data_padded) else { break };
         if block_end > payload.len() {
             break;
@@ -2657,7 +2657,7 @@ mod tests {
         c.extend_from_slice(id);
         c.extend_from_slice(&(data.len() as u32).to_le_bytes());
         c.extend_from_slice(data);
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             c.push(0);
         }
         c

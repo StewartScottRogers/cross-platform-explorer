@@ -474,7 +474,7 @@ mod tests {
         // vanish, so a short token + zero-padding wrongly compared equal. `"A"` vs `"A" + 256
         // zero bytes` (len 1 vs 257, 1 ^ 257 = 256 → 0 as u8) must NOT be equal.
         let mut padded = vec![b'A'];
-        padded.extend(std::iter::repeat(0u8).take(256));
+        padded.extend(std::iter::repeat_n(0u8, 256));
         assert!(!ct_eq(b"A", &padded), "length delta of 256 must not alias to equal");
         // End-to-end: with a 1-byte known token "A", presenting "A"+256 NULs must NOT authenticate
         // (against the old truncation it aliased to a match).

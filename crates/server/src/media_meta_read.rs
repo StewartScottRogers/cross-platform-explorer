@@ -143,7 +143,7 @@ fn decode_utf16_bom(data: &[u8]) -> String {
 /// Decode raw UTF-16 code units (`little_endian` picks the byte order), lossily for unpaired surrogates.
 fn decode_utf16(data: &[u8], little_endian: bool) -> String {
     let units: Vec<u16> = data
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|c| if little_endian { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
         .collect();
     String::from_utf16_lossy(&units)
@@ -517,7 +517,7 @@ fn parse_photoshop_8bim(data: &[u8]) -> Vec<MetaField> {
         pos += 2;
         let Some(&name_len) = data.get(pos) else { break };
         let name_total = 1 + name_len as usize; // length byte + name bytes
-        let name_padded = if name_total % 2 == 0 { name_total } else { name_total + 1 };
+        let name_padded = if name_total.is_multiple_of(2) { name_total } else { name_total + 1 };
         let Some(after_name) = pos.checked_add(name_padded) else { break };
         if after_name > data.len() {
             break;
@@ -527,7 +527,7 @@ fn parse_photoshop_8bim(data: &[u8]) -> Vec<MetaField> {
         let data_size = be_u32(size_bytes) as usize;
         pos += 4;
         let Some(block_data) = data.get(pos..pos + data_size) else { break };
-        let data_padded = if data_size % 2 == 0 { data_size } else { data_size + 1 };
+        let data_padded = if data_size.is_multiple_of(2) { data_size } else { data_size + 1 };
         if resource_id == IPTC_RESOURCE_ID {
             return parse_iim_datasets(block_data);
         }
@@ -927,7 +927,7 @@ pub fn read_wav(bytes: &[u8]) -> Vec<MetaField> {
             }
         }
         // RIFF chunks are padded to an even length; the pad byte is not part of the next chunk.
-        let padded_size = if size % 2 == 0 { size } else { size + 1 };
+        let padded_size = if size.is_multiple_of(2) { size } else { size + 1 };
         let Some(next) = data_start.checked_add(padded_size) else { break };
         pos = next;
     }
@@ -950,7 +950,7 @@ fn parse_wav_info(data: &[u8]) -> Vec<MetaField> {
         let value_start = pos + 8;
         let Some(value_end) = value_start.checked_add(size) else { break };
         let Some(raw) = data.get(value_start..value_end) else { break };
-        let padded_size = if size % 2 == 0 { size } else { size + 1 };
+        let padded_size = if size.is_multiple_of(2) { size } else { size + 1 };
         let Some(next) = value_start.checked_add(padded_size) else { break };
         pos = next;
 
@@ -2328,7 +2328,7 @@ mod tests {
         b.extend_from_slice(&[0u8, 0u8]); // empty Pascal-string name (1 len byte + 0 name bytes), padded to 2
         b.extend_from_slice(&(data.len() as u32).to_be_bytes());
         b.extend_from_slice(data);
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             b.push(0); // pad data to even length
         }
         b
@@ -2700,7 +2700,7 @@ mod tests {
         c.extend_from_slice(id);
         c.extend_from_slice(&(data.len() as u32).to_le_bytes());
         c.extend_from_slice(data);
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             c.push(0); // RIFF pad byte
         }
         c
