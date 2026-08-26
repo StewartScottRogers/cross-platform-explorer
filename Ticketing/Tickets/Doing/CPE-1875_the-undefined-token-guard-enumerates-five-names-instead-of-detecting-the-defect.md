@@ -3,7 +3,7 @@ id: CPE-1875
 title: the undefined-token guard enumerates five names instead of detecting the defect, so a sixth occurrence ships green
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-23
@@ -75,3 +75,11 @@ the reasoning.
   on the independent Reviewer's recommendation from PR #1009. The reviewer marked it explicitly as a
   follow-up rather than a blocker, since CPE-1821's own acceptance criteria asked to extend the named
   guard, not to build a detector — so #1009 merges and this ticket carries the general fix.
+- **2026-08-26 USMST** — Picked up by a sprint Worker. Plan: replace the hard-coded `GUARDED_TOKENS`
+  coverage block in `src/app.css.warn-token.test.ts` with a real detector that greps every
+  `var(--token, <fallback>)` call site across `.svelte`/`.css`/`.ts` and asserts each discovered
+  token resolves to a concrete hex in all five live theme blocks. Keep the three existing per-token
+  invariants (dead-fallback ban for the original five, literal-hex ban, WCAG contrast pairings)
+  unchanged since they carry extra meaning beyond coverage. Expect `--mono` (CPE-1876, ~24 call
+  sites) to go red immediately; disposition an explicit dated allowlist pointing at CPE-1876 rather
+  than fixing it here.
