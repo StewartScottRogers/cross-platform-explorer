@@ -428,19 +428,53 @@ function isRenderPosition(inTag: boolean, currentAttrName: string | null): boole
   return currentAttrName === "title" || currentAttrName === "aria-label" || currentAttrName === "alt";
 }
 
-/** Scan Svelte markup (script/style already stripped) for every render-position mustache — text
- *  content, `title=`/`aria-label=`/`alt=`, and `{@html …}` — and return the 1-based lines of the ones
- *  that are NOT provably safe per `isSafeExpr`. A `{#if …}`/`{:else …}`/`{/each}`/`{#each … as X}`/
- *  `{@const …}`/`{@debug …}` control tag is never itself treated as a render (its condition/binding
- *  isn't drawn), but DOES count as a valid "preceding token" for whatever mustache follows it.
+/** One raw-render occurrence `scanUnsafeRenderSites` (the shared engine behind `findUnsafeRenderLines`
+ *  and `findUnsafeRenderSites`) found while walking a file's markup — everything `findUnsafeRenderLines`
+ *  reports, PLUS the render position's *kind*, which that function's `"<line>:<expr>"` string form has no
+ *  room for. CPE-1885 round 2: keying `bidiEscape.guard.test.ts`'s REGISTRY by `expr` alone (stripping
+ *  the line number for stability under reformatting) is a strict information loss versus the OLD
+ *  `"<line>:<expr>"` keying whenever that engine encounters the SAME expression text more than once in
+ *  one component — the count still matches, but there is nothing left to tell WHICH occurrence is which.
+ *  A future edit that fixes one occurrence (wraps it in `displaySafeName`/`displaySafePath`) while
+ *  introducing an unrelated brand-new raw occurrence of the IDENTICAL expression text elsewhere in the
+ *  same file leaves the total count unchanged, so an expression-only multiset stays green while the
+ *  actual unsafe surface silently moved to a new, unreviewed line — the exact "guard silently stops
+ *  guarding" failure class this ticket exists to close, one level down. `kind` is the fix: it is the DOM
+ *  sink the expression reaches — `"text"` for body text-node content, `"@html"` for an `{@html …}` block,
+ *  or the exact attribute name (`"title"`, `"aria-label"`, `"alt"`) for an attribute value — never an
+ *  address, so it stays exactly as stable under insertion/deletion/reformatting as bare expression text
+ *  did, while distinguishing two identical-text occurrences that reach DIFFERENT sinks. **Residual, stated
+ *  precisely rather than implied away**: it does NOT distinguish two occurrences of the identical
+ *  expression in the identical `kind` within one file (e.g. the same `baseName(path)` rendered raw in
+ *  TWO separate body-text positions) — a swap between exactly those two stays invisible, the same way a
+ *  swap between two same-text/same-line occurrences already was under the OLD line-keyed design (a `Set`
+ *  entry there could only ever record ONE of them too). Closing that residual would need a full
+ *  occurrence-index (the ticket's own second suggested option), which reintroduces a position-shaped key
+ *  and its own reformatting fragility — the ticket also offers "count occurrences" as sufficient, and
+ *  `(expr, kind)` is exactly that, refined by DOM sink instead of by raw index. */
+export interface UnsafeRenderSite {
+  line: number;
+  expr: string;
+  kind: string;
+}
+
+/** Shared engine behind `findUnsafeRenderLines` and `findUnsafeRenderSites`: scan Svelte markup
+ *  (script/style already stripped) for every render-position mustache — text content, `title=`/
+ *  `aria-label=`/`alt=`, and `{@html …}` — and return one `UnsafeRenderSite` per occurrence that is NOT
+ *  provably safe per `isSafeExpr`, IN ENCOUNTER ORDER, undeduplicated (unlike `findUnsafeRenderLines`'s
+ *  `Set`-deduplicated string output — see that function for why line+expr collapsing is fine for ITS
+ *  contract, and `UnsafeRenderSite`'s own doc above for why it is not enough for REGISTRY's). A
+ *  `{#if …}`/`{:else …}`/`{/each}`/`{#each … as X}`/`{@const …}`/`{@debug …}` control tag is never itself
+ *  treated as a render (its condition/binding isn't drawn), but DOES count as a valid "preceding token"
+ *  for whatever mustache follows it.
  *
  *  Runs a small tag/text state machine over the markup (rather than a pure lookback regex) specifically
  *  so a component's shorthand-prop attribute list — `<Sidebar {density} {currentPath} … />`, extremely
  *  common in this codebase — is never mistaken for a run of text-content renders just because each `{…}`
  *  sits right after the previous one's `}`; that ambiguity is exactly why `inTag` is threaded through. */
-export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): string[] {
+function scanUnsafeRenderSites(fileSrc: string, fileLabel = "<source>"): UnsafeRenderSite[] {
   const markup = stripNonMarkup(fileSrc);
-  const offenders = new Set<string>();
+  const sites: UnsafeRenderSite[] = [];
   let i = 0;
   let inTag = false;
   let quoteChar: string | null = null;
@@ -473,7 +507,12 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
       const expr = isHtmlTag ? trimmed.replace(/^@html\s*/, "") : inner;
       if (isRenderPosition(inTag, currentAttrName) && !isSafeExpr(expr)) {
         const { line } = lineCol(markup, openIdx);
-        offenders.add(`${line}:${normalizeExprForLabel(expr)}`);
+        // CPE-1885 round 2: `kind` names the DOM sink this occurrence reaches — the render-position
+        // discriminator UnsafeRenderSite's own doc comment (above) explains — computed from the exact
+        // same state (`isHtmlTag`, `inTag`, `currentAttrName`) `isRenderPosition` just gated on, so it
+        // can never disagree with what was actually matched.
+        const kind = isHtmlTag ? "@html" : inTag ? (currentAttrName ?? "attr") : "text";
+        sites.push({ line, expr: normalizeExprForLabel(expr), kind });
       }
     }
     i = close + 1;
@@ -600,7 +639,34 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
   if (inTag) {
     fail(markup.length - 1, `reached end of file inside an unterminated tag — no closing ">" was found`);
   }
+  return sites;
+}
+
+/** Scan Svelte markup for every render-position mustache and return the 1-based lines of the ones that
+ *  are NOT provably safe per `isSafeExpr` — see `scanUnsafeRenderSites` (the shared engine this and
+ *  `findUnsafeRenderSites` both call) for the full account of what counts as a render position and why.
+ *  Deduplicates by the exact `"<line>:<expr>"` pair via a `Set`, so two DIFFERENT-kind occurrences that
+ *  happen to share both a line and expression text (e.g. `title={x}>{x}` on one line) collapse to a
+ *  single reported entry — this is unchanged, long-standing behavior (every existing caller of this
+ *  function, and the exact strings it has always returned, depend on it staying this way); it is exactly
+ *  the gap `findUnsafeRenderSites`/`UnsafeRenderSite.kind` exists to close for REGISTRY's stricter needs. */
+export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): string[] {
+  const sites = scanUnsafeRenderSites(fileSrc, fileLabel);
+  const offenders = new Set<string>();
+  for (const s of sites) offenders.add(`${s.line}:${s.expr}`);
   return [...offenders].sort(compareOffenders);
+}
+
+/** Like `findUnsafeRenderLines`, but returns the richer `UnsafeRenderSite` (line + expr + kind) for every
+ *  occurrence, UNDEDUPLICATED — so two occurrences that share a line, expression, and kind (a genuine
+ *  same-position duplicate is not a real shape this engine produces, since one mustache is one site) or
+ *  that share expr+kind but sit on different lines (a REAL duplicate — e.g. the same expression rendered
+ *  raw in two different body-text positions) both appear as two separate entries, preserving multiplicity
+ *  the way `findUnsafeRenderLines`'s `Set` never needed to. Exists for `bidiEscape.guard.test.ts`'s
+ *  REGISTRY, which keys by `(kind, expr)` rather than by line — see `UnsafeRenderSite`'s doc comment for
+ *  why bare expression text alone is not a safe key. */
+export function findUnsafeRenderSites(fileSrc: string, fileLabel = "<source>"): UnsafeRenderSite[] {
+  return scanUnsafeRenderSites(fileSrc, fileLabel);
 }
 
 /** CPE-1768 (widened this round — reviewer B1; widened again CPE-1790): the membership CRITERION — a
