@@ -3,7 +3,7 @@ id: CPE-1889
 title: the write leg has no parent-directory containment, so a junction one level up writes outside the root and reports success
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-25
