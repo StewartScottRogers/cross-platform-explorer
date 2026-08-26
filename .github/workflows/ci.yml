@@ -1658,6 +1658,27 @@ jobs:
             ./sidecar/repos -> target
             ./src-tauri -> target
 
+      # This job's first real run (PR #1027) reported `sidecar/host` and `src-tauri` as MSRV failures
+      # when they were nothing of the sort -- `libdbus-sys`/`glib-sys` build scripts failed on a
+      # missing SYSTEM library (`dbus-1`, `glib-2.0` via pkg-config), not a Rust API/toolchain gap. The
+      # `Backend (ubuntu-latest)` and `Sidecar platform (ubuntu-latest)` jobs already install exactly
+      # these packages before their own `cargo check`/`clippy` — this job runs the same `cargo check`
+      # against the same manifests on the same OS, so it needs the same system deps, or it reports a
+      # false MSRV red for an unrelated environment gap. Union of both jobs' package lists, same
+      # ForceIPv4/retry/timeout hardening (CPE-1772/1787) for the same GitHub-hosted-runner IPv6-stall
+      # risk on `apt-get update`.
+      - name: Install Linux system dependencies (src-tauri's WebKitGTK + sidecar/host's D-Bus keyring)
+        timeout-minutes: 8
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libdbus-1-dev \
+            pkg-config
+
       # src-tauri's `build.rs` (tauri_build) needs the frontend `dist/` to exist at compile time --
       # same reason the `backend` job builds it first, above.
       - name: Setup Node
