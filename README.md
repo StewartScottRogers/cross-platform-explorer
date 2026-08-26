@@ -149,6 +149,13 @@ monitor** so the window is always visible; invalid values exit with an error. `c
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password you chose (blank if none)
 5. **Never commit `updater.key`** — it is already covered by `.gitignore`.
 
+**Rotating the key later (CPE-1873):** the public key from step 2 is also pinned a second time, in
+`crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY`, so a lone edit to
+`tauri.conf.json`'s `pubkey` — accidental or malicious — fails CI (`cargo test -p cpe-updater-verify`,
+which `ci.yml` runs on every push/PR). A real rotation is one PR that updates **both** locations to the
+new public key together, rotates the `TAURI_SIGNING_PRIVATE_KEY*` secrets above, and states the reason
+in the PR description. See that file's module doc for the full procedure.
+
 ### Agent catalog updates — one-time setup (optional)
 
 The AI Console's roster of coding agents is described by signed manifests, which can refresh from your

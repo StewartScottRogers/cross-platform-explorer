@@ -220,7 +220,18 @@ fn main() -> ExitCode {
                     "manifest claims {total} platform(s) but only {n} were actually, cryptographically verified -- refusing to report success on a partial check (this should be unreachable; verify_update_manifest is supposed to fail before returning Ok in this case)",
                 ));
             }
-            println!("OK: verified {n} of {total} platform signature(s) against the configured pubkey.");
+            // CPE-1873: say plainly what this proved. This checks that the manifest's signatures are
+            // internally CONSISTENT with the pubkey baked into `tauri.conf.json` in *this* checkout --
+            // it does not, and cannot by itself, prove that pubkey is the one users already trust,
+            // because both the artifact and the value it's checked against come from the same tagged
+            // commit. That second property (authenticity of the pubkey itself) is what
+            // `tests/pinned_pubkey_guard.rs` checks, separately, on every push/PR.
+            println!(
+                "OK: verified {n} of {total} platform signature(s) are internally consistent with the \
+                 pubkey configured in this checkout's tauri.conf.json. This does NOT by itself prove that \
+                 pubkey is the one users already trust -- see crates/updater-verify/src/pinned_pubkey.rs \
+                 (CPE-1873) for the separate guard that pins the pubkey's authenticity."
+            );
             ExitCode::SUCCESS
         }
         Err(problems) => {
