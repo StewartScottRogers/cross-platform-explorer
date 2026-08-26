@@ -3,7 +3,7 @@ id: CPE-1873
 title: nothing pins the updater pubkey, so anyone who can push a tag can rotate the app's root of trust and the release guard will bless it
 type: bug
 priority: High
-status: Backlog
+status: Doing
 tags: ready
 estimate: M
 created: 2026-08-23
@@ -89,3 +89,14 @@ that is **not** CPE-1872's to fix — it predates that PR and is a different tru
 - **2026-08-23 13:40 USMST** — Filed by the Foreman during batched run `batched-2026-08-23-1124`,
   from the independent Security Auditor's report on PR #1008. Evidence is the auditor's own
   constructed fixture run, reproduced above verbatim.
+- **2026-08-26 (Worker)** — Picked up. Plan: pin the real `src-tauri/tauri.conf.json`
+  `plugins.updater.pubkey` value as a literal constant in a second, reviewed file inside
+  `crates/updater-verify` (the crate that already builds/tests on every push via
+  `ci.yml`'s "updater-verify — clippy + test" step), add a guard test that reads the live
+  config and fails loudly + informatively the moment the two disagree, make the
+  `verify-release-artifacts` success message state plainly what property it checked
+  (internal consistency, not authenticity against a value outside the tagged commit), and
+  document the intended rotation procedure in README.md's existing "Auto-updates" setup
+  section plus the guard's own doc comment. Will red-proof by committing, then rotating the
+  live pubkey to a fresh keypair, running the guard, recording the RED output, and
+  restoring.
