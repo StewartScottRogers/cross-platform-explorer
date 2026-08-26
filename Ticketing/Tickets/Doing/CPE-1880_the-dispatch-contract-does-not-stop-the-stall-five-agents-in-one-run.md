@@ -81,10 +81,10 @@ Foreman that does not know this failure mode will wait on it.
 
 ## Acceptance criteria
 
-- [ ] A stated, evidenced conclusion on whether instruction alone can prevent this.
-- [ ] A structural change that makes the stall impossible or self-recovering.
-- [ ] All five recorded returns replayed against the fix.
-- [ ] The loop specifically addressed: an agent that has armed a monitor must not be able to emit
+- [x] A stated, evidenced conclusion on whether instruction alone can prevent this.
+- [x] A structural change that makes the stall impossible or self-recovering.
+- [x] All five recorded returns replayed against the fix.
+- [x] The loop specifically addressed: an agent that has armed a monitor must not be able to emit
       "still waiting" indefinitely.
 
 ## Notes
@@ -165,3 +165,149 @@ Concretely:
 Note the run's own instructions already drifted toward this by accident: the later dispatch briefs say
 "the Foreman owns CI for this PR — do not watch, poll, or monitor it", and no worker briefed that way
 has stalled since.
+
+### 2026-08-26 — investigated and fixed, branch `cpe-1880-foreman-owns-ci`
+
+#### Step 1 — what the five stalls actually were, and which of the three explanations holds
+
+The ticket offers three candidate explanations. Only one survives contact with the evidence.
+
+| Candidate | Verdict |
+|---|---|
+| The agents never received the contract | **Ruled out.** Three of the five CPE-1794 returns came *after* a direct `SendMessage` that quoted the blocking command, named the defect, and named CPE-1848. |
+| They received it and ignored it | **Ruled out.** Return #2 — `"A background monitor is now polling PR #1017's two check suites every 30s"` — is not defiance; `--interval 30` is CPE-1848's own prescribed interval. The agent was doing exactly what it was told. |
+| They followed it correctly and stalled on something it does not cover | **This one.** And worse than "does not cover": the contract *prescribed the mechanism of the failure*. |
+
+**The measurement that settles it.** Two facts multiply:
+
+1. The harness's Bash tool caps one call at `timeout: 600000` ms. A command that outlives the cap is
+   **auto-backgrounded, not killed** — so the agent is handed a background task by the harness, through
+   no decision of its own, and then does the only thing available to something holding a background task
+   it cannot be woken from.
+2. `gh run watch` blocks until the run finishes. I pulled the last 100 `ci.yml` runs
+   (`gh run list --workflow=ci.yml --limit 100 --json databaseId,createdAt,updatedAt,status,conclusion`,
+   95 completed, window 2026-08-23T02:10Z → 2026-08-26T13:57Z) and computed wall clock as
+   `updatedAt − createdAt`:
+
+   | | min | p25 | median | p75 | p90 | max |
+   |---|---|---|---|---|---|---|
+   | all completed (n=95) | 0.2 m | 41.8 m | **58.9 m** | 63.7 m | 77.3 m | 97.0 m |
+   | **successful only (n=71)** | **28.6 m** | — | **60.7 m** | — | — | — |
+
+   **Zero of the 71 successful runs finished inside 600 s.** The only four sub-ten-minute runs in the
+   whole window (`32689955727`, `32689226762`, `32686063824`, `32683231765`) were all `cancelled`.
+
+   The two runs CPE-1857's worker cited check out independently: `32672218824` = 48 m 17 s,
+   `32677925708` = 84 m 18 s (both `cpe-1857-overwrite-through-hardlink`, both `success`).
+
+So CPE-1848 handed every dispatched agent a command with a **0-of-71** chance of returning inside the
+cap. Instructing them harder could never have worked — which is precisely the pattern the evidence
+showed: three tellings, three stalls.
+
+**On the prior run's own retrospective.** `.claude/sprint-metrics/history.md` (line 1477) concluded
+*"Hand agents the blocking command, not just the prohibition… The brief said 'you get no notifications';
+it did not say `gh run watch <id> --interval 30`. Saying the latter is what stops it."* That lesson IS
+reflected in the current contract text — it is the literal line CPE-1848 added — and the five stalls
+post-date it by hours. The lesson was right in form and wrong in content: **a blocking command is only
+safe if it is bounded below the tool cap**, and `gh run watch` is not bounded at all. Following the
+retrospective is what produced the next round of stalls.
+
+**A second, sharper finding while replacing that line.** CPE-1848's guard test
+(`src/lib/sprintDispatchAndCiLogGuards.test.ts`) asserted
+`expect(SPRINT_MD).toContain("gh run watch <run-id> --interval 30")` under the test name *"gives the
+bounded-poll idiom inline"*. The command is not bounded, and the guard was therefore **pinning the
+defect in place** — deleting the stall-causing line would have turned CI red. That is this repo's own
+most-repeated finding wearing a new hat: a guard that is green while the thing it guards is broken. The
+assertion is now inverted (see below).
+
+#### Step 2 — instruction alone cannot prevent this (AC 1)
+
+Stated and evidenced: **no.** The agents complied and complying is what stalled them. A fourth wording
+of "do not wait on a notification" cannot help an agent whose call was backgrounded by the harness after
+it had already returned control. The fix has to remove the unbounded call and catch the failure on
+arrival.
+
+#### Step 3 — the structural fix, and what was rejected
+
+**Chosen (AC 2), three parts, in decreasing order of how structural they are:**
+
+1. **`scripts/ci-poll.mjs`** — a bounded CI poll that *cannot* be backgrounded. Worst-case wall clock is
+   clamped to `600 s − 120 s margin` by `clampBudgetMs()`, and the clamp is one-directional: `--budget`
+   can only ever ask for *less*. There is no flag, env var, or argument that raises the ceiling, so the
+   stall cannot be reintroduced by configuration — only by deleting the function, which reds four tests.
+   It prints one timestamped line per tick and always ends with a single `CI VERDICT:` line carrying
+   `total_count`, `pending`, `mergeable`, and the SHA. It also **mechanises the two poll traps sprint.md
+   states in prose** — `total_count == 0` is reported rather than read as green (naming `CONFLICTING`
+   when that is why), and `pending == 0` is only trusted once `total_count` has been stable across two
+   reads — so those rules no longer depend on an agent remembering them mid-poll.
+2. **`scripts/stall-check.mjs`** — a classifier the Foreman runs over every returned report. Six pattern
+   families, split `hard` (a backgrounded watcher — the offence itself) and `soft` (contentless
+   deferral, which an explicit handoff line legitimately excuses). Fenced blocks and `>` blockquotes are
+   stripped first, so *documenting* the rule is not *committing* the offence — without that, this
+   ticket's own PR body would trip its own detector.
+3. **`sprint.md` / `sprint-batched.md`: the Foreman owns CI.** Workers push and report; they are never
+   asked to establish a CI outcome. `gh run watch` / `gh pr checks --watch` are now banned for
+   sub-agents outright rather than prescribed, with the 0-of-71 measurement inline so the ban reads as a
+   fact rather than a preference. The `timeout 570 gh run watch` mitigation is explicitly warned off —
+   it was measured, it still backgrounds (the harness timer spans the compound command), and it is the
+   fix everyone reaches for.
+
+**The loop, specifically (AC 4).** `classifyReport(report, { priorStalls })` bounds the escalation at
+**one** retry: first stall-shaped return → re-invoke once; **second from the same agent → kill and take
+over**. Replaying the recorded CPE-1794 sequence gives `["re-invoke", "take-over", "take-over",
+"take-over"]` — exactly one re-invoke, and the run never reaches returns 3 and 4. That is asserted as a
+test.
+
+**Rejected, with reasons:**
+
+- *Deny background/monitor tooling to sub-agents outright.* The most structural option on the list and
+  the one I would take if it were reachable — but it is a harness capability, not a repo one. Nothing in
+  this tree can revoke it, and more to the point it would not have helped: the harness backgrounded these
+  calls **on the agents' behalf** when they overran the cap. The agents never invoked a monitor tool.
+  Removing the tool leaves the auto-background intact.
+- *A stronger/louder contract paragraph.* Measured and refuted by the ticket itself. Retained only as the
+  carrier for the other two fixes, never as the mechanism.
+- *`timeout 570 gh run watch … | tail`.* Recorded as tried and failed; now documented as a trap rather
+  than left to be rediscovered.
+- *A reusable dispatch-prompt builder so the contract cannot be omitted.* Genuinely attractive and it is
+  the right answer to "the Foreman forgot to paste it" — but that is not what happened here. The contract
+  *was* pasted, verbatim, plus a follow-up message. A builder would have reproduced the bad command with
+  perfect fidelity. It solves an adjacent problem this evidence does not show.
+- *Making `ci-poll` a Rust binary or a `cpe-server` module.* No: it is harness tooling, not product. Node
+  is already a build dependency, it costs the shipped app nothing, and PURPOSE.md's small/predictable
+  tiebreaker says keep it out of the binary.
+
+#### Step 4 — replaying all five recorded returns (AC 3)
+
+`src/lib/sprintStallControls.test.ts` carries the five verbatim returns from run
+`batched-2026-08-23-1124` and the three phrasings CPE-1848 banned by name. All eight classify as stalls;
+the five all yield `re-invoke` on first offence and `take-over` on the second. **44 tests, all green.**
+
+A benign corpus of eight must-not-trip cases runs alongside them, including the two that matter most:
+the *prescribed* return (`"CI still pending on 84d20517 — total_count=19 pending=4 mergeable=MERGEABLE.
+Handing CI to the Foreman."`) and `ci-poll`'s own budget-exhausted output — if the detector flagged
+either, the two controls would fight each other. It also covers the product's own "watcher" vocabulary
+(Agent Watch streams events in the background), `npm run test:watch`, and a future-tense
+"the Performance Guard will report the size delta" that must not read as a promised notification.
+
+**Proof the tests can fail** (three mutations, each reverted):
+
+| Mutation | Result |
+|---|---|
+| every `severity: "hard"` → `"soft"` in `stall-check.mjs` | 5 of 44 red — a backgrounded watcher would be excused by a handoff line |
+| `MAX_BUDGET_MS = HARNESS_TOOL_TIMEOUT_MS * 4` in `ci-poll.mjs` | red — the clamp assertions catch a re-widened budget |
+| restore `To watch CI: gh run watch <run-id> --interval 30` in `sprint.md` | 1 of 29 red in the CPE-1848 guard |
+
+#### Assumptions logged
+
+- The 600 s figure is read from the Bash tool's own documented `timeout` maximum, not from a probe of the
+  auto-background threshold. `SAFETY_MARGIN_MS` is 120 s to absorb being wrong about where exactly the
+  line sits; `assertNotBackgroundable()` fires at start-up if the numbers ever drift.
+- The detector deliberately **over-flags**. A false positive costs one re-invoke of an agent that
+  restates a report it already has; a false negative costs a hung agent, a frozen batch counter, and a
+  full Foreman round-trip. Those costs are not close, so the bias is one-sided on purpose. One known and
+  accepted false positive: "I am still waiting on the reviewer" with no handoff line reads as a stall.
+- CI duration is measured as `updatedAt − createdAt`, i.e. queued + running, which is the number that
+  matters to a blocking watch. Queue depth is an aggravating factor (15 runs in flight across seven
+  branches during the recorded run), not the cause: even the *fastest successful* run in three days,
+  28.6 min, is 2.9× the cap.

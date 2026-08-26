@@ -288,7 +288,12 @@ export function readFromPrJson(json) {
   };
   const pending = rollup.filter(isPending).length;
   return {
-    terminal: rollup.length > 0 && pending === 0,
+    // NEVER terminal, even at pending == 0. A workflow RUN has an authoritative `status: completed`;
+    // a PR check rollup has no such signal — it is only ever "everything scheduled so far has
+    // reported," and `gui-smoke` shards do not exist until their build job finishes. Marking this
+    // terminal would short-circuit the two-read stability rule and reintroduce exactly the CPE-1863
+    // dip-before-it-rises misread. Let decideFromReads() require the second read.
+    terminal: false,
     conclusion:
       rollup.length === 0
         ? null

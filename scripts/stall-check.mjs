@@ -190,8 +190,8 @@ export function classifyReport(report, opts = {}) {
       handoff,
       action: "accept",
       message: handoff
-        ? "accept — real report; CI handed off explicitly"
-        : "accept — no stall language",
+        ? "real report; CI handed off explicitly"
+        : "no stall language",
     };
   }
   if (priorStalls >= 1) {
@@ -201,7 +201,7 @@ export function classifyReport(report, opts = {}) {
       handoff,
       action: "take-over",
       message:
-        `take-over — this agent has now returned ${priorStalls + 1} stall-shaped reports. Do NOT re-invoke ` +
+        `this agent has now returned ${priorStalls + 1} stall-shaped reports. Do NOT re-invoke ` +
         "again: kill it, read its PR yourself, and run the gauntlet by hand. Re-invoking a third time is " +
         "the loop CPE-1880 exists to bound.",
     };
@@ -212,7 +212,7 @@ export function classifyReport(report, opts = {}) {
     handoff,
     action: "re-invoke",
     message:
-      "re-invoke — SendMessage this agent: \"I own CI; do not watch, poll, or monitor it. Report now, " +
+      "SendMessage this agent: \"I own CI; do not watch, poll, or monitor it. Report now, " +
       "synchronously, with the work you already have.\" Do not wait on it.",
   };
 }

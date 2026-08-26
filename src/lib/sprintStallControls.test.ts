@@ -197,6 +197,21 @@ describe("ci-poll mechanises the poll traps sprint.md states in prose (CPE-1880)
     expect(pr).toMatchObject({ terminal: false, totalCount: 2, pending: 1, mergeable: "CONFLICTING", sha: "cafebabe" });
   });
 
+  it("a PR rollup is never 'terminal', even at pending==0 — only a RUN carries an authoritative status", () => {
+    // A rollup at pending==0 means "everything scheduled SO FAR has reported", which is precisely the
+    // CPE-1863 misread. If this were terminal it would bypass the two-read rule and the poll would
+    // stop on the dip. Caught by smoke-testing the real CLI against PR #1031, not by the pure tests.
+    const allGreen = readFromPrJson({
+      mergeable: "MERGEABLE",
+      headRefOid: "7fcd1f94",
+      statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+    });
+    expect(allGreen.terminal).toBe(false);
+    expect(allGreen.conclusion).toBe("success");
+    expect(decideFromReads([allGreen as never]).done).toBe(false);
+    expect(decideFromReads([allGreen as never, allGreen as never]).done).toBe(true);
+  });
+
   it("requires a poll target — no argument means a loud usage error, not a silent no-op", () => {
     expect(() => parseArgs([])).toThrow(/--run|--pr/);
     expect(() => parseArgs(["--nope"])).toThrow(/unknown argument/);
