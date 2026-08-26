@@ -38,6 +38,11 @@ fn main() -> ExitCode {
     let mut manifest_path: Option<PathBuf> = None;
     let mut search_dirs: Vec<PathBuf> = Vec::new();
     let mut expect_url_prefix: Option<String> = None;
+    // CPE-1873: opt-OUT of the pubkey/endpoints pin check (default is to run it). Exists ONLY for
+    // this crate's own test fixtures, which scaffold a fresh, throwaway keypair per test unrelated
+    // to the repo's real pinned value -- they test manifest/signature logic, not the pin itself. A
+    // real invocation (release.yml, or anyone running this by hand) must never pass this.
+    let mut skip_pin_check = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -58,9 +63,10 @@ fn main() -> ExitCode {
                 Some(v) => expect_url_prefix = Some(v.clone()),
                 None => return fail("--expect-url-prefix needs a value"),
             },
+            "--skip-pin-check" => skip_pin_check = true,
             "-h" | "--help" => {
                 println!(
-                    "verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>]"
+                    "verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>] [--skip-pin-check]"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -91,6 +97,56 @@ fn main() -> ExitCode {
         Some(v) => v.to_string(),
         None => return fail("tauri.conf.json has no top-level version"),
     };
+
+    // CPE-1873 round 2 (independent reviewer, attempt 1's rejection): the `#[test]` guard in
+    // `tests/pinned_pubkey_guard.rs` only runs where `cargo test -p cpe-updater-verify` runs --
+    // `ci.yml`'s push/PR-to-main path. Neither release workflow runs that test, so a tag pointed at a
+    // commit that never touched `main` (or one CI never evaluated) sailed straight past it. THIS binary
+    // is what both `release.yml`'s `verify-published-manifest` job actually invokes on every tag push,
+    // so the pin is enforced HERE too -- the same invocation that already checks manifest signatures now
+    // also refuses to run against a `tauri.conf.json` whose pubkey/endpoints don't match the pinned
+    // copies, before it ever gets to the (comparatively weaker) internal-consistency check below. See
+    // `pinned_pubkey.rs` for what this proves and the rotation procedure; a deliberate rotation updates
+    // BOTH `tauri.conf.json` and the pinned constants in the same commit, so this passes for an
+    // authorized rotation exactly like the `#[test]` does. `--skip-pin-check` exists only for this
+    // crate's own fixtures (see its use sites in tests/release_guard.rs) -- never pass it for real.
+    if !skip_pin_check {
+        if pubkey != cpe_updater_verify::EXPECTED_TAURI_UPDATER_PUBKEY {
+            return fail(&format!(
+                "SECURITY (CPE-1873): the updater root of trust changed. {}'s plugins.updater.pubkey does \
+                 not match the pinned copy in crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY. \
+                 If this is a deliberate, authorized key rotation, update EXPECTED_TAURI_UPDATER_PUBKEY to the \
+                 same new value in the same commit as the tauri.conf.json change (see that file's module doc \
+                 for the full procedure) -- do not sign or publish a release until it does. If this was not an \
+                 intentional rotation: STOP, this tag/build is not trustworthy.\n  configured: {pubkey}\n  pinned:      {}",
+                conf.display(),
+                cpe_updater_verify::EXPECTED_TAURI_UPDATER_PUBKEY,
+            ));
+        }
+
+        // Same pin, same reasoning, for `endpoints` (CPE-1873 attempt 2): a signature check alone
+        // doesn't stop a downgrade -- repointing where the app fetches `latest.json` from can serve an
+        // older, genuinely-signed, vulnerable build forever, even with the pubkey pin fully intact.
+        let endpoints: Vec<String> = conf_json
+            .pointer("/plugins/updater/endpoints")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let expected_endpoints: Vec<String> = cpe_updater_verify::EXPECTED_TAURI_UPDATER_ENDPOINTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if endpoints != expected_endpoints {
+            return fail(&format!(
+                "SECURITY (CPE-1873): the updater's manifest endpoint(s) changed. {}'s plugins.updater.endpoints \
+                 does not match the pinned copy in crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_ENDPOINTS. \
+                 If this is a deliberate, authorized change, update EXPECTED_TAURI_UPDATER_ENDPOINTS to match in the \
+                 same commit -- do not sign or publish a release until it does. If this was not intentional: STOP, \
+                 this tag/build is not trustworthy.\n  configured: {endpoints:?}\n  pinned:      {expected_endpoints:?}",
+                conf.display(),
+            ));
+        }
+    }
 
     // --- Build a basename -> path index of every file under the search dirs, and find latest.json ---
     //
@@ -220,7 +276,22 @@ fn main() -> ExitCode {
                     "manifest claims {total} platform(s) but only {n} were actually, cryptographically verified -- refusing to report success on a partial check (this should be unreachable; verify_update_manifest is supposed to fail before returning Ok in this case)",
                 ));
             }
-            println!("OK: verified {n} of {total} platform signature(s) against the configured pubkey.");
+            // CPE-1873 (round 2 wording fix): say plainly what this proved, and — as importantly — what
+            // it did NOT. This checks that the manifest's signatures are internally CONSISTENT with the
+            // pubkey baked into `tauri.conf.json` in *this* checkout, AND (via the pin check above) that
+            // this checkout's own pubkey/endpoints agree with the pinned copies in pinned_pubkey.rs. That
+            // is agreement between files read from the SAME commit/checkout -- it does not, and cannot,
+            // consult anything outside it (no repo secret, no org variable, no previously published
+            // release). It does not prove authenticity against the key users already trust; it proves
+            // this commit is self-consistent, and that a lone edit to the pubkey/endpoints without the
+            // matching pin update would have failed loud instead.
+            println!(
+                "OK: verified {n} of {total} platform signature(s) are internally consistent with the \
+                 pubkey configured in this checkout's tauri.conf.json, AND that pubkey/endpoints match the \
+                 second in-repo pin -- so a lone tauri.conf.json edit would have failed this run. This does \
+                 NOT prove authenticity against a value outside this commit; see \
+                 crates/updater-verify/src/pinned_pubkey.rs (CPE-1873) for exactly what is and isn't proven."
+            );
             ExitCode::SUCCESS
         }
         Err(problems) => {

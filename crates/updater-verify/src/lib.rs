@@ -22,6 +22,11 @@
 
 use base64::Engine as _;
 
+// CPE-1873 — the second, reviewed pin for the updater root-of-trust public key. See
+// `pinned_pubkey.rs`'s module doc for what it proves, what it doesn't, and the rotation procedure.
+pub mod pinned_pubkey;
+pub use pinned_pubkey::{EXPECTED_TAURI_UPDATER_ENDPOINTS, EXPECTED_TAURI_UPDATER_PUBKEY};
+
 /// Standard base64 (with padding) — the alphabet Tauri uses for both the config pubkey and signatures.
 const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 

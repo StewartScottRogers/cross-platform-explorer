@@ -62,6 +62,9 @@ fn run(dir: &std::path::Path) -> std::process::Output {
             dir.join("tauri.conf.json").to_str().unwrap(),
             "--search",
             dir.to_str().unwrap(),
+            // CPE-1873: these fixtures use a fresh, throwaway keypair per test, unrelated to the
+            // repo's real pinned pubkey -- they exercise manifest/signature logic, not the pin.
+            "--skip-pin-check",
         ])
         .output()
         .expect("run verify-release-artifacts")
@@ -129,6 +132,8 @@ fn run_repo_layout(root: &std::path::Path) -> std::process::Output {
             "latest.json",
             "--search",
             "src-tauri/target",
+            // CPE-1873: throwaway per-test keypair, not the repo's real pin -- see the comment on `run()`.
+            "--skip-pin-check",
         ])
         .output()
         .expect("run verify-release-artifacts")
@@ -176,7 +181,7 @@ fn manifest_at_repo_root_is_not_found_by_search_under_target_alone() {
     let dir = scaffold_repo_layout(bytes, bytes);
     let out = Command::new(BIN)
         .current_dir(dir.path())
-        .args(["--conf", "src-tauri/tauri.conf.json", "--search", "src-tauri/target"])
+        .args(["--conf", "src-tauri/tauri.conf.json", "--search", "src-tauri/target", "--skip-pin-check"])
         .output()
         .expect("run verify-release-artifacts");
     assert!(
@@ -304,7 +309,7 @@ fn smuggled_extra_platform_is_rejected() {
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
 
     let out = Command::new(BIN)
-        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap()])
+        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap(), "--skip-pin-check"])
         .output()
         .expect("run verify-release-artifacts");
     assert!(
@@ -359,7 +364,7 @@ fn smuggled_local_name_is_rejected() {
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
 
     let out = Command::new(BIN)
-        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap()])
+        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap(), "--skip-pin-check"])
         .output()
         .expect("run verify-release-artifacts");
     assert!(!out.status.success(), "signature from the wrong key must fail, artifact-availability aside");
@@ -406,7 +411,7 @@ fn basename_decoy_is_rejected() {
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
 
     let out = Command::new(BIN)
-        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap()])
+        .args(["--conf", root.join("tauri.conf.json").to_str().unwrap(), "--search", root.to_str().unwrap(), "--skip-pin-check"])
         .output()
         .expect("run verify-release-artifacts");
     assert!(
@@ -472,7 +477,7 @@ fn scaffold_with_url(signed_bytes: &[u8], url: &str) -> tempfile::TempDir {
 
 fn run_with_optional_url_prefix(dir: &std::path::Path, prefix: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new(BIN);
-    cmd.args(["--conf", dir.join("tauri.conf.json").to_str().unwrap(), "--search", dir.to_str().unwrap()]);
+    cmd.args(["--conf", dir.join("tauri.conf.json").to_str().unwrap(), "--search", dir.to_str().unwrap(), "--skip-pin-check"]);
     if let Some(p) = prefix {
         cmd.args(["--expect-url-prefix", p]);
     }

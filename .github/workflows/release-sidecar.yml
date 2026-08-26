@@ -88,8 +88,58 @@ jobs:
           echo "resolved release_id=$release_id"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
+  # CPE-1873 round 2 (independent reviewer + Security Auditor, both correct): the updater
+  # root-of-trust pin lived ONLY in a `#[test]` that `cargo test -p cpe-updater-verify` runs, and that
+  # only runs via `ci.yml`'s push/PR-to-main path — this workflow (`workflow_dispatch` only) never ran
+  # it, so a pubkey/endpoint change reaching this dispatch's checked-out ref was never checked before
+  # this channel — the build every install actually ships — signed and published a release under it.
+  #
+  # Worse, the Security Auditor demonstrated the pin ALONE is insufficient even where it does run: this
+  # channel's actual config is the base `tauri.conf.json` with a chain of `--config` overlays applied
+  # (see `src/lib/sidecarBundleResources.test.ts`'s `CONFIG_CHAIN`), and Tauri's own `--config` merge
+  # lets an overlay silently override `plugins.updater.pubkey`/`.endpoints` — the same mechanism
+  # CPE-1270/1271 already documented overriding `bundle.resources`. A one-line addition to
+  # `tauri.sidecar.conf.json` (base file untouched) passed the base-config pin at EXIT=0 while
+  # compromising this channel's actual root of trust.
+  #
+  # This job runs BOTH checks, BEFORE the build/sign/publish matrix below (via `needs:`), against
+  # whatever ref this workflow_dispatch checked out:
+  #   1. `cargo test -p cpe-updater-verify` — the base-config pin (`pinned_pubkey_guard.rs`).
+  #   2. `vitest run src/lib/sidecarBundleResources.test.ts` — the FULL merged-overlay-chain pin, which
+  #      is what actually reflects this channel's shipped config.
+  # A failure here blocks `release-sidecar` from running at all, so a rotated-without-updating-the-pin
+  # config (base OR overlay) never reaches a signed, published sidecar release.
+  verify-updater-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./crates/updater-verify -> target"
+
+      - name: Updater pubkey/endpoints pin — base config (CPE-1873)
+        working-directory: crates/updater-verify
+        run: cargo test --test pinned_pubkey_guard
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Updater pubkey/endpoints pin — FULL merged overlay chain, per shipped OS (CPE-1873)
+        run: npx vitest run src/lib/sidecarBundleResources.test.ts
+
   release-sidecar:
-    needs: create-release
+    needs: [create-release, verify-updater-pin]
     strategy:
       fail-fast: false
       matrix:

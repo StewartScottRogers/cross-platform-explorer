@@ -15,7 +15,7 @@
 // `release-sidecar` job passes to `tauri-action` for each shipped OS (see its matrix + the
 // `args:` line under "Build and publish sidecar-enabled release").
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC_TAURI = join(process.cwd(), "src-tauri");
@@ -78,11 +78,22 @@ function mergeJson(base: unknown, overlay: unknown): unknown {
   return overlay;
 }
 
-/** Final `bundle.resources` value (array | object | undefined) after applying an OS's full overlay chain. */
-function mergedBundleResources(os: ShipOS): unknown {
+/** The FULL merged config (base + every `--config` overlay, in order) for a shipped OS — the config
+ *  that actually governs the release-sidecar.yml build for that OS. Shared by every guard in this
+ *  file that needs to know what a shipped install's config really ends up containing. */
+function mergedConfig(os: ShipOS): Record<string, unknown> {
   const configs = CONFIG_CHAIN[os].map(loadConfig);
   const merged = configs.reduce((acc, cfg) => mergeJson(acc, cfg));
-  return isPlainObject(merged) && isPlainObject(merged.bundle) ? merged.bundle.resources : undefined;
+  if (!isPlainObject(merged)) {
+    throw new Error(`${os}: merged tauri config chain did not produce a JSON object`);
+  }
+  return merged;
+}
+
+/** Final `bundle.resources` value (array | object | undefined) after applying an OS's full overlay chain. */
+function mergedBundleResources(os: ShipOS): unknown {
+  const merged = mergedConfig(os);
+  return isPlainObject(merged.bundle) ? merged.bundle.resources : undefined;
 }
 
 /**
@@ -174,4 +185,101 @@ describe("shipped sidecar bundle — every runtime-required resource is bundled 
     const overlay = { resources: { "b.dll": "b.dll" } };
     expect(mergeJson(base, overlay)).toEqual({ resources: { "b.dll": "b.dll" } });
   });
+});
+
+// CPE-1873 (round 2 — independent Security Auditor, DEMONSTRATED not inferred): the updater
+// root-of-trust pin in crates/updater-verify only ever reads the BASE `tauri.conf.json`. The build
+// every install actually ships is release-sidecar.yml's: base config + this file's own `CONFIG_CHAIN`
+// of `--config` overlays. Tauri's `--config` merge (RFC 7386 recursive object merge — the same
+// mechanism the guard above proves overrides `bundle.resources`, CPE-1270) lets any overlay in that
+// chain override `plugins.updater.pubkey` / `.endpoints` too. Proven: adding an updater override block
+// to `tauri.sidecar.conf.json` alone (base file untouched) left crates/updater-verify's entire test
+// suite green, including its base-config pin, while the actual shipped sidecar channel's root of trust
+// was attacker-controlled. This guard checks the full merged `--config` overlay chain instead, so an
+// override anywhere in CONFIG_CHAIN is caught regardless of which file introduced it. It does NOT (by
+// itself) cover a config file Tauri merges automatically outside of `--config` entirely — see the
+// separate describe block below (CPE-1873 finding 6) for that.
+//
+// Keep these two literals in lockstep with crates/updater-verify/src/pinned_pubkey.rs's
+// EXPECTED_TAURI_UPDATER_PUBKEY / EXPECTED_TAURI_UPDATER_ENDPOINTS — same value, same rotation
+// procedure (documented in that file's module doc).
+const EXPECTED_UPDATER_PUBKEY =
+  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUyMUU1NzRGNjhFMjU2MUEKUldRYVZ1Sm9UMWNlVXYvc283NmRaeHVhYkQrNGpQKzZ5aitWL1ErWWRxUGFWRXlQdXJDTkNENG4K";
+const EXPECTED_UPDATER_ENDPOINTS = [
+  "https://github.com/StewartScottRogers/cross-platform-explorer/releases/latest/download/latest.json",
+];
+
+function mergedUpdaterConfig(os: ShipOS): { pubkey: unknown; endpoints: unknown } {
+  const merged = mergedConfig(os);
+  const plugins = isPlainObject(merged.plugins) ? merged.plugins : undefined;
+  const updater = plugins && isPlainObject(plugins.updater) ? plugins.updater : undefined;
+  return { pubkey: updater?.pubkey, endpoints: updater?.endpoints };
+}
+
+describe("shipped sidecar bundle — updater root of trust survives the FULL overlay merge (CPE-1873)", () => {
+  (["windows", "linux", "macos"] as const).forEach((os) => {
+    it(`${os}: merged plugins.updater.pubkey equals the pinned value (no overlay override)`, () => {
+      const { pubkey } = mergedUpdaterConfig(os);
+      expect(
+        pubkey,
+        `${os}: the FINAL merged config's plugins.updater.pubkey does not match the pinned value -- ` +
+          `some file in the overlay chain (${CONFIG_CHAIN[os].join(" -> ")}) overrides it. This IS the ` +
+          `shipped sidecar channel's actual root of trust; an override here is a live compromise, not a ` +
+          `lint nit. See crates/updater-verify/src/pinned_pubkey.rs (CPE-1873) for the rotation ` +
+          `procedure if this is deliberate -- update the pin there too, in the same commit.`,
+      ).toEqual(EXPECTED_UPDATER_PUBKEY);
+    });
+
+    it(`${os}: merged plugins.updater.endpoints equals the pinned value (no overlay override)`, () => {
+      const { endpoints } = mergedUpdaterConfig(os);
+      expect(
+        endpoints,
+        `${os}: the FINAL merged config's plugins.updater.endpoints does not match the pinned value -- ` +
+          `some file in the overlay chain (${CONFIG_CHAIN[os].join(" -> ")}) overrides it. A changed ` +
+          `endpoint can silently downgrade users to an older, genuinely-signed but vulnerable build ` +
+          `forever, even with the pubkey pin intact. See crates/updater-verify/src/pinned_pubkey.rs ` +
+          `(CPE-1873).`,
+      ).toEqual(EXPECTED_UPDATER_ENDPOINTS);
+    });
+  });
+});
+
+// CPE-1873 finding 6 (round 3 — independent Security Auditor, DEMONSTRATED): Tauri merges a
+// per-platform config file AUTOMATICALLY, with no `--config` flag involved at all --
+// `tauri-utils::config::parse::read_from` reads `tauri.conf.json` and then looks for
+// `tauri.macos.conf.json` / `tauri.linux.conf.json` / `tauri.windows.conf.json` next to it and merges
+// each via RFC 7396, unconditionally, on every build. None of the three exists in this repo today, and
+// none is in CONFIG_CHAIN (which only lists overlays release-sidecar.yml explicitly passes via
+// `--config`). Proven: a `src-tauri/tauri.windows.conf.json` containing only a `plugins.updater`
+// override left every guard in this file AND crates/updater-verify's entire suite green, while shipping
+// an attacker's pubkey/endpoints on every Windows build -- plain channel and sidecar both, since this
+// mechanism has nothing to do with `--config` and fires on a plain `tauri.conf.json` read too.
+//
+// This does not try to merge/validate those files' content -- it just refuses their EXISTENCE with a
+// `plugins.updater` key, since none is supposed to exist at all right now. Mirrors
+// `no_automatic_per_platform_config_overrides_the_updater_pin` in
+// crates/updater-verify/tests/pinned_pubkey_guard.rs (same check, Rust side, covers the base/tag path).
+describe("shipped bundle — no automatic per-platform Tauri config overrides the updater pin (CPE-1873 finding 6)", () => {
+  (["tauri.windows.conf.json", "tauri.macos.conf.json", "tauri.linux.conf.json"] as const).forEach(
+    (fileName) => {
+      it(`${fileName}: does not exist, or exists without a plugins.updater key`, () => {
+        const path = join(SRC_TAURI, fileName);
+        if (!existsSync(path)) return; // doesn't exist -- the expected, safe state today.
+        const config = loadConfig(fileName);
+        const hasUpdaterKey =
+          isPlainObject(config) && isPlainObject(config.plugins) && "updater" in config.plugins;
+        expect(
+          hasUpdaterKey,
+          `src-tauri/${fileName} exists and sets plugins.updater. Tauri merges this file into the ` +
+            `build AUTOMATICALLY (no --config flag needed) on every OS build that matches its name, so ` +
+            `it can silently override the pinned pubkey/endpoints exactly like a --config overlay can, ` +
+            `without ever appearing in CONFIG_CHAIN or being reachable by any --config-based guard. If ` +
+            `this is deliberate: it must not set plugins.updater at all -- put any real key/endpoint ` +
+            `change through tauri.conf.json (or a --config overlay already in CONFIG_CHAIN) so the ` +
+            `existing pins actually see it. If not: STOP, this file's plugins.updater block is not ` +
+            `trustworthy (CPE-1873).`,
+        ).toBe(false);
+      });
+    },
+  );
 });
