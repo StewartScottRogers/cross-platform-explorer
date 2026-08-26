@@ -3,7 +3,7 @@ id: CPE-1734
 title: macro Convert writes through a link at the new name, then trashes the original
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
