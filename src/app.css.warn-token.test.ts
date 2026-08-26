@@ -140,23 +140,211 @@ function semanticDeclsFor(label: string, selector: RegExp): Map<string, string> 
   return extractDecls(blocks[0]);
 }
 
-// The full set of tokens this file guards against ever going back to the "defined nowhere, hex
-// fallback silently wins" shape. --warn/--warn-fill are CPE-1810's originals; --text-muted/
-// --accent-2/--bg-dim are CPE-1821's three, extended into this same file per that ticket's own
-// "extend rather than parallel" instruction.
+// The five tokens the OLD hard-coded coverage block enumerated by hand. Kept only as the input to
+// the still-scoped "no dead fallback" (b) and "no raw literal" (c) checks below, which carry extra
+// meaning (they're retiring a SPECIFIC historical fallback idiom / literal, not just re-deriving
+// coverage) and which this ticket's own instructions say to keep. --warn/--warn-fill are CPE-1810's
+// originals; --text-muted/--accent-2/--bg-dim are CPE-1821's three.
 const GUARDED_TOKENS = ["--warn", "--warn-fill", "--text-muted", "--accent-2", "--bg-dim"];
 
-describe("every previously-undefined token resolves to a real hex in every live theme (CPE-1810/CPE-1821)", () => {
+// ---------------------------------------------------------------------------------------------
+// CPE-1875: the detector that replaces the hard-coded five-name list above as the COVERAGE
+// mechanism. The old block only ever asserted resolution for GUARDED_TOKENS — anything outside
+// that list was invisible to it, which is exactly how CPE-1810 and CPE-1821 each had to be found
+// by hand, and how a SIXTH undefined token (`--mono`, ~24 call sites, font-family fallback rather
+// than a colour — see CPE-1876) shipped green through this file without anyone noticing. Instead
+// of hand-listing tokens, this DISCOVERS every `var(--token, <fallback>)` call site across every
+// `.svelte` component (and any standalone `.css`/`.ts` that emits one — none currently do outside
+// app.css itself, which is the definer, not a consumer, and is excluded below) and requires each
+// discovered token to resolve to a concrete hex in all five live theme blocks — the identical bar
+// the old list enforced for its five names, now applied to every name automatically.
+function walkTokenSources(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) {
+      walkTokenSources(p, out);
+    } else if (
+      (name.endsWith(".svelte") || name.endsWith(".css") || name.endsWith(".ts")) &&
+      !name.endsWith(".test.ts") &&
+      !name.endsWith(".spec.ts") &&
+      p !== APP_CSS_PATH
+    ) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+const stripAllComments = (s: string) => s.replace(/<!--[\s\S]*?-->/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** Every top-level `var(--token, <fallback>)` 2-argument call in `content`, fully balanced-paren
+ *  parsed so a fallback that itself contains parens (`var(--a, var(--b, #fff))`, `color-mix(...)`)
+ *  doesn't truncate at the wrong comma. A bare `var(--token)` with no fallback is not this idiom
+ *  and is skipped — an undefined token with no fallback fails loudly/visibly (nothing renders),
+ *  which is a different, self-announcing bug, not the "looks themed but silently isn't" shape this
+ *  file guards. */
+function scanFallbackCalls(content: string): { token: string; fallback: string }[] {
+  const out: { token: string; fallback: string }[] = [];
+  const openRe = /var\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(content)) !== null) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (; i < content.length && depth > 0; i++) {
+      if (content[i] === "(") depth++;
+      else if (content[i] === ")") depth--;
+    }
+    const inner = content.slice(m.index + m[0].length, i - 1);
+    let innerDepth = 0;
+    let commaAt = -1;
+    for (let j = 0; j < inner.length; j++) {
+      if (inner[j] === "(") innerDepth++;
+      else if (inner[j] === ")") innerDepth--;
+      else if (inner[j] === "," && innerDepth === 0) {
+        commaAt = j;
+        break;
+      }
+    }
+    if (commaAt === -1) continue;
+    const token = inner.slice(0, commaAt).trim();
+    const fallback = inner.slice(commaAt + 1).trim();
+    if (/^--[a-zA-Z0-9-]+$/.test(token)) out.push({ token, fallback });
+  }
+  return out;
+}
+
+/** True if `content` (already comment-stripped) DECLARES `token` itself — `--token: <value>` —
+ *  anywhere outside of a `var(--token, ...)` read. Recognises a component-local custom property
+ *  (one the component sets on itself, usually via an inline `style="--foo: ..."` attribute) rather
+ *  than a global theme token expected to come from app.css's cascade. `--indent` (PreviewPane.svelte,
+ *  set per-line from fold state, `0` fallback) and `--sw` (TagEditor.svelte, set per-swatch from a
+ *  fixed label-colour list, `var(--surface-alt)` fallback) are the current instances — each a real,
+ *  working, intentional local variable, not an instance of the CPE-1810/1821/1876 defect (an
+ *  undefined GLOBAL token whose fallback silently wins in every theme). Requiring these to resolve
+ *  in app.css would assert something false about code that isn't broken.
+ */
+function declaresItself(content: string, token: string): boolean {
+  const esc = token.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+  return new RegExp(`${esc}\\s*:`).test(content);
+}
+
+/** True if `fallback` is (only) a nested `var(--otherToken ...)` reference and `otherToken` itself
+ *  resolves to a concrete hex in every one of the five theme blocks. Distinguishes the two shapes
+ *  a 2-argument `var()` can take when its OWN token is undefined:
+ *    - `var(--undefinedToken, #hex)` / `var(--undefinedToken, ui-monospace, monospace)` — the
+ *      fallback is a LITERAL. The literal is the only value that will ever render, in every theme,
+ *      forever — this is the exact CPE-1810/1821/1876 defect shape and must resolve or be
+ *      allowlisted as debt.
+ *    - `var(--undefinedToken, var(--realToken))` — the fallback is itself a LIVE, already-verified
+ *      token reference. `--undefinedToken` is dead weight (an odd, never-populated first choice)
+ *      but every render already resolves through to `--realToken`'s correctly-themed value in every
+ *      theme, so this is NOT the masking bug — nothing ever silently locks to an untheed literal.
+ *      `--agent-accent` (FileList.svelte, `var(--agent-accent, var(--agent-unknown))`),
+ *      `--accent-soft` (IcalPreview.svelte, `var(--accent-soft, var(--surface))`) and `--surface-2`
+ *      (DiffPeek.svelte, `var(--surface-2, var(--surface, #181818))`) are the current instances —
+ *      already investigated and explicitly ruled out as "not this bug" by CPE-1876's own UAT pass.
+ */
+function fallbackIsLiveChain(fallback: string, semanticDeclsByTheme: Map<string, string>[]): boolean {
+  const chain = fallback.match(/^var\(\s*(--[a-zA-Z0-9-]+)\s*(?:,[\s\S]*)?\)$/);
+  if (!chain) return false;
+  const refToken = chain[1];
+  return semanticDeclsByTheme.every((decls) => HEX_RE.test(resolveHex(decls, refToken) ?? ""));
+}
+
+const allSemanticDecls = THEMES.map(({ label, selector }) => semanticDeclsFor(label, selector));
+
+/** token -> referencing files (relative, forward-slashed), in first-seen order. Excludes tokens
+ *  that declare themselves locally (component-scoped custom properties) and tokens whose every
+ *  fallback occurrence is a live chain to an already-themed token (see the two functions above) —
+ *  neither is an instance of the defect this file guards against. */
+function discoverFallbackTokens(): Map<string, string[]> {
+  const found = new Map<string, string[]>();
+  const localTokens = new Set<string>();
+  const liveChainOnly = new Map<string, boolean>(); // token -> "every occurrence so far is a live chain"
+  for (const f of walkTokenSources(SRC)) {
+    const content = stripAllComments(readFileSync(f, "utf8"));
+    const rel = f.replace(SRC, "src").replace(/\\/g, "/");
+    for (const { token, fallback } of scanFallbackCalls(content)) {
+      if (declaresItself(content, token)) {
+        localTokens.add(token);
+        continue;
+      }
+      const isLiveChain = fallbackIsLiveChain(fallback, allSemanticDecls);
+      liveChainOnly.set(token, (liveChainOnly.get(token) ?? true) && isLiveChain);
+      const files = found.get(token) ?? [];
+      files.push(rel);
+      found.set(token, files);
+    }
+  }
+  for (const token of localTokens) found.delete(token);
+  for (const [token, allLiveChain] of liveChainOnly) if (allLiveChain) found.delete(token);
+  return found;
+}
+
+// Known-open debt: tokens the detector above genuinely finds undefined-with-a-literal-fallback in
+// at least one theme block TODAY, each pinned to the ticket that owns fixing it, dated when it was
+// added here. This is what keeps the guard green without silently hiding the gap — an allowlisted
+// token still shows up in `npx vitest` output (search this file's describe title), and the "stale
+// entry" check below fails the moment an owning ticket actually fixes its token and someone forgets
+// to delete the entry, so the list can't quietly go stale in either direction (silently grow OR
+// silently outlive its bug). Disposition chosen over splitting the work: CPE-1876 already exists
+// and owns `--mono` end to end (~24 call sites — a real, scoped follow-up); re-deriving that fix
+// inside this coverage ticket would duplicate that ticket's scope for no benefit, and an unlisted
+// new token still fails immediately, which is the property this ticket exists to establish.
+const ALLOWLIST: { token: string; ticket: string; added: string; note: string }[] = [
+  {
+    token: "--mono",
+    ticket: "CPE-1876",
+    added: "2026-08-26",
+    note: "font-family fallback (`ui-monospace, monospace`) masks an undefined token at ~24 call " +
+      "sites across the app — the sixth occurrence of the CPE-1810/1821 defect shape, surfaced by " +
+      "this ticket's detector. CPE-1876 owns defining --mono (or retokenizing its call sites) in " +
+      "all five theme blocks.",
+  },
+];
+const ALLOWLISTED_TOKENS = new Set(ALLOWLIST.map((e) => e.token));
+
+const discovered = discoverFallbackTokens();
+
+describe("every var(--token, <fallback>) call site resolves to a real hex in every live theme, or is on the dated debt allowlist (CPE-1875)", () => {
   for (const { label, selector } of THEMES) {
     const semanticDecls = semanticDeclsFor(label, selector);
 
-    for (const token of GUARDED_TOKENS) {
-      it(`${label} defines ${token} as a concrete hex`, () => {
+    for (const [token, files] of discovered) {
+      if (ALLOWLISTED_TOKENS.has(token)) continue;
+      it(`${label} defines ${token} as a concrete hex (referenced from ${files.join(", ")})`, () => {
         const hex = resolveHex(semanticDecls, token);
-        expect(hex, `${token} did not resolve to a hex in ${label} — got raw value ${JSON.stringify(semanticDecls.get(token))}`).toMatch(HEX_RE);
+        expect(hex, `${token} (referenced from ${files.join(", ")}) did not resolve to a hex in ${label} — got raw value ${JSON.stringify(semanticDecls.get(token))}. If this is known, pre-existing debt, add a dated entry to ALLOWLIST above pointing at the ticket that owns it — do not fix the underlying token here unless that IS the ticket this work is filed under.`).toMatch(HEX_RE);
       });
     }
   }
+
+  it("the five originally-guarded tokens still resolve to a real hex in every theme (no silent narrowing)", () => {
+    // These five no longer have a LIVE var(--token, <fallback>) call site at all — invariant (b)
+    // below already bans that idiom for them outright, so `discovered` correctly finds nothing to
+    // check. What must not regress is the tokens' own definitions: assert resolution directly,
+    // independent of any call site existing, so this file keeps proving the exact bar CPE-1810/1821
+    // established for these five, and (b)'s ban means the generic detector above would immediately
+    // pick back up any of them the moment a fallback idiom reappeared for one.
+    for (const { label, selector: sel } of THEMES) {
+      const decls = semanticDeclsFor(label, sel);
+      for (const token of GUARDED_TOKENS) {
+        const hex = resolveHex(decls, token);
+        expect(hex, `${token} did not resolve to a hex in ${label} — got raw value ${JSON.stringify(decls.get(token))}`).toMatch(HEX_RE);
+      }
+    }
+  });
+
+  it("every allowlisted token is genuine, still-open debt — not a stale entry masking a fix that already landed", () => {
+    for (const { token, ticket } of ALLOWLIST) {
+      expect(discovered.has(token), `${token} is on the ALLOWLIST for ${ticket} but no var(${token}, <fallback>) call site was found anywhere in src/ — remove the stale allowlist entry.`).toBe(true);
+      const stillBroken = THEMES.some(({ label, selector }) => {
+        const semanticDecls = semanticDeclsFor(label, selector);
+        return !HEX_RE.test(resolveHex(semanticDecls, token) ?? "");
+      });
+      expect(stillBroken, `${token} is allowlisted for ${ticket} as known-open debt, but it now resolves to a hex in every theme block — the fix has landed. Remove this allowlist entry so the detector covers ${token} for real.`).toBe(true);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
