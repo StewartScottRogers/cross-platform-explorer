@@ -239,3 +239,34 @@ the five workflow files' raw text and asserts:
   combination not explicitly exercised by an existing `--features` step in these workflows — not
   swept exhaustively; only the combinations CI's own steps already build were checked, matching
   CPE-1855's equivalent scoping note.
+
+**2026-08-26 — the "not verified here" gap closed: re-tested against a REAL stale lockfile, PR #1027
+attempt 2.** The previous entry's local measurements were all against lockfiles that were ALREADY
+correctly in sync (or freshly fixed); this pass deliberately manufactured drift and watched the guard
+catch it, rather than trusting the earlier "would NOT have redded CI" conclusion on faith.
+
+Method: bumped `crates/updater-verify/Cargo.toml`'s `version` field from `0.1.0` to `0.1.1` **without**
+touching `Cargo.lock` (a real backup taken first) — the same shape of drift CLAUDE.md documents for
+`package-lock.json`/`Cargo.lock` going stale. Ran `cargo check --locked --all-targets`:
+
+```
+error: cannot update the lock file .../crates/updater-verify/Cargo.lock because --locked was passed
+       to prevent this
+```
+
+Exit 101 — the guard reds on manufactured drift, not just on the happy path. Reverted the version
+field (`sed`, not PowerShell — see the project's own file-corruption memory note) and confirmed
+`Cargo.lock` was never touched by the experiment (`diff` against the backup: identical; the backup was
+then deleted). `git diff --numstat` after revert shows only this session's real
+`rust-version = "1.83.0"` → `"1.88.0"` bump on that file (CPE-1855, same PR) — the stale-lockfile
+probe left no residue.
+
+This directly answers this ticket's own acceptance criterion ("measure how often it would have redded
+CI... a backstop that fires on ordinary dependency work will be switched off within a week") with a
+positive control: the mechanism is not just present in the workflow YAML, it demonstrably fires when
+the condition it exists to catch is really there. Re-ran `npx vitest run
+src/lib/lockfileLockedGuard.test.ts` afterward (6/6 passing) as a second, independent confirmation that
+nothing about this probe disturbed the existing guard-test state.
+
+The GitHub Actions run itself: pushed as `8133858f` (this attempt's commit, combined with CPE-1855's
+MSRV floor correction above) and watched to conclusion this time — see PR #1027 for the live result.

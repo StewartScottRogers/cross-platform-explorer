@@ -185,3 +185,60 @@ acceptance criteria asks for, applied to the ratchet itself.
   `src-tauri --features sidecar-platform`) — the new `msrv` job checks default features only. Recorded
   as a known gap rather than silently presented as full coverage, consistent with this ticket's Low
   priority / Small estimate.
+
+**2026-08-26 — 1.83.0 was ALSO fiction; the real floor is 1.88.0, found empirically, PR #1027
+attempt 2.** The "not verified here" gap above turned out to matter on the very first real CI run:
+the new `msrv` job failed on **every one of the 17 manifests** at 1.83.0, but not because of our own
+code — `cargo check` at 1.83.0 couldn't even DOWNLOAD/PARSE `block-buffer v0.12.1`, `getrandom
+v0.4.3`, or `rpassword 7.5.4`'s manifests: `feature edition2024 is required ... not stabilized in this
+version of Cargo (1.83.0)`. Those three transitive deps declare `edition = "2024"`, and Cargo itself
+can't parse an edition-2024 manifest below the Rust release that stabilised edition 2024 at the
+toolchain level — a floor set by the dependency graph, not by any API our code calls.
+
+This machine's "no toolchain installs" constraint from the last entry was re-examined and superseded:
+CPE-1855/1865's own review directive for this attempt explicitly authorised `rustup toolchain
+install` for MSRV bisection, on the condition the toolchains are LEFT INSTALLED afterward (never
+uninstalled) so no sibling agent on this shared machine is affected. Installed and kept:
+
+- `1.85.0` — bisection probe. Gets past the edition2024 parse error (Cargo itself is new enough) but
+  still fails to COMPILE: `rustc 1.85.0 is not supported by calamine@0.36.1 (requires rustc 1.88) /
+  image@0.25.10 (1.88.0) / plist@1.10.0 (1.88.0) / rcgen@0.14.8 (1.88) / suppaftp@10.0.1 (1.88.0) /
+  time@0.3.55, time-core@0.1.9, time-macros@0.2.32 (all 1.88.0) / zip@8.6.0 (1.88)` — every one of
+  those numbers read directly from the dependency's own committed `Cargo.toml` `rust-version` field
+  (`cargo`'s own error message quotes them), not guessed or looked up externally.
+- `1.88.0` — the ceiling implied by the numbers above. Ran `cargo +1.88.0 check --locked --all-targets`
+  against all 17 manifests in one probe: **exit 0 across the board**, `src-tauri` included (the
+  largest, ~2 minutes to compile). Re-ran the identical probe again after the clippy sweep below
+  (which touched `crates/server` and introduced a new API, `slice::as_chunks`) to make sure nothing
+  had silently raised the floor further — still exit 0 on all 17.
+
+`rust-version` bumped `"1.83.0"` → `"1.88.0"` in the same 17 manifests the previous entry touched
+(`sed` via git-bash, one file at a time — the project's own memory notes flag PowerShell
+`Set-Content` as a source of file corruption, so plain `sed`/`Edit` was used throughout, and
+`git diff --numstat` confirms clean `1 1` single-line swaps on every manifest with no encoding
+damage). The `msrv` job's name, `dtolnay/rust-toolchain@` pin, and both `::error::` message templates
+in `ci.yml` were updated from 1.83.0 → 1.88.0 to match, and the job's explanatory comment block was
+extended (not replaced) with the bisection method and the exact numbers above, so the next person
+who has to re-derive this starts from evidence instead of a guess.
+
+**Unplanned scope, recorded rather than silently absorbed:** GitHub's `stable` Rust channel moved to
+1.98.0 between this PR's first CI attempt and this one, stabilising several new clippy lints
+(`manual_is_multiple_of`, `manual_repeat_n`, a `chunks_exact` case) that fired across code this
+ticket never otherwise touches (`crates/server`, `crates/security`, `crates/ftp`). Left unfixed,
+these keep `Server crates` / `Backend` / `Sidecar platform` red regardless of the MSRV fix, so they
+were fixed too — via `cargo clippy --fix --all-targets --allow-dirty --allow-staged -- -D warnings`,
+run per-crate per-feature-mode across all 17 manifests, diffs reviewed by hand for correctness (all
+mechanical: `x % 2 == 0` → `x.is_multiple_of(2)`, `repeat(v).take(n)` → `repeat_n(v, n)`,
+`chunks_exact(2)` → `as_chunks::<2>().0.iter()`). Local `stable` toolchain updated `1.97.0` → `1.98.0`
+via `rustup update stable` specifically to match CI's live toolchain while diagnosing this — kept, not
+rolled back. `1.85.0` and `1.88.0` also both left installed. No toolchain was uninstalled.
+
+Full verification this pass: `npx vitest run` (333 files / 4465 tests, 0 failed — `msrvSync.test.ts`
+included), `npm run check` (0 errors/warnings), `cargo clippy --all-targets -- -D warnings` clean in
+every feature mode CI actually exercises across all 17 manifests (including `crates/server --features
+specta` and `src-tauri --features "specta-bindings sidecar-platform"`, both named explicitly in this
+review's instructions), targeted `cargo test --locked` runs on every crate whose source actually
+changed (`crates/server`, `crates/security --features jwt`, `crates/ftp --features e2e-extra-ca`,
+`src-tauri`) all green, and the typed-bindings drift guard re-run (`export_bindings`) confirmed
+byte-identical output — no drift. Pushed as `8133858f` and CI re-run; see PR #1027 for the live
+result at push time.
