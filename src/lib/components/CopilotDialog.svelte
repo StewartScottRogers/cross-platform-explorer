@@ -296,7 +296,7 @@
               {#if undoError}<div class="err" data-testid="undo-error">{undoError}</div>{/if}
               {#if undoOutcome}
                 <div class="note" data-testid="undo-outcome">
-                  <RevertOutcomePanel outcome={undoOutcome} testid="undo-outcome-panel" verb="Undo" />
+                  <RevertOutcomePanel outcome={undoOutcome} testid="undo-outcome-panel" verb="Undo" {root} />
                 </div>
               {/if}
             {/if}

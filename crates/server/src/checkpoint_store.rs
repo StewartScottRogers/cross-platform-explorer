@@ -199,6 +199,14 @@ pub struct HeldBackSummary {
     pub next_step: String,
     /// Convenience mirror of [`OpOutcome::retryable`] so a template can branch without re-deriving it.
     pub retryable: bool,
+    /// **CPE-1869.** `true` when `next_step` actually tells the user to go delete these paths themselves
+    /// — mirrors [`crate::revert_engine::HeldBack::advises_manual_delete`], see its doc for why a consumer
+    /// must read this field rather than infer it from `next_step`'s wording. A "copy every held-back path"
+    /// affordance belongs behind this, not behind `outcome == held_back_by_checkpoint` alone: that
+    /// discriminant is also true of the alias/collision hold-back, where the paths are the checkpoint's
+    /// OWN content under another spelling and offering to delete them would be the bug this field exists
+    /// to prevent.
+    pub advises_manual_delete: bool,
 }
 
 impl RevertOutcome {
@@ -220,6 +228,7 @@ impl RevertOutcome {
                 reason: group.reason,
                 next_step: group.next_step,
                 retryable: group.outcome.retryable(),
+                advises_manual_delete: group.advises_manual_delete,
             }
         });
         Self { applied: report.applied as u32, skipped, held_back }

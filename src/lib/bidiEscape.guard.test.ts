@@ -94,7 +94,17 @@ const REGISTRY: Record<string, string[]> = {
   // them. Review round 2 was right that the earlier note here ("the same class as most other entries")
   // was wrong — most entries are counts and labels, this one provably carries a filename — so the
   // strings are escaped and what is left recorded below is a count and a literal.
-  "RevertOutcomePanel.svelte": ["37:headline", "41:summary.reason", "42:summary.nextStep", "51:summary.more"],
+  // CPE-1869 adds one more raw line: the copy-full-list button's label. It interpolates only
+  // `summary.heldBack` (a count) and the literal "Copied"/`""`/`"s"` — no path or backend-authored
+  // prose — so it is the same "count/literal, provably safe" class as `summary.more` beside it, not a
+  // new filename/path surface.
+  "RevertOutcomePanel.svelte": [
+    "94:headline",
+    "98:summary.reason",
+    "99:summary.nextStep",
+    "112:copied ? \"Copied\" : `Copy all ${summary.heldBack} held-back path${summary.heldBack === 1 ? \"\" : \"s\"}`",
+    "125:summary.more",
+  ],
   "DiffSideBySide.svelte": ["38:r.left ?? \"\"","39:r.right ?? \"\""],
   "InspectCryptoDialog.svelte": [],
   "BoardView.svelte": ["265:error","278:boardQuery.trim()","283:boardQuery.trim()","297:col","298:list.length","301:showArchived ? \"hide\" : `+${archivedEpicList.length} archived`","311:\"Open \" + e.id + \" — details\"","313:e.id","314:\"Copy \" + e.id","315:copiedId === e.id ? \"✓\" : \"⧉\"","316:e.status","318:e.title","321:bar.state === \"empty\" ? \"No sub-tickets yet\" : bar.state === \"complete\" && p.total === 0 ? \"Epic complete\" : p.done + \" of \" + p.total + \" tickets done\"","328:bar.label","350:col","351:list.length","354:showArchived ? \"hide\" : `+${archived.length} archived`","363:\"Open \" + c.id + \" — details\"","365:c.id","366:\"Copy \" + c.id","367:copiedId === c.id ? \"✓\" : \"⧉\"","368:c.priority","370:c.title","373:c.epic","374:c.sprint","375:t","394:grouped[l].length","394:l","396:error || note || \"\""],

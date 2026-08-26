@@ -26,6 +26,16 @@
  * `nextStep` comes from the backend rather than being composed here, because it is not the same advice
  * in both cases: a `skipped_by_plan` hold-back really does clear on a re-run, and a
  * `held_back_by_checkpoint` one never will on this machine.
+ *
+ * ## CPE-1869 — the list the advice points at
+ *
+ * The permanent cases tell the user to delete the held-back paths themselves, but only ever showed up to
+ * {@link MAX_LISTED} of them. That is fine as a *preview*; it stopped being fine as the user's only way to
+ * find the rest. {@link RevertSummary.allHeldBackPaths} carries the untruncated set so a "copy full list"
+ * affordance can hand it over without re-running the revert, gated on
+ * {@link RevertSummary.advisesManualDelete} so it never appears on the alias/collision hold-back (those
+ * paths are the checkpoint's own content under another spelling — a delete affordance there would be the
+ * bug, not the fix).
  */
 import type { RevertOutcome } from "./bindings.gen";
 
@@ -34,9 +44,11 @@ import type { RevertOutcome } from "./bindings.gen";
  *
  * The cap is real: the unrestorable-key case holds back *everything added since the checkpoint*, which
  * can be thousands of paths. What it costs is recorded honestly rather than pretended away — at scale
- * the advice ("delete these files yourself") and the list stop agreeing, because the list is truncated
- * and the full set is visible nowhere else. A copy-the-full-list or reveal-in-the-file-pane affordance
- * is the fix; it is deliberately not in this change, and is written up in the ticket.
+ * the advice ("delete these files yourself") and the on-screen list stop agreeing, because the list is
+ * truncated. CPE-1845 left the full set visible nowhere else; CPE-1869 closes that with a copy-full-list
+ * affordance (see {@link RevertSummary.allHeldBackPaths} / {@link RevertSummary.advisesManualDelete} and
+ * `RevertOutcomePanel.svelte`) rather than raising this cap — 8 is still a fine preview once the rest is
+ * retrievable.
  */
 export const MAX_LISTED = 8;
 
@@ -68,6 +80,24 @@ export type RevertSummary = {
    * "and 1 more" is longer than the name it replaced, so the cap stretches by one instead.
    */
   more: number;
+  /**
+   * **CPE-1869.** Every held-back path, untruncated, in plan order — the answer to "the held-back list
+   * tells you to delete files it will not show you". Never rendered as a DOM list ({@link listed} is the
+   * on-screen preview, capped at {@link MAX_LISTED}); this is read only by the copy-full-list affordance,
+   * so a 200-path revert costs one clipboard write, not 200 extra rows.
+   */
+  allHeldBackPaths: string[];
+  /**
+   * **CPE-1869.** Whether the backend's advice is "delete these files yourself" (an empty checkpoint, an
+   * unrestorable checkpoint key, or a permanent write refusal) as opposed to "nothing needs doing" (the
+   * alias/collision hold-back, where {@link listed}'s paths ARE the checkpoint's own content under
+   * another spelling — offering to delete them would destroy it) or "run it again" (the retryable
+   * hold-back, where nothing needs deleting yet). Read straight off the backend's
+   * `HeldBackSummary::advises_manual_delete` — never inferred from {@link nextStep}'s wording, which is
+   * exactly the coupling this module's doc comment says never to do. The copy-full-list affordance is
+   * gated on this, not on {@link retryable} alone, so it never appears on the alias/collision hold-back.
+   */
+  advisesManualDelete: boolean;
   /** The genuine failures, each with its own (distinct) reason. */
   failures: { path: string; error: string }[];
 };
@@ -105,6 +135,8 @@ export function summarizeRevert(outcome: RevertOutcome): RevertSummary {
     // stretches by one rather than truncating.
     listed: heldBackPaths.slice(0, heldBackPaths.length === MAX_LISTED + 1 ? MAX_LISTED + 1 : MAX_LISTED),
     more: heldBackPaths.length > MAX_LISTED + 1 ? heldBackPaths.length - MAX_LISTED : 0,
+    allHeldBackPaths: heldBackPaths.map((p) => p.path),
+    advisesManualDelete: held?.advises_manual_delete ?? false,
     failures,
   };
 }
