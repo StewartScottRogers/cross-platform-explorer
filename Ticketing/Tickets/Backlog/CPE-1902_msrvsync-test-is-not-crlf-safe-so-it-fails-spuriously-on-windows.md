@@ -55,3 +55,22 @@ misread).
 Worth noting for whoever picks it up: the CI matrix runs the frontend suite on Ubuntu only, so no
 amount of CI green will ever surface this class of defect. It is visible exclusively to a human running
 the suite locally on Windows — which is every contributor on this project.
+
+## Independently confirmed by a second leg
+
+CPE-1855's UAT hit this separately from its reviewer, without either seeing the other's report, and
+diagnosed it the same way: `.github/workflows/ci.yml` lands with CRLF under `core.autocrlf=true`, the
+raw `indexOf("\n  msrv:\n")` returns `-1`, and the test reports the plainly-false
+`"ci.yml has no msrv: job at all"` while the job is present and correct.
+
+Two independent legs converging is the strongest signal this run has, so treat the diagnosis as
+settled rather than re-deriving it.
+
+The UAT also identified the counter-example that tells you what "fixed" looks like:
+`src/lib/lockfileLockedGuard.test.ts` does **not** have this bug, because it splits and trims per line
+rather than searching raw text. Copy that shape.
+
+One consequence worth recording: while this stands, CPE-1855's claimed local gate ("5 passed / 0
+failed") is **not reproducible on a Windows checkout**. That is not a false claim by its author — it is
+true on LF — but it does mean a contributor following the ticket's own instructions gets a different
+answer than the ticket reports, which is its own small corrosion of trust.
