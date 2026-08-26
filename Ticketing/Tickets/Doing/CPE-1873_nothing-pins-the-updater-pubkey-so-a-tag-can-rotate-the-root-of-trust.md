@@ -71,10 +71,10 @@ outside party.
 
 ## Acceptance criteria
 
-- [ ] A commit that changes `plugins.updater.pubkey` alone fails CI.
-- [ ] The failure message says plainly that the updater root of trust changed and what to do about it.
-- [ ] The intended key-rotation procedure is documented where the next person will find it.
-- [ ] Demonstrated red: the auditor's scenario 10 (self-consistent attacker keypair) now fails.
+- [x] A commit that changes `plugins.updater.pubkey` alone fails CI.
+- [x] The failure message says plainly that the updater root of trust changed and what to do about it.
+- [x] The intended key-rotation procedure is documented where the next person will find it.
+- [x] Demonstrated red: the auditor's scenario 10 (self-consistent attacker keypair) now fails.
 
 ## Notes
 
@@ -100,3 +100,63 @@ that is **not** CPE-1872's to fix — it predates that PR and is a different tru
   section plus the guard's own doc comment. Will red-proof by committing, then rotating the
   live pubkey to a fresh keypair, running the guard, recording the RED output, and
   restoring.
+- **2026-08-26 (Worker)** — Implemented + red-proofed.
+
+  **What shipped.**
+  - `crates/updater-verify/src/pinned_pubkey.rs` — `EXPECTED_TAURI_UPDATER_PUBKEY`, a literal copy of
+    `src-tauri/tauri.conf.json`'s `plugins.updater.pubkey`, committed in a second, reviewed location
+    (module doc carries the full threat framing + the rotation procedure).
+  - `crates/updater-verify/tests/pinned_pubkey_guard.rs` — `live_pubkey_matches_the_pinned_copy`, a
+    plain `cargo test` that reads the real `src-tauri/tauri.conf.json` and asserts equality against the
+    pin. Runs on every push/PR to `main` via `ci.yml`'s existing "updater-verify — clippy + test" step
+    (not gated on a tag), so a commit that changes only the pubkey fails CI immediately — satisfies
+    acceptance criterion 1.
+  - `crates/updater-verify/src/bin/verify-release-artifacts.rs` — the `OK:` success message now states
+    plainly that it verified internal consistency with *this checkout's* pubkey, not authenticity
+    against the value users already trust, and points at `pinned_pubkey.rs` for the check that does —
+    satisfies acceptance criterion 2.
+  - `README.md` "Auto-updates — one-time setup" — documents the two-location pin and the rotation
+    procedure where a maintainer setting up signing will find it — satisfies acceptance criterion 3.
+
+  **Rotation story (decided + recorded, per step 4 of the ticket):** a legitimate rotation is one PR
+  that updates BOTH `tauri.conf.json`'s `pubkey` and `EXPECTED_TAURI_UPDATER_PUBKEY` together, states
+  the reason, and separately rotates the `TAURI_SIGNING_PRIVATE_KEY*` GitHub secrets (held outside the
+  repo, by whoever generated the new keypair). This does not stop someone with full push access from
+  editing both files in the same commit — nothing living inside the repo can, and the ticket's own "Why
+  High" section scopes the threat to a compromised token / a careless mistake, not an unrestricted
+  malicious insider. What it buys: a one-line, easy-to-miss `tauri.conf.json` diff becomes a two-file
+  diff a normal PR review actually surfaces, and an unintended change now fails CI loudly instead of
+  quietly reporting success.
+
+  **Red-proof (acceptance criterion 4).** Committed the guard first (green: `live_pubkey_matches_the_pinned_copy ... ok`).
+  Then generated a fresh, self-consistent attacker minisign keypair (via a throwaway
+  `cargo run --example`, not committed), swapped `src-tauri/tauri.conf.json`'s `pubkey` to the
+  attacker's public key — the exact shape of the auditor's scenario 10 — and re-ran the guard:
+
+  ```
+  running 1 test
+  test live_pubkey_matches_the_pinned_copy ... FAILED
+
+  thread 'live_pubkey_matches_the_pinned_copy' panicked at tests\pinned_pubkey_guard.rs:38:5:
+  assertion `left == right` failed:
+
+  SECURITY (CPE-1873): the updater's root-of-trust public key changed.
+  `src-tauri/tauri.conf.json` -> plugins.updater.pubkey no longer matches the pinned copy in
+  crates/updater-verify/src/pinned_pubkey.rs::EXPECTED_TAURI_UPDATER_PUBKEY.
+  ...
+    left: "...DBD17E37AC7446C1..." (attacker key)
+   right: "...521E574F68E2561A..." (real key)
+
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+  ```
+
+  Exit code 101 — a hard CI failure, not a warning. Restored the real pubkey immediately after
+  (`git status --short` confirmed a clean working tree — `src-tauri/tauri.conf.json` back to its
+  original bytes), re-ran the guard, confirmed GREEN again, and deleted the throwaway keygen example.
+  Note `verify-release-artifacts` itself still reports `OK` for a self-consistent attacker keypair per
+  its own now-honest wording (it only ever proved internal consistency, never authenticity) — that is
+  expected and unchanged; the pin in this ticket is the independent check that catches what that binary
+  by design cannot.
+
+  **Verification.** `cargo clippy --all-targets -- -D warnings` clean. Full crate `cargo test`: 22 lib +
+  1 new pinned-pubkey + 15 release_guard = 38/38 pass.
