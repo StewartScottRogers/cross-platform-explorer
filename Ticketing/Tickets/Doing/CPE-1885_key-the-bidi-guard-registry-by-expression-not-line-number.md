@@ -104,3 +104,49 @@ than by what it says.
   passed (1 intentionally skipped — GUI smoke windows-latest), confirmed via `gh pr checks 1029
   --json ... | grep pending` returning empty with a stable `total_count` of 19 across repeated reads.
   PR ready for review/merge.
+- **2026-08-26 USMST — attempt 2 (CHANGES REQUESTED, blocking finding).** An independent reviewer
+  verified round 1 exhaustively (multiset direction-correctness, 0 lost entries across all 98 files
+  vs. base `05a36379`, the RevertOutcomePanel.svelte carry-across, `bidiRenderScan.ts` zero-diff, all
+  three round-1 red-proofs) and found ONE real hole: keying REGISTRY by bare EXPRESSION TEXT alone is a
+  strict information loss versus the old `"<line>:<expr>"` keying whenever the same expression occurs
+  more than once in a component — the multiset can count occurrences but cannot tell WHICH is which. A
+  future edit that wraps ONE occurrence of a duplicated expression (a real fix) while introducing an
+  unrelated brand-new raw occurrence of the IDENTICAL text elsewhere in the same file leaves the total
+  count unchanged, so the guard stays green while the unsafe surface silently moves to a new, unreviewed
+  line — this ticket's own failure class, one level down, and WORSE in kind: the line-number bug was a
+  false POSITIVE (noisy, safe); this is a false NEGATIVE (unsafe content passes). Demonstrated on a real
+  file, not a hypothetical: SplitFileDialog.svelte renders `baseName(path)` raw at two real text-node
+  positions (101, 114) and `outDir` raw at two real positions (107 title AND text, 168 title).
+  **Fix**: keyed REGISTRY by `(expression, render-position KIND)` instead of expression alone. Added
+  `UnsafeRenderSite` + `findUnsafeRenderSites` to `bidiRenderScan.ts` (a new function alongside the
+  UNCHANGED `findUnsafeRenderLines` — same shared internal scanner, refactored into a private
+  `scanUnsafeRenderSites`, zero behavior change to any existing caller; `bidiRenderScan.test.ts` 69/69
+  still green). `kind` is `"text"` / `"@html"` / the exact attribute name (`"title"`, `"aria-label"`,
+  `"alt"`) — never a line address, so it is exactly as stable under reformatting as bare expression text
+  was. REGISTRY's 98 entries were regenerated PROGRAMMATICALLY through `findUnsafeRenderSites` (not
+  hand-edited) to guarantee correctness; this surfaced 29 previously-invisible occurrences across 20
+  files — all the `title={x}>{x}`-shaped same-line dual-position case `findUnsafeRenderLines`'s `Set`
+  has always silently collapsed to one entry (e.g. SplitFileDialog.svelte:107 was one recorded `outDir`
+  offender, is now the two real occurrences — `title:outDir` and `text:outDir` — it always was). Guard
+  test's helpers renamed `exprMultiset`→`siteKeyMultiset`/`siteKey`, still comparing by MULTISET (not
+  deduplicated membership); the 4 substitution-demonstration tests (PreviewPane/ConfirmDialog/StatusBar/
+  AgentMenu) updated to compare `findUnsafeRenderSites` output instead of expression-only.
+  **Stated residual (explicit, not implied away)**: `(kind, expr)` does NOT distinguish two occurrences
+  of the identical expression in the identical kind within one file — SplitFileDialog.svelte's
+  `text:baseName(path)` pair stays exactly as ambiguous as it was under the OLD line-keyed design (a
+  `Set` entry there could only ever record ONE of a same-line `title={x}>{x}` pair too). Closing that
+  needs a full occurrence-index, which reintroduces a position-shaped key and the reformatting fragility
+  this ticket exists to remove — documented in both `UnsafeRenderSite`'s doc comment and this file's
+  header, not glossed over.
+  **Red-proofed for real, live on real files, captured and reverted** (see PR description for exact
+  output): (1) the reviewer's exact swap (SplitFileDialog.svelte: wrap one `baseName(path)` text
+  occurrence, add a new `title={baseName(path)}` occurrence) — confirmed the OLD expression-only view
+  shows NO difference (reconstructed literally in a new permanent test), confirmed the NEW (kind, expr)
+  view goes RED naming `NEW raw offender(s): title:baseName(path)` + `STALE ... text:baseName(path)`.
+  (2) Reformat immunity re-confirmed: 6 blank lines inserted into StatusBar.svelte, guard stayed GREEN
+  (16/16). (3) Duplicate-count both directions re-confirmed on SplitFileDialog.svelte's real
+  `baseName(path)` duplicate: wrapping one occurrence (2→1) reds as STALE; adding a third (2→3) reds as
+  NEW. `npm run check`: 0/0. `npx vitest run`: 331 files / 4461 tests, all green. Rebasing onto current
+  `main` (moved several times since last rebase) before repushing; CI is in a confirmed GitHub Actions
+  outage (30-40+ min queued runs org-wide) — not waiting on it, verified locally instead per the
+  Foreman's explicit instruction, reporting `CI still pending on <SHA>`.
