@@ -291,7 +291,7 @@ mod tests {
                 format!("{} 0 obj\n<< /Type /Page >>\nendobj\n", n + 1).as_bytes(),
             );
         }
-        big.extend(std::iter::repeat(b'%').take((HEADER_CAP as usize) + 4096)); // push past the cap
+        big.extend(std::iter::repeat_n(b'%', (HEADER_CAP as usize) + 4096)); // push past the cap
         for n in 2..5 {
             big.extend_from_slice(
                 format!("{} 0 obj\n<< /Type /Page >>\nendobj\n", n + 1).as_bytes(),

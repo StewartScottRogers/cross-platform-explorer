@@ -261,7 +261,7 @@ mod tests {
     fn bands_png(n_blocks: u32, block_px: u32, h: u32, start_black: bool) -> Vec<u8> {
         let mut img = RgbImage::new(n_blocks * block_px, h);
         for (x, _y, px) in img.enumerate_pixels_mut() {
-            let is_black = ((x / block_px) % 2 == 0) == start_black;
+            let is_black = (x / block_px).is_multiple_of(2) == start_black;
             let v = if is_black { 0 } else { 255 };
             *px = image::Rgb([v, v, v]);
         }

@@ -1949,10 +1949,8 @@ fn drain_reapable(
     grace: std::time::Duration,
     now: std::time::Instant,
 ) -> Vec<PathBuf> {
-    // The newest entry's age is how long this process has been quiet. (`map_or`, not `is_none_or`:
-    // this crate's MSRV is 1.77.2 and that method is 1.82 — clippy's `incompatible_msrv` caught it.)
-    #[allow(clippy::unnecessary_map_or)]
-    let quiet = live.back().map_or(true, |(_, started)| now.duration_since(*started) >= grace);
+    // The newest entry's age is how long this process has been quiet.
+    let quiet = live.back().is_none_or(|(_, started)| now.duration_since(*started) >= grace);
     let target = if quiet { max_live } else { hard_cap };
     let mut due = Vec::new();
     // Oldest first: within a session the oldest extraction is the one whose consumer is most likely to

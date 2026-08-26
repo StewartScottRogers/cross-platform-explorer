@@ -2,7 +2,7 @@
 name = "repos"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83.0"
+rust-version = "1.88.0"
 description = "The Repositories sidecar for Cross-Platform Explorer — browse & two-way mirror any forge/VCS (CPE-429)."
 license = "MIT"
 

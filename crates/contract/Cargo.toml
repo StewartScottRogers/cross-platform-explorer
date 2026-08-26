@@ -2,7 +2,7 @@
 name = "cpe-contract"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83.0"
+rust-version = "1.88.0"
 description = "The transport-neutral, versioned wire contract between the Cross-Platform Explorer GUI/Client and its Server (CPE-810/811)."
 license = "MIT"
 

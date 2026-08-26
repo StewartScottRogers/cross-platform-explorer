@@ -685,10 +685,10 @@ pub fn prune(store_dir: &str, manifest_id: &str) -> Result<u64, String> {
     // normal cost of a prune, not an exceptional one.
     let at_risk: BTreeSet<String> = hashes
         .iter()
-        // `map_or(true, ..)`: a hash the index doesn't know about is at risk too — the delete loop
+        // `is_none_or(..)`: a hash the index doesn't know about is at risk too — the delete loop
         // below keys off `!store.contains(hash)`, so an absent entry is exactly the case that removes a
         // blob file with no refcount ever having said it was free.
-        .filter(|h| store.get(h).map_or(true, |m| m.refs <= 1))
+        .filter(|h| store.get(h).is_none_or(|m| m.refs <= 1))
         .cloned()
         .collect();
     // The pruned manifest's own file is already gone (the point of no return above), so this scan sees

@@ -212,9 +212,9 @@ mod tests {
         // --- Image data section: raw (uncompressed), planar R then G then B ---
         b.extend_from_slice(&0u16.to_be_bytes()); // compression = 0 (raw)
         let plane = (width * height) as usize;
-        b.extend(std::iter::repeat(200u8).take(plane)); // R plane
-        b.extend(std::iter::repeat(100u8).take(plane)); // G plane
-        b.extend(std::iter::repeat(50u8).take(plane)); // B plane
+        b.extend(std::iter::repeat_n(200u8, plane)); // R plane
+        b.extend(std::iter::repeat_n(100u8, plane)); // G plane
+        b.extend(std::iter::repeat_n(50u8, plane)); // B plane
         b
     }
 

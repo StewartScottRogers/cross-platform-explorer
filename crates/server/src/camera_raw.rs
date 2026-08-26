@@ -376,7 +376,7 @@ mod tests {
     fn tiny_jpeg(len: usize) -> Vec<u8> {
         assert!(len >= 4);
         let mut v = vec![0xFF, 0xD8];
-        v.extend(std::iter::repeat(0x00).take(len - 4));
+        v.extend(std::iter::repeat_n(0x00, len - 4));
         v.push(0xFF);
         v.push(0xD9);
         v

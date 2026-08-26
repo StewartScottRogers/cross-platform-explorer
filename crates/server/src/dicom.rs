@@ -64,7 +64,7 @@ pub fn read_dicom_tags(path: &str) -> Result<Vec<(String, String)>, String> {
 /// well-formed buffer already validated to be `rows * columns * 3` bytes) is left untouched by
 /// `chunks_exact_mut`.
 fn convert_ybr_full_to_rgb_u8(data: &mut [u8]) {
-    for pixel in data.chunks_exact_mut(3) {
+    for pixel in data.as_chunks_mut::<3>().0 {
         let y = pixel[0] as f32;
         let cb = pixel[1] as f32 - 128.0;
         let cr = pixel[2] as f32 - 128.0;

@@ -786,7 +786,7 @@ mod tests {
     /// single `JSON`-typed chunk holding `json`, space-padded to a 4-byte boundary per the glTF spec.
     fn glb(json: &[u8]) -> Vec<u8> {
         let mut padded = json.to_vec();
-        while padded.len() % 4 != 0 {
+        while !padded.len().is_multiple_of(4) {
             padded.push(b' ');
         }
         let total_len = 12 + 8 + padded.len();

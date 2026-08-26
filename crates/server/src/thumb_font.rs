@@ -160,7 +160,7 @@ fn unwrap_woff(bytes: &[u8]) -> Result<Vec<u8>, String> {
     for data in &table_data {
         out.extend_from_slice(data);
         let pad = (4 - (data.len() % 4)) % 4;
-        out.extend(std::iter::repeat(0u8).take(pad));
+        out.extend(std::iter::repeat_n(0u8, pad));
     }
 
     Ok(out)

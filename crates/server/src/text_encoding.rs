@@ -232,7 +232,7 @@ fn classify_nul_bytes(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     let mut even_count = 0usize;
     let mut odd_count = 0usize;
     for (i, &b) in bytes[..sniff_len].iter().enumerate() {
-        if (base_offset + i as u64) % 2 == 0 {
+        if (base_offset + i as u64).is_multiple_of(2) {
             even_count += 1;
             if b == 0 {
                 even_nul += 1;

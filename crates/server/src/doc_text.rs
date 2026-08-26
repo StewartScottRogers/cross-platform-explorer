@@ -510,7 +510,7 @@ mod tests {
             let mut xml: Vec<u8> = Vec::with_capacity(CAP);
             xml.extend_from_slice(prefix);
             let fill_len = CAP - prefix.len() - suffix.len();
-            xml.extend(std::iter::repeat(b'A').take(fill_len));
+            xml.extend(std::iter::repeat_n(b'A', fill_len));
             xml.extend_from_slice(suffix);
             assert_eq!(xml.len(), CAP, "fixture must be exactly the cap size");
 

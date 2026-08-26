@@ -218,11 +218,11 @@ fn decode_pem_certificate(pem: &str) -> Option<Vec<u8>> {
 fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let clean: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if clean.is_empty() || clean.len() % 4 != 0 {
+    if clean.is_empty() || !clean.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(clean.len() / 4 * 3);
-    for chunk in clean.chunks_exact(4) {
+    for chunk in clean.as_chunks::<4>().0 {
         let mut vals = [0u8; 4];
         let mut pad = 0u8;
         for (i, &b) in chunk.iter().enumerate() {

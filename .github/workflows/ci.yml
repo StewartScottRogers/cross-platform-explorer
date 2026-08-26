@@ -1597,6 +1597,23 @@ jobs:
   # because it is *still* unstable even in the newest available stable rustc, so it does not enter
   # into this floor at all.
   #
+  # But 1.83.0 turned out to be fiction too, on the FIRST real run of this job: it isn't our code that
+  # raises the floor past that point, it's the dependency graph. `cargo check` at 1.83.0 failed on
+  # EVERY manifest with `feature edition2024 is required ... not stabilized in this version of Cargo` --
+  # transitive deps (`block-buffer`, `getrandom`) ship an `edition = "2024"` manifest, and Cargo can't
+  # even PARSE that manifest below the Rust release that stabilised edition 2024. Bisected empirically
+  # (installed `1.85.0`, `1.88.0` via `rustup toolchain install` and ran this exact `cargo check --locked
+  # --all-targets` loop locally against all 17 manifests at each): 1.85.0 gets past the edition2024 parse
+  # error but still fails on `crates/ftp` (and others sharing its dependency graph) with `rustc 1.85.0 is
+  # not supported by ... calamine@0.36.1 requires rustc 1.88 / image@0.25.10 requires rustc 1.88.0 /
+  # plist@1.10.0 requires rustc 1.88.0 / rcgen@0.14.8 requires rustc 1.88 / suppaftp@10.0.1 requires
+  # rustc 1.88.0 / time@0.3.55, time-core@0.1.9, time-macros@0.2.32 require rustc 1.88.0 / zip@8.6.0
+  # requires rustc 1.88` -- all read directly from each dependency's own committed `Cargo.toml`
+  # (`rust-version = "1.88"`/`"1.88.0"`), not guessed. **1.88.0 compiled every one of the 17 manifests
+  # clean** (`cargo +1.88.0 check --locked --all-targets`, one probe run, exit 0 across the board,
+  # `src-tauri` included). 1.88.0 is the true floor: it is the highest number any dependency in this
+  # tree actually declares, and the empirical probe confirms nothing needs higher.
+  #
   # Deliberately NOT a `rust-toolchain.toml`: that would make `rustup` auto-install/switch to this
   # pinned version the moment ANY `cargo` command runs inside a checkout of this repo, including on a
   # shared local dev machine -- exactly the machine-global toolchain change this repo's sprint workers
@@ -1611,13 +1628,13 @@ jobs:
   # the one that surfaced the problem -- a partial sweep here is this repo's most-repeated defect, one
   # level up.
   msrv:
-    name: MSRV (1.83.0) compiles on every manifest
+    name: MSRV (1.88.0) compiles on every manifest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.83.0 (the declared floor, not "stable")
-        uses: dtolnay/rust-toolchain@1.83.0
+      - name: Install Rust 1.88.0 (the declared floor, not "stable")
+        uses: dtolnay/rust-toolchain@1.88.0
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -1657,7 +1674,7 @@ jobs:
       # Every manifest that declares `rust-version` in this tree, checked with the exact toolchain
       # that number promises. `cargo check --all-targets` (not `build`) is enough to catch an
       # MSRV-violating API in library OR test code, and a dependency whose OWN floor is newer than
-      # 1.83.0 surfaces here the same way -- both are a compile error at this exact toolchain.
+      # 1.88.0 surfaces here the same way -- both are a compile error at this exact toolchain.
       - name: cargo check every manifest at the declared floor
         shell: bash
         run: |
@@ -1671,7 +1688,7 @@ jobs:
           ; do
             echo "::group::cargo check --locked --all-targets -- $dir"
             if ! (cd "$dir" && cargo check --locked --all-targets); then
-              echo "::error::$dir does not compile at the declared MSRV (rustc 1.83.0) -- either the code needs an API newer than that, or a dependency's own MSRV is newer than 1.83.0. Fix the code/dependency, or raise rust-version in $dir/Cargo.toml (and every other manifest in the tree, to keep one honest floor) and record why."
+              echo "::error::$dir does not compile at the declared MSRV (rustc 1.88.0) -- either the code needs an API newer than that, or a dependency's own MSRV is newer than 1.88.0. Fix the code/dependency, or raise rust-version in $dir/Cargo.toml (and every other manifest in the tree, to keep one honest floor) and record why."
               fail=1
             fi
             echo "::endgroup::"

@@ -2,7 +2,7 @@
 name = "cpe-server"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83.0"
+rust-version = "1.88.0"
 description = "The Cross-Platform Explorer Server: Tauri-free domain logic behind the ServerCtx runtime seam + the contract envelope (CPE-810/815)."
 license = "MIT"
 
