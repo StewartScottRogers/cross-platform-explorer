@@ -311,3 +311,24 @@ either, the two controls would fight each other. It also covers the product's ow
   matters to a blocking watch. Queue depth is an aggravating factor (15 runs in flight across seven
   branches during the recorded run), not the cause: even the *fastest successful* run in three days,
   28.6 min, is 2.9× the cap.
+
+#### An unrelated trap found while building this, and closed
+
+Mid-ticket, the rebase onto `main` re-checked out `scripts/*.mjs` with CRLF (this box runs
+`core.autocrlf=true`) and the entire new suite stopped collecting with:
+
+    SyntaxError: Invalid or unexpected token
+      src/lib/sprintStallControls.test.ts:2:31
+
+Line 2 of that file is `//`. The location is meaningless and the module actually at fault
+(`scripts/stall-check.mjs`) is not named anywhere. **Vite's transform of a `.mjs` does not survive
+CRLF**, and it reproduces *only* on a checkout with `autocrlf=true` — the Linux CI runner takes LF and
+stays green, so CI structurally cannot catch it. Bisected by flipping the line endings of each file
+one at a time.
+
+Closed by pinning `scripts/*.mjs text eol=lf` in `.gitattributes` (the mirror of the existing
+`.cmd`/`.bat` CRLF pin, and for the same reason: a parser that cannot cope). The index already stored
+LF, so the pin changes only what lands on disk — zero content diff. A guard test scans **all** of
+`scripts/*.mjs`, not just this ticket's two, and it fired immediately on `organize-done.mjs`. Its
+reach is stated honestly in the test: if the unpinned file is one the suite imports, collection dies
+before any assertion runs; the value is naming an unpinned file nobody imports *yet*.

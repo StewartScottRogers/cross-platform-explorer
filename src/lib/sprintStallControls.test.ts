@@ -27,6 +27,8 @@
 //      the product's own "watcher" vocabulary) is not; and a second stall from the same agent escalates
 //      to take-over rather than a third re-invoke, which is the loop bound the ticket asks for.
 import { describe, it, expect } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   HARNESS_TOOL_TIMEOUT_MS,
   MAX_BUDGET_MS,
@@ -350,6 +352,30 @@ describe("stall-check ignores QUOTED prohibitions, so documenting the rule is no
       "> both complete. Waiting for that event.\n\n" +
       "The cause is the 600 s harness cap, not defiance. CI VERDICT: completed success.";
     expect(classifyReport(prBody).action).toBe("accept");
+  });
+});
+
+describe("the harness scripts stay importable from vitest (CPE-1880)", () => {
+  // Found the hard way, mid-ticket: the rebase re-checked these files out with CRLF (this box runs
+  // core.autocrlf=true) and the whole suite stopped collecting with `SyntaxError: Invalid or
+  // unexpected token` pointing at a COMMENT on line 2 of this file — a location with nothing wrong
+  // with it, and no mention of the module actually at fault. Vite's transform of a `.mjs` does not
+  // survive CRLF. It reproduces only on a Windows checkout; the Linux CI runner takes LF and stays
+  // green, so CI structurally cannot catch it. `.gitattributes` now pins `scripts/*.mjs text eol=lf`.
+  //
+  // Being honest about this guard's reach: if the offending file is one THIS suite imports, collection
+  // dies before any assertion runs — the suite still reds, just uselessly. Its real value is the OTHER
+  // case: a script in `scripts/` that nobody imports yet (a future one, or `organize-done.mjs`) sitting
+  // unpinned, where this names the file and points at `.gitattributes` instead of leaving the next
+  // author to rediscover the whole thing. So it scans the directory rather than a hard-coded pair.
+  it("every scripts/*.mjs is checked out LF, not CRLF", () => {
+    const dir = join(process.cwd(), "scripts");
+    const mjs = readdirSync(dir).filter((f) => f.endsWith(".mjs"));
+    expect(mjs.length).toBeGreaterThanOrEqual(3); // ci-poll, stall-check, organize-done
+    for (const rel of mjs) {
+      const bytes = readFileSync(join(dir, rel));
+      expect(bytes.includes("\r\n"), `scripts/${rel} is checked out with CRLF — see .gitattributes`).toBe(false);
+    }
   });
 });
 

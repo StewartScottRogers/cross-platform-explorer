@@ -8,3 +8,13 @@
 # platform. Treat all of samples/ as binary so git never applies EOL conversion
 # (a CRLF-munged PDF/MP3/etc. would no longer match the generated baseline).
 samples/** -text
+
+# CPE-1880: the harness scripts under scripts/ are imported by vitest through Vite's
+# transform pipeline, and a .mjs checked out with CRLF makes that transform throw
+# `SyntaxError: Invalid or unexpected token` with a location that points at a comment
+# on line 2 — i.e. no usable diagnostic at all. It reproduces ONLY on a checkout with
+# core.autocrlf=true (Windows dev boxes); the Linux CI runner checks out LF and stays
+# green, so CI cannot catch it and the next person loses an hour. Pin them to LF on
+# every checkout regardless of the user's autocrlf setting, the same way the .cmd/.bat
+# rule above pins the opposite direction for cmd.exe.
+scripts/*.mjs text eol=lf
