@@ -3,7 +3,7 @@ id: CPE-1885
 title: key the bidi-escape guard's registry by expression text, not line number — it cost three round-trips in one day
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-23
@@ -79,3 +79,18 @@ than by what it says.
   after the third occurrence in one day. PR #1019's reviewer independently recommended the same change
   and correctly noted the guard is self-correcting rather than merely fragile, which is why this is a
   usability fix and not a correctness one.
+- **2026-08-26 USMST** — Picked up by a worker; moved Backlog → Doing.
+- **2026-08-26 USMST** — Re-keyed `REGISTRY` in `src/lib/bidiEscape.guard.test.ts`: entries are now bare
+  expression text (the leading `"<line>:"` stripped from every one of the 92 file entries), compared as
+  a MULTISET (occurrence-counted, not deduped) via new `exprMultiset`/`multisetDiff` helpers so a
+  component with the same expression on two lines (TrashView's two `$t("trash.moreActions")`) still
+  requires two matching entries. `findUnsafeRenderLines`'s own `"<line>:<expr>"` output shape is
+  untouched (other tests depend on it), only REGISTRY's recorded keys and the comparison logic changed.
+  `APP_MARKUP_OFFENDERS` (App.svelte's separate flat array) is deliberately left as `"<line>:<expr>"` —
+  out of scope; the ticket's own examples (StatusBar.svelte, TrashView.svelte) are REGISTRY entries.
+  Failure messages now name the component + bare expression first, addresses last. `npm run check`: 0
+  errors, 0 warnings. `npx vitest run`: full suite green. Red-proofed for real (reformat stays green;
+  delete goes red; new unregistered render goes red) — see the PR description for the exact commands and
+  captured output. PR #1026 (sibling, `RevertOutcomePanel.svelte`'s registry entry) was still OPEN at
+  push time, not yet merged — rebased onto current `origin/main` before opening the PR; will re-check for
+  its merge before calling this done.
