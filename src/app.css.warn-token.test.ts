@@ -175,44 +175,35 @@ function walkTokenSources(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** Strips `//` line comments, but ONLY outside a `'...'`/`"..."`/`` `...` `` string — a quote-aware
- *  scan rather than a regex, so a `//` inside a string (a `https://` URL, or literal text) survives
- *  untouched while a REAL line comment (this file's own header uses `//` throughout, and any future
- *  doc comment quoting the `var(--token, <fallback>)` idiom by name — e.g.
- *  `// example: var(--newFeatureToken, #fff)`) is removed before the scanner below ever sees it.
- *  Without this, prose reds CI for non-code (CPE-1875 re-review finding 2). Escaped quote characters
- *  (`\"`, `\'`, `` \` ``) inside a string are honoured so an escaped quote doesn't end the string
- *  early. Runs AFTER stripBlockAndHtmlComments below; a block-comment or HTML-comment marker is
- *  treated as ordinary text here (this scanner only understands `//` and quotes), which is harmless
- *  because the whole block/HTML comment span is already gone by the time this runs. */
+/** Strips a line comment ONLY when `//` (optional leading whitespace) is the FIRST thing on the
+ *  line — to end of line. Nothing else is inspected: no quote state, no regex-literal awareness.
+ *
+ *  CPE-1875 re-review attempt 2 tried a quote-aware scanner that tracked `'`/`"`/`` ` `` string
+ *  state so a `//` inside a string (a URL, plain text) would survive. That scanner had no concept
+ *  of a REGEX LITERAL — `\/\/` inside `/\/\//` (an ordinary pattern for matching a literal double
+ *  slash) tripped the same `//`-start check and silently deleted the rest of that line, including
+ *  any real `var(--token, <fallback>)` call site sharing it. Proven by a controlled A/B: an
+ *  undefined token alone on its own line was caught (5 failures); the identical token sharing a
+ *  line with `const R = /\/\//;` vanished from output entirely, suite fully green — a FALSE
+ *  NEGATIVE, the guard going blind with no signal anything was missed. That is strictly worse than
+ *  the false positive (a `//` doc comment on its own line quoting the idiom by name) this exists
+ *  to fix in the first place.
+ *
+ *  Distinguishing a real comment from one inside a string from one inside a regex literal from one
+ *  inside a template-literal expression is a full tokenizer's job, and every attempt to approximate
+ *  it here has only grown a new failure mode. So this deliberately stops trying and biases to FAIL
+ *  SAFE instead: a comment-ONLY line (nothing but whitespace before `//`) is stripped — that is the
+ *  one shape that can never contain a real call site, so it can never eat one, no matter what
+ *  regexes, strings, or escapes appear on OTHER lines. A trailing `// comment` after real code is
+ *  deliberately left alone — worst case it gets scanned as if it were code, producing a false
+ *  positive (noise: an extra failure naming a token that's actually just prose), which is rare and,
+ *  if it ever happens, allowlistable. That is the safe direction to err in: under-stripping only
+ *  adds noise, while over-stripping silently blinds the guard. */
 function stripLineComments(s: string): string {
-  let out = "";
-  let quote: string | null = null;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (quote) {
-      out += c;
-      if (c === "\\" && i + 1 < s.length) {
-        out += s[i + 1];
-        i++;
-        continue;
-      }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"' || c === "`") {
-      quote = c;
-      out += c;
-      continue;
-    }
-    if (c === "/" && s[i + 1] === "/") {
-      while (i < s.length && s[i] !== "\n") i++;
-      i--; // let the loop's own i++ land back on the newline so it's preserved in `out`
-      continue;
-    }
-    out += c;
-  }
-  return out;
+  return s
+    .split("\n")
+    .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+    .join("\n");
 }
 
 const stripBlockAndHtmlComments = (s: string) => s.replace(/<!--[\s\S]*?-->/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -254,39 +245,6 @@ function scanFallbackCalls(content: string): { token: string; fallback: string }
   return out;
 }
 
-/** True if `content` (already comment-stripped) DECLARES `token` itself — `--token: <value>` —
- *  with a value that is actually DYNAMIC (a Svelte template mustache or a JS template-literal
- *  interpolation, both of which always contain a `{`), anywhere outside of a `var(--token, ...)`
- *  read. Recognises a component-local custom property (one the component sets on itself, usually
- *  via an inline `style="--foo: {expr}"` / `` style={`--foo: ${expr}`} `` attribute) rather than a
- *  global theme token expected to come from app.css's cascade. `--indent` (PreviewPane.svelte, set
- *  per-line from fold state — `style="--indent: {indent[i] ?? 0}"`) and `--sw` (TagEditor.svelte,
- *  set per-swatch from a fixed label-colour list — `` `--sw: ${LABEL_COLORS[key]}` ``) are the
- *  current instances — each a real, working, intentional local variable, not an instance of the
- *  CPE-1810/1821/1876 defect (an undefined GLOBAL token whose fallback silently wins in every
- *  theme). Requiring these to resolve in app.css would assert something false about code that
- *  isn't broken.
- *
- *  Requiring the VALUE to be dynamic (not just the presence of a `token:` declaration anywhere in
- *  the file) is deliberate and closes a real hole: a first version of this function only checked
- *  for the declaration existing, which a masking-literal call site can trivially forge —
- *  `<div style="--newtok: #654321"><span style="color: var(--newtok, #654321)"></span></div>` reads
- *  as "locally declared" under that looser check even though the value is a permanent, non-themed
- *  hex, functionally identical to the CPE-1810/1821/1876 defect (CPE-1875 re-review finding 1). A
- *  value with no `{` in it — a bare hex, keyword, or number — is a static literal and is NOT exempt,
- *  regardless of where it's written; only an interpolated (computed) value is. */
-function declaresItself(content: string, token: string): boolean {
-  const esc = token.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-  const re = new RegExp(`${esc}\\s*:\\s*([^;"\`]*)`, "g");
-  let m: RegExpExecArray | null;
-  let sawDeclaration = false;
-  while ((m = re.exec(content)) !== null) {
-    sawDeclaration = true;
-    if (!m[1].includes("{")) return false; // a static-valued declaration disqualifies the exemption
-  }
-  return sawDeclaration;
-}
-
 /** True if `fallback` is (only) a nested `var(--otherToken ...)` reference and `otherToken` itself
  *  resolves to a concrete hex in every one of the five theme blocks. Distinguishes the two shapes
  *  a 2-argument `var()` can take when its OWN token is undefined:
@@ -312,22 +270,26 @@ function fallbackIsLiveChain(fallback: string, semanticDeclsByTheme: Map<string,
 
 const allSemanticDecls = THEMES.map(({ label, selector }) => semanticDeclsFor(label, selector));
 
-/** token -> referencing files (relative, forward-slashed), in first-seen order. Excludes tokens
- *  that declare themselves locally (component-scoped custom properties) and tokens whose every
- *  fallback occurrence is a live chain to an already-themed token (see the two functions above) —
- *  neither is an instance of the defect this file guards against. */
-function discoverFallbackTokens(): Map<string, string[]> {
+/** token -> referencing files (relative, forward-slashed), in first-seen order.
+ *  `discovered` excludes tokens whose every fallback occurrence is a live chain to an
+ *  already-themed token (see the function above) — that is not an instance of the defect this file
+ *  guards against. Component-local custom properties (`--indent`, `--sw`, ...) are NOT filtered
+ *  here — see LOCAL_CUSTOM_PROPERTIES below for why that exemption moved to an explicit list instead
+ *  of living in this scan.
+ *  `allSeen` is the SAME scan before the live-chain filter is applied — every token with at least
+ *  one real `var(--token, <fallback>)` call site anywhere in `src/`, full stop. Used by the
+ *  LOCAL_CUSTOM_PROPERTIES stale-entry check below: `--sw`'s fallback (`var(--surface-alt)`) is
+ *  itself a live chain, so `--sw` is ALREADY absent from `discovered` by the time that check would
+ *  run against it — checking against `discovered` there would misreport a real, live local property
+ *  as a stale entry. `allSeen` is call-site truth, independent of which exemption mechanism would
+ *  end up covering the token. */
+function discoverFallbackTokens(): { discovered: Map<string, string[]>; allSeen: Map<string, string[]> } {
   const found = new Map<string, string[]>();
-  const localTokens = new Set<string>();
   const liveChainOnly = new Map<string, boolean>(); // token -> "every occurrence so far is a live chain"
   for (const f of walkTokenSources(SRC)) {
     const content = stripAllComments(readFileSync(f, "utf8"));
     const rel = f.replace(SRC, "src").replace(/\\/g, "/");
     for (const { token, fallback } of scanFallbackCalls(content)) {
-      if (declaresItself(content, token)) {
-        localTokens.add(token);
-        continue;
-      }
       const isLiveChain = fallbackIsLiveChain(fallback, allSemanticDecls);
       liveChainOnly.set(token, (liveChainOnly.get(token) ?? true) && isLiveChain);
       const files = found.get(token) ?? [];
@@ -335,9 +297,9 @@ function discoverFallbackTokens(): Map<string, string[]> {
       found.set(token, files);
     }
   }
-  for (const token of localTokens) found.delete(token);
+  const allSeen = new Map(found);
   for (const [token, allLiveChain] of liveChainOnly) if (allLiveChain) found.delete(token);
-  return found;
+  return { discovered: found, allSeen };
 }
 
 // Known-open debt: tokens the detector above genuinely finds undefined-with-a-literal-fallback in
@@ -363,14 +325,60 @@ const ALLOWLIST: { token: string; ticket: string; added: string; note: string }[
 ];
 const ALLOWLISTED_TOKENS = new Set(ALLOWLIST.map((e) => e.token));
 
-const discovered = discoverFallbackTokens();
+// Explicit, CLOSED allowlist of genuinely COMPONENT-LOCAL custom properties — tokens a component
+// sets on itself (via an inline `style="--foo: ..."` attribute) that are never expected to come
+// from app.css's cascade at all, so requiring them to resolve there would assert something false
+// about code that isn't broken.
+//
+// CPE-1875 re-review attempt 3: this REPLACES a heuristic, not extends one. Two successive
+// heuristics tried to infer "is this exemption legitimate" from a declaration's static text —
+// attempt 1 checked only that a `token:` declaration existed anywhere in the file; attempt 2
+// tightened that to require the declared value contain a `{`. Both were defeated in the same shape
+// two seconds after being proposed: `style="--newtok: {'#654321'}"` (a braced STRING LITERAL) and
+// `style="--newtok: {SOME_CONST}"` (a braced reference to a script-level constant that is itself
+// `"#654321"`) both satisfy "contains `{`" while being exactly as static and exactly as
+// theme-invariant as a bare hex — the CPE-1810/1821/1876 defect wearing a `{}` costume. Confirmed
+// by construction: injected alone into a real component, the full suite ran green with zero
+// mention of the token. No further heuristic on the STATIC TEXT of a declaration can distinguish
+// "genuinely computed" from "static value dressed up to look computed", so this stops guessing.
+//
+// Enumeration is the RIGHT tool here, unlike the token-name enumeration this very ticket replaced
+// above: that failed because the surface being enumerated was open-ended and attacker/author
+// chosen (any token name, at any new call site, forever). This surface is a small, closed set of
+// AUTHOR-chosen custom-property NAMES that a new masking literal cannot add itself to merely by
+// existing — getting a token onto this list requires an actual entry in this file, i.e. a
+// deliberate, reviewable code change, which is exactly the property a heuristic can never have.
+// Same dated, ticket-owning shape as ALLOWLIST above so the two lists read alike; here `ticket`
+// names the ticket that made the reviewable decision to allowlist the entry (not one that owes a
+// future fix — there is nothing to fix, these are permanently local by design).
+const LOCAL_CUSTOM_PROPERTIES: { token: string; ticket: string; added: string; note: string }[] = [
+  {
+    token: "--indent",
+    ticket: "CPE-1875",
+    added: "2026-08-26",
+    note: 'PreviewPane.svelte sets it per-line from fold state (`style="--indent: {indent[i] ?? 0}"`) ' +
+      "to drive a background-size calc() for indent guides — a per-row layout NUMBER, not a colour, " +
+      "and never a semantic theme token.",
+  },
+  {
+    token: "--sw",
+    ticket: "CPE-1875",
+    added: "2026-08-26",
+    note: "TagEditor.svelte sets it per-swatch from a fixed LABEL_COLORS lookup " +
+      "(`` `--sw: ${LABEL_COLORS[key]}` ``) to paint that one swatch — a per-instance value drawn " +
+      "from a fixed palette, not a token app.css is expected to define.",
+  },
+];
+const LOCAL_CUSTOM_PROPERTY_TOKENS = new Set(LOCAL_CUSTOM_PROPERTIES.map((e) => e.token));
 
-describe("every var(--token, <fallback>) call site resolves to a real hex in every live theme, or is on the dated debt allowlist (CPE-1875)", () => {
+const { discovered, allSeen } = discoverFallbackTokens();
+
+describe("every var(--token, <fallback>) call site resolves to a real hex in every live theme, or is on an explicit allowlist (CPE-1875)", () => {
   for (const { label, selector } of THEMES) {
     const semanticDecls = semanticDeclsFor(label, selector);
 
     for (const [token, files] of discovered) {
-      if (ALLOWLISTED_TOKENS.has(token)) continue;
+      if (ALLOWLISTED_TOKENS.has(token) || LOCAL_CUSTOM_PROPERTY_TOKENS.has(token)) continue;
       it(`${label} defines ${token} as a concrete hex (referenced from ${files.join(", ")})`, () => {
         const hex = resolveHex(semanticDecls, token);
         // CPE-1875 re-review finding 3: `expect(undefined).toMatch(HEX_RE)` throws vitest's own
@@ -410,6 +418,12 @@ describe("every var(--token, <fallback>) call site resolves to a real hex in eve
         return !HEX_RE.test(resolveHex(semanticDecls, token) ?? "");
       });
       expect(stillBroken, `${token} is allowlisted for ${ticket} as known-open debt, but it now resolves to a hex in every theme block — the fix has landed. Remove this allowlist entry so the detector covers ${token} for real.`).toBe(true);
+    }
+  });
+
+  it("every LOCAL_CUSTOM_PROPERTIES entry still has a live call site (no stale entry enumerated for nothing)", () => {
+    for (const { token, ticket } of LOCAL_CUSTOM_PROPERTIES) {
+      expect(allSeen.has(token), `${token} is on LOCAL_CUSTOM_PROPERTIES (${ticket}) but no var(${token}, <fallback>) call site was found anywhere in src/ — remove the stale entry.`).toBe(true);
     }
   });
 });
