@@ -75,3 +75,42 @@ threat), **CPE-1757** (`cpe-1757-bidi-guard-test`), **CPE-1771** (manifest mojib
 Worth pairing with a look at `src/docs/03-explorer.md`'s "Not yet covered" list, which the current
 message already points at — if a developer is being told to disclose a gap there, the docs side of that
 flow should be as clear as the test side.
+
+## Third defect, found against attempt 2's new message format (2026-08-26)
+
+CPE-1885's attempt 2 re-keyed the registry to `(kind, expression)`, so entries now print as
+`text:baseName(path)` and `title:outDir`. A focused re-UAT of the new wording found both original
+findings still stand, and one new one.
+
+**A NEW clause and a STALE clause are joined by a bare space, with no punctuation.** The
+position-kind swap — the exact case attempt 2 exists to catch — produces:
+
+    SplitFileDialog.svelte: NEW raw offender(s) (kind:expr): title:baseName(path) STALE recorded entry(ies), no longer rendered raw (kind:expr): text:baseName(path) — full found ...
+
+At a skim, `title:baseName(path)` and `STALE` run together with nothing marking the sentence
+boundary. Parsed correctly it is exactly the right information — *this expression was fixed at one
+sink and reappeared at a different one*, which tells the developer they are looking at a **moved
+risk**, not a confused guard. The run-on formatting works against that reading at precisely the moment
+it matters most: two clauses, one failure, one file.
+
+Fix: insert a period or `; ` between the NEW and STALE clauses in the `mismatches.push(...)`
+construction in `bidiEscape.guard.test.ts`. Purely a string template; it does not touch the mechanism,
+which an independent reviewer byte-verified sound.
+
+## Why the `kind:` prefix does not fix finding #2
+
+Worth recording so nobody assumes attempt 2 already closed it. The re-UAT reproduced finding #2
+verbatim on `SplitFileDialog.svelte` and explained precisely why the new format does not help:
+
+Both the surviving occurrence and the deleted one share the same kind (`text`), so
+`text:baseName(path)` going STALE reads exactly as misleadingly as bare `baseName(path)` did. The
+prefix only disambiguates duplicates whose **kinds differ** — TrashView's `title:` / `aria-label:`
+pair. For same-kind duplicates it adds a token and no signal.
+
+## And on readability of the prefix itself
+
+Judged an improvement, not a solved problem. `title:` / `aria-label:` / `@html:` map onto their HTML
+meaning immediately, and `text:` reads as body text by elimination — but only because the vocabulary
+happens to overlap with familiar HTML. Nothing in the message states that the prefix is a *render
+position* rather than a type or a filename. Worth one clause of explanation wherever the "why" from
+finding #1 lands.
