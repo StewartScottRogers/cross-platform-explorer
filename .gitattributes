@@ -22,3 +22,11 @@ scripts/*.mjs text eol=lf
 # CPE-1880 follow-up: `scripts/*.mjs` does not match subdirectories, so
 # `scripts/dev-harness/**/check.mjs` was left unpinned. Match nested scripts too.
 scripts/**/*.mjs text eol=lf
+
+# CPE-1893: the same CRLF-on-a-Windows-checkout risk CPE-1880 fixed for scripts/*.mjs applies here
+# too, with a harsher failure mode — a CRLF .sh sourced/run by a GitHub Actions step on the
+# Linux/macOS runners those workflows target fails at the shell level (a stray `\r` on the shebang
+# or inside a function body), not merely at a JS transform. Pin every workflow helper script to LF
+# on every checkout regardless of the user's core.autocrlf, covering both the pre-existing
+# ffmpeg-anchor-check.sh (CPE-1796) and catalog-freshness-check.sh (CPE-1893) added alongside it.
+.github/workflows/scripts/*.sh text eol=lf
