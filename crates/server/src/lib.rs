@@ -208,6 +208,16 @@ pub mod ticket_mcp;
 /// Small shared filesystem utilities: epoch-ms time conversion + streaming SHA-256 (CPE-815).
 pub mod fsutil;
 
+/// Handle-relative, per-component file opening that is **atomic with its own containment check**
+/// (CPE-1896): `NtCreateFile(RootDirectory=..)` on Windows, `openat2(RESOLVE_BENEATH)` / an
+/// `openat`+`O_NOFOLLOW` walk on Unix. Closes the check-then-open race every path-based guard in
+/// `fsutil` records as a residual. Crate-internal — it hands out raw write handles.
+///
+/// `#[cfg(any(unix, windows))]` with **no fallback arm**: an earlier revision carried a path-based one
+/// for other targets, and PR #1043's reviewer showed it had never compiled. See the module doc.
+#[cfg(any(unix, windows))]
+pub(crate) mod open_beneath;
+
 /// Text statistics — line/word/char/byte counts for a text file (CPE-414).
 pub mod text_stats;
 

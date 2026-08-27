@@ -185,6 +185,21 @@ const CDP_CALL_TIMEOUT_MS = 15000;
  *  GitHub's runners, where this call never gets close to either timeout). */
 const CDP_NAVIGATE_TIMEOUT_MS = 40000;
 
+/** CPE-1891: `waitForHttp` below used to wait a flat, unnamed 15s for Chrome to expose its CDP
+ *  endpoint at all — BEFORE `Page.navigate` above is ever called, before the dev server is even
+ *  touched — and its error message named the port but not the budget. CI failed twice in a row on a
+ *  GitHub-hosted runner already busy with this workflow's OTHER jobs: Chrome launched (the
+ *  orphan-reaper log line proved the process existed) but the wait gave up at ~19s, before
+ *  `--remote-debugging-port` ever came up — the identical "cold start on a loaded machine" cost class
+ *  `CDP_NAVIGATE_TIMEOUT_MS` above exists for, just one step earlier in the sequence (the endpoint has
+ *  to come up before anything can navigate through it at all). Sits deliberately next to
+ *  `CDP_NAVIGATE_TIMEOUT_MS` rather than folding into it — they gate two SEPARATE waits (endpoint-up
+ *  vs. first-navigate-ack) that can each independently be the slow one, so collapsing them into one
+ *  constant would hide which wait actually expired. Reuses that same 40000ms rather than inventing a
+ *  third number: both waits exist for the identical "Chrome + a cold vite dev server, together, on a
+ *  loaded machine" cause, so one shared, already-justified budget beats two uncoordinated guesses. */
+const CDP_ENDPOINT_TIMEOUT_MS = 40000;
+
 function makeCdpClient(ws) {
   const pending = new Map();
   ws.addEventListener("message", (ev) => {
@@ -758,8 +773,12 @@ export async function runAllCases({ cases, devServerBase, chromePath, cdpPort = 
     { stdio: ["ignore", "ignore", "ignore"] },
   );
   try {
-    const cdpUp = await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, 15000);
-    if (!cdpUp) throw new Error(`chrome CDP endpoint on ${cdpPort} never came up`);
+    const cdpUp = await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, CDP_ENDPOINT_TIMEOUT_MS);
+    if (!cdpUp) {
+      throw new Error(
+        `chrome CDP endpoint on ${cdpPort} never came up within CDP_ENDPOINT_TIMEOUT_MS=${CDP_ENDPOINT_TIMEOUT_MS}ms`,
+      );
+    }
     const targets = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
     const target = targets.find((t) => t.type === "page") || targets[0];
     const ws = new WebSocket(target.webSocketDebuggerUrl);
