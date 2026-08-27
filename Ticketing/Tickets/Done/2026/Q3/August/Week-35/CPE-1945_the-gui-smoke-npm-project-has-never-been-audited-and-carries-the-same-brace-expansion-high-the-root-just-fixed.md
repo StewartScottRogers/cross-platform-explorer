@@ -3,7 +3,7 @@ id: CPE-1945
 title: `gui-smoke/` is a second npm project that no Dependency Steward pass has ever audited — 17 advisories, 5 non-major fixable, including the same `brace-expansion` high the root just fixed
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -240,3 +240,75 @@ harness by two majors.
 It rested entirely on the sweep being trustworthy, and a registry blip made it green. With the metadata
 check landed and regression-tested, "no follow-up ticket — `npm-audit-sweep` reds when upstream ships"
 holds as written.
+
+## Closed 2026-08-27 — merged as PR #1065, after two rounds
+
+**Reviewer APPROVE.** Verified on `main` after the merge: `node scripts/audit-npm-projects.mjs` runs,
+sweeps **both** projects, and prints `{"moderate":9,"high":15,"critical":1,"total":25}` as an explicit
+**sum, not any one project's number**.
+
+**The ticket's own numbers were wrong, and the author corrected them.** Two advisories cleared, not
+five — `brace-expansion` (the high, and the sharp one) and `js-yaml`. npm's `fixAvailable` is
+optimistic: after the fix `@puppeteer/browsers`, `extract-zip` and `webdriver` **still** report
+`fixAvailable: true` while `npm audit fix` is a proven no-op, and `webdriver` even **flips between
+runs of the same command**. `gui-smoke/` 17 → 15; root untouched at 10.
+
+### The `--force` finding is the strongest thing in the PR
+
+What npm *offers* as the fix is a **downgrade**: `@wdio/local-runner` and `@wdio/cli` **9.31.4 →
+7.40.0** against an installed 9.31.4, plus `@wdio/mocha-framework` → 8.14.0. It **rewrites
+`package.json`'s pins**, leaves an incoherent **v7/v8/v9** mix, and takes the project from **15
+advisories to 28** — it makes the number worse while regressing by two majors the harness that guards
+the entire GUI verification leg. That is the concrete case for no-`--force` being *structural* rather
+than conventional, and it is now in `CLAUDE.md`.
+
+**A note on that measurement:** the reviewer's first run gave `@wdio/cli 8.14.6` / 29 advisories; the
+author's gave `7.40.0` / 28. **Neither mis-measured — the `--force` outcome genuinely varies between
+runs**, the same instability the PR documents for `fixAvailable`. The Foreman aligned the script
+comment to CLAUDE.md and recorded that the numbers vary while the direction does not.
+
+### The guard built to stop a false green was itself failing open
+
+Round 1's `npmAuditJson` guarded on *"is stdout parseable JSON?"* — but npm's `--json` **error** path
+emits **well-formed JSON with no `metadata` key**, so `JSON.parse` succeeded and the guard never
+fired:
+
+    npm audit --json --registry=http://127.0.0.1:9/   -> valid JSON, npm exit 0
+    node scripts/audit-npm-projects.mjs               -> "0 vulnerabilities across 2 projects", EXIT 0
+
+And with a corrupt lockfile it **re-emitted CPE-1945 itself**, printing the root's 10 as the repo-wide
+sum. The script's own header named the hazard; the right error message was wired to a condition that
+could never trigger.
+
+Fixed by checking `metadata.vulnerabilities` after the parse, extracted as an exported
+`isUsableAuditReport()` so it could be pinned offline, with **npm's real ECONNREFUSED payload as the
+fixture**. The property that matters most: on failure it now emits **zero `Repo-wide` lines** — a sum
+that is never printed cannot be misread. The reviewer attacked it with 19 shapes and found three that
+would still sum to zero (`vulnerabilities: null` — the `typeof null` gotcha — plus `[]` and `{}`) but
+**could not get npm to emit any of them**: hardening, not a hole.
+
+### The enumeration is permanent, and proven so
+
+`scripts/audit-npm-projects.mjs` + an `npm-audit-sweep` CI job + `src/lib/npmProjects.test.ts`.
+Red-proofed both ways by the reviewer: a **third fixture project is swept with zero script edits**;
+removing one exits 1 on the floor **before any audit runs**. The guard's failure condition is
+**measured** — it runs a real `npm audit fix --package-lock-only` on a scratch copy and fails only if
+the lockfile **moves** — because the obvious `fixAvailable` predicate would have red-flagged CI on day
+one over an unactionable advisory.
+
+### The lesson, in the author's own words
+
+> The failure wasn't that I skipped `gui-smoke/`, it's that I never asked how many npm projects there
+> were. I read "run `npm audit`" and executed it where I happened to be standing.
+
+**CPE-1932 in a different costume.** The enumerate step costs one `git ls-files`. Generalised into
+`CLAUDE.md` under **Guards and ratchets**, alongside the durable form of the second lesson: *any
+wrapper around an external tool must distinguish "ran and found nothing" from "did not run", and fail
+closed on the latter.*
+
+**Deferral, and why no follow-up ticket:** the remaining 15 are **gated behind WebdriverIO's and
+mocha's own dependency ranges**, not nonexistent — `deepmerge-ts@8.0.2` and
+`serialize-javascript@7.1.0` are published but unreachable through `^7.0.3` / `^6.0.2`. `gui-smoke/` is
+**already on the latest** `@wdio/*` (9.31.4), so there is no migration to schedule, and the sweep now
+reds on its own when upstream ships. The reviewer made that deferral conditional on the fail-open fix
+landing, and confirmed it stands.
