@@ -306,3 +306,78 @@ red-proofable by reverting the fix.
 
   **Final verification**: `npm run check` clean. `npm run harness:layout-guard` 14/14 clean, including
   the new `clickReaches` check at both widths. All 43 `StatusBar.*.test.ts` tests green, unchanged.
+
+
+- **2026-08-27 (round 4) — Worker, same branch.** PR #1045 was Reviewer-APPROVED and the Visual Critic
+  returned VISUAL PASS; the only remaining blocker was mechanical: the branch conflicted with `main`
+  (PR #1041/CPE-1914 landed a shared-timeout refactor to the same `checkOneCaseOnClient` function in
+  `scripts/dev-harness/layout-guard/engine.mjs` while this ticket was in flight), and GitHub schedules
+  zero CI checks on a conflicting PR — which is why it had been showing no runs rather than pending ones.
+
+  **Merge resolved**: `git merge origin/main`, one file conflicted (`engine.mjs`) exactly as expected —
+  CPE-1914's `CDP_NAVIGATE_TIMEOUT_MS` (a dedicated 40s budget for the cold-server `Page.navigate` call)
+  plus its `caseContext(label)` naming helper threaded through every `client.send` call, against this
+  ticket's `Emulation.setFocusEmulationEnabled` addition and the `pseudoOnScreen`/`clickReaches` check
+  kinds. Kept both: the merged `checkOneCaseOnClient` uses CPE-1914's enriched `client.send(method,
+  params, { context })` calling convention throughout, including in `runClickReachesChecks` (threaded
+  `caseContext` in as a new parameter so its own timeout/error messages stay just as identifiable by
+  case/width/height as every other call in the file). One stray duplicate closing brace from a
+  mechanical slicing mistake while resolving the conflict region — caught by `node --check` before ever
+  running the harness, not left for CI to find.
+
+  **Confirmed both sides survived, not just compiled**: `npm run harness:layout-guard` 14/14 clean
+  post-merge, with the enriched `case="..." width=... height=...` context visible in this file's error
+  paths (CPE-1914's contribution) and all three of this ticket's own check kinds
+  (`pseudoOnScreen`/`clickReaches`/the round-1 `rectBounds`) still running and passing with the exact
+  same measured numbers as before the merge.
+
+  **CPE-1930 (Reviewer's own follow-up finding, non-blocking but fixed here rather than deferred)**:
+  `clickReaches`'s `selectors: [".git .git-btn"]` resolved via `document.querySelector`, which only
+  ever tests the FIRST match (Pull) — a regression isolated to Push or Sync alone would have slipped
+  past as a false-negative 14/14 PASS. Rewrote `runClickReachesChecks` to resolve via
+  `document.querySelectorAll` and dispatch a real click at every match, not just the first.
+
+  Doing this exposed a second, smaller correctness gap in my own first attempt at the fix: an initial
+  version gated "should this target even be click-tested" on a pure window-viewport-bounds check alone,
+  which incorrectly classified `.git .git-btn[1]` (Push) as on-screen at 600px busy (its centre point
+  IS geometrically inside the 600px window) even though it is actually invisible there — clipped by
+  `.git`'s own `overflow: hidden` (CPE-1836; the row is too crowded for all three buttons to paint at
+  that width, a pre-existing, unrelated defect, not this ticket's). That version dispatched a real
+  click there anyway and got a genuine `CLICK-MISS` (`landed on SPAN.dim` — some other row element
+  painting underneath) — a REAL, reproducible finding, but out of THIS ticket's scope and not something
+  the guard should fail the build over. Fixed by adding a purely geometric ancestor-clip walk
+  (`clippedByAncestor`, in `engine.mjs`) alongside the viewport check — no hit-test API involved, so it
+  cannot suffer round 3's exact failure mode; deliberately NOT gated on the target's own
+  `width`/`height` being non-zero, so a hypothetical future regression that collapses a button to
+  zero-size still gets a REAL click dispatched at its degenerate centre and an honest `CLICK-MISS`
+  rather than being silently skipped — preserving exactly the robustness the Reviewer's own zero-sized-
+  target stress test validated on the single-target version.
+
+  Re-measured, matching the Reviewer's own description exactly:
+
+  | width | `.git-btn[0]` (Pull) | `.git-btn[1]` (Push) | `.git-btn[2]` (Sync) |
+  |---|---|---|---|
+  | 600px busy | `clicked=true` | not paintable here (skipped — pre-existing `.git` clip) | not paintable here (skipped — pre-existing `.git` clip) |
+  | 900px busy | `clicked=true` | `clicked=true` | `clicked=true` |
+
+  Red-proofed the multi-target version the same way as round 3: removed the base rule's
+  `pointer-events: none` again and reran. Correctly caught at BOTH widths this time (round 3's
+  single-target check only ever exercised Pull, which happens to be the one every width's compound-busy
+  row keeps on-screen) — `.git-btn[0]` (Pull) fails at both 600px and 900px
+  (`landed on SPAN.filtered-hidden`), while Push/Sync at 900px stay green (they sit further right, past
+  the invisible span's ~367px reach, so they were never affected by this specific regression) — restored,
+  all green again.
+
+  **Final verification**: `npm run check` clean. `npm run harness:layout-guard` 14/14 clean post-merge
+  and post-CPE-1930-fix. All 43 `StatusBar.*.test.ts` tests green, unchanged.
+
+  **Visual Critic's separate verdict, for the record**: the leftward-growing box now reads as
+  deliberate, covers only passive information while leaving the actionable git/disk cluster visible
+  *and* clickable, `color: transparent` leaves zero pixels near the old accent colour anywhere in the
+  bar (counted), and dark-theme contrast measured 3.21:1 -> 12.8:1.
+
+  **Process note (not this ticket's fault)**: PR #1045 had also briefly conflicted on the screenshot
+  files themselves, because the Foreman had landed a copy of this ticket's captures on `main` at the
+  same paths while the PR was still open. Foreman fixed it and the rule going forward is a PR's visual
+  evidence stays on its own branch until merge — noting it here only so a future ticket's Worker isn't
+  puzzled by a screenshot-path conflict that isn't caused by anything they did.

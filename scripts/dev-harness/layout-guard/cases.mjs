@@ -133,6 +133,13 @@ export const CASES = [
       // `pointer-events: none` added to the base rule (see StatusBar.svelte's own round-3 comment); this
       // check exists so the next person who touches that rule and drops the override again gets a red
       // build instead of a silently-swallowed click.
+      // CPE-1930 (Reviewer, round 3's own follow-up finding): `.git .git-btn` matches THREE buttons
+      // (Pull/Push/Sync) but this check's first version resolved the selector via `querySelector`,
+      // which only ever tests the first one -- a regression isolated to Push or Sync alone would have
+      // slipped past as a false-negative PASS. `runClickReachesChecks` now iterates every match via
+      // `querySelectorAll` and clicks each one that is actually on-screen; at 600px busy, Push/Sync sit
+      // off-viewport for a pre-existing, unrelated row-overflow reason (not this ticket's bug) and are
+      // reported honestly as skipped rather than counted as a miss.
       { kind: "clickReaches", selectors: [".git .git-btn"] },
     ],
   },

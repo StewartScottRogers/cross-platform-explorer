@@ -582,66 +582,129 @@ async function runClickReachesChecks(client, clickChecks, caseContext) {
   const info = [];
   for (const check of clickChecks) {
     for (const sel of check.selectors) {
+      // CPE-1930 (Reviewer, filed against round 3's first version): `document.querySelector` only ever
+      // grabs the FIRST match -- Pull, for `.git .git-btn` -- so a synthetic regression isolated to
+      // Push/Sync alone slipped past as a false-negative 14/14 PASS. `querySelectorAll` here instead,
+      // stashed on `window.__cprEls` so later per-target Runtime.evaluate calls can reference the SAME
+      // element by index rather than re-querying (DOM order is stable across these calls; nothing here
+      // reflows the row). Each target is measured for whether it is actually PAINTABLE before any click
+      // is dispatched -- both outside the window viewport AND clipped by an ancestor's own
+      // `overflow: hidden` count (a purely geometric ancestor-chain walk, not a hit-test API -- see the
+      // in-page probe's own `clippedByAncestor` comment for why): at 600px busy, `.git`'s own
+      // `overflow: hidden` (CPE-1836) clips Push/Sync for a pre-existing, unrelated row-overflow reason
+      // (not this ticket's bug), so a click dispatched there would land on nothing meaningful. Those are
+      // reported honestly as `hitTag: "not paintable here (skipped)"` with `clicked: null` (neither pass
+      // nor fail) rather than silently counted as a miss or silently dropped.
       const setup = await client.send(
         "Runtime.evaluate",
         {
           expression: `
             (function () {
-              var el = document.querySelector(${JSON.stringify(sel)});
-              if (!el) return { error: 'not found' };
-              if (window.__cprHandler) document.removeEventListener('click', window.__cprHandler, true);
-              window.__cprClicked = false;
-              window.__cprHitTag = null;
-              window.__cprHandler = function (e) {
-                window.__cprClicked = !!(e.target === el || (el.contains && el.contains(e.target)));
-                var cls = (e.target.className && typeof e.target.className === 'string')
-                  ? e.target.className.trim().split(/\s+/)[0] : '';
-                window.__cprHitTag = e.target.tagName + (cls ? '.' + cls : '');
-              };
-              document.addEventListener('click', window.__cprHandler, true);
-              var r = el.getBoundingClientRect();
-              return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+              // Geometric only, no hit-test API (see this function's own header for why): a target's
+              // centre can sit inside the WINDOW viewport while still being invisible because an
+              // ANCESTOR clips it (e.g. ".git { overflow: hidden; }" clipping an overflowing pinned
+              // child on a crowded row -- CPE-1836 territory, pre-existing and out of this ticket's
+              // scope). Walk up the ancestor chain checking computed overflow; if any clipping ancestor's
+              // own rect does not contain the centre point, the target is not actually paintable there.
+              function clippedByAncestor(el, x, y) {
+                var node = el.parentElement;
+                while (node) {
+                  var cs = getComputedStyle(node);
+                  if (cs.overflow === 'hidden' || cs.overflowX === 'hidden' || cs.overflowY === 'hidden') {
+                    var r = node.getBoundingClientRect();
+                    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return true;
+                  }
+                  node = node.parentElement;
+                }
+                return false;
+              }
+              var els = Array.prototype.slice.call(document.querySelectorAll(${JSON.stringify(sel)}));
+              if (els.length === 0) return { error: 'not found' };
+              window.__cprEls = els;
+              return els.map(function (el, i) {
+                var r = el.getBoundingClientRect();
+                var x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
+                // Deliberately NOT gated on r.width/r.height > 0: a genuinely zero-sized target (e.g. a
+                // future CSS regression that collapses a button) still gets a REAL click dispatched at
+                // its degenerate centre point and an honest CLICK-MISS if it fails, rather than being
+                // silently skipped -- that is exactly the case the Reviewer stress-tested against the
+                // single-target version of this check and got a real, non-crashing failure out of; this
+                // multi-target version must not quietly downgrade that to a skip. Only genuine
+                // window-bounds / ancestor-clip exclusion (the pre-existing, expected 600px case) skips.
+                var inWindow = x >= 0 && x <= window.innerWidth && y >= 0 && y <= window.innerHeight;
+                var onScreen = inWindow && !clippedByAncestor(el, x, y);
+                return { i: i, x: x, y: y, onScreen: onScreen };
+              });
             })()
           `,
           returnByValue: true,
         },
         { context: caseContext(`(clickReaches setup: ${sel})`) },
       );
-      const pt = setup.result.value;
-      if (!pt || pt.error) {
+      const targets = setup.result.value;
+      if (!targets || targets.error) {
         failures.push(`clickReaches: not found: ${sel}`);
         continue;
       }
-      await client.send(
-        "Input.dispatchMouseEvent",
-        { type: "mouseMoved", x: pt.x, y: pt.y },
-        { context: caseContext(`(clickReaches mouseMoved: ${sel})`) },
-      );
-      await client.send(
-        "Input.dispatchMouseEvent",
-        { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 },
-        { context: caseContext(`(clickReaches mousePressed: ${sel})`) },
-      );
-      await client.send(
-        "Input.dispatchMouseEvent",
-        { type: "mouseReleased", x: pt.x, y: pt.y, button: "left", clickCount: 1 },
-        { context: caseContext(`(clickReaches mouseReleased: ${sel})`) },
-      );
-      const readback = await client.send(
-        "Runtime.evaluate",
-        { expression: "({ clicked: !!window.__cprClicked, hitTag: window.__cprHitTag || null })", returnByValue: true },
-        { context: caseContext(`(clickReaches readback: ${sel})`) },
-      );
-      const clicked = readback.result.value.clicked;
-      const hitTag = readback.result.value.hitTag;
-      info.push({ selector: sel, x: Number(pt.x.toFixed(1)), y: Number(pt.y.toFixed(1)), clicked, hitTag });
-      if (!clicked) {
-        failures.push(
-          `clickReaches: a real dispatched click at (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) ` +
-          `(the centre of ${sel}) landed on ${hitTag || 'nothing'} instead -- this control is not ` +
-          `actually clickable here, even though it may still test as "reachable" via ` +
-          `elementFromPoint/elementsFromPoint`
+      for (const t of targets) {
+        const label = `${sel}[${t.i}]`;
+        if (!t.onScreen) {
+          info.push({ selector: label, x: Number(t.x.toFixed(1)), y: Number(t.y.toFixed(1)), clicked: null, hitTag: "not paintable here (skipped)" });
+          continue;
+        }
+        await client.send(
+          "Runtime.evaluate",
+          {
+            expression: `
+              (function () {
+                var el = window.__cprEls[${t.i}];
+                if (window.__cprHandler) document.removeEventListener('click', window.__cprHandler, true);
+                window.__cprClicked = false;
+                window.__cprHitTag = null;
+                window.__cprHandler = function (e) {
+                  window.__cprClicked = !!(e.target === el || (el.contains && el.contains(e.target)));
+                  var cls = (e.target.className && typeof e.target.className === 'string')
+                    ? e.target.className.trim().split(/\s+/)[0] : '';
+                  window.__cprHitTag = e.target.tagName + (cls ? '.' + cls : '');
+                };
+                document.addEventListener('click', window.__cprHandler, true);
+              })()
+            `,
+            returnByValue: true,
+          },
+          { context: caseContext(`(clickReaches arm: ${label})`) },
         );
+        await client.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseMoved", x: t.x, y: t.y },
+          { context: caseContext(`(clickReaches mouseMoved: ${label})`) },
+        );
+        await client.send(
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x: t.x, y: t.y, button: "left", clickCount: 1 },
+          { context: caseContext(`(clickReaches mousePressed: ${label})`) },
+        );
+        await client.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x: t.x, y: t.y, button: "left", clickCount: 1 },
+          { context: caseContext(`(clickReaches mouseReleased: ${label})`) },
+        );
+        const readback = await client.send(
+          "Runtime.evaluate",
+          { expression: "({ clicked: !!window.__cprClicked, hitTag: window.__cprHitTag || null })", returnByValue: true },
+          { context: caseContext(`(clickReaches readback: ${label})`) },
+        );
+        const clicked = readback.result.value.clicked;
+        const hitTag = readback.result.value.hitTag;
+        info.push({ selector: label, x: Number(t.x.toFixed(1)), y: Number(t.y.toFixed(1)), clicked, hitTag });
+        if (!clicked) {
+          failures.push(
+            `clickReaches: a real dispatched click at (${t.x.toFixed(1)}, ${t.y.toFixed(1)}) ` +
+            `(the centre of ${label}) landed on ${hitTag || 'nothing'} instead -- this control is not ` +
+            `actually clickable here, even though it may still test as "reachable" via ` +
+            `elementFromPoint/elementsFromPoint`
+          );
+        }
       }
     }
   }
