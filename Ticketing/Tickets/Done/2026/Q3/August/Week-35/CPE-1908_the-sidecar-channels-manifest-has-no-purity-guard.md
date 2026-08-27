@@ -239,3 +239,81 @@ gap that can actually reach a user.
     pre-existing `ci.yml` `msrv:`-job gap on `main` itself — confirmed via
     `git diff --stat origin/main -- .github/workflows/ci.yml` showing zero diff, untouched by this
     branch, a sibling worker's file per the original dispatch note).
+- **2026-08-27 USMST** — Round 3, picked up from a stalled prior worker (silent 4.5h, stopped by the
+  Foreman). Merged `origin/main` first (8 PRs had landed overnight, several touching
+  `.github/workflows/*` and `crates/updater-verify`) — **clean, no conflicts**; `git merge origin/main`
+  auto-resolved everything, confirmed via `git status --porcelain` showing no `UU`/`AA`/etc entries.
+  Then worked the round-2 Reviewer + Security Auditor fix-list, all on the same branch:
+  1. **R2-1 (must-fix — inverts the check, not merely disables it):**
+     `channelPurityCoverage.test.ts`'s `guardInvocations()` did
+     `logicalLines(step.run).join(" ")` then matched `--expect-channel` against the WHOLE joined step.
+     Since `logicalLines()` already joins backslash continuations, a real `cargo run ... --bin
+     verify-release-artifacts -- ... --expect-channel sidecar` invocation is already one logical line —
+     nothing required the flag to be ON that line. Fixed: the regex now runs only against the single
+     logical line `isRealInvocationLine()` (new) confirms genuinely INVOKES the binary (anchored on
+     `^cargo\s+run\b.*--bin\s+verify-release-artifacts\b.*--`), which also closes the decoy-job finding
+     (a step whose `run:` is just `echo cargo run --bin verify-release-artifacts --
+     --expect-channel sidecar` — contains every substring, but doesn't start with `cargo run`).
+  2. **R2-2 (feeds R2-1):** `shellScriptLines.ts` (moved `src/lib/preview/` → `src/lib/`, per the
+     Reviewer's finding that directory is exclusively the file-preview subsystem — verified nothing
+     enumerates it and it's only imported by test files) had no backslash-escape handling, so
+     `echo "a \" b"   # --expect-channel sidecar` misread the escaped `"` as closing the quote early,
+     then treated the line's own trailing `"` as opening a NEW unterminated quote that swallowed the
+     real comment for the rest of the line — never stripped, read as live code. Fixed with escape
+     handling inside quotes, PLUS a word-boundary rule for when a quote character can open a string at
+     all (mirroring the existing `#`-comment rule) — an apostrophe mid-word (`don't`) no longer opens a
+     phantom quote either. Also added heredoc-body awareness to `logicalLines()`: a heredoc body is
+     data fed to a command, never a shell statement, so a body line crafted to look like a real
+     invocation is now skipped entirely rather than scanned. Corrected the module's header comment,
+     which had claimed quote-awareness was "load-bearing in the SAFE direction" because a false
+     negative is dangerous — true for `releaseHangHardening.test.ts`'s original use, but INVERTED for a
+     presence-implies-coverage ratchet (this file's, and structurally `releaseHangHardening.test.ts`'s
+     own "no invocation left unhardened" checks too): there, a false POSITIVE (mistaking a comment/
+     heredoc body for a live invocation) is the dangerous direction.
+  3. **R2-3 (Rust, separate commit):** `crates/updater-verify/src/lib.rs`'s `Channel::ALL` was a
+     hand-written literal next to a SEPARATE `exhaustiveness_guard` match — demonstrated: a variant +
+     `Display` arm + `FromStr` arm + guard arm all compiled clean while `ALL` stayed
+     `[Channel; 2]`, so the round-trip test passed VACUOUSLY for the new variant. A first attempt (a
+     const-eval index-bound-check tying `ALL` to a compile-time assertion) was tried and rejected: nothing
+     forced the assertion LIST ITSELF to grow when a variant was added, so the same exploit still
+     compiled. Fixed at the root with `define_channel!`, a `macro_rules!` macro that generates the
+     enum, `ALL`, `Display`, and `FromStr` from ONE invocation — there is no second, independently
+     hand-kept list left to drift. Red-proofed against a scratch copy of the pre-fix crate (not this
+     branch's working tree): reproduced the exact exploit (Beta variant + Display arm + FromStr arm +
+     guard arm, `ALL` untouched) — compiled clean, round-trip test reported `ok` covering only 2
+     variants. Against the fixed macro: attempting the same shape (a bare `Beta,` with no `=>
+     "token"`) is a macro-pattern PARSE ERROR (`no rules expected this token in macro call`) — it is no
+     longer possible to add a variant without simultaneously wiring its token, and doing so correctly
+     (`Beta => "beta"`) automatically grows `ALL` to length 3, verified with a temporary
+     `assert_eq!(Channel::ALL.len(), 3)` test. `cargo test` 70/70 green, `cargo clippy --all-targets
+     -- -D warnings` clean.
+  4. **R2-4 (must-fix, publish path):** `.claude/commands/run.md` resolved a sidecar release's
+     verify-job run via `select(.displayTitle | contains("<TAG>"))` against a title the dispatcher
+     typed. An honestly-dispatched run for a decoy tag containing this one as a substring (e.g.
+     `v1.2.3-sidecar-decoy` containing `v1.2.3-sidecar`) would match too, and — being newer — would be
+     picked, its `success` conclusion read, and `/run` would proceed to `gh release edit
+     --draft=false` on an unverified draft. Fixed with an exact match:
+     `select(.displayTitle == "Release (sidecar) <TAG>")`. Red-proofed with a Node simulation of the
+     jq `select` semantics: the old `contains()` filter matched BOTH a decoy run and the real one
+     (decoy first, since `gh run list` returns newest-first); the new exact `==` matched only the real
+     one. Also added a sentence at the "no run found" throw: that is fail-closed and correct — not a
+     broken release — for any sidecar draft published before `release-sidecar.yml` gained its
+     `run-name:`; the fix is to dispatch a fresh run or verify by hand, not to read it as broken.
+  5. **Smaller fixes:** `isActuallyWired()`'s `if:` comparisons now go through
+     `normalizeExpressionWhitespace()` (collapses whitespace strictly inside `${{ }}` before comparing)
+     so `if: ${{ !cancelled()  }}` (one accidental extra space) no longer reads as unwired — verified
+     the exact-string compare rejected it (RED) before the fix, and the normalized compare accepts it
+     (GREEN); the quoted form, a trailing YAML comment, and block-sequence `needs:` were unaffected
+     (untouched code paths, still covered by existing assertions). Added a comment on
+     `SIGNING_KEY_STEP_IF` noting CPE-1923 must update it in the same change or fixing that ticket
+     reddens this ratchet. The `armRe` "accept `f.write_str(...)` alongside `write!(f, ...)`" ask is
+     obsoleted by R2-3's redesign: `channelPurityCoverage.test.ts` no longer scans the `Display` impl
+     via regex at all (it's macro-generated as `write!(f, $token)` uniformly and can never vary), so
+     there is no `armRe` left to widen — the ratchet now reads each variant's token directly from
+     `define_channel!`'s invocation instead, which is strictly more robust than widening a regex would
+     have been.
+  - Full validation: `cargo test --locked` in `crates/updater-verify` 70/70 green, `cargo clippy
+    --all-targets -- -D warnings` clean, `npm run check` clean, full `vitest run` **4660/4660 green**
+    (338 files — the round-2 msrv gap is gone now that `main`'s merge brought that fix in). Two
+    commits on the branch: R2-3 (Rust) landed and validated before the R2-1/R2-2/R2-4/smaller-fixes
+    commit (TS + run.md), per instruction to commit before probing each behaviour change.
