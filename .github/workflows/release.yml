@@ -5,10 +5,35 @@ name: Release
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
+# CPE-1894: the tag filter below used to be a bare `"v*"`, which matches `v0.57.69-sidecar` exactly
+# as happily as `v0.57.69` -- so pushing (or, as here, `gh release create`/tauri-action creating) a
+# `-sidecar` tag ALSO fired this, the plain-build workflow, which then merged its plain installers
+# into the SAME draft release `release-sidecar.yml` was populating: one manifest naming assets from
+# two different products (identifiers `com.example.crossplatformexplorer` vs
+# `....crossplatformexplorer.sidecar`). Confirmed live: v0.57.69's published latest.json had
+# `linux-x86_64`/`darwin-aarch64` pointing at `...Sidecar...` assets and
+# `windows-x86_64`/`darwin-x86_64` pointing at plain `Cross-Platform.Explorer_...` assets.
+#
+# Fix: exclude any tag ending `-sidecar` from THIS workflow's trigger, using GitHub Actions'
+# documented include+negate-within-one-list form (`tags: [pattern, "!pattern"]`) -- NOT the separate
+# `tags`/`tags-ignore` keys, which GitHub explicitly forbids combining for the same event. This is
+# deliberately an EXCLUDE on the plain side rather than a narrower positive pattern on either side
+# (e.g. requiring plain tags to look like `v[0-9]*.[0-9]*.[0-9]*` with no suffix at all): a narrower
+# positive pattern would silently stop firing on ANY future suffixed plain tag (e.g. a `-rc1` or
+# `-beta` convention nobody has invented yet), whereas `!v*-sidecar` names exactly the one suffix
+# that must never reach this workflow and leaves every other `v*` tag working as before.
+#
+# `release-sidecar.yml` needs no matching change: it is `workflow_dispatch`-only and has never
+# listened on `push` at all (see the header comment over there) -- the only overreach was ever this
+# workflow reaching into the sidecar channel's tags, never the other way around. So this one change
+# makes the two channels' tag triggers disjoint: a `-sidecar` tag now runs no `push`-triggered
+# workflow at all (only the manual sidecar dispatch that creates it in the first place), and a plain
+# `vX.Y.Z` tag runs only this one.
 on:
   push:
     tags:
       - "v*"
+      - "!v*-sidecar"
 
 # Needed so the workflow can create the GitHub Release.
 permissions:

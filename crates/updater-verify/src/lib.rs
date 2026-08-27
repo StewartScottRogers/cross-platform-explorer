@@ -334,6 +334,85 @@ pub fn platforms_with_url_outside_prefix(manifest_json: &str, expected_prefix: &
         .collect()
 }
 
+/// CPE-1894 — which release **channel** a manifest platform's asset belongs to, inferred from the
+/// asset URL's basename. The plain build's installers are named from `tauri.conf.json`'s
+/// `productName` ("Cross-Platform Explorer"); the sidecar build's from `tauri.sidecar.conf.json`'s
+/// ("Cross-Platform Explorer (Sidecar)", see `release-sidecar.yml`'s header comment) — so a sidecar
+/// asset's basename always carries "sidecar" (case-insensitive; Tauri's bundler turns the space into
+/// an underscore/dot, e.g. `Cross-Platform.Explorer_(Sidecar)_0.57.69_x64-setup.nsis.zip` vs the
+/// plain `Cross-Platform.Explorer_0.57.69_x64-setup.nsis.zip`) and a plain one never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// Built from `tauri.sidecar.conf.json` — bundles the AI Console. The standing project rule is
+    /// that installs/runs must always use this build (see `[[always-install-sidecar-build]]`).
+    Sidecar,
+    /// Built from the base `tauri.conf.json` — the plain, sidecar-free explorer.
+    Plain,
+}
+
+impl std::fmt::Display for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Channel::Sidecar => write!(f, "sidecar"),
+            Channel::Plain => write!(f, "plain"),
+        }
+    }
+}
+
+/// Infer a manifest platform's channel from its asset `url`'s basename. Unknown/empty basenames read
+/// as [`Channel::Plain`] — the safe default, since the sidecar marker is a positive signal ("this IS
+/// the sidecar build") rather than something a plain asset would ever need to declare.
+fn channel_of_asset_url(url: &str) -> Channel {
+    let basename = url.rsplit(['/', '\\']).next().unwrap_or(url);
+    if basename.to_ascii_lowercase().contains("sidecar") {
+        Channel::Sidecar
+    } else {
+        Channel::Plain
+    }
+}
+
+/// Which channel a manifest is EXPECTED to be, derived from the `productName` in the same
+/// `tauri.conf.json` (or `tauri.sidecar.conf.json`) a caller is already reading for pubkey/version —
+/// so callers never need a separate flag to say which channel they think they're checking.
+pub fn expected_channel_from_product_name(product_name: &str) -> Channel {
+    if product_name.to_ascii_lowercase().contains("sidecar") {
+        Channel::Sidecar
+    } else {
+        Channel::Plain
+    }
+}
+
+/// CPE-1894 — the guard this ticket adds: assert every platform a manifest names is built from the
+/// SAME release channel as `expected`. This is what made the live bug checkable — `release.yml`'s
+/// `v*` tag trigger matched `-sidecar` tags too, so the plain workflow's installers landed in the
+/// SAME draft release `release-sidecar.yml` was populating, producing one manifest naming assets
+/// from two different products (`linux-x86_64`/`darwin-aarch64` → sidecar, `windows-x86_64`/
+/// `darwin-x86_64` → plain, in the actually-published `v0.57.69` manifest) — made checkable
+/// deliberately WITHOUT ever reading the workflow YAML that caused it: a test that reads the tag
+/// pattern would have agreed with the very pattern that was wrong (see the ticket).
+///
+/// Returns every platform whose asset channel does not match `expected`, alongside the channel it
+/// actually resolved to — empty means the manifest is channel-pure. An unparseable manifest returns
+/// no offenders; that failure is already reported elsewhere (as [`ManifestProblem::Unparseable`]),
+/// and there is nothing to add on top of it here.
+pub fn platforms_with_mismatched_channel(manifest_json: &str, expected: Channel) -> Vec<(String, Channel)> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+        return Vec::new();
+    };
+    collect_platforms(&value)
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            let url = entry.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let channel = channel_of_asset_url(url);
+            if channel != expected {
+                Some((name, channel))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,5 +780,109 @@ mod tests {
             platforms_with_url_outside_prefix(&m, REAL_PREFIX),
             vec![("windows-x86_64".to_string(), String::new())]
         );
+    }
+
+    // --- CPE-1894: channel-purity guard ------------------------------------------------------
+
+    fn plain_url(platform: &str) -> String {
+        format!(
+            "https://github.com/example/cross-platform-explorer/releases/download/v0.57.69/Cross-Platform.Explorer_0.57.69_{platform}-setup.nsis.zip"
+        )
+    }
+
+    fn sidecar_url(platform: &str) -> String {
+        format!(
+            "https://github.com/example/cross-platform-explorer/releases/download/v0.57.69-sidecar/Cross-Platform.Explorer_(Sidecar)_0.57.69_{platform}-setup.nsis.zip"
+        )
+    }
+
+    #[test]
+    fn expected_channel_from_product_name_reads_plain_and_sidecar() {
+        assert_eq!(expected_channel_from_product_name("Cross-Platform Explorer"), Channel::Plain);
+        assert_eq!(
+            expected_channel_from_product_name("Cross-Platform Explorer (Sidecar)"),
+            Channel::Sidecar
+        );
+        // Case-insensitive, matching channel_of_asset_url's own matching.
+        assert_eq!(expected_channel_from_product_name("cross-platform explorer (SIDECAR)"), Channel::Sidecar);
+    }
+
+    #[test]
+    fn a_uniform_plain_manifest_has_no_channel_offenders() {
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": {
+                "windows-x86_64": { "signature": "sig", "url": plain_url("windows-x86_64") },
+                "darwin-x86_64": { "signature": "sig", "url": plain_url("darwin-x86_64") },
+                "linux-x86_64": { "signature": "sig", "url": plain_url("linux-x86_64") },
+            }
+        })
+        .to_string();
+        assert_eq!(platforms_with_mismatched_channel(&m, Channel::Plain), Vec::new());
+    }
+
+    #[test]
+    fn a_uniform_sidecar_manifest_has_no_channel_offenders() {
+        let m = serde_json::json!({
+            "version": VERSION,
+            "platforms": {
+                "windows-x86_64": { "signature": "sig", "url": sidecar_url("windows-x86_64") },
+                "darwin-aarch64": { "signature": "sig", "url": sidecar_url("darwin-aarch64") },
+                "linux-x86_64": { "signature": "sig", "url": sidecar_url("linux-x86_64") },
+            }
+        })
+        .to_string();
+        assert_eq!(platforms_with_mismatched_channel(&m, Channel::Sidecar), Vec::new());
+    }
+
+    /// CPE-1894's own red-proof: reconstruct the EXACT shape of the manifest that actually shipped
+    /// live (`linux-x86_64`/`darwin-aarch64` pointing at sidecar assets, `windows-x86_64`/
+    /// `darwin-x86_64` pointing at plain ones) and assert the guard names precisely the two
+    /// platforms that don't match the manifest's own declared (plain) channel — this is the guard
+    /// going red and naming the mismatched platforms, exactly as the ticket's acceptance criteria
+    /// require. Restoring to a uniform manifest (the two tests above) shows it goes green again.
+    #[test]
+    fn the_live_mixed_manifest_shape_is_caught_and_named() {
+        let m = serde_json::json!({
+            "version": "0.57.69",
+            "platforms": {
+                "windows-x86_64": { "signature": "sig", "url": plain_url("windows-x86_64") },
+                "darwin-x86_64": { "signature": "sig", "url": plain_url("darwin-x86_64") },
+                "linux-x86_64": { "signature": "sig", "url": sidecar_url("linux-x86_64") },
+                "darwin-aarch64": { "signature": "sig", "url": sidecar_url("darwin-aarch64") },
+            }
+        })
+        .to_string();
+
+        // This is release.yml's own job: --conf src-tauri/tauri.conf.json is always the PLAIN
+        // config, so the expected channel here is Plain, exactly like the real guard invocation.
+        let mut offenders = platforms_with_mismatched_channel(&m, Channel::Plain);
+        offenders.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            offenders,
+            vec![
+                ("darwin-aarch64".to_string(), Channel::Sidecar),
+                ("linux-x86_64".to_string(), Channel::Sidecar),
+            ],
+            "expected exactly the two sidecar-channel platforms to be named as offenders against an expected Plain manifest"
+        );
+
+        // And the inverse view -- checking the SAME mixed manifest against Sidecar -- must name the
+        // other two, proving this isn't accidentally symmetric/always-empty.
+        let mut inverse = platforms_with_mismatched_channel(&m, Channel::Sidecar);
+        inverse.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            inverse,
+            vec![
+                ("darwin-x86_64".to_string(), Channel::Plain),
+                ("windows-x86_64".to_string(), Channel::Plain),
+            ]
+        );
+    }
+
+    #[test]
+    fn unparseable_manifest_has_no_channel_offenders() {
+        // Reported elsewhere (as Unparseable) -- this check has nothing to add on top of that.
+        assert_eq!(platforms_with_mismatched_channel("{ not json ", Channel::Plain), Vec::new());
     }
 }
