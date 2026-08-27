@@ -62,3 +62,31 @@ was **not** deferred once PR #1039 merged and made those lines exist; it was fol
 Related: **CPE-1923** (the version binding, PR #1053), **CPE-1908** (the channel-purity guard),
 **CPE-1941** (the other route a correctly-signed bundle can carry stale content), **CPE-1872**
 (release-workflow wiring).
+
+## Narrowed 2026-08-27 — the trusted comment does NOT close this, and we checked rather than assumed
+
+Both the Foreman and PR #1053's Security Auditor expected CPE-1923's trusted-comment fix to delete
+this exemption outright, and said so. **It does not.** PR #1053's worker downloaded the real `.sig`
+assets before relying on it:
+
+    file:Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe
+    file:Cross-Platform Explorer (Sidecar).app.tar.gz      <- NO VERSION
+    file:Cross-Platform Explorer.app.tar.gz                <- NO VERSION
+
+macOS's **signed** name is versionless too, so binding to the signed name buys nothing here.
+
+**What the fix did do is narrow the exemption sharply.** It went from *"any signed bytes uploaded
+under a macOS-looking name"* — the auditor's working attack, which put an old Windows `.exe`'s bytes
+through a `darwin-aarch64` key at exit 0 — to *"a genuine macOS app tarball from another release of
+this product"*. That is a large narrowing and the remaining hole is much harder to reach, but it is
+still a downgrade route.
+
+So the acceptance criteria stand as written, with one correction: **do not attempt to close this by
+reading the trusted comment.** That has been tried and measured. The remaining options are the ones
+already listed — have the release workflow record the version alongside the asset (still the likely
+answer, and it costs the crate nothing), read `CFBundleShortVersionString` from the tarball, or bind
+by a content hash recorded at build time.
+
+Also worth carrying forward as method: **the worker checked the real signatures instead of complying
+with two people's confident expectation.** That is the second time on this PR that reading published
+ground truth disproved an assumption which would otherwise have shipped.
