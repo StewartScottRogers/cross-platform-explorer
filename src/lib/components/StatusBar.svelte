@@ -418,6 +418,19 @@
   .unreadable:focus-visible {
     overflow: visible;
     color: transparent;
+    /* CPE-1883 round 3 (Reviewer, real dispatched-click test — see the comment above `overflow:
+       visible` for why `color: transparent` alone leaves this span's raw text still painting, invisibly,
+       across its full unclipped ~367px natural width): with no `pointer-events` override here, that
+       invisible text is STILL A LIVE CLICK TARGET over `.git`'s Pull/Push/Sync buttons — confirmed via
+       actual CDP `Input.dispatchMouseEvent` (mouseMoved -> mousePressed -> mouseReleased) at the Pull
+       button's exact centre, not `elementFromPoint`/`elementsFromPoint`: both of those APIs returned the
+       git button as reachable, but the real click landed on `.filtered-hidden` instead — see the
+       `clickReaches` check kind and cases.mjs's own comment for why hit-test APIs are not trustworthy for
+       this class of bug and had to be replaced with a real dispatched click, both for this manual finding
+       and for the permanent CI guard. `pointer-events: none` removes the invisible text from hit-testing
+       entirely, same as it already did for the `::after` overlay itself. Verified: real click on Pull
+       flips from swallowed-by-the-span to landing on the button. */
+    pointer-events: none;
   }
   .filtered-hidden:focus-visible::after,
   .unreadable:focus-visible::after {

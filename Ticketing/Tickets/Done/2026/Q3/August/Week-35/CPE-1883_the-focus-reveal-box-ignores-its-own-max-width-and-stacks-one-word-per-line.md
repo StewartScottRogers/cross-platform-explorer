@@ -253,3 +253,56 @@ red-proofable by reverting the fix.
   PNG pixel bytes directly (bypassing any viewer-side rendering) at several points inside the reveal box
   — dark theme reads `[43, 43, 43]` (`--surface` dark), light reads `[255, 255, 255]`, both exactly
   matching `getComputedStyle`'s own reported background for each theme.
+
+
+- **2026-08-27 (round 3) — Worker, same branch.** One remaining defect, found by the Reviewer via a
+  method neither of us had used yet: an actual dispatched CDP mouse click.
+
+  **The bug**: round 2's `overflow: visible; color: transparent;` on the base `:focus-visible` rule
+  (added to stop the span's raw text bleeding out beside the `::after` overlay) left that same raw
+  text still PAINTING — invisibly, at zero alpha, `white-space: nowrap`, no width constraint — across
+  its full unclipped ~367px natural width, with default `pointer-events: auto`. That invisible text
+  physically overlaps `.git`'s Pull/Push/Sync buttons. A real click there landed on `.filtered-hidden`
+  (the span), not the button: `{"pullClicked": false, "fhClicked": true}`, reproducible across trials.
+  Arguably worse than round 1's version: there is now no visual cue at all that the click won't land.
+
+  **Which API lies here, recorded so nobody reaches for it on this exact question again**: both
+  `document.elementFromPoint` (singular) and `document.elementsFromPoint` (plural) reported the git
+  buttons as reachable at this exact point — I used the plural form for round 2's own verification and
+  got a clean, reassuring, WRONG answer; `selfPaint` (the existing check kind, built for CPE-1827) also
+  uses the singular form and would have been equally fooled had I reached for it here instead of
+  writing a bespoke check. Confirmed independently by the Reviewer with the SAME plural API, before it
+  dispatched a real click and got the opposite answer. The failure shape is specific: an INVISIBLE,
+  UNCLIPPED, `pointer-events: auto` element overlapping a control. For ordinary z-index/overlap
+  regressions elsewhere in this repo, `elementFromPoint` is still the right tool (it is exactly what
+  CPE-1836's `clipProbe` and CPE-1827/CPE-1884's `selfPaint` are built on, and nothing here calls that
+  into question) — but for "does an invisible sibling still eat the click", only a REAL dispatched
+  input event proved reliable. Two hit-test APIs agreeing with each other is not independent
+  confirmation when both share the same underlying (and, for this one shape, wrong) hit-test path.
+
+  **Fix**: `pointer-events: none` added to the BASE `.filtered-hidden:focus-visible,
+  .unreadable:focus-visible` rule (previously only the `::after` overlay had it). Keyboard
+  focusability is unaffected — `tabindex` focus does not route through `pointer-events`.
+
+  **Verified with a real dispatched click**, not a hit-test API — matches the Reviewer's own method
+  and exact coordinates:
+
+  | width | click target | before (span text still `auto`) | after (`pointer-events: none` added) |
+  |---|---|---|---|
+  | 600px busy | `.git .git-btn` at (538.4, 13.5) | `clicked=false hit=SPAN.filtered-hidden` | `clicked=true hit=BUTTON.git-btn` |
+  | 900px busy | `.git .git-btn` at (691.6, 13.5) | `clicked=false hit=SPAN.filtered-hidden` | `clicked=true hit=BUTTON.git-btn` |
+
+  **CI guard, the third check kind built for this ticket**: new `clickReaches` kind
+  (`scripts/dev-harness/layout-guard/engine.mjs`'s `runClickReachesChecks`), deliberately implemented
+  OUTSIDE the in-page probe string every other check kind runs through — it needs CDP's own Input
+  domain (`Input.dispatchMouseEvent`: mouseMoved -> mousePressed -> mouseReleased, a click synthesized
+  through the renderer's real event pipeline), not anything reachable from browser JS. A capture-phase
+  `click` listener installed fresh per target records the REAL event's `e.target`, which is what the
+  check compares against, not a hit-test API result. Added to the `statusbar-focus-reveal` case
+  (`{ kind: "clickReaches", selectors: [".git .git-btn"] }`), both widths. Red-proofed by removing just
+  the new `pointer-events: none` line: both widths correctly go red with
+  `CLICK-MISS clickReaches: ... landed on SPAN.filtered-hidden instead`, matching the manual table
+  above exactly; restored, both go green (`clicked=true hit=BUTTON.git-btn`).
+
+  **Final verification**: `npm run check` clean. `npm run harness:layout-guard` 14/14 clean, including
+  the new `clickReaches` check at both widths. All 43 `StatusBar.*.test.ts` tests green, unchanged.

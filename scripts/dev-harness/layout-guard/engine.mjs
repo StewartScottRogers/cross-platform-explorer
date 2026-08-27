@@ -91,12 +91,28 @@
 //    (sub-pixel rounding) — so this check now trusts whichever side computes to (near) zero, since this
 //    CSS pattern always authors its anchor as an exact `0` offset.
 //
+//  - `clickReaches` — CPE-1883 round 3 (Reviewer finding, the most important lesson this whole check
+//    kind exists to record): does a REAL, CDP-dispatched mouse click on a `selectors` entry actually
+//    land on that element (or a descendant), or does something else swallow it? `selfPaint` (above) asks
+//    a similar-sounding question but answers it with `document.elementFromPoint` — proven, twice, NOT
+//    trustworthy for this exact failure shape: an invisible (`color: transparent`), unclipped
+//    (`overflow: visible`), `pointer-events: auto` element that overlaps a control. Both
+//    `elementFromPoint` AND `elementsFromPoint` reported CPE-1883's `.git` Pull button as reachable while
+//    a real dispatched click on it landed on the invisible span instead — repro'd twice, not a fluke (see
+//    StatusBar.svelte's own CPE-1883 round-3 comment). `clickReaches` runs OUTSIDE the in-page probe
+//    string this file builds for every other check kind, because it needs CDP's own Input domain (a
+//    click synthesized through the renderer's real event pipeline), not anything reachable from browser
+//    JS — see `runClickReachesChecks` below for the implementation and exactly why the hit-test APIs
+//    diverge from a real click for this shape.
+//
 // `siblingOverlap`/`clipProbe`/`textOverflow` catch a decorative element BLEEDING onto something else;
-// `selfPaint` catches an interactive element BECOMING UNREACHABLE; `rectBounds` catches an element's OWN
-// box growing the wrong SHAPE; `pseudoOnScreen` catches the right shape landing in the wrong PLACE. All
-// are real, distinct failure shapes on record in this repo (CPE-1836 is the first kind, CPE-1827/CPE-1884
-// are the second, CPE-1883 is the third and fourth) — a generic harness needs all four, not just one two
-// or three.
+// `selfPaint` catches an interactive element APPEARING unreachable by hit-test APIs (which is usually
+// sufficient, but see `clickReaches`'s own note for the one shape it can miss); `rectBounds` catches an
+// element's OWN box growing the wrong SHAPE; `pseudoOnScreen` catches the right shape landing in the
+// wrong PLACE; `clickReaches` catches a control that LOOKS reachable but isn't, when only tested via
+// hit-test APIs rather than a real click. All are real, distinct failure shapes on record in this repo
+// (CPE-1836 is the first kind, CPE-1827/CPE-1884 are the second, CPE-1883 is the third, fourth, and
+// fifth) — a generic harness needs all five, not fewer.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -482,7 +498,91 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
     expression: buildProbeExpression(kase.checks),
     returnByValue: true,
   });
-  return r.result.value;
+  const result = r.result.value;
+
+  // CPE-1883 round 3 (Reviewer finding): a real dispatched click on ".git"'s Pull button was silently
+  // swallowed by an INVISIBLE, unclipped span sitting over it (round 2's `color: transparent` fix left
+  // the span's own raw text still painting at zero alpha across its full ~367px natural width, with
+  // default `pointer-events: auto`) -- and BOTH `document.elementFromPoint` and
+  // `document.elementsFromPoint`, used for every other check kind in this file, reported the button as
+  // reachable anyway. Repro'd twice, not a fluke: those APIs are Chromium's own hit-test result, which
+  // in this specific case (an invisible, unclipped, overflowing inline text run) diverged from what a
+  // REAL dispatched mouse event actually hits. `clickReaches` checks below run OUTSIDE the in-page probe
+  // string above for exactly that reason -- they need CDP's own Input domain (a genuine synthesized
+  // click through the renderer's real event pipeline), not anything reachable from browser JS.
+  const clickChecks = kase.checks.filter((c) => c.kind === "clickReaches");
+  if (clickChecks.length > 0) {
+    const { failures, info } = await runClickReachesChecks(client, clickChecks);
+    result.clickFailures = failures;
+    result.clickReachesInfo = info;
+  } else {
+    result.clickFailures = [];
+    result.clickReachesInfo = [];
+  }
+
+  return result;
+}
+
+/** CPE-1883 round 3: dispatches a REAL mouse click (mouseMoved -> mousePressed -> mouseReleased via
+ *  CDP's Input domain) at each `selector`'s own measured centre, and reports whether the click's actual
+ *  DOM target (a capture-phase `click` listener installed fresh per selector) was that element or one of
+ *  its descendants -- the one signal proven (see the comment above) to disagree with
+ *  `elementFromPoint`/`elementsFromPoint` for an invisible-but-still-pointer-events:auto overlapping
+ *  element. Deliberately its own small helper, not folded into `buildProbeExpression`'s in-page probe:
+ *  everything else in that function runs as pure browser JS in one `Runtime.evaluate` round trip, but a
+ *  real click needs the Input domain, which only exists at the CDP client level in this Node process. */
+async function runClickReachesChecks(client, clickChecks) {
+  const failures = [];
+  const info = [];
+  for (const check of clickChecks) {
+    for (const sel of check.selectors) {
+      const setup = await client.send("Runtime.evaluate", {
+        expression: `
+          (function () {
+            var el = document.querySelector(${JSON.stringify(sel)});
+            if (!el) return { error: 'not found' };
+            if (window.__cprHandler) document.removeEventListener('click', window.__cprHandler, true);
+            window.__cprClicked = false;
+            window.__cprHitTag = null;
+            window.__cprHandler = function (e) {
+              window.__cprClicked = !!(e.target === el || (el.contains && el.contains(e.target)));
+              var cls = (e.target.className && typeof e.target.className === 'string')
+                ? e.target.className.trim().split(/\s+/)[0] : '';
+              window.__cprHitTag = e.target.tagName + (cls ? '.' + cls : '');
+            };
+            document.addEventListener('click', window.__cprHandler, true);
+            var r = el.getBoundingClientRect();
+            return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+          })()
+        `,
+        returnByValue: true,
+      });
+      const pt = setup.result.value;
+      if (!pt || pt.error) {
+        failures.push(`clickReaches: not found: ${sel}`);
+        continue;
+      }
+      await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y });
+      await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
+      await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
+      const readback = await client.send("Runtime.evaluate", {
+        expression: "({ clicked: !!window.__cprClicked, hitTag: window.__cprHitTag || null })",
+        returnByValue: true,
+      });
+      const clicked = readback.result.value.clicked;
+      const hitTag = readback.result.value.hitTag;
+      info.push({ selector: sel, x: Number(pt.x.toFixed(1)), y: Number(pt.y.toFixed(1)), clicked, hitTag });
+      if (!clicked) {
+        failures.push(
+          `clickReaches: a real dispatched click at (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}) ` +
+          `(the centre of ${sel}) landed on ${hitTag || 'nothing'} instead -- this control is not ` +
+          `actually clickable here, even though it may still test as "reachable" via ` +
+          `elementFromPoint/elementsFromPoint`
+        );
+      }
+    }
+  }
+  return { failures, info };
 }
 
 /** Runs every (case × width) combination against ONE launched Chrome instance, reused for the whole

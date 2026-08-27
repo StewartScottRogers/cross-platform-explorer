@@ -33,6 +33,12 @@
 //      Text might not fit its own box and could paint outside it?   -> textOverflow.
 //      A button/control might get squeezed or covered and become
 //      unclickable?                                                 -> selfPaint.
+//      A button/control LOOKS reachable via elementFromPoint but a
+//      REAL click might still land on something else invisibly
+//      overlapping it?                                              -> clickReaches (needs an actual
+//                                                                      CDP-dispatched click; hit-test
+//                                                                      APIs alone are not trustworthy
+//                                                                      for this shape — see engine.mjs).
 //      A revealed/expanded box (focus, hover, ...) should grow WIDE
 //      up to its own max-width, not stack into a tall column?       -> rectBounds (maxHeight) on the
 //                                                                      element, from a harness page
@@ -115,6 +121,19 @@ export const CASES = [
       // (grows leftward from the pill, which is always on-screen) — this check proves that holds at
       // both tested widths, not just at the one width it happened to fit.
       { kind: "pseudoOnScreen", anchorSelector: ".filtered-hidden", pseudo: "::after", edge: "right" },
+      // CPE-1883 round 3 (Reviewer finding, via a REAL dispatched CDP click — see engine.mjs's own
+      // `clickReaches`/`runClickReachesChecks` doc for why `selfPaint`'s `elementFromPoint` approach is
+      // NOT trustworthy for this exact shape and had to be replaced): round 2's `color: transparent`
+      // fix on `.filtered-hidden`'s base `:focus-visible` rule left that span's own raw text still
+      // painting -- invisibly, at zero alpha -- across its full unclipped ~367px natural width, with
+      // default `pointer-events: auto`. That invisible text physically overlaps `.git`'s Pull/Push/Sync
+      // buttons, and with no `pointer-events` override a real click there lands on the SPAN, not the
+      // BUTTON -- confirmed reproducible, and NOT caught by `document.elementFromPoint` /
+      // `document.elementsFromPoint`, which both reported the buttons reachable anyway. Fixed with
+      // `pointer-events: none` added to the base rule (see StatusBar.svelte's own round-3 comment); this
+      // check exists so the next person who touches that rule and drops the override again gets a red
+      // build instead of a silently-swallowed click.
+      { kind: "clickReaches", selectors: [".git .git-btn"] },
     ],
   },
   {
