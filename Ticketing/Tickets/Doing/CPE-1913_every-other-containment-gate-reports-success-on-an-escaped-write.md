@@ -3,7 +3,7 @@ id: CPE-1913
 title: every other containment gate in cpe-server reports success on an escaped write — archive, transfer, revert and copilot all check-then-create with no landing check
 type: bug
 priority: High
-status: Backlog
+status: Doing
 tags: ready
 estimate: L
 created: 2026-08-26
