@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
+import { logicalLines } from "./shellScriptLines";
 
 const WORKFLOWS = join(process.cwd(), ".github", "workflows");
 
@@ -75,84 +76,9 @@ const HARDENING_FLAGS =
  *  re-deriving a third copy. */
 const APT_COMMAND_WORD = /(?<![\w-])apt(?:-get)?(?![\w-])/;
 
-/** Strips a shell `#` comment from one line, respecting quotes. A `#` only opens a comment when it
- *  is unquoted AND starts a word (line start, or preceded by whitespace). The quote-awareness is
- *  load-bearing in the SAFE direction: a naive "cut at the first #" would truncate a real curl
- *  invocation whose URL carries a fragment, or whose quoted header value contains a `#`, hiding it
- *  from the scan entirely -- a SILENT false negative, the dangerous direction.
- *
- *  Round 2 dropped only lines whose FIRST character was `#`, so an inline trailing comment such as
- *  `echo hi # curl --retry 3 --max-time 20 ...` was read as code. That direction fails LOUD (a
- *  spurious offender), so it was never a safety hole -- but it is exactly the comment-vs-code
- *  confusion this file's header says the guard exists to avoid. */
-function stripShellComment(line: string): string {
-  let quote: string | null = null;
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (quote !== null) {
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
-  }
-  return line;
-}
-
-/** Splits a `run` script into LOGICAL shell lines: backslash continuations joined, `#` comments
- *  stripped, before anything looks for a flag.
- *
- *  The join is the important half, and it closes a hole that was fully SILENT. Round 2's scan split
- *  on newlines and required `--retry` and `--max-time` on the SAME physical line, so ordinary shell
- *  formatting evaded it completely:
- *
- *      curl --fail --retry 3 \
- *        --max-time 20 -sS -o /tmp/x https://example.com/x
- *
- *  Neither physical line carries both flags, so the pairing rule never fired and the file reported
- *  a clean pass. That is not a hypothetical style: this repo ALREADY writes curl exactly that way
- *  in ffmpeg-pin-freshness.yml (the `head_check()` call in "HEAD-check pinned assets" and the
- *  candidate-URL call in "Validate the recommendation before publishing it" -- identified by step
- *  rather than by line number, per CPE-1824 round 3's stale-pointer finding), and apt-get that way
- *  in release.yml's "Install Linux system dependencies". Any scan of shell text for a flag
- *  COMBINATION has to join continuations first, or it is checking nothing.
- *
- *  CPE-1849 re-verified the join against those two ffmpeg-pin-freshness.yml sites rather than
- *  assuming it generalised: adding that file to GUARDED before fixing it reported BOTH sites as
- *  offenders, each as one fully-joined logical line carrying --max-time and --retry together --
- *  which also confirms parseWorkflow() accepts that file, since it throws rather than returning
- *  empty when the bounded-subset parser cannot read one.
- *
- *  That probe says NOTHING about stripShellComment()'s quote-awareness, and an earlier draft of
- *  this comment claimed it did, citing a `#` inside `-w '%{http_code}'`. There is no `#` in
- *  `%{http_code}` -- the characters are % { h t t p _ c o d e } -- and neither curl invocation in
- *  that file contains a `#` anywhere. The probe could not have proven it even if one did: --retry
- *  and --max-time both sit BEFORE the `-w` tail, so a strip that truncated there would still leave
- *  an offender to report, and the test would look identical. Demonstrated, not reasoned: replacing
- *  stripShellComment()'s whole body with a naive `line.slice(0, line.indexOf("#"))` -- no quote
- *  tracking at all -- left every test in this file passing, so nothing in the suite exercised
- *  quote-awareness at all. It is now exercised directly, on synthetic input, by the describe block
- *  "logicalLines() handles shell comments and continuations" below: a real property needs a real
- *  test, not a claim that some unrelated probe happened to cover it. */
-function logicalLines(run: string | undefined): string[] {
-  const out: string[] = [];
-  let pending = "";
-  for (const raw of (run ?? "").split("\n")) {
-    const line = stripShellComment(raw).trim();
-    if (line.endsWith("\\")) {
-      pending += `${line.slice(0, -1).trim()} `;
-      continue;
-    }
-    const joined = (pending + line).trim();
-    if (joined) out.push(joined);
-    pending = "";
-  }
-  if (pending.trim()) out.push(pending.trim());
-  return out;
-}
+// stripShellComment()/logicalLines() now live in src/lib/shellScriptLines.ts (CPE-1908
+// round 2) so channelPurityCoverage.test.ts can reuse the exact same comment/continuation
+// handling instead of a second hand-rolled stripper. Imported at the top of this file.
 
 function aptGetLines(run: string | undefined): string[] {
   return logicalLines(run).filter((line) => APT_COMMAND_WORD.test(line));

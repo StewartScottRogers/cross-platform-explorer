@@ -39,21 +39,59 @@ empty or is missing an installer for the current OS:
 - If the run **failed**, STOP, report it, and point at `gh run view --log-failed`.
 - Either way, do NOT publish, and do NOT install.
 
-**1b-ii. Confirm the manifest was verified before publishing (CPE-1872).** Having installer assets is
-not the same as those assets being SAFE to publish — the `verify-published-manifest` job (`release.yml`)
-re-checks the manifest exactly as it now sits on the draft: every platform's minisign signature against
-the configured pubkey, AND that every platform's `url` actually points at this repo's own release
-rather than a foreign host or the wrong tag serving a same-named asset. Publishing without checking this
-job's result would let an unverified (or url-spoofed) `latest.json` go live to the real auto-updater.
+**1b-ii. Confirm the manifest was verified before publishing (CPE-1872, CPE-1908).** Having installer
+assets is not the same as those assets being SAFE to publish. Both release channels have a job that
+re-checks the manifest exactly as it now sits on the draft — every platform's minisign signature
+against the configured pubkey, that every platform's `url` actually points at this repo's own release
+rather than a foreign host or the wrong tag serving a same-named asset, and (CPE-1908) that every
+platform's asset is actually from the channel this tag claims to be. Publishing without checking this
+job's result would let an unverified, url-spoofed, or channel-mixed `latest.json` go live to the real
+auto-updater.
+
+**`/run`'s "latest release" is channel-agnostic and is very often the SIDECAR channel** (CPE-1908 round
+2, Reviewer): `gh release list --limit 1` in step 1a returns whichever release is newest regardless of
+which workflow built it, and this project's shipping strategy is sidecar-only (RELEASING.md), so most
+tags reaching this step end in `-sidecar`. The two channels' verify job lives in a DIFFERENT workflow
+under a DIFFERENT name, and — because `release-sidecar.yml` is `workflow_dispatch`-only — its runs
+can't be found the same way `release.yml`'s tag-triggered runs can: a `workflow_dispatch` run's
+`headBranch` is always the dispatched REF (e.g. `main`), never the tag, so copying the plain-channel
+lookup's `select(.headBranch=="<TAG>")` would silently match the wrong run (or none). Branch on the tag
+suffix and use the right lookup for each:
 
 ```powershell
-$runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=release.yml `
-  --json databaseId,headBranch --jq ".[] | select(.headBranch==\"<TAG>\") | .databaseId" | Select-Object -First 1
-if (-not $runId) { throw "no release.yml run found for tag <TAG> -- do not publish" }
+if ("<TAG>".EndsWith("-sidecar")) {
+  $workflow = "release-sidecar.yml"
+  $jobName = "verify-published-manifest-sidecar"
+  # workflow_dispatch runs have no tag-bearing headBranch to match on -- release-sidecar.yml sets
+  # `run-name: "Release (sidecar) ${{ inputs.tag }}"` (CPE-1908) specifically so the tag shows up in
+  # displayTitle instead. EXACT match, not `contains` (CPE-1908 round 3, R2-4 -- a security-relevant
+  # fix on the publish path): `contains("<TAG>")` also matches an honestly-dispatched run for a
+  # DIFFERENT, decoy tag that merely contains this one as a substring (e.g. a tampered
+  # "v1.2.3-sidecar-decoy" run's displayTitle "Release (sidecar) v1.2.3-sidecar-decoy" contains
+  # "v1.2.3-sidecar"), so a same-day decoy dispatch could get matched, read as `success`, and this
+  # step would then wave an UNVERIFIED draft through to `gh release edit --draft=false`. Assumes
+  # you're checking shortly after dispatch; if another sidecar dispatch for the SAME tag raced yours,
+  # resolve by createdAt too rather than trusting "most recent" alone.
+  $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
+    --json databaseId,displayTitle --jq ".[] | select(.displayTitle == \"Release (sidecar) <TAG>\") | .databaseId" |
+    Select-Object -First 1
+} else {
+  $workflow = "release.yml"
+  $jobName = "verify-published-manifest"
+  $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
+    --json databaseId,headBranch --jq ".[] | select(.headBranch==\"<TAG>\") | .databaseId" | Select-Object -First 1
+}
+if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish" }
+# This is fail-closed and correct, not a broken release, if it's the SIDECAR branch above: every
+# sidecar run dispatched before `release-sidecar.yml` gained its `run-name:` (CPE-1908) has
+# `displayTitle` equal to the plain workflow name, not "Release (sidecar) <TAG>", so it can never
+# match here and this throws for every such pre-existing draft. If you hit this on a draft that
+# predates `run-name:`, don't read it as broken: dispatch a fresh `release-sidecar.yml` run for the
+# tag (so its `displayTitle` carries the tag), or verify the job by hand per RELEASING.md instead.
 
 $verifyJobJson = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
-  --jq '.jobs[] | select(.name=="verify-published-manifest")'
-if (-not $verifyJobJson) { throw "no verify-published-manifest job found on run $runId -- do not publish" }
+  --jq ".jobs[] | select(.name==\"$jobName\")"
+if (-not $verifyJobJson) { throw "no $jobName job found on run $runId -- do not publish" }
 $verifyJob = $verifyJobJson | ConvertFrom-Json
 
 # ONLY `success` may proceed to 1c. Anything else -- `failure`, `cancelled`, `skipped`, or the job
@@ -70,16 +108,17 @@ $verifyJob = $verifyJobJson | ConvertFrom-Json
 #      false -- i.e. THE RUN WAS CANCELLED. And a run cancelled mid-matrix is precisely the case
 #      where completed legs have already uploaded installers and a merged latest.json to the draft
 #      while the verify gate never ran. Accepting `skipped` therefore let the publish through in the
-#      exact scenario the gate exists to catch.
+#      exact scenario the gate exists to catch. Same reasoning applies to both channels' jobs.
 if ($verifyJob.conclusion -ne "success") {
-  throw "verify-published-manifest did not pass (conclusion: $($verifyJob.conclusion)) -- STOP, do not publish this draft"
+  throw "$jobName did not pass (conclusion: $($verifyJob.conclusion)) -- STOP, do not publish this draft"
 }
-"verify-published-manifest: $($verifyJob.conclusion) -- OK to publish"
+"$jobName ($workflow): $($verifyJob.conclusion) -- OK to publish"
 ```
 
 If this check throws, STOP — report it plainly and do NOT run 1c. This is exactly the gap CPE-1872's
-round-3 security audit found: a partial matrix failure could leave a fully-populated, unverified draft,
-and nothing upstream of this step would have caught it.
+round-3 security audit found for the plain channel (and CPE-1908 closed for the sidecar channel, which
+this step now actually reaches most of the time): a partial matrix failure could leave a
+fully-populated, unverified draft, and nothing upstream of this step would have caught it.
 
 **1c. Publish the draft:**
 ```powershell

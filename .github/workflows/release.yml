@@ -335,7 +335,8 @@ jobs:
             --conf src-tauri/tauri.conf.json \
             --manifest release-assets/latest.json \
             --search release-assets \
-            --expect-url-prefix "https://github.com/${REPO}/releases/download/${TAG}/"
+            --expect-url-prefix "https://github.com/${REPO}/releases/download/${TAG}/" \
+            --expect-channel plain
 
   # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
   # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by

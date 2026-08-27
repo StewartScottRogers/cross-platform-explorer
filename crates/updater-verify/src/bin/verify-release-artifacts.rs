@@ -23,13 +23,23 @@
 //!
 //! Usage:
 //! ```text
-//! verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>]
+//! verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>] [--expect-channel <plain|sidecar>]
 //! ```
 //! Defaults: `--conf src-tauri/tauri.conf.json`, `--search src-tauri/target`, and the newest `latest.json`
 //! found under the search dirs; `--expect-url-prefix` is unset (no URL-binding check) by default so ad
 //! hoc/test invocations without a real GitHub release context keep working. Skipping when signing
-//! secrets are absent is handled in `release.yml` (the step only runs when `TAURI_SIGNING_PRIVATE_KEY`
-//! is set), so this binary always expects real artifacts when it runs at all.
+//! secrets are absent is handled in `release.yml`/`release-sidecar.yml` (the step only runs when
+//! `TAURI_SIGNING_PRIVATE_KEY` is set), so this binary always expects real artifacts when it runs at all.
+//!
+//! `--expect-channel <plain|sidecar>` (CPE-1908) overrides the channel this run expects the manifest to
+//! be PURE to, instead of deriving it from `--conf`'s own `productName`. Needed because `--conf` always
+//! reads pubkey/version/the CPE-1873 pin from the base `src-tauri/tauri.conf.json` (correct for BOTH
+//! channels -- the sidecar overlay never touches those fields), but that file's `productName` always
+//! says "Cross-Platform Explorer" (plain) even when this run is checking the SIDECAR channel's published
+//! manifest. `release.yml` passes `--expect-channel plain`; `release-sidecar.yml` passes
+//! `--expect-channel sidecar` -- both now explicit rather than one of them being implicit, so
+//! `channelPurityCoverage.test.ts` can assert every `Channel` variant has a workflow actually invoking
+//! this check for it (CPE-1908's own "impossible to silently lose again" requirement).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -44,6 +54,7 @@ fn main() -> ExitCode {
     let mut manifest_path: Option<PathBuf> = None;
     let mut search_dirs: Vec<PathBuf> = Vec::new();
     let mut expect_url_prefix: Option<String> = None;
+    let mut expect_channel: Option<cpe_updater_verify::Channel> = None;
     // CPE-1873: opt-OUT of the pubkey/endpoints pin check (default is to run it). Exists ONLY for
     // this crate's own test fixtures, which scaffold a fresh, throwaway keypair per test unrelated
     // to the repo's real pinned value -- they test manifest/signature logic, not the pin itself. A
@@ -69,10 +80,17 @@ fn main() -> ExitCode {
                 Some(v) => expect_url_prefix = Some(v.clone()),
                 None => return fail("--expect-url-prefix needs a value"),
             },
+            "--expect-channel" => match it.next() {
+                Some(v) => match v.parse::<cpe_updater_verify::Channel>() {
+                    Ok(c) => expect_channel = Some(c),
+                    Err(e) => return fail(&format!("--expect-channel: {e}")),
+                },
+                None => return fail("--expect-channel needs a value (plain or sidecar)"),
+            },
             "--skip-pin-check" => skip_pin_check = true,
             "-h" | "--help" => {
                 println!(
-                    "verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>] [--skip-pin-check]"
+                    "verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>] [--expect-channel <plain|sidecar>] [--skip-pin-check]"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -105,11 +123,19 @@ fn main() -> ExitCode {
     };
     // CPE-1894: which channel THIS conf builds — release.yml always passes the plain
     // `src-tauri/tauri.conf.json` here, so this resolves to `Channel::Plain` in real runs; derived
-    // from `productName` rather than hard-coded so the same binary/check works unchanged if a
-    // sidecar-channel job is ever pointed at `tauri.sidecar.conf.json` instead (out of scope for
-    // this ticket — release-sidecar.yml does not run this binary today).
+    // from `productName` by default so an ad hoc/test invocation pointed at a SELF-CONTAINED conf
+    // (productName + pubkey + version all in one file) needs no extra flag.
+    //
+    // CPE-1908: `--expect-channel`, when given, overrides this derivation outright. Real workflow
+    // invocations now ALWAYS pass it explicitly (release.yml: `plain`; release-sidecar.yml: `sidecar`)
+    // rather than relying on `--conf`'s productName -- load-bearing for the sidecar job, whose `--conf`
+    // is still the base `tauri.conf.json` (for pubkey/version/the CPE-1873 pin, which the sidecar
+    // overlay never touches) even though the manifest it's checking must be pure SIDECAR.
     let product_name = conf_json.get("productName").and_then(|v| v.as_str()).unwrap_or("");
-    let expected_channel = cpe_updater_verify::expected_channel_from_product_name(product_name);
+    let (expected_channel, channel_source) = match expect_channel {
+        Some(c) => (c, "--expect-channel"),
+        None => (cpe_updater_verify::expected_channel_from_product_name(product_name), "conf productName"),
+    };
 
     // CPE-1873 round 2 (independent reviewer, attempt 1's rejection): the `#[test]` guard in
     // `tests/pinned_pubkey_guard.rs` only runs where `cargo test -p cpe-updater-verify` runs --
@@ -269,9 +295,10 @@ fn main() -> ExitCode {
             .collect::<Vec<_>>()
             .join(", ");
         return fail(&format!(
-            "manifest mixes release channels (CPE-1894) -- {} declares productName '{product_name}', \
-             so every platform's asset must be from the '{expected_channel}' channel, but the following \
-             platform(s) are not: {detail}. This is the exact shape of the CPE-1894 defect (a workflow's \
+            "manifest mixes release channels (CPE-1894/CPE-1908) -- expected channel '{expected_channel}' \
+             (source: {channel_source}; {} productName is '{product_name}'), so every platform's asset \
+             must be from that channel, but the following platform(s) are not: {detail}. This is the \
+             exact shape of the CPE-1894 defect (a workflow's \
              tag trigger firing on the wrong channel's tag and merging its installers into this release) \
              -- do not publish this manifest.",
             conf.display(),
@@ -312,7 +339,7 @@ fn main() -> ExitCode {
         conf_dir.display()
     );
     println!("  version    : {version}");
-    println!("  channel    : {expected_channel} (product name: '{product_name}')");
+    println!("  channel    : {expected_channel} (source: {channel_source}; conf product name: '{product_name}')");
     println!("  manifest   : {}", manifest_path.display());
     println!("  search dirs: {}", search_dirs.len());
     if let Some(prefix) = &expect_url_prefix {
