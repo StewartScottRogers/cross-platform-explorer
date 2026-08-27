@@ -686,6 +686,128 @@ shapes. Every blocker below was in the arm I had flagged as never executed, or i
   Ubuntu distro was used read-only (a static binary was executed in it; nothing was installed there —
   it still has no C toolchain).
 
+## 2026-08-27 — ROUND 3 on PR #1043: the last two code gaps, and four corrected claims
+
+**Standing evidence at the start of this round.** The Security Auditor re-ran on `830fd5f0` — 400 more
+trials, **0 escapes** (398 refused, 2 normal), all 11 deterministic containment tests green: **1,500
+trials across all rounds, zero escapes.** The Reviewer wrote its **own** extraction harness (rather than
+reusing mine), cross-built static musl and ran it under WSL2 6.6.87.2, independently confirming B1's
+premise, B2's `EINVAL`/`mode` behaviour, and `walk syscalls/file new=1 overwrite=2`. It audited `link_at`
+line by line (no panic path, no fd, no leak, `parent` provably live, and it type-checks on Darwin where
+`mode_t` is `u16`) and confirmed the "lexically disjoint" wording fix holds across the whole four-shape
+`why` message space — and that the new negative test **would have failed under the old boilerplate**,
+which is what makes it a real guard. It also corrected *itself*: its round-1 claim that `FILE_SHARE_DELETE`
+made the Windows residual real was wrong.
+
+- **2026-08-27 (Worker) — "cannot be staged" was wrong, and there is now a test instead of a comment.**
+  `name_surrogate_at` claimed a non-surrogate directory reparse point needed OneDrive, dedup or ProjFS
+  and so could not be staged on a CI runner. The Auditor disproved it: `FSCTL_SET_REPARSE_POINT` with a
+  `REPARSE_GUID_DATA_BUFFER` and a **non-Microsoft** tag (bit 31 clear) needs **no privilege, no filter
+  driver, no OneDrive**. New test-support helper `fsutil::make_guid_reparse_point`, and two new tests
+  that stage both cases **on the same volume in the same run**, because the claim is that they diverge:
+
+  | component | tag | surrogate | outcome |
+  |---|---|---|---|
+  | junction → inside the root | `0xA000000C` | set | refused |
+  | junction → outside the root | `0xA000000C` | set | refused |
+  | non-MS, directory bit set | `0x10001234` | clear | **traversed**, write landed inside |
+  | non-MS, directory bit clear | `0x00001234` | clear | refused by NT, not by the check |
+
+  The decisive detail for the stated motivation is measured, not inferred: `IO_REPARSE_TAG_CLOUD`
+  (`0x9000001A`) is **N=0, D=1** — the same shape as the traversed row — so OneDrive Files-On-Demand
+  *directory* placeholders are genuinely unblocked. **Recorded at the function: the check is NECESSARY,
+  NOT SUFFICIENT.** For a non-surrogate tag the outcome belongs to NT and the filter driver; with the
+  directory bit clear the descent fails whatever the check returns.
+
+- **2026-08-27 (Worker) — F5: the leaf was still refusing on the bare bit, so the OneDrive motivation
+  was only half-delivered.** `fsutil::copy_file_onto_destination_handle` still tested
+  `facts.is_reparse_point` — the exact bit F1 rejected for the directory walk. A **dehydrated OneDrive
+  Files-On-Demand file** is that shape, and OneDrive dehydrates precisely the files an incremental
+  backup's `update` list writes onto, so "backups to OneDrive stop working" was still true at the final
+  component while the prose on `open_beneath` read as though it were settled. Fixed.
+
+  The bit and the query now have **one owner**, `batch_media::reparse_name_surrogate`, returning
+  `Option<bool>` so that neither caller's default is baked in — because the two need **opposite**
+  defaults and a default in the helper would silently give one of them the wrong one:
+  - the **leaf** guard `unwrap_or(true)` — fails **closed**; nothing downstream catches it;
+  - the **directory walk** `unwrap_or(false)` — fails **open**; a genuine surrogate is caught one
+    component later by NT (`ERROR_CANT_RESOLVE_FILENAME`, measured by neutering the check).
+
+  It costs nothing in the ordinary case: the tag is only queried when the reparse attribute is already
+  set. **Red/green, both new tests:** reverted to the bare attribute bit → both FAIL; with the surrogate
+  check → both pass.
+
+  **The honest limit, measured rather than glossed:** reading a synthetic placeholder back by ordinary
+  path fails with `ERROR_CANT_ACCESS_FILE (1920)` — a tag with no registered filter driver has nothing
+  to service an ordinary open. That is a property of the *fixture*, not the code; a real OneDrive
+  placeholder has the cloud filter in the path. The test therefore reads back through a no-follow
+  handle and says so at the assertion. What is measured is that the tag discriminates and the bytes
+  reach the object; what is *inferred* from Microsoft's documented meaning of the bit is that a real
+  placeholder behaves like the synthetic one.
+
+- **2026-08-27 (Worker) — F6: "Linux with `openat2`: immune" was too broad in two ways, one of them
+  attacker-controlled.** Now says "immune for entries whose parent chain already exists", because
+  `openat2` returns `ENOENT` whenever a parent is missing and the fast path falls through on **any**
+  failure — so **every first-entry-into-a-new-directory takes the walk**, which on a first full backup
+  is every directory in the tree. Measured on 6.6.87 (mine and the Reviewer's independently, and again
+  in this round's harness): chain present → 1 syscall for a create, 2 for an overwrite; **new chain → 6**.
+  And with a thread churning `rename(p ↔ q)`, **184,854 of 400,000 `openat2` calls (46%) returned
+  `ENOENT`** — an actor with write access can force the Linux run off the immune path onto the
+  residual-bearing walk, per entry, on demand. Not an escape, but "immune" read as a platform property
+  when it is one an attacker can revoke. `ENOENT` is correctly outside the latch set for exactly this
+  reason, and that is now stated at the latch. Corrected in `backup.rs` **and** in
+  `src/docs/safety-undo.md`, which had said "on macOS, and on older Linux systems".
+  (The Auditor also demonstrated the Unix residual live: renaming a directory with an open descendant
+  **succeeds** on POSIX, and bytes written through the held fd landed in a pre-existing
+  `dot-ssh/authorized_keys` — which is what the round-2 Unix bullet already said.)
+
+- **2026-08-27 (Worker) — three stale or false claims killed.**
+  1. `backup.rs` still said checks (1) and (2) "are compiled only where `[crate::open_beneath::ATOMIC]`
+     is `false`". That is the claim B3's deletion removed, it contradicted the new comment 190 lines
+     below it, and `ATOMIC` no longer exists — a **broken intra-doc link** that would never red CI
+     (there is no `cargo doc` step and no `deny(rustdoc::broken_intra_doc_links)`). Rewritten as
+     "DELETED, not disabled".
+  2. Two orphans from the B3 deletion: `open_beneath`'s module doc still listed `backup::parent_contained`
+     among the crate's containment guards, and the deleted fallback module's banner comment had survived
+     and was sitting directly above `#[cfg(test)] mod tests`, labelling the **test module** "Anything
+     else: no handle-relative open exists".
+  3. **A false mechanism claim I introduced in round 2**, and my own measurement disproves it: I wrote
+     that the `mode` bug latched the fast path off process-wide. It cannot — the latch is only reachable
+     from the `O_CREAT|O_EXCL` arm, and the open-existing `EINVAL` is discarded by `.ok()`. The
+     arithmetic settles it: a latch would have given **6** walk-syscalls per overwrite (the walk alone)
+     and I measured **8** — the 6 plus 2 doomed `openat2` calls that `SUPPORTED = 1` kept re-paying
+     forever. Corrected; the surrounding guidance about only latching on kernel-property errors is kept,
+     and the latch now also records that only one of its two call sites can reach it.
+
+- **2026-08-27 (Worker) — the `fstatat` clause.** Its doc said the second look was "harmless… the only
+  thing at stake is which sentence the user reads". True of the *decision*, understated for the rest:
+  swap the symlink for a regular file in the post-failure window and both give `ENOTDIR`, so **the
+  attack signature disappears from the message**, and `link_at` biases the same way when `fstatat`
+  itself fails. For an operator triaging a backup, "is a link" versus "not a directory" is the
+  difference between seeing an attack and seeing a typo. Stated, along with the direction of the bias
+  (toward under-reporting an attack, never toward inventing one).
+
+- **2026-08-27 (Worker) — the unreproducible test failure: candidate identified, NOT fixed here.** The
+  Reviewer named it and it is not this PR's code. `crates/server/src/archive.rs`: `EXTRACT_SEQ`
+  (`AtomicU64`) and `SESSION_ROOT` (`OnceLock<PathBuf>`) are **process-global** while libtest runs lib
+  tests in parallel in one process. `row1_a_squatted_temp_directory_is_stepped_over_not_written_into`
+  snapshots `EXTRACT_SEQ`, then pre-creates `e{seq}` for a 64-wide block inside the live session root
+  while sibling threads increment the same counter and create the same names, with only
+  `STAGE_ATTEMPTS = 5` retries; its own doc comment already admits the sharing.
+  `cpe_1786_many_extractions_add_one_directory_to_the_shared_root` contends on the same root. Ruled out:
+  `fsutil::scratch_dir` (already `tag-<pid>-<counter>`), `shell_menu.rs`'s `HOME_ENV_LOCK`-guarded
+  Linux-only leg, and `transfer.rs`'s pure path math. **`archive.rs` is untouched by this PR** —
+  recorded for the Foreman to file separately.
+
+- **2026-08-27 (Worker) — round 3 guardrails.** `cargo test` in `crates/server`: **2404 passed, 0
+  failed, 10 ignored** (2402 before; the two new ones are the reparse-point tests), every integration
+  binary green. `cargo clippy --all-targets -- -D warnings` clean in plain, `--features index`,
+  `--features specta`. Unix harness re-run after every round-3 edit: **6 of 6 pass** on kernel
+  6.6.87.2, now including a direct measurement of F6's claim (new chain → 6 syscalls, overwrite → 2).
+  The extracted arm also `cargo check`s clean for **both** CI Unix targets, `x86_64-unknown-linux-gnu`
+  and `x86_64-apple-darwin`. No new dependency crate. No `specta::Type` touched. Nothing machine-global
+  was added this round (the musl target from round 2 remains installed).
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a

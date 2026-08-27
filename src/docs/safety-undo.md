@@ -111,10 +111,14 @@ Three details are worth knowing, because they are deliberate:
   - **The one thing it still cannot promise.** If someone with write access *renames one of your backup
     folders out of the backup destination* while the job is copying into it, the copy follows that
     folder — the app is writing into the folder itself, not into its name. On Windows this is not
-    reachable at all: Windows refuses to rename a folder while something inside it is open. On macOS,
-    and on older Linux systems, it is reachable, and what protects you there is the after-the-fact
-    check in the next bullet — which reports those entries as failures rather than successes, except on
-    the handful of network filesystems that cannot tell one file from another.
+    reachable at all: Windows refuses to rename a folder while something inside it is open. **On macOS
+    it is always reachable, and on Linux it is reachable for any file the app has to create a new
+    folder for** — which, on a first full backup, is the first file into every folder. (Linux has a
+    faster, fully-protected route the app uses whenever the destination folder already exists; someone
+    with write access to your destination can also deliberately push the app off it.) What protects you
+    in those cases is the after-the-fact check in the next bullet — which reports those entries as
+    failures rather than successes, except on the handful of network filesystems that cannot tell one
+    file from another.
   - **If it happens anyway, the job now tells you** (CPE-1896). That instant-of-the-write swap was
     measured, and it used to end in the worst possible way: the file landed outside your backup folder,
     overwriting whatever was already there, and the run reported it as a **success** with no error —

@@ -447,9 +447,12 @@ fn landed_inside(
 /// (`cpe_1896_a_parent_swapped_under_the_copy_is_never_reported_as_a_success`, which now asserts
 /// `escaped == 0`).
 ///
-/// **Checks (1) and (2) are consequently gone from the shipped path** — they are compiled only where
-/// [`crate::open_beneath::ATOMIC`] is `false`, which is no platform this app ships on. That is where
-/// two `canonicalize` calls per file went; see the cost section.
+/// **Checks (1) and (2) are consequently DELETED, not disabled** — along with `parent_contained`
+/// itself, which had no other caller. That is where two `canonicalize` calls per file went; see the
+/// cost section. An intermediate revision of this PR kept them behind an `open_beneath::ATOMIC`
+/// `const bool` "for a target with no handle-relative open"; the reviewer compiled that target's arm
+/// and found it had never built, so the branch was unreachable code that `dead_code` could not see.
+/// See the "no fourth row" note on [`crate::open_beneath`].
 ///
 /// **The residual, and the reason it is safe is DIFFERENT ON EACH PLATFORM — an earlier draft of this
 /// paragraph gave one reason for both and it was wrong on Unix.** The shape: the walk holds an open
@@ -465,10 +468,25 @@ fn landed_inside(
 ///   (os error 5)`, zero mid-flight escapes.** *If you re-test this, instrument the ordering.* The
 ///   auditor's first un-instrumented run reported "100,663,296 bytes outside the root, ok: true" —
 ///   that was its racer winning *after* the plan returned, which is not an escape.
-/// - **Linux with `openat2`: immune.** `RESOLVE_BENEATH` re-resolves from the root fd on every call
-///   and the kernel enforces the beneath property, so a moved directory simply is not found.
-/// - **The Unix fallback walk (macOS, and Linux without `openat2`): genuinely open, and only
-///   [`landed_inside`] catches it.** POSIX `rename` has no open-descendant restriction. The earlier
+/// - **Linux, for an entry whose parent chain already exists: immune** — and the qualifier is not
+///   pedantry. `RESOLVE_BENEATH` re-resolves from the root fd on every call and the kernel enforces the
+///   beneath property, so a moved directory is simply not found. But `openat2` returns `ENOENT`
+///   whenever any parent in the chain is missing, and `openat2_beneath` falls through to the walk on
+///   **any** failure — so **every first-entry-into-a-new-directory takes the walk**, which on a first
+///   full backup is every directory in the tree. Measured on 6.6.87: chain present → 1 walk syscall for
+///   a create, 2 for an overwrite (the fast path served it); new chain → 6 (the walk).
+///
+///   **And an actor can force the fall-through on demand.** With a thread churning `rename(p ↔ q)` in
+///   the destination, **184,854 of 400,000 `openat2` calls (46%) returned `ENOENT`**. That is not an
+///   escape — the walk still refuses links and [`landed_inside`] still catches the move — but "immune"
+///   would read as a property of the platform when it is one an actor with write access can revoke,
+///   per entry, at will. (`ENOENT` is correctly outside the `SUPPORTED` latch set for exactly this
+///   reason; no `EAGAIN` was observed on 6.6.87, so the latch is not implicated.)
+/// - **The Unix fallback walk — macOS always, and Linux for every entry the fast path declines:
+///   genuinely open, and only [`landed_inside`] catches it.** Demonstrated live by PR #1043's Security
+///   Auditor: renaming a directory with an open descendant **succeeds** on POSIX where Windows refuses,
+///   and bytes written through the held fd landed in a pre-existing `dot-ssh/authorized_keys`.
+///   POSIX `rename` has no open-descendant restriction. The earlier
 ///   claim that "the attacker can only relocate a directory the backup itself owns, so the bytes
 ///   cannot be aimed at a pre-existing `.ssh`" is **false** here: `rename` into a *new name inside* a
 ///   pre-existing sensitive directory succeeds, and since both the directory name and the filename

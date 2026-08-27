@@ -4,7 +4,7 @@
 //! # The problem this exists to remove, not to narrow
 //!
 //! Every other containment guard in this crate — [`crate::fsutil::confined_to`],
-//! [`crate::fsutil::contained_under`], `backup::parent_contained`, `backup::landed_inside` — asks a
+//! [`crate::fsutil::contained_under`], `backup::landed_inside` — asks a
 //! question about a **path** and then, some syscalls later, performs an **open** by that same path. The
 //! two are separate operations, so an actor with write access to the tree can change what the path
 //! means in between. CPE-1889 documented that window; CPE-1896's Security Auditor measured it, at
@@ -544,8 +544,14 @@ mod sys {
     /// answer comes from `fstatat(AT_SYMLINK_NOFOLLOW)` rather than from guessing at an errno.
     ///
     /// It is a second look at a name, so in principle the name could have changed since the failed
-    /// open. Harmless, and worth stating: nothing is opened or written on the strength of it, the
-    /// entry is refused either way, and the only thing at stake is which sentence the user reads.
+    /// open. Nothing is opened or written on the strength of it and the entry is refused either way,
+    /// so the **decision** is unaffected — but "only the sentence changes" undersells what that
+    /// sentence carries. Swap the symlink for a regular file in the window between the failed open and
+    /// this call and both produce `ENOTDIR`, so the refusal reads "could not be opened (Not a
+    /// directory)" and **the attack signature disappears from the message**; `link_at` also returns
+    /// `false` when `fstatat` itself fails, biasing the same way. For an operator triaging a backup,
+    /// "is a link" versus "not a directory" is the difference between seeing an attack and seeing a
+    /// typo. The bias is toward under-reporting an attack, never toward inventing one.
     fn link_at(parent: RawFd, name: &CString) -> bool {
         // SAFETY: `parent` is borrowed from a live `File`, `name` outlives the call, and `st` is a
         // correctly-sized out-parameter. Read-only query, no ownership transfer.
@@ -674,11 +680,17 @@ mod sys {
                 // open-existing         mode=0    -> fd 6
                 // ```
                 //
-                // The consequence was not merely two wasted syscalls: `EINVAL` is in the latch set
-                // below, so the **first overwrite in a run turned `openat2` off process-wide**, and
-                // every entry of the `update` list — the case this module's own doc calls the common
-                // one — silently fell back to the walk. Nothing surfaced it, because the fast path
-                // swallows its errors by design.
+                // **What it actually cost, corrected — an earlier draft of this comment got the
+                // mechanism wrong and the measurement disproves it.** That draft said `EINVAL` is in
+                // the latch set below, so the first overwrite turned `openat2` off process-wide. It
+                // cannot: the latch is only reachable from the `O_CREAT|O_EXCL` arm of the `match`, and
+                // the `EINVAL` from the open-existing call is discarded by `.ok()`. The real shape is
+                // worse in one way and better in another — `SUPPORTED` stayed at 1, so **every**
+                // `update`-list entry re-paid two doomed `openat2` calls forever and then walked
+                // anyway. The arithmetic says so: a latch would have given 6 walk-syscalls per
+                // overwrite (the walk alone), and 8 were measured — the 6, plus 2 that were never
+                // going to succeed. Nothing surfaced it either way, because the fast path swallows its
+                // errors by design.
                 mode: if flags & libc::O_CREAT != 0 { 0o666 } else { 0 },
                 resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
             };
@@ -716,11 +728,20 @@ mod sys {
                 // to find that out again. Anything else is a per-entry answer the walk will re-derive.
                 //
                 // **This latch is process-wide and permanent, so it is only ever set from errors that
-                // are a property of the kernel, never of the entry.** One wrongly-latching call turns
-                // the fast path off for every backup this process runs afterwards — which is exactly
-                // what the `mode` bug above did, from a single overwrite. Nothing is unsafe when it
-                // happens (the walk is the authority), but it is invisible, so the bar for adding an
-                // errno here is that no per-file condition can produce it.
+                // are a property of the kernel, never of the entry.** One wrongly-latching call would
+                // turn the fast path off for every backup this process runs afterwards. Nothing is
+                // unsafe when that happens (the walk is the authority), but it is invisible, so the
+                // bar for adding an errno here is that no per-file condition can produce it.
+                //
+                // It is reachable **only from the `O_CREAT|O_EXCL` arm**, which is why the `mode` bug
+                // above did not in fact latch: that `EINVAL` came from the open-existing call, whose
+                // error is discarded by `.ok()`. Worth knowing before adding an errno — the two calls
+                // are not symmetric, and only this one can turn the fast path off.
+                //
+                // `ENOENT` is deliberately **absent**: a missing parent chain is the ordinary
+                // first-file-in-a-new-directory case, and a racing rename in the destination can
+                // produce it at will (46% of 400,000 calls under a churning racer, measured). Latching
+                // on it would let an actor with write access permanently disable the fast path.
                 if matches!(e.raw_os_error(), Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EINVAL)) {
                     SUPPORTED.store(2, Ordering::Relaxed);
                     return None;
@@ -798,8 +819,6 @@ mod sys {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Anything else: no handle-relative open exists, so this is the pre-CPE-1896 path-based behaviour.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,20 +892,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// The **negative** half of the link classification, and it is the half that keeps the positive
-    /// half honest: an ordinary file sitting where a directory component should be is refused too, but
-    /// must **not** be described as a link.
-    ///
-    /// This exists because the errno cannot tell the two apart. On Linux and macOS a symlink at a
-    /// component opened with `O_DIRECTORY` reports `ENOTDIR` — and so does a plain file at that same
-    /// component. An earlier revision classified on `ELOOP`, which is simply the wrong error on both
-    /// platforms (and `EMLINK` on FreeBSD); the fix asks `fstatat(AT_SYMLINK_NOFOLLOW)` instead, and
-    /// this test is what proves the answer discriminates rather than always saying "link".
-    ///
-    /// It also guards the wording split that made the sibling assertions meaningful: while
-    /// [`refuse`]'s shared tail still contained the phrase "is a link", *every* refusal matched
-    /// `contains("is a link")` and both link tests passed for any failure at all.
-    #[test]
     /// CPE-1896 round 3: a reparse point that is **not a name surrogate** must be traversed, not
     /// refused — the OneDrive Files-On-Demand case, staged for real.
     ///
@@ -958,6 +963,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The **negative** half of the link classification, and it is the half that keeps the positive
+    /// half honest: an ordinary file sitting where a directory component should be is refused too, but
+    /// must **not** be described as a link.
+    ///
+    /// This exists because the errno cannot tell the two apart. On Linux and macOS a symlink at a
+    /// component opened with `O_DIRECTORY` reports `ENOTDIR` — and so does a plain file at that same
+    /// component. An earlier revision classified on `ELOOP`, which is simply the wrong error on both
+    /// platforms (and `EMLINK` on FreeBSD); the fix asks `fstatat(AT_SYMLINK_NOFOLLOW)` instead, and
+    /// this test is what proves the answer discriminates rather than always saying "link".
+    ///
+    /// It also guards the wording split that made the sibling assertions meaningful: while
+    /// [`refuse`]'s shared tail still contained the phrase "is a link", *every* refusal matched
+    /// `contains("is a link")` and both link tests passed for any failure at all.
     #[test]
     fn a_plain_file_where_a_directory_belongs_is_refused_but_not_called_a_link() {
         let d = scratch("notdir");
