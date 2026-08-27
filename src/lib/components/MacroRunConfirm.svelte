@@ -23,7 +23,10 @@
    *   here and Run; checking it re-issues `macroRun` with `confirmedOverwrite: true`.
    * - **not confirmable** — a link (live or dangling). CPE-1734's refusal is absolute here: it is
    *   listed the same way (CPE-1869's reused approach — show the user what they're being told to act
-   *   on) but there is no checkbox that unblocks it, and Run stays disabled while any are present.
+   *   on) but there is no checkbox that unblocks it, and Run stays disabled while any are present. Each
+   *   blocked row also renders the backend's own `reason` sentence — WHY that name can't be confirmed
+   *   (a rename/move destroys the link; a convert writes through it — different hazards, worded
+   *   differently), right there next to the path rather than left unread in the response payload.
    */
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
@@ -160,16 +163,25 @@
 
       {#if blocked.length}
         <!-- CPE-1734's refusal, unconditional: a link is listed so the user can SEE it (CPE-1869's
-             reused list-affordance) but there is no checkbox — nothing here can unblock it. -->
+             reused list-affordance) but there is no checkbox — nothing here can unblock it.
+
+             CPE-1891 UAT: the header above says THAT a link is refused; it does not say WHY, and that
+             is the question a user actually has ("why can't I just tick the box for this one?"). The
+             backend already computes the real explanation per collision, worded differently for a
+             rename/move (destroys the link) than a convert (writes through it) — `c.reason` — so it is
+             rendered per item here rather than left in the payload unread. -->
         <div class="collision blocked" data-testid="blocked-collisions">
           <div class="collision-head">
             <Icon name="link-broken" size={13} />
             {blocked.length} destination{blocked.length === 1 ? "" : "s"} can’t be overwritten — a link,
             never confirmable
           </div>
-          <ul class="collision-list">
+          <ul class="collision-list blocked-list">
             {#each blocked.slice(0, MAX_LISTED) as c (c.op_index)}
-              <li title={c.to}>{c.to}</li>
+              <li>
+                <div class="collision-path" title={c.to}>{c.to}</div>
+                <div class="collision-reason" data-testid="blocked-reason">{c.reason}</div>
+              </li>
             {/each}
             {#if blocked.length > MAX_LISTED}
               <li class="more">and {blocked.length - MAX_LISTED} more</li>
@@ -274,6 +286,24 @@
   .collision-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); max-height: 120px; overflow: auto; }
   .collision-list li { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 11.5px; }
   .collision-list li.more { list-style: none; margin-left: -18px; font-family: inherit; }
+  /* CPE-1891 UAT follow-up: a blocked row now carries the backend's full per-collision explanation
+     (`c.reason` — why THIS name can't be confirmed, worded differently for rename/move vs convert), not
+     just the bare path, so each row is taller than a confirmable row. The shared 120px preview height
+     would turn 8 such rows into a cramped one-row scroller, so this list gets its own taller cap; the
+     confirmable list (path-only, unchanged) keeps the original 120px. */
+  .blocked-list { max-height: 260px; }
+  .blocked-list li { display: flex; flex-direction: column; gap: 3px; padding: 5px 0; }
+  .blocked-list li:not(:last-child) { border-bottom: 1px solid var(--border); }
+  .collision-path { overflow-wrap: anywhere; }
+  /* Prose, not a path — pulled back out of the li's monospace so it reads like the rest of the dialog's
+     explanatory text. Text colour is `var(--text)`, never `var(--danger)`: the red BORDER on `.collision.
+     blocked` is the "this is refused" signal (see above); red text for "destructive" is the thing
+     docs/design/MENUS.md's convention exists to rule out everywhere in this app, and that holds here too
+     even though this box isn't a menu. */
+  .collision-reason {
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    font-size: 11.5px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere;
+  }
   /* CPE-1869's "copy the whole list" affordance, same `.mini` treatment as RevertOutcomePanel. */
   .mini {
     display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;

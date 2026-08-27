@@ -41,7 +41,17 @@ const BLOCKED_COLLISION = {
   to: "/work/a_v2.txt",
   kind: "rename",
   confirmable: false,
-  reason: '"/work/a_v2.txt" is a link, and renaming onto a link destroys it',
+  reason: '"/work/a_v2.txt" is a link, and renaming onto a link destroys it — the link is removed and its target is left orphaned',
+};
+// Same shape, the CONVERT-flavored wording (CPE-1891 follow-up: the two must read differently, not just
+// share a generic "is a link" header).
+const CONVERT_BLOCKED_COLLISION = {
+  op_index: 1,
+  from: "/work/b.png",
+  to: "/work/b.jpg",
+  kind: "convert",
+  confirmable: false,
+  reason: '"/work/b.jpg" is a link, and creating a file at a link\'s name writes THROUGH it — the bytes would land at the link\'s target, a path you did not name',
 };
 
 beforeEach(() => {
@@ -176,6 +186,30 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     expect(screen.queryByTestId("confirmable-collisions")).toBeNull();
     expect(screen.queryByTestId("confirm-overwrite")).toBeNull();
     expect((screen.getByTestId("run-btn") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("renders each blocked collision's own WHY-not-confirmable reason from the backend, not just the header", async () => {
+    // The header ("N destinations can't be overwritten — a link, never confirmable") only says THAT a
+    // link is refused. The backend's per-collision `reason` says WHY — and worded differently for a
+    // rename/move (destroys the link) than a convert (writes through it), since the two are genuinely
+    // different hazards. Both must actually reach the DOM, not just live in the fetched payload.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "macro_plan") return PLAN;
+      if (cmd === "macro_preflight") return [BLOCKED_COLLISION, CONVERT_BLOCKED_COLLISION];
+      return null;
+    });
+
+    render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/a.txt", "/work/b.png"], root: "/work" });
+    await screen.findByTestId("blocked-collisions");
+    const reasons = screen.getAllByTestId("blocked-reason").map((el) => el.textContent);
+
+    expect(reasons).toContain(BLOCKED_COLLISION.reason);
+    expect(reasons).toContain(CONVERT_BLOCKED_COLLISION.reason);
+    // The two variants must actually read differently -- a shared generic sentence would defeat the
+    // point (rename/move "destroys" the link; convert "writes THROUGH" it).
+    expect(BLOCKED_COLLISION.reason).not.toEqual(CONVERT_BLOCKED_COLLISION.reason);
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("destroys it");
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("writes THROUGH it");
   });
 
   it("a mix of confirmable and blocked collisions still refuses Run even once the confirmable one is checked", async () => {
