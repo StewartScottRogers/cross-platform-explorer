@@ -16,6 +16,11 @@
 //! - Does **NOT** look at any `--config` overlay (`tauri.sidecar*.conf.json` etc.) — only the base
 //!   file. `src/lib/sidecarBundleResources.test.ts` covers the merged-overlay path, because an
 //!   overlay can override these same keys the same way it can override `bundle.resources`.
+//! - Does **NOT** look at the per-platform config files Tauri merges *automatically*, with no
+//!   `--config` flag at all. That is `tests/platform_config_guard.rs` (CPE-1903), which moved out of
+//!   this file when its three-hardcoded-filenames form was replaced by a directory scan — and which
+//!   also runs inside `verify-release-artifacts`, so unlike the two guards below it reaches the tag
+//!   path.
 //!
 //! See `src/pinned_pubkey.rs` for the full picture: what all of these checks together prove, what
 //! they deliberately do NOT protect against, and the intended key-rotation procedure.
@@ -26,16 +31,11 @@ use cpe_updater_verify::{EXPECTED_TAURI_UPDATER_ENDPOINTS, EXPECTED_TAURI_UPDATE
 /// this workspace addresses the repo's config: `CARGO_MANIFEST_DIR` is `<repo>/crates/updater-verify`,
 /// so the real config is two levels up.
 fn repo_tauri_conf_path() -> std::path::PathBuf {
-    repo_src_tauri_dir().join("tauri.conf.json")
-}
-
-/// `<repo>/src-tauri` — shared by every guard in this file that needs to look at more than one file
-/// in that directory (CPE-1873 finding 6 below needs the directory itself, not just the base config).
-fn repo_src_tauri_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("src-tauri")
+        .join("tauri.conf.json")
 }
 
 #[test]
@@ -111,51 +111,4 @@ fn live_endpoints_match_the_pinned_copy() {
          else (CPE-1873).
 "
     );
-}
-
-/// CPE-1873 finding 6 (round 3 — independent Security Auditor, DEMONSTRATED): Tauri merges a
-/// per-platform config file AUTOMATICALLY, with no `--config` flag involved at all --
-/// `tauri-utils::config::parse::read_from` reads `tauri.conf.json` and then looks for
-/// `tauri.macos.conf.json` / `tauri.linux.conf.json` / `tauri.windows.conf.json` next to it and merges
-/// each via RFC 7396, unconditionally, on every build. None of the three exists in this repo today, and
-/// none was in `CONFIG_CHAIN` (the guard above only knows about overlays release-sidecar.yml explicitly
-/// passes via `--config`). Proven: a `src-tauri/tauri.windows.conf.json` containing only a
-/// `plugins.updater` override left every other guard in this crate AND
-/// `sidecarBundleResources.test.ts` green, while shipping an attacker's pubkey/endpoints on every
-/// Windows build -- plain channel and sidecar both, since this file has nothing to do with
-/// `--config` and is picked up by a plain `tauri.conf.json` read too.
-///
-/// This does not try to merge/validate those files' content (that's what the guards above do for the
-/// base config) -- it just refuses their EXISTENCE with a `plugins.updater` key, since none is
-/// supposed to exist at all right now. If one is ever legitimately introduced, this test's failure
-/// message says exactly what to do.
-#[test]
-fn no_automatic_per_platform_config_overrides_the_updater_pin() {
-    let src_tauri = repo_src_tauri_dir();
-    for platform_file in ["tauri.windows.conf.json", "tauri.macos.conf.json", "tauri.linux.conf.json"] {
-        let path = src_tauri.join(platform_file);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue; // doesn't exist -- the expected, safe state today.
-        };
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("{} exists but is not valid JSON: {e}", path.display()));
-        assert!(
-            json.pointer("/plugins/updater").is_none(),
-            "\n\n\
-             SECURITY (CPE-1873 finding 6): {} exists and sets plugins.updater.\n\
-             Tauri merges this file into the build AUTOMATICALLY (no --config flag needed -- see\n\
-             tauri-utils::config::parse::read_from), so it can silently override the pinned\n\
-             pubkey/endpoints on every build for that OS, exactly like a --config overlay can, without\n\
-             ever appearing in CONFIG_CHAIN or this crate's own --search path.\n\
-             \n\
-             If this is a deliberate, authorized change: it must not set plugins.updater at all -- put\n\
-             any real key/endpoint change through tauri.conf.json (or a --config overlay already in\n\
-             CONFIG_CHAIN) so the existing pins actually see it, and record why in the ticket that\n\
-             authorized it.\n\
-             \n\
-             If you did not intend to add this: STOP, this file's plugins.updater block is not\n\
-             trustworthy (CPE-1873).\n",
-            path.display()
-        );
-    }
 }

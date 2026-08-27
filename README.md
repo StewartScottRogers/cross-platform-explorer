@@ -176,6 +176,15 @@ places, all of which must move together in the same PR:
   `bundle.resources` (the original CPE-1270/1271 footgun this file guards). This is what actually
   runs before `release-sidecar.yml` — the build every install actually ships — is allowed to build.
 
+**A rotation must also not arrive as a per-platform config file (CPE-1903).** Tauri merges
+`src-tauri/tauri.<platform>.conf.json`, `…conf.json5` and `Tauri.<platform>.toml` into the build
+**automatically** — no `--config` flag, no workflow involvement — so such a file overrides the
+updater's root of trust while sitting outside both pins above. None exists in this repo, and
+`crates/updater-verify/src/platform_config_guard.rs` keeps it that way by *scanning* `src-tauri/`
+rather than probing filenames: every format, every target, any casing. If you ever need a genuine
+per-platform config, it may set anything **except** `plugins.updater` — route real key/endpoint
+changes through `tauri.conf.json` so the pins actually see them.
+
 Update all three constants to the new value, rotate the `TAURI_SIGNING_PRIVATE_KEY*` secrets above,
 and state the reason in the PR description. See `pinned_pubkey.rs`'s module doc for the full
 walkthrough and — importantly — **what this does and does not prove**: every one of these checks
