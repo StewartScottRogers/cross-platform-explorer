@@ -94,6 +94,15 @@ async function waitForHttp(url, timeoutMs) {
 }
 
 let nextId = 1;
+/** CPE-1882 CI-round-3 finding: NO individual CDP call had its own timeout — only the outer
+ *  ready-poll loop had an overall 40s deadline, checked BETWEEN calls, not around one. If a single
+ *  `Runtime.evaluate`/`Page.navigate` etc. never got a response (a Chrome hiccup mid-call — a GC pause,
+ *  a stalled internal navigation, a brief unresponsive period; real on a shared/throttled CI runner,
+ *  never reproduced locally), the `await` on that one call blocked forever, hanging the WHOLE run
+ *  silently until the job's own external `timeout-minutes` killed it with no information about where it
+ *  was stuck. `CDP_CALL_TIMEOUT_MS` below makes every call fail LOUD, by method name, instead. */
+const CDP_CALL_TIMEOUT_MS = 15000;
+
 function makeCdpClient(ws) {
   const pending = new Map();
   ws.addEventListener("message", (ev) => {
@@ -109,7 +118,14 @@ function makeCdpClient(ws) {
     send(method, params = {}) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`CDP call "${method}" got no response within ${CDP_CALL_TIMEOUT_MS}ms (id=${id})`));
+        }, CDP_CALL_TIMEOUT_MS);
+        pending.set(id, {
+          resolve: (v) => { clearTimeout(timer); resolve(v); },
+          reject: (e) => { clearTimeout(timer); reject(e); },
+        });
         ws.send(JSON.stringify({ id, method, params }));
       });
     },

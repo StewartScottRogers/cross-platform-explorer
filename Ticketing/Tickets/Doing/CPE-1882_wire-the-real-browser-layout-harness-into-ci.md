@@ -300,3 +300,63 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   the job's own YAML comment to record this finding rather than repeat the unverified "~1 minute" claim.
   **CI verdict on the refactored design is still unconfirmed** — pushing this fix now; the Foreman owns
   watching the next run to completion, per CPE-1880.
+
+- **2026-08-26 (CI round 4 — the sweep passed, the JOB still hung)** — Pushed the single-Chrome-instance
+  fix. Real CI run (job `98383557464`, log fetched via `gh api .../logs`, 232 lines) showed the ACTUAL
+  deliverable working: `[layout-guard] PASS — clean at all 12 case/width combination(s).` printed at
+  `01:46:53Z`, only **~18 seconds** after the sweep started (`01:46:35Z`) — the Node-22 fix, the
+  pid-derived dev-server port (`:32410`, not the old hardcoded `4331`), and the single-Chrome-instance
+  refactor all confirmed working on the real runner, not just locally. Both the Foreman and I read this
+  same log independently and reached the same conclusion.
+
+  **But the job did not complete.** Nothing happened for the next ~14m39s until
+  `##[error]The operation was canceled.` at `02:01:32Z` (the job's own 15-minute cap) — GitHub's own
+  "Cleaning up orphan processes" step then had to force-kill `npm run harness:layout-guard` (pid 2398),
+  `npm run harness:layout-guard-server` (pid 2418), the real `vite`/node process (2410/2430), and
+  `esbuild` (2438) — ALL of them still alive well after the harness itself had already printed its
+  verdict and returned from `main()`.
+
+  **Root cause**: `run.mjs` spawns the dev server via `spawn("npm", [...], { shell: true })`. On POSIX
+  this returns a ChildProcess whose pid is the `sh -c` WRAPPER, not `npm` — `sh` forks `npm` as a genuine
+  child rather than `exec`-replacing itself, so `vite.kill()` (the old `finally` block, non-Windows
+  branch) only ever killed the shell, leaving `npm` → the real `vite` node process → `esbuild` all
+  orphaned and alive. Those orphans kept holding open the WRITE end of the very stdout/stderr pipes
+  `run.mjs` itself was reading from (inherited file descriptors, not closed just because the shell died),
+  so `run.mjs`'s own Node process never saw EOF on those streams and never exited naturally — the whole
+  JOB sat there until the EXTERNAL job-level timeout did the killing GitHub's own cleanup log shows.
+  Windows was never affected: its branch already used `taskkill /pid <shell> /T /F`, which kills the
+  WHOLE process tree by walking it explicitly, not by relying on the immediate child dying cleanly.
+
+  **Fix, two parts**: (1) spawn the vite child with `detached: true` on POSIX (a no-op on Windows, which
+  keeps its own taskkill path unchanged) — this makes it the leader of its OWN process group, which every
+  descendant (`sh` → `npm` → `vite`/node → `esbuild`) inherits automatically, so `process.kill(-vite.pid,
+  "SIGKILL")` in the `finally` block now reaches the WHOLE tree by process-group id, the same guarantee
+  `taskkill /T` already gave Windows. (2) A hard backstop regardless: `main()` now ends with
+  `process.exit(process.exitCode ?? 0)` inside a `.finally()`, rather than trusting Node's "exit once the
+  event loop drains" behaviour — a single missed handle anywhere (a stream that doesn't see EOF, a timer
+  that doesn't clear) must never again hang the whole CI job silently for its full external timeout after
+  the actual verdict is already known and printed. Verified the exit path does not race an unflushed
+  verdict: `console.log`/`console.error` to a pipe are synchronous in Node for the process's own direct
+  stdout, and the explicit `process.exit()` only runs in `.finally()` AFTER every `console.*` call in
+  `main()` has already executed — the printed verdict is what determines `process.exitCode` in the first
+  place, so there is no ordering gap for it to race.
+
+  Also fixed the same *class* of gap in `engine.mjs`'s CDP client while investigating: no individual CDP
+  call (`Runtime.evaluate`, `Page.navigate`, etc.) had its own timeout — only the outer ready-poll loop
+  had a 40s deadline, checked BETWEEN calls, never around one, so a single stalled response (a CI-only
+  Chrome hiccup, never reproduced locally) could have hung a call forever with the outer deadline never
+  getting a chance to fire. Every CDP call now individually times out at 15s, failing loud and by method
+  name instead. Not confirmed as a contributor to THIS specific hang (the process-tree leak explains it
+  completely on its own), but a real, independent gap worth closing given how expensive silent hangs are
+  to diagnose here — this repo's own tooling (the 10-minute foreground-tool cap vs. CI's own run
+  durations) makes exactly this failure shape the hardest one to see, which is the whole reason CPE-1880
+  exists.
+
+  Re-verified locally (both PASS and a forced-FAIL red-proof): `npm run harness:layout-guard` now exits
+  with the CORRECT code (`0` clean, `1` on the CPE-1836 red-proof) and returns control to the shell
+  immediately after printing its verdict — no hang observed locally either, though the leaked-orphan bug
+  itself was CI(Linux)-only (Windows' `taskkill /T` path was never broken). `git diff` on
+  `StatusBar.svelte`: zero change. `npm run check`: 0 errors, 0 warnings. Zero leftover Chrome profile
+  dirs after the run (cleanup fix from CI round 2 still holds). Pushing now; CI verdict on THIS fix is
+  still unconfirmed — the Foreman owns watching it to a real completion (not just a printed PASS line),
+  per CPE-1880.

@@ -111,10 +111,24 @@ async function main() {
   console.log("[layout-guard] starting vite dev server…");
   // `shell: true` on Windows: spawning "npm"/"npm.cmd" directly (no shell) throws EINVAL — see the
   // identical comment in sidebar-drop-stack-overlap/check.mjs.
+  //
+  // CPE-1882 CI-round-4 finding: `detached: true` on POSIX (ignored/harmless on Windows, which uses its
+  // own taskkill-based teardown below) makes THIS spawned process the leader of a NEW process group,
+  // which every process it goes on to spawn (`sh -c` -> `npm` -> the real `vite`/node process -> vite's
+  // own `esbuild` workers) inherits by default. That group is what makes it possible to kill the WHOLE
+  // tree by process GROUP id, not just this one direct child — see the `finally` block below for why
+  // that distinction is the actual root cause of a real CI hang (job 98383557464): the harness sweep
+  // itself printed "PASS" in under 20 seconds, but the JOB then sat for the remaining ~14.7 minutes
+  // until GitHub's own external timeout force-killed a pile of orphaned `npm`/`vite`/`esbuild`
+  // processes — `vite.kill()` had only ever killed the immediate `sh` wrapper, not its descendants,
+  // which kept holding this process's own piped `stdout`/`stderr` open (a descendant that inherited the
+  // pipe's write end keeps it open even after the process this script directly spawned is dead), so
+  // Node itself never saw EOF and never exited on its own.
   const vite = spawn("npm", ["run", "harness:layout-guard-server", "--", "--port", String(DEV_PORT), "--strictPort"], {
     cwd: REPO_ROOT,
     stdio: ["ignore", "pipe", "pipe"],
     shell: true,
+    detached: process.platform !== "win32",
   });
 
   try {
@@ -155,15 +169,37 @@ async function main() {
   } finally {
     // See sidebar-drop-stack-overlap/check.mjs's identical comment: `shell: true` means `vite.pid` is
     // the shell, not the real dev-server process, on Windows — `taskkill /T` kills the whole tree.
+    //
+    // CPE-1882 CI-round-4 fix: on POSIX, kill the whole PROCESS GROUP (negative pid), not just the
+    // immediate `sh` child — `vite.kill()` alone left `npm`/`vite`(node)/`esbuild` alive as orphans
+    // (confirmed from a real CI job's "Terminate orphan process" cleanup log), which is what hung the
+    // job for its full remaining timeout after the actual sweep had already printed PASS/FAIL. Requires
+    // the `detached: true` this process was spawned with above, which put it in its own group.
     if (process.platform === "win32") {
       spawn("taskkill", ["/pid", String(vite.pid), "/T", "/F"], { stdio: "ignore" });
     } else {
-      vite.kill();
+      try {
+        process.kill(-vite.pid, "SIGKILL");
+      } catch {
+        // Group already gone, or this platform doesn't support negative-pid group kill — fall back to
+        // killing just the direct child rather than throwing out of a `finally` block.
+        vite.kill("SIGKILL");
+      }
     }
   }
 }
 
-main().catch((e) => {
-  console.error("[layout-guard] FAIL:", e);
-  process.exit(1);
-});
+main()
+  .catch((e) => {
+    console.error("[layout-guard] FAIL:", e);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // CPE-1882 CI-round-4 fix, the real backstop: even with the process-GROUP kill above, do not trust
+    // Node's natural "exit once the event loop drains" behaviour for a script that just spawned a
+    // multi-process shell pipeline — a single missed handle (a stream that didn't get an EOF, a timer
+    // that didn't clear) hangs the WHOLE CI job silently until its external timeout kills it, exactly
+    // what happened on a real run. Exiting explicitly, with whatever `process.exitCode` was already set
+    // to (0 if never touched), makes this script's own termination unconditional instead of a hope.
+    process.exit(process.exitCode ?? 0);
+  });
