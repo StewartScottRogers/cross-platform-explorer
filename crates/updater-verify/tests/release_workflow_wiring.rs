@@ -250,7 +250,9 @@ fn scaffold(manifest_dir: &str, conf_rel: &str, signed_bytes: &[u8], artifact_on
         Some(&kp.pk),
         &kp.sk,
         std::io::Cursor::new(signed_bytes),
-        Some("trusted"),
+        // CPE-1923/SEC-1: the anti-rollback decision reads the trusted comment's `file:` field, so
+        // this fixture carries the real shape a Tauri signature has.
+        Some(&format!("timestamp:1787496720	file:{ARTIFACT_NAME}")),
         Some("untrusted"),
     )
     .expect("sign");

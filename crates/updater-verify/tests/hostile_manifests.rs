@@ -45,12 +45,37 @@ const REPO: &str = "StewartScottRogers/cross-platform-explorer";
 /// that the cryptography is real and the manifest is hostile anyway.
 struct Entry {
     platform: &'static str,
+    /// The filename the asset is UPLOADED under. Attacker-chosen in this guard's threat model.
     asset: String,
+    /// The filename recorded in the minisign **trusted comment**, which the global signature covers
+    /// — so this is what the artifact really is, and changing it needs the signing key. Defaults to
+    /// `asset` (the honest case, where the upload keeps the name it was signed under).
+    signed_as: String,
     bytes: Vec<u8>,
 }
 
 fn entry(platform: &'static str, asset: impl Into<String>, bytes: &str) -> Entry {
-    Entry { platform, asset: asset.into(), bytes: bytes.as_bytes().to_vec() }
+    let asset = asset.into();
+    Entry { platform, signed_as: asset.clone(), asset, bytes: bytes.as_bytes().to_vec() }
+}
+
+impl Entry {
+    /// The SEC-1 rename attack: keep the bytes and the signature, upload them under a different
+    /// name. Reads at the call site exactly as the attack is performed — `entry(...the old
+    /// installer...).uploaded_as(...a current-looking name...)`.
+    fn uploaded_as(mut self, uploaded: impl Into<String>) -> Self {
+        self.asset = uploaded.into();
+        self
+    }
+
+    /// Record the trusted comment's filename explicitly. Real Tauri signatures carry the
+    /// **unsanitised** product name (`Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe`)
+    /// while the uploaded asset carries the bundler-sanitised one
+    /// (`Cross-Platform.Explorer.Sidecar._0.57.69_x64-setup.exe`), so a faithful fixture sets both.
+    fn signed_as(mut self, signed: impl Into<String>) -> Self {
+        self.signed_as = signed.into();
+        self
+    }
 }
 
 /// The release-download prefix this fixture release publishes under, matching what
@@ -86,7 +111,11 @@ fn scaffold(
             Some(&kp.pk),
             &kp.sk,
             std::io::Cursor::new(&e.bytes),
-            Some("trusted"),
+            // The real shape, read off this repo's published `.sig` assets:
+            //   timestamp:1787496720	file:Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe
+            // This is the field the global signature covers, and the one the anti-rollback decision
+            // now binds against instead of the attacker-chosen upload name.
+            Some(&format!("timestamp:1787496720	file:{}", e.signed_as)),
             Some("untrusted"),
         )
         .expect("sign");
@@ -437,7 +466,11 @@ fn h2_an_unrecognised_platform_key_is_refused() {
             "a payload under a platform key nothing here builds",
         )],
     );
-    refuse(&run(dir.path(), &tag), &["solaris-sparc"]);
+    // Reviewer: asserting only the platform name left this test SHADOWED -- the version binding's
+    // own UnknownPlatformKey names the same platform, so it stayed green with the mapping check
+    // disabled. Naming the property makes it isolate, the way its sibling
+    // `h2_only_the_mapping_check_...` already does.
+    refuse(&run(dir.path(), &tag), &["platform/asset mapping", "solaris-sparc"]);
 }
 
 // ── Hostile 3 — channel inference was an unanchored substring match ───────────────────────────
@@ -711,4 +744,228 @@ fn the_sidecar_jobs_own_invocation_shape_still_refuses_a_plain_asset() {
         "the refusal must say WHERE the expectation came from, since --conf's productName \
          disagrees with it by design in this shape.\n--- stderr ---\n{stderr}"
     );
+}
+
+// ── SEC-1: the rename bypass, and the signed name that closes it ──────────────────────────────
+//
+// The first version of this guard bound the version to the UPLOADED asset filename. That name is
+// chosen by the attacker in the exact threat model the guard declares — release-asset write, no
+// signing key — so the whole binding was defeated by renaming the upload. Two independent
+// reviewers reproduced it, with different spellings of the current-looking name, both at EXIT 0:
+//
+//   old 0.1.0 installer under its own name              -> exit 1 (refused)
+//   THE SAME BYTES, THE SAME SIGNATURE, uploaded as
+//     Cross-Platform.Explorer.Sidecar._0.57.70_...exe   -> exit 0, "verified 1 of 1"
+//
+// The fix binds to the minisign trusted comment instead. `tauri-bundler` writes the original
+// filename there, and the global signature covers it (`minisign::verify` checks
+// `ed25519::verify(sig_and_trusted_comment, pk, global_sig)`), so altering it requires the signing
+// key — the one capability this threat model withholds. The rename now buys nothing.
+
+/// SEC-1, the auditor's spelling. Same bytes, same signature, uploaded under a current-looking
+/// name. Before the fix: EXIT 0. Delete the trusted-comment binding and this goes green again.
+#[test]
+fn sec1_the_rename_bypass_is_refused() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "windows-x86_64",
+            // Signed as the OLD, vulnerable build...
+            format!("Cross-Platform Explorer (Sidecar)_{OLD_VERSION}_x64-setup.exe"),
+            "the OLD, vulnerable 0.1.0 installer bytes -- genuinely signed",
+        )
+        // ...uploaded under a name that claims to be the current release.
+        .uploaded_as(format!("Cross-Platform.Explorer.Sidecar._{VERSION}_x64-setup.exe"))],
+    );
+    let stderr = refuse(&run(dir.path(), &tag), &["artifact/version binding", "windows-x86_64"]);
+    assert!(
+        stderr.contains("was SIGNED as"),
+        "the refusal must say the artifact was SIGNED as something else -- naming the uploaded \
+         name would be repeating the attacker's own claim back at the reader.\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stderr.contains(OLD_VERSION),
+        "the refusal must show the version the artifact really is.\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("did NOT verify"),
+        "the signature IS genuine here; a signature-failure message would mean the fixture is not \
+         reproducing the attack.\n--- stderr ---\n{stderr}"
+    );
+}
+
+/// SEC-1, the Reviewer's spelling of the same attack, reached independently. Kept as its own
+/// fixture because two reviewers converging is the evidence, and a future refactor that fixed only
+/// one spelling would be caught by the other.
+#[test]
+fn sec1_the_reviewers_rename_spelling_is_also_refused() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "windows-x86_64",
+            format!("Cross-Platform Explorer (Sidecar)_{OLD_VERSION}_x64-setup.exe"),
+            "same old bytes",
+        )
+        .uploaded_as(format!("Cross-Platform.Explorer.Sidecar._{VERSION}_x64-setup.exe"))],
+    );
+    refuse(&run(dir.path(), &tag), &["artifact/version binding"]);
+}
+
+/// The control the rename tests need: the honest pair — signed as the current version, uploaded
+/// under the bundler's sanitised spelling of that same name — must still pass. Note the two names
+/// genuinely differ (`Explorer (Sidecar)_` vs `Explorer.Sidecar._`), exactly as they do on a real
+/// release, so this also proves the check compares them by normalised identity rather than
+/// demanding they be equal.
+#[test]
+fn sec1_control_the_honest_signed_and_uploaded_name_pair_passes() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "windows-x86_64",
+            format!("Cross-Platform.Explorer.Sidecar._{VERSION}_x64-setup.exe"),
+            "the real current installer bytes",
+        )
+        .signed_as(format!("Cross-Platform Explorer (Sidecar)_{VERSION}_x64-setup.exe"))],
+    );
+    accept(&run(dir.path(), &tag), 1);
+}
+
+/// The auditor's attack on the macOS exemption: an old Windows `.exe`'s bytes and genuine
+/// signature, renamed to the versionless macOS artifact name and served under `darwin-aarch64`.
+/// The pre-SEC-1 exemption keyed on the UPLOADED name, so any signed bytes at all could claim it.
+/// Keyed on the SIGNED name, the trusted comment still says `…_0.1.0_x64-setup.exe`, which is
+/// neither current nor a macOS app tarball.
+#[test]
+fn sec1_the_macos_exemption_cannot_be_claimed_by_renaming_other_signed_bytes() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "darwin-aarch64",
+            format!("Cross-Platform Explorer (Sidecar)_{OLD_VERSION}_x64-setup.exe"),
+            "an old WINDOWS installer's bytes, genuinely signed",
+        )
+        .uploaded_as("Cross-Platform.Explorer.Sidecar._aarch64.app.tar.gz")],
+    );
+    refuse(&run(dir.path(), &tag), &["darwin-aarch64"]);
+}
+
+/// ...and the exemption still works for the artifact that actually forces it: a genuine macOS app
+/// tarball, versionless in BOTH names, because that is how Tauri signs and names it.
+#[test]
+fn sec1_control_a_genuine_versionless_macos_artifact_is_still_admitted() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "darwin-aarch64",
+            "Cross-Platform.Explorer.Sidecar._aarch64.app.tar.gz",
+            "genuine macos app tarball bytes",
+        )
+        .signed_as("Cross-Platform Explorer (Sidecar).app.tar.gz")],
+    );
+    let out = run(dir.path(), &tag);
+    accept(&out, 1);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("exempt   : darwin-aarch64 -> signed as `Cross-Platform Explorer (Sidecar).app.tar.gz`"),
+        "the exemption must be printed with the SIGNED name, so a reader can see what was actually \
+         admitted rather than what the upload claimed.\n--- stdout ---\n{stdout}"
+    );
+}
+
+/// A signature with no `file:` trusted comment must be refused, not waved through. minisign's own
+/// `verify` accepts a signature carrying no trusted comment at all, so treating an absent one as
+/// acceptable would hand the rename bypass straight back by simply stripping the field.
+#[test]
+fn sec1_a_signature_with_no_file_trusted_comment_is_refused() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "windows-x86_64",
+            format!("Cross-Platform.Explorer.Sidecar._{VERSION}_x64-setup.exe"),
+            "bytes signed without a file: field",
+        )
+        .signed_as("")],
+    );
+    refuse(&run(dir.path(), &tag), &["artifact/version binding", "windows-x86_64"]);
+}
+
+/// The channel is now readable from the SIGNED name too, and that reading is the stronger one: the
+/// trusted comment carries the raw `Explorer (Sidecar)_` spelling the uploaded asset never has. So
+/// a plain artifact uploaded under a sidecar-looking name is caught even though the upload name is
+/// channel-correct.
+#[test]
+fn sec1_a_plain_artifact_uploaded_under_a_sidecar_name_is_caught_by_its_signed_name() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "windows-x86_64",
+            // Genuinely signed as the PLAIN build of the current version...
+            format!("Cross-Platform Explorer_{VERSION}_x64-setup.exe"),
+            "plain-channel bytes of the current version",
+        )
+        // ...uploaded under a perfectly sidecar-looking, correctly-versioned name.
+        .uploaded_as(format!("Cross-Platform.Explorer.Sidecar._{VERSION}_x64-setup.exe"))],
+    );
+    let stderr = refuse(&run(dir.path(), &tag), &["release channel, signed name", "windows-x86_64"]);
+    assert!(
+        stderr.contains("signed as"),
+        "--- stderr ---\n{stderr}"
+    );
+}
+
+/// Reviewer finding: `version` was read with `Some(v) => v.to_string()`, accepting `"version": ""`,
+/// while the `pubkey` and `productName` reads on either side of it both check for emptiness — and
+/// `artifact_binding`'s doc asserted "the binary refuses before reaching here", which was not true.
+///
+/// A **darwin-only** manifest is the shape that made it exploitable: every other platform fails
+/// closed on an empty version, but the versionless-macOS exemption would have waved this through.
+/// Both defences now hold — the binary refuses up front, and `bind_signed_artifact` checks the
+/// empty version *before* considering the exemption — so this asserts the exit code AND that the
+/// refusal is the up-front one, which is what isolates the binary's own check.
+#[test]
+fn an_empty_version_in_the_config_is_refused_even_for_a_darwin_only_manifest() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        // The release declares no version at all...
+        "",
+        VERSION,
+        &tag,
+        // ...and names only the platform whose artifact is legitimately versionless.
+        &[entry(
+            "darwin-aarch64",
+            "Cross-Platform.Explorer.Sidecar._aarch64.app.tar.gz",
+            "genuine macos app tarball bytes",
+        )
+        .signed_as("Cross-Platform Explorer (Sidecar).app.tar.gz")],
+    );
+    refuse(&run(dir.path(), &tag), &["EMPTY top-level `version`"]);
 }

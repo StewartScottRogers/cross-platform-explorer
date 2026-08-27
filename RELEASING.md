@@ -250,10 +250,26 @@ kill-all before touching the installer.
 the draft release**, plus every asset it names, and refuses on: a signature that does not verify, a
 platform it could not fetch, a `url` outside this tag's download prefix, a mixed release channel, a
 platform key serving another OS's payload, and — the one an attacker with release-asset write but no
-signing key would otherwise walk through — **an artifact belonging to a different version than the
-one being shipped**. A refusal always names which property failed. One residual is deliberate and
-documented: macOS's `<productName>.app.tar.gz` carries no version in its name, so that one asset is
-bound to the release by its url and signature only; the run prints every such exemption it grants.
+signing key would otherwise walk through — **an artifact belonging to a different release than the
+one being shipped**.
+
+That last check reads the artifact's **signed** name (the `file:` field of the minisign trusted
+comment, which the global signature covers), *not* the name it was uploaded under. The distinction is
+the whole point: an asset-write attacker chooses the upload name freely, so an earlier version of this
+guard that compared the upload name was defeated by uploading the old, genuinely-signed installer
+under a current-looking filename. Changing the signed name requires the signing key.
+
+The three checks added for this (channel, platform/payload mapping, artifact/release binding) prefix
+their refusals with `PROPERTY FAILED -- <property>`. The older refusals — pubkey pin, manifest-vs-config
+version mismatch, tampered artifact, missing manifest — predate that convention and do not carry the
+prefix; they still name what went wrong in prose.
+
+**One residual is deliberate and tracked as CPE-1942.** Tauri signs the macOS artifact as
+`<productName>.app.tar.gz`, with no version in the signed name either — verified against the real
+published `.sig` assets — so there is nothing to bind that one artifact kind against. It is admitted
+on its url prefix and signature alone. The exemption is narrow: it applies only to a `darwin-*`
+platform whose *signed* name ends `.app.tar.gz`, so other signed bytes cannot claim it by being
+renamed. The run prints every exemption it grants, with the signed name.
 
 ### OS installer code signing
 

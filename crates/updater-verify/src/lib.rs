@@ -42,9 +42,9 @@ pub use platform_config_guard::{
 // See that module's doc for the auditor's signed-downgrade walkthrough and the macOS exception.
 pub mod artifact_binding;
 pub use artifact_binding::{
-    basename_of_url, platform_os_of_key, platforms_not_bound_to_version,
-    platforms_with_wrong_extension_for_key, product_token, ExtensionFault, PlatformOs,
-    VersionBinding, VersionBindingFault, VersionlessExemption,
+    basename_of_url, bind_signed_artifact, platform_os_of_key,
+    platforms_with_wrong_extension_for_key, product_token, trusted_comment_file, ExtensionFault,
+    PlatformOs, SignedBinding, SignedBindingFault,
 };
 
 /// Standard base64 (with padding) — the alphabet Tauri uses for both the config pubkey and signatures.
@@ -79,6 +79,11 @@ pub enum ManifestProblem {
     BadSignature { platform: String, detail: String },
     /// The minisign signature did not verify against the pubkey over the artifact bytes.
     VerificationFailed { platform: String },
+    /// CPE-1923 finding 1 (SEC-1): the signature verified, but the artifact it authenticates does
+    /// not belong to the release being cut. "This signature is valid" and "this is an acceptable
+    /// version to move to" are different questions; this is the second one, decided from the
+    /// signature's own trusted comment rather than from the attacker-chosen upload name.
+    ArtifactNotBoundToRelease { platform: String, fault: artifact_binding::SignedBindingFault },
 }
 
 impl std::fmt::Display for ManifestProblem {
@@ -103,7 +108,7 @@ impl std::fmt::Display for ManifestProblem {
             }
             ManifestProblem::ArtifactUnavailable { platform } => write!(
                 f,
-                "platform `{platform}` has no locally-available artifact bytes to verify its signature                  against -- a manifest platform that cannot be verified is a failure, not a skip"
+                "platform `{platform}` has no locally-available artifact bytes to verify its signature against -- a manifest platform that cannot be verified is a failure, not a skip"
             ),
             ManifestProblem::BadPubkey(detail) => {
                 write!(f, "configured pubkey is unusable: {detail}")
@@ -115,11 +120,39 @@ impl std::fmt::Display for ManifestProblem {
                 f,
                 "platform `{platform}` signature did NOT verify against the configured pubkey"
             ),
+            ManifestProblem::ArtifactNotBoundToRelease { platform, fault } => write!(
+                f,
+                "PROPERTY FAILED -- artifact/version binding (CPE-1923 finding 1, SIGNED DOWNGRADE): platform `{platform}` {fault}"
+            ),
         }
     }
 }
 
 impl std::error::Error for ManifestProblem {}
+
+/// What a successful [`verify_update_manifest`] actually established, per platform.
+///
+/// `Ok` used to be `()`. It carries data now because the only *authenticated* name an artifact has
+/// is the one inside its verified trusted comment, and callers need it: the binary reports the
+/// versionless-macOS exemptions it granted, and runs the channel check a second time over these
+/// signature-covered names rather than only over the attacker-chosen upload names.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VerifiedManifest {
+    /// `(platform, filename the artifact was SIGNED as)` for every platform that verified.
+    pub signed_files: Vec<(String, String)>,
+    /// Platforms admitted by the narrow versionless-macOS exemption rather than by carrying the
+    /// version. Reported so a run cannot consist silently of exemptions.
+    pub versionless_exemptions: Vec<(String, String)>,
+}
+
+/// The `file:` value of a trusted comment, or the whole comment when it has no `file:` field.
+/// Only reached for comments [`artifact_binding::bind_signed_artifact`] has already accepted, so
+/// the fallback is unreachable in practice and exists to keep this total.
+fn trusted_comment_file_owned(trusted_comment: &str) -> String {
+    artifact_binding::trusted_comment_file(trusted_comment)
+        .unwrap_or(trusted_comment)
+        .to_string()
+}
 
 /// Verify a Tauri updater manifest end-to-end, mirroring the runtime plugin's checks.
 ///
@@ -154,8 +187,9 @@ pub fn verify_update_manifest(
     pubkey_config_b64: &str,
     expected_version: &str,
     artifact: impl Fn(&str) -> Option<Vec<u8>>,
-) -> Result<(), Vec<ManifestProblem>> {
+) -> Result<VerifiedManifest, Vec<ManifestProblem>> {
     let mut problems = Vec::new();
+    let mut verified = VerifiedManifest::default();
 
     // Parse the configured pubkey once. If it's unusable nothing can verify, but we still report shape
     // problems below (a bad pubkey and a malformed manifest are independent failures worth surfacing
@@ -242,11 +276,50 @@ pub fn verify_update_manifest(
         // both minisign signature forms (prehashed + legacy ed25519) verify — Tauri uses prehashed.
         if minisign::verify(pk, &sig_box, std::io::Cursor::new(&bytes), true, false, true).is_err() {
             problems.push(ManifestProblem::VerificationFailed { platform: name });
+            continue;
+        }
+
+        // ── CPE-1923 finding 1 / SEC-1: the anti-rollback decision ────────────────────────────
+        //
+        // Everything above proves the BYTES are ones this key once signed. It says nothing about
+        // WHICH RELEASE they are from, and the first version of this guard tried to answer that
+        // from the uploaded asset's filename -- which the attacker in this threat model (release
+        // asset write, no signing key) simply renames. The signed trusted comment carries the
+        // original filename and is covered by the global signature `minisign::verify` just
+        // checked, so it is the one name here that an asset-write attacker cannot choose.
+        //
+        // This runs HERE, inline, immediately after that verification, for two reasons: the
+        // trusted comment is only trustworthy once verification has succeeded, and putting the
+        // decision inside the function whose `Ok` every caller already gates on means it cannot be
+        // forgotten at a call site the way a separate follow-up check could.
+        let trusted_comment = match sig_box.trusted_comment() {
+            Ok(tc) => tc,
+            Err(e) => {
+                problems.push(ManifestProblem::ArtifactNotBoundToRelease {
+                    platform: name,
+                    fault: artifact_binding::SignedBindingFault::NoSignedFilename {
+                        detail: e.to_string(),
+                    },
+                });
+                continue;
+            }
+        };
+        match artifact_binding::bind_signed_artifact(&name, &trusted_comment, expected_version) {
+            Ok(artifact_binding::SignedBinding::BoundToVersion) => {
+                verified.signed_files.push((name, trusted_comment_file_owned(&trusted_comment)));
+            }
+            Ok(artifact_binding::SignedBinding::VersionlessMacApp { signed_file }) => {
+                verified.signed_files.push((name.clone(), signed_file.clone()));
+                verified.versionless_exemptions.push((name, signed_file));
+            }
+            Err(fault) => {
+                problems.push(ManifestProblem::ArtifactNotBoundToRelease { platform: name, fault });
+            }
         }
     }
 
     if problems.is_empty() {
-        Ok(())
+        Ok(verified)
     } else {
         Err(problems)
     }
@@ -621,7 +694,7 @@ mod tests {
     /// The artifact bytes every fixture signs over.
     const ARTIFACT: &[u8] = b"cross-platform-explorer installer bytes v0.57.33";
     const VERSION: &str = "0.57.33";
-    const URL: &str = "https://example.com/releases/download/v0.57.33/app_x64-setup.nsis.zip";
+    const URL: &str = "https://example.com/releases/download/v0.57.33/app_0.57.33_x64-setup.nsis.zip";
 
     /// A freshly generated keypair, encoded into the SAME double-base64 shape the real config uses, so the
     /// test exercises the real decode path (`config pubkey → base64 → minisign public-key file`).
@@ -644,7 +717,10 @@ mod tests {
             Some(&keypair.pk),
             &keypair.sk,
             std::io::Cursor::new(data),
-            Some("trusted comment"),
+            // CPE-1923/SEC-1: the anti-rollback decision reads the trusted comment's `file:`
+            // field, so these fixtures carry the real shape a Tauri signature has. `windows-x86_64`
+            // + a versioned name is the ordinary, binding case.
+            Some(&format!("timestamp:1787496720	file:app_{VERSION}_x64-setup.exe")),
             Some("signature from test key"),
         )
         .expect("sign");

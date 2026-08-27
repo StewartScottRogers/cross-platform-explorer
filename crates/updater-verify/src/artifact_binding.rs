@@ -26,8 +26,11 @@
 //! Those are two different questions and this crate used to answer only the first. This module is
 //! the **one** place that answers the second, so there is no second copy to disagree with it:
 //!
-//! * [`platforms_not_bound_to_version`] — the anti-rollback decision. An asset may only ship under
-//!   the version whose token its own filename carries.
+//! * [`bind_signed_artifact`] — the anti-rollback decision. An artifact may only ship under the
+//!   version its own **signed** name carries. It reads the minisign trusted comment, not the
+//!   uploaded asset's filename: the asset name is attacker-chosen in this exact threat model, and
+//!   binding to it was defeated by renaming the upload (SEC-1). The trusted comment is covered by
+//!   the global signature, so changing it needs the signing key.
 //! * [`platforms_with_wrong_extension_for_key`] — the platform-key → payload-kind decision, so a
 //!   `darwin-*` entry cannot serve a Windows installer (denial-of-update, and the exact shape a
 //!   channel-mixing bug corrupts).
@@ -44,20 +47,28 @@
 //!
 //! ```text
 //! windows-x86_64        Cross-Platform.Explorer_0.57.69_x64_en-US.msi           <- versioned
-//! windows-x86_64-nsis   Cross-Platform.Explorer_0.57.69_x64-setup.exe           <- versioned
+//! windows-x86_64-nsis Cross-Platform.Explorer_0.57.69_x64-setup.exe           <- versioned
 //! linux-x86_64          Cross-Platform.Explorer.Sidecar._0.57.69_amd64.AppImage <- versioned
-//! linux-x86_64-rpm      Cross-Platform.Explorer.Sidecar.-0.57.69-1.x86_64.rpm   <- versioned
+//! linux-x86_64-rpm Cross-Platform.Explorer.Sidecar.-0.57.69-1.x86_64.rpm   <- versioned
 //! darwin-aarch64        Cross-Platform.Explorer.Sidecar._aarch64.app.tar.gz     <- NOT versioned
 //! ```
 //!
-//! So a blanket rule would break macOS on the first real release. The exemption is deliberately as
-//! narrow as the fact that forces it: the platform key must resolve to [`PlatformOs::Darwin`] **and**
-//! the basename must end in `.app.tar.gz`. A Windows or Linux entry cannot claim it by renaming its
-//! payload, and a `darwin-*` entry that claims it is simultaneously held to
-//! [`platforms_with_wrong_extension_for_key`], which permits `darwin-*` nothing else. The residual
-//! is honest and recorded rather than hidden: a macOS `.app.tar.gz` is still bound to the release
-//! only by its `url` (CPE-1872 round 3's tag prefix) and its signature, not by its own name. The
-//! binary prints every exemption it grants so a run cannot quietly consist entirely of them.
+//! So a blanket rule would break macOS on the first real release, and — checked against the real
+//! `.sig` assets — the trusted comment does not rescue it either: macOS's *signed* name is
+//! versionless too (`file:Cross-Platform Explorer (Sidecar).app.tar.gz`). There is simply no
+//! version anywhere to bind against for this one artifact kind.
+//!
+//! The exemption is therefore as narrow as the fact that forces it: the platform key must resolve
+//! to [`PlatformOs::Darwin`] **and** the artifact's **signed** name must end `.app.tar.gz`. Keying
+//! it on the signed name rather than the uploaded one is what makes it safe: an attacker cannot
+//! claim it by renaming an upload, so "any signed bytes at all, called `…app.tar.gz`" no longer
+//! qualifies — only bytes that were actually signed as a macOS app tarball.
+//!
+//! The residual is recorded rather than hidden: a genuinely-signed macOS `.app.tar.gz` from a
+//! *different release of this same product* is still admitted, bound to this release only by its
+//! `url` (CPE-1872 round 3's tag prefix) and its signature. Closing that needs
+//! `CFBundleShortVersionString` out of the tarball — tracked as CPE-1942. The binary prints every
+//! exemption it grants so a run cannot quietly consist entirely of them.
 
 /// The operating system a manifest platform key names.
 ///
@@ -211,119 +222,182 @@ pub fn platforms_with_wrong_extension_for_key(manifest_json: &str) -> Vec<(Strin
         .collect()
 }
 
-/// Why a platform entry's asset is not bound to the version being shipped (CPE-1923 finding 1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VersionBindingFault {
-    /// The platform key names no OS this release builds for, so the macOS versionless exemption
-    /// cannot even be evaluated. Fails closed.
-    UnknownPlatformKey { basename: String },
-    /// The asset's filename carries no occurrence of the version this release is shipping. This is
-    /// the auditor's downgrade: a genuinely-signed *older* installer uploaded under the new tag.
-    NotBoundToVersion { basename: String, expected_version: String },
+/// The `file:` value out of a **verified** minisign trusted comment.
+///
+/// `tauri-bundler` signs each artifact with a trusted comment of the form
+/// `timestamp:<unix>\tfile:<original filename>` — confirmed by reading the real `.sig` assets off
+/// this repo's published `v0.57.69-sidecar` release rather than taken on trust:
+///
+/// ```text
+/// timestamp:1787496720\tfile:Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe
+/// timestamp:1787496631\tfile:Cross-Platform Explorer_0.57.69_amd64.deb
+/// timestamp:1787496952\tfile:Cross-Platform Explorer (Sidecar)-0.57.69-1.x86_64.rpm
+/// timestamp:1787496658\tfile:Cross-Platform Explorer (Sidecar).app.tar.gz
+/// ```
+///
+/// The value can contain spaces (it is the *unsanitised* product name — note `Explorer (Sidecar)_`,
+/// which the uploaded asset name never carries), so the field is split on tabs, never whitespace.
+/// Returns `None` when there is no `file:` field at all.
+pub fn trusted_comment_file(trusted_comment: &str) -> Option<&str> {
+    trusted_comment
+        .split('\t')
+        .find_map(|field| field.trim().strip_prefix("file:"))
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
 }
 
-impl std::fmt::Display for VersionBindingFault {
+/// Why a platform's **signed** artifact does not belong to the release being cut (CPE-1923
+/// finding 1, as re-founded after the SEC-1 rename bypass).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedBindingFault {
+    /// The signature carries no usable trusted comment, so there is nothing signature-covered to
+    /// bind against. Fails closed: minisign's own `verify` accepts a signature with no trusted
+    /// comment at all (`(None, None) => {}`), so treating an absent one as "fine" would hand an
+    /// attacker the bypass back by simply stripping it.
+    NoSignedFilename { detail: String },
+    /// The signed filename does not carry the version this release is shipping. **This is the
+    /// downgrade**, and unlike the uploaded asset's name, this one cannot be renamed without the
+    /// signing key.
+    NotBoundToVersion { signed_file: String, expected_version: String },
+    /// The platform key names no OS this release builds for, so the macOS versionless exemption
+    /// cannot be evaluated. Fails closed.
+    UnknownPlatformKey { signed_file: String },
+    /// The release is not shipping any version at all. A missing version is a broken release, not a
+    /// permissive one.
+    NoExpectedVersion { signed_file: String },
+}
+
+impl std::fmt::Display for SignedBindingFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VersionBindingFault::UnknownPlatformKey { basename } => write!(
+            SignedBindingFault::NoSignedFilename { detail } => write!(
                 f,
-                "platform key names no OS this release builds for (asset `{basename}`), so the \
-                 macOS versionless-artifact exemption cannot be evaluated -- refusing to guess"
+                "signature carries no usable `file:` trusted comment ({detail}), so the artifact \
+                 cannot be bound to a release -- refusing rather than assuming it is current"
             ),
-            VersionBindingFault::NotBoundToVersion { basename, expected_version } => write!(
+            SignedBindingFault::NotBoundToVersion { signed_file, expected_version } => write!(
                 f,
-                "serves `{basename}`, whose filename does not carry the version being shipped \
-                 (`{expected_version}`) -- a correctly-signed artifact from a DIFFERENT release is \
-                 still a downgrade"
+                "was SIGNED as `{signed_file}`, which is not an artifact of the version being \
+                 shipped (`{expected_version}`) -- a correctly-signed build from a DIFFERENT \
+                 release is still a downgrade, however the uploaded asset was named"
+            ),
+            SignedBindingFault::UnknownPlatformKey { signed_file } => write!(
+                f,
+                "platform key names no OS this release builds for (signed as `{signed_file}`), so \
+                 the macOS versionless-artifact exemption cannot be evaluated -- refusing to guess"
+            ),
+            SignedBindingFault::NoExpectedVersion { signed_file } => write!(
+                f,
+                "this release declares no version, so `{signed_file}` cannot be bound to one"
             ),
         }
     }
 }
 
-/// A platform let through by the narrow macOS exemption rather than by actually carrying the
-/// version. Reported so a run cannot consist silently of exemptions.
+/// How a platform's signed artifact was admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VersionlessExemption {
-    pub platform: String,
-    pub basename: String,
+pub enum SignedBinding {
+    /// The signed filename carries the version being shipped.
+    BoundToVersion,
+    /// Admitted by the narrow macOS exemption: Tauri names the macOS updater artifact
+    /// `<productName>.app.tar.gz` with no version in it, and the **trusted comment says the same**
+    /// (`file:Cross-Platform Explorer (Sidecar).app.tar.gz`) — so there is no version anywhere to
+    /// bind against for this one artifact kind. See [`bind_signed_artifact`] for exactly how narrow
+    /// this is and what it still leaves open.
+    VersionlessMacApp { signed_file: String },
 }
 
-/// The outcome of the anti-rollback decision over a whole manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct VersionBinding {
-    /// Platforms whose asset is not bound to the version being shipped. Non-empty means refuse.
-    pub offenders: Vec<(String, VersionBindingFault)>,
-    /// Platforms let through by the macOS versionless-artifact exemption.
-    pub exemptions: Vec<VersionlessExemption>,
-}
-
-/// CPE-1923 finding 1, **the anti-rollback decision** — the one place that decides whether a
-/// manifest's artifacts belong to the version being shipped.
+/// CPE-1923 finding 1, **the anti-rollback decision** — the one place that decides whether an
+/// artifact belongs to the release being cut.
 ///
-/// `expected_version` is `tauri.conf.json`'s `version`: the version this checkout is actually
-/// releasing, not the manifest's own claim about itself. Using the config's value is what makes
-/// this independent of the manifest — an attacker who can write `latest.json` controls the
-/// manifest's `version` field, and binding artifact names to a field the attacker also writes
-/// would prove nothing.
+/// # Why this reads the trusted comment and not the asset name (SEC-1)
 ///
-/// An empty `expected_version` makes every platform an offender rather than exempting all of them:
-/// a missing version is a broken release, not a permissive one. (The binary refuses before
-/// reaching here, but this function must be safe on its own terms.)
+/// The first version of this check bound `expected_version` to the **uploaded asset's filename**.
+/// That name is chosen by the attacker in the very threat model this guard declares — release-asset
+/// write, no signing key — so the whole binding was defeated by renaming the upload:
 ///
-/// The version must appear as a **delimited token**, so shipping `0.57.69` does not satisfy a
-/// manifest for `0.57.6`, and `0.57.690` does not satisfy one for `0.57.69`.
-pub fn platforms_not_bound_to_version(manifest_json: &str, expected_version: &str) -> VersionBinding {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
-        return VersionBinding::default();
+/// ```text
+/// old 0.1.0 installer under its own name            -> refused
+/// THE SAME BYTES, THE SAME SIGNATURE, uploaded as
+///   Cross-Platform.Explorer.Sidecar._0.57.70_...exe -> EXIT 0, "verified 1 of 1"
+/// ```
+///
+/// Minisign's trusted comment is covered by the **global signature** (`minisign::verify` checks
+/// `ed25519::verify(sig_and_trusted_comment, pk, global_sig)`), and `tauri-bundler` writes the
+/// original filename into it. So the signed name cannot be altered without the signing key, which
+/// is exactly the capability the threat model withholds. Binding to it makes the rename buy
+/// nothing.
+///
+/// **Ordering is load-bearing:** a trusted comment is only trustworthy *after* verification
+/// succeeds. This function must never be called on a signature that has not just verified, and its
+/// only caller — [`crate::verify_update_manifest`] — calls it immediately after `minisign::verify`
+/// returns `Ok` for that same artifact.
+///
+/// `expected_version` is `tauri.conf.json`'s `version`: the version this checkout is releasing, not
+/// the manifest's own `version` field, which the attacker also writes.
+///
+/// # The macOS exception, and what it still leaves open
+///
+/// Verified against the real published `.sig` assets: every platform's trusted comment carries the
+/// version **except** macOS, whose artifact is genuinely versionless in both the asset name and the
+/// signed name (`file:Cross-Platform Explorer (Sidecar).app.tar.gz`). So the trusted comment does
+/// **not** remove this exemption — there is no version anywhere to bind against.
+///
+/// What it does do is shrink the exemption enormously. It is now keyed on the **signed** name, so
+/// the artifact must actually have been signed *as a macOS app tarball*. The pre-SEC-1 exemption
+/// keyed on the uploaded name, which meant any signed bytes whatsoever — an old Windows `.exe`
+/// renamed `…_universal.app.tar.gz` — could claim it. That attack is dead. The residual is now
+/// precisely: a genuinely-signed macOS `.app.tar.gz` from a *different release of this same
+/// product*, which is CPE-1942 and needs `CFBundleShortVersionString` out of the tarball to close.
+pub fn bind_signed_artifact(
+    platform: &str,
+    trusted_comment: &str,
+    expected_version: &str,
+) -> Result<SignedBinding, SignedBindingFault> {
+    let Some(signed_file) = trusted_comment_file(trusted_comment) else {
+        return Err(SignedBindingFault::NoSignedFilename {
+            detail: format!("trusted comment was {trusted_comment:?}"),
+        });
     };
-    let mut out = VersionBinding::default();
-    for (name, entry) in crate::collect_platforms(&value) {
-        let url = entry.get("url").and_then(|u| u.as_str()).unwrap_or("");
-        let basename = basename_of_url(url).to_string();
+    let signed_file = signed_file.to_string();
 
-        let Some(os) = platform_os_of_key(&name) else {
-            out.offenders
-                .push((name, VersionBindingFault::UnknownPlatformKey { basename }));
-            continue;
-        };
-
-        if basename_carries_version(&basename, expected_version) {
-            continue;
-        }
-
-        // The narrow macOS exemption -- see this module's doc. `darwin-*` AND `.app.tar.gz`; a
-        // Windows/Linux key cannot reach it by renaming its payload, and a `darwin-*` key that
-        // reaches it has already been held to `platforms_with_wrong_extension_for_key`, which
-        // permits `darwin-*` nothing but `.app.tar.gz` anyway.
-        if os == PlatformOs::Darwin && basename.to_ascii_lowercase().ends_with(".app.tar.gz") {
-            out.exemptions.push(VersionlessExemption { platform: name, basename });
-            continue;
-        }
-
-        out.offenders.push((
-            name,
-            VersionBindingFault::NotBoundToVersion {
-                basename,
-                expected_version: expected_version.to_string(),
-            },
-        ));
+    if expected_version.is_empty() {
+        return Err(SignedBindingFault::NoExpectedVersion { signed_file });
     }
-    out
+
+    let Some(os) = platform_os_of_key(platform) else {
+        return Err(SignedBindingFault::UnknownPlatformKey { signed_file });
+    };
+
+    if basename_carries_version(&signed_file, expected_version) {
+        return Ok(SignedBinding::BoundToVersion);
+    }
+
+    // The narrow macOS exemption -- keyed on the SIGNED name, so it cannot be claimed by renaming
+    // an upload. A Windows or Linux key cannot reach it at all.
+    if os == PlatformOs::Darwin && signed_file.to_ascii_lowercase().ends_with(".app.tar.gz") {
+        return Ok(SignedBinding::VersionlessMacApp { signed_file });
+    }
+
+    Err(SignedBindingFault::NotBoundToVersion {
+        signed_file,
+        expected_version: expected_version.to_string(),
+    })
 }
 
-/// Does `basename` carry `version` as a delimited token?
+/// Does `name` carry `version` as a delimited token?
 ///
 /// "Delimited" means the characters immediately around the match are neither digits nor `.`, so
 /// `…_0.57.690_…` does not satisfy a `0.57.69` release and `…_10.57.69_…` does not either. Every
 /// real separator Tauri emits around a version (`_`, `-`) satisfies this, as does start/end of the
 /// name. An empty `version` matches nothing — fail closed.
-fn basename_carries_version(basename: &str, version: &str) -> bool {
+fn basename_carries_version(name: &str, version: &str) -> bool {
     if version.is_empty() {
         return false;
     }
-    let bytes = basename.as_bytes();
+    let bytes = name.as_bytes();
     let boundary = |b: u8| !(b.is_ascii_digit() || b == b'.');
-    basename.match_indices(version).any(|(i, m)| {
+    name.match_indices(version).any(|(i, m)| {
         let before_ok = i == 0 || boundary(bytes[i - 1]);
         let end = i + m.len();
         let after_ok = end >= bytes.len() || boundary(bytes[end]);
@@ -416,82 +490,183 @@ mod tests {
         assert!(matches!(offenders[0].1, ExtensionFault::UnknownPlatformKey { .. }));
     }
 
-    /// The whole live manifest must bind clean at its own version, exempting exactly the
-    /// versionless macOS assets -- otherwise this guard would red every real release.
+    /// The trusted-comment shape, pinned against the real `.sig` assets published on
+    /// `v0.57.69-sidecar`. These strings were read out of those files, not invented — the `file:`
+    /// value carries the UNSANITISED product name, with spaces and parentheses the uploaded asset
+    /// name never has, which is why the field is split on tabs rather than whitespace.
     #[test]
-    fn the_live_manifest_binds_to_its_own_version_with_only_the_macos_entries_exempt() {
-        let binding = platforms_not_bound_to_version(&live_manifest_json(), "0.57.69");
-        assert_eq!(binding.offenders, Vec::new(), "no offenders expected: {binding:?}");
-        let mut exempt: Vec<&str> = binding.exemptions.iter().map(|e| e.platform.as_str()).collect();
-        exempt.sort_unstable();
-        assert_eq!(
-            exempt,
-            vec!["darwin-aarch64", "darwin-aarch64-app", "darwin-x86_64", "darwin-x86_64-app"],
-            "only the versionless macOS .app.tar.gz entries may be exempt"
-        );
-    }
-
-    /// CPE-1923 finding 1, the serious one: a genuinely-signed OLDER installer uploaded under the
-    /// new tag. The name does not carry the version being shipped, so it must be refused.
-    #[test]
-    fn a_signed_downgrade_is_refused_by_name() {
-        let m = serde_json::json!({
-            "version": "0.57.70",
-            "platforms": {
-                "windows-x86_64": { "signature": "s", "url": "https://x/Cross-Platform.Explorer.Sidecar._0.1.0_x64-setup.exe" }
-            }
-        })
-        .to_string();
-        let binding = platforms_not_bound_to_version(&m, "0.57.70");
-        assert_eq!(binding.offenders.len(), 1, "{binding:?}");
-        assert_eq!(binding.offenders[0].0, "windows-x86_64");
-        assert!(matches!(binding.offenders[0].1, VersionBindingFault::NotBoundToVersion { .. }));
-        assert!(binding.exemptions.is_empty());
-    }
-
-    /// The exemption is for macOS's naming, not for anyone who wants it: a Windows key cannot buy
-    /// its way out of the version binding by naming its payload `.app.tar.gz`.
-    #[test]
-    fn the_versionless_exemption_cannot_be_claimed_by_a_non_darwin_key() {
-        for key in ["windows-x86_64", "linux-x86_64"] {
-            let m = serde_json::json!({
-                "version": "0.57.70",
-                "platforms": { key: { "signature": "s", "url": "https://x/Cross-Platform.Explorer_universal.app.tar.gz" } }
-            })
-            .to_string();
-            let binding = platforms_not_bound_to_version(&m, "0.57.70");
-            assert_eq!(binding.offenders.len(), 1, "{key} must not be exempt: {binding:?}");
-            assert!(binding.exemptions.is_empty(), "{key} must not be exempt: {binding:?}");
+    fn the_real_trusted_comment_shape_parses() {
+        for (comment, expected) in [
+            (
+                "timestamp:1787496720\tfile:Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe",
+                "Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe",
+            ),
+            (
+                "timestamp:1787496952\tfile:Cross-Platform Explorer (Sidecar)-0.57.69-1.x86_64.rpm",
+                "Cross-Platform Explorer (Sidecar)-0.57.69-1.x86_64.rpm",
+            ),
+            (
+                "timestamp:1787496658\tfile:Cross-Platform Explorer (Sidecar).app.tar.gz",
+                "Cross-Platform Explorer (Sidecar).app.tar.gz",
+            ),
+            (
+                "timestamp:1787496934\tfile:Cross-Platform Explorer.app.tar.gz",
+                "Cross-Platform Explorer.app.tar.gz",
+            ),
+        ] {
+            assert_eq!(trusted_comment_file(comment), Some(expected), "{comment}");
         }
     }
 
-    /// ...and a `darwin-*` key cannot claim it for something that is not the versionless macOS
-    /// payload either.
     #[test]
-    fn a_darwin_key_serving_a_versioned_payload_is_still_bound_to_the_version() {
-        let m = serde_json::json!({
-            "version": "0.57.70",
-            "platforms": {
-                "darwin-aarch64": { "signature": "s", "url": "https://x/Cross-Platform.Explorer.Sidecar._0.1.0_aarch64.dmg" }
-            }
-        })
-        .to_string();
-        let binding = platforms_not_bound_to_version(&m, "0.57.70");
-        assert_eq!(binding.offenders.len(), 1, "{binding:?}");
-        assert!(binding.exemptions.is_empty());
+    fn a_trusted_comment_with_no_file_field_yields_nothing() {
+        assert_eq!(trusted_comment_file("timestamp:1787496720"), None);
+        assert_eq!(trusted_comment_file(""), None);
+        assert_eq!(trusted_comment_file("timestamp:1\tfile:"), None);
+    }
+
+    /// The signed name carries the channel too — and better than the uploaded name does, since it
+    /// has the raw `(Sidecar)` marker. `product_token` normalises it to the same token the
+    /// sanitised asset name produces.
+    #[test]
+    fn the_signed_name_normalises_to_the_same_channel_token_as_the_asset_name() {
+        let sidecar = product_token("Cross-Platform Explorer (Sidecar)");
+        assert!(product_token("Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe").starts_with(&sidecar));
+        assert!(product_token("Cross-Platform.Explorer.Sidecar._0.57.69_x64-setup.exe").starts_with(&sidecar));
+        assert!(!product_token("Cross-Platform Explorer_0.57.69_x64-setup.exe").starts_with(&sidecar));
+    }
+
+    fn tc(file: &str) -> String {
+        format!("timestamp:1787496720\tfile:{file}")
+    }
+
+    /// CPE-1923 finding 1 / SEC-1: the anti-rollback decision, made from the signed name.
+    #[test]
+    fn an_artifact_signed_as_the_shipping_version_is_bound() {
+        assert_eq!(
+            bind_signed_artifact(
+                "windows-x86_64",
+                &tc("Cross-Platform Explorer (Sidecar)_0.57.70_x64-setup.exe"),
+                "0.57.70"
+            ),
+            Ok(SignedBinding::BoundToVersion)
+        );
+    }
+
+    /// The downgrade. The UPLOADED name is irrelevant here — this function never sees it, which is
+    /// the entire point of the SEC-1 fix.
+    #[test]
+    fn an_artifact_signed_as_an_older_version_is_refused_however_it_was_uploaded() {
+        let fault = bind_signed_artifact(
+            "windows-x86_64",
+            &tc("Cross-Platform Explorer (Sidecar)_0.1.0_x64-setup.exe"),
+            "0.57.70",
+        )
+        .unwrap_err();
+        assert!(matches!(fault, SignedBindingFault::NotBoundToVersion { .. }), "{fault:?}");
+        assert!(fault.to_string().contains("was SIGNED as"));
+    }
+
+    /// The macOS exemption: forced by the real artifact, which is versionless in the SIGNED name
+    /// too — verified against the published `.sig`. This is why the trusted comment could not
+    /// delete the exemption outright (CPE-1942 stays open).
+    #[test]
+    fn a_genuine_versionless_macos_artifact_is_exempt() {
+        assert_eq!(
+            bind_signed_artifact(
+                "darwin-aarch64",
+                &tc("Cross-Platform Explorer (Sidecar).app.tar.gz"),
+                "0.57.70"
+            ),
+            Ok(SignedBinding::VersionlessMacApp {
+                signed_file: "Cross-Platform Explorer (Sidecar).app.tar.gz".into()
+            })
+        );
+    }
+
+    /// ...but the exemption is keyed on the SIGNED name, so other signed bytes cannot claim it by
+    /// being uploaded under a macOS-looking name. This is the attack that worked before SEC-1.
+    #[test]
+    fn the_exemption_cannot_be_claimed_by_bytes_signed_as_something_else() {
+        let fault = bind_signed_artifact(
+            "darwin-aarch64",
+            // Signed as an old WINDOWS installer; only the upload was renamed, which this function
+            // cannot see and does not care about.
+            &tc("Cross-Platform Explorer (Sidecar)_0.1.0_x64-setup.exe"),
+            "0.57.70",
+        )
+        .unwrap_err();
+        assert!(matches!(fault, SignedBindingFault::NotBoundToVersion { .. }), "{fault:?}");
+    }
+
+    /// ...and a non-darwin key cannot claim it even for a genuine macOS artifact.
+    #[test]
+    fn the_exemption_is_not_available_to_a_non_darwin_key() {
+        for key in ["windows-x86_64", "linux-x86_64"] {
+            let fault =
+                bind_signed_artifact(key, &tc("Cross-Platform Explorer.app.tar.gz"), "0.57.70")
+                    .unwrap_err();
+            assert!(matches!(fault, SignedBindingFault::NotBoundToVersion { .. }), "{key}: {fault:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_trusted_comment_file_field_fails_closed() {
+        let fault =
+            bind_signed_artifact("windows-x86_64", "timestamp:1787496720", "0.57.70").unwrap_err();
+        assert!(matches!(fault, SignedBindingFault::NoSignedFilename { .. }), "{fault:?}");
+    }
+
+    #[test]
+    fn an_unknown_platform_key_fails_closed() {
+        let fault = bind_signed_artifact(
+            "solaris-sparc",
+            &tc("Cross-Platform Explorer (Sidecar)_0.57.70_x64-setup.exe"),
+            "0.57.70",
+        )
+        .unwrap_err();
+        assert!(matches!(fault, SignedBindingFault::UnknownPlatformKey { .. }), "{fault:?}");
     }
 
     #[test]
     fn an_empty_expected_version_fails_closed_rather_than_exempting_everything() {
-        let m = serde_json::json!({
-            "version": "",
-            "platforms": {
-                "windows-x86_64": { "signature": "s", "url": "https://x/Cross-Platform.Explorer_0.57.69_x64-setup.exe" }
-            }
-        })
-        .to_string();
-        let binding = platforms_not_bound_to_version(&m, "");
-        assert_eq!(binding.offenders.len(), 1, "an empty version must refuse, not permit: {binding:?}");
+        let fault = bind_signed_artifact(
+            "windows-x86_64",
+            &tc("Cross-Platform Explorer (Sidecar)_0.57.70_x64-setup.exe"),
+            "",
+        )
+        .unwrap_err();
+        assert!(matches!(fault, SignedBindingFault::NoExpectedVersion { .. }), "{fault:?}");
+        // ...including for darwin, which the exemption would otherwise have waved through -- the
+        // hole the Reviewer found when `version: ""` reached here.
+        let fault = bind_signed_artifact(
+            "darwin-aarch64",
+            &tc("Cross-Platform Explorer (Sidecar).app.tar.gz"),
+            "",
+        )
+        .unwrap_err();
+        assert!(matches!(fault, SignedBindingFault::NoExpectedVersion { .. }), "{fault:?}");
+    }
+
+    /// Every artifact of this repo's real published release must bind at its own version, with only
+    /// the macOS entries exempt. Signed names read off the actual `.sig` assets.
+    #[test]
+    fn every_real_published_artifact_binds_at_its_own_version() {
+        let cases = [
+            ("windows-x86_64", "Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe", false),
+            ("windows-x86_64-msi", "Cross-Platform Explorer_0.57.69_x64_en-US.msi", false),
+            ("linux-x86_64", "Cross-Platform Explorer (Sidecar)_0.57.69_amd64.AppImage", false),
+            ("linux-x86_64-deb", "Cross-Platform Explorer (Sidecar)_0.57.69_amd64.deb", false),
+            ("linux-x86_64-rpm", "Cross-Platform Explorer (Sidecar)-0.57.69-1.x86_64.rpm", false),
+            ("darwin-aarch64", "Cross-Platform Explorer (Sidecar).app.tar.gz", true),
+            ("darwin-x86_64", "Cross-Platform Explorer.app.tar.gz", true),
+        ];
+        for (platform, signed_file, expect_exempt) in cases {
+            let bound = bind_signed_artifact(platform, &tc(signed_file), "0.57.69")
+                .unwrap_or_else(|e| panic!("{platform} ({signed_file}) must bind: {e}"));
+            let is_exempt = matches!(bound, SignedBinding::VersionlessMacApp { .. });
+            assert_eq!(is_exempt, expect_exempt, "{platform} ({signed_file}) exemption mismatch");
+        }
     }
 
     #[test]
@@ -505,6 +680,78 @@ mod tests {
         assert!(!basename_carries_version("app_0.57.69.1_x64-setup.exe", "0.57.69"));
         assert!(!basename_carries_version("app_x64-setup.exe", "0.57.69"));
         assert!(!basename_carries_version("app_0.57.69_x64-setup.exe", ""));
+    }
+
+
+    /// The Reviewer's measurement of the SEC-2 anchor regression, pinned as a fixture.
+    ///
+    /// This repo's **real published** `v0.57.69-sidecar` manifest genuinely contains five
+    /// plain-channel entries — that is CPE-1894's live defect, still sitting on the release. The
+    /// sidecar job checks it as `--conf` plain + `--expect-channel sidecar`, and the Reviewer
+    /// measured what each anchor produces against it:
+    ///
+    /// ```text
+    /// anchor taken from --conf's productName (the regression):  0 offender(s)
+    /// anchor taken from the EXPECTED CHANNEL (correct):         5 offender(s)
+    /// ```
+    ///
+    /// Zero, because the plain token is a strict prefix of the sidecar one, so in the
+    /// `crate::Channel::Sidecar` arm every plain asset satisfied `starts_with("crossplatformexplorer")`.
+    /// `main` catches all five today; shipping the naive anchor would have regressed it.
+    ///
+    /// Revert `base_product_token` to a raw `product_token(conf_product_name)` and this returns to
+    /// 0, which is the assertion below going red.
+    #[test]
+    fn the_real_published_manifest_yields_exactly_five_channel_offenders_for_the_sidecar_job() {
+        // Exactly as `release-sidecar.yml` invokes it: --conf is the BASE (plain) config.
+        let offenders = crate::platforms_with_mismatched_channel(
+            &live_manifest_json(),
+            crate::Channel::Sidecar,
+            "Cross-Platform Explorer",
+        );
+        let mut named: Vec<&str> = offenders.iter().map(|(p, _)| p.as_str()).collect();
+        named.sort_unstable();
+        assert_eq!(
+            named,
+            vec![
+                "darwin-x86_64",
+                "darwin-x86_64-app",
+                "windows-x86_64",
+                "windows-x86_64-msi",
+                "windows-x86_64-nsis",
+            ],
+            "the five plain-channel entries in the REAL v0.57.69-sidecar manifest must all be \
+             named. 0 offenders means the anchor collapsed back to --conf's productName, whose \
+             plain token is a prefix of every sidecar token (SEC-2)."
+        );
+        assert_eq!(offenders.len(), 5);
+        for (platform, fault) in &offenders {
+            assert_eq!(
+                fault,
+                &crate::ChannelFault::WrongChannel(crate::Channel::Plain),
+                "{platform} must be named as a PLAIN asset, not merely as unrecognised"
+            );
+        }
+    }
+
+    /// The control for the fixture above: checked as the PLAIN channel, the same real manifest's
+    /// other six entries are the offenders instead. Proves the check is not simply always-nonempty
+    /// on this manifest.
+    #[test]
+    fn the_same_real_manifest_checked_as_plain_names_the_other_six() {
+        let offenders = crate::platforms_with_mismatched_channel(
+            &live_manifest_json(),
+            crate::Channel::Plain,
+            "Cross-Platform Explorer",
+        );
+        assert_eq!(offenders.len(), 6, "{offenders:?}");
+        for (platform, fault) in &offenders {
+            assert_eq!(
+                fault,
+                &crate::ChannelFault::WrongChannel(crate::Channel::Sidecar),
+                "{platform} must be named as a SIDECAR asset"
+            );
+        }
     }
 
     /// This repo's real `latest.json`, as published on the `v0.57.69-sidecar` release. Reproduced

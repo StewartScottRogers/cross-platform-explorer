@@ -296,3 +296,91 @@ lockfile pre-flight → `0 stale of 17 checked`.
 
 The macOS residual (a `.app.tar.gz` bound to the release only by url prefix and signature) remains
 deferred and is **not** filed here — the Foreman is filing it as its own ticket.
+
+### 2026-08-27 (round 3) — SEC-1: the version binding read the wrong name
+
+Security Auditor and Reviewer independently found the same blocker: the version binding rested on
+the **uploaded asset filename**, which is attacker-chosen in this guard's own declared threat model
+(release-asset write, no signing key). The old 0.1.0 installer, byte-identical and with its genuine
+signature, only had to be uploaded under a current-looking name to pass at exit 0. The claim in the
+PR body, the module doc and RELEASING.md — that this closed the downgrade for an asset-write
+attacker — was therefore false for every platform, not just macOS.
+
+**Ground truth first, again, and it changed two decisions.** Before relying on the remedy both
+reviewers proposed, I downloaded the real `.sig` assets from `v0.57.69-sidecar` and read their
+trusted comments:
+
+```text
+file:Cross-Platform Explorer (Sidecar)_0.57.69_x64-setup.exe
+file:Cross-Platform Explorer (Sidecar)-0.57.69-1.x86_64.rpm
+file:Cross-Platform Explorer (Sidecar).app.tar.gz      <- NO VERSION
+file:Cross-Platform Explorer.app.tar.gz                <- NO VERSION
+```
+
+Two consequences neither reviewer had:
+
+1. **The macOS exemption cannot be deleted.** Both suggested the trusted comment would remove it.
+   It does not: macOS's *signed* name is versionless too, so there is no version anywhere to bind
+   that artifact kind against. **CPE-1942 must stay open.** What the trusted comment does is shrink
+   the exemption from "any signed bytes at all, uploaded under a macOS-looking name" — the
+   auditor's demonstrated attack — to "a genuinely-signed macOS app tarball from another release of
+   this same product", because the exemption is now keyed on the **signed** name.
+2. **The `file:` value carries the unsanitised product name** (`Explorer (Sidecar)_`), which the
+   uploaded asset name never has. That is a second, signature-covered channel signal, so the
+   channel check now runs a second time over the signed names — catching a plain artifact uploaded
+   under a perfectly sidecar-looking, correctly-versioned name.
+
+**Where the decision now lives, and why there.** Inside `verify_update_manifest`, immediately after
+each artifact's `minisign::verify` returns `Ok`. Ordering is load-bearing: a trusted comment is only
+trustworthy once the global signature over it has been checked (`minisign::verify` does
+`ed25519::verify(sig_and_trusted_comment, pk, global_sig)` — confirmed in the crate source, not
+assumed). Putting it inside the function whose `Ok` every caller already gates on also means it
+cannot be dropped at a call site the way a separate follow-up check could.
+
+The name-based version binding was **deleted rather than kept alongside**: the asset name adds
+nothing an attacker cannot forge, and two copies of an anti-rollback rule reading different inputs
+could only ever disagree. `Ok(())` became `Ok(VerifiedManifest)` so the binary can report exemptions
+and re-check the channel from the authenticated names.
+
+A signature with **no** `file:` field is refused, not admitted — minisign's own `verify` accepts a
+signature carrying no trusted comment at all (`(None, None) => {}`), so treating an absent one as
+acceptable would hand the bypass straight back.
+
+**Also fixed this round (all Reviewer findings, all in files already being touched):**
+
+- `version` was read with `Some(v) => v.to_string()`, accepting `"version": ""`, while `pubkey` and
+  `productName` two lines away both checked. `artifact_binding`'s doc asserted "the binary refuses
+  before reaching here" — it did not. Both the check and the doc are now honest.
+- `h2_an_unrecognised_platform_key_is_refused` was itself **shadowed**: it asserted only the
+  platform name, which the version binding's own `UnknownPlatformKey` also produces, so it stayed
+  green with the mapping check disabled. It now names the property and isolates.
+- RELEASING.md claimed "a refusal always names which property failed", true only of the three new
+  checks. Narrowed, and the residual re-scoped to what it actually is.
+- Clippy caught literal tabs in the doc examples (the real trusted-comment strings). Escaped rather
+  than suppressed.
+
+**Red-proofs, all on the merged tree, each reverted after measuring:**
+
+| Sabotage | Red |
+|---|---|
+| Bind against the uploaded basename again (the pre-SEC-1 rule) | **6** — 5 on the **exit code**, incl. both rename spellings and the macOS-exemption abuse |
+| `if false &&` the platform/asset mapping refusal | **3** — including the newly de-shadowed unknown-key test |
+| Revert `base_product_token` to the naive anchor | **10** — 4 of them legitimate-manifest controls |
+| Restore the permissive sidecar sig-detect one-liner | **2** — one on the **exit code** |
+| Accept an empty `version` again | **1** (see below) |
+
+The empty-version sabotage initially reddened **nothing** — a guard with no red-proof, exactly the
+shape this ticket exists to remove. I added
+`an_empty_version_in_the_config_is_refused_even_for_a_darwin_only_manifest` (the darwin-only shape
+the Reviewer identified as the exploitable one) and re-ran the sabotage; it now reddens.
+
+**The Reviewer's 5-offender measurement is landed as a fixture.** Against the **real published**
+`v0.57.69-sidecar` manifest, checked as `--conf` plain + `--expect-channel sidecar`, the naive anchor
+produced 0 offenders and the correct one produces exactly the 5 real plain-channel entries
+(`darwin-x86_64`, `darwin-x86_64-app`, `windows-x86_64`, `windows-x86_64-msi`,
+`windows-x86_64-nsis`), each named as `WrongChannel(Plain)`. A control checks the same manifest as
+plain and gets the other 6.
+
+**Merged-tree verification:** `cargo clippy --locked --all-targets -- -D warnings` clean;
+`cargo test --locked` 129 pass / 0 fail; `npm run check` 0/0; `npm test` 339 files / 4,700 tests /
+0 failures; lockfile pre-flight `0 stale of 17`.

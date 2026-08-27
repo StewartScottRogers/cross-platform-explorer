@@ -134,8 +134,17 @@ fn main() -> ExitCode {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return fail("tauri.conf.json has no plugins.updater.pubkey"),
     };
+    // CPE-1923 (Reviewer): `Some(v) => v.to_string()` used to accept `"version": ""`, while the
+    // pubkey and productName reads on either side of it both check for emptiness. An empty version
+    // fails closed for every non-darwin platform, but a darwin-only manifest would have passed --
+    // and `artifact_binding`'s doc asserted "the binary refuses before reaching here", which was
+    // simply not true. Enforce the property the doc claims.
     let version = match conf_json.get("version").and_then(|v| v.as_str()) {
-        Some(v) => v.to_string(),
+        Some(v) if !v.trim().is_empty() => v.to_string(),
+        Some(_) => return fail(&format!(
+            "{} has an EMPTY top-level `version`. A release must declare the version it is shipping: it is what every artifact's signed name is bound against (CPE-1923              finding 1), and with nothing to bind to that check cannot do its job.",
+            conf.display()
+        )),
         None => return fail("tauri.conf.json has no top-level version"),
     };
     // CPE-1894: which channel THIS conf builds — release.yml always passes the plain
@@ -164,11 +173,16 @@ fn main() -> ExitCode {
         Some(p) if !p.trim().is_empty() => p.to_string(),
         _ => {
             return fail(&format!(
-                "{} has no non-empty top-level `productName`. It is required: the channel check                  (CPE-1894/CPE-1923) anchors every asset basename to this product's own name, and                  with nothing to anchor against that check would pass everything.",
+                "{} has no non-empty top-level `productName`. It is required: the channel check (CPE-1894/CPE-1923) anchors every asset basename to this product's own name, and with nothing to anchor against that check would pass everything.",
                 conf.display()
             ))
         }
     };
+    // The channel-free base identity, and the sidecar form of it. Computed once here so the
+    // pre-download check (over uploaded basenames) and the post-verification check (over signed
+    // names) cannot drift apart into two different notions of what this product is called.
+    let base_token = cpe_updater_verify::base_product_token(&product_name);
+    let sidecar_token = cpe_updater_verify::channel_product_token(&base_token, cpe_updater_verify::Channel::Sidecar);
     let (expected_channel, channel_source) = match expect_channel {
         Some(c) => (c, "--expect-channel"),
         None => (cpe_updater_verify::expected_channel_from_product_name(&product_name), "conf productName"),
@@ -341,7 +355,7 @@ fn main() -> ExitCode {
             .collect::<Vec<_>>()
             .join("; ");
         return fail(&format!(
-            "PROPERTY FAILED -- release channel (CPE-1894/CPE-1908/CPE-1923 finding 3): expected              channel '{expected_channel}' (source: {channel_source}; {} declares productName              '{product_name}'), so every platform's asset basename must ANCHOR to that product's              name in its '{expected_channel}' form. These do not: {detail}. This is the shape of the              CPE-1894 defect (a workflow's tag trigger firing on the wrong channel's tag and merging              its installers into this release), and of CPE-1923 finding 3 (an asset renamed to claim              a channel it did not come from) -- do not publish this manifest.",
+            "PROPERTY FAILED -- release channel (CPE-1894/CPE-1908/CPE-1923 finding 3): expected channel '{expected_channel}' (source: {channel_source}; {} declares productName              '{product_name}'), so every platform's asset basename must ANCHOR to that product's name in its '{expected_channel}' form. These do not: {detail}. This is the shape of the CPE-1894 defect (a workflow's tag trigger firing on the wrong channel's tag and merging its installers into this release), and of CPE-1923 finding 3 (an asset renamed to claim a channel it did not come from) -- do not publish this manifest.",
             conf.display(),
         ));
     }
@@ -367,35 +381,20 @@ fn main() -> ExitCode {
         ));
     }
 
-    // CPE-1923 finding 1 -- THE ANTI-ROLLBACK DECISION, and the most serious of the three. A
-    // signature proves the bytes are ones we once signed; it says nothing about WHICH RELEASE they
-    // came from. An actor with release-asset write only (no signing key) can upload the old,
-    // vulnerable installer AND ITS GENUINE OLD SIGNATURE to the new draft tag and write a
-    // `latest.json` carrying the new version -- and every check above this line agrees. Published
-    // users then auto-"update" onto an older signed build.
+    // CPE-1923 finding 1 -- THE ANTI-ROLLBACK DECISION -- deliberately does NOT live here.
     //
-    // The decision lives in exactly one place (`cpe_updater_verify::artifact_binding`), is made
-    // against the version in `--conf` (which the attacker does not write) rather than the
-    // manifest's own `version` field (which they do), and is deliberately NOT folded into
-    // `verify_update_manifest`'s `VersionMismatch` -- that one compares two fields and passed this
-    // attack cleanly. See that module's doc for the macOS `.app.tar.gz` naming exception.
-    let version_binding = cpe_updater_verify::platforms_not_bound_to_version(&manifest, &version);
-    if !version_binding.offenders.is_empty() {
-        let detail = version_binding
-            .offenders
-            .iter()
-            .map(|(name, fault)| format!("{name}: {fault}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return fail(&format!(
-            "PROPERTY FAILED -- artifact/version binding (CPE-1923 finding 1, SIGNED DOWNGRADE): \
-             this release ships version '{version}', so every platform's asset must be an artifact \
-             OF that version. These are not: {detail}. A correctly-signed installer from an older \
-             release, uploaded to this tag, verifies perfectly and downgrades every user who \
-             auto-updates -- which is why 'the signature is valid' is not the same question as \
-             'this is an acceptable version to move to'. Do not publish this manifest."
-        ));
-    }
+    // It used to: this is where the manifest's asset basenames were checked for the version being
+    // shipped. SEC-1 showed why that was worthless -- the uploaded asset's name is chosen by the
+    // attacker in this guard's own threat model (release-asset write, no signing key), so the old
+    // 0.1.0 installer, byte-identical and with its genuine signature, simply had to be uploaded
+    // under a 0.57.70 name to pass. The only name an asset-write attacker cannot choose is the one
+    // inside the minisign trusted comment, which the global signature covers -- and that is not
+    // trustworthy until the signature has verified.
+    //
+    // So the decision moved INTO `verify_update_manifest`, immediately after each artifact's
+    // `minisign::verify` succeeds, and it is reported as
+    // `ManifestProblem::ArtifactNotBoundToRelease`. There is exactly one copy of the rule
+    // (`cpe_updater_verify::artifact_binding::bind_signed_artifact`), reading exactly one name.
 
     // CPE-1872 round 3 (security-audit finding B): the crypto check below only ever proves the ARTIFACT
     // BYTES behind a `url` are genuine -- it never looks at the url's host or path, because the loader
@@ -434,19 +433,6 @@ fn main() -> ExitCode {
     println!("  channel    : {expected_channel} (source: {channel_source}; conf product name: '{product_name}')");
     println!("  manifest   : {}", manifest_path.display());
     println!("  search dirs: {}", search_dirs.len());
-    // CPE-1923: every asset the version binding let through WITHOUT the version in its name is
-    // named here rather than passing silently, so a run cannot consist entirely of exemptions
-    // without that being visible in the log.
-    println!(
-        "  version bind: {} of {} platform asset(s) carry version '{version}' in their filename; \
-         {} exempt (macOS .app.tar.gz, which Tauri names without a version)",
-        manifest_platform_total.saturating_sub(version_binding.exemptions.len()),
-        manifest_platform_total,
-        version_binding.exemptions.len()
-    );
-    for e in &version_binding.exemptions {
-        println!("    exempt   : {} -> {}", e.platform, e.basename);
-    }
     if let Some(prefix) = &expect_url_prefix {
         println!("  url prefix : {prefix} (enforced)");
     }
@@ -471,7 +457,7 @@ fn main() -> ExitCode {
     });
 
     match result {
-        Ok(()) => {
+        Ok(verified) => {
             // CPE-1872 (security-audit finding 1): as of the lib.rs fix, `Ok(())` is only possible when
             // EVERY platform the manifest names was fetched and cryptographically verified -- a platform
             // this runner couldn't fetch is now a hard `ArtifactUnavailable` failure, not a skip, so `n`
@@ -479,6 +465,48 @@ fn main() -> ExitCode {
             // practice (an empty `platforms` is already `NoPlatforms`, which is `Err`) -- kept as a
             // belt-and-suspenders guard in case that invariant is ever loosened again, so a future
             // regression fails loud here too rather than silently printing a misleading "OK".
+            // CPE-1923: every artifact admitted WITHOUT the version in its signed name is named
+            // here rather than passing silently, so a run cannot consist entirely of exemptions
+            // without that being visible in the log. These are the SIGNED names -- the ones an
+            // asset-write attacker cannot choose -- not the uploaded basenames.
+            println!(
+                "  version bind: {} of {} artifact(s) were SIGNED as version '{version}'; {} exempt (macOS .app.tar.gz, which Tauri signs without a version -- CPE-1942)",
+                verified.signed_files.len() - verified.versionless_exemptions.len(),
+                verified.signed_files.len(),
+                verified.versionless_exemptions.len()
+            );
+            for (platform, signed_file) in &verified.versionless_exemptions {
+                println!("    exempt   : {platform} -> signed as `{signed_file}`");
+            }
+
+            // CPE-1923 finding 3, second pass -- over the SIGNED names this time. The check before
+            // download reads the uploaded basename, which an asset-write attacker chooses; this one
+            // reads the trusted comment, which they cannot. It is also strictly better evidence:
+            // the signed name carries the raw, unsanitised product name
+            // (`Cross-Platform Explorer (Sidecar)_...`) that the uploaded asset name never has.
+            let signed_channel_offenders: Vec<String> = verified
+                .signed_files
+                .iter()
+                .filter(|(_, signed_file)| {
+                    let token = cpe_updater_verify::product_token(signed_file);
+                    let actual = if token.starts_with(&sidecar_token) {
+                        cpe_updater_verify::Channel::Sidecar
+                    } else {
+                        cpe_updater_verify::Channel::Plain
+                    };
+                    !token.starts_with(&base_token) || actual != expected_channel
+                })
+                .map(|(platform, signed_file)| format!("{platform}: signed as `{signed_file}`"))
+                .collect();
+            if !signed_channel_offenders.is_empty() {
+                return fail(&format!(
+                    "PROPERTY FAILED -- release channel, signed name (CPE-1923 finding 3): the \
+                     signature's own trusted comment says these artifact(s) are not from the \
+                     '{expected_channel}' channel: {}. The uploaded asset names claimed otherwise, \
+                     so the upload was renamed -- do not publish this manifest.",
+                    signed_channel_offenders.join("; ")
+                ));
+            }
             let n = served.get();
             let total = if manifest_platform_total == 0 { n } else { manifest_platform_total };
             if n == 0 || n != total {

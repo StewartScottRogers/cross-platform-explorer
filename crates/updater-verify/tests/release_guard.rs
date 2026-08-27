@@ -34,11 +34,12 @@ fn scaffold(signed_bytes: &[u8], artifact_on_disk: &[u8], manifest_version: &str
     let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
     let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
 
+    let signed_name = ARTIFACT_NAME;
     let sig = minisign::sign(
         Some(&kp.pk),
         &kp.sk,
         std::io::Cursor::new(signed_bytes),
-        Some("trusted"),
+        Some(&trusted_comment_for(signed_name)),
         Some("untrusted"),
     )
     .expect("sign");
@@ -101,11 +102,12 @@ fn scaffold_repo_layout(signed_bytes: &[u8], artifact_on_disk: &[u8]) -> tempfil
 
     let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
     let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
+    let signed_name = ARTIFACT_NAME;
     let sig = minisign::sign(
         Some(&kp.pk),
         &kp.sk,
         std::io::Cursor::new(signed_bytes),
-        Some("trusted"),
+        Some(&trusted_comment_for(signed_name)),
         Some("untrusted"),
     )
     .expect("sign");
@@ -284,12 +286,20 @@ fn tampered_artifact_at_repo_root_layout_still_fails_the_release() {
 // verify-release-artifacts.rs now hard-fails the moment ANY basename is indexed more than once under
 // the search dirs, rather than silently keeping whichever file a directory walk happened to visit first.
 
-fn sign_bytes(keypair: &minisign::KeyPair, bytes: &[u8]) -> String {
+/// CPE-1923/SEC-1: the anti-rollback decision reads the minisign trusted comment's `file:` field,
+/// not the uploaded asset name, so every fixture signature has to carry the real shape a Tauri
+/// signature does -- `timestamp:<unix>\tfile:<original filename>`, as read off this repo's own
+/// published `.sig` assets.
+fn trusted_comment_for(name: &str) -> String {
+    format!("timestamp:1787496720\tfile:{name}")
+}
+
+fn sign_bytes(keypair: &minisign::KeyPair, bytes: &[u8], signed_as: &str) -> String {
     let sig = minisign::sign(
         Some(&keypair.pk),
         &keypair.sk,
         std::io::Cursor::new(bytes),
-        Some("trusted"),
+        Some(&trusted_comment_for(signed_as)),
         Some("untrusted"),
     )
     .expect("sign");
@@ -316,11 +326,11 @@ fn smuggled_extra_platform_is_rejected() {
     let win_name = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
     let win_bytes = b"the real windows installer bytes";
     std::fs::write(root.join(win_name), win_bytes).expect("write windows artifact");
-    let win_sig = sign_bytes(&honest, win_bytes);
+    let win_sig = sign_bytes(&honest, win_bytes, win_name);
 
     // Attacker's entry: no local artifact will ever exist for this basename, and it's signed by a key
     // that isn't the configured pubkey -- both facts a real verifier must catch.
-    let evil_sig = sign_bytes(&evil, b"whatever the attacker wants to ship");
+    let evil_sig = sign_bytes(&evil, b"whatever the attacker wants to ship", "Cross-Platform.Explorer_1.2.3_amd64.AppImage");
 
     let manifest = serde_json::json!({
         "version": VERSION,
@@ -371,12 +381,12 @@ fn smuggled_local_name_is_rejected() {
     let win_name = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
     let win_bytes = b"the real windows installer bytes";
     std::fs::write(root.join(win_name), win_bytes).expect("write windows artifact");
-    let win_sig = sign_bytes(&honest, win_bytes);
+    let win_sig = sign_bytes(&honest, win_bytes, win_name);
 
     let evil_name = "Cross-Platform.Explorer_1.2.3_amd64.deb";
     let evil_bytes = b"whatever the attacker wants to ship";
     std::fs::write(root.join(evil_name), evil_bytes).expect("write smuggled artifact locally");
-    let evil_sig = sign_bytes(&evil, evil_bytes);
+    let evil_sig = sign_bytes(&evil, evil_bytes, evil_name);
 
     let manifest = serde_json::json!({
         "version": VERSION,
@@ -429,7 +439,7 @@ fn basename_decoy_is_rejected() {
     std::fs::write(decoy_dir.join(name), decoy_bytes).expect("write decoy");
     std::fs::write(real_dir.join(name), real_build_output_bytes).expect("write real build output");
 
-    let sig = sign_bytes(&kp, decoy_bytes);
+    let sig = sign_bytes(&kp, decoy_bytes, name);
     let manifest = serde_json::json!({
         "version": VERSION,
         "platforms": {
@@ -483,11 +493,12 @@ fn scaffold_with_url(signed_bytes: &[u8], url: &str) -> tempfile::TempDir {
     let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
     let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
 
+    let signed_name = ARTIFACT_NAME;
     let sig = minisign::sign(
         Some(&kp.pk),
         &kp.sk,
         std::io::Cursor::new(signed_bytes),
-        Some("trusted"),
+        Some(&trusted_comment_for(signed_name)),
         Some("untrusted"),
     )
     .expect("sign");
@@ -638,11 +649,15 @@ fn scaffold_with_url_and_product_name(signed_bytes: &[u8], url: &str, product_na
     let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
     let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
 
+    // These fixtures deliberately VARY the asset basename to carry (or not carry) the sidecar
+    // product token, so the signed name has to follow the url rather than the fixed default --
+    // otherwise every one of them would look like a rename attack to the CPE-1923/SEC-1 check.
+    let signed_name = url.rsplit('/').next().expect("url has a basename");
     let sig = minisign::sign(
         Some(&kp.pk),
         &kp.sk,
         std::io::Cursor::new(signed_bytes),
-        Some("trusted"),
+        Some(&trusted_comment_for(signed_name)),
         Some("untrusted"),
     )
     .expect("sign");
@@ -755,13 +770,13 @@ fn scaffold_mixed_manifest(product_name: &str) -> tempfile::TempDir {
     let sidecar_url = format!("https://example.com/releases/download/v{VERSION}-sidecar/{sidecar_name}");
     let sidecar_bytes = b"sidecar windows installer bytes";
     std::fs::write(root.join(&sidecar_name), sidecar_bytes).expect("write sidecar artifact");
-    let sidecar_sig = sign_bytes(&kp, sidecar_bytes);
+    let sidecar_sig = sign_bytes(&kp, sidecar_bytes, &sidecar_name);
 
     let plain_name = ARTIFACT_NAME.to_string();
     let plain_url = format!("https://example.com/releases/download/v{VERSION}-sidecar/{plain_name}");
     let plain_bytes = b"a PLAIN-channel artifact smuggled into the sidecar manifest";
     std::fs::write(root.join(&plain_name), plain_bytes).expect("write plain artifact");
-    let plain_sig = sign_bytes(&kp, plain_bytes);
+    let plain_sig = sign_bytes(&kp, plain_bytes, &plain_name);
 
     let manifest = serde_json::json!({
         "version": VERSION,
@@ -859,7 +874,7 @@ fn a_uniform_sidecar_manifest_passes_with_expect_channel_sidecar() {
     for (name, plat) in names.iter().zip(platform_keys.iter()) {
         let bytes = format!("bytes for {name}").into_bytes();
         std::fs::write(root.join(name), &bytes).expect("write artifact");
-        let sig = sign_bytes(&kp, &bytes);
+        let sig = sign_bytes(&kp, &bytes, name);
         let url = format!("https://example.com/releases/download/v{VERSION}-sidecar/{name}");
         platforms.insert((*plat).to_string(), serde_json::json!({ "signature": sig, "url": url }));
     }
