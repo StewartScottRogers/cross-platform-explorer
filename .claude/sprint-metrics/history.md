@@ -1648,3 +1648,40 @@ shares one thread — so a leak crosses tests.
 not rely on the instrumented path being reached.** `WALK_SYSCALLS` has no such guard either, and its
 only consumer prints an unasserted number — so there is no existing pattern to copy, and the next
 module reusing this machinery (`copilot::apply_op` + `renameat`) is the one at risk.
+
+## 2026-08-27 — the backstop fired, filed a correct diagnosis, and nobody read it for hours
+
+`catalog-freshness.yml` detected that the live catalog URL a real client fetches returns **HTTP 404 —
+no catalog published at all**, and **filed GitHub issue #1062 ten seconds later** with the right
+diagnosis. It sat open, unread, while the Foreman ran an entire shift's worth of ticks.
+
+`Ticketing/wiki.md` → "External findings" **already specifies** a Foreman `gh issue list` sweep. The
+sweep simply never happened, because nothing in the tick loop prompted it.
+
+**Rule: `gh issue list --state open` belongs in the same first-thing-every-tick sweep as
+`gh pr list --state open`.** An automated backstop that files somewhere nobody looks is
+indistinguishable from no backstop. PR #1064's worker was right to decline adding a second, louder
+channel — a second channel would have the same failure mode. **The fix is procedural.**
+
+Worth noting how it surfaced: not from the alarm, but from a worker answering an *incidental*
+question about published catalog indexes and choosing to measure all 60 release runs instead of
+giving the one-line answer it was asked for.
+
+## 2026-08-27 — a skipped job is invisible to the merge gate
+
+The catalog job did not fail for 33 days; it was **skipped**, because `needs: release` and the release
+was broken. `ci-poll.mjs` reports `pending` and `failure` counts — a **skipped** job is neither, so
+this whole class is invisible to the gate the Foreman actually merges on.
+
+Two instances found today by one enumeration (CPE-1932): `catalog` behind `release`, and **all five of
+`ci.yml`'s test jobs behind `lockfile-preflight` with no `if:`** (CPE-1956). The second matters
+because **GitHub counts a skipped required check as satisfied** — latent only because this repo has no
+branch protection at all.
+
+**Rule: when a job is chained behind another, decide explicitly whether a skip should be loud, and
+prefer a terminal `if: always()` verdict job** — the shape `gui-smoke-linux-verdict` (CPE-1753)
+already uses, which exists because "everything else happened to pass" is not "everything ran".
+
+Corollary worth carrying: **CPE-1893's guard was real but conditional.** It made the job fail loudly
+at `gh release upload` — *only when the signing key was present*. With the key unset, every step was
+gated off and the job ended **green having published nothing**. A green job is not even suspicious.

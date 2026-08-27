@@ -74,3 +74,39 @@ Related: **CPE-1917** (the plain-Release breakage that starved it, PR #1048 — 
 **CPE-1893** (the fail-loudly guard, untested), **CPE-308** (the catalog pipeline), **CPE-1951** (the
 publish-side lower-bound check, which must handle `latest` having no catalog index at all — which is
 true today because of this), **CPE-1941** (the versioning change).
+
+## Numbers corrected 2026-08-27 — the gap is 33 days, not four
+
+PR #1064's worker re-derived the history and this ticket's own headline was wrong in the reassuring
+direction:
+
+- **Last catalog publish: `v0.57.33`, 2026-07-25.** Not v0.57.32 (whose index survives only because
+  33's release was later deleted, and which is a *draft* no client ever fetched), and not 2026-08-23
+  — that is the last *failed* run, not the last successful publish.
+- **The gap is 33 days**, not four.
+- The "23 consecutive runs" figure is exactly right, but only **2 of them were plain tags**: since
+  CPE-1894 a `-sidecar` tag does not trigger `release.yml` at all.
+
+## The freshness backstop worked. The intake failed.
+
+`catalog-freshness.yml` run `33107498544` **filed GitHub issue #1062 ten seconds later**, correctly
+diagnosing `HTTP 404 — no catalog is published there at all` at the exact URL a real client fetches.
+It is open and was open for hours.
+
+So AC 4 has a different answer than the ticket assumed: **the notification path is not broken.**
+`Ticketing/wiki.md` → "External findings" already specifies a Foreman `gh issue list` sweep, and that
+sweep simply did not happen. PR #1064's worker deliberately declined to add a second, louder channel
+that would depend on someone reading it — the right call. **The fix is procedural, not technical.**
+
+## One more thing the live 404 will not fix by itself
+
+`/releases/latest/` currently resolves to `v0.57.69-sidecar`, so **a plain release alone will not
+clear the 404** (CPE-1894 / CPE-1908 / CPE-1909). Whoever closes the gap needs to account for which
+release `latest` points at, not just for a successful catalog job.
+
+## Still unproven, and why
+
+No release was cut (deliberately — that is the user's to authorise). So these remain open: a real
+runner executing `catalog` end to end; **whether `CPE_CATALOG_SIGNING_KEY` is still valid at all**
+(last evidence 2026-07-25 — PR #1064 converts an invalid key from *silent green* to *loud red* on the
+next tag, but cannot tell you beforehand); and the gap's end date.
