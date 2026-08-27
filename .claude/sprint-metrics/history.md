@@ -1714,3 +1714,32 @@ Two smaller instances from the same round, both caught by their authors before p
   parse step contributes two). It grepped rather than recalled, on the second try.
 - Reviewing its own diff it saw `CPE-1955` showing as **deleted** — its `origin/main` ref predated the
   Foreman filing that ticket. Re-fetched rather than resolving the phantom deletion.
+
+## 2026-08-27 — a test harness can report a wall of green PASSes that are all artifacts
+
+PR #1064's Reviewer, attacking new workflow gates, wrote this before its findings:
+
+> My first attack harness reported a wall of green PASSes that were **all artifacts** — Windows temp
+> paths unreachable to bash (rc=127), `subprocess(env=)` not reaching this WSL bash (`set -u` killed
+> every body at line 2), and PATH stubs with no exec bit. **Every one of those satisfied "expect
+> nonzero" for the wrong reason.**
+
+It only trusted its numbers after fixing all three and **re-asserting that each guard fails with its
+own diagnostic message**.
+
+This is the exact inverse of the week's other lesson. We have been finding guards that pass when they
+should fail; this is a *harness* that fails when it should pass, reported as success. Both come from
+the same root: **asserting on a coarse signal (an exit code, a green suite) instead of on the specific
+thing the check is about.**
+
+**Rule: an "expect nonzero" assertion is nearly worthless on its own.** A missing binary, an
+unreachable path, an env var that never arrived, a stub without an exec bit — all produce nonzero.
+Assert the **diagnostic message** the guard is supposed to emit. Same for "expect zero": assert what
+was produced, not that nothing complained.
+
+Corollary observed twice in one day: **a test that `return`s early on a missing tool reports a green
+pass for a test that never ran.** #1064 has 3 of 33 doing this where `jq` is absent (so its "33 tests"
+is 30 on that machine, and its 23/33 mutation kill is a *lower bound*), and #1061's bash-gated tests
+had the same shape until its author was asked to make them throw. **Prefer failing on a missing tool
+over skipping** — CI always has it, so the only machine that skips is the one where a human would
+have wanted to know.
