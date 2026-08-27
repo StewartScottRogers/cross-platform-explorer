@@ -1913,24 +1913,41 @@ mod tests {
     /// went, every path is once again exactly what it says it is. The source file is 1 MiB so that
     /// window exists at all. Both forms assert the same property.
     ///
-    /// # The two-phase leg does NOT win on Windows here, measured — and that is recorded, not hidden
+    /// # The two-phase leg DOES win on Windows — this test's racer is simply not patient enough
     ///
-    /// On this Windows volume the *swap-back* consistently loses: across 400 trials with the identity
-    /// comparison deliberately neutralised — the state in which a landed swap-back MUST have tripped the
-    /// harm assertion — **131 two-phase escapes produced zero `ok: true`**, meaning the rename-back never
-    /// completed before the engine looked. Retrying it (2,000 attempts, 10 µs apart) changed nothing
-    /// except the runtime: 20 s to 256 s, still zero. The likely cause is that the engine still holds the
-    /// escaped file open through the junction while it streams 1 MiB, and Windows refuses the directory
-    /// rename until that handle closes — which is roughly when the check runs.
+    /// An earlier revision of this comment claimed the swap-back could not land on Windows, on the
+    /// theory that the engine holds the escaped file open through the junction while it streams and
+    /// Windows refuses a directory rename until that handle closes. **The mechanism is real; the
+    /// conclusion was wrong, and it is corrected here rather than quietly dropped.**
     ///
-    /// **So this test does not red-proof the identity comparison, and must not be cited as doing so.**
-    /// `cpe_1896_the_landing_check_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote` does, on
-    /// every run, on every platform, with no thread involved. The leg is kept anyway for two reasons: it
-    /// is the auditor's actual attack shape rather than a reconstruction of its end state, and POSIX
-    /// imposes no such restriction — `rename(2)` on a directory with open files inside it always
-    /// succeeds — so the CI Linux and macOS legs are where it has a real chance of landing. Do not delete
-    /// it on the strength of a Windows-only observation, and do not read a quiet Windows run as evidence
-    /// the swap-back is closed.
+    /// This test's racer retries the rename-back 2,000 times at 10 µs — a **20 ms** budget — and sees
+    /// zero landings. An independent Security Auditor's racer waits for the outside file to pass 4 KiB
+    /// and then retries against a **400 ms** deadline, and on this same Windows machine measured, with
+    /// the identity comparison neutralised: **206 escapes, 9 reported `ok: true`, swap-back completing
+    /// 214 times in 400 trials.** With the comparison live and the same racer: **214 escapes, 0 reported
+    /// `ok: true`**, swap-back completing the same 214 times. The attack lands equally in both; only the
+    /// engine's ability to be lied to changed.
+    ///
+    /// The open-handle argument does not protect anyone: `copy_file_onto_no_follow_with_wording` drops
+    /// the write handle when it returns, and `landed_inside`'s `canonicalize` runs *after* that. There is
+    /// a genuine handle-free window on Windows and a patient racer finds it. 20 ms was simply shorter
+    /// than a 1 MiB copy plus `set_permissions` and `carry_file_times` on a loaded machine.
+    ///
+    /// **Do not read this as Windows being structurally safer than POSIX here. It is not.**
+    ///
+    /// **As written — with its 20 ms budget — this test still does not red-proof the identity
+    /// comparison, and must not be cited as doing so.** That is a property of this racer's impatience,
+    /// not of the platform, and CPE-1915 tracks widening the deadline so it bites here too (~2% of
+    /// trials at a few hundred ms, per the auditor's measurement).
+    ///
+    /// The thing that actually red-proofs the identity comparison, today, is
+    /// `cpe_1896_the_landing_check_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote` — on every
+    /// run, on every platform, with no thread and no timing. Neutralise the comparison and it fails
+    /// while the other three stay green; the auditor confirmed that across three consecutive runs.
+    ///
+    /// The leg is kept because it is the auditor's actual attack shape rather than a reconstruction of
+    /// its end state. Do not delete it, and do not read a quiet run — on any platform — as evidence the
+    /// swap-back is closed.
     ///
     /// # What it asserts — the SAFETY PROPERTY, not the race outcome
     ///
