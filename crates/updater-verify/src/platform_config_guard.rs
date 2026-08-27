@@ -57,6 +57,12 @@
 //! - a per-platform file carrying only, say, `plugins.cli` is legitimate and stays allowed;
 //! - `{"plugins":{"updater":null}}` is refused — under RFC 7396 a `null` *deletes* the base config's
 //!   updater block, which is every bit as much a change to the root of trust as replacing it;
+//! - and so is `{"plugins":null}`, and a non-object root (CPE-1903 finding 9). Deleting the parent
+//!   deletes the child: a `null` at `plugins` removes the whole plugins block, updater included, and
+//!   a non-object root replaces the entire config. The harm class there is update *suppression* rather
+//!   than root-of-trust replacement — every install frozen on the build it already has, security fixes
+//!   silently stopping — which is exactly what the `endpoints` pin exists to prevent, so it is refused
+//!   the same way;
 //! - the pinned pubkey/endpoints *values* are not consulted here at all, because a file that sets the
 //!   right value today can set the wrong one in the next commit, and nothing in this repo would
 //!   re-review a file class that is not supposed to exist.
@@ -125,8 +131,13 @@ pub fn is_auto_merged_platform_config_name(file_name: &str) -> bool {
     segments.next().is_some()
 }
 
-/// Decide whether a per-platform config file's `text` sets `plugins.updater`, returning the refusal
-/// reason if it does — or if this guard cannot honestly rule it out.
+/// Decide whether a per-platform config file's `text` changes the shipped updater configuration,
+/// returning the refusal reason if it does — or if this guard cannot honestly rule it out.
+///
+/// "Changes it" is applied at every level RFC 7396 can reach, not only at `plugins.updater`: a
+/// non-object root replaces the whole config, a non-object (or `null`) `plugins` replaces/deletes the
+/// whole plugins block, and a `plugins.updater` key of any value replaces or deletes the updater block
+/// itself. See CPE-1903 finding 9 — the first version checked only the innermost of the three.
 ///
 /// Strict JSON is parsed and inspected structurally: full fidelity, `null` included. Anything else
 /// (JSON5, TOML, or a `.json`-named file holding JSON5, which Tauri's `do_parse` accepts) gets a
@@ -137,12 +148,43 @@ pub fn is_auto_merged_platform_config_name(file_name: &str) -> bool {
 /// file that trips either arm fails loud, and the message says how to make it inspectable.
 pub fn platform_config_updater_refusal(text: &str) -> Option<String> {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
-        return json.pointer("/plugins/updater").map(|_| {
-            "exists and sets a `plugins.updater` key. Tauri merges this file into the build \
-             automatically via RFC 7396, so that key decides the shipped updater's root of trust — and \
-             a `null` there DELETES the pinned block just as effectively as a value replaces it"
-                .to_string()
-        });
+        // CPE-1903 finding 9: the refusal has to be applied at every level a `null` can delete from,
+        // not just at `plugins.updater`. Under RFC 7396 a `null` (or any non-object) AT a key replaces
+        // whatever the base config had there -- so `{"plugins":null}` deletes the entire plugins block,
+        // updater included, and a non-object ROOT replaces the entire config. Both are changes to the
+        // shipped updater configuration made by a file no pin can see; the first version of this guard
+        // checked only `/plugins/updater` and let both through. Deleting the parent deletes the child.
+        if !json.is_object() {
+            return Some(
+                "exists and its top-level value is not a JSON object. As an RFC 7396 merge patch that \
+                 REPLACES the entire base config -- `plugins.updater` and all -- rather than adding to \
+                 it, so it changes the shipped updater configuration without any pin being able to see \
+                 it"
+                    .to_string(),
+            );
+        }
+        if let Some(plugins) = json.pointer("/plugins") {
+            if !plugins.is_object() {
+                return Some(
+                    "exists and sets `plugins` to something other than an object. Under RFC 7396 that \
+                     REPLACES the base config's whole `plugins` block -- and a `null` there DELETES it \
+                     -- so the shipped app can end up with no updater configuration at all: update \
+                     suppression, which freezes every install on the build it already has and stops \
+                     security fixes reaching it (CPE-1903 finding 9)"
+                        .to_string(),
+                );
+            }
+            if plugins.get("updater").is_some() {
+                return Some(
+                    "exists and sets a `plugins.updater` key. Tauri merges this file into the build \
+                     automatically via RFC 7396, so that key decides the shipped updater's root of \
+                     trust — and a `null` there DELETES the pinned block just as effectively as a \
+                     value replaces it"
+                        .to_string(),
+                );
+            }
+        }
+        return None;
     }
 
     let lower = text.to_ascii_lowercase();
@@ -168,8 +210,10 @@ pub fn platform_config_updater_refusal(text: &str) -> Option<String> {
 /// Scan `dir` for per-platform config files that set `plugins.updater`.
 ///
 /// `read_dir` — never a name lookup — so the result does not depend on the host filesystem's case
-/// behaviour. Directories are skipped (Tauri reads files). A file this guard cannot read as text is a
-/// refusal, not a skip: failing closed is the only safe default on this surface.
+/// behaviour. Every matching entry is then **read through**, with no file-type probe of any kind: a
+/// symlink is followed exactly as Tauri follows it, and a directory, junction or otherwise unreadable
+/// entry becomes a refusal rather than a skip. Failing closed is the only safe default on this
+/// surface, and CPE-1903 finding 8 is what happens when a fail-open probe sits in front of it.
 ///
 /// Returns `Err` only when `dir` itself cannot be listed, which callers must treat as a failure rather
 /// than as "nothing found".
@@ -183,9 +227,22 @@ pub fn scan_for_platform_config_updater_overrides(
         if !is_auto_merged_platform_config_name(&file_name) {
             continue;
         }
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
+        // CPE-1903 finding 8: there is deliberately NO file-type probe here any more. The first
+        // version had `if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) { continue; }`,
+        // which is lstat-shaped -- `DirEntry::file_type` does not traverse, so a SYMLINK named
+        // `tauri.linux.conf.json` pointing at an innocuous-looking committed file was dropped before
+        // it was ever read, while Tauri's own `read_platform` (`path.exists()` + `read_to_string`,
+        // both of which FOLLOW links) merged the payload. Demonstrated with the real CLI: `npx tauri
+        // info` reported the attacker's config while every guard was green. Git stores such a link as
+        // mode 120000, so it materialises as a real symlink on the ubuntu and macOS runners -- and
+        // `verify-updater-pin`, the job that gates the sidecar build/sign/publish matrix, is
+        // `runs-on: ubuntu-latest`, exactly where it is real and therefore was invisible.
+        //
+        // Worse, that probe was fail-OPEN: `unwrap_or(false)` skipped the entry on an lstat error too,
+        // one line above a `read_to_string` whose error branch is correctly fail-CLOSED. Removing it
+        // is both the fix and the simplification: `read_to_string` follows links exactly as Tauri
+        // does, and a directory / junction / unreadable entry now produces a refusal through the
+        // already-correct fail-closed branch instead of a silent skip.
         let reason = match std::fs::read_to_string(entry.path()) {
             Ok(text) => platform_config_updater_refusal(&text),
             Err(e) => Some(format!(
@@ -403,6 +460,87 @@ mod tests {
         .unwrap();
         let hits = scan_for_platform_config_updater_overrides(dir.path()).expect("scan");
         assert_eq!(hits.len(), 1, "{hits:?}");
+    }
+
+    /// CPE-1903 finding 9. `{"plugins":null}` is 17 bytes and, under RFC 7396, deletes the base
+    /// config's entire `plugins` block — updater included. The first version of this guard checked
+    /// `/plugins/updater`, which on a null `plugins` cannot index and returned `None`. Deleting the
+    /// parent deletes the child; the refusal has to apply at every level a `null` can reach.
+    #[test]
+    fn refuses_a_null_or_non_object_plugins_block() {
+        for body in [
+            r#"{"plugins":null}"#,
+            r#"{"plugins":[]}"#,
+            r#"{"plugins":"gone"}"#,
+            r#"{"plugins":42}"#,
+        ] {
+            assert!(platform_config_updater_refusal(body).is_some(), "{body}");
+        }
+    }
+
+    /// The same principle one level further up: a non-object ROOT is an RFC 7396 patch that replaces
+    /// the whole config rather than merging into it.
+    #[test]
+    fn refuses_a_non_object_root() {
+        for body in ["null", "[]", r#""gone""#, "0"] {
+            assert!(platform_config_updater_refusal(body).is_some(), "{body}");
+        }
+    }
+
+    /// CPE-1903 finding 8, the directory half: a directory named like a per-platform config used to be
+    /// skipped by the `is_file()` probe. With the probe gone it becomes a refusal through
+    /// `read_to_string`'s already-correct fail-closed branch.
+    #[test]
+    fn scan_refuses_a_directory_named_like_a_platform_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("tauri.linux.conf.json")).unwrap();
+        let hits = scan_for_platform_config_updater_overrides(dir.path()).expect("scan");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].reason.contains("could not be read as text"), "{hits:?}");
+    }
+
+    /// CPE-1903 finding 8, the symlink half — the one that was DEMONSTRATED against the real CLI. A
+    /// symlink named `tauri.linux.conf.json` pointing at an innocuous committed file was dropped by
+    /// the old lstat-shaped `entry.file_type().is_file()` probe, while Tauri's `read_platform`
+    /// (`exists()` + `read_to_string`, both of which follow links) merged the payload. Git stores it
+    /// as mode 120000, so it is a real symlink on the ubuntu and macOS runners — including
+    /// `verify-updater-pin`'s `ubuntu-latest`, which gates the sidecar build/sign/publish matrix.
+    ///
+    /// Creating a symlink needs no privilege on Unix; on Windows it needs Developer Mode or elevation,
+    /// so there this test reports that it could not construct the fixture rather than passing
+    /// vacuously. The legs that matter run it for real.
+    #[test]
+    fn scan_follows_a_symlink_named_like_a_platform_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("innocent-looking-resource.json");
+        std::fs::write(&target, r#"{"plugins":{"updater":{"pubkey":"attacker"}}}"#).unwrap();
+        let link = dir.path().join("tauri.linux.conf.json");
+
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let made = false;
+
+        if !made {
+            eprintln!(
+                "CPE-1903 finding 8: could not create a symlink on this host (Windows needs Developer \
+                 Mode or elevation) -- the fixture, not the guard, is what is unavailable. This test \
+                 runs for real on the Linux and macOS legs, which are the ones where git materialises \
+                 mode 120000 as a real symlink."
+            );
+            return;
+        }
+
+        let hits = scan_for_platform_config_updater_overrides(dir.path()).expect("scan");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a symlink named like a per-platform config must be READ THROUGH, exactly as Tauri reads \
+             it -- never skipped on a file-type probe; got {hits:?}"
+        );
+        assert_eq!(hits[0].file_name, "tauri.linux.conf.json");
     }
 
     #[test]

@@ -314,9 +314,24 @@ function platformConfigUpdaterRefusal(text: string): string | null {
     parsedAsStrictJson = false;
   }
   if (parsedAsStrictJson) {
-    const hasUpdaterKey =
-      isPlainObject(parsed) && isPlainObject(parsed.plugins) && "updater" in parsed.plugins;
-    return hasUpdaterKey
+    // CPE-1903 finding 9: apply the refusal at EVERY level RFC 7396 can delete from, not just at
+    // `plugins.updater`. `{"plugins":null}` deletes the whole plugins block -- updater included -- and
+    // a non-object root replaces the entire config. Deleting the parent deletes the child.
+    if (!isPlainObject(parsed)) {
+      return (
+        "exists and its top-level value is not a JSON object. As an RFC 7396 merge patch that REPLACES " +
+        "the entire base config -- `plugins.updater` and all -- rather than adding to it"
+      );
+    }
+    if ("plugins" in parsed && !isPlainObject(parsed.plugins)) {
+      return (
+        "exists and sets `plugins` to something other than an object. Under RFC 7396 that REPLACES the " +
+        "base config's whole `plugins` block -- and a `null` there DELETES it -- so the shipped app can " +
+        "end up with no updater configuration at all: update suppression, which freezes every install " +
+        "on the build it already has and stops security fixes reaching it (CPE-1903 finding 9)"
+      );
+    }
+    return isPlainObject(parsed.plugins) && "updater" in parsed.plugins
       ? "exists and sets a `plugins.updater` key. Tauri merges this file into the build automatically " +
           "via RFC 7396, so that key decides the shipped updater's root of trust -- and a `null` there " +
           "DELETES the pinned block just as effectively as a value replaces it"
@@ -340,10 +355,26 @@ function platformConfigUpdaterRefusal(text: string): string | null {
 
 /** Every auto-merged per-platform config in `src-tauri/` that sets `plugins.updater`. */
 function scanForPlatformConfigUpdaterOverrides(): { fileName: string; reason: string }[] {
+  // CPE-1903 finding 8: there is deliberately NO `e.isFile()` filter here. Node's `Dirent.isFile()`
+  // is lstat-shaped -- it does not traverse -- so a SYMLINK named `tauri.linux.conf.json` pointing at
+  // an innocuous committed file was dropped before it was ever read, while Tauri's own `read_platform`
+  // (`exists()` + `read_to_string`, both of which FOLLOW links) merged the payload. Demonstrated with
+  // the real CLI. Git stores such a link as mode 120000, so it is a real symlink on the ubuntu and
+  // macOS runners -- including the `ubuntu-latest` host that runs this file in `verify-updater-pin`.
+  // `readFileSync` follows links exactly as Tauri does, and a directory or unreadable entry now
+  // becomes a refusal through the fail-closed catch below instead of a silent skip.
   return readdirSync(SRC_TAURI, { withFileTypes: true })
-    .filter((e) => e.isFile() && isAutoMergedPlatformConfigName(e.name))
+    .filter((e) => isAutoMergedPlatformConfigName(e.name))
     .flatMap((e) => {
-      const reason = platformConfigUpdaterRefusal(readFileSync(join(SRC_TAURI, e.name), "utf8"));
+      let reason: string | null;
+      try {
+        reason = platformConfigUpdaterRefusal(readFileSync(join(SRC_TAURI, e.name), "utf8"));
+      } catch (err) {
+        reason =
+          `exists but could not be read as text (${err instanceof Error ? err.message : String(err)}), ` +
+          `so this guard cannot rule out a plugins.updater key in a file Tauri merges automatically. ` +
+          `Refused rather than skipped`;
+      }
       return reason === null ? [] : [{ fileName: e.name, reason }];
     })
     .sort((a, b) => a.fileName.localeCompare(b.fileName));
@@ -414,6 +445,25 @@ describe("shipped bundle — no auto-merged per-platform Tauri config overrides 
     expect(platformConfigUpdaterRefusal(`[plugins.updater]\npubkey = "x"\n`)).not.toBeNull();
     expect(platformConfigUpdaterRefusal(`plugins.updater.pubkey = "x"\n`)).not.toBeNull();
     expect(platformConfigUpdaterRefusal(`{ plugins: { "\\u0075pdater": {} } }`)).not.toBeNull();
+  });
+
+  // CPE-1903 finding 9: `{"plugins":null}` is 17 bytes and deletes the base config's whole plugins
+  // block under RFC 7396 — updater included — so the shipped app receives no updates at all. The first
+  // version of this guard only looked at `plugins.updater` and let it through. Deleting the parent
+  // deletes the child, so the refusal applies at every level a null can reach.
+  it("refuses a null/non-object plugins block, and a non-object root", () => {
+    for (const body of [
+      `{"plugins":null}`,
+      `{"plugins":[]}`,
+      `{"plugins":"gone"}`,
+      `{"plugins":42}`,
+      `null`,
+      `[]`,
+      `"gone"`,
+      `0`,
+    ]) {
+      expect(platformConfigUpdaterRefusal(body), body).not.toBeNull();
+    }
   });
 
   it("still allows a per-platform file that does not touch the updater", () => {
