@@ -655,7 +655,13 @@ function beginBusy() {
 }
 async function withBusy(fn) { const end = beginBusy(); try { return await fn(); } finally { end(); } }
 function agentById(id) { return catalog.agents.find((a) => a.id === id); }
-function setMsg(m, ok) { const el = $("msg"); el.textContent = m || ""; el.style.color = ok ? "#3a9d4a" : "#d05656"; }
+// `ok`: true = success (green), false = actionable error (red), "warn" = informational/no-action-needed
+// (amber — same colour as the STATE_META "blocked" dot below) — CPE-1911 review round 2: "nothing
+// changed, nothing you need to do" must not paint in the same red as "you need to fix something".
+function setMsg(m, ok) {
+  const el = $("msg"); el.textContent = m || "";
+  el.style.color = ok === "warn" ? "#d08a1a" : ok ? "#3a9d4a" : "#d05656";
+}
 
 // A provider needs an API key unless it's a built-in login ("native") or a local server (CPE-394).
 function providerNeedsKey(p) { return !!p && p !== "native" && !/local/i.test(p); }
@@ -1801,8 +1807,11 @@ async function relaunch(s) {
 }
 // --- Catalog refresh (CPE-374/376): fetch + apply the signed agent catalog, then re-render. ---
 // CPE-1911: "nothing changed" is NOT one situation — it's genuinely-current, a stale/broken
-// publishing pipeline, or an outright failed/offline fetch, and the user must be able to tell
-// those apart instead of always reading the same reassuring "up to date" line.
+// publishing pipeline, a corrupt/mis-signed publish, or an outright failed/offline fetch, and the
+// user must be able to tell those apart instead of always reading the same reassuring "up to date"
+// line. None of the "nothing changed" outcomes below are something the user needs to fix — their
+// existing agents are untouched and safe to use — so they render in the neutral "warn" colour, not
+// the same red as an actionable error (review round 2).
 async function refreshCatalog() {
   closeManageMenu();
   setMsg("Checking for agent updates…", true);
@@ -1814,19 +1823,24 @@ async function refreshCatalog() {
     } else if (r.error) {
       // The fetch itself failed (e.g. a 404 — the publishing pipeline is down), not just "nothing
       // new". Say so plainly and give the honest, non-alarming next step.
-      setMsg("Couldn't check for agent updates (" + r.error + "). Nothing changed — no action needed from you; try again later.", false);
+      setMsg("Couldn't check for agent updates (" + r.error + "). Nothing changed — no action needed from you; try again later.", "warn");
     } else if (r.offline) {
-      setMsg("You're offline, so agent updates weren't checked. Nothing changed.", false);
+      setMsg("You're offline, so agent updates weren't checked. Nothing changed.", "warn");
+    } else if (r.indexOk && r.integrityRejected > 0) {
+      // The index verified fine, but every listed entry failed its OWN integrity check (bad/missing
+      // manifest signature, or content that doesn't match the index) — a corrupt or mis-signed
+      // publish, not "nothing to apply". Distinct from the anti-rollback/stale case below.
+      setMsg("The published catalog looks corrupted or mis-signed, so nothing was installed. Your existing agents are untouched and safe to use — no action needed on your end.", "warn");
     } else if (r.indexOk && r.staleRejected > 0) {
       // The index verified fine, but every entry is no newer than what's installed — the
       // *published* catalog is stale, which is different from "you're current".
-      setMsg("The published catalog isn't newer than what's installed, so nothing changed. If this doesn't clear up on its own, the publishing pipeline may be stuck — no action needed on your end.", false);
+      setMsg("The published catalog isn't newer than what's installed, so nothing changed. If this doesn't clear up on its own, the publishing pipeline may be stuck — no action needed on your end.", "warn");
     } else if (r.indexOk) {
       setMsg("Agents are already up to date.", true);
     } else {
       // Fetched, but the catalog itself didn't verify (bad/missing signature) — the trust engine
       // correctly refused it and left the previous catalog in place.
-      setMsg("The catalog couldn't be verified, so nothing was changed.", false);
+      setMsg("The catalog couldn't be verified, so nothing was changed.", "warn");
     }
   } catch (e) { setMsg("Update failed: " + e.message); }
 }
