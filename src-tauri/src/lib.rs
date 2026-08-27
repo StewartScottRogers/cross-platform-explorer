@@ -7086,10 +7086,13 @@ fn macro_preflight_collisions(run: &ResolvedRun) -> Vec<MacroCollision> {
                 return None;
             }
             let to_path = Path::new(&op.to);
-            // The link half is checked with the kind-appropriate probe: `convert` writes through a
-            // link (create-shaped), `rename`/`move` destroy one (rename-shaped) — see
+            // LINK-ONLY: this is a read-only preflight CLASSIFICATION, not a guard-then-write site — no
+            // `fs::rename`/`restore_all` follows this call in this function, so there is no occupancy
+            // half to pair it with. The link half is checked with the kind-appropriate probe: `convert`
+            // writes through a link (create-shaped), `rename`/`move` destroy one (rename-shaped) — see
             // `create_slot_link_refusal`'s and `symlink_slot_refusal`'s own docs for why the two are
-            // not interchangeable. Either way, a link is never confirmable (CPE-1734).
+            // not interchangeable. Either way, a link is never confirmable (CPE-1734); the occupancy
+            // half (plain-file collision) is `clobber_refusal`, called separately below.
             let link_refusal = if op.kind == "convert" {
                 cpe_server::fsutil::create_slot_link_refusal(to_path)
             } else {
