@@ -48,6 +48,29 @@ That cuts the box by about two lines and puts the distinguishing words where the
 - [ ] Re-capture `cpe-1891-{light,dark}-many-blocked.png`, the only evidence that exercises both
       kinds at once.
 
+
+## Two more doc one-liners folded in here (2026-08-27)
+
+PR #1044's Reviewer raised these as explicit non-blocking follow-ups after approving. They are
+one sentence each, and they were **deliberately not pushed to that PR**: it was approved with CI
+already running, and a push would have restarted a ~1-hour CI cycle to add two doc sentences.
+
+- [ ] **`macro_run`'s doc comment: the confirmed set is keyed by *name*, not by file identity.**
+      The Reviewer probed it — deleting the confirmed occupant and creating a *different* plain file
+      at that exact name still authorises the overwrite (`PROBE swapped-file-at-same-name -> BYPASS
+      STILL ALLOWED`). Judged acceptable, and I agree: it is a name the user was shown and ticked; a
+      link at that name flips `confirmable` false and is refused unconditionally; a hard-linked one
+      is refused on the handle; every un-ticked name fails closed. Pinning identity would need a
+      handle or dev/ino carried across two IPC calls, which this repo does only *within* a call, and
+      Batch-Media's plan-to-execute re-check is likewise path-based across that boundary. Write it
+      down so the next reviewer does not rediscover it.
+- [ ] **`src/docs/organizing-macros.md`: a Rename template containing a separator now relocates
+      within the root.** A real behaviour change on the *unconfirmed* path, and a fix — it used to be
+      flattened to the input's own parent while the plan preview, the preflight and the recorded
+      inverse all said `sub/`, so undo of such a macro was already broken. It now lands where the
+      preview always promised. Pinned by
+      `cpe_1891_a_rename_template_with_a_separator_lands_at_the_same_full_to_confirmed_or_not`.
+
 ## Notes
 
 Filed 2026-08-27 by the sprint Foreman from PR #1044's Visual Critic. Purely editorial — nothing
