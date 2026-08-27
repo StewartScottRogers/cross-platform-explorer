@@ -3,7 +3,7 @@ id: CPE-1928
 title: the two link-hazard sentences read as duplicates, because the only differing clause is buried mid-sentence
 type: task
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-27
@@ -194,3 +194,57 @@ identical before and after this PR; and because dedup is by bucket, a "could not
 collision appearing before a real-link one suppresses the real-link sentence (and now its remedy)
 entirely. Both are properties of the bucketing/genericizing that predate this change, and fixing them
 means revisiting how a non-link-shaped refusal is bucketed — larger than this XS.
+
+## Closed 2026-08-27 — merged as PR #1056
+
+**Reviewer APPROVE + Visual Critic VISUAL PASS.** Derivation guard re-run on merged `main`: 21/21.
+
+**What shipped.** Each hazard sentence now leads with its differentiator and the shared remedy is
+stated **once**, below both. 7 rendered lines → 4 + 1. Implemented by **splitting** the backend
+`reason` rather than replacing it, so an unrecognised shape still falls through to `genericizeReason`.
+
+**The Visual Critic judged it on measurements, not impressions.** Ink-band gaps: hazard 1 → hazard 2
+**9px**, hazard 2's own internal leading **4px**, hazard 2 → remedy **12px**. The remedy sits *further*
+from sentence 2 than sentence 2 sits from sentence 1, and 3× its own paragraph leading — so it reads
+as a third sibling paragraph closing the pair, not as sentence 2's tail. Identical in both themes.
+Dark contrast **13.6:1** body / **8.8:1** list; panel 241px → 196px with nothing cramped.
+
+### Two defects the review caught that the diff did not create
+
+1. **The tail was stripped before the lead was tested.** `hazardSentence` tested the *stripped* string
+   while `representativeReasons` tested the *raw* one for the same predicate — so on a lead-only
+   backend reword, one concluded "not a link hazard" after the other had already consumed the remedy.
+   The remedy would have been **deleted from the sentence and never reprinted anywhere.** Not
+   hypothetical: `batch_media.rs:1972` already prefixes its own link refusal. One-line reordering,
+   plus a test asserting three things — the remedy is on screen, the sentence came through
+   byte-identical, and it appears **exactly once**, so the fix cannot satisfy itself by sliding into
+   the double-print direction instead.
+2. **Nothing bound the TS parse to the Rust string.** Every assertion compared frontend constants to
+   frontend fixtures, both hand-copied, and every Rust assertion was a `contains(...)` substring check
+   that a lead reword would not disturb. So a backend copy edit passed `cargo test`, passed
+   `npm test`, and silently changed what the dialog rendered.
+
+### The derivation guard, and why it earns its fifteen lines
+
+Rather than take the follow-up ticket, the author built the guard: it reads `crates/server/src/fsutil.rs`,
+walks the `Ok(true)` arm's `format!` literal out of each function — resolving `\"`, `\`, and Rust's
+backslash-at-end-of-line continuation, **which also swallows the next line's indentation**, the part a
+naive join gets wrong — substitutes the fixture path for `{}`, and asserts byte-identity.
+
+It red-proofed twice, and **deliberately chose the second reword to be one `cargo test` does not
+catch**, on the reasoning that a guard which only reds on edits the Rust suite already catches would
+not earn its lines. The Reviewer verified that independently: `renaming onto a link **wrecks** it`
+leaves the full `cpe-server` suite at **2412 passed, 0 failed**, and reddens only in the new guard.
+
+It also **fails at collection** if `fsutil.rs` moves or the function is renamed — the suite cannot run
+at all, let alone pass with zero comparisons. Loud to a fault, which is the right side of this repo's
+recurring defect.
+
+**Residual, filed as CPE-1947** with the one-line hardening the Reviewer measured as strictly better
+on every probe: anchor the walker on the match arm rather than on "the first `format!` after the fn".
+As it stands, a comment between the signature and the real `format!(` that quotes the old message can
+be pinned instead of the shipped literal.
+
+**One claim disproved.** The author and the Foreman both believed the hoisted remedy made CPE-1947's
+suppression case worse. The Reviewer measured every suppression ordering on both trees: remedy
+visibility is **identical**. The mechanism changed; the outcome did not. CPE-1947 corrected.
