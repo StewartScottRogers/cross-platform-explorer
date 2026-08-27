@@ -54,7 +54,14 @@ Windows-specific (`server.fs.deny` bypass, NTLMv2 hash disclosure via UNC), and 
 vitest critical is arbitrary file read *and execute* when the Vitest UI server is listening. "Dev-only" bounds
 the blast radius to the development environment; it does not make the advisories theoretical.
 
-Baseline for the next Steward pass to diff against: **`{"moderate":8,"high":1,"critical":1,"total":10}`** on
-npm 10.9.8 / node v22.22.3.
+Baseline for the next Steward pass to diff against — **root project only**, i.e. `npm audit` run at the repo
+root against the top-level `package.json` / `package-lock.json`: **`{"moderate":8,"high":1,"critical":1,"total":10}`**
+on npm 10.9.8 / node v22.22.3.
+
+**That number is not the repo's whole npm position.** `git ls-files '*package-lock.json'` enumerates **two** npm
+projects: this root one and **`gui-smoke/`**, which carries its own `package.json` + `package-lock.json`, its own
+advisories, and its own CI job (`gui-smoke.yml`). A Steward pass must
+**enumerate** the lockfiles rather than assume "the npm audit" means the root one; CPE-1932 is the standing
+lesson here. This ticket's scope is unchanged either way: CPE-1443 owns the **root** dev-toolchain majors only.
 
 Related: **CPE-1926** (the non-major half, done), **CPE-1904** (package-lock drift backstop).

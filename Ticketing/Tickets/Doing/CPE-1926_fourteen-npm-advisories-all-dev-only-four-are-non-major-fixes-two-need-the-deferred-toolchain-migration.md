@@ -85,7 +85,7 @@ that generated the existing lockfile — the diff is surgical, not a whole-file 
 | `postcss` | 8.5.16 | **8.5.26** | GHSA-fxqj-rqcc-2cmp — attacker-controlled `sourceMappingURL` reads arbitrary `.map` files when `from` is unset |
 | `undici` | 7.28.0 | **7.29.0** | GHSA-8xcm-r25x-g524 downstream response desync via retry interceptor (+ 4 more) |
 
-### Audit numbers (the baseline the next Steward pass should diff against)
+### Audit numbers (root project only — the baseline the next Steward pass should diff against)
 
 ```
 BEFORE  npm audit --json .metadata.vulnerabilities
@@ -115,6 +115,13 @@ left; the number only moves again when the toolchain majors land under **CPE-144
   owned it.)*
 - `@sveltejs/vite-plugin-svelte` ^3 → **7.3.0** — clears the plugin, `-inspector`, `vitefu`; rides the
   vite/svelte majors.
+
+**Scope limit on this pass, worth carrying forward:** every number here is the **root** `npm audit` only.
+`git ls-files '*package-lock.json'` enumerates **two** npm projects — this one and **`gui-smoke/`**, which has
+its own manifest, its own advisories and its own CI job. `gui-smoke/` was **not** audited in this pass, and its
+findings include a non-major-fixable `brace-expansion` high — the same package fixed here at the root, still
+live in the second lockfile. Filed separately by the Foreman. The lesson is the CPE-1932 one: **enumerate the
+lockfiles, do not recall them** — "the npm audit" silently meant "the root npm audit".
 
 CPE-1443 has been updated with this table, the security framing (dev-only bounds the blast radius to the
 dev environment — it does not make the advisories theoretical, and two of the vite ones are
