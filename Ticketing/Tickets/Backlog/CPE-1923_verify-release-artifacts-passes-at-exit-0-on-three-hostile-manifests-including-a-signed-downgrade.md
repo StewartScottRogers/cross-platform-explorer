@@ -100,3 +100,13 @@ Related: **CPE-1908** (the channel-purity guard), **CPE-1873** (the endpoint pin
 **CPE-1901** (`--skip-pin-check` as a one-token kill switch, plus the unconditional
 "matches the second in-repo pin" success line that prints even when the check was skipped),
 **CPE-1874** (six shipped releases never signature-checked), **CPE-1917** (plain release broken 27 days).
+
+## Coupling note added 2026-08-27 — read before fixing finding 4
+
+CPE-1908's coverage ratchet (`src/lib/channelPurityCoverage.test.ts`) now **requires** the verify
+step's `if:` to be exactly `steps.sig.outputs.has == 'true'`, via a `SIGNING_KEY_STEP_IF` constant.
+That is the very condition finding 4 says must change.
+
+So whoever closes finding 4 must update `SIGNING_KEY_STEP_IF` **in the same change**, or the ratchet
+goes red on the fix — a guard blocking its own remedy. Flagged by PR #1039's Security Auditor on
+re-audit, and a pointer comment was added at the constant.
