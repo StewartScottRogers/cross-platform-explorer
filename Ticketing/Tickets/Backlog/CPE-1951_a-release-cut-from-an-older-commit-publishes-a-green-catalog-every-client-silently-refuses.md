@@ -85,8 +85,14 @@ release run `latest` is still the *previous* release, which is exactly the bound
       directions.
 - [ ] Handle the `latest`/draft distinction explicitly — PR #1061's review found `v0.57.32` is a
       **draft**, never served to any client, which is exactly the sort of thing this check will trip
-      over. Say what happens when `latest` has no catalog index at all (which is true of every
-      release after v0.57.32 — see CPE-1953).
+      over. Say what happens when `latest` has no catalog index at all — which is true **right now**:
+      `/releases/latest/` resolves to `v0.57.69-sidecar`, and only the plain channel runs the
+      `catalog` job at all, so the live index URL 404s (confirmed 2026-08-27 by
+      `catalog-freshness.yml` run 33107498544 → issue #1062).
+      **Record correction (CPE-1953):** the last release that actually PUBLISHED a catalog index is
+      **v0.57.33**, not v0.57.32. An asset scan says v0.57.32 only because v0.57.33's release was
+      later deleted; v0.57.32 is itself a draft no client ever fetched. The last successful
+      `release.yml` run was v0.57.33 on **2026-07-25**.
 - [ ] Keep `CATALOG_VERSION_FLOOR`. The static floor and the monotonic bound answer different
       questions and both are wanted.
 - [ ] Red-proof the fetch failure path: a 404, a truncated body, a 500, and a timeout must each fail
@@ -100,4 +106,5 @@ found it independently of each other, plus the author's recommended shape.
 Related: **CPE-1941** (the versioning change, PR #1061), **CPE-1940** (the fail-closed baseline, PR
 #1058 — the index-fetch work would build on its `VerifiedIndex`), **CPE-1924** (where an index fetch
 was first costed and rejected, for a different reason), **CPE-308** (the catalog pipeline),
-**CPE-1953** (no release since v0.57.32 publishes a catalog index at all).
+**CPE-1953** (no release since **v0.57.33** publishes a catalog index at all — corrected there from
+v0.57.32).
