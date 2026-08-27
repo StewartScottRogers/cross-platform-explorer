@@ -1,0 +1,299 @@
+name: agent catalog freshness check
+
+# CPE-1893 — the signed agent-catalog bundle (CPE-308/377) went unpublished for 31 days
+# (2026-07-25 to 2026-08-25) because release.yml's `catalog` job was `needs: release` with no `if:`,
+# so a single failing leg of the `release` matrix silently SKIPPED it on every tagged run. Nobody
+# noticed for a month because `skipped` in the run summary reads exactly like a job that correctly
+# had nothing to do — a publishing job that produced nothing looked identical to one that had
+# nothing to produce. release.yml's `catalog` job now runs with `if: ${{ !cancelled() }}` (matching
+# the established `verify-published-manifest` pattern, CPE-1872 finding A) so that specific coupling
+# can't recur — but that only closes ONE way this bundle could stop shipping. This workflow is the
+# independent backstop: it checks the wall-clock age of whatever catalog is ACTUALLY live right now,
+# on a schedule, regardless of whether a release was even tagged recently, so a *different* future
+# failure mode (a misconfigured secret, an upload step silently attaching the wrong files, the
+# `catalog` job "succeeding" at zero work because CPE_CATALOG_SIGNING_KEY got unset, or — CONFIRMED
+# LIVE on 2026-08-26 while investigating this ticket — a completely unrelated cause: GitHub's
+# `/releases/latest/` can currently resolve to a `-sidecar` release that never runs `catalog` at
+# all, see CPE-1894/1908/1909) still surfaces on its own instead of waiting another month for
+# someone to trip over it.
+#
+# ── Why a schedule, not workflow_run (unlike release-pipeline-watchdog.yml, CPE-1872) ────────────
+# release-pipeline-watchdog.yml deliberately reacts to release.yml/release-sidecar.yml COMPLETING,
+# specifically because a scheduled canary could go weeks between tags without re-checking. That
+# reasoning doesn't transfer here: THIS check's subject is not "did the last release workflow run
+# succeed" (the watchdog above already answers that, and will now also catch a loud `catalog`
+# failure since a failed job flips the whole run's conclusion) — it's "is the artifact a real client
+# fetches right now, at this moment, too old", which is a fact about the published state of the
+# world that keeps drifting even when NO workflow runs at all. Only a wall-clock schedule checks
+# that a whole week (or month) of silence, on its own.
+#
+# ── What is actually checked ───────────────────────────────────────────────────────────────────
+# The exact URL a real client's `do_fetch_catalog` (src-tauri/src/lib.rs) requests by default:
+# `https://github.com/<repo>/releases/latest/download/catalog-index.json`. catalog-sign
+# (sidecar/host/src/bin/catalog_sign.rs) stamps every entry's `version` field with `date +%s` at
+# sign time (CPE-372's anti-rollback counter doubles as a publish timestamp for free), so "how old
+# is the live catalog" is `now - max(entries[].version)` — no extra provenance to add or let drift.
+# See .github/workflows/scripts/catalog-freshness-check.sh for the one copy of that arithmetic
+# (sourced here, and directly runnable locally for a red-proof dry run with no live Actions run
+# needed — see its own header).
+#
+# A 404 here is its OWN alarm, not folded into "stale" or brushed off as inconclusive: it means the
+# live channel has NO catalog at all right now (confirmed live 2026-08-26, see above) — arguably a
+# more urgent finding than merely-old, and one an age comparison alone would never catch. Any other
+# non-200/404 status (transport failure, 403, 429, 5xx) is INCONCLUSIVE — never treated as evidence
+# of staleness, but never silently swallowed as a pass either (fails loud instead), mirroring
+# ffmpeg-pin-freshness.yml's three-way verdict (CPE-1763) and its stated reasoning.
+#
+# ── Threshold: 14 days, chosen deliberately from the PLAIN channel's own cadence ──────────────
+# `catalog` lives in release.yml, whose tag trigger is `["v*", "!v*-sidecar"]` (CPE-1894) -- it
+# fires ONLY on plain tags. release-sidecar.yml is workflow_dispatch-only and never runs `catalog`
+# at all. So the number below has to be based on how often a PLAIN tag actually gets cut, not how
+# often this repo ships overall (the sidecar channel is close to daily, but that is a DIFFERENT
+# channel gated on a DIFFERENT trigger, and applying its pace here would be measuring the wrong
+# thing -- an earlier draft of this check picked 7 days on exactly that wrong measurement). Read
+# directly from this repo's own plain-channel tags (`git log -1 --format=%aI <tag>`):
+#   v0.57.32  2026-07-24            v0.57.37  2026-07-26
+#   v0.57.33  2026-07-24            v0.57.69  2026-08-23   <- 28 days after v0.57.37
+# That 28-day gap is the plain channel's own ordinary pace -- separate from, and in addition to,
+# this ticket's 31-day verify-driven outage.
+#
+# Neither 7 nor 14 is free of false-alarm risk against a gap that size, and this comment does not
+# pretend otherwise: against the observed 28-day gap, a 7-day threshold goes red at day 8 (red for
+# ~20 of the 28 days -- "roughly three weeks", the shape that gets an alarm muted within a week and
+# defeats the point of having one); 14 goes red at day 15 (red for ~13 of the 28 days -- about a
+# THIRD fewer red days, i.e. roughly two-thirds the exposure, not half and not zero). 14 is chosen
+# as the better available compromise, not a false-alarm-free number: it still catches a REAL outage
+# at this ticket's own 31-day scale with ~17 days of runway (31 - 14) before reaching that scale,
+# while meaningfully cutting how much of an ordinary-paced gap it would flag red. Keeping 7 (or
+# going lower) is only defensible alongside
+# an explicit, written commitment that a plain release gets cut at least that often -- nothing
+# enforces that today, so 14 is the honest number for the cadence this channel actually has, not
+# the cadence it would need to have to justify something tighter. If the plain channel's cutting
+# pace changes, re-derive this number from its tags again rather than reusing this constant on
+# faith. Checked DAILY regardless (not weekly, unlike ffmpeg-pin-freshness.yml's canary): this
+# check is a single cheap GET + a timestamp compare (no multi-asset HEAD sweep, no upstream API
+# pagination), so there is no cost reason to wait between checks, and a daily cadence means a
+# breach is caught within ~24h of crossing the threshold instead of waiting up to a week for the
+# next scheduled run.
+#
+# ── Notification: a GitHub issue AND a red run ─────────────────────────────────────────────────
+# Same shape as ffmpeg-pin-freshness.yml (CPE-1763) and release-pipeline-watchdog.yml (CPE-1872):
+# nobody watches the Actions tab for a scheduled canary, so a confirmed stale/unreachable catalog
+# files (or comments on) a deduped GitHub issue, and the run itself stays red as the backstop for
+# anyone who isn't watching Issues either. `Ticketing/wiki.md` ("External findings") documents the
+# intake for issues filed by these canaries.
+
+on:
+  workflow_dispatch:
+    inputs:
+      override_threshold_days:
+        description: >-
+          Test hook (CPE-1893): override the staleness threshold (days) instead of the real one, to
+          dry-run the stale path without waiting for a real catalog to actually age. Leave empty for
+          a normal run.
+        required: false
+        type: string
+  schedule:
+    - cron: "37 8 * * *" # daily, 08:37 UTC — see cadence note above
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CATALOG_REPO: ${{ github.repository }}
+  DEFAULT_THRESHOLD_DAYS: 14
+
+jobs:
+  check-catalog-freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine effective threshold
+        id: threshold
+        env:
+          OVERRIDE: ${{ inputs.override_threshold_days }}
+        run: |
+          set -euo pipefail
+          effective="${OVERRIDE:-$DEFAULT_THRESHOLD_DAYS}"
+          if ! [[ "$effective" =~ ^[0-9]+$ ]]; then
+            echo "::error::override_threshold_days must be a non-negative integer, got: ${effective}"
+            exit 1
+          fi
+          echo "days=${effective}" >> "$GITHUB_OUTPUT"
+          echo "using freshness threshold: ${effective} day(s)"
+
+      # Same URL a real client's do_fetch_catalog (src-tauri/src/lib.rs, catalog_url()) requests by
+      # default. --retry set covers transient network/CDN hiccups without ever retrying a real 404
+      # into a false pass or manufacturing a 200 (mirrors ffmpeg-pin-freshness.yml's HEAD-check).
+      - name: Fetch the live catalog index
+        id: fetch
+        timeout-minutes: 3
+        run: |
+          set -uo pipefail
+          url="https://github.com/${CATALOG_REPO}/releases/latest/download/catalog-index.json"
+          code=$(curl -sSL --max-time 30 --retry 3 --retry-max-time 20 --retry-delay 2 \
+            --retry-connrefused -o catalog-index.json -w '%{http_code}' "$url")
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "http_code=${code}" >> "$GITHUB_OUTPUT"
+          echo "fetched ${url} -> HTTP ${code}"
+
+      - name: Evaluate freshness
+        id: eval
+        if: steps.fetch.outputs.http_code == '200'
+        timeout-minutes: 2
+        env:
+          THRESHOLD_DAYS: ${{ steps.threshold.outputs.days }}
+        run: |
+          set -euo pipefail
+          source .github/workflows/scripts/catalog-freshness-check.sh
+
+          # CPE-1893 UAT round 1 (reviewer finding 2): under `set -e`, a BARE failing `jq` inside
+          # `published=$(jq ...)` aborts this step immediately -- before `unparseable=true` is ever
+          # written. The run still goes red (the always() "Pass/fail summary" step below still
+          # catches it), but "File an issue" below never sees `unparseable == 'true'`, so a genuinely
+          # corrupt body (HTTP 200, unparseable JSON) went red WITHOUT filing an issue --
+          # inconsistent with the sibling case right below it (valid JSON, empty entries[]), which
+          # DOES reach the issue-filing step. Fix: a command used as an `if` CONDITION is exempt from
+          # `set -e` (only a bare failing command aborts; one guarding an `if` never does), so
+          # wrapping the assignment in `if ! published=$(...); then` catches the failure here instead
+          # of aborting past it.
+          jq_err="$(mktemp)"
+          if ! published=$(jq -r '[.entries[]?.version] | max // empty' catalog-index.json 2>"$jq_err"); then
+            echo "::error::catalog-index.json fetched OK (HTTP 200) but could not be parsed as JSON at all -- corrupt or truncated body:"
+            cat "$jq_err" >&2
+            echo "unparseable=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if [ -z "$published" ]; then
+            echo "::error::catalog-index.json fetched OK and parsed, but has no entries[].version -- cannot evaluate freshness (schema changed? empty index?)"
+            echo "unparseable=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          age_days=$(catalog_age_days "$published")
+          echo "published_epoch=${published}" >> "$GITHUB_OUTPUT"
+          echo "age_days=${age_days}" >> "$GITHUB_OUTPUT"
+
+          # CPE-1893 UAT round 1 (reviewer finding 1): is_catalog_stale is a 3-way verdict via exit
+          # code (0=stale, 1=fresh, 2=CLOCK SKEW -- a future-dated `version`), not a boolean. A bare
+          # `if is_catalog_stale ...; then stale=true; else stale=false; fi` collapses exit code 2
+          # into the `else` branch -- i.e. reports a nonsensical negative age as "fresh". Capturing
+          # the real exit code explicitly (condition-position calls are exempt from `set -e`
+          # regardless of which nonzero code they return, so this is safe under it) and switching on
+          # all three values is what keeps clock skew from ever reading as healthy.
+          set +e
+          is_catalog_stale "$published" "$THRESHOLD_DAYS"
+          verdict=$?
+          set -e
+          case "$verdict" in
+            2)
+              echo "clock_skew=true" >> "$GITHUB_OUTPUT"
+              echo "stale=false" >> "$GITHUB_OUTPUT"
+              echo "::error::catalog's published version (epoch ${published}) is in the FUTURE relative to this run (age ${age_days}d) -- a clock skew on the signing runner, or a mis-stamped catalog version. Never treated as fresh."
+              exit 1
+              ;;
+            0)
+              echo "clock_skew=false" >> "$GITHUB_OUTPUT"
+              echo "stale=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::catalog is ${age_days} day(s) old, over the ${THRESHOLD_DAYS}-day threshold"
+              ;;
+            *)
+              echo "clock_skew=false" >> "$GITHUB_OUTPUT"
+              echo "stale=false" >> "$GITHUB_OUTPUT"
+              echo "catalog is ${age_days} day(s) old -- within the ${THRESHOLD_DAYS}-day threshold"
+              ;;
+          esac
+
+      # A confirmed 404 (no catalog live at all) is its own alarm -- see header comment. A clock-skew
+      # verdict (reviewer finding 1) is likewise its own alarm, never folded into "stale". Anything
+      # else non-200 (transport failure, 403, 429, 5xx) is inconclusive, handled below: never treated
+      # as evidence of a problem, never silently swallowed as a pass either.
+      - name: File an issue (deduped) on a confirmed problem
+        if: always() && (steps.fetch.outputs.http_code == '404' || steps.eval.outputs.stale == 'true' || steps.eval.outputs.unparseable == 'true' || steps.eval.outputs.clock_skew == 'true')
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HTTP_CODE: ${{ steps.fetch.outputs.http_code }}
+          FETCH_URL: ${{ steps.fetch.outputs.url }}
+          AGE_DAYS: ${{ steps.eval.outputs.age_days }}
+          THRESHOLD_DAYS: ${{ steps.threshold.outputs.days }}
+          UNPARSEABLE: ${{ steps.eval.outputs.unparseable }}
+          CLOCK_SKEW: ${{ steps.eval.outputs.clock_skew }}
+        run: |
+          set -uo pipefail
+          label="catalog-stale"
+          gh label create "$label" \
+            --color d93f0b \
+            --description "The signed agent catalog (CPE-308/377) is stale or unreachable at its live URL" \
+            2>/dev/null || true # already exists -- fine
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body_file="$(mktemp)"
+          {
+            printf '%s\n\n' "The agent catalog freshness check (\`.github/workflows/catalog-freshness.yml\`, run [${GITHUB_RUN_ID}](${run_url})) found a problem at the live catalog URL a real client fetches by default:"
+            printf '%s\n\n' "\`${FETCH_URL}\`"
+            if [ "$HTTP_CODE" = "404" ]; then
+              printf '%s\n' "**HTTP 404 — no catalog is published there at all.** A real client's fetch (\`do_fetch_catalog\` in \`src-tauri/src/lib.rs\`) fails outright; the AI Console UI shows this identically to being offline (\"No agent update available (offline, or none published yet).\", see \`sidecar/ai-console/src/launcher.html\`'s \`refreshCatalog()\`)."
+              printf '%s\n' "Known live cause as of 2026-08-26 (CPE-1893's investigation): GitHub's \`/releases/latest/\` can resolve to a \`-sidecar\` release, and only \`release.yml\` (the plain channel) runs the \`catalog\` job — a sidecar-latest release has no catalog asset at all. Also confirmed 2026-08-26: every recent plain release is sitting as an unpublished Draft, so this check will most likely keep firing on its own until a plain release is actually published. That is CPE-1894/1908/1909 territory, not this check's job to fix; this issue is the freshness signal, not a diagnosis."
+            elif [ "$CLOCK_SKEW" = "true" ]; then
+              printf '%s\n' "**The catalog's published version is stamped in the FUTURE** (age ${AGE_DAYS} day(s), i.e. negative) relative to this run. That means either the signing runner's clock was wrong when \`catalog-sign\` ran, or the catalog was mis-stamped some other way -- either way, do not trust its freshness until this is understood."
+            elif [ "$UNPARSEABLE" = "true" ]; then
+              printf '%s\n' "**Fetched HTTP 200, but the body has no parseable \`entries[].version\`** — the index schema may have changed, the file is empty, or the body is not valid JSON at all (corrupt/truncated). Cannot evaluate freshness."
+            else
+              printf '%s\n' "**Stale: ${AGE_DAYS} day(s) old, over the ${THRESHOLD_DAYS}-day threshold.** A fetch against this catalog will keep succeeding but applying nothing new (anti-rollback rejects a same-or-older \`version\`, see \`sidecar/host/src/catalog.rs::apply_bundle_with\`) — the AI Console UI shows this identically to genuinely being up to date (\"Agents are already up to date.\")."
+            fi
+            printf '\n%s\n' "Check whether \`release.yml\`'s \`catalog\` job ran and succeeded on the most recent tagged release, and whether \`CPE_CATALOG_SIGNING_KEY\` is still a valid repo secret."
+            printf '\n%s\n' "Filed automatically by CPE-1893. Please convert to a CPE-NNN ticket on triage (see Ticketing/wiki.md, \"External findings\")."
+          } > "$body_file"
+
+          # CPE-1794 lesson (release-pipeline-watchdog.yml / ffmpeg-pin-freshness.yml): a transient
+          # `gh issue list` failure must never read as "no existing issue" -- that would file a
+          # duplicate instead of failing loud. Capture the lookup's exit status separately from its
+          # output.
+          list_output="$(mktemp)"
+          if gh issue list --state open --label "$label" --json number --jq '.[0].number' > "$list_output"; then
+            existing="$(cat "$list_output")"
+          else
+            echo "::error::could not query existing issues (gh issue list failed -- see its own output above). Not filing a new issue: a lookup failure is not evidence there is no existing one." >&2
+            exit 1
+          fi
+
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            echo "an open issue already tracks this (#$existing) -- commenting with this run's details instead of filing a duplicate"
+            gh issue comment "$existing" --body-file "$body_file"
+          else
+            gh issue create \
+              --title "Agent catalog is stale or unreachable" \
+              --label "$label" \
+              --body-file "$body_file"
+          fi
+
+      - name: Pass/fail summary
+        if: always()
+        env:
+          HTTP_CODE: ${{ steps.fetch.outputs.http_code }}
+          STALE: ${{ steps.eval.outputs.stale }}
+          CLOCK_SKEW: ${{ steps.eval.outputs.clock_skew }}
+          AGE_DAYS: ${{ steps.eval.outputs.age_days }}
+          THRESHOLD_DAYS: ${{ steps.threshold.outputs.days }}
+        run: |
+          if [ "$HTTP_CODE" = "200" ] && [ "$STALE" = "false" ] && [ "$CLOCK_SKEW" != "true" ]; then
+            echo "catalog is fresh (age ${AGE_DAYS}d, threshold ${THRESHOLD_DAYS}d) -- nothing to report"
+            exit 0
+          fi
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "::error::catalog is unreachable at its live URL (HTTP 404) -- see the filed/updated issue above. This run is intentionally red until it's fixed."
+            exit 1
+          fi
+          if [ "$CLOCK_SKEW" = "true" ]; then
+            echo "::error::catalog's published version is stamped in the future (age ${AGE_DAYS}d, negative) -- a clock skew or mis-stamped version, see the filed/updated issue above. This run is intentionally red until this is understood."
+            exit 1
+          fi
+          if [ "$STALE" = "true" ]; then
+            echo "::error::catalog is stale (age ${AGE_DAYS}d > threshold ${THRESHOLD_DAYS}d) -- see the filed/updated issue above. This run is intentionally red until a fresh catalog is published."
+            exit 1
+          fi
+          echo "::error::could not conclusively check catalog freshness (HTTP ${HTTP_CODE:-<none>} -- not 200, not 404). Not filing an issue on an ambiguous status; re-run this workflow (workflow_dispatch) to confirm before trusting a future green run's silence."
+          exit 1

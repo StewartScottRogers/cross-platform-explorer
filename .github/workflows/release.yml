@@ -339,10 +339,33 @@ jobs:
 
   # Sign + publish the agent-catalog bundle next to the installer (CPE-377/308), so the AI Console
   # can refresh its agent roster without an app release. Runs once, after the installers. Guarded by
-  # the signing-key secret so it SKIPS (never fails) on repos that haven't set up catalog signing —
-  # exactly like the OS-code-signing pattern above.
+  # the signing-key secret so its OWN steps skip (never fail) on repos that haven't set up catalog
+  # signing — exactly like the OS-code-signing pattern above. That per-step secret gate is a
+  # DIFFERENT, deliberate kind of "nothing to do" than the job-level `if:` below — see CPE-1893.
+  #
+  # CPE-1893 — `needs: release` used to carry no `if:` at all, which means this job was SKIPPED
+  # (not failed, not run-and-succeeded — silently absent from the run) the moment `release` reported
+  # anything other than success. `release` is `fail-fast: false`, so on a partial matrix failure the
+  # surviving legs still finish and tauri-action still creates/populates the draft release — the
+  # exact same situation CPE-1872 round 3 already fixed for `verify-published-manifest` below, for
+  # the identical reason (see that job's own comment). Concretely: `release` failed on every tagged
+  # run from 2026-07-26 to 2026-08-23 (a step now moved into `verify-published-manifest`, unrelated
+  # to this job's own work), so `catalog` silently skipped on all ~15 of those runs and the signed
+  # agent-catalog bundle went unpublished for 31 days with nothing anywhere saying so — `skipped`
+  # reads in the run summary exactly like a job that correctly had nothing to do.
+  #
+  # `if: ${{ !cancelled() }}` (same expression, same reasoning, as `verify-published-manifest`) makes
+  # this job run regardless of `release`'s pass/fail outcome — only an actual workflow cancellation
+  # skips it now. On a genuine total-matrix failure (no release/draft object created at all) this job
+  # now runs and FAILS LOUDLY at `gh release upload` (there's nothing to upload to), rather than
+  # skipping quietly — turning a genuine dependency into a loud failure instead of a silent no-op,
+  # per this ticket's own requirement. A DEDICATED, schedule-driven freshness check
+  # (catalog-freshness.yml) is the independent backstop for every other way this bundle could stop
+  # shipping without a `release`-job failure at all (e.g. this job "succeeding" at zero work because
+  # the signing-key secret got unset) — see that workflow's header comment.
   catalog:
     needs: release
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
