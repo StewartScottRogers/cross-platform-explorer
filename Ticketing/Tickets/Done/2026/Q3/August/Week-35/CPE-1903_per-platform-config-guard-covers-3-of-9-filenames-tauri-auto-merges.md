@@ -3,7 +3,7 @@ id: CPE-1903
 title: the per-platform config guard covers 3 of the 9 filenames Tauri auto-merges — .json5 and Tauri.<os>.toml bypass it, and the check never runs on the tag path
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-26
