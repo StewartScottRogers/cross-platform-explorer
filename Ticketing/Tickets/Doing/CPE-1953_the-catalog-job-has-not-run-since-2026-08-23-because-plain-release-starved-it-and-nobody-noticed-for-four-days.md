@@ -318,3 +318,47 @@ reviewer's: a green result is only evidence once you have shown what it would ta
 **Rebase note.** `main` had meanwhile added CPE-1953's own numbers-corrected sections and filed
 **CPE-1956** for the `ci.yml`-behind-`lockfile-preflight` chain this PR's enumeration recommended.
 Both merged in; the recommendation is now tracked.
+
+### 2026-08-27 — worker, review round 2 (CI red on two of this PR's own tests)
+
+**I asserted on bash's error text instead of my own guard's.** Git Bash on Windows says
+`integer expected`; GNU bash on ubuntu says `integer expression expected`. Both the MECHANISM test and
+the REGRESSION DEMO pinned the Windows spelling, so both went red the moment they ran on Linux.
+
+That is round 1's own lesson applied one notch too literally. "Assert the diagnostic the guard emits"
+means **our** diagnostic — `which is not one non-negative integer` — not the shell's incidental
+complaint on the way there. Bash's wording is another tool's human-readable output: the same class the
+reviewer flagged when it noted `/npm error/i` would not match npm 6's `npm ERR!`.
+
+**Fixed by asserting the behavioural facts instead**, all platform-stable:
+
+- **MECHANISM** — the comparison now runs twice, once bare to capture `[`'s own exit status
+  (`cmp_rc=2` — an *error*, not a verdict) and once as an `if` condition to show that status being
+  flattened into "false", plus the branch not taken and the script continuing to what would have been
+  the upload. Bash's text is kept only as corroboration that the exit code came from the integer parse,
+  matched on the shape both spellings share.
+- **REGRESSION DEMO** — asserts the pre-review body exits **0**, prints neither the zero-entry refusal
+  nor the shape-check refusal, and reaches its own pre-upload success line. The stderr text is
+  incidental to that regression and is no longer asserted at all.
+
+**A second, smaller version of the same mistake, caught before pushing.** The obvious "loose" pattern
+`/integer expres/` matches the **Linux** spelling and **not** the Windows one — a narrower pin wearing a
+wildcard, red on the very machine the original was written on. Verified both spellings against the
+pattern actually shipped (`/integer\b.*\bexpected/`) before committing rather than assuming "looser"
+meant "portable". The site says so, and says what to do if a third bash wording ever appears: widen to
+the exit code alone, never grow an alternation of vendors' prose.
+
+**Audited the whole file for external-tool wording, as asked.** One other message assertion exists —
+`release not found` in the upload test — and it is safe for a reason now written at the site: that
+string is **this test's own `gh` stub** speaking, standing in for gh's real not-found response, not a
+claim about how any released `gh` words it. Real `gh` output is asserted on nowhere; the fact under
+test there is the exit code. Everything else in the file asserts on this repo's own workflow
+diagnostics, on `$GITHUB_OUTPUT` keys, or on exit codes.
+
+**Re-measured on the rebased head** (`main` gained a test file since round 1, so the previously
+reported 343/4874 had drifted):
+
+- `npm test` — **344 files, 4891 passed, 2 skipped** (the two real-`jq` corroborations, absent here).
+- `npm run check` — 0 errors, 0 warnings.
+- Whole-file mutation vs `main`: **31 failed / 9 passed / 2 skipped**, unchanged by this round's edits.
+- Targeted mutation still kills exactly the right two tests per blocker.

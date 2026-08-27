@@ -249,6 +249,11 @@ describe('CPE-1893\'s "fail loudly at gh release upload" claim, exercised (CPE-1
         gh: 'echo "release not found" >&2; exit 1',
       },
     });
+    // The fact under test is the EXIT CODE: the step propagates gh's failure instead of skipping.
+    // The message assertion below is safe only because that text is this test's OWN stub speaking
+    // (see `stubs.gh` above), standing in for gh's real not-found response -- it is not a claim about
+    // how any released `gh` words it. Real `gh` output is never asserted on anywhere in this file;
+    // it would be exactly the portability trap the MECHANISM test below documents.
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("release not found");
   });
@@ -359,15 +364,38 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
   it.skipIf(!hasBash)('MECHANISM: `[ "0\\n1" -lt 1 ]` exits 2, and an `if` cannot tell 2 from false', () => {
     const r = spawnSync(
       "bash",
-      ["-c", 'entries=$(printf "0\\n1"); if [ "${entries:-0}" -lt 1 ]; then echo TOOK-LT-BRANCH; fi; echo "step-continued"'],
+      [
+        "-c",
+        'entries=$(printf "0\\n1"); [ "${entries:-0}" -lt 1 ]; echo "cmp_rc=$?"; ' +
+          'if [ "${entries:-0}" -lt 1 ]; then echo TOOK-LT-BRANCH; fi; echo "step-continued"',
+      ],
       { encoding: "utf8" },
     );
-    // The whole defect in three lines: the guard branch is not taken, the script carries on, and the
-    // only trace is a stderr line nobody reads.
+    // The comparison runs TWICE on purpose: once bare, to capture `[`'s own exit status, and once as
+    // an `if` condition, to show that status being flattened into "false". The captured status is
+    // the fact under test -- not anything bash prints about it.
+    //
+    // The whole defect in three observable, platform-stable facts: `[` reports 2 (an ERROR, not a
+    // verdict), the guard branch is nonetheless not taken, and the script carries on to what would
+    // have been the upload.
     expect(r.status).toBe(0);
+    expect(r.stdout).toContain("cmp_rc=2");
     expect(r.stdout).not.toContain("TOOK-LT-BRANCH");
     expect(r.stdout).toContain("step-continued");
-    expect(r.stderr).toContain("integer expected");
+    // LOOSE ON PURPOSE, and saying why is the point (CPE-1953 review round 2): this string is
+    // BASH's incidental complaint, not a diagnostic this repo emits, and the two bash builds this
+    // file runs on word it differently — Git Bash on Windows says "integer expected", GNU bash on
+    // ubuntu says "integer expression expected". An earlier version pinned the Windows spelling and
+    // went red on CI: the same "asserting on another tool's human-readable output" mistake the
+    // review flagged elsewhere, committed while following the rule to assert on diagnostics. That
+    // rule means assert on OUR diagnostic. The shell's text is kept ONLY as corroboration that the
+    // exit code above came from the integer parse rather than from something else, so it is matched
+    // on the shape the two spellings share — `integer` … `expected` — and not on a literal
+    // substring of either. (A first attempt at "loose" used `/integer expres/`, which matches the
+    // Linux spelling and NOT the Windows one: a narrower pin wearing a wildcard, red on the very
+    // machine the original was written on. If a third bash wording ever appears, widen this to the
+    // exit code alone rather than growing an alternation of vendors' prose.)
+    expect(r.stderr).toMatch(/integer\b.*\bexpected/);
   });
 
   const CONCATENATED_STREAM = '{"entries":[]}{"entries":[{"id":"demo","version":1800000000}]}';
@@ -430,9 +458,16 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
       },
       stubs: { jq: 'printf \'%s\\n\' 0 1; exit 0' },
     });
+    // The regression is entirely behavioural, and every assertion below is on this repo's own
+    // output: the step exits 0, never prints its zero-entry refusal or its shape-check refusal, and
+    // reaches its own pre-upload success line — i.e. it would have gone on to upload a bundle whose
+    // entry count it could not read. Bash's "integer expres…" complaint is incidental to that and is
+    // deliberately NOT asserted here; see the MECHANISM test above for why its wording is not
+    // portable across the two bash builds this file runs on.
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("integer expected");
     expect(r.all).not.toContain("zero entries"); // the guard branch was never taken -- failing OPEN
+    expect(r.all).not.toContain("which is not one non-negative integer"); // nor the shape check
+    expect(r.stdout).toContain("signed catalog bundle carries"); // reached the pre-upload success line
   });
 
   it.skipIf(!hasBash)("with jq absent from PATH entirely, the step still fails LOUD -- never green", () => {
