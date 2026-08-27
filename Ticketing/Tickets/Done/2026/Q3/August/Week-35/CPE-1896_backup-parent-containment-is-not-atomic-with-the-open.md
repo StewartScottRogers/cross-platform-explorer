@@ -3,7 +3,7 @@ id: CPE-1896
 title: backup's parent containment is not atomic with the open — a three-syscall parent swap writes outside the root and reports ok:true (measured 73/1200)
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: L
 created: 2026-08-26
@@ -1187,3 +1187,32 @@ volumes that report no usable file index, and would close **CPE-1912** for free 
 real path be compared against the *plan* path rather than only against the root.
 
 Related, all filed from this work: **CPE-1912**, **CPE-1913**, **CPE-1915**.
+
+## Closing note — Foreman, 2026-08-27
+
+Merged as PR #1043 after **six rounds**. Final independent verdicts: Reviewer **APPROVE**, Security
+Auditor **SEC PASS**, UAT **PASS**.
+
+**The number that closes it: 2,700 race-probe trials across four rounds, 0 escapes.** The ticket
+opened on a measured 73-escapes-in-1,200, where a racing directory swap made the backup overwrite a
+file *outside* the destination root and report `ok: true` with an empty error.
+
+Rounds 3 and 4 are where the real defects were, and **both were tests that proved nothing rather than
+code that did not work**:
+- the leaf surrogate guard could be disabled entirely with all 2,404 tests staying green, because an
+  unrelated path check standing in front of it answered on the same bit;
+- two link-refusal assertions matched a phrase that appeared in the boilerplate every refusal shares,
+  so they passed for any failure at all.
+
+That first one was generalised into **CPE-1929** (shadowed guards, with a diagnostic tell) and a named
+lead. Other tickets this work produced: **CPE-1920** (the ~850 us/file identity probe this change made
+redundant), **CPE-1925** (backup silently drops empty directories), **CPE-1927** (an archive.rs test
+race), **CPE-1932** (seven stale lockfiles, found one per CI hour).
+
+The Foreman overrode its own 3-attempt cap **twice** on this ticket; both overrides and their
+reasoning are recorded in `.claude/sprint-metrics/history.md` per CPE-1835.
+
+**Still resting on inference, not measurement, and queued for an attended check:** whether a write
+through a `FILE_OPEN_REPARSE_POINT` handle onto a **live dehydrated OneDrive placeholder** yields a
+correct hydrated file. The classification half is measured; `src/docs/safety-undo.md` was softened
+accordingly rather than claiming it.
