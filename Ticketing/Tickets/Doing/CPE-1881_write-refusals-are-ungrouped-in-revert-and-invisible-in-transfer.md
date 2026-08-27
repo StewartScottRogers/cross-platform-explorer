@@ -3,7 +3,7 @@ id: CPE-1881
 title: hard-link write refusals are ungrouped in revert (8 MiB of prose) and invisible in transfer (stderr only)
 type: bug
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-23
@@ -75,3 +75,4 @@ and "say nothing" — **the third option was not considered.**
 - **2026-08-23 17:00 USMST** — Filed by the Foreman during batched run `batched-2026-08-23-1124`,
   from the Security Auditor's findings F3 and F4 on PR #1016. Both were measured rather than asserted.
   Neither blocks that PR: the refusal itself is correct and the alternative is the write going through.
+- **2026-08-27 USMST** — Picked up. Starting on branch `cpe-1881-refusal-reporting`.
