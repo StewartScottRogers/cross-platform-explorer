@@ -155,6 +155,49 @@ Fixtures added: 0/1/2/3-space indents all count identically; 4-space reds; a fen
 36 tests (was 28). The Legend now documents the indentation rule, the fenced-block rule, and the known,
 accepted limitation that the marker is pinned to "exactly one cell", not to the Status **column**.
 
+**2026-08-27 — review round 3. The durable variant: a debt table that is never *gained*.**
+
+Round 2's floors caught an existing table being *lost*. They did not catch a **new** table logged inside
+a blockquote. Reproduced on the real ledger — GitHub renders 9 tables with all three `⛰` rows visible,
+the parser's total does not move, and every check passes:
+
+```
+parser total    : 13  (header says 13 -> the header test PASSES)
+tables parsed   : 8   | accounted lines: 48
+floor A pre-fix : announced 8 vs parsed 8   -> PASS (blind)
+floor B pre-fix : loose 48 vs accounted 48  -> PASS (blind)
+```
+
+Cause: floor B's loose matcher was `/^\s*\|/`, and `>` is not whitespace — so a blockquoted row was
+rejected by the loose matcher **and** by the gate, and both counts moved together. Fix is one character,
+`/^[\s>]*\|/`, applied to `TABLE_ANNOUNCEMENT` for the same reason. Same file, after:
+
+```
+floor A fixed   : announced 9 vs parsed 8   -> RED
+floor B fixed   : loose 53 vs accounted 48  -> RED
+```
+
+**Floor A is now derived rather than hard-coded.** `tables.length >= 8` went slack the moment a ninth
+table was added without bumping it — which is what made this variant durable. It now asserts
+`tables.length === (number of <!-- mvd-table: … --> announcements)`, so adding a table raises the expected
+count automatically and a table that stops being parsed while its announcement remains reds at once.
+
+**One fence model, not two.** `fencedLines` is exported and the guard test reuses it. The test's own
+simpler model toggled on any fence line and diverged from the parser on a ``` block containing a `~~~`
+line — reddening a legal file with a message pointing at *tables* when the cause was a *fence*. While
+there, the latent CommonMark divergence review flagged is **fixed, not just noted**: the closer must be
+the same character **and at least as long**, so a four-backtick fence is no longer closed by a
+three-backtick line (it would have counted a table GFM renders as code — an over-count, not a silent
+loss, but wrong either way; a sibling PR hit the same class the same day).
+
+**The 4-space decision was validated by measurement, better than it was argued.** At four spaces GFM
+itself loses the table — 8 rendered tables become 7, the 5-row wave table gone — so a 4-space pipe row in
+this file is *always* a mistake, and reddening it adds no false-positive surface (a genuine sample row
+belongs in a fence, which is excluded outright).
+
+40 tests, was 36. Fixtures added for the blockquote variant (all three floors, including a case pinning
+that the pre-fix matcher passed), and for the fence-length rule.
+
 **Interlock with CPE-1934 / PR #1052 (in flight).** Its `manual-test-mvd` ratchet entry reads this file's
 header sentence with `\*\*MVD \(still-manual surfaces\):[^*]*?=\s*(\d+)\s*total\*\*`. That shape is
 preserved byte-for-byte, and a dedicated test here asserts that regex still matches and still returns the

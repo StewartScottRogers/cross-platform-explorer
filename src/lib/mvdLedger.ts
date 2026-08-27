@@ -144,24 +144,52 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
  * Which lines sit inside a fenced code block. Those lines are not markdown at all, so a `|` there is
  * text. Without this, a future shift quoting an example table row inside a fence — likely, now that this
  * ledger documents its own table format — would red with a confusing "table is not annotated".
+ *
+ * **Exported so the guard test reuses this exact model rather than keeping a second, simpler one.** A
+ * test that toggled on any fence line diverged from this one on a ``` block containing a `~~~` line, and
+ * reported the divergence as a *table* problem — a guard reddening a legal file, with a message pointing
+ * at the wrong thing. One model, not two.
+ *
+ * Matches CommonMark on the two rules that bite: the closer must use the **same character** as the
+ * opener, and be **at least as long**. A four-backtick fence is therefore not closed by a three-backtick
+ * line. (Comparing only the first character closed such a block early, which would count a table GFM
+ * renders as code — an over-count rather than a silent loss, but wrong either way. A sibling PR hit the
+ * same class of bug on the same day.)
  */
-function fencedLines(lines: string[]): boolean[] {
+export function fencedLines(lines: string[]): boolean[] {
   const inFence = new Array<boolean>(lines.length).fill(false);
-  let open: string | null = null;
+  let openChar: string | null = null;
+  let openLen = 0;
   for (let i = 0; i < lines.length; i++) {
     const m = FENCE.exec(lines[i]);
-    if (open === null) {
+    if (openChar === null) {
       if (m) {
-        open = m[1][0];
+        openChar = m[1][0];
+        openLen = m[1].length;
         inFence[i] = true;
       }
     } else {
       inFence[i] = true;
-      if (m && m[1][0] === open) open = null;
+      if (m && m[1][0] === openChar && m[1].length >= openLen) openChar = null;
     }
   }
   return inFence;
 }
+
+/**
+ * A line that ANNOUNCES a table — anchored at the start of its line, which is what distinguishes a real
+ * annotation from this ledger's own prose describing the format inside backticks.
+ *
+ * The guard test compares the number of these against the number of tables the parser actually built.
+ * That equality is the floor that a hard-coded `tables.length >= N` cannot be: `>= 8` goes slack the
+ * moment a ninth table is added without bumping it, and a table can then vanish undetected — which is
+ * exactly what made the blockquoted-table variant durable in review.
+ *
+ * `[\s>]` and not `[\s]` for the same reason as the guard test's loose row matcher: a table announced
+ * from inside a blockquote must still be *seen* to be announced, or the floor moves in lockstep with the
+ * thing it is supposed to catch and passes.
+ */
+export const TABLE_ANNOUNCEMENT = /^[\s>]*<!--\s*mvd-table:/;
 
 /**
  * Split one table line into cells the way GFM does: on **unescaped** pipes only.

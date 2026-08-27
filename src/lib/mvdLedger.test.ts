@@ -11,7 +11,16 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseBurndown, describeCounts, splitRow, MvdLedgerError, STILL_MANUAL, STATUS_MARKERS } from "./mvdLedger";
+import {
+  parseBurndown,
+  describeCounts,
+  splitRow,
+  fencedLines,
+  TABLE_ANNOUNCEMENT,
+  MvdLedgerError,
+  STILL_MANUAL,
+  STATUS_MARKERS,
+} from "./mvdLedger";
 
 const LEDGER_PATH = join(process.cwd(), ".claude", "qa-architecture", "MANUAL-TEST-BURNDOWN.md");
 const source = readFileSync(LEDGER_PATH, "utf8");
@@ -53,41 +62,51 @@ describe("MANUAL-TEST-BURNDOWN.md — the MVD total is derived from its own tabl
   // 13 -> 10 while `rows.length` only went 24 -> 19 and the supplementary-table count only 5 -> 4 —
   // both floors still passed, and the test then instructed the next shift to write 10 into the header.
   // These two assertions are the floors that would have caught it.
-  it("no table can go missing: the table count is a one-way floor", () => {
+  it("no table can go missing: every announced table was actually parsed", () => {
+    // DERIVED, not hard-coded. Review round 3: `tables.length >= 8` goes slack the moment a ninth table
+    // is added without bumping it — and a table can then vanish undetected, which is what made the
+    // blockquoted-table variant durable. Counting the `<!-- mvd-table: -->` announcements instead means
+    // adding a table raises the expected count automatically, and a table that stops being parsed while
+    // its announcement remains reds immediately.
+    const lines = source.split(/\r?\n/);
+    const fenced = fencedLines(lines);
+    const announced = lines.filter((line, i) => !fenced[i] && TABLE_ANNOUNCEMENT.test(line)).length;
     const l = parseBurndown(source);
     expect(
       l.tables.length,
-      "a table disappeared from the parser's view. This is the exact shape of the indented-table blind " +
-        "spot: the rendered page can look unchanged while a whole table stops being counted. Do not " +
-        "lower this floor to make a red go away — find the table.",
-    ).toBeGreaterThanOrEqual(8);
+      `${announced} tables are announced with an <!-- mvd-table: ... --> comment, but the parser built ` +
+        `${l.tables.length}. A table disappeared from the parser's view — the rendered page can look ` +
+        "unchanged while a whole table stops being counted. Find the table; do not delete the annotation.",
+    ).toBe(announced);
+    expect(announced, "the ledger announces almost no tables — did an edit gut the file?").toBeGreaterThan(4);
     for (const t of l.tables) {
       expect(t.dataRows, `the ${t.kind} table at line ${t.line} has no data rows`).toBeGreaterThan(0);
     }
   });
 
   it("every table-shaped line in the file is accounted for by some parsed table", () => {
-    // Deliberately detected with a LOOSER matcher than the parser's own gate (`/^ {0,3}\|/`): any
-    // leading whitespace at all. If the gate ever narrows again — which is precisely the bug this
-    // review caught — the loose count exceeds what the tables account for and this reds, instead of
-    // the number quietly getting smaller.
+    // Deliberately detected with a LOOSER matcher than the parser's own gate (`/^ {0,3}\|/`). If the
+    // gate ever narrows again — the bug review round 2 caught — the loose count exceeds what the tables
+    // account for and this reds, instead of the number quietly getting smaller.
+    //
+    // `[\s>]` and not `[\s]`: round 3 found the one variant neither floor caught. A NEW debt table
+    // logged inside a blockquote renders as a 9th table on GitHub with its rows fully visible, while
+    // `>` is not whitespace — so the loose matcher rejected the row exactly as the gate did, both
+    // counts moved together, and three real ⛰ rows went uncounted with every check green. One
+    // character fixes it. (Reusing the parser's own `fencedLines` rather than a second, simpler fence
+    // model: a test that toggled on any fence line diverged on a ``` block containing a `~~~` line and
+    // reported it as a table problem.)
     const lines = source.split(/\r?\n/);
-    let inFence = false;
-    let looseRows = 0;
-    for (const line of lines) {
-      if (/^ {0,3}(`{3,}|~{3,})/.test(line)) {
-        inFence = !inFence;
-        continue;
-      }
-      if (!inFence && /^\s*\|/.test(line)) looseRows++;
-    }
+    const fenced = fencedLines(lines);
+    const looseRows = lines.filter((line, i) => !fenced[i] && /^[\s>]*\|/.test(line)).length;
     const l = parseBurndown(source);
     const accounted = l.tables.reduce((n, t) => n + 2 + t.dataRows, 0); // header + delimiter + rows
     expect(
       accounted,
       `${looseRows} lines in the ledger look like table rows, but the parsed tables only account for ` +
         `${accounted} of them. Some rows are outside every table — they are not being counted, and on ` +
-        "GitHub they are probably not rendering as a table either.",
+        "GitHub they are probably not rendering as a table either. A blockquoted (`> |`) or " +
+        "tab-indented table is the usual cause.",
     ).toBe(looseRows);
   });
 
@@ -175,6 +194,61 @@ describe("parseBurndown — the happy path", () => {
       // The pre-fix behaviour was to skip it in silence and report 3 instead of 4.
       expect(() => parseBurndown(src)).toThrow(/indented four or more spaces is an indented CODE BLOCK/);
     });
+  });
+
+  // Review round 3, the variant neither floor caught. Note the shape: it is not an EXISTING table being
+  // lost (the announced-vs-parsed floor catches that) — it is a NEW debt table that is never gained.
+  // GitHub renders it as a real table with its rows visible, so a human reviewing the ledger sees three
+  // ⛰ rows that the total does not include. Nothing about the file looks wrong.
+  describe("a debt table logged inside a blockquote is not silently uncounted", () => {
+    const QUOTED = [
+      "> <!-- mvd-table: supplementary -->",
+      ">",
+      "> | Ticket | Surface | Status | Logged |",
+      "> |--------|---------|--------|--------|",
+      "> | CPE-7 | one | ⛰ manual | 2026-08-27 |",
+      "> | CPE-6 | two | ⛰ manual | 2026-08-27 |",
+      "> | CPE-5 | three | ⛰ manual | 2026-08-27 |",
+    ].join("\n");
+    const withQuoted = HEAD(3, 1, 4) + PRIMARY + "\n\n" + SUPP + "\n\n" + QUOTED + "\n";
+
+    it("the parser does not count it (blockquoted rows are not this ledger's format)", () => {
+      // Documenting the real behaviour: the three rows are simply not seen. That is the danger.
+      expect(parseBurndown(withQuoted).counted.total).toBe(4);
+    });
+
+    it("but the loose matcher DOES see them, so the accounted-for floor reds", () => {
+      const lines = withQuoted.split("\n");
+      const fenced = fencedLines(lines);
+      const loose = lines.filter((line, i) => !fenced[i] && /^[\s>]*\|/.test(line)).length;
+      const accounted = parseBurndown(withQuoted).tables.reduce((n, t) => n + 2 + t.dataRows, 0);
+      expect(loose, "the one-character `[\\s>]` fix is what makes these rows visible to the floor").toBe(accounted + 5);
+      expect(accounted).not.toBe(loose);
+      // and with the pre-fix whitespace-only matcher, both counts moved together and it passed:
+      const preFix = lines.filter((line, i) => !fenced[i] && /^\s*\|/.test(line)).length;
+      expect(preFix).toBe(accounted);
+    });
+
+    it("and the announced-vs-parsed floor reds too", () => {
+      const lines = withQuoted.split("\n");
+      const fenced = fencedLines(lines);
+      const announced = lines.filter((line, i) => !fenced[i] && TABLE_ANNOUNCEMENT.test(line)).length;
+      expect(announced).toBe(3);
+      expect(parseBurndown(withQuoted).tables.length).toBe(2);
+    });
+  });
+
+  it("a four-backtick fence is not closed by a three-backtick line", () => {
+    // CommonMark: the closer must use the same character AND be at least as long. Comparing only the
+    // first character closed the block early and would have counted a table GFM renders as code — an
+    // over-count rather than a silent loss, but wrong either way.
+    const lines = ["````", "```", "| # | Aspect | Status | Ticket |", "````", "after"];
+    expect(fencedLines(lines)).toEqual([true, true, true, true, false]);
+    // and the same-length case still closes
+    expect(fencedLines(["```", "| x |", "```", "after"])).toEqual([true, true, true, false]);
+    // a ``` block containing a ~~~ line stays open — the divergence that made a second fence model
+    // in the test report a fence problem as a table problem
+    expect(fencedLines(["```", "~~~", "| x |", "```", "after"])).toEqual([true, true, true, true, false]);
   });
 
   it("a pipe row inside a fenced code block is text, not a table", () => {

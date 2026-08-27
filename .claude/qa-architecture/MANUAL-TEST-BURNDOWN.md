@@ -153,7 +153,15 @@ never be argued about again:
   left the rendered page byte-identical while the total silently fell 13 → 10, and the test then told the
   next shift to write 10 into the header. Two floors now guard that class directly — the table count is a
   one-way floor, and every table-shaped line in this file must be accounted for by some parsed table.)
+- **Do not log a debt table inside a blockquote.** GitHub renders it as a perfectly good table, rows and
+  all, but it is not this file's format and the parser does not count it. This is the one variant that
+  passed every check in review — the total does not move, so nothing looks wrong, while real `⛰` rows go
+  uncounted. Two floors now catch it: the number of `<!-- mvd-table: … -->` announcements must equal the
+  number of tables the parser built, and every table-shaped line in the file must belong to some parsed
+  table. Both matchers deliberately see through `>` so they cannot move in lockstep with the mistake.
 - Pipe rows inside a **fenced code block** are text, not tables — quote an example row in a fence freely.
+  Fences follow CommonMark: the closing fence must use the **same character** as the opener and be **at
+  least as long**, so a four-backtick fence is not closed by a three-backtick line.
 - Known and accepted: the Status **column** is not pinned, only "exactly one marker cell per row". A row
   that left its Status cell empty and put the marker in the Automation cell would still count correctly,
   but the status would be readable off the wrong column. Keep the marker in the Status cell.
