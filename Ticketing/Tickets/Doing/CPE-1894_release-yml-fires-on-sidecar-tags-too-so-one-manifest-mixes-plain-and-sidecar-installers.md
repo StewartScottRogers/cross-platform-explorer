@@ -3,7 +3,7 @@ id: CPE-1894
 title: release.yml fires on `-sidecar` tags too, so one live manifest mixes plain and sidecar installers
 type: bug
 priority: High
-status: Backlog
+status: Doing
 tags: ready
 estimate: M
 created: 2026-08-26
@@ -50,3 +50,21 @@ genuinely separate defects and should not be collapsed into one ticket.
 
 See [[always-install-sidecar-build]] for why a plain-build asset reaching a user is the specific harm
 here, rather than a cosmetic packaging inconsistency.
+
+## Work Log
+
+- **2026-08-26 USMST** — Picked up by a sprint Worker. Plan:
+  1. `release.yml`'s `on.push.tags` becomes `["v*", "!v*-sidecar"]` — GitHub Actions' documented
+     include+negate-in-one-list filter form (not the separate `tags`/`tags-ignore` keys, which
+     cannot be combined for the same event). `release-sidecar.yml` stays `workflow_dispatch`-only;
+     it never listens on `push` at all, so nothing symmetric is needed there — the only overreach was
+     the plain workflow's `v*` catching the sidecar tag too.
+  2. Add a channel-purity check to `crates/updater-verify` — a pure function over the parsed
+     manifest (asset URL basename contains `sidecar`, case-insensitive, per the real overlay-built
+     filenames `release-sidecar.yml` produces vs. the plain `Cross-Platform Explorer_...` names) —
+     wired into the existing `verify-release-artifacts` binary so the already-running
+     `verify-published-manifest` job in `release.yml` fails loud, naming the offending platforms, on
+     a mixed manifest. Unit tests red-prove it directly (construct the exact mixed shape from the
+     live bug, assert the named offenders, assert a uniform manifest passes).
+  3. Investigate whether the already-published mixed manifest can be repaired via `gh` without a
+     new build, or must be documented as a known-bad manifest superseded by the next tagged release.
