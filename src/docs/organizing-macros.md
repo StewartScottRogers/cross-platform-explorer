@@ -94,7 +94,9 @@ Starting a macro (from any of the three run surfaces above) always goes through 
    as one backend operation and is **never** placed on the Ctrl+Z stack. So once you close this dialog,
    that one-click "undo this run" option is gone and there is **no fallback** — Ctrl+Z will not reverse
    it. If you want a safety net, take a **Checkpoint** first (see *Limits* below). **Close** dismisses the
-   dialog either way.
+   dialog either way. **Undo can't restore a confirmed overwrite's victim** (see *Collisions* below) —
+   it puts names back where they were, but the content a confirmed overwrite replaced was never kept
+   anywhere, so there's nothing for Undo to restore it from.
 
 ## Worked example
 
@@ -121,13 +123,18 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   discovered one at a time by running, failing, and retrying.
 - A collision with a **plain, ordinary file** already at that name is **confirmable**: check the
   **"Overwrite these files"** box (an inline checkbox, not a separate dialog) and the button becomes
-  **"Overwrite N and Run"**. Confirming re-runs with permission to replace those specific files' bytes.
+  **"Overwrite N and Run"**. Confirming re-runs naming exactly those destinations, so only the file(s)
+  you were shown and ticked are overwritten — a collision that shows up somewhere else is still refused.
+  **This can't be undone**: the panel says so, and *Result + Undo* above explains why.
 - A collision with a **link** (a shortcut, symlink, or similar) is listed the same way but is **never**
-  confirmable — no checkbox unblocks it, and Run stays disabled while one is present. Writing through a
-  link would put the bytes somewhere other than the name you picked, so this refusal doesn't have an
-  override; remove or rename the link first if that's really what you meant.
-- **Copy all N names** copies every colliding destination to the clipboard, one per line, for a batch
-  larger than the on-screen preview shows.
+  confirmable — no checkbox unblocks it, and Run stays disabled while one is present. One sentence under
+  the heading explains why (a Rename/Move step would destroy the link; a Convert step would write
+  through it and land the bytes at a path you never named — two different hazards, worded differently);
+  remove or rename the link first if that's really what you meant.
+- **Copy all N names** — each list has its own copy button, copying that list's destinations to the
+  clipboard one per line, for a batch larger than the on-screen preview shows. The blocked list's is the
+  one you'll reach for most: those are the names you have to go rename or remove by hand before you can
+  re-plan.
 
 ## Limits / notes
 

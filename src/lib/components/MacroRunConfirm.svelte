@@ -20,19 +20,29 @@
    * one at a time via repeated run/rollback cycles. Each collision is either:
    * - **confirmable** — a plain pre-existing file. The inline "Overwrite" checkbox below (never a
    *   second modal — the repo's inline-instant-control convention) is the only thing standing between
-   *   here and Run; checking it re-issues `macroRun` with `confirmedOverwrite: true`.
+   *   here and Run; checking it re-issues `macroRun` with `confirmedOverwrite` naming exactly those
+   *   destinations (never a blanket flag — the backend only bypasses the occupancy guard at a
+   *   destination the user was actually shown and ticked).
    * - **not confirmable** — a link (live or dangling). CPE-1734's refusal is absolute here: it is
    *   listed the same way (CPE-1869's reused approach — show the user what they're being told to act
-   *   on) but there is no checkbox that unblocks it, and Run stays disabled while any are present. Each
-   *   blocked row also renders the backend's own `reason` sentence — WHY that name can't be confirmed
-   *   (a rename/move destroys the link; a convert writes through it — different hazards, worded
-   *   differently), right there next to the path rather than left unread in the response payload.
+   *   on), but there is no checkbox that unblocks it, and Run stays disabled while any are present. ONE
+   *   sentence under the heading explains WHY (two if a run mixes rename/move and convert kinds — they
+   *   fail differently: a rename/move destroys the link, a convert writes through it) — a Visual Critic
+   *   pass found the earlier per-row placement clipped mid-sentence past a handful of rows and repeated
+   *   the same paragraph once per path, so this hoists it out instead: one explanation, paths stay a
+   *   plain list below it.
+   *
+   * **Neither list is fully reversible once run (Blocker 3, PR #1044 review round 2).** A confirmed
+   * overwrite replaces the occupant's bytes with nothing preserved anywhere — Undo (and a mid-run
+   * rollback) can restore the NAME, never that content. The warning next to the checkbox says so before
+   * the run, not after.
    */
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import type { ActionMacro, MacroCollision, PlannedOp, ResolvedRun } from "../bindings.gen";
   import { formatPathsForClipboard } from "../format";
+  import { MAX_LISTED } from "../revertHoldBack"; // CPE-1869's cap — imported, not redeclared
   import Icon from "./Icon.svelte";
 
   export let macro: ActionMacro;
@@ -42,17 +52,16 @@
 
   const dispatch = createEventDispatcher<{ close: void; ran: ResolvedRun }>();
 
-  /** Matches `revertHoldBack.ts`'s `MAX_LISTED` (CPE-1869) — the same on-screen preview cap. */
-  const MAX_LISTED = 8;
-
   let plan: PlannedOp[] | null = null;
   let planError = "";
   let collisions: MacroCollision[] | null = null;
   let preflightError = "";
   /** The inline instant control (CPE-1891) — a checkbox, not a modal, toggled on a dime. */
   let confirmOverwrite = false;
-  let copied = false;
-  let copyTimer: ReturnType<typeof setTimeout> | undefined;
+  let copiedBlocked = false;
+  let copiedConfirmable = false;
+  let copyTimerBlocked: ReturnType<typeof setTimeout> | undefined;
+  let copyTimerConfirmable: ReturnType<typeof setTimeout> | undefined;
   let running = false;
   let runError = "";
   let run: ResolvedRun | null = null;
@@ -79,18 +88,56 @@
     !!plan && plan.length > 0 && blocked.length === 0 && (confirmable.length === 0 || confirmOverwrite);
   $: runLabel = running
     ? "Running…"
-    : confirmable.length > 0 && confirmOverwrite
+    : confirmable.length > 0 && confirmOverwrite && blocked.length === 0
       ? `Overwrite ${confirmable.length} and Run`
       : "Run";
 
-  async function copyCollisionPaths(list: MacroCollision[]) {
+  /** CPE-1869's exact preview shape: `MAX_LISTED` items, except a list exactly one over the cap shows
+   *  all of them (an "and 1 more" line is longer than the name it would replace), and `more` is the
+   *  remainder beyond that. Reused here rather than re-deriving it, so both lists cap identically to the
+   *  revert hold-back list. */
+  function preview<T>(items: T[]): { listed: T[]; more: number } {
+    const limit = items.length === MAX_LISTED + 1 ? MAX_LISTED + 1 : MAX_LISTED;
+    return { listed: items.slice(0, limit), more: items.length > MAX_LISTED + 1 ? items.length - MAX_LISTED : 0 };
+  }
+  $: blockedPreview = preview(blocked);
+  $: confirmablePreview = preview(confirmable);
+
+  /** One representative `reason` sentence per DISTINCT hazard the blocked set contains (CPE-1891
+   *  Visual Critic pass): every `rename`/`move` collision shares the same "destroys the link" wording
+   *  (both are refused by the same backend guard, `symlink_slot_refusal`) and every `convert` collision
+   *  shares the same "writes THROUGH it" wording (`create_slot_link_refusal`) — the two hazards are
+   *  genuinely different and both need saying, but a THIRD `move` alongside a rename would just repeat
+   *  the first sentence, which is exactly the "N copies of one paragraph" this hoists past. Order
+   *  matches first appearance in `blocked` for a stable, non-flickering readout. */
+  function representativeReasons(items: MacroCollision[]): string[] {
+    const seenKinds = new Set<string>();
+    const out: string[] = [];
+    for (const c of items) {
+      const bucket = c.kind === "convert" ? "convert" : "rename-move";
+      if (!seenKinds.has(bucket)) {
+        seenKinds.add(bucket);
+        out.push(c.reason);
+      }
+    }
+    return out;
+  }
+  $: blockedReasons = representativeReasons(blocked);
+
+  async function copyCollisionPaths(list: MacroCollision[], which: "blocked" | "confirmable") {
     try {
       // Same "Copy as path" quoting Explorer uses (`formatPathsForClipboard`) — one quoted path per
       // line, ready to paste into a search box, a terminal, or a script (CPE-1869's reused approach).
       await navigator.clipboard.writeText(formatPathsForClipboard(list.map((c) => c.to)));
-      copied = true;
-      clearTimeout(copyTimer);
-      copyTimer = setTimeout(() => (copied = false), 1500);
+      if (which === "blocked") {
+        copiedBlocked = true;
+        clearTimeout(copyTimerBlocked);
+        copyTimerBlocked = setTimeout(() => (copiedBlocked = false), 1500);
+      } else {
+        copiedConfirmable = true;
+        clearTimeout(copyTimerConfirmable);
+        copyTimerConfirmable = setTimeout(() => (copiedConfirmable = false), 1500);
+      }
     } catch {
       /* clipboard unavailable — the paths are still on screen (up to MAX_LISTED of them) to copy by hand */
     }
@@ -100,7 +147,11 @@
     running = true;
     runError = "";
     try {
-      const resolved = unwrap(await commands.macroRun(macro, inputs, root, confirmOverwrite));
+      // Only the destinations actually shown and confirmed — never a blanket flag (CPE-1891, PR #1044
+      // review round 2, Blocker 2): the backend only bypasses the occupancy guard at a `to` in this
+      // exact list, so a stray extra collision the user never saw still refuses.
+      const confirmedDestinations = confirmOverwrite ? confirmable.map((c) => c.to) : [];
+      const resolved = unwrap(await commands.macroRun(macro, inputs, root, confirmedDestinations));
       run = resolved;
       dispatch("ran", resolved);
     } catch (e) {
@@ -163,30 +214,39 @@
 
       {#if blocked.length}
         <!-- CPE-1734's refusal, unconditional: a link is listed so the user can SEE it (CPE-1869's
-             reused list-affordance) but there is no checkbox — nothing here can unblock it.
-
-             CPE-1891 UAT: the header above says THAT a link is refused; it does not say WHY, and that
-             is the question a user actually has ("why can't I just tick the box for this one?"). The
-             backend already computes the real explanation per collision, worded differently for a
-             rename/move (destroys the link) than a convert (writes through it) — `c.reason` — so it is
-             rendered per item here rather than left in the payload unread. -->
+             reused list-affordance) but there is no checkbox — nothing here can unblock it. The reason
+             sentence(s) sit directly under the heading (CPE-1891 Visual Critic pass) rather than once
+             per row: the wording is per-KIND, not per-path, so a sentence per row was N copies of one
+             paragraph AND clipped mid-sentence past a handful of blocked names. -->
         <div class="collision blocked" data-testid="blocked-collisions">
           <div class="collision-head">
             <Icon name="link-broken" size={13} />
             {blocked.length} destination{blocked.length === 1 ? "" : "s"} can’t be overwritten — a link,
             never confirmable
           </div>
-          <ul class="collision-list blocked-list">
-            {#each blocked.slice(0, MAX_LISTED) as c (c.op_index)}
-              <li>
-                <div class="collision-path" title={c.to}>{c.to}</div>
-                <div class="collision-reason" data-testid="blocked-reason">{c.reason}</div>
-              </li>
+          {#each blockedReasons as reason}
+            <div class="collision-reason" data-testid="blocked-reason">{reason}</div>
+          {/each}
+          <ul class="collision-list">
+            {#each blockedPreview.listed as c (c.op_index)}
+              <li title={c.to}>{c.to}</li>
             {/each}
-            {#if blocked.length > MAX_LISTED}
-              <li class="more">and {blocked.length - MAX_LISTED} more</li>
+            {#if blockedPreview.more}
+              <li class="more">and {blockedPreview.more} more</li>
             {/if}
           </ul>
+          <!-- This is the list the user must act on BY HAND (rename/remove the link, then re-plan) —
+               capped the same way the confirmable list is, so the same copy-to-clipboard need applies
+               (CPE-1869's approach, and this panel had been missing it). -->
+          <button
+            class="mini"
+            data-testid="copy-blocked-collisions"
+            on:click={() => copyCollisionPaths(blocked, "blocked")}
+            title="Copy every blocked name to the clipboard, one per line"
+          >
+            <Icon name={copiedBlocked ? "check" : "copy"} size={13} />
+            {copiedBlocked ? "Copied" : `Copy all ${blocked.length} name${blocked.length === 1 ? "" : "s"}`}
+          </button>
         </div>
       {/if}
 
@@ -197,26 +257,30 @@
             {confirmable.length} destination name{confirmable.length === 1 ? "" : "s"} already exist{confirmable.length === 1 ? "s" : ""}
           </div>
           <ul class="collision-list">
-            {#each confirmable.slice(0, MAX_LISTED) as c (c.op_index)}
+            {#each confirmablePreview.listed as c (c.op_index)}
               <li title={c.to}>{c.to}</li>
             {/each}
-            {#if confirmable.length > MAX_LISTED}
-              <li class="more">and {confirmable.length - MAX_LISTED} more</li>
+            {#if confirmablePreview.more}
+              <li class="more">and {confirmablePreview.more} more</li>
             {/if}
           </ul>
           <button
             class="mini"
             data-testid="copy-collisions"
-            on:click={() => copyCollisionPaths(confirmable)}
+            on:click={() => copyCollisionPaths(confirmable, "confirmable")}
             title="Copy every colliding name to the clipboard, one per line"
           >
-            <Icon name={copied ? "check" : "copy"} size={13} />
-            {copied ? "Copied" : `Copy all ${confirmable.length} name${confirmable.length === 1 ? "" : "s"}`}
+            <Icon name={copiedConfirmable ? "check" : "copy"} size={13} />
+            {copiedConfirmable ? "Copied" : `Copy all ${confirmable.length} name${confirmable.length === 1 ? "" : "s"}`}
           </button>
           <label class="confirm-check" data-testid="confirm-overwrite-label">
             <input type="checkbox" data-testid="confirm-overwrite" bind:checked={confirmOverwrite} />
             Overwrite {confirmable.length === 1 ? "this file" : "these files"}
           </label>
+          <p class="irreversible-note" data-testid="irreversible-note">
+            This can’t be undone — Undo (and a rollback if a later step fails) restores the name, not the
+            content it replaces.
+          </p>
         </div>
       {/if}
 
@@ -283,37 +347,29 @@
   .collision.blocked { border-color: var(--danger); }
   .collision-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
   .collision.blocked .collision-head { color: var(--danger); }
+  /* One (or two, mixed-kind) explanation sentence(s) under the heading — CPE-1891 Visual Critic pass —
+     ordinary prose, `var(--text)` (never `var(--danger)`: the red BORDER above is the "this is refused"
+     signal; MENUS.md's no-red-text-for-destructive convention holds here even off a menu). */
+  .collision-reason { margin-top: 4px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
   .collision-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); max-height: 120px; overflow: auto; }
   .collision-list li { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 11.5px; }
   .collision-list li.more { list-style: none; margin-left: -18px; font-family: inherit; }
-  /* CPE-1891 UAT follow-up: a blocked row now carries the backend's full per-collision explanation
-     (`c.reason` — why THIS name can't be confirmed, worded differently for rename/move vs convert), not
-     just the bare path, so each row is taller than a confirmable row. The shared 120px preview height
-     would turn 8 such rows into a cramped one-row scroller, so this list gets its own taller cap; the
-     confirmable list (path-only, unchanged) keeps the original 120px. */
-  .blocked-list { max-height: 260px; }
-  .blocked-list li { display: flex; flex-direction: column; gap: 3px; padding: 5px 0; }
-  .blocked-list li:not(:last-child) { border-bottom: 1px solid var(--border); }
-  .collision-path { overflow-wrap: anywhere; }
-  /* Prose, not a path — pulled back out of the li's monospace so it reads like the rest of the dialog's
-     explanatory text. Text colour is `var(--text)`, never `var(--danger)`: the red BORDER on `.collision.
-     blocked` is the "this is refused" signal (see above); red text for "destructive" is the thing
-     docs/design/MENUS.md's convention exists to rule out everywhere in this app, and that holds here too
-     even though this box isn't a menu. */
-  .collision-reason {
-    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
-    font-size: 11.5px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere;
-  }
-  /* CPE-1869's "copy the whole list" affordance, same `.mini` treatment as RevertOutcomePanel. */
+  /* CPE-1869's "copy the whole list" affordance, same `.mini` treatment as RevertOutcomePanel — now on
+     BOTH panels (CPE-1891 Visual Critic pass): the blocked list is the one the user must act on BY
+     HAND, so it needs the copy affordance at least as much as the confirmable one does. `min-width`
+     keeps the button's footprint stable between "Copy all N…" and "Copied" instead of visibly shrinking. */
   .mini {
-    display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; min-width: 128px;
     height: 22px; padding: 0 9px; border-radius: var(--radius);
     border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font-size: 12px;
     cursor: pointer;
   }
   .mini:hover { background: var(--surface-alt); }
-  /* CPE-1891 — the inline instant control: a checkbox the user flips on a dime, never a second modal. */
-  .confirm-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; cursor: pointer; }
+  /* CPE-1891 — the inline instant control: a checkbox the user flips on a dime, never a second modal.
+     `min-height: 24px` meets the minimum comfortable target size (a Visual Critic pass measured the
+     checkbox itself at 13×13px inside a 17px row). */
+  .confirm-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; min-height: 24px; cursor: pointer; }
+  .irreversible-note { margin-top: 4px; font-size: 11.5px; line-height: 1.4; color: var(--text-dim); }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn:disabled { opacity: 0.5; }

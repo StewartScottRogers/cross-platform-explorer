@@ -4,8 +4,11 @@
  * `commands.*` client routes through the mocked `../invoke`, mirroring TemplatesDialog.test.ts.
  *
  * CPE-1891 added `macro_preflight` (a read-only real-filesystem collision scan run alongside
- * `macro_plan`) and threaded `confirmedOverwrite` through `macro_run`, so a colliding destination no
- * longer aborts and rolls back the whole batch with no recourse — the tests below cover that flow.
+ * `macro_plan`) and threaded `confirmedOverwrite` through `macro_run` as the list of destinations the
+ * user actually confirmed (PR #1044 review round 2, Blocker 2 -- never a blanket bool), so a colliding
+ * destination no longer aborts and rolls back the whole batch with no recourse — the tests below cover
+ * that flow, plus the review round's reason-rendering redesign (one sentence per hazard KIND, hoisted
+ * above the path list, not one per row) and its irreversibility warning.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
@@ -53,6 +56,16 @@ const CONVERT_BLOCKED_COLLISION = {
   confirmable: false,
   reason: '"/work/b.jpg" is a link, and creating a file at a link\'s name writes THROUGH it — the bytes would land at the link\'s target, a path you did not name',
 };
+// A THIRD blocked item, same "rename-move" bucket as BLOCKED_COLLISION but a DIFFERENT path/reason
+// string -- proves the dedup is by hazard kind, not by exact reason text.
+const MOVE_BLOCKED_COLLISION = {
+  op_index: 2,
+  from: "/work/c.txt",
+  to: "/work/Archive/c.txt",
+  kind: "move",
+  confirmable: false,
+  reason: '"/work/Archive/c.txt" is a link, and renaming onto a link destroys it — the link is removed and its target is left orphaned',
+};
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -81,7 +94,7 @@ describe("MacroRunConfirm dry-run + confirm (CPE-1191)", () => {
     });
   });
 
-  it("Run is disabled while the plan is still loading, and calls macro_run with macro/inputs/root/confirmedOverwrite", async () => {
+  it("Run is disabled while the plan is still loading, and calls macro_run with an EMPTY confirmedOverwrite when nothing collided", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "macro_run") return RESOLVED_RUN;
       if (cmd === "macro_plan") return PLAN;
@@ -102,7 +115,7 @@ describe("MacroRunConfirm dry-run + confirm (CPE-1191)", () => {
       macro: MACRO,
       inputs: ["/work/a.txt"],
       root: "/work",
-      confirmedOverwrite: false,
+      confirmedOverwrite: [],
     });
     expect(ran).toHaveBeenCalledWith(RESOLVED_RUN);
   });
@@ -143,7 +156,7 @@ describe("MacroRunConfirm dry-run + confirm (CPE-1191)", () => {
 });
 
 describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
-  it("lists a confirmable collision, disables Run until the overwrite box is checked, then runs confirmed", async () => {
+  it("lists a confirmable collision, disables Run until the overwrite box is checked, warns it's not undoable, then runs with that destination named", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "macro_plan") return PLAN;
       if (cmd === "macro_preflight") return [CONFIRMABLE_COLLISION];
@@ -155,6 +168,8 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     const list = await screen.findByTestId("confirmable-collisions");
     expect(list.textContent).toContain("/work/a_v2.txt");
     expect(screen.queryByTestId("blocked-collisions")).toBeNull();
+    // Blocker 3 (PR #1044 review round 2): the confirm panel must warn this isn't reversible.
+    expect(screen.getByTestId("irreversible-note").textContent).toMatch(/can.t be undone/i);
 
     const runBtn = screen.getByTestId("run-btn") as HTMLButtonElement;
     expect(runBtn.disabled).toBe(true);
@@ -165,11 +180,13 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     expect(runBtn.textContent).toContain("Overwrite 1 and Run");
 
     await fireEvent.click(runBtn);
+    // Blocker 2: the CONFIRMED DESTINATION, not a bare `true` -- the backend only bypasses the
+    // occupancy guard at a `to` actually named here.
     expect(invokeMock).toHaveBeenCalledWith("macro_run", {
       macro: MACRO,
       inputs: ["/work/a.txt"],
       root: "/work",
-      confirmedOverwrite: true,
+      confirmedOverwrite: ["/work/a_v2.txt"],
     });
   });
 
@@ -188,11 +205,38 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     expect((screen.getByTestId("run-btn") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("renders each blocked collision's own WHY-not-confirmable reason from the backend, not just the header", async () => {
-    // The header ("N destinations can't be overwritten — a link, never confirmable") only says THAT a
-    // link is refused. The backend's per-collision `reason` says WHY — and worded differently for a
-    // rename/move (destroys the link) than a convert (writes through it), since the two are genuinely
-    // different hazards. Both must actually reach the DOM, not just live in the fetched payload.
+  it("renders ONE reason sentence per distinct hazard kind, hoisted above the path list -- not one per row", async () => {
+    // CPE-1891 Visual Critic pass: the earlier per-row placement repeated the same paragraph once per
+    // path (the wording is per-KIND, not per-path) and clipped mid-sentence past a handful of rows.
+    // Three blocked items: rename + move (share the "destroys it" wording) + convert ("writes THROUGH
+    // it") -- must collapse to exactly TWO reason sentences, not three, and both must actually reach the
+    // DOM.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "macro_plan") return PLAN;
+      if (cmd === "macro_preflight") return [BLOCKED_COLLISION, CONVERT_BLOCKED_COLLISION, MOVE_BLOCKED_COLLISION];
+      return null;
+    });
+
+    render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/a.txt", "/work/b.png", "/work/c.txt"], root: "/work" });
+    await screen.findByTestId("blocked-collisions");
+    const reasons = screen.getAllByTestId("blocked-reason").map((el) => el.textContent);
+
+    expect(reasons).toHaveLength(2);
+    expect(reasons).toContain(BLOCKED_COLLISION.reason);
+    expect(reasons).toContain(CONVERT_BLOCKED_COLLISION.reason);
+    expect(reasons).not.toContain(MOVE_BLOCKED_COLLISION.reason);
+    // The two variants must actually read differently -- a shared generic sentence would defeat the
+    // point (rename/move "destroys" the link; convert "writes THROUGH" it).
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("destroys it");
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("writes THROUGH it");
+    // All three PATHS still appear in the plain path list below the reason(s), including the
+    // move-kind item whose own reason text was folded into the rename/move sentence above.
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("/work/Archive/c.txt");
+  });
+
+  it("copies every blocked destination name to the clipboard from its own copy button", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "macro_plan") return PLAN;
       if (cmd === "macro_preflight") return [BLOCKED_COLLISION, CONVERT_BLOCKED_COLLISION];
@@ -200,19 +244,15 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     });
 
     render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/a.txt", "/work/b.png"], root: "/work" });
-    await screen.findByTestId("blocked-collisions");
-    const reasons = screen.getAllByTestId("blocked-reason").map((el) => el.textContent);
+    const btn = await screen.findByTestId("copy-blocked-collisions");
+    expect(btn.textContent).toContain("Copy all 2 names");
 
-    expect(reasons).toContain(BLOCKED_COLLISION.reason);
-    expect(reasons).toContain(CONVERT_BLOCKED_COLLISION.reason);
-    // The two variants must actually read differently -- a shared generic sentence would defeat the
-    // point (rename/move "destroys" the link; convert "writes THROUGH" it).
-    expect(BLOCKED_COLLISION.reason).not.toEqual(CONVERT_BLOCKED_COLLISION.reason);
-    expect(screen.getByTestId("blocked-collisions").textContent).toContain("destroys it");
-    expect(screen.getByTestId("blocked-collisions").textContent).toContain("writes THROUGH it");
+    await fireEvent.click(btn);
+    expect(writeText).toHaveBeenCalledWith('"/work/a_v2.txt"\n"/work/b.jpg"');
+    expect(await screen.findByText("Copied")).toBeTruthy();
   });
 
-  it("a mix of confirmable and blocked collisions still refuses Run even once the confirmable one is checked", async () => {
+  it("a mix of confirmable and blocked collisions still refuses Run, and keeps the plain 'Run' label, even once the confirmable one is checked", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "macro_plan") return PLAN;
       if (cmd === "macro_preflight") return [CONFIRMABLE_COLLISION, { ...BLOCKED_COLLISION, op_index: 1 }];
@@ -224,7 +264,11 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     await screen.findByTestId("blocked-collisions");
 
     await fireEvent.click(screen.getByTestId("confirm-overwrite"));
-    expect((screen.getByTestId("run-btn") as HTMLButtonElement).disabled).toBe(true);
+    const runBtn = screen.getByTestId("run-btn") as HTMLButtonElement;
+    expect(runBtn.disabled).toBe(true);
+    // Should-fix (PR #1044 review round 2): a still-blocked run must not read as armed-and-ready.
+    expect(runBtn.textContent?.trim()).toBe("Run");
+    expect(runBtn.textContent).not.toContain("Overwrite");
   });
 
   it("copies every confirmable collision's destination name to the clipboard (CPE-1869's reused affordance)", async () => {
