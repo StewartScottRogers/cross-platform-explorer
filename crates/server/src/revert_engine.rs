@@ -1347,23 +1347,51 @@ mod tests {
         // checkpoint-key stand-down above it and not some other rule.
         assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
         // **The refusal READS differently per platform, and that asymmetry is load-bearing, not noise.**
-        // On Unix `O_NOFOLLOW` fails the **open itself**, so the post-open refusals never run and the
-        // message is the generic open error; on Windows the open succeeds on the reparse point and the
-        // post-open check is what refuses, in words. `copy_file_onto_no_follow`'s own doc says exactly
-        // this, and this test is where it was PROVEN: the first push asserted the Windows wording
-        // unconditionally and reddened `Server crates` on ubuntu **and** macOS with
-        // `could not open the destination for writing: Too many levels of symbolic links (os error 40)`.
-        // That is the ELOOP claim the Work Log had listed as "not verified locally", verified by CI in
-        // the strongest available way — a test that could not pass unless it were true.
+        // On Unix `O_NOFOLLOW` fails the **open itself**, so the post-open refusals never run; on
+        // Windows `FILE_OPEN_REPARSE_POINT` hands back a handle to the reparse point and the post-open
+        // check is what refuses, in words. `copy_file_onto_no_follow`'s own doc says exactly this, and
+        // this test is where it was PROVEN: the first push asserted the Windows wording unconditionally
+        // and reddened `Server crates` on ubuntu **and** macOS. That is the ELOOP claim the Work Log had
+        // listed as "not verified locally", verified by CI in the strongest available way — a test that
+        // could not pass unless it were true.
         //
-        // The errno's *text* is deliberately not matched (Linux and macOS need not word it alike, and a
-        // libc could reword it); the prefix plus the asserted-live planted link is what identifies the
-        // refusal. Asserting merely "something was refused" would let any earlier rule satisfy this.
+        // **CPE-1913 changed the Unix half of that sentence, and this guard is what caught it** — the
+        // whole reason the guard is here. The Unix branch used to assert
+        // `could not open the destination for writing`, `open_no_follow`'s generic wrapper around the
+        // raw `ELOOP` ("Too many levels of symbolic links (os error 40)"): an errno with no idea what it
+        // had hit. The per-component walk now refuses the leaf through `open_beneath::refuse_link`
+        // instead, which NAMES the link and carries `Refusal::policy = true` out of the guard that
+        // fired — which is what `apply_overwrite` turns into `Refused::permanent`. So the arriving
+        // refusal is a **different sentence for a better reason**, and the branch is updated to it
+        // rather than relaxed: the old string was a generic open-failure prefix that ANY open error
+        // satisfied, while `refuse_link`'s diagnosis cannot be produced by anything but a link at a
+        // component (`open_beneath`'s own negative test pins the surrounding boilerplate as lexically
+        // disjoint from it, so this cannot pass on a permission error or a vanished name). Naming the
+        // component as well pins it to the LEAF, not to some interior one.
+        //
+        // Measured on real Linux against this very fixture, not reasoned:
+        //
+        // ```text
+        // skipped[0] = ("a.txt", "refusing to write inside the folder being restored \"…\": the path
+        //               component \"a.txt\" is a link (a symlink, junction or other reparse point),
+        //               and a link inside the folder being restored redirects the write to wherever
+        //               it points. …")
+        // held_back  = HeldBack { outcome: HeldBackByCheckpoint, advises_manual_delete: true, … }
+        // ```
+        //
+        // The **permanence** this test exists to protect is therefore intact under the new refusal, and
+        // it is still asserted below, unchanged — that is the property, not the wording.
+        //
+        // The errno's *text* is deliberately still matched nowhere here (Linux and macOS need not word
+        // one alike, and a libc could reword it); the diagnosis plus the asserted-live planted link is
+        // what identifies the refusal. Asserting merely "something was refused" would let any earlier
+        // rule satisfy this.
         let refusal = &report.skipped[0].1;
         let is_the_link_refusal = if cfg!(windows) {
             refusal.contains("never writes through one")
         } else {
-            refusal.contains("could not open the destination for writing")
+            refusal.contains("the path component \"a.txt\" is a link (a symlink, junction or other \
+                              reparse point)")
         };
         assert!(
             is_the_link_refusal,

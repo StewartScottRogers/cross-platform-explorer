@@ -458,3 +458,64 @@ wins the window is reported as a success. Same shape as CPE-1896, four more plac
   extraction harness — regenerated for round 2, because F1 added Windows-only code to the arm the
   harness exists to check, and proved red first again before its green was trusted. `cargo check` clean
   in `src-tauri`; `npm run check` 0/0; docs guard tests green.
+
+- **2026-08-27 (Worker) — CPE-1846's inertness guard tripped on Linux and macOS, and the guard was
+  right.** CI's `Server crates` job reddened on ubuntu **and** macOS (Windows green) with
+  `cpe_1846_a_link_at_the_destination_is_reported_permanent_not_as_run_it_again` failing — **not** on
+  its subject assertion but on its own fixture-liveness guard, which exists to catch exactly this: a
+  refusal quietly becoming a different refusal, leaving the test green and vacuous.
+
+  **The gap that let it through to CI.** Round 2's "Unix harness clean on both targets" evidence is a
+  cross-**compile**; it never *runs* the Unix tests, so a behaviour change that only shows up at
+  runtime on Unix is invisible to it. Closed for this fix by executing the suite on **real Linux**
+  (WSL Ubuntu 2, rustc 1.97.1, a rootless-bootstrapped gcc-15 for `rusqlite/bundled`). That
+  environment reproduced CI exactly — **2402 passed / 1 failed / 10 ignored**, the same single
+  failure — before anything was changed.
+
+  **Which refusal is correct on Unix: the new one.** Decided on the measured report, not on which fix
+  was cheaper:
+
+  ```text
+  skipped[0] = ("a.txt", "refusing to write inside the folder being restored \"…\": the path
+                component \"a.txt\" is a link (a symlink, junction or other reparse point), and a
+                link inside the folder being restored redirects the write to wherever it points. …")
+  held_back  = HeldBack { outcome: HeldBackByCheckpoint, advises_manual_delete: true,
+                          next_step: "Re-running will not clear this on its own: …" }
+  ```
+
+  The leaf's `O_NOFOLLOW` `openat` still fails, but the walk now classifies that failure through
+  `open_beneath::refuse_link` instead of surfacing `open_no_follow`'s generic `ELOOP` wrapper — so the
+  refusal **names the link** and carries `Refusal::policy = true` out of the guard that fired, which
+  `apply_overwrite` turns into `Refused::permanent`. The permanence CPE-1846 exists to protect is
+  therefore **intact and strictly better carried** than before: it is now a typed fact from the point
+  of refusal rather than a `symlink_metadata` re-probe, which is the very correction this PR made for
+  the junction case. Not a regression, so the fix belonged in the test.
+
+  **Updated, not relaxed.** The Unix branch now asserts
+  `the path component "a.txt" is a link (a symlink, junction or other reparse point)`. That is
+  *stronger* than what it replaced: the old string, `could not open the destination for writing`, was a
+  generic open-failure prefix that **any** open error satisfied, while this one cannot be produced by
+  anything but a link at a component (`open_beneath`'s own negative test pins the surrounding
+  boilerplate as lexically disjoint from `"is a link"`), and naming the component pins it to the
+  **leaf** rather than to some interior one. Every permanence assertion below it is untouched and now
+  actually runs. Red-proofed on Linux: with the component spelled `zzz.txt` the guard fails; with
+  `a.txt` it passes.
+
+  **Sibling sweep — no other test encoded the pre-CPE-1913 Unix wording.** Method: (a) grep every
+  refusal-text assertion in the converted legs (`archive`, `backup`, `revert_engine`, `transfer`) and
+  every `cfg!(windows)`/`cfg!(unix)`-gated message assertion crate-wide; (b) check each asserted
+  substring against `open_beneath`'s boilerplate, since a test can only go *silently* vacuous if the
+  new generic refusal satisfies its assertion — none do, and the one that could (`"is a link"`) is
+  already proven disjoint by `open_beneath`'s negative test; (c) run the whole suite on real Linux and
+  read the skip notices, which showed only the pre-existing CPE-1696/1705 platform-mechanism skips.
+  Two near-misses examined and cleared: `transfer`'s pre-existing-symlink test still asserts the harm on
+  the filesystem and still gets *the symlink refusal for that entry*, only from the walk rather than the
+  post-open check; `overwrite_confirmed_no_follow_never_writes_through_a_dangling_link` is not an
+  `open_beneath` call site at all.
+
+  **Verification.** Real Linux: `cargo test` **2403 passed / 0 failed / 10 ignored** plus all
+  integration targets green, and `cargo clippy --all-targets -- -D warnings` clean in plain,
+  `--features index` and `--features specta`. Windows: `cargo test --lib` **2416 passed / 0 failed /
+  10 ignored**, clippy clean in the same three modes. macOS is still CI-first — but the failure was
+  identical on both Unix targets and the fix is on the shared `#[cfg(unix)]` path, not on anything
+  Linux-specific.
