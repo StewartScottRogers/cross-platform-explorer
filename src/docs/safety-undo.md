@@ -94,6 +94,15 @@ Three details are worth knowing, because they are deliberate:
     file is being written — closing that needs an operating-system facility the app does not have on
     all three platforms. If your backup destination is a shared network folder that other people can
     write to, that residual risk is real and this guard does not remove it.
+  - **If it happens anyway, the job now tells you** (CPE-1896). That instant-of-the-write swap was
+    measured, and it used to end in the worst possible way: the file landed outside your backup folder,
+    overwriting whatever was already there, and the run reported it as a **success** with no error —
+    including when "verify copies by checksum" was switched on, because the check re-read the same
+    redirected file and agreed with itself. Now, after each file is written, the app resolves where the
+    bytes actually went. If that is not inside the backup destination you chose, the entry is reported
+    as a **failure** naming both the file and the outside path it reached, so you know exactly what to
+    go and look at. **This does not prevent the redirect** — by then the bytes are already written — it
+    stops the job from calling it a success. Closing the gap itself is still open work.
   - **Backup copies do not currently carry Windows' "downloaded from the internet" mark
     (`Zone.Identifier`).** A file copied by File Explorer keeps that mark, so Windows still warns before
     opening it after a restore; a file copied by a backup job in this app currently does not carry it
