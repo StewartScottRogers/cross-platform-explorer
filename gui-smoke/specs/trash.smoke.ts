@@ -88,10 +88,12 @@
 // every other Trash-touching spec that might share this worker's Trash directory. In practice
 // `trash-titlebar.smoke.ts` and `trash.smoke.ts` land on DIFFERENT shards (each its own runner, its own
 // filesystem, its own Trash directory — `lib/shard.ts`'s cost-based bin-packing, not sort order, decides
-// this and can change run to run), so today neither can observe the other's fixtures regardless of which
-// runs first. This spec's own cleanup discipline does not depend on that separation holding, though — it
-// wipes/removes what it wrote either way, on the off chance a future shard rebalance ever puts the two
-// specs on the same worker.
+// this). CPE-1822 review round 3 correction: that partition is DETERMINISTIC, not something that
+// changes run to run — `lib/shard.ts`'s own header names determinism as its headline property; the
+// assignment only changes if the spec SET or the hand-maintained cost table itself changes. So today
+// neither spec can observe the other's fixtures regardless of which runs first. This spec's own
+// cleanup discipline does not depend on that separation holding, though — it wipes/removes what it
+// wrote either way, in case a future spec-set or cost-table change ever puts the two on one worker.
 //
 // CPE-1819 (a separate, open ticket) is about the copy-pasted gui-smoke COMMAND-PALETTE-open block —
 // this spec never opens the palette at all (Trash is reached via the Sidebar's own "Open Trash" row,
@@ -197,8 +199,9 @@ function removeFabricated(entries: Array<{ trashinfoPath: Buffer; filesPath: Buf
  *  empty" test starts from a known-clean baseline regardless of what a sibling spec (or a prior run on a
  *  non-ephemeral machine) left behind — `trash-titlebar.smoke.ts` seeds one real entry and never restores
  *  it. Safe on CI's ephemeral runners (nothing else is using this Trash); on a real developer's own Linux
- *  machine this would be destructive, so the ONLY call site (this spec's `before()` hook) additionally
- *  gates on `process.env.CI` before calling this at all — the rust equivalent
+ *  machine this would be destructive, so BOTH call sites (this spec's `before()` and `after()` hooks —
+ *  CPE-1822 review round 3 correction: there are two, not one) additionally gate on `process.env.CI`
+ *  before calling this at all — the rust equivalent
  *  (`src-tauri/src/lib.rs`'s `lock_real_trash`) redirects `XDG_DATA_HOME` to a private scratch dir for
  *  exactly this reason; this spec can't redirect the already-launched app process's own environment, so
  *  it refuses to wipe anything outside CI instead (CPE-1822 review round 2).
@@ -244,7 +247,14 @@ async function openTrash(): Promise<void> {
 async function closeTrash(): Promise<void> {
   if (await $(".tv-panel").isExisting()) {
     await $(".tv-x").click();
-    await $(".tv-panel").waitForExist({ timeout: 5_000, reverse: true, timeoutMsg: "expected TrashView to close" });
+    // CPE-1822 review round 3: raised from 5s to 15s. The mid-stream tests' shared `afterEach` can call
+    // this while the main thread is still finishing several remaining 256-row batches plus unvirtualized
+    // DOM insertion for up to 2,500 rows — a 5s reverse-wait could time out there even though the view
+    // WOULD close given a moment longer, and a caller that then swallows the resulting error would leave
+    // `.tv-overlay` (z-index 60) sitting over the Sidebar for the next test's own `openTrash()` click —
+    // the exact failure cascade the `afterEach` restructuring exists to prevent, reintroduced at its
+    // busiest boundary (the light→dark mid-stream handoff).
+    await $(".tv-panel").waitForExist({ timeout: 15_000, reverse: true, timeoutMsg: "expected TrashView to close" });
   }
 }
 
@@ -281,14 +291,30 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
     // above already reported.
     try {
       await closeTrash();
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      // CPE-1822 review round 3: no longer a silent swallow. This can only fire now if `closeTrash`'s
+      // own 15s reverse-wait (raised from 5s this round — see its doc comment) is STILL exceeded,
+      // genuinely rare given that raise — but if it happens, `.tv-overlay` is still up and WILL
+      // intercept the next test's `openTrash()` click. Logging here (never throwing — an `afterEach`
+      // hook failure would skip every remaining test in this FILE, a strictly worse outcome than one
+      // more test failing on a stuck overlay) at least makes the real cause visible in the CI log
+      // instead of surfacing only as the next test's confusing "element not interactable".
+      // eslint-disable-next-line no-console
+      console.error("[trash.smoke.ts] afterEach: closeTrash() failed — the next test may see a stuck overlay:", e);
     }
     // CPE-1822 review round 2 should-fix: `resetAppState` deliberately does NOT reset theme between
     // tests — `gui-smoke/lib/resetAppState.ts` names `preview-pane.smoke.ts`'s own
     // `afterEach { setTheme("light") }` as "the model to copy, not a coincidence" — and every test
     // below ends on whichever theme it last set. Reset it the same way.
-    await setTheme("light");
+    //
+    // CPE-1822 review round 3, nit: was the only unguarded call in this hook — a throw here (e.g. the
+    // app window closed unexpectedly) would record a hook failure and skip the rest of the suite, same
+    // as an unguarded `closeTrash()` would have. Wrapped for the same reason.
+    try {
+      await setTheme("light");
+    } catch {
+      /* best-effort — a failed theme reset must not abort the rest of this hook chain */
+    }
   });
 
   // Safety-net cleanup in case an `it()` below throws before reaching its own cleanup — best-effort,
@@ -307,6 +333,12 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
       this.skip();
       return;
     }
+    // CPE-1822 review round 3, nit: the `before()` hook above only wipes the real Trash directory under
+    // `process.env.CI` (see `wipeTrashDir`'s doc comment). On a genuine local Linux run, outside CI, this
+    // means a developer whose own real Trash already has something in it will see THIS test fail here —
+    // deliberately: refusing to assert "empty" against a Trash this spec never actually emptied is the
+    // honest outcome, not a bug in the test. Failing loudly beats silently wiping a contributor's real
+    // Trash (or silently passing an assertion the fixture never earned).
     await openTrash();
 
     const body = await $(".tv-body");

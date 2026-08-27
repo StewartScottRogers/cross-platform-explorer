@@ -159,8 +159,14 @@ once the next test's `openTrash()` starts a fresh load.
 *between* two table rows, turning the following `| CPE-1708 / CPE-1775 ... |` row into a lazy Markdown
 paragraph continuation (literal pipe text, not a table row) — silently deleting the still-open StatusBar
 row from the rendered ledger. Moved the note below the whole table (matching the existing `→ ✅ CPE-1586
-RETIRED` precedent), confirmed the CPE-1708/1775 row now immediately follows the CPE-1803/1804/1805 row
-with nothing between them.
+RETIRED` precedent). **Round 2 self-check was wrong and reached the wrong way**: it checked that the
+paragraph text no longer sat *between* the two rows in the source, rather than actually RENDERING the
+file — and left a blank line at the new boundary, which GFM treats as ending the table body exactly the
+same way the paragraph text had, so the row was still silently lost. Round 3's independent Reviewer
+caught it by rendering through `marked --gfm` and counting `<tr>`s. Re-verified for round 3 the same way
+this time (see "Verification, round 3" below) — checking that a paragraph is textually gone is not the
+same claim as checking the table still renders, and only the second one is the actual acceptance
+criterion for a ledger row that must not silently stop rendering.
 
 **Silent-pass holes, both fixed and red-proofed** (see "Verification, round 2" below):
 - The sticky-header test's scroll step (`if (body) body.scrollTop = body.scrollHeight`) was a silent
@@ -236,3 +242,69 @@ state reset runs once per spec FILE, not per test).
     renamed selector genuinely returns `null`.
   All three probe assertions passed as predicted; full console output captured before the probe file was
   deleted.
+
+## Round 3 (Reviewer: one blocker, relocated defect; attempt 3 of 3)
+
+**BLOCKER — same defect, relocated.** Round 2 moved the retirement paragraph below the table but left a
+BLANK LINE between the two table rows (`.../MANUAL-TEST-BURNDOWN.md:477`). A blank line ends a GFM table
+body exactly like a paragraph does — so `| CPE-1708 / CPE-1775 ... |` was still rendering as a literal
+`<p>| CPE-1708...` orphan, not a `<tr>`, and the still-open StatusBar row was still silently missing from
+the rendered ledger. **Fix: deleted the blank line at :477. That was the whole change.**
+
+**Verification, round 3 — by rendering, not by reading.** Installed nothing new to the project; ran the
+real `marked` package transiently via `npx --yes marked --gfm` (no `package.json`/lockfile change) piped
+the whole burndown file through it, and grepped the resulting HTML:
+- The CPE-1803/1804/1805 `<table>...</table>` block (was: table cut short after 1 body row) now contains
+  BOTH `<td>CPE-1803 / CPE-1804 / CPE-1805</td>` and `<td>CPE-1708 / CPE-1775 (+ CPE-1660, CPE-1798)</td>`
+  inside the same `<table>`, with the `→ ✅ ... RETIRED` note rendering as a `<p>` immediately AFTER
+  `</tbody></table>`, not inside it.
+- Whole-file orphan scan (`grep -c '<p>|'`): **4**, matching the reviewer's cited `origin/main` baseline
+  — not 5. The other 4 orphans are pre-existing, unrelated rows elsewhere in the document (tray/CPE-1090/
+  CPE-1114/CPE-1586), confirmed by line number, not something this round touched.
+- Total `<tr>` count: **26** (was 25 with the bug), matching the reviewer's own count exactly.
+
+Corrected the round-2 Work Log entry above in place: it had claimed the fix was "confirmed" by checking
+the paragraph text no longer sat between the two rows in the SOURCE — which is not the same claim as
+checking the table still RENDERS, and missed the blank-line variant of the identical defect. That is the
+more useful lesson than the one-line fix itself, per the Reviewer's own framing, so it's recorded here
+rather than silently corrected.
+
+**Real new risk, fixed (non-blocking per the Reviewer, done anyway).** The shared `afterEach`'s
+`closeTrash()` (added round 2) could run while the 2,500-item mid-stream test's stream was still
+processing several remaining batches plus unvirtualized DOM insertion for up to 2,500 rows — its old 5s
+reverse-wait could time out there even though the view would close given a moment longer, and the
+`afterEach`'s own `try { } catch { /* best-effort */ }` would then silently swallow that, leaving
+`.tv-overlay` up for the next test's `openTrash()` click — the exact cascade round 2's `afterEach` change
+existed to prevent, reintroduced at its busiest boundary. Fixed two ways: raised `closeTrash()`'s
+internal reverse-wait from 5s to 15s (see its own updated doc comment), and changed the `afterEach`'s
+catch from a silent swallow to a `console.error` naming the failure — never a throw (an `afterEach`
+throw would skip every remaining test in the file, strictly worse than one more test seeing a stuck
+overlay), but no longer invisible in the CI log either.
+
+**Four nits, all one-liners, all applied:**
+- `await setTheme("light")` in `afterEach` is now wrapped in its own `try`/`catch`, matching the other
+  two calls in that hook.
+- `wipeTrashDir`'s doc comment said "the ONLY call site" — there are two (`before()` and `after()`),
+  both correctly CI-gated; corrected the sentence.
+- The shard-separation comment said the partition "can change run to run" — corrected: `lib/shard.ts`
+  makes determinism its own headline property; the assignment only changes when the spec set or the
+  hand-maintained cost table changes, never between otherwise-identical runs.
+- Added a comment to test 1 ("a genuinely empty Trash...") stating plainly that outside CI on Linux
+  (where the wipe is deliberately skipped — round 2's should-fix), this test will fail loudly for a
+  developer whose own real Trash isn't already empty, and that this is the intended trade-off (fail
+  loudly rather than wipe a contributor's real Trash, or pass an assertion the fixture never earned),
+  not a bug in the test.
+
+**What the Reviewer confirmed already fixed in round 2 and did not ask re-checked:** fixture I/O
+genuinely in `before()`/`after()` with `function` (not arrow) callbacks for correct `this`; the
+2,500-handle serialization off the hot path; the 60s resolve-wait removed from the `it()`; measured
+per-theme cost ≈1.3–7s typical against a ≈43s worst case on the 90s budget (≈2× headroom, no longer near
+the cliff); removing `this.timeout(60_000)` from the CPE-1805 test was a strict improvement (it had been
+LOWERING that test's budget, not raising it); both silent-pass fixes verified closed (the degraded-empty
+needle matches only the real CPE-1803 wording and correctly rejects `stillLoading`/`empty`/`skippedOne`;
+the scroll check returns `-1` on a missing `.tv-body` and the real clamped value otherwise); `afterEach`
+runs on failure and is failure-tolerant; all four round-2 comment corrections are accurate.
+
+**Verification, round 3 (full).** `gui-smoke && npm run typecheck` — clean. Markdown rendering per above.
+No change to `TrashView.svelte`, `wdio.conf.ts`, or any dependency this round — 2 files touched
+(`gui-smoke/specs/trash.smoke.ts`, `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md`), plus this ticket.
