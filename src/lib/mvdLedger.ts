@@ -63,6 +63,9 @@ export interface MvdTable {
   /** 1-based line of the table's header row. */
   line: number;
   columns: number;
+  /** Data rows in the table, INCLUDING an `excluded` table's (whose rows are not in `rows`). A whole
+   *  table going missing is easier to see here than in a total that merely got smaller. */
+  dataRows: number;
   rows: MvdRow[];
 }
 
@@ -114,6 +117,51 @@ const HEADER = /\*\*MVD \(still-manual surfaces\): (\d+) primary \+ (\d+) supple
 
 /** A GFM table delimiter row: `|---|:--:|---|`. */
 const DELIMITER_CELL = /^:?-{3,}:?$/;
+
+/**
+ * A line GFM will render as a table row.
+ *
+ * **Up to three leading spaces, and no more.** This is not pedantry — it was a real blind spot found in
+ * review. Gating on `startsWith("|")` made the parser skip an indented table entirely: indenting the
+ * 2026-08-10 supplementary table by two spaces left the rendered page **byte-identical** (GFM allows the
+ * indent) while the parser's total silently fell 13 → 10, and the test then told the next shift to write
+ * 10 into the header. A guard that launders an under-count as verified is worse than no guard, and it is
+ * reachable by an ordinary edit — nesting a debt table under a bullet, which this file's style invites.
+ *
+ * Four or more spaces is an **indented code block** in GFM, not a table, so it is deliberately NOT
+ * matched here — but it is not ignored either: `INDENTED_CODE_ROW` below reds on it, because a row a
+ * human meant as a table row and GFM renders as code is the same silent-loss failure wearing a hat.
+ */
+const TABLE_ROW = /^ {0,3}\|/;
+
+/** A pipe row indented far enough that GFM renders it as code, not as a table row. */
+const INDENTED_CODE_ROW = /^ {4,}\|/;
+
+/** Opening/closing fence of a fenced code block (``` or ~~~), with GFM's own 0–3 space indent. */
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+
+/**
+ * Which lines sit inside a fenced code block. Those lines are not markdown at all, so a `|` there is
+ * text. Without this, a future shift quoting an example table row inside a fence — likely, now that this
+ * ledger documents its own table format — would red with a confusing "table is not annotated".
+ */
+function fencedLines(lines: string[]): boolean[] {
+  const inFence = new Array<boolean>(lines.length).fill(false);
+  let open: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const m = FENCE.exec(lines[i]);
+    if (open === null) {
+      if (m) {
+        open = m[1][0];
+        inFence[i] = true;
+      }
+    } else {
+      inFence[i] = true;
+      if (m && m[1][0] === open) open = null;
+    }
+  }
+  return inFence;
+}
 
 /**
  * Split one table line into cells the way GFM does: on **unescaped** pipes only.
@@ -203,17 +251,29 @@ export function parseBurndown(src: string): MvdLedger {
   }
 
   // --- the tables ----------------------------------------------------------------------------
+  const inFence = fencedLines(lines);
   const tables: MvdTable[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].startsWith("|")) continue;
+    if (inFence[i]) continue;
+    if (INDENTED_CODE_ROW.test(lines[i])) {
+      throw new MvdLedgerError(
+        "a table row indented four or more spaces is an indented CODE BLOCK in GFM, not a table row — " +
+          "it will not render as part of any table. Outdent it to at most three spaces, or put it in a " +
+          "fenced block if it really is sample text. (Silently skipping it is how a whole table could " +
+          "vanish from the count while the page still looked right.)",
+        i + 1,
+      );
+    }
+    if (!TABLE_ROW.test(lines[i])) continue;
 
-    // Maximal run of consecutive lines starting with a pipe.
+    // Maximal run of consecutive table rows. GFM allows each one 0–3 leading spaces, so the run is
+    // matched on `TABLE_ROW` and every line is trimmed before it is split into cells.
     const start = i;
     let end = i;
-    while (end + 1 < lines.length && lines[end + 1].startsWith("|")) end++;
+    while (end + 1 < lines.length && !inFence[end + 1] && TABLE_ROW.test(lines[end + 1])) end++;
     i = end;
 
-    const block = lines.slice(start, end + 1);
+    const block = lines.slice(start, end + 1).map((l) => l.trim());
     const at = (n: number) => start + n + 1; // 1-based line of block row n
 
     // The annotation must be the nearest preceding non-blank line. That single rule is what makes a
@@ -317,7 +377,7 @@ export function parseBurndown(src: string): MvdLedger {
       rows.push({ kind, line: at(n), id: cells[0], status: STATUS_MARKERS[marked[0].markers[0]] });
     }
 
-    tables.push({ kind, note, line: at(0), columns, rows });
+    tables.push({ kind, note, line: at(0), columns, dataRows: block.length - 2, rows });
   }
 
   // --- CPE-1932: a guard that measured nothing must go red, not green ------------------------

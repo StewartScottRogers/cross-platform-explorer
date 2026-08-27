@@ -48,6 +48,49 @@ describe("MANUAL-TEST-BURNDOWN.md — the MVD total is derived from its own tabl
     expect(l.tables.filter((t) => t.kind === "supplementary").length).toBeGreaterThan(2);
   });
 
+  // Review finding: the two floors above were too loose to notice a WHOLE TABLE vanishing. Indenting
+  // one supplementary table by two spaces (legal GFM, rendered page byte-identical) dropped the total
+  // 13 -> 10 while `rows.length` only went 24 -> 19 and the supplementary-table count only 5 -> 4 —
+  // both floors still passed, and the test then instructed the next shift to write 10 into the header.
+  // These two assertions are the floors that would have caught it.
+  it("no table can go missing: the table count is a one-way floor", () => {
+    const l = parseBurndown(source);
+    expect(
+      l.tables.length,
+      "a table disappeared from the parser's view. This is the exact shape of the indented-table blind " +
+        "spot: the rendered page can look unchanged while a whole table stops being counted. Do not " +
+        "lower this floor to make a red go away — find the table.",
+    ).toBeGreaterThanOrEqual(8);
+    for (const t of l.tables) {
+      expect(t.dataRows, `the ${t.kind} table at line ${t.line} has no data rows`).toBeGreaterThan(0);
+    }
+  });
+
+  it("every table-shaped line in the file is accounted for by some parsed table", () => {
+    // Deliberately detected with a LOOSER matcher than the parser's own gate (`/^ {0,3}\|/`): any
+    // leading whitespace at all. If the gate ever narrows again — which is precisely the bug this
+    // review caught — the loose count exceeds what the tables account for and this reds, instead of
+    // the number quietly getting smaller.
+    const lines = source.split(/\r?\n/);
+    let inFence = false;
+    let looseRows = 0;
+    for (const line of lines) {
+      if (/^ {0,3}(`{3,}|~{3,})/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (!inFence && /^\s*\|/.test(line)) looseRows++;
+    }
+    const l = parseBurndown(source);
+    const accounted = l.tables.reduce((n, t) => n + 2 + t.dataRows, 0); // header + delimiter + rows
+    expect(
+      accounted,
+      `${looseRows} lines in the ledger look like table rows, but the parsed tables only account for ` +
+        `${accounted} of them. Some rows are outside every table — they are not being counted, and on ` +
+        "GitHub they are probably not rendering as a table either.",
+    ).toBe(looseRows);
+  });
+
   it("still-manual is exactly ⛰ + 🔧 + 🟡 (documented in the ledger's own Legend)", () => {
     const l = parseBurndown(source);
     const still = l.rows.filter((r) => STILL_MANUAL.has(r.status)).length;
@@ -105,6 +148,42 @@ describe("parseBurndown — the happy path", () => {
       byStatus: { manual: 2, "in progress": 1, partial: 1, automated: 2 },
     });
     expect(describeCounts(l)).toContain("3 primary + 1 supplementary = 4 total");
+  });
+
+  // Review finding, BLOCKING. `startsWith("|")` made an indented table invisible: GFM allows a table
+  // row up to three leading spaces, so the rendered page was byte-identical while the parser silently
+  // stopped counting a whole table — and the test then coached the next shift to write the smaller
+  // number into the header. A guard that launders an under-count as verified is worse than no guard.
+  describe("a table indented the way GFM allows is still counted", () => {
+    for (const indent of ["", " ", "  ", "   "]) {
+      it(`${indent.length} leading space(s) — counted identically`, () => {
+        const nudged = SUPP.split("\n")
+          .map((l) => (l.startsWith("|") ? indent + l : l))
+          .join("\n");
+        const l = parseBurndown(HEAD(3, 1, 4) + PRIMARY + "\n\n" + nudged + "\n");
+        expect(l.counted.total).toBe(4);
+        expect(l.tables.length).toBe(2);
+        expect(l.tables[1].dataRows).toBe(2);
+      });
+    }
+
+    it("FOUR leading spaces is a GFM code block, not a table — and it REDS rather than vanishing", () => {
+      const buried = SUPP.split("\n")
+        .map((l) => (l.startsWith("|") ? "    " + l : l))
+        .join("\n");
+      const src = HEAD(3, 1, 4) + PRIMARY + "\n\n" + buried + "\n";
+      // The pre-fix behaviour was to skip it in silence and report 3 instead of 4.
+      expect(() => parseBurndown(src)).toThrow(/indented four or more spaces is an indented CODE BLOCK/);
+    });
+  });
+
+  it("a pipe row inside a fenced code block is text, not a table", () => {
+    // Latent foot-gun the review flagged: this ledger now documents its own table format, so a future
+    // shift quoting an example row inside a fence is likely. It must not red as "not annotated".
+    const fenced = "```\n| # | Aspect | Status | Ticket |\n|---|---|---|---|\n| 1 | example | ⛰ manual | CPE-0 |\n```\n";
+    const l = parseBurndown(HEAD(3, 1, 4) + PRIMARY + "\n\n" + fenced + "\n" + SUPP + "\n");
+    expect(l.counted.total).toBe(4);
+    expect(l.tables.length).toBe(2);
   });
 
   it("reports rows with their real line numbers", () => {

@@ -117,11 +117,43 @@ CPE-1822**. The snapshot is named `trash-degraded-scrolled-dark`, the `it()` tit
 and the `snap()` call carries a comment explaining why. Recorded in the ledger so the question closes with
 evidence rather than staying open.
 
-**Left for the next pass, deliberately:** one row in an `excluded` historical table (**CPE-1263**) claims
-a *render/gui-smoke* residual rather than the feel/taste residual its table-mates carry. Promoting it
-would have made this recount land on a number nobody had independently checked — the exact habit this
-ticket exists to break — so it is flagged in the ledger as promote-or-close for the next QA-Architect
-shift instead of being silently swallowed.
+**Carried discrepancy, stated rather than promised:** one row in an `excluded` historical table
+(**CPE-1263**, the file-content search dialog) does not meet the exclusion's own criterion — its residual
+is render/gui-smoke, not feel/taste, and it has a named retiring ticket, **CPE-1819**, live in
+`Ticketing/Tickets/Backlog/` and named by Ledger row #12 as the shared blocker. By the file's own rule the
+total is 13 where it is arguably 14. Not promoted in this shift for one reason: it would move the recount
+off 12, the value PR #1042's UAT tester reached independently, trading the only external cross-check this
+number has. The ledger now names the row, the ticket, the exact effect of promoting it (supplementary
+7→8, total 13→14) and the reason it is deferred — a filed, assignable choice instead of a prose promise
+about "the next pass".
+
+**2026-08-27 — review round 2 (PR #1055, blocking finding fixed).**
+
+`parseBurndown` gated table rows on `startsWith("|")`. **GFM allows up to three leading spaces**, so an
+indented table was invisible to the parser while rendering identically. Reproduced on the real ledger by
+indenting the 2026-08-10 supplementary table by two spaces: rendered page byte-identical (8 tables, rows
+`[14,7,1,5,2,1,1,1]`), parser 13 → **10**, and *both* CPE-1932 floors still passed (`rows.length` 24→19 >
+15; supplementary tables 5→4 > 2). The test then reds saying "Set it to the counted number above" —
+instructing the next shift to write **10** into the header. A silent under-count laundered as verified:
+precisely what this module's own header and the Legend declare impossible. Reachable by an ordinary edit
+(nesting a debt table under a bullet).
+
+Fixed: the gate is `/^ {0,3}\|/` and each row is trimmed before splitting. Four-plus spaces is a GFM
+indented code block — **not** silently skipped either: `INDENTED_CODE_ROW` reds on it, since a row a human
+meant as a table row and GFM renders as code is the same silent loss wearing a hat. Fenced code blocks are
+now excluded from table scanning too (the non-blocking foot-gun: this ledger documents its own table
+format, so a future shift quoting an example row inside a fence would have red "table is not annotated").
+
+**Two floors added that would have caught it**, both red on the real file under the pre-fix gate:
+`tables.length >= 8` ("a table disappeared from the parser's view … do not lower this floor"), and an
+accounted-for check that counts table-shaped lines with a **looser** matcher than the parser's own gate
+(`/^\s*\|/`) and asserts the parsed tables account for all of them — so if the gate ever narrows again the
+loose count exceeds the accounted count and it reds instead of the number quietly shrinking. Verified:
+`48 lines … look like table rows, but the parsed tables only account for 41`.
+
+Fixtures added: 0/1/2/3-space indents all count identically; 4-space reds; a fenced pipe row is text.
+36 tests (was 28). The Legend now documents the indentation rule, the fenced-block rule, and the known,
+accepted limitation that the marker is pinned to "exactly one cell", not to the Status **column**.
 
 **Interlock with CPE-1934 / PR #1052 (in flight).** Its `manual-test-mvd` ratchet entry reads this file's
 header sentence with `\*\*MVD \(still-manual surfaces\):[^*]*?=\s*(\d+)\s*total\*\*`. That shape is

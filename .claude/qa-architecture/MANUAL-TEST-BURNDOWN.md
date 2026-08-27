@@ -146,6 +146,17 @@ never be argued about again:
   onto a second line, a missing pipe, or a stray unescaped `|` all fail the test naming the line. This is
   not hypothetical: a blank line inside the Ledger had detached rows #10–#14 from it — they had stopped
   rendering as a table at all — and that was found by *rendering* the page, not by reading it.
+- **Indentation follows GFM, exactly.** A table row may carry **up to three leading spaces** and is
+  counted normally — so a debt table nested under a bullet still counts. **Four or more** spaces is an
+  indented code block in GFM, not a table, and reds rather than being skipped. (Review of this very
+  ticket caught the parser gating on a hard left margin: indenting one supplementary table by two spaces
+  left the rendered page byte-identical while the total silently fell 13 → 10, and the test then told the
+  next shift to write 10 into the header. Two floors now guard that class directly — the table count is a
+  one-way floor, and every table-shaped line in this file must be accounted for by some parsed table.)
+- Pipe rows inside a **fenced code block** are text, not tables — quote an example row in a fence freely.
+- Known and accepted: the Status **column** is not pinned, only "exactly one marker cell per row". A row
+  that left its Status cell empty and put the marker in the Automation cell would still count correctly,
+  but the status would be readable off the wrong column. Keep the marker in the Status cell.
 
 ## Ledger
 
@@ -201,9 +212,10 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
      prose written before the marker Legend existed, and every row now reads "render automated — feel
      residual": feel/taste is reserved for the user by the CPE-1148 split and is something we never intend
      to burn down, so logging it as MVD would inflate the number with work that has no retiring ticket.
-     Kept verbatim as history. (One row, CPE-1263, claims a *render* residual rather than a feel one — it
-     is flagged in the 2026-08-27 section at the foot as a promote-or-close candidate for the next pass,
-     rather than being silently swallowed here.) -->
+     Kept verbatim as history. (One row, CPE-1263, does NOT meet that criterion: its residual is
+     render/gui-smoke, and it has a named retiring ticket, CPE-1819. By the rule above it is countable
+     debt, so the total is 13 where it is arguably 14. That discrepancy is stated in full, with its
+     ticket, in the 2026-08-27 section at the foot — it is a deferred decision, not an oversight.) -->
 
 | Ticket | Surface | Automated coverage today | Status | Logged |
 |--------|---------|--------------------------|--------|--------|
@@ -658,11 +670,24 @@ because in both cases a human is still the test until the automation lands. The 
 **Deliberately NOT folded in.** The two 2026-07 tables are annotated `excluded`, with the reason in the
 annotation itself: their Status cells predate the marker Legend, and every row now reads "render
 automated — feel residual". Feel/taste is reserved for the user by the CPE-1148 split — debt we never
-intend to burn down — so counting it would inflate the number with work that has no retiring ticket. One
-row in there, **CPE-1263**, claims a *render/gui-smoke* residual rather than a feel one; it is flagged
-here rather than silently swallowed, and the next QA-Architect pass should either promote it to a
-supplementary row or close it. Promoting it inside this ticket would have meant the recount landing on a
-number nobody had independently checked — the habit this ticket exists to break.
+intend to burn down — so counting it would inflate the number with work that has **no retiring ticket**.
+
+**A known discrepancy is being carried here deliberately: the total is 13, and by this file's own
+exclusion criterion it is arguably 14.** One row in that excluded table, **CPE-1263** (the file-content
+search dialog, `ContentIndexSearchDialog.svelte`), does not meet the criterion the annotation states. Its
+residual is *render/gui-smoke*, not feel/taste, and it **does** have a named retiring ticket:
+**CPE-1819** — "The gui-smoke palette-open block is copy-pasted in three specs, and the one palette-only
+search dialog has never rendered in CI", live in `Ticketing/Tickets/Backlog/`, and named by Ledger row #12
+as the shared blocker (palette-driven opening retires row #12 and CPE-1263 together). By the rule written
+above it is countable debt.
+
+It is not being counted **in this shift**, for one reason and no other: promoting it would move the
+recount off **12**, which is the value PR #1042's UAT tester reached independently. Losing that
+cross-check to fold in one row would trade the only external verification this number has for a
+correction that can be made just as well later. **The decision is deferred, not the record of it** — the
+discrepancy is stated here with its ticket so that promote-or-close is a filed, assignable choice rather
+than a prose promise about "the next pass". If it is promoted, primary stays 6, supplementary goes 7 → 8,
+and the total goes 13 → 14.
 
 **`trash-degraded-scrolled` — checked, and already honest.** The concern that it is captured dark-only
 while its test title claims "in both themes" was **already resolved inside CPE-1822**: the snapshot is
