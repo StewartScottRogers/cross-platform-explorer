@@ -1640,7 +1640,11 @@ pub(crate) fn claim_destination_handle(
     // swapping a junction back defeats. `None` on a platform whose identity model `batch_media` does
     // not know; degenerate values are judged by the caller via `FileIdentity::is_degenerate`, never
     // here — this function has no policy about them.
-    let mut written: Option<crate::batch_media::FileIdentity> = None;
+    // Declared without an initialiser on purpose (CPE-1913 round 2): the `else` below now returns, so
+    // the compiler itself proves this is always assigned — which is the invariant the `else` arm's
+    // comment describes, checked rather than asserted. A `= None` default would compile and quietly
+    // re-open the fail-open the moment someone made that `else` fall through again.
+    let written: Option<crate::batch_media::FileIdentity>;
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         written = Some(facts.id);
         // CPE-1896 round 3 (F5): refuse a reparse point only when it is a **name surrogate** — a tag
@@ -1744,6 +1748,52 @@ pub(crate) fn claim_destination_handle(
                 policy: true,
             });
         }
+    } else {
+        // **`handle_facts` said it cannot describe this handle, so REFUSE — CPE-1913 round 2, the
+        // Reviewer's finding A, and a fail-open this PR itself introduced.**
+        //
+        // Every question in the block above — is it a link, is it a directory, does it have a second
+        // name — is inside an `if let Some(facts)`. Round 1 let a `None` fall straight through to the
+        // write, which is the exact fail-open CPE-1857's Security Auditor found and closed at the two
+        // call sites this PR then deleted: `transfer`'s `NameLinks::Unknown` went to `undelivered`,
+        // and `archive`'s `entry_slot_action` `Unknown` arm aborted. Moving the question onto the
+        // handle was right; dropping its "cannot tell" answer with it was not. A gate that answers
+        // "no" when it cannot tell is a gate that is not there.
+        //
+        // **`policy: false`, and that is a deliberate departure from the shape the review suggested.**
+        // `policy: true` would make this a per-entry skip the run still reports `Ok` for. Both deleted
+        // arms did the opposite — they failed the call — and one of them still exists: the tar and 7z
+        // legs go on aborting through `entry_sink_action`'s `Unknown` arm
+        // (`cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`). A zip entry
+        // that skipped where a tar entry aborts would be a new disagreement inside one module about
+        // one condition, and it would weaken CPE-1709's rule that a file the user asked for and did
+        // not get must not leave the transfer `Ok`. So this restores the deleted behaviour exactly
+        // rather than approximately.
+        //
+        // On the platforms this crate builds for, `None` means the query genuinely failed —
+        // `GetFileInformationByHandle` on Windows, `File::metadata` on a live fd on Unix. It is NOT
+        // the degenerate-identity case (a zero volume/index from a network redirector), which arrives
+        // as `Some` with a usable `links` count and is `backup::landed_inside`'s business, not this
+        // one. The `#[cfg(not(any(windows, unix)))]` arm that returns `None` unconditionally cannot be
+        // reached: `open_beneath` does not compile there, so the crate does not build there.
+        //
+        // **One consequence, stated rather than left to be found:** `CopiedOnto::written` can no
+        // longer be `None` on any production path. `backup::landed_inside`'s `written == None` branch
+        // is therefore now a directly-unit-tested backstop rather than a reachable one
+        // (`cpe_1896_…_admits_an_ordinary_destination` drives it). It is kept, not deleted: it is data
+        // flow rather than a guard, and the alternative is changing a type to encode an invariant that
+        // this branch could relax again.
+        drop(w);
+        if created {
+            let _ = std::fs::remove_file(dst);
+        }
+        return Err(crate::open_beneath::Refusal::failure(format!(
+            "{}: could not check how many names this file has, or whether it is a link, so nothing \
+             was written for it — refusing to guess rather than risk writing through a second name \
+             into a file outside {}. Nothing was written for this entry",
+            dst.display(),
+            wording.scope
+        )));
     }
 
     // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in

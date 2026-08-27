@@ -4360,6 +4360,62 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// **CPE-1913 round 2, the Reviewer's finding A, at the zip leg: an undescribable destination
+    /// handle ABORTS the extraction — it does not write.**
+    ///
+    /// This is the property `cpe_1857_an_unreadable_probe_refuses_the_entry_rather_than_writing_it`
+    /// held before round 1 deleted it, restored against the question the loop actually asks now. That
+    /// test drove `entry_sink_action`'s `Unknown` arm through the **path** probe; this loop no longer
+    /// asks the path anything, so the same fail-open moved to `handle_facts` returning `None` and round
+    /// 1 let it fall through to the write.
+    ///
+    /// **Abort, not skip, and the consistency argument is the reason.** `entry_sink_action`'s `Unknown`
+    /// arm still aborts for the tar and 7z legs — pinned by
+    /// `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`, which is still in
+    /// this file — so a zip entry that quietly skipped where a tar entry aborts would be a new
+    /// disagreement inside one module about one condition. The shared gate carries `policy: false` for
+    /// this case for exactly that reason.
+    ///
+    /// The fixture is an ordinary occupied slot, deliberately: nothing about it is a link or a hard
+    /// link, so the *only* thing that can refuse it is the cannot-describe arm. If that arm goes, this
+    /// test does not report a weaker refusal — it reports a successful overwrite.
+    #[test]
+    fn cpe_1913_an_undescribable_destination_handle_aborts_the_zip_extraction() {
+        let d = scratch("cpe1913-zip-blind-handle");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let slot = dest.join("note.txt");
+        fs::write(&slot, b"ALREADY HERE").unwrap();
+        let zip_path = d.join("aimed.zip");
+        fs::write(&zip_path, craft_zip_with_entry_name("note.txt", b"ARCHIVE PAYLOAD")).unwrap();
+
+        let outcome = {
+            let _reset = crate::batch_media::ProbeReset::arm(
+                crate::batch_media::ProbeInjection::HandleUndescribable,
+            );
+            extract_archive(&zip_path.to_string_lossy(), &dest.to_string_lossy())
+        };
+
+        // HARM FIRST: a destination the gate could not describe must not have been written through.
+        assert_eq!(
+            fs::read(&slot).ok().as_deref(),
+            Some(&b"ALREADY HERE"[..]),
+            "HARM: the gate could not describe the handle it was about to write through and extracted \
+             the entry anyway — a guard that answers \"no\" when it cannot tell is a guard that is not \
+             there: {outcome:?}"
+        );
+        let err = outcome.expect_err(
+            "an undescribable slot at a GATE is a refusal, not a silent pass — the same condition \
+             `entry_sink_action`'s `Unknown` arm still aborts on for the tar and 7z legs",
+        );
+        assert!(
+            err.contains("could not check how many names"),
+            "and it must be THIS guard's wording, not an incidental failure from elsewhere in the run: \
+             {err}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// **CPE-1857 Security-Auditor finding 1, half two — re-aimed by CPE-1913.**
     ///
     /// The finding was that `entry_sink_action` asked `batch_media::name_links`, a **path** probe, and
@@ -8059,7 +8115,14 @@ mod tests {
         for point_outside in [true, false] {
             let d = scratch("cpe1913-zip-junction");
             let stage = d.join("stage");
-            fs::create_dir_all(stage.join("sub")).unwrap();
+            // **`deeper` is not decoration — CPE-1913 round 2, the Reviewer's finding B.** `sub/` is
+            // the only directory entry without it, and `dest/sub` already exists (it IS the junction),
+            // so sabotaging `create_dir_beneath` back to `create_dir_all` produced no observable debris
+            // and this test stayed green. A directory entry *below* the junction is the one shape that
+            // makes a by-path `create_dir_all` build something on the far side of it — exactly what
+            // `row18` demonstrates for the outside-the-root case, staged here for the inside-the-root
+            // case that is this ticket's whole thesis.
+            fs::create_dir_all(stage.join("sub").join("deeper")).unwrap();
             fs::write(stage.join("sub").join("leaf.txt"), b"ARCHIVED LEAF").unwrap();
             fs::write(stage.join("ok.txt"), b"ARCHIVED OK").unwrap();
             let archive = d.join("in.zip");
@@ -8108,6 +8171,18 @@ mod tests {
                 !elsewhere.join("leaf.txt").exists(),
                 "HARM: the extraction wrote the archive entry's bytes through a junction at dest/sub \
                  into {}, which the archive never named (point_outside={point_outside})",
+                elsewhere.display()
+            );
+            // **The DIRECTORY entry's own harm, which the file assertion above cannot see** (CPE-1913
+            // round 2, finding B). `create_dir_all` is not destructive, so a redirected directory entry
+            // writes no bytes — it silently builds the archive's tree shape somewhere the user never
+            // named, and the deeper the archive nests the more of it goes out there. This is the
+            // assertion that reddens when `create_dir_beneath` alone is sabotaged; without it the
+            // directory guard was only ever proven by the file guard standing next to it.
+            assert!(
+                !elsewhere.join("deeper").exists(),
+                "HARM: the extraction created the archive's `sub/deeper` directory through a junction \
+                 at dest/sub, inside {}, which the archive never named (point_outside={point_outside})",
                 elsewhere.display()
             );
             let report = outcome.expect("an escaping entry SKIPS; the rest of the archive still extracts");

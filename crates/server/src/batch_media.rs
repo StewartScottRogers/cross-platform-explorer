@@ -1328,10 +1328,23 @@ pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
 /// found exactly that: `archive::entry_sink_action` and `transfer::download_tree` are *gates*, and a
 /// gate that answers "no" when it cannot tell fails **open** — the guard is present, silent, and the
 /// write proceeds. Compare `resolve_output_containment`, which maps [`Probe::Unreadable`] to
-/// `Containment::Unverifiable` and refuses. Both gates now refuse on [`NameLinks::Unknown`], on the same
-/// terms they already refuse an unreadable *link* verdict (`archive` aborts, matching
-/// `entry_slot_action`'s `Unknown` arm and `cpe1759_an_unreadable_slot_aborts_both_tar_paths…`;
-/// `transfer` records it in `undelivered`, matching `LeafProbe::Uninspectable`).
+/// `Containment::Unverifiable` and refuses. Both gates refuse on [`NameLinks::Unknown`], on the same
+/// terms they already refuse an unreadable *link* verdict.
+///
+/// **Where those two gates are now — CPE-1913 moved them, and this paragraph used to describe a world
+/// that no longer exists.** It said `archive` aborts and `transfer` records the entry in `undelivered`
+/// "matching `LeafProbe::Uninspectable`". `LeafProbe` is gone, and neither the **zip** extraction loop
+/// nor `download_tree` asks this function anything any more: both open their destination through
+/// [`crate::open_beneath::create_beneath`] and ask [`handle_facts`] instead, which answers about the
+/// **open handle** rather than about a name. The outcomes are unchanged and deliberately so — an
+/// undescribable handle is `crate::fsutil::claim_destination_handle`'s fail-closed arm, carrying
+/// `Refusal { policy: false }`, so `archive` still aborts and `transfer` still ends `Err` — but the
+/// question that produces them is a different one, asked one layer down.
+///
+/// This function is still the gate for the **tar** and **7z** legs via `archive::entry_sink_action`
+/// (`archive` aborts, matching `entry_slot_action`'s `Unknown` arm and
+/// `cpe1759_an_unreadable_slot_aborts_both_tar_paths…`), and it is still the *classifier* for
+/// `revert_engine::apply_write`'s hard-link count after a refusal has already been decided.
 ///
 /// **`Unknown` is now rare on purpose, which is what makes failing closed on it payable.** Before the
 /// [`probe_no_follow`] / [`probe_facts_no_follow`] split, a degenerate identity — every object on some
@@ -1401,6 +1414,9 @@ fn real_facts(facts: FileFacts) -> Probe {
             return Probe::Real(FileFacts { id: FileIdentity { volume: 0, index: 0 }, ..facts })
         }
         Some(ProbeInjection::Unreadable) => return Probe::Unreadable(WHY_PROBE_FAILED),
+        // Matched explicitly rather than folded into `None`: this variant is `handle_facts`'s, and a
+        // wildcard here would silently start swallowing any fourth variant someone adds later.
+        Some(ProbeInjection::HandleUndescribable) => {}
         None => {}
     }
     Probe::Real(facts)
@@ -1421,6 +1437,15 @@ pub(crate) enum ProbeInjection {
     DegenerateIdentity,
     /// Fail to establish anything about the name at all.
     Unreadable,
+    /// Make [`handle_facts`] return `None` — the OPEN HANDLE cannot be described.
+    ///
+    /// A different question from [`Self::Unreadable`], which blinds the by-**path** probe
+    /// [`probe_facts_no_follow`]. CPE-1913 moved every write leg's link-count and directoriness
+    /// question off the path and onto the handle, so this is the shape that now has to fail closed —
+    /// and, exactly like the other two, it cannot be staged: `GetFileInformationByHandle` on a handle
+    /// the OS just returned succeeds on every filesystem a test can reach, and `File::metadata` on a
+    /// live fd is close to unfailable. A fail-open no test can reach is one that comes back.
+    HandleUndescribable,
 }
 
 #[cfg(test)]
@@ -2039,9 +2064,25 @@ pub(crate) struct HandleFacts {
     pub(crate) is_reparse_point: bool,
 }
 
+/// The [`ProbeInjection::HandleUndescribable`] seam, asked by both real arms of [`handle_facts`] before
+/// they do anything, so the injection cannot be honoured on one platform and not the other (CPE-1913).
+#[cfg(test)]
+fn handle_facts_injected_none() -> bool {
+    matches!(PROBE_INJECTION.with(|c| c.get()), Some(ProbeInjection::HandleUndescribable))
+}
+
+#[cfg(not(test))]
+#[inline]
+fn handle_facts_injected_none() -> bool {
+    false
+}
+
 #[cfg(unix)]
 pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
     use std::os::unix::fs::MetadataExt;
+    if handle_facts_injected_none() {
+        return None;
+    }
     let meta = file.metadata().ok()?;
     Some(HandleFacts {
         id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
@@ -2061,6 +2102,9 @@ pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
         FILE_ATTRIBUTE_REPARSE_POINT,
     };
 
+    if handle_facts_injected_none() {
+        return None;
+    }
     let handle = HANDLE(file.as_raw_handle() as isize);
     // SAFETY: `handle` is borrowed from a live `File` that outlives this call; `info` is a correctly-sized
     // out-parameter. Read-only query — no ownership taken, nothing closed here.
@@ -2081,9 +2125,21 @@ pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
     }
 }
 
+/// **`None` here means "cannot tell", and every caller must treat it as a refusal** — CPE-1913 round 2.
+///
+/// This arm returned `None` under a comment that read "fail closed on a platform whose identity model
+/// this module does not know". That was backwards about the *consumer*: `None` is a value, and whether
+/// it fails closed or open is decided where it is read. CPE-1913 round 1 read it inside an
+/// `if let Some(facts)` with no `else` and let the write proceed — fail **open**, the exact shape
+/// CPE-1857 exists to close. `crate::fsutil::claim_destination_handle` now refuses on it, so the claim
+/// this comment makes is true again; it is worded as an obligation on the reader rather than as a
+/// property of this arm, because that is where it actually lives.
+///
+/// The arm itself is unreachable in a shipped build: `crate::open_beneath` is `#[cfg(any(unix, windows))]`
+/// and the crate deliberately does not compile without it.
 #[cfg(not(any(windows, unix)))]
 pub(crate) fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
-    None // fail closed on a platform whose identity model this module does not know
+    None
 }
 
 /// `IO_REPARSE_TAG_NAME_SURROGATE` — the tag bit Microsoft sets on exactly those reparse points whose

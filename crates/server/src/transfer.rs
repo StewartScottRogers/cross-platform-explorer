@@ -1369,6 +1369,75 @@ mod tests {
         }
     }
 
+    /// **CPE-1913 round 2, the Reviewer's finding A: a destination handle that cannot be described must
+    /// REFUSE, and the transfer must not report success for it.**
+    ///
+    /// Round 1 moved this leg's hard-link and directoriness questions off `batch_media::name_links` (a
+    /// path probe) and onto the write handle, which was right — and dropped the *"could not tell"*
+    /// answer with them, which was not. Every one of those questions sits inside an
+    /// `if let Some(facts) = handle_facts(&w)`, and round 1 let a `None` fall through to the write. The
+    /// code it replaced refused: `NameLinks::Unknown` went into `undelivered` and failed the transfer,
+    /// with a doc that said in as many words *"a gate that cannot tell must REFUSE"*.
+    ///
+    /// This pins the restored arm at the leg where the harm is visible. The fixture is a real hard link
+    /// to a file outside the download folder, so a fall-through does not merely write something
+    /// unchecked — it overwrites a bystander, which is CPE-1857's measured harm arriving silently.
+    ///
+    /// `ProbeInjection::HandleUndescribable` is the seam, for the same reason its two siblings exist:
+    /// `GetFileInformationByHandle` on a handle the OS just returned does not fail on any filesystem a
+    /// test can reach, and `File::metadata` on a live fd is close to unfailable. A fail-open no test can
+    /// reach is one that comes back.
+    #[test]
+    fn cpe_1913_a_destination_whose_handle_cannot_be_described_is_never_written_through() {
+        let d = crate::fsutil::scratch_dir("cpe1913-xfer-blind-handle");
+        let root = d.join("root");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, b"OUTSIDE CONTENT").unwrap();
+        if std::fs::hard_link(&victim, root.join("target.txt")).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1913_a_destination_whose_handle_cannot_be_described_is_never_written_through: \
+                 no hard-link support here — NOTHING on this run covered the undescribable-handle fail-open"
+            );
+            return;
+        }
+        // Liveness: the two names must really be one object, or a green here proves nothing.
+        std::fs::write(&victim, b"OUTSIDE CONTENT").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("target.txt")).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "fixture is inert: the leaf and the outside file are not one object"
+        );
+
+        let cancel = AtomicBool::new(false);
+        let outcome = {
+            let _reset = crate::batch_media::ProbeReset::arm(
+                crate::batch_media::ProbeInjection::HandleUndescribable,
+            );
+            download_tree(&OneFile, "", &root, &cancel)
+        };
+
+        // HARM FIRST, off the filesystem.
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(&b"OUTSIDE CONTENT"[..]),
+            "HARM: the gate could not describe the handle it was about to write through and wrote the \
+             remote server's bytes anyway, into a file outside the download folder: {outcome:?}"
+        );
+        let err = outcome.expect_err(
+            "a destination that cannot be described is a file the user asked for and did not get, so \
+             the transfer must not end Ok — that is the route `NameLinks::Unknown` took before CPE-1913 \
+             and the route CPE-1709 F1 exists to keep open",
+        );
+        assert!(
+            err.contains("could not check how many names"),
+            "and it must be THIS guard's wording, not an incidental failure from elsewhere — those are \
+             the same red for opposite reasons and only the string tells them apart: {err}"
+        );
+    }
+
     /// A provider serving one file in a subdirectory the remote server names — `sub/target.txt`.
     /// Separate from [`OneFile`] because the whole point of CPE-1913's transfer harm test is that the
     /// **remote** chooses an intermediate path component, which is what a junction planted locally can
@@ -1378,9 +1447,17 @@ mod tests {
         fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
             match path {
                 "" => Ok(vec![ProviderEntry { name: "sub".into(), is_dir: true, size: 0 }]),
-                "sub" => {
-                    Ok(vec![ProviderEntry { name: "target.txt".into(), is_dir: false, size: 11 }])
-                }
+                // **`deeper` is not decoration — CPE-1913 round 2, the Reviewer's finding B.** With
+                // `sub` as the only directory entry, the directory guard could not be red-proofed on
+                // its own: `dl/sub` already exists (it IS the junction), so sabotaging
+                // `create_dir_beneath` back to `create_dir_all` produced no observable debris and the
+                // harm test stayed green. A directory entry *below* the junction is the one shape that
+                // makes a by-path `create_dir_all` build something on the far side of it, which is what
+                // `!elsewhere.join("deeper").exists()` then asserts on.
+                "sub" => Ok(vec![
+                    ProviderEntry { name: "deeper".into(), is_dir: true, size: 0 },
+                    ProviderEntry { name: "target.txt".into(), is_dir: false, size: 11 },
+                ]),
                 _ => Ok(vec![]),
             }
         }
@@ -1460,6 +1537,18 @@ mod tests {
                 !elsewhere.join("target.txt").exists(),
                 "HARM: the download wrote the remote server's bytes through a junction at dl/sub into \
                  {}, which the user never named (point_outside={point_outside})",
+                elsewhere.display()
+            );
+            // **The DIRECTORY leg's own harm, which the file assertion above cannot see** (CPE-1913
+            // round 2, finding B). `create_dir_all` is not destructive, so a redirected directory entry
+            // writes no bytes — it silently builds the remote tree's shape somewhere the user never
+            // named, and the deeper the tree the more of it goes out there. This is the assertion that
+            // reddens when `create_dir_beneath` alone is sabotaged; without it, the directory guard was
+            // only ever proven by the file guard standing next to it.
+            assert!(
+                !elsewhere.join("deeper").exists(),
+                "HARM: the download created the remote tree's `sub/deeper` directory through a junction \
+                 at dl/sub, inside {}, which the user never named (point_outside={point_outside})",
                 elsewhere.display()
             );
             // And the refusal must REACH THE CALLER. `eprintln!` + `Ok` is the shape CPE-1913 exists
