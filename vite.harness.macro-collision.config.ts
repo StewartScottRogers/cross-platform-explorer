@@ -10,7 +10,7 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 //
 // Not the RevertOutcomePanel harness's shape (mount N cases side by side in plain panels) — MacroRun
 // Confirm renders its own `position:fixed; inset:0` backdrop, so only one instance is mounted per page
-// load, picked by `?case=blocked|mixed`, and `?theme=light|dark` sets the theme the same way
+// load, picked by `?case=blocked|mixed|many`, and `?theme=light|dark` sets the theme the same way
 // `src/lib/theme.ts` does in the real app.
 //
 // Usage: `npm run harness:macro-collision`, then open
