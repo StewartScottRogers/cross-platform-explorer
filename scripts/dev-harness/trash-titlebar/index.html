@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+  CPE-1882 layout-guard case — mounts the REAL TrashView.svelte (no iframe/narrow-width machinery
+  needed: the layout-guard engine drives width via CDP's Emulation.setDeviceMetricsOverride directly,
+  the same way scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs already does, so it doesn't need
+  the outer-shell/iframe trick statusbar-notice/checkpoint-narrow use for their own `--dump-dom`
+  invocations). Its own `.tv-titlebar` is exactly the CPE-1827 "the Trash titlebar cannot fit seven
+  buttons and a title on one line" surface: `.tv-title` (icon + "Trash" + status) vs. `.tv-tools` (the
+  overflow-menu trigger + Close ×) at the app's own 600px width floor (`src-tauri/src/lib.rs`
+  `.min_inner_size`) and up.
+
+  TrashView takes no props — it mounts itself, calls `rawInvoke("list_trash_stream", ...)` in
+  `onMount`, and renders from what that resolves. main.ts registers a canned fixture BEFORE mounting
+  (see ../layout-guard/shared-mocks/invoke.ts for the pluggable-mock pattern this relies on).
+
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1882 layout-guard — Trash titlebar</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html, body { margin: 0; padding: 0; background: var(--bg, #1e1e1e); }
+    </style>
+  </head>
+  <body>
+    <div id="mount"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

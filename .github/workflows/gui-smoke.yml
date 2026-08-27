@@ -1056,3 +1056,71 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           include-hidden-files: true
+
+  # CPE-1882: the generalised real-browser layout guard — scripts/dev-harness/layout-guard/. Reuses
+  # this workflow's own shape (real Chrome on a hosted runner, workflow-level `concurrency:` above) but
+  # NOT its heavy machinery: no `tauri build`, no msedgedriver/tauri-driver/WebdriverIO, no sharding.
+  # It drives plain installed Chrome (`chrome.exe`/`google-chrome --headless=new`) over raw CDP against
+  # the project's OWN `vite` dev server — the exact approach
+  # scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs already proved out for CPE-1884, now
+  # generalised (engine.mjs) into reusable `siblingOverlap`/`clipProbe`/`textOverflow`/`selfPaint`
+  # checks any case in cases.mjs can point at a component + a width list, with no WebDriver in the
+  # loop. That is most of the point: this job should be far more reliable than gui-smoke's WebDriver
+  # legs (see this file's own header — the Windows leg above has NEVER produced a passing run in CI),
+  # which is why it is unconditional and BLOCKING on every push/PR rather than schedule/dispatch-only.
+  #
+  # Cost, measured locally (2 cases / 12 width combinations — StatusBar.svelte red-proofing CPE-1836,
+  # TrashView.svelte red-proofing CPE-1827): ~35s dev-server cold start (first module-graph compile) +
+  # ~1-2s per width thereafter, under a minute end to end. No build step, no driver install — this is
+  # the cheapest real-browser job in this workflow by a wide margin, which is why it runs on EVERY
+  # push/PR rather than being path-filtered to layout-relevant paths: at well under a minute, a
+  # silently-skipped run (the CPE-1893 shape — a job that produced nothing reading identically, in the
+  # checks list, to one that had nothing to do that run) is a worse trade than just always paying it.
+  layout-guard:
+    name: Layout guard (real-browser rects, no WebDriver) — CPE-1882
+    runs-on: ubuntu-latest
+    # CPE-1882 CI-round-3 finding: this job's FIRST real CI run (job 98379701649) hit this cap and was
+    # CANCELLED after 10m14s without completing a single case — the local "~1 minute" measurement never
+    # exercised a real CI runner. Root cause: `runAllCases` (engine.mjs) used to launch a FRESH Chrome
+    # process + fresh profile dir for every width (12 for the two shipped cases today) — cheap on a dev
+    # workstation, but 12 sequential full-process-launch-plus-CDP-handshakes is far more expensive on a
+    # shared/throttled GitHub-hosted runner. Fixed by reusing ONE Chrome instance for the whole sweep
+    # (see `runAllCases`'s own header comment for why that's safe). 15 minutes here is deliberate
+    # headroom over the now-expected wall-clock, not a claim that it needs anywhere near that long —
+    # widen this further only if a FUTURE real CI run's own timing says so, not preemptively.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # CPE-1882 UAT finding: pinned to 22, NOT this workflow's usual 20 (every other job here
+      # stays on 20 -- do not "fix" this to match them). scripts/dev-harness/layout-guard/engine.mjs
+      # calls the global `WebSocket` constructor directly (its own CDP client, no `ws` dependency --
+      # see that file's header) and global `WebSocket` is only stable in Node from v22; on v20 it is
+      # `ReferenceError: WebSocket is not defined`, unconditionally, on every run -- confirmed on a
+      # real CI run (job 98371907013) before this fix. The alternative (drop the global-WebSocket
+      # dependency, e.g. the `ws` package) was rejected: it's a new npm dependency, which the ticket's
+      # own bar was to avoid, and this job's Chrome-CDP approach otherwise has zero dependencies.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # google-chrome-stable ships preinstalled on GitHub-hosted ubuntu-latest runner images, but its
+      # exact path is an image detail, not a documented contract — resolved here rather than hard-coded
+      # in engine.mjs's own `defaultChromePath()`, and exported to CHROME_PATH so that function's
+      # `process.env.CHROME_PATH` override picks it up. Fails loud (empty `$CHROME_BIN` -> the
+      # `--version` call errors) rather than silently falling through to a guessed path that might not
+      # exist on a future runner image.
+      - name: Resolve + confirm Chrome
+        run: |
+          CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium-browser)"
+          echo "Using Chrome at: $CHROME_BIN"
+          "$CHROME_BIN" --version
+          echo "CHROME_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+
+      - name: Run the layout guard (npm run harness:layout-guard)
+        run: npm run harness:layout-guard
