@@ -48,15 +48,30 @@
  *    the native driver disappeared mid-response to the `DELETE /session`.
  *  - `socket hang up` / `ECONNRESET` / `EPIPE` — the other shapes the same "peer went away" event takes
  *    depending on exactly when it happens. Not observed in these four logs; included because they are
- *    the same class and excluding them would just mean the next variant reads as a mystery again. */
-const TRANSPORT_DEATH_MARKERS: readonly string[] = [
-  "UND_ERR_SOCKET",
-  "ECONNREFUSED",
+ *    the same class and excluding them would just mean the next variant reads as a mystery again.
+ *
+ *  CPE-1955 review round 2 — the codes are matched as WHOLE WORDS, the phrases as substrings. `EPIPE` as
+ *  a bare substring matches `STAGEPIPELINE`, and while no such string is reachable from here today (every
+ *  assertion message in `gui-smoke/lib` and `gui-smoke/specs` was grepped and none contains any marker),
+ *  a word-boundary match costs nothing and removes the class rather than the instance. */
+const TRANSPORT_DEATH_CODES: readonly string[] = ["UND_ERR_SOCKET", "ECONNREFUSED", "ECONNRESET", "EPIPE"];
+
+/** CPE-1955 review round 2 — OUR OWN sentinel, and the reason it is in this list rather than only in a
+ *  message. When `respawnTauriDriver` has spent its budget it throws, and that throw has to be
+ *  recognisable as a transport death or the abort never latches and `formatShardAbort` never prints.
+ *  The concrete path the review found: a SECOND transport death in one shard, where the reset's own error
+ *  is app-level (the observed breadcrumb shape) and the death first surfaces at `reloadSession()`. There,
+ *  neither the original error nor a plain budget-spent message carries a marker, so the shard would have
+ *  died red but silent — the exact illegibility this ticket exists to remove. The sentinel is the literal
+ *  opening words of that thrown message, so the two cannot drift apart without this constant moving too. */
+export const TRANSPORT_DEAD_SENTINEL = "the WebDriver transport is gone";
+
+/** Phrases matched as plain substrings — real sentences from tauri-driver/undici, plus our sentinel. */
+const TRANSPORT_DEATH_PHRASES: readonly string[] = [
   "Connection refused (os error 111)",
   "connection closed before message completed",
   "socket hang up",
-  "ECONNRESET",
-  "EPIPE",
+  TRANSPORT_DEAD_SENTINEL,
 ];
 
 /** Flattens whatever was thrown into the text this module matches against. Errors carry their marker in
@@ -87,6 +102,21 @@ function errorText(err: unknown): string {
   return parts.join("\n");
 }
 
+/** Whole-word `indexOf`, so a short code cannot match inside a longer identifier — `EPIPE` must not be
+ *  found in `STAGEPIPELINE`. Written with an explicit character check rather than a `RegExp` built from
+ *  interpolation, so nothing here depends on escaping a dynamic value correctly. */
+function containsWholeWord(text: string, word: string): boolean {
+  const isWordChar = (c: string): boolean => c !== "" && /[A-Za-z0-9_]/.test(c);
+  for (let from = 0; ; ) {
+    const at = text.indexOf(word, from);
+    if (at < 0) return false;
+    const before = at === 0 ? "" : text.charAt(at - 1);
+    const after = text.charAt(at + word.length);
+    if (!isWordChar(before) && !isWordChar(after)) return true;
+    from = at + 1;
+  }
+}
+
 /** True when `err` is the WebDriver transport being GONE rather than the app under test misbehaving.
  *
  *  Deliberately conservative: it matches only the socket-level markers above, so an ordinary in-app
@@ -97,7 +127,8 @@ function errorText(err: unknown): string {
 export function isTransportDead(err: unknown): boolean {
   const text = errorText(err);
   if (text === "") return false;
-  return TRANSPORT_DEATH_MARKERS.some((marker) => text.includes(marker));
+  if (TRANSPORT_DEATH_PHRASES.some((phrase) => text.includes(phrase))) return true;
+  return TRANSPORT_DEATH_CODES.some((code) => containsWholeWord(text, code));
 }
 
 /** One-line-per-clause summary of an unrecoverable shard abort, printed once by `wdio.conf.ts` at the

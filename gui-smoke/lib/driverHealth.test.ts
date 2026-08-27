@@ -9,8 +9,13 @@
 // copied verbatim from the four failing job logs named in `driverHealth.ts`'s header, so these tests
 // falsify the fix against the real evidence rather than against a paraphrase of it.
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { formatShardAbort, isTransportDead } from "./driverHealth.js";
+import { fileURLToPath } from "node:url";
+import { TRANSPORT_DEAD_SENTINEL, formatShardAbort, isTransportDead } from "./driverHealth.js";
+
+const LIB_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** The `WebDriverRequestError` shape WDIO actually threw into `handleRunnableStart`'s catch once the
  *  native driver behind tauri-driver had gone (job 98646323315, 19:44:19Z): an Error whose `message`
@@ -78,6 +83,39 @@ describe("isTransportDead — app misbehaving vs plumbing gone", () => {
     assert.equal(isTransportDead(undefined), false);
     assert.equal(isTransportDead(null), false);
     assert.equal(isTransportDead(42), false);
+  });
+
+  // CPE-1955 review round 2 — the concrete silent path the review found. `respawnTauriDriver`'s
+  // budget-spent throw has to be recognisable, or a SECOND transport death in one shard (where the
+  // reset's own error is app-level and the death first surfaces at `reloadSession()`) leaves BOTH errors
+  // unmarked: `shardAborted` never latches and `formatShardAbort` never prints. Red, but silent.
+  it("recognises respawnTauriDriver's own budget-spent throw", () => {
+    const budgetSpent = new Error(
+      `[gui-smoke] ${TRANSPORT_DEAD_SENTINEL} and the tauri-driver respawn budget (1) is spent — not retrying again (CPE-1955)`,
+    );
+    assert.equal(isTransportDead(budgetSpent), true);
+  });
+
+  it("keeps the sentinel and the thrown message from drifting apart", () => {
+    // If someone reworded the throw without moving the constant, the test above would still pass because
+    // it builds its input FROM the constant. This asserts the constant is actually present in the shipped
+    // source of the throw, which is the thing that can silently drift.
+    const conf = fs.readFileSync(path.resolve(LIB_DIR, "../wdio.conf.ts"), "utf-8");
+    assert.match(
+      conf,
+      /\[gui-smoke\] \$\{TRANSPORT_DEAD_SENTINEL\} and the tauri-driver respawn budget/,
+      "respawnTauriDriver's budget-spent throw no longer interpolates TRANSPORT_DEAD_SENTINEL, so " +
+        "isTransportDead cannot recognise it and the shard would die red but with no SHARD ABORTED block.",
+    );
+  });
+
+  it("does not match a code embedded in a longer identifier", () => {
+    // `EPIPE` as a bare substring matches `STAGEPIPELINE`. Whole-word matching removes the class.
+    assert.equal(isTransportDead(new Error('deploy step "STAGEPIPELINE" failed')), false);
+    assert.equal(isTransportDead(new Error("PRECONNRESETTER did not run")), false);
+    // ...while the genuine codes still match at real word boundaries.
+    assert.equal(isTransportDead(new Error("write EPIPE")), true);
+    assert.equal(isTransportDead(new Error("read ECONNRESET")), true);
   });
 
   it("does not spin on a self-referential cause chain", () => {

@@ -43,21 +43,21 @@ regression through. A guard people learn to re-run is a guard that has stopped w
 
 ## Acceptance criteria
 
-- [ ] **Find out what dies.** The ratchet reports only the aftermath. Get the job's own log for a
+- [x] **Find out what dies.** The ratchet reports only the aftermath. Get the job's own log for a
       failing run and identify whether it is a timeout, a crash, a hang in `tauri-driver`, an OOM, or
       a spec that never returns. **Do not fix anything until you can name the cause** — this repo has
       spent the week finding that plausible explanations are not measurements.
-- [ ] Establish whether it is **shard 2 specifically** or the second shard *whatever it contains*.
+- [x] Establish whether it is **shard 2 specifically** or the second shard *whatever it contains*.
       Those have completely different fixes. The shard plan is deterministic, so this is answerable by
       changing the split and re-running.
-- [ ] Check whether the **first spec that reports** is always the same one, and whether the dying spec
+- [x] Check whether the **first spec that reports** is always the same one, and whether the dying spec
       is always the second in the shard's order. If so, it is a specific spec, not the shard.
-- [ ] **Make the failure legible.** Whatever the cause, the job should say which spec it died in and
+- [x] **Make the failure legible.** Whatever the cause, the job should say which spec it died in and
       why — "only 1 of 14 reported" is a symptom, not a diagnosis. That is most of the value here even
       if the underlying hang proves hard to fix.
-- [ ] **Do not weaken the ratchet.** `incomplete=true ⇒ RED` stays. If the fix is a retry, it must be
+- [x] **Do not weaken the ratchet.** `incomplete=true ⇒ RED` stays. If the fix is a retry, it must be
       a bounded retry **inside** the job that still reds when it exhausts, never an exemption.
-- [ ] Check the other shards' failure rates over the same period. If shard 2 is an outlier, that is
+- [x] Check the other shards' failure rates over the same period. If shard 2 is an outlier, that is
       evidence; if all four shards do this occasionally, the diagnosis changes completely.
 
 ## Notes
@@ -150,8 +150,13 @@ lines — shard 2 is a genuine outlier, and the reason is what it contains, not 
 **The ratchet was not touched.** `incomplete=true => RED` (CPE-1753) is correct and stays; the retry is
 bounded, inside the job, and still reds when it exhausts. Nothing here can turn a red run green.
 
-**Verification:** `gui-smoke` typecheck clean; `gui-smoke` unit tests 146/146 (was 142); root
-`npm run check` 0 errors; root `npm test` 4926 passed / 2 skipped across 345 files.
+**Verification:** `gui-smoke` typecheck clean; `gui-smoke` unit tests **149/149, up from 130** at the
+merge base `5de1978a` — **+19 cases**, not the "+4" an earlier draft of this log claimed. That number was
+wrong and in the wrong direction: it was measured *after* `driverHealth.test.ts` already existed, so it
+recorded the absolute at a moment mid-change instead of the delta (exactly what `8106f88b` warns about,
+one commit earlier). Re-measured directly: the base `beforeSessionAwaits.test.ts` extracted from
+`5de1978a` and run in place reports **5** cases against this PR's **9** (+4), plus `driverHealth.test.ts`
+at **15**. Root `npm run check` 0 errors; root `npm test` 4926 passed / 2 skipped across 345 files.
 
 **What remains unproven.** *Why* the native driver dies on the `DELETE /session` in the first place is
 not established — it survives the identical sequence in other runs, so it is timing-dependent inside
@@ -162,3 +167,63 @@ reproduced on demand — the trigger is a slow-renderer race), so its value is p
 construction + the guard tests; if it fails, the outcome is exactly today's red, now with a diagnosis
 attached. Also unproven: whether `checkpoint-restore.smoke.ts` is intrinsically reset-hostile or merely
 unlucky in following `archive-browse.smoke.ts` — worth a look if this recurs after this lands.
+
+
+### 2026-08-27 — review round 2, and what the fix immediately found
+
+Three corrections from review, all taken:
+
+- **The test-count claim was wrong** (see the corrected Verification line above): 130 -> 149, **+19**, not
+  "+4". Measured at the merge base, not asserted.
+- **The budget-spent throw carried no transport marker.** `respawnTauriDriver`'s error read
+  `[gui-smoke] the WebDriver transport is gone and the tauri-driver respawn budget (1) is spent`, which
+  matched none of the markers. Concrete silent path: a **second** transport death in one shard where the
+  reset's own error is app-level (the observed breadcrumb shape) and the death first surfaces at
+  `reloadSession()` — then `isTransportDead(recoveryErr)` is false *and* `isTransportDead(err)` is false,
+  so `shardAborted` never latches and `formatShardAbort` never prints. Red, but silent — and
+  `respawnTauriDriver`'s own docstring asserted the opposite. Fixed with an exported
+  `TRANSPORT_DEAD_SENTINEL` that the throw interpolates and `isTransportDead` matches, plus a test that
+  reds if the throw stops interpolating it (a test building its input *from* the constant cannot catch
+  that drift on its own). Docstring corrected to say what the code does.
+- **`EPIPE` was an unanchored substring** — it matched `STAGEPIPELINE`. Codes are now matched whole-word
+  via an explicit character check; phrases stay substrings. The header's "the bias is towards not
+  matching" was overstated and now says plainly that a marker quoted inside an assertion message *would*
+  match, that none exists in `gui-smoke/lib` or `gui-smoke/specs` today (grepped, not assumed), and not to
+  write one.
+
+Both new guard-shaped assertions red-proofed by sabotage (removing the sentinel from the throw; reverting
+whole-word matching to `includes`) — each reds exactly its own named case.
+
+#### The fix found a real failing case on its first CI run
+
+Shard 2 on this PR reported **`14/14 spec file(s) reported ... incomplete=false`** and named
+`macro-param-prompt.smoke.ts :: running a bound {ask:suffix} macro opens MacroParamPrompt before any
+dry-run confirm` — instead of the old `1/14 ... 0 new failing cases`. The attribution fix working in
+production, first run.
+
+**Is that failure ours? No — and it is not new.** Job **98697809924** (shard 2, 22:53Z, branch
+`worktree-agent-add93db74672448c3`, sha `373ee259` — a different agent's branch, **before this change
+existed**) reported the identical thing: `14/14 spec file(s) reported, 26 case(s) — 23 passed, 1 failed,
+2 skipped/pending` and the same `NEW GUI REGRESSION` for the same case, with the real UI error
+`element (".ctx .flyout .row") still not existing after 5000ms`. Byte-identical counts to this PR's run,
+which also answers the "2 skipped/pending" question: pre-existing, unchanged, not a new symptom.
+
+**Was it hidden inside the swallowed thirteen?** Checked, and the honest answer is **no, not by the
+swallowing** — it was hidden by something adjacent. `grep -c 'ctx .flyout .row'` on the swallowed run
+(job 98646323315) is **0**, and `macro-param-prompt.smoke.ts` appears there only as cascade noise:
+`handleRunnableStart:newFile` -> `resetFailedRestartingSession` in ~3 ms with a `WebDriverRequestError`.
+The transport died at spec #2 (`checkpoint-restore`) at 19:43:18; `macro-param-prompt` is spec #6, so the
+app was already gone and the spec never really ran. Those four runs therefore cannot say anything about
+that spec's real health.
+
+**The masking is real, just one step earlier than assumed.** Shard 2 has had two independent failure
+modes on the same day: an illegible transport death that reports "0 new failing cases", and a genuine
+intermittent `macro-param-prompt` failure. A run that died reported nothing actionable and got re-run; a
+run that survived reported the regression — and by the ticket's own record those were re-run too. So the
+concrete worry this ticket was filed about ("a guard people learn to re-run is a guard that has stopped
+working") is not hypothetical: there was already a real failing case behind the re-run reflex. Surfacing
+it is the fix working, not the fix breaking.
+
+**Deliberately not done here:** `macro-param-prompt` is **not** added to `known-failing.json` and the GUI
+bug is not chased — this PR stays the harness fix, and exempting a real regression to land the tool that
+surfaced it would be self-defeating. Handed to the Foreman to file separately.

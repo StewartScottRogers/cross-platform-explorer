@@ -556,6 +556,8 @@ before giving up. When that budget is spent the job prints a `[gui-smoke] SHARD 
 spec it died in, the cause, and — importantly — that the N failures after it are **one death, not N
 regressions**, so nobody files N `known-failing.json` entries for them.
 
+**The `DELETE` -> death gap, measured per job:** 451 / 602 / 612 / 606 ms.
+
 **The ratchet was never the problem and was not touched.** `incomplete=true ⇒ RED` (CPE-1753) is correct
 and stays. This is containment plus legibility, never an exemption; nothing here can turn a red run green.
 

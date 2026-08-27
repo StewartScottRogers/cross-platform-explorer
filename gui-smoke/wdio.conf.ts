@@ -25,7 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
-import { formatShardAbort, isTransportDead } from "./lib/driverHealth.js";
+import { TRANSPORT_DEAD_SENTINEL, formatShardAbort, isTransportDead } from "./lib/driverHealth.js";
 import { resetAppState } from "./lib/resetAppState.js";
 import { assignShardSpecs, parseShardId, shardResultFilePrefix } from "./lib/shard.js";
 import { listSpecFiles, specRunPath } from "./lib/specFiles.js";
@@ -1052,8 +1052,9 @@ let shuttingDown = false;
 // another's budget.
 
 /** How many times ONE worker may respawn tauri-driver mid-shard. One. This is a bounded in-job retry,
- *  never an exemption: when it is spent, `respawnTauriDriver` throws, the shard is marked aborted, and the
- *  ratchet reds exactly as it does today. Raising this would trade a fast, legible red for a slow one —
+ *  never an exemption: when it is spent, `respawnTauriDriver` throws an error carrying
+ *  `TRANSPORT_DEAD_SENTINEL` — which is what lets `handleRunnableStart`'s catch recognise it, latch this
+ *  flag and print the diagnosis — and the ratchet reds exactly as it does today. Raising this would trade a fast, legible red for a slow one —
  *  each respawn costs a full driver + app cold start — and would not fix anything a single restart cannot,
  *  since a transport that dies twice in one shard is a real, reportable defect and not a blip. */
 const MAX_DRIVER_RESPAWNS = 1;
@@ -1295,8 +1296,15 @@ async function recoverSession(cause: unknown): Promise<void> {
  *  spent so the caller reds rather than looping. */
 async function respawnTauriDriver(): Promise<void> {
   if (driverRespawnsUsed >= MAX_DRIVER_RESPAWNS) {
+    // CPE-1955 review round 2 — this message MUST open with `TRANSPORT_DEAD_SENTINEL`. It is what makes
+    // `isTransportDead` recognise the budget-spent throw, which is what latches `shardAborted` and prints
+    // the diagnosis in `handleRunnableStart`'s catch. Without it there is a real silent path: a SECOND
+    // transport death in one shard, where the reset's own error is app-level (the observed breadcrumb
+    // shape) and the death first surfaces at `reloadSession()` — neither error would carry a marker, so
+    // the shard would die red but with no `SHARD ABORTED` block, i.e. exactly the illegibility this
+    // ticket exists to remove.
     throw new Error(
-      `[gui-smoke] the WebDriver transport is gone and the tauri-driver respawn budget (${MAX_DRIVER_RESPAWNS}) is spent — not retrying again (CPE-1955)`,
+      `[gui-smoke] ${TRANSPORT_DEAD_SENTINEL} and the tauri-driver respawn budget (${MAX_DRIVER_RESPAWNS}) is spent — not retrying again (CPE-1955)`,
     );
   }
   driverRespawnsUsed += 1;
