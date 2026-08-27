@@ -929,6 +929,13 @@ fn sweep_stale_staging(blob_path: &Path) {
         }
         let path = entry.path();
         let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
+        // **CPE-1929: `is_symlink()` here is subsumed by `!is_file()` and can never be the decider.**
+        // `std`'s `FileType::is_file` is false for a link on every platform, so on a `symlink_metadata`
+        // result `is_symlink() => !is_file()` and the second disjunct is unreachable — deleting it
+        // changes no behaviour, and no fixture can make it the reason an entry is skipped. Kept as a
+        // **statement of intent** (a link wearing our staging prefix is never one of our own staged
+        // blobs, and is never deleted as if it were), not as a second net. Untestable on its own,
+        // deliberately, and recorded so a green sabotage on it reads as expected, not as a missing test.
         if !md.is_file() || md.file_type().is_symlink() {
             continue;
         }

@@ -1989,17 +1989,18 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
         .map_err(|e| format!("could not open output for writing: {e}"))?;
     let verified = VerifiedOutput { file, created };
 
-    // Belt and braces for a platform that ignores the no-follow flag (or a wrong `O_NOFOLLOW` constant):
-    // if the name is a link at all, refuse regardless of what the open returned.
-    if std::fs::symlink_metadata(output).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        verified.abandon(output);
-        return Err(format!(
-            "refusing at write time: \"{output}\" is a link, and a batch never writes through one — a \
-             link's target can be re-pointed after any check, even a dangling link that happens to point \
-             back inside this same folder. Nothing was written for this file"
-        ));
-    }
-
+    // **The handle answers the link question first (CPE-1929 — the same reorder CPE-1896 made in
+    // `fsutil`).** This used to sit *below* the `symlink_metadata(output)` path check that now follows
+    // it, and that ordering made this refusal untestable for every fixture anyone had: on Windows
+    // `std`'s `is_symlink` reads the same name-surrogate bit, so every symlink and junction was caught
+    // by the path check first and this branch only ever saw reparse points nobody had a fixture for.
+    // Measured on CPE-1929: `if false && facts.is_reparse_point` left the whole 2,423-test lib suite
+    // green, and forcing `is_reparse_point` to a lying `false` changed no `batch_media` behaviour at all
+    // — the two-sabotage tell for a shadowed guard. Handle-first is also the *more trustworthy* order:
+    // the object this question is asked of is the one the bytes will land in and it cannot be
+    // substituted after the open, whereas the name can be swapped either way in the window before a
+    // `symlink_metadata`. Covered now by
+    // `cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`.
     let facts = match handle_facts(&verified.file) {
         Some(f) if !f.id.is_degenerate() => f,
         _ => {
@@ -2013,8 +2014,28 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     if facts.is_reparse_point {
         verified.abandon(output);
         return Err(format!(
-            "refusing at write time: \"{output}\" is a reparse point (a link, junction or stand-in for \
-             another name), and a batch never writes through one. Nothing was written for this file"
+            "refusing at write time: \"{output}\" is a link or other reparse point (a symlink, a \
+             junction, or any name that can stand in for another), and a batch never writes through \
+             one — such a name's target can be re-pointed after any check, even a dangling link that \
+             happens to point back inside this same folder. Nothing was written for this file"
+        ));
+    }
+
+    // **Second net, and deliberately unreachable on every platform this ships on — do not be alarmed
+    // when sabotaging it leaves the suite green (CPE-1929).** On Windows every symlink and junction
+    // carries `FILE_ATTRIBUTE_REPARSE_POINT`, so the handle check above has already refused it. On
+    // Linux/macOS/BSD `O_NOFOLLOW` makes the *open itself* fail on a link at the final component, so
+    // control never arrives here at all. What is left is exactly one case: a Unix that is none of those,
+    // where [`O_NOFOLLOW`] is compiled as `0`, the open follows the link, and `is_reparse_point` is
+    // hard-coded `false`. No such platform is built or tested, so this branch is untestable *by
+    // construction* rather than merely untested. It is kept because the alternative on that platform is
+    // writing through a link, and it is argued rather than demonstrated.
+    if std::fs::symlink_metadata(output).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        verified.abandon(output);
+        return Err(format!(
+            "refusing at write time: \"{output}\" is a link, and a batch never writes through one — a \
+             link's target can be re-pointed after any check, even a dangling link that happens to point \
+             back inside this same folder. Nothing was written for this file"
         ));
     }
     if facts.is_dir {
@@ -4675,10 +4696,14 @@ mod tests {
     /// that case, not just recite reasoning that doesn't apply to it.
     ///
     /// `#[cfg(windows)]`: `O_NOFOLLOW` on Unix makes the *open itself* fail on any symlink final
-    /// component — dangling or not — before this belt-and-braces `symlink_metadata` check is ever reached
-    /// (see [`open_output_verified`]'s own comment on that check, "for a platform that ignores the
-    /// no-follow flag"). This exact message is therefore only reachable in practice on Windows, where
+    /// component — dangling or not — so this message is only reachable in practice on Windows, where
     /// `FILE_FLAG_OPEN_REPARSE_POINT` opens the reparse point object itself rather than erroring.
+    ///
+    /// **Which check produces it changed with CPE-1929.** It used to come from the
+    /// `symlink_metadata(output).is_symlink()` path check; that check now sits *below* the handle's
+    /// `is_reparse_point` refusal, which is what answers here (every symlink carries the reparse
+    /// attribute). The wording moved with the decision, so this assertion still pins the same
+    /// user-facing promise — it is now pinned on the answer that cannot be substituted after the open.
     #[cfg(windows)]
     #[test]
     fn cpe_1667_the_symlink_refusal_names_the_dangling_inside_the_folder_case() {
@@ -4708,6 +4733,75 @@ mod tests {
             err.contains("dangling"),
             "the refusal must name the dangling-inside-the-folder case, not just recite the attack \
              reasoning: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **CPE-1929 — the test the handle-side reparse refusal never had.** Sabotaging that refusal
+    /// (`if false && facts.is_reparse_point`) left the whole 2,423-test lib suite green, and forcing
+    /// `is_reparse_point` to a lying `false` changed nothing in `batch_media` either: the two-sabotage
+    /// tell for a guard an earlier check is shadowing. The earlier check was the
+    /// `symlink_metadata(output).is_symlink()` path check, which on Windows reads the **same
+    /// name-surrogate bit**, so every symlink and junction anyone could stage was refused there and the
+    /// handle check was never the decider for any fixture in the crate.
+    ///
+    /// The fixture that breaks the shadow is a **non-surrogate** reparse point: `std` does not call it a
+    /// symlink, so the path check cannot answer, and only the handle's `FILE_ATTRIBUTE_REPARSE_POINT`
+    /// bit is left to refuse it. The assertion below that `is_symlink()` is **false** is not decoration
+    /// — it is what makes this test prove the handle check fired rather than the path check passing for
+    /// free. `make_guid_reparse_point` needs no privilege and no filter driver (see its doc), so this
+    /// cannot silently degrade into a skip on a normal runner.
+    ///
+    /// Windows-only by construction: `HandleFacts::is_reparse_point` is hard-coded `false` on Unix.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check() {
+        /// Non-Microsoft (bit 31 clear), NOT a name surrogate (bit 29 clear) — the dehydrated-cloud-file
+        /// shape, which `std::fs::FileType::is_symlink` answers `false` for.
+        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1929;
+
+        let dir = scratch("cpe1929-handle-reparse");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let input = selected.join("photo.png");
+        std::fs::write(&input, b"input bytes").unwrap();
+        let output = selected.join("out.png");
+        std::fs::write(&output, b"stale").unwrap();
+
+        if !crate::fsutil::make_guid_reparse_point(&output, NON_SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check: \
+                 could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                 handle-side reparse refusal in open_output_verified."
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+
+        // Liveness: without the attribute this is a test that an ordinary file is refused, which it is
+        // not — the whole point of `open_output_verified` is that an ordinary existing output is opened.
+        assert!(
+            std::os::windows::fs::MetadataExt::file_attributes(
+                &std::fs::symlink_metadata(&output).unwrap()
+            ) & 0x400
+                != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the output"
+        );
+        // The control that makes this test mean anything: the path check standing next to the handle
+        // check cannot see this object, so it cannot be the one that refuses.
+        assert!(
+            !std::fs::symlink_metadata(&output).unwrap().file_type().is_symlink(),
+            "fixture is shadowed: std calls this a symlink, so the symlink_metadata path check would \
+             refuse it for free and this test would prove nothing about the handle check"
+        );
+
+        let err = open_output_verified(&input.to_string_lossy(), &output.to_string_lossy())
+            .err()
+            .expect("a reparse point at the output must be refused, whatever its tag");
+        assert!(
+            err.contains("reparse point"),
+            "the handle-side refusal must be the one that fired, and must name the reason: {err}"
         );
 
         let _ = std::fs::remove_dir_all(dir.path());

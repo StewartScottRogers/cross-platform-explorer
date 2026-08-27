@@ -181,7 +181,14 @@ const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 // out of scope" note (above) now enforced structurally instead of by accident.
 const STYLE_BLOCK = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
 const STYLE_ATTR = /\b(?:style|style:[a-zA-Z][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/gi;
-const STYLE_ASSIGNMENT_START = /\.style\.(?:cssText|[a-zA-Z][\w-]*)\s*=\s*/g;
+// CPE-1929 widened this to `setProperty(` as well as `= `. `el.style.setProperty("--x", "#abc123")`
+// is a real, live CSS-affecting value set from `<script>` -- structurally the SAME false-negative class
+// as the `FileList.svelte` `.style.cssText` bug the CPE-1931 Reviewer round fixed -- but a method call
+// has no `=`, so the `\s*=\s*` tail could never match it. Measured before the fix on
+// `el.style.setProperty("--x", "#abc123")`: **zero** values extracted, **zero** hex counted. No live
+// site uses `setProperty` today (grepped), so this moves no baseline -- it closes the door before
+// someone walks through it, which is the only moment a growth ratchet's blind spot is cheap to fix.
+const STYLE_ASSIGNMENT_START = /\.style\.(?:setProperty\s*\(|(?:cssText|[a-zA-Z][\w-]*)\s*=\s*)/g;
 
 // CPE-1931 Reviewer round (UAT on PR #1049): the first cut of this narrowing dropped a real, live
 // hard-coded colour -- FileList.svelte's `badge.style.cssText = "...color:#fff;..."` -- because
@@ -207,6 +214,21 @@ const STYLE_ASSIGNMENT_START = /\.style\.(?:cssText|[a-zA-Z][\w-]*)\s*=\s*/g;
  *  `/\.style\.\w+\s*=\s*([^;]+);/` stops at the FIRST `;` it sees, which for `.cssText` is almost
  *  always INSIDE the first quoted CSS-declaration string (CSS uses `;` as its own separator), long
  *  before the statement's real end. */
+
+/* **Known, deliberately-unfixed gap (CPE-1929): a regex literal containing a quote character inside a
+ *  `.style.` assignment desyncs this scanner's quote tracking.** `el.style.color = /['"]/.test(x) ?
+ *  "#fff" : "#000";` -- the apostrophe inside the character class opens a quote that never closes, so
+ *  the scan swallows the rest of the source. It is left alone because the net effect was MEASURED and
+ *  it is the loud direction: the desynced value runs to end-of-source, but every later `.style.` start
+ *  is re-found by a fresh pass over the UNTOUCHED source and re-scanned from `quote = null`, so a
+ *  desync can never blind the matcher to a later assignment -- it can only DOUBLE-COUNT the next one.
+ *  Measured on the shape above: 4 hex hits (`#fff`, `#000`, `#123456`, `#123456`) against a control
+ *  with the regex removed that yields 3. Inflation trips the growth ratchet on unrelated code, which
+ *  is a false CI failure with an obvious cause; the alternative -- teaching this scanner to recognise
+ *  JS regex literals, which needs the regex-vs-division ambiguity heuristic -- risks getting the call
+ *  wrong in the other direction and SWALLOWING a real assignment, converting a loud failure into a
+ *  silent one. Pinned by a test below so a future change to the scanner shows up as a diff against
+ *  this measured behaviour rather than as a surprise. No live site has this shape today. */
 function scriptStyleAssignmentValues(source: string): string[] {
   const values: string[] = [];
   const startRe = new RegExp(STYLE_ASSIGNMENT_START.source, STYLE_ASSIGNMENT_START.flags);
@@ -485,6 +507,26 @@ describe("hexColourSites() matches only CSS value positions (CPE-1931)", () => {
   it("does not count a hex fallback in a plain attribute binding — same shape as ColorRulesDialog.svelte's rule.color ?? \"#888888\" colour-picker fallback", () => {
     const svelte = `<input type="color" value={rule.color ?? "#888888"} />\n`;
     expect(hexColourSites(svelte)).toEqual([]);
+  });
+
+  // CPE-1929: the two gaps PR #1049's re-review left latent — one closed, one pinned as-is.
+  it("catches a hex literal passed to el.style.setProperty() — a method call has no `=`, so the pre-CPE-1929 matcher could not see it at all (measured: zero values, zero hex)", () => {
+    const svelte = `<script>\n  el.style.setProperty("--x", "#abc123");\n</script>\n`;
+    expect(hexColourSites(svelte)).toEqual(["#abc123"]);
+  });
+
+  // NOT a statement that this behaviour is desirable — it is the measured behaviour of a known,
+  // deliberately-unfixed gap (see the block comment on `scriptStyleAssignmentValues`). A regex
+  // literal containing a quote desyncs the char scanner, and the net effect is that the NEXT real
+  // assignment is double-counted, never dropped: inflation trips the growth ratchet loudly instead
+  // of blinding it. Pinning it means a future change to the scanner shows up here as a diff rather
+  // than as an unexplained movement in the repo-wide baseline.
+  it("a quote inside a regex literal inflates rather than blinds the scan (known gap, pinned not fixed)", () => {
+    const withRegex = `<script>\n  el.style.color = /['"]/.test(x) ? "#fff" : "#000";\n  other.style.background = "#123456";\n</script>\n`;
+    const control = `<script>\n  el.style.color = flag ? "#fff" : "#000";\n  other.style.background = "#123456";\n</script>\n`;
+    expect(hexColourSites(control)).toEqual(["#fff", "#000", "#123456"]);
+    // The extra "#123456" is the double-count: nothing is LOST, the later assignment is counted twice.
+    expect(hexColourSites(withRegex)).toEqual(["#fff", "#000", "#123456", "#123456"]);
   });
 });
 
