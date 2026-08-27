@@ -154,10 +154,13 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
     (547.2,13.5) hit .git-btn) — not clipped`. Restored the line → clean at all 12 case/width
     combinations again (confirmed `git diff` shows zero change to `StatusBar.svelte`).
   - CPE-1827: reintroduced the pre-fix shape in `TrashView.svelte` (dropped `.tv-title`'s
-    `flex-wrap: wrap` back to the old pinned width, and added 5 dummy buttons to `.tv-tools` to restore
+    `flex-wrap: wrap` back to the old pinned width, and added dummy buttons to `.tv-tools` to restore
     the old toolbar density) → `layout-guard` went red at the app's own 600px/640px floor: `TEXT-OVERFLOW
     .tv-title scrollWidth=91 clientWidth=0 overflow-x=visible — text paints past its own background`.
     Reverted both → clean again (confirmed `git diff` shows zero change to `TrashView.svelte`).
+    **[Reviewer correction, see below]: this originally said "5 dummy buttons" — wrong, corrected after
+    an independent reviewer could not reproduce with literally 5. See the 2026-08-26 UAT-round-2 entry
+    for the accurate repro recipe.**
 
   Both real components ship unchanged — only the harness itself (engine.mjs/cases.mjs) is a permanent
   diff. Next: wire the `layout-guard` job into `.github/workflows/gui-smoke.yml`, run `npm run
@@ -182,3 +185,84 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   **Status:** PR ready to open. Real components (`StatusBar.svelte`, `TrashView.svelte`) ship with
   ZERO diff — every red-proof edit was reverted, confirmed via `git status`/`git diff`. Staying in
   `Doing/` until the PR merges (CI verdict owned by the Foreman per CPE-1880 — I cannot watch it).
+
+- **2026-08-26 (UAT attempt 2 — BLOCKING fail, worker response)** — PR #1035 UAT: the `layout-guard`
+  job crashed on **every real CI run**, before measuring a single pixel — `ReferenceError: WebSocket is
+  not defined` (job 98371907013). Root cause: `engine.mjs`'s CDP client calls the global `WebSocket`
+  constructor directly, which is only a stable Node built-in from v22; the job was pinned to
+  `node-version: 20` (copy-pasted from this workflow's other jobs, all of which stay on 20 — this ONE
+  job does not, deliberately). Every local red-proof in the original pass ran on local Node ≥22, which
+  never exercises what CI actually runs — the gap the UAT named exactly: "the harness works" vs. "the
+  harness is wired into CI". Fixed: pinned `layout-guard`'s own `Setup Node` step to 22 (see that step's
+  own comment for why 22, not the `ws` package). `engine.mjs`'s header now states the minimum Node
+  version explicitly. `cases.mjs` gained the UAT's own decision table (its independent case-building
+  test found `siblingOverlap` doesn't fire for a missing `flex-wrap` — pushes the row past the viewport
+  or shoves the next block down, doesn't make chips overlap). `siblingOverlap`'s failure message now
+  computes a human "overlap by NxM px" figure (verified with a real self-inflicted overlap:
+  `.git × .dim overlap by 26.0px × 16.0px`, then reverted, zero diff). `MANUAL-TEST-BURNDOWN.md`
+  corrected to not claim CI enforcement before a real CI run confirms it, with a same-shift correction
+  entry recording the root cause.
+
+- **2026-08-26 (independent reviewer, same attempt) — 4 more findings, folded in**:
+  1. **Real local flakiness, cause identified**: 1/9 local runs measured a class (`.tv-sync-badge`) that
+     exists in no worktree's committed code — the reviewer's OWN in-progress fixture from a DIFFERENT
+     worktree's UAT test, running concurrently. Root cause: `cdpPortBase` (engine.mjs) defaulted to a
+     fixed `9600` and the vite dev server (run.mjs) to a fixed `4331` + `strictPort: true` — two
+     concurrent `run.mjs` processes (different worktrees, same codebase, the NORMAL condition on this
+     dev machine) could pick the same dev-server port; the OLD code's readiness check
+     (`waitForHttp`) only confirmed "something answered HTTP 200", which a FOREIGN worktree's own
+     already-running server on that same port satisfies just as well as this run's own — a genuine race,
+     not a theory. Fixed with two independent layers: (a) both the CDP port base and the dev-server port
+     now derive from `process.pid` (unique per concurrently-running process), making an actual collision
+     between two SEPARATE runs astronomically unlikely instead of routine; (b) `run.mjs`'s
+     `waitForViteBoundHere` now requires THIS process's own vite child to announce, on its own stdout,
+     that it bound this exact port (not merely "something answered HTTP") — caught + fixed a real bug
+     while building this: vite colours its "Local:" banner with ANSI escapes and inserts one literally
+     between "localhost:" and the port digits, so a plain string match on "localhost:<port>" never
+     matched the raw bytes; strips ANSI codes first now. (c) `checkOneWidthHeight`'s ready-poll now also
+     asserts `location.href` matches the exact URL this run navigated to, before trusting `readySelector`
+     at all, as a second independent layer inside the browser itself.
+  2. **`MISSING` selector must fail the run — self-tested, already did.** Built a real self-test (a case
+     pointed at a selector that cannot exist), ran the harness, confirmed `process.exitCode` was already
+     1 with the missing selector named in the output, then reverted (`git diff` on `cases.mjs`: zero net
+     change from the self-test). Could not reproduce the specific "reported MISSING, still exited 0"
+     symptom directly — most likely explained by finding 1 (their run may have been measuring a
+     different worktree's page entirely, which can produce confusing combined results). Fixed the
+     SEPARATE, real bug the same finding named: the shared mock alias (`vite.harness.layout-guard.
+     config.ts`) only matched `../invoke`/`../bindings.gen` (written by a component under
+     `src/lib/components/*.svelte`), not `./invoke`/`./bindings.gen` (written by a plain service module
+     living in `src/lib/*.ts`, e.g. `src/lib/tags.ts` — exactly what `TagEditor.svelte`'s seed path goes
+     through). Broadened the alias regex to match both depths.
+  3. **Unbounded local disk growth — real, 1.4 GB reclaimed.** `checkOneWidthHeight` created a fresh
+     Chrome profile dir per width and never deleted it, only `chrome.kill()`. Confirmed before the fix:
+     a full 12-width run left new dirs behind. Fixed: waits for the process to actually exit (bounded at
+     3s, not just for `kill()` to have been called) then deletes the dir, best-effort (a still-held
+     Windows file lock right after exit must never fail the actual layout check). Confirmed after the
+     fix: a full 12-width run left the leftover-dir count UNCHANGED (147 before, 147 after) — zero new
+     leaks. Deleted the pre-fix accumulated debt (1.4 GB, gitignored scratch, not tracked).
+  4. **Work Log wording fixed** — see the corrected note on the original CPE-1827 red-proof entry above.
+     Re-verified the ACCURATE repro: `flex-wrap: wrap` removed AND 8 wider-text buttons added to
+     `.tv-tools` (not 5) reproduces the failure at every width 600-1200px this time (`TEXT-OVERFLOW` +
+     `UNREACHABLE .tv-x` both fire once the toolbar is wide enough to push Close off-panel entirely, a
+     stronger/more convincing repro than the original one-width finding). Reverted, zero diff confirmed.
+
+  **Non-blocking, noted per the reviewer's ask, not built under the attempt cap**: nothing today asserts
+  the OTHER half of the pill convention — that a pill's own text stays on one line and does not shrink.
+  A pill that wraps internally instead of ellipsising is invisible to `textOverflow` unless it ALSO
+  overlaps or truly overflows. A fifth check kind (`whiteSpace`-based: flag any watched element whose
+  `getComputedStyle().whiteSpace` isn't `nowrap` when the case declares it as pill-shaped) would close
+  this. Flagged for the reviewer/Foreman to file as its own ticket rather than adding a fifth check kind
+  here under the attempt cap.
+
+  Guardrails re-run after all of the above: `npm run check` → 0 errors, 0 warnings.
+  `npm run harness:layout-guard` → clean at all 12 case/width combinations, twice in a row (once to
+  confirm the port/cleanup fixes, once after the CPE-1827 repro re-check's revert). Rebased onto the
+  Foreman's merge of `main` (which carried the `--locked` fix for `release-sidecar.yml` — one of the 3
+  vitest failures flagged as pre-existing in the previous pass is now gone on `main` itself). `npx vitest
+  run` then surfaced two more CRLF-checked-out `.mjs` files unrelated to this ticket
+  (`scripts/organize-done.mjs`, `scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs` — neither
+  touched by CPE-1882) via `sprintStallControls.test.ts`'s CPE-1880 checkout guard; fixed both with the
+  test's own suggested remedy (`rm <file> && git checkout -- <file>`, zero-diff re-materialisation from
+  the already-LF index — confirmed via `git status`). Final `npx vitest run`: **2 failures, both
+  `msrvSync.test.ts`** (no `msrv:` job in `ci.yml` — CPE-1855's territory, unrelated to and out of scope
+  for this ticket), 4581/4583 passing.

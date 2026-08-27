@@ -22,7 +22,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 void __dirname; // kept for symmetry with sibling harness scripts; REPO_ROOT comes from engine.mjs
 
 const CHROME = defaultChromePath();
-const DEV_PORT = Number(process.env.HARNESS_DEV_PORT || 4331);
+// CPE-1882 UAT/reviewer finding: this used to be a fixed `4331` with `--strictPort`. This repo
+// routinely runs many worktrees on one dev machine concurrently (the NORMAL condition here, not an
+// edge case) — a fixed port meant a second concurrent `run.mjs` (a different worktree, same codebase)
+// could have its OWN vite fail to bind (port taken) while `waitForHttp` below still got a 200 from the
+// FIRST worktree's already-running server, racing ahead to measure a completely different worktree's
+// harness pages under this run's name. A live case of exactly this: `.tv-sync-badge`, a fixture that
+// exists in NO worktree's committed code, showed up in one worktree's measurement — because it was
+// another worktree's own in-progress fixture. `process.pid` is unique per concurrently-running process
+// on one machine, so deriving the port from it makes an accidental collision between two SEPARATE
+// `run.mjs` invocations astronomically unlikely (as opposed to the OLD code's certainty of collision
+// the moment two ran at once). `waitForViteBoundHere` below is the second, independent layer: even if a
+// collision somehow still occurred, it refuses to proceed unless THIS run's own vite process announces
+// binding THIS exact port on its own stdout — not merely "something answered HTTP on this port".
+const DEV_PORT = Number(process.env.HARNESS_DEV_PORT || 30000 + (process.pid % 20000));
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -40,6 +53,43 @@ async function waitForHttp(url, timeoutMs) {
     await sleep(150);
   }
   return false;
+}
+
+/** Waits for THIS process's own vite child to announce, on its OWN stdout, that it bound `port` —
+ *  vite prints e.g. "Local:   http://localhost:<port>/" once it is actually listening. This is the
+ *  authoritative signal (as opposed to `waitForHttp`'s generic "something answered", which a foreign
+ *  process's already-running server on the same port can satisfy just as well — see the comment on
+ *  `DEV_PORT` above for the real collision this closes). Rejects immediately and by name if vite's own
+ *  stderr reports the port is already taken, rather than waiting out the full timeout for a doomed run. */
+function waitForViteBoundHere(vite, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    const onData = (buf) => {
+      // vite colours its "ready"/"Local:" banner with ANSI escapes, and inserts one right between
+      // "localhost:" and the port digits themselves (`localhost:\x1b[1m37999\x1b[22m/`) — a plain
+      // `.includes("localhost:" + port)` never matches the raw bytes. Strip escape codes first.
+      const text = buf.toString().replace(/\x1b\[[0-9;]*m/g, "");
+      if (text.includes(`localhost:${port}`) && /local/i.test(text)) settle(resolve, undefined);
+      if (/eaddrinuse|already in use|port .* is in use/i.test(text)) {
+        settle(reject, new Error(`vite could not bind port ${port} — a foreign process already holds it: ${text.trim()}`));
+      }
+    };
+    vite.stdout.on("data", onData);
+    vite.stderr.on("data", onData);
+    vite.once("exit", (code) => {
+      if (code !== null && code !== 0) settle(reject, new Error(`vite exited (code ${code}) before announcing it bound port ${port}`));
+    });
+    const timer = setTimeout(
+      () => settle(reject, new Error(`vite never announced binding port ${port} within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
 }
 
 function formatProblems(r) {
@@ -62,15 +112,16 @@ async function main() {
     stdio: ["ignore", "pipe", "pipe"],
     shell: true,
   });
-  let viteFailed = false;
-  vite.on("exit", (code) => {
-    if (code !== null && code !== 0) viteFailed = true;
-  });
 
   try {
-    const devUp = await waitForHttp(`http://localhost:${DEV_PORT}/`, 20000);
-    if (!devUp || viteFailed) throw new Error("vite dev server never came up");
-    console.log(`[layout-guard] dev server up on :${DEV_PORT}`);
+    // Two independent checks, in order: (1) THIS process's own vite child must announce, on its own
+    // stdout, that it bound this exact port — see `waitForViteBoundHere`'s header for why a generic
+    // HTTP 200 alone is not proof of that. (2) only once that is true, a real HTTP round-trip as a
+    // last sanity check (belt + suspenders; (1) is the load-bearing one).
+    await waitForViteBoundHere(vite, DEV_PORT, 30000);
+    const devUp = await waitForHttp(`http://localhost:${DEV_PORT}/`, 10000);
+    if (!devUp) throw new Error("vite announced binding the port but the dev server never answered HTTP");
+    console.log(`[layout-guard] dev server up on :${DEV_PORT} (pid ${process.pid})`);
 
     const totalWidths = CASES.reduce((n, k) => n + k.widths.length, 0);
     console.log(`[layout-guard] sweeping ${CASES.length} case(s), ${totalWidths} width combination(s)…`);

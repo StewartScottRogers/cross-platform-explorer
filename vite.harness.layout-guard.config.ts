@@ -10,12 +10,21 @@ import path from "node:path";
 // each did before this ticket — that per-case-config shape is exactly the "touching harness internals"
 // CPE-1882's own acceptance criterion says a new case must NOT require.
 //
-// Backend-talking imports (`../invoke`, `../bindings.gen`) are aliased to
-// scripts/dev-harness/layout-guard/shared-mocks/*, which is deliberately GENERIC and PLUGGABLE (see
-// that file's own header) rather than bespoke per component, so adding a new case that mounts a
-// backend-talking component ALSO never touches this config — only the new case's own harness page
-// (index.html + main.ts) and its entry in cases.mjs. Components with no backend-talking imports
-// (StatusBar.svelte, RevertOutcomePanel.svelte) are unaffected by the alias.
+// Backend-talking imports are aliased to scripts/dev-harness/layout-guard/shared-mocks/*, which is
+// deliberately GENERIC and PLUGGABLE (see that file's own header) rather than bespoke per component, so
+// adding a new case that mounts a backend-talking component ALSO never touches this config — only the
+// new case's own harness page (index.html + main.ts) and its entry in cases.mjs. Components with no
+// backend-talking imports (StatusBar.svelte, RevertOutcomePanel.svelte) are unaffected by the alias.
+//
+// BOTH specifier depths are aliased — `../invoke`/`../bindings.gen` (written by a component under
+// `src/lib/components/*.svelte`, one directory below `src/lib/`) AND `./invoke`/`./bindings.gen`
+// (written by a plain service module living directly in `src/lib/*.ts`, e.g. `src/lib/tags.ts`).
+// Reviewer finding (CPE-1882 UAT round 2): a case mounting `TagEditor.svelte` seeds its data through
+// `setEntryTags()` in `src/lib/tags.ts`, which is one level shallower and imports the single-dot form —
+// aliasing only the double-dot form let that call reach the REAL Tauri `invoke` in a plain browser
+// (which throws), silently mounting the component with none of its seed data. Both forms are aliased so
+// this class of gap can't recur for either the "component talks to the backend directly" shape (both
+// shipped cases today) or the "component goes through a src/lib/*.ts service module" shape.
 //
 // Entirely separate from vite.config.ts / the app's own dev server (different port, never used for
 // `npm run tauri dev` or the production build) — dev-only.
@@ -30,11 +39,11 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^\.\.\/invoke$/,
+        find: /^\.{1,2}\/invoke$/,
         replacement: path.resolve(__dirname, "scripts/dev-harness/layout-guard/shared-mocks/invoke.ts"),
       },
       {
-        find: /^\.\.\/bindings\.gen$/,
+        find: /^\.{1,2}\/bindings\.gen$/,
         replacement: path.resolve(__dirname, "scripts/dev-harness/layout-guard/shared-mocks/bindings.gen.ts"),
       },
     ],
