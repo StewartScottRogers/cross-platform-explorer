@@ -1765,3 +1765,31 @@ guard to fail-open. Same defect, caught before it shipped there and after it shi
 
 **Practical test:** if the string you are asserting on was written by someone else's program, it is
 evidence, not the assertion. Match it loosely if at all, and say at the site why it is loose.
+
+### Coda, same day — the "loose pattern" fix I suggested was ALSO wrong
+
+Having told #1064's worker to assert its own diagnostic rather than bash's, the Foreman offered
+`/integer expres/` as a loose fallback if it wanted the shell's complaint too.
+
+**That pattern matches `integer expression expected` but NOT `integer expected`** — green on ubuntu,
+red on the Windows machine the original was written on. The same failure, inverted. A narrower pin
+wearing a wildcard.
+
+The worker caught it because it **ran** the fix rather than reasoning about it: its first attempt went
+red locally on exactly that pattern. It shipped `/integer\b.*\bexpected/`, verified against both
+literal spellings before committing, with the site recording what to do if a third wording appears:
+**widen to the exit code alone, never grow an alternation of vendors' prose.**
+
+Two things to carry:
+
+1. **A regex over another tool's prose is not made safe by being loose.** Looseness has to be
+   *verified against every spelling that exists*, which is the same work as not depending on it.
+2. Its better fix was to stop needing the string at all — the MECHANISM test now captures `[`'s own
+   exit status (`cmp_rc=2`) and asserts branch-not-taken. **`cmp_rc=2` is a stronger statement than
+   any message match**, because it names the thing (`[` reporting an *error*, not a verdict) rather
+   than a symptom of it.
+
+Its external-tool sweep of the whole file also produced the right general test: one surviving message
+assertion (`release not found`) is safe because **that string is the test's own `gh` stub speaking** —
+a fixture the test controls, not a claim about how any released `gh` words it. *Own the string or
+don't assert on it.*
