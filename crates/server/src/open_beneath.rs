@@ -143,6 +143,40 @@ fn tick() {
 #[inline]
 fn tick() {}
 
+// **A test-only seam between the descent and the leaf (CPE-1937 round 2), and why it had to exist.**
+//
+// PR #1059's Security Auditor ran the entire 2,406-test non-ignored suite with `unlinkat` swapped for a
+// by-path `fs::remove_file` — the descent left completely intact — and got **2,406 passed, 0 failed**,
+// while the `#[ignore]`d race harness caught 141 destroyed bystanders in 200 trials. So the leaf
+// primitive, which is containment and not tidiness, had **zero CI coverage**: its only red-proof was a
+// harness nobody runs by default, and the next ticket reuses this module for `copilot::apply_op`.
+//
+// A race harness cannot fix that — it is `#[ignore]`d precisely because it is slow and statistical. What
+// closes it is making the window *deterministic*: fire once, exactly where the race lands, and let the
+// test do the swap the racer was trying to hit by luck. `cpe_1937_the_leaf_and_not_only_the_descent…`
+// then passes only if the leaf resolves against the handle rather than the path.
+//
+// Compiled out entirely in a shipped binary — `#[cfg(test)]`, the same discipline as `WALK_SYSCALLS`
+// above, so the seam cannot become a production hook. The hook is **taken** rather than borrowed across
+// the call, so it fires exactly once and a hook that re-enters this module cannot deadlock the `RefCell`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BETWEEN_DESCENT_AND_LEAF: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn between_descent_and_leaf() {
+    let hook = BETWEEN_DESCENT_AND_LEAF.with(|h| h.borrow_mut().take());
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn between_descent_and_leaf() {}
+
 /// Resolve and hold the root. `real_root` must already be canonical — this does not resolve it, and
 /// deliberately **does** follow a link at the root itself, because the root is the location the user
 /// chose and a link there is their own arrangement, not a redirect planted underneath them.
@@ -268,13 +302,41 @@ pub(crate) fn create_dir_beneath(root: &RootDir, rel: &Path) -> Result<(), Refus
 ///   refuses one), then `SetFileInformationByHandle(FileDispositionInfo)` on that handle. The name is
 ///   never presented to the filesystem again after the parent chain is opened.
 ///
+/// # THE LEAF IS LOAD-BEARING, and it is reached on every successful delete
+///
+/// It is tempting to reason that the descent's `O_NOFOLLOW` / `FILE_OPEN_REPARSE_POINT` already refuses
+/// anything hostile, so the leaf primitive is a formality. **That is wrong, it was written into an
+/// earlier revision of this doc, and PR #1059's Reviewer disproved it by measurement.** The descent
+/// only refuses when a component *is currently* a link; on every delete that is going to succeed the
+/// descent hands back a handle and the leaf runs. A by-path leaf re-resolves the whole path from the
+/// root at that moment, and a concurrent rename redirects it — which is the entire defect this module
+/// exists for, reintroduced one line below the guard that was supposed to have removed it.
+///
+/// Swapping `unlinkat(parent, name, 0)` for `fs::remove_file(root.join(rel))` — leaving the descent
+/// completely intact — leaves the whole static suite **green** and produces this, on real Linux:
+///
+/// ```text
+/// unix leaf                                    trials  FILES_DELETED_OUTSIDE  swaps
+/// unlinkat (this module)                         200            0            7373/7373
+/// fs::remove_file, after the same descent        200           89            7742/7742
+/// ```
+///
+/// Comparable denominators, so the 89 is signal. `cargo test -p cpe-server --lib --release --
+/// --ignored cpe_1937_raced_delete` is what says so; a green static run says nothing about it. The
+/// descent decides *whether* the delete may proceed; the leaf decides *what it lands on*, and both are
+/// required.
+///
 /// # Errors
 ///
 /// Same [`Refusal`] contract as [`create_beneath`], including `policy`: a link at a component is a
-/// **verdict** (`policy: true`, permanent — a junction does not stop being one between runs), while a
-/// vanished name, a permission problem or a sharing violation is an I/O answer (`policy: false`).
-/// `revert_engine::apply_delete` turns that distinction straight into `Refused::permanent` versus
-/// `Refused::transient`, so a planted junction never tells the user to "run the revert again".
+/// **verdict** (`policy: true`), while a vanished name, a permission problem or a sharing violation is
+/// an I/O answer (`policy: false`).
+///
+/// **`revert_engine::apply_delete` currently discards `policy`**, and deliberately: the delete loop has
+/// no channel to report retryability to a user, so translating it into a `Refused::permanent` nothing
+/// reads would be a guard nothing can red-proof (CPE-1929). The flag is kept here — it is free, it is
+/// correct, and it is what a future `DeleteRefusalGroup` would read. See `apply_delete`'s doc for what
+/// wiring it would actually cost.
 pub(crate) fn remove_file_beneath(root: &RootDir, rel: &Path) -> Result<(), Refusal> {
     let parts = plain_components(root, rel)?;
     let Some((last, dirs)) = parts.split_last() else {
@@ -471,10 +533,14 @@ mod sys {
         RtlNtStatusToDosError, BOOLEAN, HANDLE, NTSTATUS, UNICODE_STRING,
     };
     use windows::Win32::Storage::FileSystem::{
-        SetFileInformationByHandle, FileDispositionInfo, DELETE, FILE_ACCESS_RIGHTS,
-        FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_TRAVERSE, SYNCHRONIZE,
+        GetFileInformationByHandleEx, SetFileInformationByHandle, FileBasicInfo, FileDispositionInfo,
+        FileDispositionInfoEx, DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
+        FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
+        SYNCHRONIZE,
     };
     use windows::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -769,57 +835,199 @@ mod sys {
     /// goes, which is also `remove_file`'s behaviour and the never-follow rule this module holds
     /// everywhere else.
     ///
+    /// **Do not replace this pair with `DeleteFileW`/`fs::remove_file` on the grounds that `descend`
+    /// already refused everything hostile.** It has not: `descend` refuses a component that *is* a link
+    /// right now, so on every delete that succeeds it hands back a handle and this runs — and a by-path
+    /// delete here re-parses the whole path from the drive letter, where a concurrent rename redirects
+    /// it. The equivalent substitution was measured on the Unix arm (descent untouched): 89 bystanders
+    /// destroyed outside the root over 200 trials, against 0 for the handle-relative form, with the
+    /// static suite green both times. See [`remove_file_beneath`](super::remove_file_beneath).
+    ///
     /// **`FileDispositionInfo` is delete-on-close, and that is the same contract `DeleteFileW` has**:
     /// the name goes when the last handle closes, and ours is dropped on return. If another process
     /// holds the file open *without* `FILE_SHARE_DELETE` the open above fails with a sharing violation
     /// — a `policy: false` refusal the revert reports as transient, which is what a locked file is.
-    pub(super) fn unlink(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<(), Refusal> {
-        let mut sofar = PathBuf::new();
-        let held = descend(root, Act::Delete, dirs, &mut sofar)?;
-        let parent = held.as_ref().unwrap_or(&root.dir);
-        sofar.push(last);
-
-        let file = nt_child(
-            parent,
-            last,
-            FILE_ACCESS_RIGHTS(DELETE.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0),
-            FILE_OPEN,
-            NTCREATEFILE_CREATE_OPTIONS(
-                FILE_NON_DIRECTORY_FILE.0 | FILE_OPEN_REPARSE_POINT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0,
+    /// Mark an already-open handle for deletion the way `std::fs::remove_file` does — the modern
+    /// `FileDispositionInfoEx` call, with **POSIX semantics** and **ignore-read-only** (CPE-1937 round 2).
+    ///
+    /// Both flags fix a measured defect in the first cut of this function, which used plain
+    /// `FileDispositionInfo`:
+    ///
+    /// - **`IGNORE_READONLY_ATTRIBUTE`.** `FileDispositionInfo` **fails** on a file carrying
+    ///   `FILE_ATTRIBUTE_READONLY`, so a revert that previously deleted a read-only file — `main` used
+    ///   `fs::remove_file`, which handles it — stopped being able to, and reported a refusal the user
+    ///   could not act on. Measured by PR #1059's Security Auditor:
+    ///   `remove_file_beneath -> Err(policy=false), file survives` where `std::fs::remove_file -> Ok`
+    ///   on the identical fixture. Linux was unaffected (`unlinkat` does not consult a read-only bit).
+    /// - **`POSIX_SEMANTICS`.** Plain `FileDispositionInfo` is *delete-on-close*: with another handle
+    ///   open (sharing delete), the call returns success and **the name stays in the directory** until
+    ///   the last handle closes. That is a report-vs-filesystem divergence — `applied` counted against a
+    ///   name still present — which is the exact family of defect this ticket exists to close, so it is
+    ///   not left as a documented quirk. POSIX semantics unlinks the name immediately, matching
+    ///   `unlinkat` on the Unix side and `std` on this one.
+    ///
+    /// Returns `Err` when the call is unavailable (pre-Windows 10 1709, or a filesystem that does not
+    /// implement it), which is what the caller's fallback is for.
+    fn dispose_posix(file: &File) -> windows::core::Result<()> {
+        let info = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
+                FILE_DISPOSITION_FLAG_DELETE.0
+                    | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
+                    | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
             ),
-        )
-        .map_err(|s| {
-            if leaf_is_link(parent, last) {
-                refuse_link(root, Act::Delete, &sofar)
-            } else {
-                refuse(
-                    root,
-                    Act::Delete,
-                    &sofar,
-                    &format!("could not be opened for deletion ({})", io_err(s)),
-                )
-            }
-        })?;
+        };
+        tick();
+        // SAFETY: `file` is a live handle opened with `DELETE` access; `info` is a correctly-sized,
+        // correctly-typed input buffer for `FileDispositionInfoEx` and outlives the call. No ownership
+        // is transferred — the handle stays ours and is closed by `File`'s drop.
+        unsafe {
+            SetFileInformationByHandle(
+                HANDLE(file.as_raw_handle() as isize),
+                FileDispositionInfoEx,
+                std::ptr::addr_of!(info).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>()).unwrap_or(1),
+            )
+        }
+    }
 
+    /// The pre-1709 fallback: plain `FileDispositionInfo` (delete-on-close, refuses a read-only file).
+    fn dispose_on_close(file: &File) -> windows::core::Result<()> {
         let info = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
         tick();
-        // SAFETY: `file` is a live handle opened with `DELETE` access just above; `info` is a
-        // correctly-sized, correctly-typed input buffer for `FileDispositionInfo` and outlives the
-        // call. No ownership is transferred — the handle is still ours and is closed by `File`'s drop.
-        let set = unsafe {
+        // SAFETY: as `dispose_posix` — live handle with `DELETE`, correctly-sized input buffer that
+        // outlives the call, no ownership transfer.
+        unsafe {
             SetFileInformationByHandle(
                 HANDLE(file.as_raw_handle() as isize),
                 FileDispositionInfo,
                 std::ptr::addr_of!(info).cast(),
                 u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>()).unwrap_or(1),
             )
+        }
+    }
+
+    /// Clear `FILE_ATTRIBUTE_READONLY` **on the handle we already hold**, returning the attributes as
+    /// they were so the caller can put them back if the delete still fails.
+    ///
+    /// `std` does this by *path* (`set_permissions`) in its own fallback. Doing it by path here would
+    /// reintroduce exactly the defect this module exists to remove — a second name lookup a rename can
+    /// redirect — so it is done on the open handle, which is the same object the disposition is about
+    /// by construction. `None` means there was nothing to clear (or the attributes could not be read,
+    /// in which case the delete is simply attempted as-is).
+    ///
+    /// Zero in a `FILE_BASIC_INFO` time field means "leave it alone", so this changes attributes only.
+    fn clear_read_only(file: &File) -> Option<u32> {
+        tick();
+        // SAFETY: `file` is live; `basic` is a correctly-sized, correctly-typed out-parameter for
+        // `FileBasicInfo` that outlives the call.
+        let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(file.as_raw_handle() as isize),
+                FileBasicInfo,
+                std::ptr::addr_of_mut!(basic).cast(),
+                u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).unwrap_or(1),
+            )
         };
-        set.map_err(|e| {
+        if read.is_err() || basic.FileAttributes & FILE_ATTRIBUTE_READONLY.0 == 0 {
+            return None;
+        }
+        let was = basic.FileAttributes;
+        set_attributes(file, was & !FILE_ATTRIBUTE_READONLY.0).ok()?;
+        Some(was)
+    }
+
+    /// Write `attributes` back onto an open handle, leaving every timestamp untouched.
+    fn set_attributes(file: &File, attributes: u32) -> windows::core::Result<()> {
+        let info = FILE_BASIC_INFO {
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: attributes,
+        };
+        tick();
+        // SAFETY: live handle; correctly-sized, correctly-typed input buffer outliving the call.
+        unsafe {
+            SetFileInformationByHandle(
+                HANDLE(file.as_raw_handle() as isize),
+                FileBasicInfo,
+                std::ptr::addr_of!(info).cast(),
+                u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).unwrap_or(1),
+            )
+        }
+    }
+
+    pub(super) fn unlink(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<(), Refusal> {
+        let mut sofar = PathBuf::new();
+        let held = descend(root, Act::Delete, dirs, &mut sofar)?;
+        // The descent is done and its handle is held; a by-path leaf would re-resolve from here.
+        // Test-only seam — compiled out of a shipped binary. See its definition for the coverage
+        // hole it exists to close.
+        super::between_descent_and_leaf();
+        let parent = held.as_ref().unwrap_or(&root.dir);
+        sofar.push(last);
+
+        let options = NTCREATEFILE_CREATE_OPTIONS(
+            FILE_NON_DIRECTORY_FILE.0 | FILE_OPEN_REPARSE_POINT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0,
+        );
+        // `FILE_WRITE_ATTRIBUTES` is asked for so the read-only fallback below can clear the bit on
+        // **this** handle rather than by path. It is asked for *optionally*: a file whose ACL grants
+        // DELETE but not attribute-write must still be deletable, which is what `main`'s
+        // `fs::remove_file` did, so a refusal here falls back to the minimal access set rather than
+        // becoming a new way for a revert to fail.
+        let full = FILE_ACCESS_RIGHTS(
+            DELETE.0 | FILE_READ_ATTRIBUTES.0 | FILE_WRITE_ATTRIBUTES.0 | SYNCHRONIZE.0,
+        );
+        let minimal = FILE_ACCESS_RIGHTS(DELETE.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0);
+        let (file, may_write_attrs) = match nt_child(parent, last, full, FILE_OPEN, options) {
+            Ok(f) => (f, true),
+            Err(_) => match nt_child(parent, last, minimal, FILE_OPEN, options) {
+                Ok(f) => (f, false),
+                // **Classified by asking the filesystem, never by the status code** — the same rule,
+                // and the same shared helper, as the write leaf's. A directory junction standing at a
+                // file entry's name comes back `STATUS_FILE_IS_A_DIRECTORY` through
+                // `FILE_NON_DIRECTORY_FILE`, which is not link-shaped at all.
+                Err(s) => {
+                    return Err(if leaf_is_link(parent, last) {
+                        refuse_link(root, Act::Delete, &sofar)
+                    } else {
+                        refuse(
+                            root,
+                            Act::Delete,
+                            &sofar,
+                            &format!("could not be opened for deletion ({})", io_err(s)),
+                        )
+                    })
+                }
+            },
+        };
+
+        // The modern call first: it unlinks the name immediately and ignores a read-only attribute, so
+        // on every supported Windows this is the whole function.
+        if dispose_posix(&file).is_ok() {
+            return Ok(());
+        }
+        // Fallback for a host or filesystem without `FileDispositionInfoEx`: clear the read-only bit
+        // ourselves (on the handle, never by path) and use the delete-on-close form. If that still
+        // fails, put the attribute back — a refused deletion must not leave the file's attributes
+        // changed, which would be a silent edit performed by an operation that did nothing else.
+        let restore = if may_write_attrs { clear_read_only(&file) } else { None };
+        dispose_on_close(&file).map_err(|e| {
+            if let Some(was) = restore {
+                let _ = set_attributes(&file, was);
+            }
+            let note = if !may_write_attrs {
+                " — the file could not be opened for attribute changes, so a read-only attribute could \
+                 not be cleared"
+            } else {
+                ""
+            };
             refuse(
                 root,
                 Act::Delete,
                 &sofar,
-                &format!("could not be marked for deletion ({e})"),
+                &format!("could not be marked for deletion ({e}){note}"),
             )
         })
     }
@@ -1203,9 +1411,22 @@ mod sys {
     /// `AT_REMOVEDIR` is deliberately **not** passed: a directory (a symlink to one included, since
     /// `unlinkat` does not traverse) is refused with `EISDIR`/`EPERM` rather than removed, matching
     /// `fs::remove_file` and keeping a revert's delete leg to the files its plan named.
+    ///
+    /// **Do not replace this with `fs::remove_file(root.join(sofar))` on the grounds that the descent
+    /// above already refused everything hostile.** It has not: the descent only refuses a component
+    /// that *is* a link right now, so on every delete that succeeds it hands back a handle and this
+    /// line runs — and a by-path call here re-resolves the whole path from the root, where a
+    /// concurrent rename redirects it. Measured on real Linux, descent untouched: **89 bystanders
+    /// destroyed outside the root over 200 trials** (7742 swaps), against **0** (7373 swaps) for the
+    /// `unlinkat` below. The static suite is green either way — the harness that says so is
+    /// `revert_engine`'s `cpe_1937_raced_delete_never_escapes_the_restore_root`, which is `#[ignore]`d.
     pub(super) fn unlink(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<(), Refusal> {
         let mut sofar = PathBuf::new();
         let held = descend(root, Act::Delete, dirs, &mut sofar)?;
+        // The descent is done and its handle is held; a by-path leaf would re-resolve from here.
+        // Test-only seam — compiled out of a shipped binary. See its definition for the coverage
+        // hole it exists to close.
+        super::between_descent_and_leaf();
         sofar.push(last);
         let c = cname(last).map_err(|()| {
             refuse(root, Act::Delete, &sofar, "contains a NUL byte, which no filesystem name can hold")
@@ -1365,6 +1586,177 @@ mod tests {
             let _ = std::fs::remove_dir_all(&link);
             let _ = std::fs::remove_dir_all(&elsewhere);
         }
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1937 round 2 — the LEAF is containment, and this is the test that says so in CI.**
+    ///
+    /// PR #1059's Security Auditor ran the whole non-ignored suite with `unlinkat` replaced by a
+    /// by-path `fs::remove_file`, descent untouched, and got **2406 passed / 0 failed** — while the
+    /// `#[ignore]`d race harness caught 141 destroyed bystanders in 200 trials. The leaf had no CI
+    /// coverage at all, and the PR narrative had gone further and called it unreachable.
+    ///
+    /// The race is what a real attacker does; this makes the same window **deterministic**. The seam
+    /// fires once, exactly between the descent and the leaf — where the auditor measured the swap
+    /// landing — and does what the racer was trying to hit by luck: move the real directory aside and
+    /// leave a link with the same name in its place. From that instant:
+    ///
+    /// - a **handle-relative** leaf unlinks inside the directory it already opened → the in-tree file
+    ///   goes and the bystander is untouched;
+    /// - a **by-path** leaf re-resolves `<root>/sub/target.txt` from the root, walks the new link, and
+    ///   destroys the bystander outside the root while reporting success.
+    ///
+    /// Both halves are asserted on the filesystem, and the fixture's liveness (the name really is a
+    /// link when the leaf runs) is asserted too, so a machine that cannot stage the swap reddens or
+    /// skips loudly rather than passing on a window that never opened.
+    #[test]
+    fn cpe_1937_the_leaf_and_not_only_the_descent_contains_the_delete() {
+        const BYSTANDER: &[u8] = b"a bystander outside the root";
+        let d = scratch("leaf-guard");
+        let outside = scratch("leaf-guard-outside");
+        let outside_real = std::fs::canonicalize(&outside).unwrap();
+        std::fs::write(outside_real.join("target.txt"), BYSTANDER).unwrap();
+
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub").join("target.txt"), b"in tree").unwrap();
+
+        let root = open_root(&d, "folder being restored").unwrap();
+
+        let swapped_at = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (sub, moved, flag) = (d.join("sub"), d.join("moved"), swapped_at.clone());
+            let outside_for_hook = outside_real.clone();
+            BETWEEN_DESCENT_AND_LEAF.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    // `clippy.toml` bans bare `fs::rename`; here the rename IS the attack under test
+                    // and both names are this test's own scratch tree.
+                    #[allow(clippy::disallowed_methods)]
+                    let moved_ok = std::fs::rename(&sub, &moved).is_ok();
+                    if moved_ok && crate::fsutil::make_dir_link(&outside_for_hook, &sub) {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else if moved_ok {
+                        #[allow(clippy::disallowed_methods)]
+                        let _ = std::fs::rename(&moved, &sub);
+                    }
+                }));
+            });
+        }
+
+        let verdict = remove_file_beneath(&root, Path::new("sub/target.txt"));
+
+        if !swapped_at.load(std::sync::atomic::Ordering::Relaxed) {
+            // Windows refuses to rename a directory whose handle another opener holds without
+            // `FILE_SHARE_DELETE`; if the swap could not be staged this run has proven nothing, and
+            // saying so is the only honest outcome.
+            BETWEEN_DESCENT_AND_LEAF.with(|h| *h.borrow_mut() = None);
+            crate::skip_notice!(
+                "SKIPPING cpe_1937_the_leaf_and_not_only_the_descent_contains_the_delete: could not \
+                 swap the directory for a link mid-delete on this machine. NOTHING on this run \
+                 covered the LEAF's containment — only the descent's."
+            );
+            drop(root);
+            let _ = std::fs::remove_dir_all(&d);
+            let _ = std::fs::remove_dir_all(&outside);
+            return;
+        }
+
+        // HARM FIRST, off the filesystem. This is the assertion a by-path leaf fails.
+        assert_eq!(
+            std::fs::read(outside_real.join("target.txt")).ok().as_deref(),
+            Some(BYSTANDER),
+            "HARM: the leaf re-resolved the path after the descent and deleted a bystander outside \
+             the root; verdict was {verdict:?}"
+        );
+        // And the positive half: the delete really happened, through the handle, on the object the
+        // descent opened. Without this the test would also pass if the leaf simply did nothing.
+        assert!(
+            verdict.is_ok(),
+            "the delete must still succeed — the handle it holds is a perfectly good directory: \
+             {verdict:?}"
+        );
+        assert!(
+            !d.join("moved").join("target.txt").exists(),
+            "the file the descent's handle addressed must be the one that went"
+        );
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// **CPE-1937 round 2, Security Auditor F2 — a read-only file must still delete.**
+    ///
+    /// `main` used `fs::remove_file`, which clears `FILE_ATTRIBUTE_READONLY` and retries, so a revert
+    /// could always delete a read-only file the plan named. The first cut of this module used plain
+    /// `FileDispositionInfo`, which **fails** on one — measured as `Err(policy=false), file survives`
+    /// against `std::fs::remove_file -> Ok` on the identical fixture — and, because that classified as
+    /// an I/O answer, the user was told to try again at something that would never work.
+    ///
+    /// `FileDispositionInfoEx` with `IGNORE_READONLY_ATTRIBUTE` is what `std` itself uses and is what
+    /// this now does. Unix has no equivalent bit — `unlinkat` never consults one — so the test runs on
+    /// every platform with the permission staged the platform's own way, and both must delete.
+    #[test]
+    fn cpe_1937_a_read_only_file_is_still_deleted_as_std_would() {
+        let d = scratch("unlink-readonly");
+        let target = d.join("ro.txt");
+        std::fs::write(&target, b"read only").unwrap();
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&target, perms).unwrap();
+        assert!(
+            std::fs::metadata(&target).unwrap().permissions().readonly(),
+            "fixture is inert: the file is not read-only, so this proves nothing"
+        );
+
+        let root = open_root(&d, "folder being restored").unwrap();
+        let verdict = remove_file_beneath(&root, Path::new("ro.txt"));
+
+        assert!(
+            !target.exists(),
+            "HARM (regression): a read-only file the plan named survived a revert that `main` would \
+             have deleted — `fs::remove_file` clears the attribute and retries: {verdict:?}"
+        );
+        assert!(verdict.is_ok(), "and it must be reported as done, not refused: {verdict:?}");
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1937 round 2, Security Auditor F3 — `Ok` must mean the name is gone NOW.**
+    ///
+    /// Windows' plain `FileDispositionInfo` is *delete-on-close*: with another handle open (sharing
+    /// delete) it returns success and the name **stays in the directory** until the last handle closes.
+    /// A revert would then count the action `applied` against a name still sitting in the user's
+    /// folder — the report-vs-filesystem divergence this whole ticket exists to close, arriving through
+    /// the fix for it. `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` unlinks immediately, matching `unlinkat`
+    /// on the Unix side and `std::fs::remove_file` on this one, so the test is written once for both.
+    #[test]
+    fn cpe_1937_a_reported_delete_has_left_the_directory_immediately() {
+        let d = scratch("unlink-posix");
+        let target = d.join("held.txt");
+        std::fs::write(&target, b"open elsewhere").unwrap();
+
+        // A second reader, held open ACROSS the delete — the whole point.
+        // `std`'s own share mode on Windows is READ|WRITE|DELETE, so this is the ordinary
+        // "another program has the file open" case rather than a contrived one.
+        let holder = std::fs::File::open(&target)
+            .expect("the fixture needs a second handle open across the delete");
+
+        let root = open_root(&d, "folder being restored").unwrap();
+        let verdict = remove_file_beneath(&root, Path::new("held.txt"));
+        assert!(verdict.is_ok(), "an open reader must not stop the delete: {verdict:?}");
+
+        // The name must be gone WHILE the other handle is still open. `symlink_metadata`, so a link
+        // left at the name would also count as "still there".
+        let still_there = std::fs::symlink_metadata(&target).is_ok();
+        drop(holder);
+        assert!(
+            !still_there,
+            "a delete reported as applied left the name in the folder until the last handle closed — \
+             `applied` must not be able to disagree with the directory"
+        );
 
         drop(root);
         let _ = std::fs::remove_dir_all(&d);

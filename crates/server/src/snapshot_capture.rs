@@ -446,10 +446,7 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // **CPE-1846 took the other half of that pattern, which is the half a restore can use.** The
     // rejection above covered only step 1 (claim the name atomically). Step 2 — *never follow a link at
     // the final component* — costs a restore nothing, because opening an existing regular file for
-    // truncate-and-write is exactly what an overwrite is. `fsutil::copy_file_onto_no_follow` below opens
-    // the target with `batch_media`'s own `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT` open (the same
-    // per-target constants, not a second spelling), refuses the handle if it addresses a link or a
-    // directory, and streams the blob's bytes through it. So the final-component swap is no longer a
+    // truncate-and-write is exactly what an overwrite is. So the final-component swap stopped being a
     // race at all: the object written is the object opened.
     //
     // What that residual *was*, stated accurately because an earlier draft overstated it in both
@@ -458,14 +455,24 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // through — it was that the check and the copy were two syscalls, checked but not atomically. That
     // gap is now gone.
     //
-    // **The interior-component race is NOT closed and is still the recorded residual.** `safe_target`
-    // resolves the directories above the final component by path, and the open below is by path too, so
-    // a directory link swapped into an interior component between them still redirects the write.
-    // Closing that needs `openat`-relative resolution, which `std` does not expose. Pass 2 re-resolving
-    // immediately before each write is what keeps that window one open wide instead of a whole pass.
+    // **The interior-component race IS closed now, and this paragraph used to say it was not**
+    // (CPE-1937). Until this ticket it read: *"`safe_target` resolves the directories above the final
+    // component by path, and the open below is by path too, so a directory link swapped into an
+    // interior component between them still redirects the write. Closing that needs `openat`-relative
+    // resolution, which `std` does not expose."* Every sentence of that has stopped being true: the
+    // write below is `fsutil::copy_file_onto_destination_handle` through an
+    // `open_beneath::create_beneath` closure, resolved one component at a time against a root handle
+    // held for the whole restore, and `open_beneath` is exactly the `openat`-relative resolution the
+    // paragraph said did not exist. `safe_target` is gone from this loop entirely.
+    //
+    // Left uncorrected for one ticket, forty lines above the line it describes, **this is the precise
+    // shape that produced CPE-1937**: PR #1050's Reviewer found that bug by checking whether the
+    // documentation matched the code, and PR #1059's Security Auditor found this paragraph the same
+    // way. A stale residual note is worse than none — it is read as a live one.
     //
     // The Windows cost of writing through a handle rather than `CopyFileExW` — alternate data streams
-    // are no longer carried — is measured and argued in `copy_file_onto_no_follow`'s own doc.
+    // are no longer carried — is measured and argued in `copy_file_onto_no_follow`'s own doc, which
+    // `copy_file_onto_destination_handle` shares.
     let mut written: HashSet<PathBuf> = HashSet::new();
     for (rel, file) in &manifest.files {
         // **`safe_segments`, not `safe_target` (CPE-1937) — the guard is replaced, not stacked.**
@@ -546,8 +553,26 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     Ok(())
 }
 
-/// The three guards for one manifest entry, yielding the `(target, blob)` pair pass 2 will use. Pure
-/// judgement — it creates nothing, which is what lets [`restore`] run it over the whole manifest first.
+/// The three guards for one manifest entry. Pure judgement — it creates nothing, which is what lets
+/// [`restore`] run it over the whole manifest first.
+///
+/// # PASS 1 ONLY, and its `Ok` value is discarded (CPE-1937)
+///
+/// This used to say "yielding the `(target, blob)` pair pass 2 will use", and that has stopped being
+/// true. Pass 2 no longer calls this at all: it recomputes from [`crate::revert_engine::safe_segments`]
+/// plus [`blob_source`] and writes through `open_beneath::create_beneath` against a root handle held
+/// for the restore. Pass 1 calls this purely for the `Err`, to decide whether the manifest may be
+/// attempted at all; the `Ok` is dropped on the floor.
+///
+/// **So the `safe_target` here is a pre-flight, not the guard the write rests on**, and that is what
+/// keeps it clear of CPE-1929. A guard stacked in front of the walk would make the walk's refusal
+/// unreachable for everything the path check already catches. This one is not in front of anything —
+/// it answers a different question (*may this manifest be attempted at all*, so that a refused one
+/// writes **nothing** rather than a partial tree) at a point where nothing has been written. The
+/// containment the write depends on is the walk, it is the only one, and the inside-pointing junction
+/// that `fsutil::confined_to` cannot see is therefore caught *and red-proofable* at the write — which
+/// `cpe_1937_a_link_pointing_back_inside_the_folder_still_never_redirects_the_restore` proves by going
+/// red when pass 2's walk is swapped back for the old by-path copy.
 fn resolve_entry(
     dest_path: &Path,
     blobs_dir_path: &Path,

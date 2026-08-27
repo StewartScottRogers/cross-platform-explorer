@@ -752,16 +752,20 @@ pub fn execute_restore(
                 // **CPE-1937: the same root handle the writes were resolved against.** A delete is the
                 // one op that destroys rather than misplaces, so it gets the strongest containment
                 // available, not the weakest: the run's already-open root, walked one component at a
-                // time. A root that would not open refuses every delete *permanently* — re-running
-                // does not make an unopenable folder open — and, critically, refuses it rather than
-                // falling back to a by-path `remove_file`.
+                // time. A root that would not open refuses every delete — and, critically, refuses it
+                // rather than falling back to a by-path `remove_file`.
+                //
+                // **A `String`, not a `Refused`, and that is deliberate** — see `apply_delete`'s doc.
+                // This arm reads `reason` and nothing else, so a `Refused` built here would carry a
+                // `permanent` flag straight to the floor; the first cut of this ticket did exactly
+                // that and its PR claimed a user-visible distinction that did not exist.
                 let outcome = match &root_handle {
                     Ok(root) => apply_delete(action, root),
-                    Err(why) => Err(Refused::permanent(why.clone())),
+                    Err(why) => Err(why.clone()),
                 };
                 match outcome {
                     Ok(()) => report.applied += 1,
-                    Err(refused) => report.skipped.push((action.path.clone(), refused.reason)),
+                    Err(reason) => report.skipped.push((action.path.clone(), reason)),
                 }
             }
         }
@@ -1199,31 +1203,50 @@ fn apply_write(
 /// walk does not replace it (`create_beneath`'s doc records the obligation to refuse the
 /// Win32-unstable names before reaching the NT layer, and `safe_segments` is where that rule lives).
 ///
-/// # Permanence comes from the guard that fired, never from the filesystem afterwards
+/// # It returns a plain `String`, NOT a [`Refused`] — the delete loop has no permanence channel
 ///
-/// Every refusal here used to be `transient` — "run the revert again". A junction at a component does
-/// not stop being one between runs, so `Refusal::policy` is what decides: a link (or a name that is
-/// not a plain relative path) is permanent, a locked file or a vanished name is transient. Same rule,
-/// and for the same reason, as `apply_write`'s.
+/// The first cut of this ticket returned `Refused::permanent` for a link refusal and
+/// `Refused::transient` otherwise, mirroring [`apply_write`], and its PR claimed a user is told a
+/// planted junction will refuse identically forever rather than "run the revert again". **That claim
+/// was false, and the branch was unobservable.** `Refused::permanent` is read at exactly one place —
+/// `any_permanent_refusal` in the *write* loop, which is consumed to pick the hold-back wording
+/// **before** any delete runs. The delete loop does `report.skipped.push((path, refused.reason))`:
+/// it moves `reason` and drops `permanent` on the floor. Measured by PR #1059's Reviewer, and
+/// reproduced: replacing the whole branch with an unconditional `transient` leaves the Windows suite
+/// at 2419 passed / 0 failed, unchanged. Nothing could tell the difference.
+///
+/// That is precisely the CPE-1929 shape this ticket set out not to create — a guard nothing can
+/// red-proof — so the branch is **deleted rather than half-wired**, and this returns the one thing the
+/// caller actually consumes.
+///
+/// **What is lost, stated rather than implied.** A permanently-refused deletion (a junction at a
+/// component; a name that is not a plain relative path) is reported to the user exactly like a
+/// transient one (a locked file, a vanished name): one entry in [`RestoreReport::skipped`] carrying
+/// the refusal sentence. The distinction exists for the *write* half of a revert and does not exist
+/// for the delete half. `src/docs/safety-undo.md` says so in the user's words rather than claiming
+/// otherwise.
+///
+/// **Wiring it would not be a one-liner, which is why it is not done here.** `held_back` is the only
+/// existing structure that carries retryability, and a path in both `held_back.paths` and
+/// `skipped` is emitted **twice** by `checkpoint_store::RevertOutcome::from_report` (it pushes an
+/// `OpResult` for each); moving the refusal out of `skipped` instead would change what
+/// `skipped.len()` means to the "did any write fail" logic above. The honest alternative is a
+/// `DeleteRefusalGroup` alongside [`RestoreReport::write_refusal`] — a new wire type, bindings and
+/// frontend rendering. `open_beneath::Refusal::policy` still carries the answer, one field away, for
+/// whoever does that.
 fn apply_delete(
     action: &RestoreAction,
     root: &crate::open_beneath::RootDir,
-) -> Result<(), Refused> {
-    let segments = safe_segments(&action.path).map_err(Refused::permanent)?;
+) -> Result<(), String> {
+    let segments = safe_segments(&action.path)?;
     let mut rel = std::path::PathBuf::new();
     for seg in &segments {
         rel.push(seg);
     }
-    crate::open_beneath::remove_file_beneath(root, &rel).map_err(|refusal| {
-        // The refusal already names the destination root and the component it stopped at, relative to
-        // that root — the two things a user can act on — so the destination is deliberately not
-        // prefixed onto it a second time, which is why this no longer takes `dest_root` at all.
-        if refusal.policy {
-            Refused::permanent(refusal.why)
-        } else {
-            Refused::transient(refusal.why)
-        }
-    })
+    // The refusal already names the destination root and the component it stopped at, relative to that
+    // root — the two things a user can act on — so the destination is deliberately not prefixed onto it
+    // a second time, which is why this no longer takes `dest_root` at all.
+    crate::open_beneath::remove_file_beneath(root, &rel).map_err(|refusal| refusal.why)
 }
 
 #[cfg(test)]
@@ -2803,6 +2826,7 @@ mod tests {
         let mut deleted_outside: u64 = 0;
         let mut trials_run: u64 = 0;
         let mut swapped_at_rest: u64 = 0;
+        let mut deletes_applied: u64 = 0;
         for _ in 0..TRIALS {
             quiesce(&run, &idle);
             // Put the real folder back under `sub` if a swap left the junction there. Done while the
@@ -2845,6 +2869,24 @@ mod tests {
                 execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
             quiesce(&run, &idle);
             applied_total += report.applied as u64;
+            // Put the real folder back under `sub` before either tally reads it, so both counts below
+            // address the real directory rather than whichever name the racer happened to leave there.
+            if is_link(&sub) {
+                let _ = fs::rename(&sub, &tmp);
+                let _ = fs::rename(&junc, &sub);
+                let _ = fs::rename(&tmp, &junc);
+            }
+            // **The denominator that actually matters, and `applied_total` is not it** (CPE-1937
+            // round 2, Security Auditor F5). The plan carries one `Overwrite` plus every delete, so
+            // `applied_total > 0` is satisfied by the **write** alone — under the racer only a
+            // fraction of the planned deletes actually apply, and a zero-escape result would have
+            // been believable while almost no delete ever ran. This counts the deletes that really
+            // happened: an in-tree file the plan named that is no longer in the real directory.
+            if !is_link(&sub) {
+                deletes_applied += (0..VICTIMS)
+                    .filter(|i| !sub.join(format!("v{i:03}.txt")).exists())
+                    .count() as u64;
+            }
 
             // The finding, read off the filesystem: a bystander outside the destination that is gone,
             // or whose bytes changed. Counted per trial and re-staged above, so the denominators are
@@ -2863,7 +2905,8 @@ mod tests {
             &mut std::io::stderr(),
             format!(
                 "\n[CPE-1937 delete raced out of the root]  trials={trials_run}  \
-                 FILES_DELETED_OUTSIDE={deleted_outside}  applied_total={applied_total}  \
+                 FILES_DELETED_OUTSIDE={deleted_outside}  \
+                 DELETES_APPLIED={deletes_applied}  applied_total={applied_total}  \
                  swaps={}/{} attempts  swapped_at_rest={swapped_at_rest}\n",
                 swaps.load(Ordering::Relaxed),
                 attempts.load(Ordering::Relaxed),
@@ -2879,6 +2922,14 @@ mod tests {
             "the racer never completed a swap — the fixture is inert and a zero is meaningless"
         );
         assert!(applied_total > 0, "no action was ever applied — the revert never ran");
+        // **The delete-specific denominator (Security Auditor F5).** `applied_total` is satisfied
+        // by the plan's single WRITE, so without this a run in which the racer blocked every
+        // deletion would report a proud zero that said nothing about the delete leg.
+        assert!(
+            deletes_applied > 0,
+            "not one DELETE applied across the whole run — every deletion was refused, so a \
+             zero-escape result certifies nothing"
+        );
         assert_eq!(
             deleted_outside, 0,
             "HARM: {deleted_outside} bystander files outside the restore root were destroyed across \

@@ -180,18 +180,35 @@ Three details are worth knowing, because they are deliberate:
   checkpoint says should not be there, and a folder shortcut inside the folder being reverted used to
   point those deletions at a different folder — including one *inside* the same folder, which the
   by-name check answers "yes" to because both places really are inside it. Measured on the previous
-  code: files that nothing in the plan named were deleted, and the revert reported complete success —
-  and under a folder being renamed underneath it at the same time, **596 files outside the folder
-  being reverted were destroyed across 200 attempts**, every one counted as applied.
+  code: files that nothing in the plan named were deleted, and the revert reported complete success.
+  With a folder being renamed underneath it at the same time it got much worse. Three independent
+  measurements, all on the previous code, all counting **files outside the folder being reverted that
+  were destroyed** — every one of them counted as applied:
+
+  | measured by | Windows | Linux |
+  |---|---|---|
+  | this change's own harness, 200 attempts | 106 | 75 |
+  | an independent audit, same harness, 200 attempts | 122 | 59 |
+  | an independent audit, a by-path deletion after the folder walk, 200 attempts | — | 141 |
+
+  The spread is what a race looks like: the number depends on machine and timing, not on whether the
+  hole is there. Re-measured the same way after the change — including one run of 2,000 attempts with
+  75,758 folder swaps — the answer is **zero**, on both systems.
   - Each deletion now walks the folder you chose one level at a time, opening each folder inside the
     one before it, and removes the file **through that opened folder** rather than by re-reading its
     path. Nothing can be swapped in underneath it, because the name is never looked up a second time.
   - **What this refuses that it used to allow.** A deletion whose path runs through a folder shortcut
-    is refused and reported against that path, instead of being carried out somewhere else. It is
-    reported as a refusal the app will make again — not "try again", which for a shortcut is advice
-    that can never work.
-  - A deletion that fails for an ordinary reason — the file is open in another program, or you do not
-    have permission — is still reported as something re-running can fix, exactly as before.
+    is refused and reported against that path, instead of being carried out somewhere else. The
+    message names the folder shortcut it stopped at.
+  - **What has not changed, checked deliberately.** A read-only file the revert planned to delete is
+    still deleted, exactly as before. And a deletion the app reports as done has left the folder *at
+    that moment*, even if another program still has the file open — so what the revert tells you and
+    what is on disk cannot disagree.
+  - **One thing it does not tell you, said plainly.** For the half of a revert that puts file
+    *contents* back, the app distinguishes "fix this and run it again" from "this will refuse the same
+    way every time". For the half that **deletes**, it does not: a deletion refused because of a folder
+    shortcut and one refused because the file is open in another program both appear the same way, as
+    one line naming the path and the reason. The reason text tells them apart; nothing else does.
 
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you
