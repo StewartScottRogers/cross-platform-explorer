@@ -369,6 +369,28 @@ impl std::fmt::Display for Channel {
     }
 }
 
+/// CPE-1908 — lets a caller (the `--expect-channel` flag on `verify-release-artifacts`) name which
+/// channel it expects EXPLICITLY, instead of only ever deriving it from a `--conf`'s own `productName`.
+/// That derivation assumes `--conf` is a SELF-CONTAINED config carrying `plugins.updater.pubkey` +
+/// `version` + the channel's own `productName` all in one file — true of the plain channel's
+/// `src-tauri/tauri.conf.json`, but NOT of `tauri.sidecar.conf.json` (a partial overlay: only
+/// `productName`/`identifier`/`bundle.createUpdaterArtifacts`, no `pubkey`, no `version` — see that
+/// file and CPE-1894's own notes on it). So the sidecar verification job reads pubkey/version/the
+/// CPE-1873 pin from the SAME base `tauri.conf.json` the plain job reads (correct: the sidecar overlay
+/// never touches those), while declaring its expected channel explicitly via this flag rather than by
+/// pointing `--conf` at a file that can't answer the pubkey/version questions on its own.
+impl std::str::FromStr for Channel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "plain" => Ok(Channel::Plain),
+            "sidecar" => Ok(Channel::Sidecar),
+            other => Err(format!("unknown channel '{other}' (expected 'plain' or 'sidecar')")),
+        }
+    }
+}
+
 /// Infer a manifest platform's channel from its asset `url`'s basename. Unknown/empty basenames read
 /// as [`Channel::Plain`] — the safe default, since the sidecar marker is a positive signal ("this IS
 /// the sidecar build") rather than something a plain asset would ever need to declare.
@@ -894,5 +916,24 @@ mod tests {
     fn unparseable_manifest_has_no_channel_offenders() {
         // Reported elsewhere (as Unparseable) -- this check has nothing to add on top of that.
         assert_eq!(platforms_with_mismatched_channel("{ not json ", Channel::Plain), Vec::new());
+    }
+
+    // --- CPE-1908: Channel::FromStr, backing --expect-channel ---------------------------------
+
+    #[test]
+    fn channel_from_str_accepts_plain_and_sidecar_case_insensitively() {
+        assert_eq!("plain".parse::<Channel>(), Ok(Channel::Plain));
+        assert_eq!("Plain".parse::<Channel>(), Ok(Channel::Plain));
+        assert_eq!("PLAIN".parse::<Channel>(), Ok(Channel::Plain));
+        assert_eq!("sidecar".parse::<Channel>(), Ok(Channel::Sidecar));
+        assert_eq!("Sidecar".parse::<Channel>(), Ok(Channel::Sidecar));
+        assert_eq!("SIDECAR".parse::<Channel>(), Ok(Channel::Sidecar));
+    }
+
+    #[test]
+    fn channel_from_str_rejects_anything_else() {
+        assert!("plaintext".parse::<Channel>().is_err());
+        assert!("".parse::<Channel>().is_err());
+        assert!("plain-sidecar".parse::<Channel>().is_err());
     }
 }

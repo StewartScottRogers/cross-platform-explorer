@@ -94,6 +94,39 @@ So the flow is: dispatch **Release (sidecar-enabled)** with a new `vX.Y.Z-sideca
 draft → **publish it** → installed apps pick up the update on their next check. Publishing is what
 makes it the `/releases/latest/` the updater sees.
 
+**Before publishing, check `verify-published-manifest-sidecar` passed (CPE-1908).** Exactly the same
+reasoning as `run.md`'s plain-channel gate (CPE-1872): having installer assets on the draft is not the
+same as those assets being *safe* to publish. This job re-checks the manifest as it actually sits on the
+draft — every platform's minisign signature against the configured pubkey, that every platform's `url`
+points at this repo's own release rather than a foreign host/wrong tag, **and** (CPE-1908) that every
+platform's asset is actually from the **sidecar** channel, not a plain-channel asset that slipped in.
+
+```powershell
+$runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=release-sidecar.yml `
+  --limit 1 --json databaseId --jq '.[0].databaseId'
+$job = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
+  --jq '.jobs[] | select(.name=="verify-published-manifest-sidecar")' | ConvertFrom-Json
+if (-not $job -or $job.conclusion -ne "success") {
+  throw "verify-published-manifest-sidecar did not pass (conclusion: $($job.conclusion)) -- do not publish"
+}
+```
+
+`--limit 1` assumes you check this immediately after dispatching — if another sidecar dispatch races
+yours, resolve the run by its `displayTitle`/`createdAt` instead of trusting "most recent". A missing or
+non-`success` job means STOP: do not `gh release edit --draft=false` this tag.
+
+**What this does *not* close (the ticket's own explicit call):** unlike `run.md`'s plain-channel gate,
+nothing in CI or in `/run` currently *forces* this check before a human types `gh release edit <TAG>
+--draft=false` by hand — there is no server-side hook on GitHub Releases that can require a workflow
+conclusion before a publish. This is the SAME residual gap the plain channel already accepts (documented
+in `release.yml`'s own comments): a CI job can make the check impossible to *silently* miss (it's a red
+run in the Actions tab, not a silent skip), but it cannot force a human to *look* before running a
+manual command. Judged acceptable for the same reason the plain channel's equivalent gap is: the actual
+publish step in both channels is already a deliberate, manual, low-frequency action (never automated,
+never in a hot path), and the realistic failure mode this ticket closes — a channel-mixing bug shipping
+undetected — is now caught the moment anyone *does* check the run (which `/run`'s equivalent flow and
+this doc's own instructions both do by default).
+
 **Gotchas:**
 - A sidecar release left as a **prerelease** (or draft) is invisible to `/releases/latest/` — the
   endpoint will fall through to an older release (or 404 if none carries `latest.json`). Don't mark

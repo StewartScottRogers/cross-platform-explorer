@@ -624,3 +624,104 @@ jobs:
           # createUpdaterArtifacts:true in tauri.sidecar.conf.json, the manifest references the
           # correctly-named `…Sidecar…` installers, signed with the shared updater key.
           includeUpdaterJson: true
+
+  # CPE-1908 — the channel-purity check CPE-1894 added only ever ran against the PLAIN manifest
+  # (release.yml's verify-published-manifest): `--conf` there is always the base `tauri.conf.json`,
+  # whose `productName` is "Cross-Platform Explorer", and `release-sidecar.yml` never invoked
+  # `verify-release-artifacts` at all. So the channel that actually reaches users (see
+  # [[always-install-sidecar-build]]) had ZERO assertion that its own manifest is channel-pure --
+  # exactly the shape of defect CPE-1894 fixed for the plain side, just never closed here. This job
+  # is release.yml's `verify-published-manifest` job, adapted:
+  #
+  #   - `needs: [create-release, release-sidecar]`, `if: ${{ !cancelled() }}` -- the SAME reasoning
+  #     as release.yml's job (CPE-1872 round 3, Finding A): `release-sidecar` is `fail-fast: false`,
+  #     so a partial matrix failure still leaves surviving legs' installers + a merged latest.json on
+  #     the draft. A bare `needs:` with no `if:` would SKIP this job the moment any one leg fails,
+  #     the exact silent-skip class CPE-1872/CPE-1893 already closed elsewhere in this repo.
+  #   - Can't be made to block BEFORE the build the way `verify-updater-pin` above does (the ticket's
+  #     preferred shape, where it fits): that job checks static config that exists before a single
+  #     byte is built. This one asserts on the manifest's own asset URLs, which only exist once every
+  #     matrix leg has uploaded to the draft -- there is no earlier point at which "channel-pure" is
+  #     even a question with an answer. So this is a RED gate on the draft, same shape and same
+  #     guarantee as the plain channel already has, not a full block-the-build prevention -- see
+  #     RELEASING.md's sidecar publish section for the human-side check this feeds. A manual `gh
+  #     release edit --draft=false` still isn't blocked by CI here, same accepted limitation the
+  #     plain channel's `run.md` gate already lives with (CPE-1908's own decision on that).
+  #   - `--expect-channel sidecar` (new): `--conf` here is STILL the base `tauri.conf.json` (needed
+  #     for pubkey/version/the CPE-1873 pin, which the sidecar overlay never touches -- see that
+  #     file's own contents), so its `productName` is the PLAIN one. Deriving the expected channel
+  #     from it would silently expect Plain even while checking the SIDECAR manifest. This flag says
+  #     explicitly which channel this job checks, so `channelPurityCoverage.test.ts` can assert the
+  #     full `Channel` enum has a real workflow invocation behind every variant.
+  #
+  # Same `contents: write` inheritance note as release.yml's job: `gh release download`/`gh release
+  # view` against a DRAFT release needs push access (the plain `GET` unauthenticated readers get
+  # 404s a draft), so this job deliberately declares no narrower `permissions:` of its own.
+  verify-published-manifest-sidecar:
+    needs: [create-release, release-sidecar]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./crates/updater-verify -> target"
+
+      # Same secret-gated pattern as release.yml's verify-published-manifest -- stays green on a
+      # checkout where updater signing was never configured, rather than failing on a manifest that
+      # was never signed in the first place.
+      - name: Detect updater signing key
+        id: sig
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+
+      # Downloads by TAG (the workflow_dispatch input), not github.ref_name -- this workflow is
+      # dispatch-only and checks out whatever ref it was run against, which is not the release tag.
+      # Same "download each referenced name individually" reasoning as release.yml's step: a missing
+      # asset must be a loud `gh` failure here, never a quietly-smaller verified set downstream.
+      - name: Download the published manifest + every asset it references
+        if: steps.sig.outputs.has == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$TAG" --pattern 'latest.json' --dir release-assets --clobber
+          names=$(jq -r '.platforms[].url' release-assets/latest.json | sed 's#.*/##' | sort -u)
+          if [ -z "$names" ]; then
+            echo "::error::latest.json on the draft release names no platform urls -- nothing to verify"
+            exit 1
+          fi
+          echo "assets referenced by the published manifest:"
+          echo "$names"
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            gh release download "$TAG" --pattern "$name" --dir release-assets --clobber
+          done <<< "$names"
+
+      # Same crypto + url-binding checks release.yml's verify step runs, PLUS `--expect-channel
+      # sidecar` (CPE-1908) so `platforms_with_mismatched_channel` actually has something to check
+      # against on this channel -- the whole point of this job.
+      - name: Verify the published manifest + signatures + channel purity (CPE-1058, CPE-1894, CPE-1908)
+        if: steps.sig.outputs.has == 'true'
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          cargo run --locked --manifest-path crates/updater-verify/Cargo.toml --release --bin verify-release-artifacts -- \
+            --conf src-tauri/tauri.conf.json \
+            --manifest release-assets/latest.json \
+            --search release-assets \
+            --expect-url-prefix "https://github.com/${REPO}/releases/download/${TAG}/" \
+            --expect-channel sidecar

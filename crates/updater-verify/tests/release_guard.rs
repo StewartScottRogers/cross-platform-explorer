@@ -690,3 +690,151 @@ fn a_plain_asset_in_a_plain_manifest_passes_the_channel_check() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// -- CPE-1908: the guard now actually runs against the SIDECAR channel too -------------------------
+//
+// `release-sidecar.yml`'s `--conf` is the BASE `src-tauri/tauri.conf.json` (needed for pubkey/version/
+// the CPE-1873 pin, none of which the sidecar overlay touches) -- so its `productName` is always the
+// PLAIN one, "Cross-Platform Explorer". Deriving the expected channel from that conf's productName
+// (like the plain job does) would therefore always resolve to Plain even when checking the sidecar
+// channel's own manifest -- exactly the gap this ticket exists to close. `--expect-channel sidecar` is
+// how the sidecar job tells the binary which channel it's actually checking, independent of `--conf`'s
+// productName. These fixtures build the conf with the ordinary PLAIN productName throughout (matching
+// the real base tauri.conf.json byte-for-byte in shape) and vary only `--expect-channel` and the
+// manifest's own asset names -- proving the flag, not the productName, decides the expected channel.
+
+/// Two artifacts on disk with different basenames, and a manifest whose two platforms point at them by
+/// url. Lets a single fixture carry both a sidecar-named and a plain-named asset in one manifest, which
+/// `scaffold_with_url_and_product_name` (single-platform) can't express.
+fn scaffold_mixed_manifest(product_name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
+    let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
+
+    let sidecar_name = format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_x64-setup.nsis.zip");
+    let sidecar_url = format!("https://example.com/releases/download/v{VERSION}-sidecar/{sidecar_name}");
+    let sidecar_bytes = b"sidecar windows installer bytes";
+    std::fs::write(root.join(&sidecar_name), sidecar_bytes).expect("write sidecar artifact");
+    let sidecar_sig = sign_bytes(&kp, sidecar_bytes);
+
+    let plain_name = ARTIFACT_NAME.to_string();
+    let plain_url = format!("https://example.com/releases/download/v{VERSION}-sidecar/{plain_name}");
+    let plain_bytes = b"a PLAIN-channel artifact smuggled into the sidecar manifest";
+    std::fs::write(root.join(&plain_name), plain_bytes).expect("write plain artifact");
+    let plain_sig = sign_bytes(&kp, plain_bytes);
+
+    let manifest = serde_json::json!({
+        "version": VERSION,
+        "platforms": {
+            "windows-x86_64": { "signature": sidecar_sig, "url": sidecar_url },
+            "linux-x86_64": { "signature": plain_sig, "url": plain_url },
+        }
+    });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "productName": product_name,
+        "plugins": { "updater": { "pubkey": pubkey_config } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    dir
+}
+
+fn run_with_expect_channel(dir: &std::path::Path, channel: &str) -> std::process::Output {
+    Command::new(BIN)
+        .args([
+            "--conf",
+            dir.join("tauri.conf.json").to_str().unwrap(),
+            "--search",
+            dir.to_str().unwrap(),
+            "--expect-channel",
+            channel,
+            "--skip-pin-check",
+        ])
+        .output()
+        .expect("run verify-release-artifacts")
+}
+
+/// RED: this reproduces exactly what `release-sidecar.yml`'s job checks for -- a manifest that is
+/// SUPPOSED to be sidecar-pure (dispatched under the sidecar tag) but carries one plain-channel asset,
+/// checked with `--conf` pointed at the ordinary base conf (plain productName, as the real sidecar job's
+/// `--conf` always is) plus `--expect-channel sidecar`. Must fail and name the offending platform, same
+/// as CPE-1894's plain-side red-proof did for the mirror-image case.
+#[test]
+fn a_plain_asset_in_a_manifest_expected_sidecar_is_rejected_by_name() {
+    let dir = scaffold_mixed_manifest("Cross-Platform Explorer"); // base conf's real productName
+    let out = run_with_expect_channel(dir.path(), "sidecar");
+    assert!(
+        !out.status.success(),
+        "a plain-channel asset in a manifest expected to be sidecar-pure must fail the guard; \
+         stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("mixes release channels"), "stderr={stderr}");
+    assert!(stderr.contains("linux-x86_64"), "must name the offending platform; stderr={stderr}");
+    // And must NOT name the honest sidecar platform as an offender too.
+    assert!(!stderr.contains("windows-x86_64 ->"), "must not falsely flag the honest platform; stderr={stderr}");
+}
+
+/// Control proving the flag actually flips the expectation (not just always failing a mixed manifest):
+/// the IDENTICAL mixed fixture, checked with `--expect-channel plain` instead, must fail in the MIRROR
+/// direction -- naming the sidecar platform, not the plain one.
+#[test]
+fn the_same_mixed_manifest_checked_as_expected_plain_names_the_other_platform() {
+    let dir = scaffold_mixed_manifest("Cross-Platform Explorer");
+    let out = run_with_expect_channel(dir.path(), "plain");
+    assert!(!out.status.success(), "a mixed manifest must fail against either expectation");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("windows-x86_64"), "must name the sidecar platform when expecting plain; stderr={stderr}");
+    assert!(!stderr.contains("linux-x86_64 ->"), "must not flag the honest plain platform; stderr={stderr}");
+}
+
+/// GREEN: the fix in its real shape -- a UNIFORM sidecar manifest (every asset sidecar-named), `--conf`
+/// still the base plain-productName conf (exactly as `release-sidecar.yml` invokes it), `--expect-channel
+/// sidecar`. This is what a healthy sidecar release checks clean against.
+#[test]
+fn a_uniform_sidecar_manifest_passes_with_expect_channel_sidecar() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
+    let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
+
+    let names = [
+        format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_x64-setup.nsis.zip"),
+        format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_amd64.AppImage"),
+        format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_aarch64.dmg"),
+    ];
+    let platform_keys = ["windows-x86_64", "linux-x86_64", "darwin-aarch64"];
+    let mut platforms = serde_json::Map::new();
+    for (name, plat) in names.iter().zip(platform_keys.iter()) {
+        let bytes = format!("bytes for {name}").into_bytes();
+        std::fs::write(root.join(name), &bytes).expect("write artifact");
+        let sig = sign_bytes(&kp, &bytes);
+        let url = format!("https://example.com/releases/download/v{VERSION}-sidecar/{name}");
+        platforms.insert((*plat).to_string(), serde_json::json!({ "signature": sig, "url": url }));
+    }
+    let manifest = serde_json::json!({ "version": VERSION, "platforms": platforms });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "productName": "Cross-Platform Explorer", // base conf's real (plain) productName, unchanged
+        "plugins": { "updater": { "pubkey": pubkey_config } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    let out = run_with_expect_channel(root, "sidecar");
+    assert!(
+        out.status.success(),
+        "a channel-pure sidecar manifest must pass with --expect-channel sidecar even though --conf's \
+         own productName is plain; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("verified 3 of 3 platform signature(s)"));
+}
