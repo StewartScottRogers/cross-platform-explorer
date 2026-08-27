@@ -72,14 +72,24 @@ if ("<TAG>".EndsWith("-sidecar")) {
   # step would then wave an UNVERIFIED draft through to `gh release edit --draft=false`. Assumes
   # you're checking shortly after dispatch; if another sidecar dispatch for the SAME tag raced yours,
   # resolve by createdAt too rather than trusting "most recent" alone.
-  $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
-    --json databaseId,displayTitle --jq ".[] | select(.displayTitle == \"Release (sidecar) <TAG>\") | .databaseId" |
-    Select-Object -First 1
+  # CPE-1918: the match is done in PowerShell, NOT in a `--jq` filter. Windows PowerShell 5.1 strips
+  # `"` when marshalling an argument to a native exe's argv, and BOTH escapes people reach for fail
+  # (`'…"x"…'` arrives unquoted; `"…\"x\"…"` arrives corrupted as `" x\)`), so any `--jq` selector
+  # carrying a string literal is broken here. `-ceq` is exact AND case-sensitive, which is what jq's
+  # `==` was doing and what the decoy-tag reasoning above requires. See RELEASING.md, "PowerShell and
+  # `gh --jq`", before rewriting this.
+  $runs = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
+    --json databaseId,displayTitle | ConvertFrom-Json
+  $runId = ($runs | Where-Object { $_.displayTitle -ceq "Release (sidecar) <TAG>" } |
+    Select-Object -First 1).databaseId
 } else {
   $workflow = "release.yml"
   $jobName = "verify-published-manifest"
-  $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
-    --json databaseId,headBranch --jq ".[] | select(.headBranch==\"<TAG>\") | .databaseId" | Select-Object -First 1
+  # Same CPE-1918 rule, and the exact match matters just as much here: `release.yml` runs exist for
+  # BOTH `v0.57.69` and `v0.57.69-sidecar`, and the former is a substring of the latter.
+  $runs = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
+    --json databaseId,headBranch | ConvertFrom-Json
+  $runId = ($runs | Where-Object { $_.headBranch -ceq "<TAG>" } | Select-Object -First 1).databaseId
 }
 if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish" }
 # This is fail-closed and correct, not a broken release, if it's the SIDECAR branch above: every
@@ -89,10 +99,14 @@ if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish
 # predates `run-name:`, don't read it as broken: dispatch a fresh `release-sidecar.yml` run for the
 # tag (so its `displayTitle` carries the tag), or verify the job by hand per RELEASING.md instead.
 
-$verifyJobJson = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
-  --jq ".jobs[] | select(.name==\"$jobName\")"
-if (-not $verifyJobJson) { throw "no $jobName job found on run $runId -- do not publish" }
-$verifyJob = $verifyJobJson | ConvertFrom-Json
+# CPE-1918 again: `--jq` only plucks the sub-tree (no `"` in the filter); the name match is
+# PowerShell's. `$jobs` is assigned BEFORE being piped on purpose -- in PS 5.1 `ConvertFrom-Json`
+# emits a JSON array as ONE pipeline object, so `… | ConvertFrom-Json | Where-Object { $_.name -ceq …}`
+# compares the whole array, finds the comparison truthy, and lets EVERY job through the filter.
+$jobs = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
+  --jq '.jobs' | ConvertFrom-Json
+$verifyJob = $jobs | Where-Object { $_.name -ceq $jobName }
+if (-not $verifyJob) { throw "no $jobName job found on run $runId -- do not publish" }
 
 # ONLY `success` may proceed to 1c. Anything else -- `failure`, `cancelled`, `skipped`, or the job
 # missing entirely -- means STOP.

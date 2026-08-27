@@ -115,12 +115,25 @@ dispatch-and-review flow, or the Cowork desktop app:
 ```powershell
 $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=release-sidecar.yml `
   --limit 1 --json databaseId --jq '.[0].databaseId'
-$job = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
-  --jq '.jobs[] | select(.name=="verify-published-manifest-sidecar")' | ConvertFrom-Json
+# CPE-1918: the `--jq` filter deliberately contains NO double quotes. Windows PowerShell 5.1 strips
+# `"` when it marshals an argument to a native exe's argv, so a filter like
+# `select(.name=="verify-published-manifest-sidecar")` reaches jq unquoted and dies with
+# `function not defined: sidecar/0` instead of this check's crafted message. Do the name match in
+# PowerShell instead — `-ceq` is exact and case-sensitive, matching jq's `==`. See the
+# "PowerShell and `gh --jq`" note below before editing any snippet in this file.
+$jobs = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
+  --jq '.jobs' | ConvertFrom-Json
+$job = $jobs | Where-Object { $_.name -ceq 'verify-published-manifest-sidecar' }
 if (-not $job -or $job.conclusion -ne "success") {
   throw "verify-published-manifest-sidecar did not pass (conclusion: $($job.conclusion)) -- do not publish"
 }
 ```
+
+> **`$jobs` is assigned first on purpose.** In Windows PowerShell 5.1 `ConvertFrom-Json` emits a JSON
+> array as a **single** pipeline object, so `… | ConvertFrom-Json | Where-Object { $_.name -ceq '…' }`
+> evaluates `$_.name` against the whole 4-element array; the array comparison returns a non-empty
+> result, `Where-Object` reads that as true, and **every** job passes the filter. Assigning to `$jobs`
+> and then piping the variable enumerates it, so exactly one job matches. (Verified, CPE-1918.)
 
 `--limit 1` assumes you check this immediately after dispatching — if another sidecar dispatch races
 yours, resolve the run by its `displayTitle`/`createdAt` instead of trusting "most recent" (`run.md`'s
@@ -137,6 +150,35 @@ skip), but it cannot physically stop a manual command that skips checking it. Ju
 same reason the plain channel's gap is — the publish step is a deliberate, manual, low-frequency
 action — and now that `/run` covers the common case automatically, the realistic remaining exposure is
 narrower than it was when this section was first written.
+
+### PowerShell and `gh --jq` — never put a `"` in the filter (CPE-1918)
+
+Every `powershell`-fenced snippet in this repo's runbooks is meant to be **pasted verbatim** into Windows
+PowerShell 5.1. That shell mangles double quotes on their way into a native executable's argv, so a
+`--jq` filter containing a string literal breaks — and the two escapes everyone reaches for break too.
+Measured on PS 5.1 (26100.9168) with `node -e "console.log(JSON.stringify(process.argv.slice(1)))"`:
+
+| Snippet as written | What `jq` actually receives | |
+|---|---|---|
+| `--jq '.jobs[] \| select(.name=="x")'` | `.jobs[] \| select(.name==x)` | ✗ `function not defined: x/0` |
+| `--jq ".jobs[] \| select(.name==\"x\")"` | `.jobs[] \| select(.name==" x\)` | ✗ `invalid escape sequence "\)"` |
+| ``--jq ".jobs[] \| select(.name==`"x`")"`` | `.jobs[] \| select(.name==x)` | ✗ same as the first |
+| `$q = '…"x"…'; --jq $q` | quotes still stripped | ✗ a variable does not help |
+| `--jq '.jobs'` | `.jobs` | ✓ no `"` in the argument |
+
+Note the second row: the escaped-double-quote form was long assumed correct here and in `run.md`, and
+it is **not** — it is broken in a *different* way, which is how the bug survived being "fixed" once.
+
+**The rule: a `--jq` / `-q` argument in a PowerShell snippet must contain no `"` at all.** Use `--jq`
+only to pluck the sub-tree (`'.jobs'`, `'.[0].databaseId'`, `'.assets[].name'`) and do any string
+matching in PowerShell with `ConvertFrom-Json` + `Where-Object { $_.field -ceq 'literal' }`. Use `-ceq`,
+not `-eq`: PowerShell's `-eq` is case-insensitive where jq's `==` is not, and these matches gate a
+publish. `src/lib/runbookJqQuoting.test.ts` fails CI if a `"` reappears inside a `--jq` argument in a
+PowerShell block.
+
+The `--jq '…"…"…'` form is *correct* in the `.github/workflows/**` steps that use it — those run under
+`bash` on Linux runners, where single quotes are honoured. The shell the snippet targets is the whole
+difference, which is why every fenced block here carries a language tag.
 
 **Gotchas:**
 - A sidecar release left as a **prerelease** (or draft) is invisible to `/releases/latest/` — the
