@@ -179,6 +179,43 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  npm-audit-sweep:
+    # CPE-1945: the npm half of `lockfile-preflight` below, and it exists for the identical reason.
+    # That job was CPE-1932's answer to "seventeen Cargo.lock files, a rule applied to two". This one
+    # answers "two npm projects, a rule applied to one": the root and `gui-smoke/`, where every
+    # Dependency Steward pass to 2026-08-27 audited the root, stopped, and quoted its number as the
+    # repo's. `gui-smoke/` had never been audited once, and was carrying 17 advisories — including the
+    # same `brace-expansion` high CPE-1926 had just fixed at the root — in a project `gui-smoke.yml`
+    # runs on CI with repo credentials.
+    #
+    # Projects are enumerated with `git ls-files '*package-lock.json'` inside the script, NEVER a
+    # hardcoded list, so a third npm project is swept the day it lands with no step here to update.
+    # The script also refuses to run on a near-empty enumeration rather than reporting a vacuous
+    # "0 vulnerabilities across 0 projects" — a sweep that finds nothing and passes is the precise
+    # failure this exists to stop.
+    #
+    # WHY THIS IS NOT ON THE `needs:` CHAIN and does not gate the builds: unlike `cargo metadata
+    # --locked`, `npm audit` is a live registry query, so its verdict can change without the tree
+    # changing. A newly-published advisory should tell the Dependency Steward to act; it should not
+    # retroactively block an unrelated PR's builds. It still FAILS (rather than merely reporting) when
+    # there is an unapplied non-major fix, because that is a one-command remedy the Steward owns.
+    #
+    # No `node_modules` is installed: `npm audit` reads the lockfile and queries the registry, and the
+    # script's "is a fix actually available?" probe uses `npm audit fix --package-lock-only` (no
+    # `--force`, ever) on a scratch COPY. Seconds, not minutes.
+    name: npm audit — every npm project in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm audit over every package-lock.json in the tree
+        run: node scripts/audit-npm-projects.mjs
+
   ratchet-guard:
     # CPE-1934: the guard that guards the ratchets.
     #
