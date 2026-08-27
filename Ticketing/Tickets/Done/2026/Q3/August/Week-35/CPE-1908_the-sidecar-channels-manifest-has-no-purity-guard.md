@@ -3,7 +3,7 @@ id: CPE-1908
 title: the channel-purity guard runs only on the plain manifest — the sidecar channel, which users actually install, has none
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-26
