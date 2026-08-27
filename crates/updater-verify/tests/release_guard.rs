@@ -17,7 +17,12 @@ use minisign::KeyPair;
 const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 const BIN: &str = env!("CARGO_BIN_EXE_verify-release-artifacts");
 const VERSION: &str = "1.2.3";
-const ARTIFACT_NAME: &str = "app_1.2.3_x64-setup.nsis.zip";
+/// CPE-1923: fixture asset names are now the shape the real bundler emits -- anchored to the
+/// product name and carrying the version -- because the guard now binds both. `app_1.2.3_…`
+/// no longer resembles anything this release process could have produced, which is the point.
+const ARTIFACT_NAME: &str = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
+/// The plain channel's `productName`, required by the anchored channel check (CPE-1923).
+const PRODUCT_NAME: &str = "Cross-Platform Explorer";
 
 /// Build a temp release tree and return its dir. `artifact_on_disk` are the bytes actually written to the
 /// artifact file; the manifest signature is always computed over `signed_bytes`. Passing different values
@@ -54,6 +59,7 @@ fn scaffold(signed_bytes: &[u8], artifact_on_disk: &[u8], manifest_version: &str
 
     let conf = serde_json::json!({
         "version": VERSION,
+        "productName": PRODUCT_NAME,
         "plugins": { "updater": { "pubkey": pubkey_config } }
     });
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
@@ -122,6 +128,7 @@ fn scaffold_repo_layout(signed_bytes: &[u8], artifact_on_disk: &[u8]) -> tempfil
 
     let conf = serde_json::json!({
         "version": VERSION,
+        "productName": PRODUCT_NAME,
         "plugins": { "updater": { "pubkey": pubkey_config } }
     });
     std::fs::write(src_tauri.join("tauri.conf.json"), conf.to_string()).expect("write conf");
@@ -306,7 +313,7 @@ fn smuggled_extra_platform_is_rejected() {
     let honest = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
     let evil = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
 
-    let win_name = "app_1.2.3_x64-setup.nsis.zip";
+    let win_name = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
     let win_bytes = b"the real windows installer bytes";
     std::fs::write(root.join(win_name), win_bytes).expect("write windows artifact");
     let win_sig = sign_bytes(&honest, win_bytes);
@@ -324,13 +331,14 @@ fn smuggled_extra_platform_is_rejected() {
             },
             "linux-x86_64": {
                 "signature": evil_sig,
-                "url": "https://evil.example/pwn.AppImage.tar.gz"
+                "url": "https://evil.example/Cross-Platform.Explorer_1.2.3_amd64.AppImage"
             }
         }
     });
     std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
     let conf = serde_json::json!({
         "version": VERSION,
+        "productName": PRODUCT_NAME,
         "plugins": { "updater": { "pubkey": pubkey_config_field(&honest) } }
     });
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
@@ -360,12 +368,12 @@ fn smuggled_local_name_is_rejected() {
     let honest = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
     let evil = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
 
-    let win_name = "app_1.2.3_x64-setup.nsis.zip";
+    let win_name = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
     let win_bytes = b"the real windows installer bytes";
     std::fs::write(root.join(win_name), win_bytes).expect("write windows artifact");
     let win_sig = sign_bytes(&honest, win_bytes);
 
-    let evil_name = "pwn.AppImage.tar.gz";
+    let evil_name = "Cross-Platform.Explorer_1.2.3_amd64.deb";
     let evil_bytes = b"whatever the attacker wants to ship";
     std::fs::write(root.join(evil_name), evil_bytes).expect("write smuggled artifact locally");
     let evil_sig = sign_bytes(&evil, evil_bytes);
@@ -386,6 +394,7 @@ fn smuggled_local_name_is_rejected() {
     std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
     let conf = serde_json::json!({
         "version": VERSION,
+        "productName": PRODUCT_NAME,
         "plugins": { "updater": { "pubkey": pubkey_config_field(&honest) } }
     });
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
@@ -410,7 +419,7 @@ fn basename_decoy_is_rejected() {
     let root = dir.path();
     let kp = minisign::KeyPair::generate_unencrypted_keypair().expect("keypair");
 
-    let name = "app_1.2.3_x64-setup.nsis.zip";
+    let name = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
     let decoy_bytes = b"bytes the signature verifies against";
     let real_build_output_bytes = b"a DIFFERENT current build's real output";
     let decoy_dir = root.join("aaa_decoy");
@@ -433,6 +442,7 @@ fn basename_decoy_is_rejected() {
     std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
     let conf = serde_json::json!({
         "version": VERSION,
+        "productName": PRODUCT_NAME,
         "plugins": { "updater": { "pubkey": pubkey_config_field(&kp) } }
     });
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
@@ -495,6 +505,7 @@ fn scaffold_with_url(signed_bytes: &[u8], url: &str) -> tempfile::TempDir {
 
     let conf = serde_json::json!({
         "version": VERSION,
+        "productName": PRODUCT_NAME,
         "plugins": { "updater": { "pubkey": pubkey_config } }
     });
     std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
@@ -640,7 +651,7 @@ fn scaffold_with_url_and_product_name(signed_bytes: &[u8], url: &str, product_na
     // The local artifact file must be named after the url's OWN basename (matching by basename is
     // exactly how the real download/verify pipeline works, per `scaffold_with_url` above) -- not the
     // fixed `ARTIFACT_NAME`, since these tests deliberately vary the basename to carry (or not carry)
-    // the "sidecar" marker the channel check keys on.
+    // the sidecar product token the channel check keys on.
     let basename = url.rsplit('/').next().expect("url has a basename");
     std::fs::write(root.join(basename), signed_bytes).expect("write artifact");
 
@@ -680,7 +691,8 @@ fn a_sidecar_asset_in_a_plain_manifest_is_rejected_by_name() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("mixes release channels"), "stderr={stderr}");
+    // CPE-1923 re-worded this refusal so every failure names WHICH property failed.
+    assert!(stderr.contains("PROPERTY FAILED -- release channel"), "stderr={stderr}");
     assert!(stderr.contains("windows-x86_64"), "must name the offending platform; stderr={stderr}");
 }
 
@@ -802,10 +814,12 @@ fn a_plain_asset_in_a_manifest_expected_sidecar_is_rejected_by_name() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("mixes release channels"), "stderr={stderr}");
+    // CPE-1923 re-worded this refusal so every failure names WHICH property failed, and prints
+    // offenders as `platform: reason` rather than `platform -> channel`.
+    assert!(stderr.contains("PROPERTY FAILED -- release channel"), "stderr={stderr}");
     assert!(stderr.contains("linux-x86_64"), "must name the offending platform; stderr={stderr}");
     // And must NOT name the honest sidecar platform as an offender too.
-    assert!(!stderr.contains("windows-x86_64 ->"), "must not falsely flag the honest platform; stderr={stderr}");
+    assert!(!stderr.contains("windows-x86_64:"), "must not falsely flag the honest platform; stderr={stderr}");
 }
 
 /// Control proving the flag actually flips the expectation (not just always failing a mixed manifest):
@@ -818,7 +832,7 @@ fn the_same_mixed_manifest_checked_as_expected_plain_names_the_other_platform() 
     assert!(!out.status.success(), "a mixed manifest must fail against either expectation");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("windows-x86_64"), "must name the sidecar platform when expecting plain; stderr={stderr}");
-    assert!(!stderr.contains("linux-x86_64 ->"), "must not flag the honest plain platform; stderr={stderr}");
+    assert!(!stderr.contains("linux-x86_64:"), "must not flag the honest plain platform; stderr={stderr}");
 }
 
 /// GREEN: the fix in its real shape -- a UNIFORM sidecar manifest (every asset sidecar-named), `--conf`
@@ -834,7 +848,11 @@ fn a_uniform_sidecar_manifest_passes_with_expect_channel_sidecar() {
     let names = [
         format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_x64-setup.nsis.zip"),
         format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_amd64.AppImage"),
-        format!("Cross-Platform.Explorer_(Sidecar)_{VERSION}_aarch64.dmg"),
+        // CPE-1923: NOT a `.dmg`. Tauri's updater cannot apply a .dmg, and this repo's real
+        // published manifest serves `.app.tar.gz` for every darwin key (the .dmg ships as a
+        // release asset but no platform entry ever points at it). Also deliberately
+        // versionless, exactly as the real macOS updater artifact is named.
+        "Cross-Platform.Explorer_(Sidecar)_aarch64.app.tar.gz".to_string(),
     ];
     let platform_keys = ["windows-x86_64", "linux-x86_64", "darwin-aarch64"];
     let mut platforms = serde_json::Map::new();

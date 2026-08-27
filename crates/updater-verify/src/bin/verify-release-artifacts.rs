@@ -21,6 +21,23 @@
 //! `v0.57.69`'s manifest with two platforms pointing at sidecar assets and two at plain ones. See
 //! [`cpe_updater_verify::platforms_with_mismatched_channel`].
 //!
+//! CPE-1923 added three more unconditional checks after an independent Security Auditor built
+//! hostile manifests that passed this binary at **EXIT 0 with genuine signatures**:
+//!
+//! 1. **artifact ↔ version binding** (the serious one) — every platform's asset must be an artifact
+//!    OF the version being shipped. A signature proves the bytes are ones we once signed; it says
+//!    nothing about which release they came from, so an actor with release-asset write and no
+//!    signing key could upload the old, vulnerable installer plus its genuine old signature to the
+//!    new tag and downgrade every auto-updating user. The decision lives in exactly one place,
+//!    [`cpe_updater_verify::platforms_not_bound_to_version`], along with the narrow macOS
+//!    `.app.tar.gz` naming exception it has to make.
+//! 2. **platform key → payload kind** — [`cpe_updater_verify::platforms_with_wrong_extension_for_key`].
+//! 3. the channel check above is now **anchored** to the real `productName` rather than testing for
+//!    the free substring "sidecar", which anyone who can name a release asset could add or omit.
+//!
+//! `productName` is consequently required in `--conf`; a config without one is refused rather than
+//! silently disarming check 3.
+//!
 //! Usage:
 //! ```text
 //! verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>] [--expect-channel <plain|sidecar>]
@@ -131,10 +148,30 @@ fn main() -> ExitCode {
     // rather than relying on `--conf`'s productName -- load-bearing for the sidecar job, whose `--conf`
     // is still the base `tauri.conf.json` (for pubkey/version/the CPE-1873 pin, which the sidecar
     // overlay never touches) even though the manifest it's checking must be pure SIDECAR.
-    let product_name = conf_json.get("productName").and_then(|v| v.as_str()).unwrap_or("");
+    //
+    // CPE-1923 finding 3: `productName` is no longer optional, and its role changed. The channel
+    // check used to be an unanchored `basename.contains("sidecar")` substring test that needed no
+    // product name at all; it is now ANCHORED to this product's name, so a config without one
+    // leaves nothing to anchor against and would silently turn the strongest of the three checks
+    // into a no-op -- the exact failure mode this ticket is about.
+    //
+    // Note what `productName` is used for AFTER CPE-1908, because the two tickets interact: it no
+    // longer decides the channel when `--expect-channel` is passed (that would be wrong -- the
+    // sidecar job deliberately passes the PLAIN conf), it supplies the *base product identity* the
+    // asset names are anchored against. `expected_channel` decides which of that base name's two
+    // forms an asset must match. See `cpe_updater_verify::platforms_with_mismatched_channel`.
+    let product_name = match conf_json.get("productName").and_then(|v| v.as_str()) {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        _ => {
+            return fail(&format!(
+                "{} has no non-empty top-level `productName`. It is required: the channel check                  (CPE-1894/CPE-1923) anchors every asset basename to this product's own name, and                  with nothing to anchor against that check would pass everything.",
+                conf.display()
+            ))
+        }
+    };
     let (expected_channel, channel_source) = match expect_channel {
         Some(c) => (c, "--expect-channel"),
-        None => (cpe_updater_verify::expected_channel_from_product_name(product_name), "conf productName"),
+        None => (cpe_updater_verify::expected_channel_from_product_name(&product_name), "conf productName"),
     };
 
     // CPE-1873 round 2 (independent reviewer, attempt 1's rejection): the `#[test]` guard in
@@ -277,6 +314,9 @@ fn main() -> ExitCode {
         Ok(t) => t,
         Err(e) => return fail(&format!("cannot read {}: {e}", manifest_path.display())),
     };
+    // How many platforms the manifest itself names. Used both for the CPE-1923 exemption tally
+    // below and for the final "verified N of M" partial-check guard, so both read the same number.
+    let manifest_platform_total = cpe_updater_verify::manifest_platform_count(&manifest).unwrap_or(0);
 
     // CPE-1894: the guard this ticket adds. `release.yml`'s `v*` tag trigger used to match
     // `-sidecar` tags too, so the PLAIN workflow fired on a sidecar tag push and merged its plain
@@ -287,21 +327,73 @@ fn main() -> ExitCode {
     // have agreed with the very pattern that was wrong. Unconditional (not gated behind a flag,
     // unlike `--expect-url-prefix`): it costs nothing and needs no external GitHub context, only
     // this checkout's own `tauri.conf.json` (already being read above) and the manifest.
-    let channel_offenders = cpe_updater_verify::platforms_with_mismatched_channel(&manifest, expected_channel);
+    // CPE-1923 finding 3 re-founded this on an ANCHORED comparison against `productName`: the old
+    // rule was a free `basename.contains("sidecar")` substring test, which the auditor flipped in
+    // both directions with nothing but release-asset write (a plain installer uploaded as
+    // `…_x64-setup.nsis.zip.sidecar` passed a sidecar-channel run at EXIT 0). See
+    // `cpe_updater_verify::platforms_with_mismatched_channel`.
+    let channel_offenders =
+        cpe_updater_verify::platforms_with_mismatched_channel(&manifest, expected_channel, &product_name);
     if !channel_offenders.is_empty() {
         let detail = channel_offenders
             .iter()
-            .map(|(name, channel)| format!("{name} -> {channel}"))
+            .map(|(name, fault)| format!("{name}: {fault}"))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("; ");
         return fail(&format!(
-            "manifest mixes release channels (CPE-1894/CPE-1908) -- expected channel '{expected_channel}' \
-             (source: {channel_source}; {} productName is '{product_name}'), so every platform's asset \
-             must be from that channel, but the following platform(s) are not: {detail}. This is the \
-             exact shape of the CPE-1894 defect (a workflow's \
-             tag trigger firing on the wrong channel's tag and merging its installers into this release) \
-             -- do not publish this manifest.",
+            "PROPERTY FAILED -- release channel (CPE-1894/CPE-1908/CPE-1923 finding 3): expected              channel '{expected_channel}' (source: {channel_source}; {} declares productName              '{product_name}'), so every platform's asset basename must ANCHOR to that product's              name in its '{expected_channel}' form. These do not: {detail}. This is the shape of the              CPE-1894 defect (a workflow's tag trigger firing on the wrong channel's tag and merging              its installers into this release), and of CPE-1923 finding 3 (an asset renamed to claim              a channel it did not come from) -- do not publish this manifest.",
             conf.display(),
+        ));
+    }
+
+    // CPE-1923 finding 2 -- the platform-key -> payload-kind binding. The auditor's fixture served
+    // the Windows installer under `darwin-aarch64` and the macOS `.app.tar.gz` under
+    // `windows-x86_64`, EACH WITH ITS OWN GENUINE SIGNATURE: channel purity, url prefix and every
+    // signature passed (`verified 2 of 2 platform signature(s)`, EXIT 0) because nothing anywhere
+    // related a platform key to the kind of file behind it. Unconditional, like the channel check:
+    // it needs no external context beyond the manifest itself.
+    let extension_offenders = cpe_updater_verify::platforms_with_wrong_extension_for_key(&manifest);
+    if !extension_offenders.is_empty() {
+        let detail = extension_offenders
+            .iter()
+            .map(|(name, fault)| format!("{name}: {fault}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return fail(&format!(
+            "PROPERTY FAILED -- platform/asset mapping (CPE-1923 finding 2): a platform key must \
+             serve a payload its own OS's bundler produces. These do not: {detail}. Every signature \
+             in such a manifest can still be genuine while every client downloads something it \
+             cannot run -- do not publish this manifest."
+        ));
+    }
+
+    // CPE-1923 finding 1 -- THE ANTI-ROLLBACK DECISION, and the most serious of the three. A
+    // signature proves the bytes are ones we once signed; it says nothing about WHICH RELEASE they
+    // came from. An actor with release-asset write only (no signing key) can upload the old,
+    // vulnerable installer AND ITS GENUINE OLD SIGNATURE to the new draft tag and write a
+    // `latest.json` carrying the new version -- and every check above this line agrees. Published
+    // users then auto-"update" onto an older signed build.
+    //
+    // The decision lives in exactly one place (`cpe_updater_verify::artifact_binding`), is made
+    // against the version in `--conf` (which the attacker does not write) rather than the
+    // manifest's own `version` field (which they do), and is deliberately NOT folded into
+    // `verify_update_manifest`'s `VersionMismatch` -- that one compares two fields and passed this
+    // attack cleanly. See that module's doc for the macOS `.app.tar.gz` naming exception.
+    let version_binding = cpe_updater_verify::platforms_not_bound_to_version(&manifest, &version);
+    if !version_binding.offenders.is_empty() {
+        let detail = version_binding
+            .offenders
+            .iter()
+            .map(|(name, fault)| format!("{name}: {fault}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return fail(&format!(
+            "PROPERTY FAILED -- artifact/version binding (CPE-1923 finding 1, SIGNED DOWNGRADE): \
+             this release ships version '{version}', so every platform's asset must be an artifact \
+             OF that version. These are not: {detail}. A correctly-signed installer from an older \
+             release, uploaded to this tag, verifies perfectly and downgrades every user who \
+             auto-updates -- which is why 'the signature is valid' is not the same question as \
+             'this is an acceptable version to move to'. Do not publish this manifest."
         ));
     }
 
@@ -342,6 +434,19 @@ fn main() -> ExitCode {
     println!("  channel    : {expected_channel} (source: {channel_source}; conf product name: '{product_name}')");
     println!("  manifest   : {}", manifest_path.display());
     println!("  search dirs: {}", search_dirs.len());
+    // CPE-1923: every asset the version binding let through WITHOUT the version in its name is
+    // named here rather than passing silently, so a run cannot consist entirely of exemptions
+    // without that being visible in the log.
+    println!(
+        "  version bind: {} of {} platform asset(s) carry version '{version}' in their filename; \
+         {} exempt (macOS .app.tar.gz, which Tauri names without a version)",
+        manifest_platform_total.saturating_sub(version_binding.exemptions.len()),
+        manifest_platform_total,
+        version_binding.exemptions.len()
+    );
+    for e in &version_binding.exemptions {
+        println!("    exempt   : {} -> {}", e.platform, e.basename);
+    }
     if let Some(prefix) = &expect_url_prefix {
         println!("  url prefix : {prefix} (enforced)");
     }
@@ -375,7 +480,7 @@ fn main() -> ExitCode {
             // belt-and-suspenders guard in case that invariant is ever loosened again, so a future
             // regression fails loud here too rather than silently printing a misleading "OK".
             let n = served.get();
-            let total = cpe_updater_verify::manifest_platform_count(&manifest).unwrap_or(n);
+            let total = if manifest_platform_total == 0 { n } else { manifest_platform_total };
             if n == 0 || n != total {
                 return fail(&format!(
                     "manifest claims {total} platform(s) but only {n} were actually, cryptographically verified -- refusing to report success on a partial check (this should be unreachable; verify_update_manifest is supposed to fail before returning Ok in this case)",

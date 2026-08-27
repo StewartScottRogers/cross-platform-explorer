@@ -232,6 +232,28 @@ kill-all before touching the installer.
   `updater.key` / `updater.pw` (both gitignored — never commit them).
 - Losing the private key OR password means you can no longer sign updates and
   auto-update breaks for existing installs.
+- **Deleting `TAURI_SIGNING_PRIVATE_KEY` no longer produces a green no-op (CPE-1923 finding 4).**
+  Both channels' verify jobs (`release.yml`'s `verify-published-manifest` and
+  `release-sidecar.yml`'s `verify-published-manifest-sidecar`) gate their real steps on that secret
+  being present, so with it unset each job used to run, skip both steps, and conclude `success` — a
+  release-integrity gate reporting green over zero verification, indistinguishable in the run
+  summary from one that actually checked something. One deleted secret disarmed both. Each
+  secret-detection step now **fails the job** when a run that is *cutting a release* finds no key.
+  If you see it, the fix is to restore the secret, never to publish the release anyway.
+  (The two workflows answer "is this cutting a release?" differently — `release.yml` from
+  `github.ref_type == 'tag'`, `release-sidecar.yml` unconditionally, since it is dispatch-only with
+  a required tag input — but run a byte-identical script, and a test asserts that equality.)
+
+### What the release gate does and does not prove
+
+`verify-release-artifacts` (run by `verify-published-manifest`) checks the manifest as **published on
+the draft release**, plus every asset it names, and refuses on: a signature that does not verify, a
+platform it could not fetch, a `url` outside this tag's download prefix, a mixed release channel, a
+platform key serving another OS's payload, and — the one an attacker with release-asset write but no
+signing key would otherwise walk through — **an artifact belonging to a different version than the
+one being shipped**. A refusal always names which property failed. One residual is deliberate and
+documented: macOS's `<productName>.app.tar.gz` carries no version in its name, so that one asset is
+bound to the release by its url and signature only; the run prints every such exemption it grants.
 
 ### OS installer code signing
 
