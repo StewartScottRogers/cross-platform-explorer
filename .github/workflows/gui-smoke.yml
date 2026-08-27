@@ -1079,7 +1079,16 @@ jobs:
   layout-guard:
     name: Layout guard (real-browser rects, no WebDriver) — CPE-1882
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # CPE-1882 CI-round-3 finding: this job's FIRST real CI run (job 98379701649) hit this cap and was
+    # CANCELLED after 10m14s without completing a single case — the local "~1 minute" measurement never
+    # exercised a real CI runner. Root cause: `runAllCases` (engine.mjs) used to launch a FRESH Chrome
+    # process + fresh profile dir for every width (12 for the two shipped cases today) — cheap on a dev
+    # workstation, but 12 sequential full-process-launch-plus-CDP-handshakes is far more expensive on a
+    # shared/throttled GitHub-hosted runner. Fixed by reusing ONE Chrome instance for the whole sweep
+    # (see `runAllCases`'s own header comment for why that's safe). 15 minutes here is deliberate
+    # headroom over the now-expected wall-clock, not a claim that it needs anywhere near that long —
+    # widen this further only if a FUTURE real CI run's own timing says so, not preemptively.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

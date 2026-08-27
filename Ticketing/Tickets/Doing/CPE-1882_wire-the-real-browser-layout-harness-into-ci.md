@@ -266,3 +266,37 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   the already-LF index — confirmed via `git status`). Final `npx vitest run`: **2 failures, both
   `msrvSync.test.ts`** (no `msrv:` job in `ci.yml` — CPE-1855's territory, unrelated to and out of scope
   for this ticket), 4581/4583 passing.
+
+- **2026-08-26 (CI round 3 — real CI run, job cancelled at its own 10-minute cap)** — Pushed, watched
+  `layout-guard` (job `98379701649`) via `gh api .../jobs/<id>` reads (not `gh run watch`). Its own step
+  timeline showed `npm ci` finishing in 4s (cache hit) and `Resolve + confirm Chrome` in 2s — the setup
+  was fine. `Run the layout guard` itself ran for **10m14s** before the job's own `timeout-minutes: 10`
+  cancelled it — a real finding, not a fluke: the local "~1 minute" cost claim never exercised a real CI
+  runner, and this design does not survive contact with one.
+
+  **Root cause**: `runAllCases` (engine.mjs) launched a FRESH Chrome process + fresh profile dir for
+  EVERY width — 12 full process-spawn-plus-CDP-handshake cycles for the two shipped cases. Cheap on a
+  dev workstation; evidently not cheap on a shared/throttled GitHub-hosted `ubuntu-latest` runner.
+
+  **Fix**: refactored to launch ONE Chrome instance for the WHOLE sweep, reused across every case×width
+  via `Page.navigate` + `Emulation.setDeviceMetricsOverride` per width (same CDP calls as before, just
+  against a long-lived connection instead of a fresh one each time) — removes 11 of 12 process launches
+  for today's two cases. This does not reintroduce the "fresh profile avoids a stale cached app.css"
+  concern the original per-width design cited (that concern is about a profile REUSED ACROSS SEPARATE
+  DAYS of local dev-loop iteration — see `sidebar-drop-stack-overlap/check.mjs`'s own comment — not
+  about one browser process living for the few seconds one run's own sweep takes; vite always serves
+  current content regardless of the browser's own cache, and every case still gets a genuine fresh
+  `Page.navigate`).
+
+  Re-verified locally after the refactor: `npm run harness:layout-guard` clean at all 12 combinations
+  (~28s wall-clock, `date +%s` before/after — comparable to the pre-refactor local timing, since local
+  Chrome launches were never the bottleneck; the fix targets CI's launch cost specifically), zero
+  leftover profile dirs (cleanup still fires correctly on the single reused instance), and the CPE-1836
+  red-proof still reproduces + reverts cleanly on the new single-instance design (proving no state leaks
+  between cases sharing one Chrome tab). `npm run check`: 0 errors, 0 warnings.
+
+  Also bumped `layout-guard`'s own `timeout-minutes` 10 → 15 (headroom over the now-expected wall-clock,
+  not a claim it needs anywhere near that long) and corrected the cost comments in `run.mjs`'s header and
+  the job's own YAML comment to record this finding rather than repeat the unverified "~1 minute" claim.
+  **CI verdict on the refactored design is still unconfirmed** — pushing this fix now; the Foreman owns
+  watching the next run to completion, per CPE-1880.

@@ -6,11 +6,15 @@
 // Run:  node scripts/dev-harness/layout-guard/run.mjs
 //   or: npm run harness:layout-guard
 //
-// Cost (measured locally, Windows, 2 cases / 15 width combinations total): ~35s dev-server cold start
-// (first module-graph compile) + ~1-2s per width thereafter ≈ under a minute end to end. Cheap enough,
-// and needs no WebDriver/native driver install and no `tauri build`, unlike gui-smoke — see this
-// ticket's PR description for the full cost accounting and why it runs on every push/PR rather than
-// being path-filtered.
+// Cost (measured locally, Windows, 2 cases / 12 width combinations total): ~1s dev-server cold start
+// (npm cache warm) + well under a second per width thereafter — under half a minute end to end. Needs
+// no WebDriver/native driver install and no `tauri build`, unlike gui-smoke. Local timing is NOT a
+// stand-in for CI timing, though: the first real CI run of this job (before `runAllCases` in engine.mjs
+// was changed to reuse ONE Chrome instance for the whole sweep, rather than launching a fresh one per
+// width) hit the job's own 10-minute cap and was cancelled without completing — see
+// `.github/workflows/gui-smoke.yml`'s `layout-guard` job comment and `runAllCases`'s own header for the
+// root cause and the fix. See this ticket's PR description for the full cost accounting (including a
+// real CI number once one exists) and why it runs on every push/PR rather than being path-filtered.
 
 import { spawn } from "node:child_process";
 import path from "node:path";

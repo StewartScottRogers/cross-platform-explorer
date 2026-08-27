@@ -7,7 +7,7 @@
 // viewport, `Runtime.evaluate` to measure) — no WebDriver, no npm dependency, Node's built-in `fetch` +
 // `WebSocket` only.
 //
-// REQUIRES NODE >= 22. `checkOneWidthHeight` below calls the global `WebSocket` constructor directly —
+// REQUIRES NODE >= 22. `runAllCases` below calls the global `WebSocket` constructor directly —
 // it is only a STABLE Node built-in from v22 (unflagged); on Node 20 it is `undefined` and every call
 // throws `ReferenceError: WebSocket is not defined`, unconditionally, on every run. This is not
 // theoretical: it reached real CI once (job 98371907013, `.github/workflows/gui-smoke.yml`'s
@@ -248,17 +248,105 @@ function buildProbeExpression(checks) {
   `;
 }
 
-/** Runs one case at one width×height. Launches its own throwaway Chrome + profile dir (so no cached
- *  app.css between runs can mask a real edit — see sidebar-drop-stack-overlap's identical comment for
- *  why a reused profile bit it once), navigates, waits for `readySelector`, sets the CDP viewport
- *  override, runs the probe, and always kills Chrome (and deletes its profile dir) even on failure. */
-export async function checkOneWidthHeight({ chromePath, devServerBase, kase, width, height, cdpPort }) {
+/** Runs ONE (case, width) check against an ALREADY-CONNECTED CDP `client` (see `runAllCases` below for
+ *  why this no longer launches its own Chrome per width — CPE-1882 CI-round-3 finding). Sets the
+ *  viewport, navigates, waits for `readySelector` AND confirms `location.href`, runs the probe. */
+async function checkOneCaseOnClient(client, { devServerBase, kase, width, height }) {
+  // The load-bearing step: `--window-size` alone does not reliably set the CSS viewport under
+  // `--headless=new` (see statusbar-notice/index.html's header comment — it clamps internally and
+  // rescales), which is why the earlier `--dump-dom`-driven harnesses needed an outer-page/iframe trick
+  // to get a trustworthy width. `Emulation.setDeviceMetricsOverride` sets the REAL CSS viewport directly
+  // (already proven by sidebar-drop-stack-overlap/check.mjs), so this engine drives harness pages
+  // directly — no iframe indirection needed here.
+  await client.send("Emulation.setDeviceMetricsOverride", {
+    width,
+    height,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const expectedUrl = `${devServerBase}${kase.path}`;
+  await client.send("Page.navigate", { url: expectedUrl });
+
+  let ready = false;
+  let urlMatched = false;
+  let lastHref = "";
+  // 40s on a cold dev server compiling the module graph on first hit (see
+  // sidebar-drop-stack-overlap's identical comment); every subsequent width against the now-warm server
+  // resolves in well under a second.
+  const deadline = Date.now() + 40000;
+  while (Date.now() < deadline) {
+    // CPE-1882 UAT/reviewer finding: this repo routinely runs many worktrees on one dev machine
+    // concurrently, and TWO SEPARATE `run.mjs` processes could end up pointed at each other's vite dev
+    // server if their (now PID-derived, see `runAllCases`) ports ever collided — the actual root cause a
+    // reviewer traced from `.tv-sync-badge`, a fixture that exists in NO worktree's committed code,
+    // showing up as a real measurement, because the OLD readiness check only confirmed `readySelector`
+    // was present, never that this tab is actually looking at THIS run's URL. `location.href` is the one
+    // signal that can't lie about that: verify it before trusting anything the DOM says.
+    const r = await client.send("Runtime.evaluate", {
+      expression: `(function(){var v=!!document.querySelector(${JSON.stringify(kase.readySelector)});return { ready: v, href: location.href };})()`,
+      returnByValue: true,
+    });
+    if (r.result && r.result.value) {
+      lastHref = r.result.value.href || "";
+      urlMatched = lastHref === expectedUrl;
+      if (urlMatched && r.result.value.ready === true) {
+        ready = true;
+        break;
+      }
+    }
+    await sleep(200);
+  }
+  if (!urlMatched) {
+    throw new Error(
+      `navigation mismatch at width=${width} height=${height}: expected location.href="${expectedUrl}" ` +
+      `but the tab reports "${lastHref}" — this Chrome instance never reached the URL this run navigated ` +
+      `it to (possibly a stale/foreign page from a port collision with another concurrent harness run)`,
+    );
+  }
+  if (!ready) {
+    throw new Error(`"${kase.readySelector}" never appeared within 40s at width=${width} height=${height} (url confirmed correct)`);
+  }
+  await sleep(300); // settle layout/fonts
+
+  const r = await client.send("Runtime.evaluate", {
+    expression: buildProbeExpression(kase.checks),
+    returnByValue: true,
+  });
+  return r.result.value;
+}
+
+/** Runs every (case × width) combination against ONE launched Chrome instance, reused for the whole
+ *  sweep — this used to launch a fresh Chrome + fresh profile dir PER WIDTH (12 launches for the two
+ *  shipped cases), which was fine on a dev workstation (~1 minute total) but never proven against a real
+ *  CI runner. It wasn't: the first real CI run of this job hit its own `timeout-minutes: 10` cap and was
+ *  cancelled without completing a single case — 12 sequential fresh-Chrome-process launches (each paying
+ *  full startup + CDP handshake cost) is far more expensive on a shared/throttled GitHub-hosted runner
+ *  than on a dev machine. ONE Chrome instance, re-navigated per width via CDP (`Page.navigate` +
+ *  `Emulation.setDeviceMetricsOverride`, same as before), removes 11 of 12 process launches for today's
+ *  two cases — the per-width overhead becomes a navigation + a `Runtime.evaluate` round trip, not a full
+ *  process spawn. This does NOT reintroduce the "fresh profile dir avoids a cached stale app.css" concern
+ *  from the original per-width design: that concern was about a profile dir REUSED ACROSS SEPARATE DAYS
+ *  of local dev-loop iteration (see sidebar-drop-stack-overlap/check.mjs's identical original comment),
+ *  not about reusing one browser process for the few seconds one CI run's own sweep takes — vite's own
+ *  dev server always serves the current transformed CSS for every navigation regardless of the browser's
+ *  own cache, and each case still gets a genuine fresh `Page.navigate` (not a SPA route change), so
+ *  nothing about a PREVIOUS case's DOM/CSS can leak into the next one's measurement.
+ *
+ *  `cdpPort`'s default is DERIVED FROM `process.pid`, not a fixed literal. This repo routinely runs many
+ *  worktrees on one dev machine concurrently (that is the NORMAL condition here, per CLAUDE.md's memory
+ *  notes, not an edge case) — a fixed port meant two concurrent `run.mjs` processes (different
+ *  worktrees, same codebase) could pick the exact same CDP port, and the second one to connect would end
+ *  up talking to the FIRST one's Chrome instance. `checkOneCaseOnClient`'s own `location.href`
+ *  verification (above) is the second, independent layer against the same class of bug — it also covers
+ *  the DEV-SERVER port (run.mjs), which this PID-derived CDP port does not touch. */
+export async function runAllCases({ cases, devServerBase, chromePath, cdpPort = 20000 + (process.pid % 20000) }) {
   const userDataDir = path.join(
     REPO_ROOT,
     ".claude",
     "dev-harness-chrome-profiles",
     `layout-guard-${cdpPort}-${Date.now()}`,
   );
+  const maxHeight = Math.max(...cases.map((k) => k.height));
   const chrome = spawn(
     chromePath,
     [
@@ -268,7 +356,7 @@ export async function checkOneWidthHeight({ chromePath, devServerBase, kase, wid
       "--disable-dev-shm-usage",
       `--remote-debugging-port=${cdpPort}`,
       `--user-data-dir=${userDataDir}`,
-      `--window-size=${width},${height}`,
+      `--window-size=1200,${maxHeight}`,
       "about:blank",
     ],
     { stdio: ["ignore", "ignore", "ignore"] },
@@ -285,71 +373,16 @@ export async function checkOneWidthHeight({ chromePath, devServerBase, kase, wid
     });
     const client = makeCdpClient(ws);
     await client.send("Page.enable");
-    // The load-bearing step: `--window-size` alone does not reliably set the CSS viewport under
-    // `--headless=new` (see statusbar-notice/index.html's header comment — it clamps internally and
-    // rescales), which is why the earlier `--dump-dom`-driven harnesses needed an outer-page/iframe
-    // trick to get a trustworthy width. `Emulation.setDeviceMetricsOverride` sets the REAL CSS viewport
-    // directly (already proven by sidebar-drop-stack-overlap/check.mjs), so this engine drives harness
-    // pages directly — no iframe indirection needed here.
-    await client.send("Emulation.setDeviceMetricsOverride", {
-      width,
-      height,
-      deviceScaleFactor: 1,
-      mobile: false,
-    });
-    const expectedUrl = `${devServerBase}${kase.path}`;
-    await client.send("Page.navigate", { url: expectedUrl });
 
-    let ready = false;
-    let urlMatched = false;
-    let lastHref = "";
-    // 40s on a cold dev server compiling the module graph on first hit (see
-    // sidebar-drop-stack-overlap's identical comment); every subsequent width against the now-warm
-    // server resolves in well under a second.
-    const deadline = Date.now() + 40000;
-    while (Date.now() < deadline) {
-      // CPE-1882 UAT/reviewer finding: this Chrome instance's OWN `--remote-debugging-port` is
-      // per-call (see `runAllCases` below), so it cannot itself be talking to a foreign worktree's
-      // Chrome — but it CAN still be pointed at a foreign worktree's VITE DEV SERVER if two worktrees'
-      // `run.mjs` processes ever picked the same dev-server port (the actual root cause a reviewer
-      // traced: `.tv-sync-badge`, a fixture that exists in NO worktree's committed code, showing up as
-      // a real measurement — one worktree's harness had silently measured a DIFFERENT worktree's
-      // Chrome/page because both happened to share port 4331 and the old code only checked that
-      // `readySelector` was present, never that this tab is actually looking at THIS run's URL).
-      // `location.href` is the one signal that can't lie about that: verify it before trusting
-      // anything the DOM says.
-      const r = await client.send("Runtime.evaluate", {
-        expression: `(function(){var v=!!document.querySelector(${JSON.stringify(kase.readySelector)});return { ready: v, href: location.href };})()`,
-        returnByValue: true,
-      });
-      if (r.result && r.result.value) {
-        lastHref = r.result.value.href || "";
-        urlMatched = lastHref === expectedUrl;
-        if (urlMatched && r.result.value.ready === true) {
-          ready = true;
-          break;
-        }
+    const results = [];
+    for (const kase of cases) {
+      for (const width of kase.widths) {
+        const measured = await checkOneCaseOnClient(client, { devServerBase, kase, width, height: kase.height });
+        results.push({ case: kase.name, width, ...measured });
       }
-      await sleep(200);
     }
-    if (!urlMatched) {
-      throw new Error(
-        `navigation mismatch at width=${width} height=${height}: expected location.href="${expectedUrl}" ` +
-        `but the tab reports "${lastHref}" — this Chrome instance never reached the URL this run navigated ` +
-        `it to (possibly a stale/foreign page from a port collision with another concurrent harness run)`,
-      );
-    }
-    if (!ready) {
-      throw new Error(`"${kase.readySelector}" never appeared within 40s at width=${width} height=${height} (url confirmed correct)`);
-    }
-    await sleep(300); // settle layout/fonts
-
-    const r = await client.send("Runtime.evaluate", {
-      expression: buildProbeExpression(kase.checks),
-      returnByValue: true,
-    });
     ws.close();
-    return r.result.value;
+    return results;
   } finally {
     // CPE-1882 UAT/reviewer finding: this used to leak `userDataDir` forever (only `chrome.kill()` ran,
     // no cleanup at all) — 1.8 GB left behind across 13 local runs. Wait for the process to actually
@@ -359,43 +392,9 @@ export async function checkOneWidthHeight({ chromePath, devServerBase, kase, wid
     const exited = new Promise((resolve) => chrome.once("exit", resolve));
     chrome.kill();
     await Promise.race([exited, sleep(3000)]);
-    // Best-effort past this point: a still-held Windows lock right after exit is a real possibility,
-    // not a bug in this code, so a cleanup failure here must never fail (or even log noisily during) the
-    // actual layout check it rode in on.
+    // Best-effort past this point: a still-held Windows lock right after exit is a real possibility, not
+    // a bug in this code, so a cleanup failure here must never fail (or even log noisily during) the
+    // actual layout checks it rode in on.
     await rm(userDataDir, { recursive: true, force: true }).catch(() => {});
   }
-}
-
-/** Runs every (case × width) combination sequentially (one Chrome instance at a time — this repo's
- *  other headless-Chrome harnesses do the same; sequential is simple, and the per-case widths lists are
- *  short enough that parallelising wouldn't meaningfully change the wall-clock cost — see run.mjs's own
- *  header for the measured total).
- *
- *  `cdpPortBase`'s default is DERIVED FROM `process.pid`, not a fixed literal. This repo routinely runs
- *  many worktrees on one dev machine concurrently (that is the NORMAL condition here, per CLAUDE.md's
- *  memory notes, not an edge case) — the old fixed `9600` base meant two concurrent `run.mjs` processes
- *  (different worktrees, same codebase) could pick the exact same CDP port for a given width index, and
- *  the second one to connect would end up talking to the FIRST one's Chrome instance. Sequential widths
- *  within ONE process never collide with each other either way (each uses a distinct offset) — the
- *  vulnerability was always cross-process, not intra-process. `checkOneWidthHeight`'s own
- *  `location.href` verification (above) is the second, independent layer against the same class of bug
- *  — it also covers the DEV-SERVER port (run.mjs), which this PID-derived CDP port does not touch. */
-export async function runAllCases({ cases, devServerBase, chromePath, cdpPortBase = 20000 + (process.pid % 20000) }) {
-  const results = [];
-  let portOffset = 0;
-  for (const kase of cases) {
-    for (const width of kase.widths) {
-      const cdpPort = cdpPortBase + (portOffset++ % 500);
-      const measured = await checkOneWidthHeight({
-        chromePath,
-        devServerBase,
-        kase,
-        width,
-        height: kase.height,
-        cdpPort,
-      });
-      results.push({ case: kase.name, width, ...measured });
-    }
-  }
-  return results;
 }
