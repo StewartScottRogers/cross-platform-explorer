@@ -127,3 +127,49 @@ be argued in the work log.
   Run" once checked. A blocked (link) collision is listed the same way (reusing CPE-1869's
   copy-the-full-list affordance and panel styling) but carries no checkbox at all — there is nothing to
   toggle that would unblock it, matching the backend's absolute refusal.
+
+- **2026-08-27 — PR #1044 review round 2: independent Reviewer + Visual Critic passes found three
+  blockers and a should-fix in the escape hatch itself, folded into the same PR.**
+
+  **Blocker 1 (security):** `overwrite_confirmed_no_follow`'s post-open re-check was by PATH
+  (`symlink_metadata`) only — a hard link is not a reparse point, so it read as an ordinary file, and a
+  confirmed Convert through a hard link from inside the macro root wrote the new bytes at BOTH names,
+  including one outside `resolve()`'s `within_root` guard. Fixed by calling
+  `batch_media::handle_facts` on the open handle and refusing `is_reparse_point`/`is_dir`/`links > 1`,
+  mirroring `copy_file_onto_no_follow_with_wording` exactly (the function this ticket's own doc
+  comment already claimed to mirror, but hadn't, fully).
+
+  **Blocker 2 (trust boundary):** `confirmed_overwrite` was a blanket `bool` handed to every op in the
+  run — confirming the one collision a 200-file batch actually had also switched off the occupancy
+  guard on the other 199. Re-scoped to `Vec<String>` (confirmed destination paths, matching exactly
+  what `MacroCollision.to` already carries): the backend only bypasses the occupancy guard at a `to`
+  the frontend actually named, re-derived fresh at run time on every call, never trusted from an
+  earlier preflight.
+
+  **Blocker 3 (irreversibility):** undo/rollback of a confirmed overwrite cannot recover the victim's
+  bytes — nothing preserves them anywhere. Chose the reviewer-sanctioned MINIMUM over building a
+  pre-overwrite checkpoint: qualified the rollback error message, documented it on `macro_undo`'s doc
+  comment, and added a plain-language warning next to the confirm checkbox
+  ("This can't be undone…"). Not the checkpoint the ticket's option 1 named, because that would mean
+  re-deriving Batch-Media's own backup/checkpoint subsystem for a second engine — a separate initiative,
+  not a cheap addition on top of blockers 1+2's rework.
+
+  **Should-fix:** the confirmed rename/move path (`macro_rename_bridge`) reconstructed its destination
+  differently from the unconfirmed path for a Rename template containing a path separator (silently
+  dropping the embedded subdirectory vs. using the full path) — a real destination DIVERGENCE, not just
+  missing guards. Fixed by unifying: rename and move, confirmed and unconfirmed, all route through one
+  bridge now, so there is exactly one destination, always.
+
+  **Visual Critic follow-up:** hoisted `MacroCollision.reason` OUT of the per-row list (added earlier
+  this same round after UAT flagged it as fetched-but-never-rendered) into one sentence per DISTINCT
+  hazard kind under the heading — the per-row placement was N copies of one paragraph and clipped
+  mid-sentence past a handful of blocked names. Added the missing "Copy all N names" button to the
+  blocked panel (it needed one at least as much as the confirmable panel, being the list the user must
+  act on by hand) and gated the "Overwrite N and Run" label on `blocked.length === 0` so a still-blocked
+  mixed run never reads as armed.
+
+  16 new/rewritten Rust tests, 13 vitest cases. Full suites green (`crates/server` 2401, `src-tauri
+  --lib` 230); `clippy --all-targets -D warnings` clean, both feature modes, both crates; `npm run
+  check` clean. New `scripts/dev-harness/macro-collision` dev harness (mirrors CPE-1869's
+  revert-heldback-copy shape) used to re-capture the blocked-collision screenshots plus new
+  mixed-collision ones proving the should-fix.
