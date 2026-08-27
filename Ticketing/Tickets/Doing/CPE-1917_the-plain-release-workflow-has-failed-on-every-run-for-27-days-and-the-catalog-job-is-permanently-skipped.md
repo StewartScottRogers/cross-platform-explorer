@@ -3,7 +3,7 @@ id: CPE-1917
 title: the plain Release workflow has failed on every run for 27 days — `verify-release-artifacts` cannot find `latest.json`, so the catalog job is permanently skipped
 type: bug
 priority: High
-status: Open
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-26
