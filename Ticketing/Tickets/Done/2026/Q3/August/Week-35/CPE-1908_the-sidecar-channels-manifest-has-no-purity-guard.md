@@ -317,3 +317,49 @@ gap that can actually reach a user.
     (338 files — the round-2 msrv gap is gone now that `main`'s merge brought that fix in). Two
     commits on the branch: R2-3 (Rust) landed and validated before the R2-1/R2-2/R2-4/smaller-fixes
     commit (TS + run.md), per instruction to commit before probing each behaviour change.
+- **2026-08-27 USMST** — PR #1039 **APPROVED** by the Reviewer, who independently confirmed: all
+  four round-2 items closed; `define_channel!` audited against seven hostile inputs (bare variant,
+  non-string literal, duplicate token, uppercase token, empty token, whitespace token, well-formed) —
+  every bad one caught, a duplicate token twice over (an `unreachable pattern` error under
+  `-D warnings` AND a round-trip test failure); confirmed `ALL` really does grow on its own (added
+  `Beta => "beta"`, asserted `ALL.len() == 3`, no hand edit anywhere); confirmed the const-eval first
+  attempt was correctly rejected (it would have reproduced the exact `ALL`-drift gap); confirmed
+  `isRealInvocationLine()` closes the whole decoy family from round 2 (echo decoy, quoted TODO,
+  heredoc body, `if false; then`); confirmed the char-scanner has no quote desync on adversarial shapes
+  (nested quotes, `grep -E "^[\"']+"`, `awk '/"/{print}'`); confirmed the `shellScriptLines.ts` move
+  broke nothing (`releaseHangHardening.test.ts` still 26 tests, identical across all three rounds);
+  confirmed R2-4's exact-match closes a real hole on the publish path.
+  - **N6 (coordinator override on the approval — fixed in this same round, not filed as a
+    follow-up):** the Reviewer flagged, and the coordinator ruled load-bearing enough to block merge
+    on, that `isRealInvocationLine()` proved the binary is *invoked*, not that its failure *fails the
+    step*. Every real site runs under `shell: bash` (`set -eo pipefail`), so a bad manifest fails the
+    job today — but appending `|| true` (or `| true`, or `; true`) silently defeats that while the
+    line still starts with `cargo run`, still names the binary, and still carries the flag, reading as
+    full coverage — the same intent as R2-1's commented-out flag, just laundered through the exit code
+    instead of the text. Fixed: `isRealInvocationLine()` now rejects any line containing `|` (covers
+    `|| true` too) or `;`, rather than trying to enumerate every fallback spelling.
+  - **Red-then-green:** reproduced the exact pre-N6 predicate (`preN6IsRealInvocationLine` /
+    `preN6ChannelsDeclaredByStepRun`, a byte-for-byte copy of `isRealInvocationLine()` as it stood
+    immediately after R2-1/R2-2) against all three shapes — each read `["sidecar"]` under the pre-N6
+    predicate, `[]` under the fixed one. New describe block, 4 new tests, in
+    `channelPurityCoverage.test.ts`.
+  - **A construction bug found and fixed during red-proofing, worth recording:** the first draft of
+    the three test fixtures used a template-literal source-level line continuation
+    (`` `${X} \<newline>...` ``) to mimic a YAML `run:` block's own backslash-continuation style. That
+    elides the newline at the JS SOURCE level (a real ECMAScript rule: `\` immediately followed by an
+    actual line terminator inside a template literal consumes both and contributes nothing to the
+    string), which happened to still produce a working test by accident, but a *separate* mistake in
+    the same authoring pass — hand-typing `\b` (word-boundary) inside a Python heredoc used to insert
+    the test block — silently corrupted it: Python recognises `\b` as a real escape (ASCII backspace,
+    0x08) in a non-raw string, so the byte that landed in the `.ts` file was a literal backspace
+    control character, not the two characters `\`+`b`. This made the *reproduction* function
+    (`preN6IsRealInvocationLine`) never match its own input, so the "RED" assertions failed for the
+    wrong reason (the reproduction was broken, not proving what it claimed to). Caught by the RED
+    assertion itself failing unexpectedly (`expected [] to deeply equal ['sidecar']` — backwards from
+    what a working reproduction should show), root-caused via `xxd`-inspecting the raw bytes around
+    the regex literal, fixed by replacing the corrupted bytes and switching to plain string
+    concatenation for the test fixtures (no source-level continuation trickery) and `\\b` (an
+    unambiguous double-backslash) in any future Python-authored regex insertion.
+  - Full validation after N6: `npm run check` clean, `vitest run` **4664/4664 green** (338 files, +4
+    from this fix). Pushed as a new commit rather than amended, so R2-3/R2-1/R2-2/R2-4 stay independent
+    and bisectable.
