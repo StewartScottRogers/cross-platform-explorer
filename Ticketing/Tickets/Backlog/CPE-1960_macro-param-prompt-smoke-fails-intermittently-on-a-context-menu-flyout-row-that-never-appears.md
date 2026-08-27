@@ -2,7 +2,7 @@
 id: CPE-1960
 title: `macro-param-prompt.smoke.ts` fails intermittently — the context-menu flyout row never appears within 5 s
 type: bug
-priority: Medium
+priority: High
 status: Open
 tags: ready
 estimate: M
@@ -71,3 +71,23 @@ just found in order to land the tool.
 Related: **CPE-1955** (the transport death and the attribution fix, PR #1068), **CPE-1728** (the
 slow-renderer family), **CPE-1753** (the `incomplete=true ⇒ RED` verdict job), **CPE-1171** (the
 gui-smoke harness).
+
+## Raised to High 2026-08-27 — and it may not be intermittent at all
+
+A third occurrence, on **PR #1066** (job at 23:47Z), byte-identical again: `14/14 spec file(s)
+reported, 26 case(s) — 23 passed, 1 failed, 2 skipped/pending`, same case, `incomplete=false`.
+
+So it has now been seen on **three unrelated branches** — `373ee259`, #1068, #1066.
+
+**Reconsider the "intermittent" framing.** Every shard-2 run that *actually completed* has reported
+this failure. The runs that appeared clean are the ones that died at spec #2 and never reached spec
+#6 (CPE-1955's transport death), which reported `0 new failing cases` and were re-run. If that holds,
+the spec is failing **consistently** and was simply never visible — which makes the reproduction step
+easier, not harder, and changes the diagnosis.
+
+**Check that first**: find any shard-2 run with `14/14 reported` and **no** `macro-param-prompt`
+failure. If none exists, the word "intermittent" should come out of this ticket.
+
+**It now blocks the merge queue.** With CPE-1955's attribution fix surfacing it on every complete run,
+this is a permanent red on the `gui-smoke-linux-verdict` job for every PR — so it is no longer a
+background defect, it is the thing standing between the queue and green.
