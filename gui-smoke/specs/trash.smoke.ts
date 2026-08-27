@@ -36,9 +36,13 @@
 // "real store seam" for the template, and the on-disk freedesktop Trash format IS that seam here: it is
 // exactly what `trash::os_limited::list()` parses in production, byte for byte.
 //
-// STATES COVERED (CPE-1822's AC, "at minimum"):
+// STATES COVERED (CPE-1822's AC, "at minimum", plus one extra the MANUAL-TEST-BURNDOWN.md row this
+// ticket retires also names — see that row's own text):
 //   - genuinely empty Trash (`trash.empty`)
 //   - a populated Trash (real rows, real fields)
+//   - the degraded notice with NO entries (CPE-1803's original shape) — extra, not in this ticket's own
+//     AC, added because the burndown row this ticket closes names it explicitly and the fixture is
+//     nearly free given the sibling degraded-with-entries test below.
 //   - the degraded notice WITH entries present — CPE-1805's ordinary shape (`.tv-degraded-banner`) —
 //     reached via a per-item non-UTF-8-name skip (CPE-1804's route), matching
 //     `a_non_utf8_field_skips_the_entry_and_the_skip_is_counted_not_silent`'s own fixture technique
@@ -317,6 +321,47 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
     }
   });
 
+  it("CPE-1803: a degraded listing with NO entries renders its own distinct note, never trash.empty, in both themes", async function () {
+    if (!IS_LINUX) {
+      this.skip();
+      return;
+    }
+    // The exact construction `src-tauri/src/lib.rs`'s own CPE-1791 pin uses
+    // (`trash_listing_degrades_to_empty_instead_of_crashing_on_a_malformed_trashinfo_file`): a
+    // `.trashinfo` body whose second line has no `=` — `trash::os_limited::list()` panics parsing it
+    // (`freedesktop.rs:139-140`, `split.next().unwrap()`), the app catches that panic and degrades the
+    // WHOLE pass to empty (CPE-1791/CPE-1803) rather than crashing. Not in this ticket's own AC (which
+    // lists "the degraded notice WITH entries present" as the minimum), but the
+    // `MANUAL-TEST-BURNDOWN.md` row this ticket retires (CPE-1803/1804/1805) names this exact state
+    // too, and the fixture is nearly free once the sibling degraded-with-entries test already exists.
+    fs.mkdirSync(path.join(trashDir, "info"), { recursive: true });
+    fs.mkdirSync(path.join(trashDir, "files"), { recursive: true });
+    const malformed = path.join(trashDir, "info", "cpe-1822-malformed.trashinfo");
+    fs.writeFileSync(malformed, "[Trash Info]\nPath\n", "utf-8");
+    try {
+      await openTrash();
+
+      const note = await $(".tv-degraded-note");
+      await note.waitForExist({ timeout: 15_000, timeoutMsg: "expected the degraded-with-no-entries note to render" });
+      const noteText = await note.getText();
+      expect(noteText, "the degraded-empty note must NOT read trash.empty's wording").to.not.include("Trash is empty");
+      expect(await $$(".tv-row").length, "a degraded-empty pass has zero rows").to.equal(0);
+
+      await setTheme("light");
+      await snap("trash-degraded-empty-light");
+      await setTheme("dark");
+      await snap("trash-degraded-empty-dark");
+
+      await closeTrash();
+    } finally {
+      try {
+        fs.unlinkSync(malformed);
+      } catch {
+        /* best-effort */
+      }
+    }
+  });
+
   it("CPE-1805: a degraded listing WITH entries renders the banner above the rows, and the sticky header + its checkbox survive a scroll, in both themes", async function () {
     if (!IS_LINUX) {
       this.skip();
@@ -419,22 +464,29 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
         await setTheme(theme);
         await openTrash();
 
-        // The core, falsifiable assertion (CPE-1816): while this pass is still in flight, the title bar
-        // must read "Still loading…", not a number — and rows must already be visible (the first batch
-        // landed, `loading` is false) at the same time. If the pass resolves before this ever observes
-        // that combination, the wait throws and this test goes RED — see the file header for why a large
-        // real listing is the honest way to make this window observable rather than fabricating it.
-        const loadingSpan = await $(".tv-count-loading");
+        // The core, falsifiable assertion (CPE-1816): while this pass is still in flight, the title
+        // bar's `.tv-count` must read "Still loading…" (`trash.stillLoading`), not a number — and rows
+        // must already be visible (the first batch landed, `loading` is false) at the same time. Keyed
+        // on the rendered TEXT rather than the `.tv-count-loading` class alone: a deliberate red-proof
+        // probe on this ticket found the class can be renamed without redding `TrashView.test.ts`'s own
+        // suite (which asserts on text), so the class alone is not the whole load-bearing contract — the
+        // VISIBLE STRING is, and it's what the Visual Critic actually judges in the screenshot below. If
+        // the pass resolves before this ever observes the combination, the wait throws and this test
+        // goes RED — see the file header for why a large real listing is the honest way to make this
+        // window observable rather than fabricating it.
+        const countSpan = await $(".tv-count");
         await browser.waitUntil(
           async () => {
-            if (!(await loadingSpan.isExisting())) return false;
+            if (!(await countSpan.isExisting())) return false;
+            const text = await countSpan.getText();
+            if (!text.includes("Still loading")) return false;
             return (await $$(".tv-row").length) > 0;
           },
           {
             timeout: 20_000,
             interval: 15,
             timeoutMsg:
-              `expected to observe .tv-count-loading ("Still loading…") together with rendered rows while the ${theme}-theme 2,500-item Trash pass was still streaming`,
+              `expected the title bar to read "Still loading…" together with rendered rows while the ${theme}-theme 2,500-item Trash pass was still streaming`,
           },
         );
 
@@ -443,7 +495,6 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
         // Let this pass finish resolving before closing/reopening for the next theme, so the next
         // `openTrash()` starts a genuinely fresh `list_trash_stream` call rather than superseding one
         // still in flight (TrashView.svelte's own `loadGen` supersession — correct, but noise here).
-        const countSpan = await $(".tv-count");
         await browser.waitUntil(async () => /\d[\d,]* items?/.test(await countSpan.getText()), {
           timeout: 60_000,
           timeoutMsg: "expected the 2,500-item pass to eventually resolve to a final item count",
