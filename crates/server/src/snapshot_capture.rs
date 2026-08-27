@@ -355,6 +355,35 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // manifest-controlled: it is the empty directory the caller named in the call.
     fs::create_dir_all(dest_path).map_err(|e| format!("{}: {e}", dest_path.display()))?;
 
+    // **CPE-1937: hold the destination open for the whole restore, once.** Pass 2's writes below are
+    // then resolved component-by-component against *this object*, so a directory link at any interior
+    // component cannot redirect one — the same anchor `revert_engine::execute_restore` and
+    // `backup::apply_backup_plan_walk` open.
+    //
+    // This function had the same defect `revert_engine::apply_delete` did, measured on `main` and on
+    // PR #1050's branch alike: with `<dest>/sub -> <dest>/other` both paths are inside the
+    // destination, `fsutil::confined_to` answered **yes**, and the manifest's bytes went to a path
+    // nothing named while `restore` returned `Ok(())`. It has no production caller — grepped across
+    // `crates/` and `src-tauri/`, the only references are this module's own tests and
+    // `snapshot_prune`'s, which uses it as the "a kept manifest still restores" oracle — but it is a
+    // `pub` API of `cpe-server` and a second live copy of CPE-1912's shape, so it is **converted**
+    // rather than left or deleted: ~30 tests and the prune suite depend on it, and the primitive it
+    // needs already exists two lines away.
+    let real_dest = fs::canonicalize(dest_path).map_err(|e| {
+        format!(
+            "the folder being restored ({}) could not be resolved ({e}), so nothing can be written \
+             into it in a way that can be checked",
+            dest_path.display()
+        )
+    })?;
+    let root = crate::open_beneath::open_root(&real_dest, "folder being restored").map_err(|e| {
+        format!(
+            "the folder being restored ({}) could not be opened ({e}), so nothing can be written \
+             into it in a way that can be checked",
+            dest_path.display()
+        )
+    })?;
+
     // ---- pass 1: the ABORT DECISION only. Judges every entry, touches nothing. ---------------------
     let mut refusals: Vec<String> = Vec::new();
     // **CPE-1823 round 5 — two entries that ADDRESS ONE FILE.** Every rule before this one judges an
@@ -417,10 +446,7 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // **CPE-1846 took the other half of that pattern, which is the half a restore can use.** The
     // rejection above covered only step 1 (claim the name atomically). Step 2 — *never follow a link at
     // the final component* — costs a restore nothing, because opening an existing regular file for
-    // truncate-and-write is exactly what an overwrite is. `fsutil::copy_file_onto_no_follow` below opens
-    // the target with `batch_media`'s own `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT` open (the same
-    // per-target constants, not a second spelling), refuses the handle if it addresses a link or a
-    // directory, and streams the blob's bytes through it. So the final-component swap is no longer a
+    // truncate-and-write is exactly what an overwrite is. So the final-component swap stopped being a
     // race at all: the object written is the object opened.
     //
     // What that residual *was*, stated accurately because an earlier draft overstated it in both
@@ -429,22 +455,60 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     // through — it was that the check and the copy were two syscalls, checked but not atomically. That
     // gap is now gone.
     //
-    // **The interior-component race is NOT closed and is still the recorded residual.** `safe_target`
-    // resolves the directories above the final component by path, and the open below is by path too, so
-    // a directory link swapped into an interior component between them still redirects the write.
-    // Closing that needs `openat`-relative resolution, which `std` does not expose. Pass 2 re-resolving
-    // immediately before each write is what keeps that window one open wide instead of a whole pass.
+    // **The interior-component race IS closed now, and this paragraph used to say it was not**
+    // (CPE-1937). Until this ticket it read: *"`safe_target` resolves the directories above the final
+    // component by path, and the open below is by path too, so a directory link swapped into an
+    // interior component between them still redirects the write. Closing that needs `openat`-relative
+    // resolution, which `std` does not expose."* Every sentence of that has stopped being true: the
+    // write below is `fsutil::copy_file_onto_destination_handle` through an
+    // `open_beneath::create_beneath` closure, resolved one component at a time against a root handle
+    // held for the whole restore, and `open_beneath` is exactly the `openat`-relative resolution the
+    // paragraph said did not exist. `safe_target` is gone from this loop entirely.
+    //
+    // Left uncorrected for one ticket, forty lines above the line it describes, **this is the precise
+    // shape that produced CPE-1937**: PR #1050's Reviewer found that bug by checking whether the
+    // documentation matched the code, and PR #1059's Security Auditor found this paragraph the same
+    // way. A stale residual note is worse than none — it is read as a live one.
     //
     // The Windows cost of writing through a handle rather than `CopyFileExW` — alternate data streams
-    // are no longer carried — is measured and argued in `copy_file_onto_no_follow`'s own doc.
+    // are no longer carried — is measured and argued in `copy_file_onto_no_follow`'s own doc, which
+    // `copy_file_onto_destination_handle` shares.
     let mut written: HashSet<PathBuf> = HashSet::new();
     for (rel, file) in &manifest.files {
-        let (target, blob) = resolve_entry(dest_path, &blobs_dir_path, rel, &file.hash).map_err(|why| {
-            format!(
-                "{why} (detected immediately before writing it — the destination changed during the \
-                 restore, so entries written before this one may already be on disk)"
-            )
-        })?;
+        // **`safe_segments`, not `safe_target` (CPE-1937) — the guard is replaced, not stacked.**
+        // The two differ in exactly one thing: `safe_target` also asks `fsutil::confined_to` whether
+        // the joined path *resolves* inside the root, and that question is now answered — better, and
+        // atomically with the open — by the per-component walk below. Leaving the path version in
+        // front of the walk would make the walk's refusal unreachable for every case the path version
+        // already catches, which is CPE-1929's shadowed guard: a new guard nothing can red-proof.
+        //
+        // **Pass 1 keeps `safe_target`, and that is not the same thing.** Pass 1 creates nothing and
+        // decides one question — *may this manifest be attempted at all* — before a single byte is
+        // written, which is what gives a refused manifest its all-or-nothing property. It is a
+        // pre-flight, not the guard the write rests on. The guard the write rests on is the walk, and
+        // it is the only one, which is why the inside-pointing junction (invisible to `confined_to`,
+        // and therefore invisible to pass 1) is caught here and can be red-proofed here.
+        let segments = crate::revert_engine::safe_segments(rel)
+            .map_err(|why| refusal(rel, &why))
+            .map_err(|why| {
+                format!(
+                    "{why} (detected immediately before writing it — the destination changed during \
+                     the restore, so entries written before this one may already be on disk)"
+                )
+            })?;
+        let mut joined = PathBuf::new();
+        for seg in &segments {
+            joined.push(seg);
+        }
+        let target = dest_path.join(&joined);
+        let blob = blob_source(&blobs_dir_path, &file.hash)
+            .map_err(|why| refusal(rel, &why))
+            .map_err(|why| {
+                format!(
+                    "{why} (detected immediately before writing it — the destination changed during \
+                     the restore, so entries written before this one may already be on disk)"
+                )
+            })?;
         // Pass 1's collision check can only see entries that already resolve to something, so in a
         // *fresh* destination it sees neither `A.txt` nor `a.txt` until one of them exists. This closes
         // that half by observation instead of prediction: after each copy the file's real identity goes
@@ -465,11 +529,23 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
                 ));
             }
         }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        crate::fsutil::copy_file_onto_no_follow(&blob, &target)
-            .map_err(|why| format!("{}: {why}", blob.display()))?;
+        // `create_dir_all(target.parent())` stood here (CPE-1937). It walked a link at any interior
+        // component like an ordinary directory, and it ran *before* the containment question was
+        // settled against anything the write would actually use. The missing directories are now
+        // created by the same handle-relative walk that opens the leaf, inside the root handle held
+        // for this restore, so a refused entry cannot leave directory debris outside the destination
+        // either.
+        crate::fsutil::copy_file_onto_destination_handle(
+            &blob,
+            &target,
+            crate::fsutil::LinkGuardWording::RESTORE,
+            || crate::open_beneath::create_beneath(&root, &joined),
+        )
+        // The blob is named by its already-hex-validated **hash**, never by its absolute path inside
+        // the app's private checkpoint store — the rule `copy_file_onto_destination_handle`'s own doc
+        // states and `revert_engine::apply_write` follows. The previous wording here leaked the store
+        // path into a user-visible message.
+        .map_err(|refused| refusal(rel, &format!("{} (blob {})", refused.why, file.hash)))?;
         if let Ok(at) = fs::canonicalize(&target) {
             written.insert(at);
         }
@@ -477,8 +553,26 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
     Ok(())
 }
 
-/// The three guards for one manifest entry, yielding the `(target, blob)` pair pass 2 will use. Pure
-/// judgement — it creates nothing, which is what lets [`restore`] run it over the whole manifest first.
+/// The three guards for one manifest entry. Pure judgement — it creates nothing, which is what lets
+/// [`restore`] run it over the whole manifest first.
+///
+/// # PASS 1 ONLY, and its `Ok` value is discarded (CPE-1937)
+///
+/// This used to say "yielding the `(target, blob)` pair pass 2 will use", and that has stopped being
+/// true. Pass 2 no longer calls this at all: it recomputes from [`crate::revert_engine::safe_segments`]
+/// plus [`blob_source`] and writes through `open_beneath::create_beneath` against a root handle held
+/// for the restore. Pass 1 calls this purely for the `Err`, to decide whether the manifest may be
+/// attempted at all; the `Ok` is dropped on the floor.
+///
+/// **So the `safe_target` here is a pre-flight, not the guard the write rests on**, and that is what
+/// keeps it clear of CPE-1929. A guard stacked in front of the walk would make the walk's refusal
+/// unreachable for everything the path check already catches. This one is not in front of anything —
+/// it answers a different question (*may this manifest be attempted at all*, so that a refused one
+/// writes **nothing** rather than a partial tree) at a point where nothing has been written. The
+/// containment the write depends on is the walk, it is the only one, and the inside-pointing junction
+/// that `fsutil::confined_to` cannot see is therefore caught *and red-proofable* at the write — which
+/// `cpe_1937_a_link_pointing_back_inside_the_folder_still_never_redirects_the_restore` proves by going
+/// red when pass 2's walk is swapped back for the old by-path copy.
 fn resolve_entry(
     dest_path: &Path,
     blobs_dir_path: &Path,
@@ -2568,6 +2662,83 @@ mod tests {
         );
         let err = r.expect_err("a refused entry must fail the restore, never be skipped into an Ok");
         assert!(err.contains("link/pwned.txt"), "the refusal must name the offending path, got: {err}");
+    }
+
+    /// **CPE-1937 — the same link, pointing INSIDE the restore folder, which is the half the test
+    /// above cannot see.**
+    ///
+    /// `confined_to` answers a question about a path: *does it resolve inside the root?* With
+    /// `<dest>/link -> <dest>/other`, both sides are inside the root, so it answers **yes** — and the
+    /// manifest's bytes went to a location nothing named while `restore` returned `Ok(())`. Measured
+    /// identically on `main` and on PR #1050's branch:
+    ///
+    /// ```text
+    /// [A9 point_outside=false]  REDIRECTED=true   verdict=Ok(())   victim="CAPTURED BYTES"
+    /// [A9 point_outside=true ]  REDIRECTED=false  verdict=Err("... escapes ...")
+    /// ```
+    ///
+    /// Both directions are staged here, and the **inside** one is what CPE-1937 closed: pass 2 now
+    /// writes through `open_beneath::create_beneath` against a root handle held for the restore, so
+    /// the containment is decided per component and atomically with the open. The outside leg still
+    /// passes for the older reason (pass 1's pre-flight refuses the manifest before anything is
+    /// written), and is kept so a change that weakens either half reddens something.
+    ///
+    /// **Asserted on the FILESYSTEM.** The defect's signature is `Ok(())` beside a redirected file, so
+    /// a test reading only the `Result` passes against the bug.
+    #[test]
+    fn cpe_1937_a_link_pointing_back_inside_the_folder_still_never_redirects_the_restore() {
+        for point_outside in [false, true] {
+            let store = scratch("cpe1937-inside-store");
+            let dest = scratch("cpe1937-inside-dest");
+            let outside = scratch("cpe1937-inside-outside");
+            let elsewhere = if point_outside { outside.to_path_buf() } else { dest.join("other") };
+            fs::create_dir_all(&elsewhere).unwrap();
+            let elsewhere = fs::canonicalize(&elsewhere).unwrap();
+
+            let link = dest.join("link");
+            if !crate::fsutil::make_dir_link(&elsewhere, &link) {
+                crate::skip_notice!(
+                    "[CPE-1937] SKIPPED the inside-pointing interior-link restore leg: this machine \
+                     could not create a directory link at {}. NOTHING on this run covered a restore \
+                     redirected to a location inside the folder that nothing named.",
+                    link.display()
+                );
+                let _ = fs::remove_dir_all(&elsewhere);
+                return;
+            }
+            // Liveness: the link must really redirect, through the exact name the entry will use.
+            fs::write(link.join("liveness.txt"), b"through").unwrap();
+            assert_eq!(
+                fs::read(elsewhere.join("liveness.txt")).ok().as_deref(),
+                Some(&b"through"[..]),
+                "fixture is inert: the link does not redirect (point_outside={point_outside})"
+            );
+            fs::remove_file(elsewhere.join("liveness.txt")).unwrap();
+
+            plant_blob(&store, GOOD_HASH);
+            plant_manifest(&store, "planted", &[("link/pwned.txt", GOOD_HASH)]);
+
+            let r = restore(&store.to_string_lossy(), "planted", &dest.to_string_lossy());
+
+            // HARM FIRST, off the filesystem, before the verdict is inspected.
+            assert!(
+                !elsewhere.join("pwned.txt").exists(),
+                "HARM: the restore wrote through the link into {}, which nothing named \
+                 (point_outside={point_outside}); verdict was {r:?}",
+                elsewhere.display()
+            );
+            let err = r.expect_err("a redirected entry must fail the restore, never be an Ok");
+            assert!(
+                err.contains("link/pwned.txt"),
+                "the refusal must name the offending path (point_outside={point_outside}), got: {err}"
+            );
+            // The refusal reaches a user, so it must not carry the app's private store layout.
+            assert!(
+                !err.contains("blobs"),
+                "a user-visible refusal must not name the private checkpoint store: {err}"
+            );
+            let _ = fs::remove_dir_all(&elsewhere);
+        }
     }
 
     /// The **read** side: `hash` is joined onto `blobs/` with nothing checking it, so a manifest could
