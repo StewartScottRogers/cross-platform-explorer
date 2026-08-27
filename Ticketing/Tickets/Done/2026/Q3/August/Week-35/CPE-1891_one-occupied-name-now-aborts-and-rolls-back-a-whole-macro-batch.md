@@ -279,3 +279,39 @@ be argued in the work log.
   and the refusal genuinely fired) — and `cargo clippy --all-targets -- -D warnings` clean, both
   feature modes, both `crates/server` and `src-tauri` (re-run after this change; a `#[cfg(test)]`-only
   edit, so `src-tauri`'s clean run was a formality but run anyway rather than assumed).
+
+- **2026-08-27 — Round 6: a shared harness fix (`scripts/dev-harness/layout-guard/engine.mjs`) landed
+  inside this PR, not its own ticket — deliberately, stated here rather than as silent scope creep.**
+  `ca791271` went fully green on backend/frontend CI; the one remaining red job,
+  `Layout guard (real-browser rects, no WebDriver) — CPE-1882`, was not this ticket's own code, but it
+  had now failed twice in a row with the identical error (not a flake) and was the only thing blocking
+  the merge, so per the coordinator's explicit go-ahead — the same call a sibling worker made tonight on
+  CPE-1930 — it was fixed here rather than opened as a separate ticket that would have cost another
+  hour-long CI cycle just to re-discover the same root cause.
+
+  **Root cause:** `runAllCases` waited a flat, unnamed 15s (`waitForHttp(..., 15000)`) for Chrome to
+  expose its CDP endpoint at all — before any navigation, before the dev server is even touched. CI logs
+  showed Chrome genuinely launching (the orphan-reaper line proves the process existed) but the wait
+  giving up at ~19s on a runner already busy with this workflow's other jobs — the identical "cold start
+  on a loaded machine" cost class CPE-1914 (PR #1041, merged to `main`) hit for the engine's first
+  `Page.navigate` call, fixed there with its own `CDP_NAVIGATE_TIMEOUT_MS = 40000`. **This branch is 27
+  commits behind `main` and does not yet have CPE-1914's fix at all** (`CDP_NAVIGATE_TIMEOUT_MS` does not
+  exist in this branch's copy of `engine.mjs`) — checked by grep before writing anything, not assumed
+  from the coordinator's framing. Rather than cherry-pick CPE-1914's commit (touches an unrelated ticket
+  file, and will reconcile cleanly on its own the next time this branch syncs with `main`) or invent a
+  new number, the fix reuses the SAME 40000ms this file already commits to a few dozen lines below, for
+  the identical "cold dev server compiling the module graph on first hit" reason
+  (`checkOneCaseOnClient`'s `readySelector` poll deadline, present on this branch already) — the same
+  kind of already-committed anchor CPE-1914 itself reused rather than a doubled or invented number.
+
+  **Change:** added `CDP_ENDPOINT_TIMEOUT_MS = 40000` (named, alongside `CDP_CALL_TIMEOUT_MS`, with a
+  comment recording the reasoning above and the `CDP_NAVIGATE_TIMEOUT_MS` precedent/gap), used it in
+  place of the bare `15000` literal, and made the failure message name both the budget and its value
+  (`chrome CDP endpoint on ${cdpPort} never came up within CDP_ENDPOINT_TIMEOUT_MS=${CDP_ENDPOINT_TIMEOUT_MS}ms`)
+  so a future timeout is diagnosable from the CI log alone, no log dive required. `waitForHttp` already
+  polls every 150ms rather than sleep-then-check-once, so no change was needed there.
+
+  **Verified:** `npm run harness:layout-guard` stays green locally (2 cases, 12 width combinations, all
+  OK) — `node --check` confirms valid syntax. A loaded-runner cold start cannot be reproduced on this
+  machine, so the honest claim is **did not regress locally**, not "fixed, verified" — the actual proof
+  is the next CI run on the pushed SHA.
