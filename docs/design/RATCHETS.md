@@ -27,17 +27,25 @@ so it costs a checkout plus a few hundred milliseconds.
 Three properties, deliberately:
 
 1. **Lowering always sails through.** Fixing debt must never need paperwork.
-2. **Raising is still possible — never quiet.** A raise passes only if the ledger below carries a row
-   naming the baseline, the *exact* old and new values, the owning ticket, and why — **and that row is
-   not already present at the base revision**. A row is a **one-time** licence for the raise made in
-   its own diff, not a standing permit: otherwise burning a baseline back down and re-raising it later
-   would pass silently under someone else's ticket. A row that doesn't match the actual movement
+2. **Raising is still possible — never quiet.** A raise passes only if **this diff ADDS** a row to the
+   ledger below naming the baseline, the *exact* old and new values, the owning ticket, and why — a
+   row **not already present at the base revision**. A row is a **one-time** licence for the raise made
+   in its own diff, not a standing permit: otherwise burning a baseline back down and re-raising it
+   later would pass silently under someone else's ticket. A row that doesn't match the actual movement
    authorises nothing.
+
+   Rows are **counted, not looked up**, so the same `from → to` can legitimately happen more than once
+   over the repo's life — append a new row and leave the historical one in place. You should never need
+   to delete or edit an existing row to get past this guard; if you think you do, that is a bug here.
 3. **A guard that cannot measure goes red, not green — and never a guessed number.** This is the one
    the first implementation got wrong three ways, so it is worth stating as a rule rather than a hope:
    a measurer that returns the *wrong* value passes a raise, which is the whole defect. Concretely, all
    of these fail the job rather than producing a number:
    - a baseline constant that stops being a bare integer (`= 200 + 78`, `= Number("278")`);
+   - **two declarations of the same constant** — a decoy in a `/* … */` block or a template literal
+     used to outrank the live one, because the search ran on raw source and took the first match.
+     Comments and string interiors are now masked *before* the search, and more than one match is a
+     red in itself: which one is live becomes a question that cannot arise;
    - an allowlist that spreads another list into itself (`[...MORE_GAPS, "x"]`), or whose literal isn't
      the whole initialiser (`[...].concat(MORE)`);
    - a constant that was renamed, or a file that was deleted;
@@ -116,6 +124,15 @@ happened quietly. **None was inflated.**
 
 Written down here rather than only in a PR body, because a limitation nobody can find is
 indistinguishable from a bug.
+
+**Regex literals are not tracked by the source masker.** Telling `/` division from a regex needs real
+parsing. Getting this wrong is the *safe* direction, which is why it is documented rather than fixed:
+an unmasked regex can only ADD apparent entries (`["a", /x,y/, "b"]` counts 4, not 3), which
+over-reports debt and therefore fails closed on a raise; and a quote inside a regex masks at most to
+the end of its own line, yielding a "no declaration found" red rather than a wrong number. No
+registered baseline contains a regex today. Stated plainly because a hand-rolled character scanner
+over JS is the shape that produced several bugs in this repo in one week, every one found by
+adversarial input rather than by reading — so assume the next one is there and probe for it.
 
 **It measures counts, not identities.** A diff that removes one offender and adds a different one
 leaves the count flat and passes. Catching that needs per-entry identity diffing — which the

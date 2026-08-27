@@ -238,20 +238,133 @@ function stripComments(s) {
 }
 
 /**
- * Find the literal assigned to `const <name>` and return its `[`/`{` index.
+ * Blank out everything in `src` that is not live code — comment bodies, and the INTERIOR of every
+ * string/template literal — replacing each character with a space so that **every index stays valid
+ * against the original source**. Newlines are preserved so line numbers survive.
+ *
+ * Why this exists (CPE-1934 review round 3, R2-F1c): the declaration *search* used to run on raw
+ * source and take the first match. `stripComments` was applied only to the captured initialiser, never
+ * before the search, so a decoy inside a `/* … *\/` block or a template literal outranked the live
+ * constant:
+ *
+ *     /* Historical note: const BASELINE_TOTAL_HEX_OCCURRENCES = 277; *\/
+ *     const BASELINE_TOTAL_HEX_OCCURRENCES = 278;   // the live value — a real raise
+ *
+ * measured 277 and exited 0. Masking first is half the fix; [`findSoleDeclaration`] is the other,
+ * durable half.
+ *
+ * String quotes are KEPT (only the interior is blanked) so the literal scanners still see a
+ * well-delimited, inert string where a string used to be. An unterminated `'`/`"` is bounded at the
+ * end of its line, so a stray quote cannot silently swallow the rest of the file.
+ *
+ * Known gap, deliberately not closed: **regex literals are not tracked.** Telling `/` division from a
+ * regex needs real parsing, and getting it wrong here is the safe direction — an unmasked regex can
+ * only ADD apparent entries (`["a", /x,y/, "b"]` counts 4, not 3), which over-reports debt and so
+ * fails closed on a raise; and a quote inside a regex masks at most to end of line, which yields a
+ * "no declaration found" red rather than a wrong number. See `docs/design/RATCHETS.md`.
+ *
  * @param {string} src
+ * @returns {string}
+ */
+export function maskNonCode(src) {
+  const out = src.split("");
+  /**
+   * @param {number} from
+   * @param {number} to
+   * @returns {void}
+   */
+  const blank = (from, to) => {
+    for (let k = Math.max(0, from); k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "/" && src[i + 1] === "/") {
+      const nl = src.indexOf("\n", i);
+      const end = nl === -1 ? src.length : nl;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const e = src.indexOf("*/", i + 2);
+      const end = e === -1 ? src.length : e + 2;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (src[j] === c) break;
+        if (c !== "`" && src[j] === "\n") break; // an unterminated quote stops at its own line
+        j++;
+      }
+      const closed = j < src.length && src[j] === c;
+      blank(i + 1, closed ? j : j); // keep the delimiters, blank the interior
+      i = closed ? j + 1 : j;
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+
+/** @param {string} s @param {number} idx @returns {number} */
+function lineOf(s, idx) {
+  return s.slice(0, idx).split("\n").length;
+}
+
+/**
+ * Find the ONE `const <name>` declaration in already-masked source and return the index just past the
+ * name. **Two or more matches is an error in itself** — that is the durable half of the R2-F1c fix: it
+ * turns "which of these did I pick?" into a question that cannot arise, so a decoy cannot outrank the
+ * live constant even in a form the masker does not understand.
+ * @param {string} masked
  * @param {string} name
  * @returns {number}
  */
-function literalStart(src, name) {
-  const decl = new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?const\\s+${name}\\b`);
-  const m = decl.exec(src);
-  if (!m) throw new Error(`no \`const ${name}\` declaration found`);
-  const eq = src.indexOf("=", m.index + m[0].length);
+function findSoleDeclaration(masked, name) {
+  const re = new RegExp(`(?:^|\\n)[ \\t]*(?:export[ \\t]+)?const[ \\t]+${name}\\b`, "g");
+  /** @type {number[]} */
+  const ends = [];
+  /** @type {number[]} */
+  const lines = [];
+  for (let m = re.exec(masked); m !== null; m = re.exec(masked)) {
+    ends.push(m.index + m[0].length);
+    lines.push(lineOf(masked, m.index + m[0].length));
+    re.lastIndex = m.index + m[0].length;
+  }
+  if (ends.length === 0) throw new Error(`no \`const ${name}\` declaration found`);
+  if (ends.length > 1) {
+    throw new Error(
+      `${ends.length} declarations of \`const ${name}\` found (lines ${lines.join(", ")}) — this guard cannot ` +
+        `tell which one is live, and picking the first is exactly how a decoy outranks the real baseline. ` +
+        `There must be exactly one.`,
+    );
+  }
+  return ends[0];
+}
+
+/**
+ * Find the literal assigned to `const <name>` and return its `[`/`{` index. Operates on MASKED source
+ * (see [`maskNonCode`]) — indices are valid against the original too.
+ * @param {string} masked
+ * @param {string} name
+ * @returns {number}
+ */
+function literalStart(masked, name) {
+  const at = findSoleDeclaration(masked, name);
+  const eq = masked.indexOf("=", at);
   if (eq === -1) throw new Error(`\`const ${name}\` has no initialiser`);
   let i = eq + 1;
-  while (i < src.length && /\s/.test(src[i])) i++;
-  if (!CLOSERS[src[i]]) throw new Error(`\`const ${name}\` is not initialised with an array/object literal`);
+  while (i < masked.length && /\s/.test(masked[i])) i++;
+  if (!CLOSERS[masked[i]]) throw new Error(`\`const ${name}\` is not initialised with an array/object literal`);
   return i;
 }
 
@@ -290,9 +403,17 @@ function assertLiteralIsWholeInitialiser(src, end, name) {
  */
 export function numericConst(name) {
   return (src) => {
-    const m = new RegExp(`(?:^|\\n)[ \\t]*(?:export[ \\t]+)?const[ \\t]+${name}\\b[^=\\n]*=([^\\n]*)`).exec(src);
-    if (!m) throw new Error(`no \`const ${name}\` declaration found`);
-    const raw = stripComments(m[1])
+    const masked = maskNonCode(src);
+    const at = findSoleDeclaration(masked, name);
+    const nl = masked.indexOf("\n", at);
+    const lineEnd = nl === -1 ? masked.length : nl;
+    const eq = masked.indexOf("=", at);
+    if (eq === -1 || eq > lineEnd) {
+      throw new Error(`\`const ${name}\` has no initialiser on its own declaration line`);
+    }
+    const raw = masked
+      .slice(eq + 1, lineEnd)
+      .trim()
       .replace(/;\s*$/, "")
       .trim();
     if (!/^\d[\d_]*$/.test(raw)) {
@@ -313,11 +434,12 @@ export function numericConst(name) {
  */
 export function arrayLength(name) {
   return (src) => {
-    const open = literalStart(src, name);
-    if (src[open] !== "[") throw new Error(`\`const ${name}\` is not an array literal`);
-    const end = endOfSpan(src, open);
-    assertLiteralIsWholeInitialiser(src, end, name);
-    return splitTopLevel(src.slice(open + 1, end - 1)).length;
+    const masked = maskNonCode(src);
+    const open = literalStart(masked, name);
+    if (masked[open] !== "[") throw new Error(`\`const ${name}\` is not an array literal`);
+    const end = endOfSpan(masked, open);
+    assertLiteralIsWholeInitialiser(masked, end, name);
+    return splitTopLevel(masked.slice(open + 1, end - 1)).length;
   };
 }
 
@@ -329,12 +451,15 @@ export function arrayLength(name) {
  */
 export function recordOfArraysTotal(name) {
   return (src) => {
-    const open = literalStart(src, name);
-    if (src[open] !== "{") throw new Error(`\`const ${name}\` is not an object literal`);
-    const end = endOfSpan(src, open);
-    assertLiteralIsWholeInitialiser(src, end, name);
+    const masked = maskNonCode(src);
+    const open = literalStart(masked, name);
+    if (masked[open] !== "{") throw new Error(`\`const ${name}\` is not an object literal`);
+    const end = endOfSpan(masked, open);
+    assertLiteralIsWholeInitialiser(masked, end, name);
     let total = 0;
-    for (const entry of splitTopLevel(src.slice(open + 1, end - 1))) {
+    // Masking also fixes a subtler hazard here: a `[` inside a KEY string can no longer be mistaken
+    // for the value array's opening bracket, because key interiors are blank by the time we look.
+    for (const entry of splitTopLevel(masked.slice(open + 1, end - 1))) {
       const bracket = entry.indexOf("[");
       if (bracket === -1) throw new Error(`\`const ${name}\` entry has no array value: ${entry.slice(0, 60)}`);
       total += splitTopLevel(entry.slice(bracket + 1, endOfSpan(entry, bracket) - 1)).length;
@@ -498,6 +623,12 @@ export const NOT_A_RATCHET = [
     file: "scripts/ratchet-baselines.mjs",
     reason: "This guard's own REGISTRY: the list OF ratchets, not a ratchet. Its completeness is tested separately.",
   },
+  {
+    file: "src/lib/ratchetBaselines.test.ts",
+    reason:
+      "This guard's own test. Its R2-F1c decoy fixtures contain literal `const BASELINE_...` text inside " +
+      "template literals, which is the point of those fixtures — none of it is a real stored baseline.",
+  },
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -535,15 +666,18 @@ export function parseLedger(md) {
 }
 
 /**
- * True when `rows` contains a row authorising exactly this movement.
+ * Every row in `rows` authorising exactly this movement. Returned as a LIST, not a first match: the
+ * same from -> to move can legitimately happen more than once over a repo's life (burn a baseline
+ * down, then re-raise it later), so what matters is whether THIS diff adds one MORE row than the base
+ * had — not whether a row for that triple exists at all (CPE-1934 review round 3, R2-F2b).
  * @param {LedgerRow[]} rows
  * @param {string} id
  * @param {number | null} from
  * @param {number} to
- * @returns {LedgerRow | undefined}
+ * @returns {LedgerRow[]}
  */
-function findRow(rows, id, from, to) {
-  return rows.find((r) => r.id === id && r.from === from && r.to === to);
+function rowsFor(rows, id, from, to) {
+  return rows.filter((r) => r.id === id && r.from === from && r.to === to);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -579,16 +713,21 @@ export function evaluate(registry, base, head, ledger, baseLedger = []) {
   const errors = [];
 
   /**
+   * A raise is authorised when this diff ADDS a row for the movement — i.e. the working-tree ledger
+   * holds strictly more rows for that (id, from, to) than the base revision did. Counting rather than
+   * `find`ing is what lets the same movement be authorised twice over the repo's life while still
+   * refusing to re-use a historical row (R2-F2b).
    * @param {string} id
    * @param {number | null} from
    * @param {number} to
-   * @returns {{ row?: LedgerRow; spent?: LedgerRow }}
+   * @returns {{ row?: LedgerRow; spent?: LedgerRow; inHead?: number; inBase?: number }}
    */
   function licence(id, from, to) {
-    const row = findRow(ledger, id, from, to);
-    if (!row) return {};
-    const spent = findRow(baseLedger, id, from, to);
-    return spent ? { spent } : { row };
+    const head = rowsFor(ledger, id, from, to);
+    if (head.length === 0) return {};
+    const base = rowsFor(baseLedger, id, from, to);
+    if (head.length > base.length) return { row: head[head.length - 1], inHead: head.length, inBase: base.length };
+    return { spent: base[0], inHead: head.length, inBase: base.length };
   }
 
   for (const b of registry) {
@@ -636,7 +775,10 @@ export function evaluate(registry, base, head, ledger, baseLedger = []) {
           `file really is new in this diff, declare it: add \`| ${b.id} | new -> ${after} | CPE-NNNN | why |\` to ` +
           `${LEDGER_PATH}. If it was renamed, keep the rename detectable (rename in its own commit, or split the ` +
           `content change out) so the old value can be read.` +
-          (spent ? ` (A row for this already existed at the base revision; a row authorises one raise, in its own diff.)` : ""),
+          (spent
+            ? ` (A \`new ->\` row for this already existed at the base revision and this diff added no further one; ` +
+              `APPEND a row under the ticket that owns this change rather than reusing or editing the old one.)`
+            : ""),
       );
       continue;
     }
@@ -658,7 +800,7 @@ export function evaluate(registry, base, head, ledger, baseLedger = []) {
       continue;
     }
 
-    const { row, spent } = licence(b.id, before, after);
+    const { row, spent, inHead, inBase } = licence(b.id, before, after);
     if (row) {
       messages.push(
         `  ${b.id}: ${before} -> ${after} RAISED, and declared in ${LEDGER_PATH} under ${row.ticket}: ${row.reason}`,
@@ -667,11 +809,13 @@ export function evaluate(registry, base, head, ledger, baseLedger = []) {
     }
     if (spent) {
       errors.push(
-        `${b.id} (${b.file}) went UP: ${before} -> ${after}, and the ledger row that would authorise it ` +
-          `(${spent.ticket}) ALREADY EXISTED at the base revision. A ledger row is a one-time licence for the ` +
-          `raise made in its own diff, not a standing permit — otherwise burning a baseline back down and ` +
-          `re-raising it later passes silently under someone else's ticket. Add a NEW row, under the ticket that ` +
-          `owns THIS raise.`,
+        `${b.id} (${b.file}) went UP: ${before} -> ${after}, but this diff did not ADD a ledger row for that ` +
+          `movement — ${LEDGER_PATH} carries ${inHead} row(s) for it and the base revision already carried ` +
+          `${inBase} (the oldest is ${spent.ticket}). A row authorises the raise made in its OWN diff, not every ` +
+          `future one: otherwise burning a baseline back down and re-raising it later passes silently under ` +
+          `someone else's ticket. APPEND a new row under the ticket that owns THIS raise — keep the historical ` +
+          `row, it is counted rather than replaced, and you should never need to delete or edit one to get past ` +
+          `this guard.`,
       );
       continue;
     }

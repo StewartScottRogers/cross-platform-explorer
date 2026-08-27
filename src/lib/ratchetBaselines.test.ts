@@ -26,6 +26,7 @@ import {
   splitTopLevel,
   endOfSpan,
   measureWorkingTree,
+  maskNonCode,
   isUnmeasurable,
   numericConst,
   arrayLength,
@@ -160,11 +161,10 @@ describe("SABOTAGE F2 — reusing a ledger row that already existed at the base 
   // week, so burn back down and re-raise later and it passes silently under someone else's ticket.
   const row = [{ id: "demo", from: 10, to: 11, ticket: "CPE-1111", reason: "an older, already-spent raise" }];
 
-  it("FAILS when the authorising row was already in the ledger at the base", () => {
+  it("FAILS when the ledger is unchanged from the base — this diff added no row", () => {
     const v = evaluate(FAKE, { demo: 10 }, { demo: 11 }, row, row);
     expect(v.ok).toBe(false);
-    expect(v.errors.join("\n")).toContain("ALREADY EXISTED at the base revision");
-    expect(v.errors.join("\n")).toContain("one-time licence");
+    expect(v.errors.join("\n")).toContain("did not ADD a ledger row");
   });
 
   it("PASSES the same row when this diff is the one that adds it", () => {
@@ -176,6 +176,132 @@ describe("SABOTAGE F2 — reusing a ledger row that already existed at the base 
   it("an unrelated pre-existing row does not spend this one", () => {
     const other = [{ id: "demo", from: 5, to: 6, ticket: "CPE-9", reason: "a different, older raise" }];
     expect(evaluate(FAKE, { demo: 10 }, { demo: 11 }, [...row, ...other], other).ok).toBe(true);
+  });
+});
+
+describe("SABOTAGE R2-F2b — the F2 fix must not make a legitimate repeat raise impossible", () => {
+  // Review input, round 3: the round-2 fix asked "does the base ledger contain a row for this
+  // movement?" — so the SAME from -> to could never legitimately happen twice. Base carries
+  // `| hex-occurrences | 277 -> 278 | CPE-1111 |`; the working tree bumps 277 -> 278 AND appends a new
+  // row under CPE-2222. That exited 1 saying "Add a NEW row, under the ticket that owns THIS raise" —
+  // which the author had already done, leaving deleting or falsifying the historical row as the only
+  // way through. And it is exactly the realistic path: hex went 276 -> 277 last week, so
+  // 277 -> 278 -> burn down -> 277 -> 278 again is how this repo actually moves.
+  //
+  // The fix is to COUNT rather than `find`: authorise when the working tree holds strictly more rows
+  // for that (id, from, to) than the base did.
+  const historical = { id: "demo", from: 10, to: 11, ticket: "CPE-1111", reason: "historical, already spent" };
+  const fresh = { id: "demo", from: 10, to: 11, ticket: "CPE-2222", reason: "this diff: a new raise, new ticket" };
+
+  it("PASSES when this diff appends a second row for the same movement under a new ticket", () => {
+    const v = evaluate(FAKE, { demo: 10 }, { demo: 11 }, [historical, fresh], [historical]);
+    expect(v.ok).toBe(true);
+    // ...and cites the NEW row, not the historical one.
+    expect(v.messages.join("\n")).toContain("CPE-2222");
+  });
+
+  it("still FAILS when the ledger carries the historical row and this diff adds nothing", () => {
+    const v = evaluate(FAKE, { demo: 10 }, { demo: 11 }, [historical], [historical]);
+    expect(v.ok).toBe(false);
+    const msg = v.errors.join("\n");
+    expect(msg).toContain("carries 1 row(s) for it and the base revision already carried 1");
+    // The remedy must not be advice the author has already followed, and must never be "delete a row".
+    expect(msg).toContain("APPEND a new row");
+    expect(msg).toContain("keep the historical row");
+  });
+
+  it("counts rather than finds — three in the tree against two at the base is one new licence", () => {
+    const third = { ...fresh, ticket: "CPE-3333" };
+    expect(evaluate(FAKE, { demo: 10 }, { demo: 11 }, [historical, fresh, third], [historical, fresh]).ok).toBe(true);
+    expect(evaluate(FAKE, { demo: 10 }, { demo: 11 }, [historical, fresh], [historical, fresh]).ok).toBe(false);
+  });
+
+  it("applies the same counting rule to a `new ->` declaration", () => {
+    const old = { id: "demo", from: null, to: 17, ticket: "CPE-1", reason: "an earlier introduction" };
+    const now = { id: "demo", from: null, to: 17, ticket: "CPE-2", reason: "this diff" };
+    expect(evaluate(FAKE, { demo: null }, { demo: 17 }, [old, now], [old]).ok).toBe(true);
+    expect(evaluate(FAKE, { demo: null }, { demo: 17 }, [old], [old]).ok).toBe(false);
+  });
+});
+
+describe("SABOTAGE R2-F1c — a decoy declaration outranking the live constant", () => {
+  // Review input, round 3: F1 again in a different costume. The declaration SEARCH ran on raw source
+  // and took the first match — `stripComments` was only ever applied to the captured initialiser,
+  // never before the search. The `[ \t]*` before `const` made a `//`-commented decoy safe, but a
+  // `/* … */` block or a template literal was not:
+  //
+  //     /*
+  //     Historical note, kept for context:
+  //     const BASELINE_TOTAL_HEX_OCCURRENCES = 277;
+  //     */
+  //     const BASELINE_TOTAL_HEX_OCCURRENCES = 278;   <- live, a real 277 -> 278 raise
+  //
+  // measured 277, said "unchanged", exit 0, 72/72 vitest green. Two-part fix: mask comments and
+  // string/template interiors before searching, AND treat more than one matching declaration as a red
+  // in itself — the second half is the durable one, because it removes the question rather than
+  // answering it.
+  const BLOCK_DECOY = `/*
+Historical note, kept for context:
+const BASELINE_TOTAL_HEX_OCCURRENCES = 277;
+*/
+const BASELINE_FILES_WITH_HEX = 85;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 278;`;
+
+  it("reads the LIVE 278, not the block-commented 277", () => {
+    expect(numericConst("BASELINE_TOTAL_HEX_OCCURRENCES")(BLOCK_DECOY)).toBe(278);
+    expect(numericConst("BASELINE_FILES_WITH_HEX")(BLOCK_DECOY)).toBe(85);
+  });
+
+  it("reads the LIVE value past a template-literal decoy", () => {
+    const src = ["const doc = `", "const N = 1;", "`;", "const N = 278;"].join("\n");
+    expect(numericConst("N")(src)).toBe(278);
+  });
+
+  it("reads the LIVE array past a block-comment decoy (the reviewer's 5-entry case measured 2)", () => {
+    const src = `/*
+Old shape:
+const A: string[] = ["one", "two"];
+*/
+const A: string[] = ["a", "b", "c", "d", "e"];`;
+    expect(arrayLength("A")(src)).toBe(5);
+  });
+
+  it("reads the LIVE array past a template-literal decoy (the reviewer's 3-entry case measured 1)", () => {
+    const src = ["const help = `", 'const A = ["only"];', "`;", 'const A = ["a", "b", "c"];'].join("\n");
+    expect(arrayLength("A")(src)).toBe(3);
+  });
+
+  it("THROWS on two LIVE declarations — the shape no masker can see through", () => {
+    const src = `const N = 277;\nconst N = 278;`;
+    expect(() => numericConst("N")(src)).toThrow(/2 declarations of `const N` found \(lines 1, 2\)/);
+    expect(() => numericConst("N")(src)).toThrow(/There must be exactly one/);
+    expect(() => arrayLength("A")(`const A = ["a"];\nconst A = ["a","b"];`)).toThrow(/2 declarations/);
+  });
+
+  it("a decoy that is only a comment is masked, so it is not counted as a second declaration", () => {
+    // The masker and the sole-declaration rule must not fight each other: a commented-out old value is
+    // ordinary, harmless housekeeping and must keep working.
+    expect(numericConst("N")(`// const N = 1;\nconst N = 278;`)).toBe(278);
+    expect(numericConst("N")(`/* const N = 1; */\nconst N = 278;`)).toBe(278);
+  });
+
+  describe("maskNonCode", () => {
+    it("preserves length and newlines so every index stays valid against the original", () => {
+      const src = `const a = "xy"; // note\n/* b */ const c = 1;\n`;
+      const masked = maskNonCode(src);
+      expect(masked).toHaveLength(src.length);
+      expect(masked.split("\n")).toHaveLength(src.split("\n").length);
+    });
+
+    it("blanks comment bodies and string interiors but keeps the quotes", () => {
+      expect(maskNonCode(`const a = "const N = 1;";`)).toBe(`const a = "${" ".repeat("const N = 1;".length)}";`);
+      expect(maskNonCode(`// const N = 1;`)).toBe(" ".repeat("// const N = 1;".length));
+    });
+
+    it("bounds an unterminated single-line quote at its own line, not the rest of the file", () => {
+      const masked = maskNonCode(`const bad = /'/;\nconst N = 278;`);
+      expect(masked).toContain("const N = 278;"); // the live declaration survives
+    });
   });
 });
 
@@ -342,6 +468,28 @@ describe("the enumeration stays complete (CPE-1932: enumerate, don't recall)", (
   // 8 against 11 real hits, which goes thin the moment a couple of allowlists burn down and get
   // deleted. This says the real thing instead: the scan must actually SEE every file it is supposed to
   // be policing, so a broken regex or a broken walk reds instead of reporting a comfortable count.
+  // Round 3: the derived requirement below is filtered by `SCAN_ROOTS.some(...)`, so narrowing
+  // SCAN_ROOTS narrowed the requirement in lockstep — `SCAN_ROOTS = ["src/lib/preview"]` made "finds
+  // every registered file it is capable of seeing" pass with ZERO files capable of being seen. Round
+  // 1's absolute `>= 8` would have caught that head-on. Both halves are asserted here instead: the
+  // roots must actually COVER the registry, and what they cover must be non-trivial.
+  it("SCAN_ROOTS covers the registry, so the derived requirement below cannot be made vacuous", () => {
+    const uncovered = REGISTRY.map((b) => b.file)
+      .filter((f) => SCANNED_EXT.test(f))
+      .filter((f) => !SCAN_ROOTS.some((r) => f === r || f.startsWith(`${r}/`)));
+    expect(
+      uncovered,
+      `these registered baseline files sit OUTSIDE SCAN_ROOTS, so the completeness scan cannot see them ` +
+        `at all: ${uncovered.join(", ")}. Widen SCAN_ROOTS — never narrow it to make a check pass.`,
+    ).toEqual([]);
+
+    expect(
+      registeredScannableFiles().length,
+      "the completeness scan is required to cover almost nothing — SCAN_ROOTS or SCANNED_EXT has been " +
+        "narrowed until the requirement below is vacuous, which is the CPE-1932 zero-enumeration false green",
+    ).toBeGreaterThanOrEqual(6);
+  });
+
   it("the scan finds every registered file it is capable of seeing", () => {
     const shaped = new Set(ratchetShapedFiles());
     const missed = registeredScannableFiles().filter((f) => !shaped.has(f));
