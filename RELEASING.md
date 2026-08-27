@@ -114,6 +114,29 @@ gh run watch          # live-follow the most recent run
 gh run view --log-failed   # show logs of failed steps
 ```
 
+### You are not the alarm — the watchdog is (CPE-1872/CPE-1917)
+
+`gh run list` shows the most recent runs of *every* workflow, which is close to useless for a release
+workflow that only fires on a version tag: `release.yml` failed on **every** run for 27 days
+(2026-08-04 → 2026-08-23, six tags) and nobody noticed, because the workflow that ships the app people
+actually install is `release-sidecar.yml` and nobody watches the other one's Actions tab. `catalog` —
+which publishes the signed agent-catalog bundle — was `skipped` on all of those runs, and `skipped`
+reads exactly like a job that correctly had nothing to do.
+
+So do not rely on looking. Two automated backstops exist and are the thing to check:
+
+- **`release-pipeline-watchdog.yml`** files/updates a deduped GitHub issue labelled
+  `release-pipeline-red` whenever either release workflow finishes with anything other than success.
+  **An open issue with that label means a release pipeline is broken right now.**
+- **`catalog-freshness.yml`** runs on a schedule and files an issue if the *live* catalog a real
+  client would fetch is missing or older than its threshold — the backstop for the ways the bundle can
+  stop shipping without any workflow going red at all.
+
+`gh issue list --label release-pipeline-red --state open` is a better health check than `gh run list`.
+Both alarms are ratcheted by tests (`src/lib/releaseVerifyWiringGuard.test.ts`,
+`src/lib/catalogPublishFreshnessGuard.test.ts`) so they cannot be silently disconnected from what they
+watch.
+
 ## Check what needs updating
 
 ```powershell
