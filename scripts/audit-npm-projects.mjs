@@ -238,9 +238,14 @@ function unappliedNonMajorFix(/** @type {string} */ dir) {
 
     // NO `--force`: accepting a semver-major has to be structurally impossible here, not merely
     // avoided by convention. Measured on a scratch copy, `--force` here downgrades @wdio/local-runner
-    // 9.31.4 -> 7.40.0, @wdio/cli 9.31.4 -> 8.14.6, webdriverio -> 8.14.6 and @wdio/mocha-framework
-    // -> 8.14.0, REWRITES package.json's pins, leaves an incoherent v7/v8/v9 mix (@wdio/types stays
-    // at 9.29.1), and takes gui-smoke from 15 advisories to 29.
+    // 9.31.4 -> 7.40.0, @wdio/cli 9.31.4 -> 7.40.0 and @wdio/mocha-framework -> 8.14.0, REWRITES
+    // package.json's pins, leaves an incoherent v7/v8/v9 mix (@wdio/types stays at 9.29.1), and
+    // takes gui-smoke from 15 advisories to 28.
+    //
+    // The exact versions and counts VARY BETWEEN RUNS -- an earlier run of the identical command
+    // gave @wdio/cli 8.14.6 / 29 advisories, the same instability this file documents for
+    // `fixAvailable`. The direction does not vary: backwards by two majors, manifest rewritten,
+    // more advisories than it started with. Do not treat the numbers as a fixture.
     let fixStderr = "";
     try {
       execFileSync("npm", ["audit", "fix", "--package-lock-only", "--no-fund", "--no-audit"], {
