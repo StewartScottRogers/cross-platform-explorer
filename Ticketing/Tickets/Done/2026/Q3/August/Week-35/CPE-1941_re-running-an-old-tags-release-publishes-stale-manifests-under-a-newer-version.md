@@ -3,7 +3,7 @@ id: CPE-1941
 title: re-running an old tag's release workflow republishes stale manifests under a *newer* version — a content downgrade anti-rollback accepts by design
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -190,3 +190,69 @@ exercised under real Linux bash (WSL Ubuntu), now stated in the PR body.
 A release cut from an older commit stamps a `%ct` below the live catalog's while clearing the floor,
 so it publishes green and every client silently refuses it. A paragraph documenting it is now in the
 script header and the design doc. Preferred fix shape is in the PR body.
+
+## Closed 2026-08-27 — merged as PR #1061, after two rounds
+
+**Reviewer APPROVE + Security Auditor SEC FINDINGS (all non-blocking).** Verified on `main` after the
+merge: `bash .github/workflows/scripts/catalog-version.sh` → **1787863202**, above the floor.
+
+**What shipped.** `VERSION` now comes from the **tagged commit's committer timestamp** (`%ct`, not
+`%at` — a rebase refreshes `%ct` so it tracks *landing* order), computed in a new
+`.github/workflows/scripts/catalog-version.sh` and passed to the signer by step output. Plus an
+**enforced, fatal** `CATALOG_VERSION_FLOOR = 1787000000`.
+
+The reproduction drives the **real** publish (`catalog::sign_bundle`) and apply (`apply_bundle_at`)
+paths, with the only difference between before and after being the one number the workflow hands the
+signer. Before: republishing an old tag is **Applied** — the on-disk manifest reverts to v1's content
+*and* the client records the new stamp, so the genuine v2 can never be re-applied either. After:
+`Rollback`, nothing written; a genuinely newer release still `Applied`; the same tag `AlreadyCurrent`.
+
+### The installed-base question was the one that could have bricked every user
+
+Both gates went at it independently. The Auditor enumerated **all 65 releases** carrying a
+`catalog-index.json` through the API: global max **1784951108**, and the version sequence is
+**perfectly monotone across every one** — no evidence the old-tag republish was ever exercised in the
+wild. The transition test reads the floor **out of the shell script** and asserts three things: floor
+> installed base, floor **in the past** (a future floor fails every release — the opposite and equally
+fatal error), and a client at the high-water mark accepts the first commit-derived release.
+`a_repo_committed_counter_would_have_bricked_the_installed_base` is the red-proof for the rejected
+alternative: `Rollback` forever.
+
+**`v0.57.32` is a DRAFT** — caught in review. No client ever fetched `1784951108`; the true public
+high-water mark is `1784894333`. The floor conclusion is unaffected (it errs high), and the author
+**kept** the higher number deliberately, saying why at each site: it is what a plain `max` over the
+releases API returns, so the next person to re-measure lands on the same value.
+
+### `GIT_COMMITTER_DATE` is the new attack surface, and it is bounded
+
+The Auditor's headline question. Answer: a `now + 86399` stamp passes (a ≤24h denial-of-update
+available to anyone with commit access, bounded and self-healing); anything beyond is `rc=4` **fatal**.
+The 18-digit cap prevents int64 blowups and an overflowing `now` fails **closed**. Correct trade-off.
+
+### Two claims that did not survive checking
+
+- The Foreman's list of places needing the draft correction said four; the author found **five** —
+  the TS constant's comment had the same wording.
+- Its own `date +%s` sabotage reds **5 of 17**, not 4: a minimal one-line swap reds 4, a full revert
+  to the pre-fix shape reds 5. It measured both rather than accepting either.
+
+Two inferred items were closed rather than left: the derive step now **asserts**
+`git rev-parse HEAD == github.sha`, and the script was exercised under real Linux bash.
+
+**`model-snapshot.yml` keeps `date -u +%s` deliberately** — live-scraped content, so publish time
+genuinely *is* content time — with the reason beside it and a test pinning both the line and the
+reason so a future "consistency" pass cannot quietly break it.
+
+### Residuals filed
+
+**CPE-1951** — the version now tracks *commit* order, not *release* order, so a release cut from an
+older base publishes a fully **green** bundle every client silently refuses. Found by **both** gates
+independently. The author argued for an index-fetch lower bound over a committed counter, and the
+reasoning is recorded in that ticket: a counter must be bumped by something, and a stale one degrades
+into the static ratchet we already have — whereas the fetch is a bound that **fails the build**, so it
+needs no signature verification to be safe.
+
+**CPE-1953** — the legacy-tag window's stated mitigation was mis-ordered: `CATALOG_TRUSTED_KEYS` is a
+**compile-time** list, so rotating the signing key makes every already-installed client reject *every*
+bundle until it app-updates, and the same secret signs the model catalog. Reordered cheapest-first,
+with restricting workflow re-runs as the option to reach for.
