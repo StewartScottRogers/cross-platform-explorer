@@ -1874,6 +1874,30 @@ The first CI run of that fix, on its own PR:
 A **named** failing case in a **named** spec, not listed as known-failing, where seven previous runs
 had said "0 new failing cases".
 
+### Correction — the mechanism above is WRONG, and the conclusion survives by a different route
+
+The Foreman's hypothesis was that `macro-param-prompt` had been failing *inside the swallowed
+thirteen*. PR #1068's worker checked instead of agreeing, and it is one step off:
+
+- `grep -c 'ctx .flyout .row'` on job `98646323315` is **0**. In the four swallowed runs the transport
+  died at spec **#2**; `macro-param-prompt` is spec **#6**, so the app was already gone and it never
+  really ran. **Those runs cannot speak to that spec's health at all.**
+- The regression is **not new and not caused by #1068**: job `98697809924`, on a *different agent's*
+  branch at sha `373ee259`, **before the fix existed**, reported byte-identical output — same
+  `14/14 reported`, same 23/1/2, same case, same real error `element (".ctx .flyout .row") still not
+  existing after 5000ms`. That also explains the `2 skipped/pending` as pre-existing rather than a new
+  symptom.
+
+**So shard 2 had TWO independent failure modes on the same day**: an illegible transport death
+reporting "0 new failing cases", and a genuine intermittent `macro-param-prompt` failure. Runs that
+died reported nothing actionable and were re-run; runs that *survived* reported the regression — and
+those were re-run too.
+
+**The conclusion holds and is arguably worse than the original claim.** The re-run reflex was not
+merely discarding evidence that had not been written; it was discarding a **legible, named regression
+that the ratchet had correctly reported.** The masking and the real failure were separate problems,
+and the habit swallowed both.
+
 Three things to carry:
 
 1. **"0 new failures" from a suite that did not complete is not information.** The ratchet was right
