@@ -808,6 +808,110 @@ made the Windows residual real was wrong.
   and `x86_64-apple-darwin`. No new dependency crate. No `specta::Type` touched. Nothing machine-global
   was added this round (the musl target from round 2 remains installed).
 
+## 2026-08-27 — ROUND 4 on PR #1043: a test that proved nothing, and why the suggested fix was not enough
+
+**Security Auditor: SEC PASS. 1,900 race-probe trials across three heads (`46f6a02a`, `830fd5f0`,
+`0496a271`), 0 escapes**, including 300 trials of its own deeper three-level-chain variant. Clean on
+every route it tried: hard link at the leaf, root swap mid-run, 39 hostile path shapes, the disclosed
+rename residual (unreachable on Windows across **248 instrumented attempts, all `Access is denied`**;
+live on Linux's fallback walk under WSL2 and caught loudly by `landed_inside`), neutering the reparse
+refusal, and forcing the shared predicate to both `None` and a lying `Some(false)`. One boundary is
+recorded as unmeasured: it could not produce a genuine `None` on this machine, so the forced-predicate
+experiment stands in for the unanswerable-volume case.
+
+- **2026-08-27 (Worker) — the defect: my leaf test proved nothing, and it is this repo's signature
+  disease one layer down.** The Reviewer sabotaged each guard independently instead of trusting my
+  red/green claim. Disabling the leaf surrogate refusal outright (`if false && facts.is_reparse_point`)
+  left `a_non_surrogate_reparse_point_at_the_leaf_is_written_not_refused` **passing** and the whole
+  suite green: **2404 passed, 0 failed**. The refusal had *zero* coverage anywhere in the crate. Its
+  "surrogate half" was a symlink, which is refused ~50 lines earlier by the unrelated
+  `symlink_metadata(dst).is_symlink()` path check — so the two halves went on diverging with the tag
+  check hard-wired to `false`, which is **exactly the condition the test's own doc claimed to
+  exclude**. The half was also wrapped in `if make_file_link(...)`, `require_staged(supported_here =
+  false)` on Windows, so a runner without `SeCreateSymbolicLinkPrivilege` skipped it **silently** — no
+  `skip_notice!`, unlike the non-surrogate half above it.
+
+- **2026-08-27 (Worker) — the suggested fix does not work on its own, and the measurement says why.**
+  The proposal was to swap the symlink for `make_guid_reparse_point(&leaf, 0x2000_1234, false)` —
+  "refused by the tag check and nothing else". Built it, and the test went **red on the wrong guard**:
+
+  ```text
+  and the SURROGATE refusal must be the one that fired — not the symlink path check …:
+  …\surrogate.txt: this name is a link, and a restore never writes through one
+  ```
+
+  `std::is_symlink` tracks the **same name-surrogate bit** the tag check reads (the Auditor's own
+  finding, arriving the same hour), so the path check catches every surrogate first. **No fixture can
+  make the tag check the decider while a path question answering on the same bit runs ahead of it.**
+  That is also the real explanation for the Auditor's forced-`Some(false)` result letting nothing
+  through.
+
+- **2026-08-27 (Worker) — so the path check now runs AFTER the handle checks.** That is the ordering
+  the rest of the function argues for: `w` is the object the bytes will enter and cannot be substituted
+  after the open; `dst` is a name that can. **On Unix nothing changes at all** — `is_reparse_point` is
+  always `false` there, so the path check remains the only net on Linux and macOS. On Windows the only
+  change is *which* guard reports a surrogate, and therefore which one a test can pin. Both still
+  refuse; both still remove a file this call created.
+
+  **Red-then-green on the exact sabotage that was green before:** with the leaf surrogate refusal
+  disabled, `cargo test --lib` is now **2404 passed, 1 failed** — the leaf test, failing with the
+  message above because it detects that the *second* net caught it instead of the tag check. Committed
+  before probing; reverted with `git checkout --` against the clean commit.
+
+- **2026-08-27 (Worker) — the second net is now a tripwire, not an inference.**
+  `cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit` asserts `is_symlink` is `true` for
+  `0x2000_1896` and `false` for `0x0000_1896`, tags differing only in bit 29. The Auditor was careful
+  that this is **three data points on one Windows build**, consistent with keying on the bit but with
+  the mechanism inferred rather than read out of the OS — and std promises nothing, so a future release
+  could narrow it to the two documented tags without breaking its contract and silently remove the net
+  the leaf guard's fail-closed argument leans on. The comment says "measured, tracked the bit", not
+  "std guarantees"; the test is what makes a change to it loud.
+
+- **2026-08-27 (Worker) — F7: the OneDrive claim split into measured and not-established.**
+  - **Measured, and the absent filter driver cannot affect it — the classification.**
+    `GetFileInformationByHandleEx(FileAttributeTagInfo)` is serviced by the **filesystem**, not by the
+    tag's owner: the tag and its surrogate bit live in the NTFS reparse data and come back identically
+    whether or not `cldflt` is loaded, and cloud tags are N=0 by construction.
+  - **Not established: that the resulting file is correct.** The fixture gives three reasons not to
+    assume it. The copy reports `Ok(16)` and the object is then unopenable by ordinary path
+    (`ERROR_CANT_ACCESS_FILE`), so the fixture cannot distinguish "wrote a correct file" from "wrote
+    into an unreadable object" — and on the fixture it is demonstrably the latter. Attributes
+    afterwards are `0x420`: **the reparse bit survives `set_len(0)` and the whole copy**, and
+    `FILE_OPEN_REPARSE_POINT` exists precisely to tell the owning filter *not* to hydrate, so on a real
+    placeholder this could leave an object OneDrive still believes is a placeholder over replaced data.
+    And `landed_inside` re-opens by ordinary path, which **fails on the fixture and would succeed on a
+    real placeholder** — the two diverge on the final verdict too, in opposite directions.
+  - Containment is untouched either way (the bytes cannot leave the destination), and the prior
+    behaviour refused *every* dehydrated file, so this is better in expectation. But it is not a
+    demonstration that backups into OneDrive work. **`src/docs/safety-undo.md` no longer tells users it
+    does**: the folder case is stated as tested, the file case as accepted-but-unverified with an
+    attended check pending, and the reassurance is scoped to "nothing can land outside your chosen
+    destination".
+
+- **2026-08-27 (Worker) — the three precision corrections, applied as asked.** (1) The `is_symlink`
+  note is worded as measured across three synthetic tags, not as a property of std's contract.
+  (2) The walk's cost is stated accurately: `name_surrogate_at` runs on **every** directory component
+  and the attribute check happens *inside* the shared helper, so the ordinary case costs **one extra
+  `GetFileInformationByHandleEx` per directory component** — the leaf's "only when the bit is set"
+  gating is the leaf's alone. `tick()` fires before the call, so AC5's 5/6 and 6/2 figures already
+  count it and nothing is re-measured. (3) `0x3000_1896` (surrogate + directory together) is recorded
+  as an **observed staging limit** — `make_guid_reparse_point` returned `false` while the other three
+  combinations staged fine, and nobody determined why — not as "Windows forbids".
+
+- **2026-08-27 (Worker) — the two nice-to-haves.** The comment naming the helper
+  `handle_is_name_surrogate` now names `reparse_name_surrogate`. And the shared helper records that
+  **both defaults rest on reading, not measurement**: the `None` arm is untestable by construction —
+  no fixture can make `GetFileInformationByHandleEx` fail on a handle that has just opened
+  successfully, the only state either caller reaches it from — so it is argued rather than
+  demonstrated, which is worth saying in a module where everything else is measured.
+
+- **2026-08-27 (Worker) — round 4 guardrails.** `cargo test` in `crates/server`: **2405 passed, 0
+  failed, 10 ignored**, all 11 targets green (2404 before; the new one is the `is_symlink` pin).
+  `cargo clippy --all-targets -- -D warnings` clean in plain, `--features index`, `--features specta`.
+  No new dependency crate, no `specta::Type` touched, nothing machine-global added. No flake observed
+  this round, and none in the Reviewer's 131.66 s run either; the `archive.rs` `EXTRACT_SEQ`/
+  `SESSION_ROOT` candidate recorded in round 3 remains untouched and unfiled.
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a
