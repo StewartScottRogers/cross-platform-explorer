@@ -115,9 +115,8 @@ tree, and red naming exactly `brace-expansion, js-yaml` when pointed at the pre-
 Partly verified locally; **CI is the first full test**, stated plainly:
 
 - `npm run typecheck` — **passes**. Covers all **43** spec files + `wdio.conf.ts` + `lib/` + `scripts/`
-  against the new types. This matters more than usual: `npm audit fix` bumped **`expect-webdriverio`
-  5.7.0 -> 6.0.9**, a transitive *major* (permitted without `--force` because it is not a declared
-  dependency), and that is the assertion library every spec's `expect()` comes from.
+  against the new types, including the one transitive *major* the fix took: **`expect-webdriverio`
+  5.7.0 -> 6.0.9** (permitted without `--force` because it is not a declared dependency).
 - `npm run test:unit` — **130/130 pass** across 38 suites.
 - Runtime module-load smoke over every bumped package (`webdriver`, `webdriverio`, `@wdio/*`,
   `expect-webdriverio`, `@puppeteer/browsers`, `js-yaml`, `extract-zip`, `brace-expansion`) plus live
@@ -172,3 +171,72 @@ own the day an upstream fix lands, which is the correct trigger. Recorded in CPE
 here ships in the redistributed binary. Also swept for the "reads repo-wide but is root-only" defect:
 CPE-1926 and CPE-1443 were already qualified, CPE-1820's line says "at repo root", and nothing else
 carried an unqualified number.
+
+## Work Log — review round 2 (2026-08-27)
+
+**CHANGES REQUESTED on #1065; one blocking defect, and it was mine, in the sharpest possible form: the
+new guard reported a false green while auditing nothing — the exact failure class it was built to
+prevent.** Reproduced both of the reviewer's cases before fixing anything.
+
+`npmAuditJson()` guarded on *"is stdout parseable JSON?"*. npm's `--json` **error** path emits
+well-formed JSON with no `metadata` key, so `JSON.parse` succeeded and the guard could never fire:
+
+    $ npm_config_registry=http://127.0.0.1:9/ node scripts/audit-npm-projects.mjs
+    Repo-wide total across all 2 npm project(s): {"moderate":0,"high":0,"critical":0,"total":0}
+    SWEEP_EXIT=0
+
+The right error message was written and wired to a condition that could not trigger — and a flaky
+registry is the likeliest failure mode of this job on CI. With one lockfile corrupted (merge-conflict
+markers, a realistic state) it was worse: the broken project contributed `{}` and **the root-only number
+printed as the repo-wide sum** — CPE-1945 reproduced inside the guard meant to close it.
+
+**Fixed** by checking `metadata.vulnerabilities` after the parse, extracted as an exported
+`isUsableAuditReport()` so it could be pinned offline. Verified all four paths:
+
+| case | before | after |
+|---|---|---|
+| dead registry | exit 0, "0 across 2 projects" | **exit 1**, `::error::`, no total printed |
+| corrupt `gui-smoke/` lockfile | exit 0, root's 10 shown as repo-wide | **exit 1**, `::error::`, no sum printed |
+| happy path | exit 0, sum 25 | unchanged — exit 0, sum 25 |
+| pre-fix lockfile (red control) | exit 1, names `brace-expansion, js-yaml` | unchanged |
+
+Also taken, as advised: the bare `catch {}` around `npm audit fix` now distinguishes a genuine failure
+from "vulnerabilities remain" — measured, the normal path writes **nothing** to stderr while a real
+failure carries npm's own `npm error` marker, so a failed probe throws instead of being swallowed into
+"no unapplied fix". And an unmakeable scratch dir now fails closed with an `::error::` line instead of a
+raw `ENOTDIR` stack. Every throw is caught at top level and printed as
+`::error::npm audit sweep FAILED -- it did not audit, which is not the same as finding nothing`.
+**4 new offline regression tests** pin npm's real error payload as unusable (9 tests total in
+`src/lib/npmProjects.test.ts`).
+
+### Four corrections to my own claims — all were overstatements, all verified independently
+
+1. **`@puppeteer/browsers@2.13.2` is not "(latest)".** Latest is **3.2.1**, whose deps are
+   `{yargs, modern-tar}` — it **dropped `extract-zip` entirely**. The real gate is `@wdio/utils` pinning
+   `^2.2.0`. Conclusion survives; my stated reason did not.
+2. **"no forward fix in existence" was too strong.** `deepmerge-ts@8.0.2` and
+   `serialize-javascript@7.1.0` are both **published**; they are unreachable through `@wdio/*`'s
+   `^7.0.3` and mocha's `^6.0.2` ranges. Now stated as *gated behind WebdriverIO's and mocha's
+   dependency ranges*.
+3. **`extract-zip`'s advisory range is `<=2.0.1`, not `*`** — corrected in all three places.
+4. **The `expect-webdriverio` claim was wrong, in the scary direction.** I called the 5.7.0 → 6.0.9
+   major load-bearing because "that is where every spec's `expect()` comes from". **It is not.** All 43
+   spec files import `expect` from **chai**; `@wdio/globals` is imported only for `$`, `$$`, `browser`.
+   `chai` is **5.3.3** and appears **zero** times in the lockfile diff — the assertion path was never
+   touched. The scariest-sounding risk in the PR was not one, and leaving it would have made a reader
+   over-weight it.
+
+### The `--force` finding, restated with measured numbers
+
+Understated the first time. On a scratch copy, `npm audit fix --force` in `gui-smoke/`: downgrades
+`@wdio/local-runner` 9.31.4 → **7.40.0**, `@wdio/cli` 9.31.4 → **7.40.0**, `@wdio/mocha-framework`
+9.31.2 → **8.14.0**; **rewrites `package.json`'s pins** (so it is not lockfile-local); leaves an
+incoherent **v7/v8/v9** mix (`@wdio/types` stays 9.29.1, `webdriverio`/`webdriver` stay 9.31.4); and
+takes the project from **15 advisories to 28**. It makes the number worse while regressing the GUI-verify
+harness by two majors.
+
+### The deferral still stands
+
+It rested entirely on the sweep being trustworthy, and a registry blip made it green. With the metadata
+check landed and regression-tested, "no follow-up ticket — `npm-audit-sweep` reds when upstream ships"
+holds as written.

@@ -66,27 +66,42 @@ lesson here. This ticket's scope is unchanged either way: CPE-1443 owns the **ro
 
 **CPE-1945 answered the open question above: `gui-smoke/`'s residue is NOT in this ticket's scope, and is
 not a migration at all.** After its non-major pass, `gui-smoke/` sits at 15 advisories (1 moderate / 14 high)
-— and every one is **upstream-gated, with no forward fix in existence**. The project is already on the
-**latest** `@wdio/*` (9.31.4) and the latest `expect-webdriverio` (6.0.9); the advisories are cascades from
-pins that WebdriverIO's own current release still carries:
+— and every one is **gated behind WebdriverIO's and mocha's own dependency ranges**, not behind any decision
+of ours. The project is already on the **latest** `@wdio/*` (9.31.4) and the latest `expect-webdriverio`
+(6.0.9); the advisories are cascades from pins that WebdriverIO's own current release still carries. Note the
+fixed versions mostly **exist** — they are simply unreachable through those pins:
 
-- `@wdio/config` / `@wdio/utils` / `@wdio/runner` / `webdriver` @ 9.31.x require `deepmerge-ts@^7.0.3`; the
-  advisory needs `>=8.0.0`. Waiting on WebdriverIO, not on us.
+- `@wdio/config` / `@wdio/utils` / `@wdio/runner` / `webdriver` @ 9.31.x require `deepmerge-ts@^7.0.3`. The
+  advisory needs `>=8.0.0`, and **`deepmerge-ts@8.0.2` is published** — the `^7.0.3` pin is the blocker.
 - `@wdio/mocha-framework@9.31.2` requires `mocha@^10.3.0`, and `mocha@10` requires
-  `serialize-javascript@^6.0.2`; the advisory needs `>7.0.4`. Same shape.
-- `@puppeteer/browsers@2.13.2` (latest) requires `extract-zip@^2.0.1`, and that advisory's range is `*` —
-  **no published version of `extract-zip` is unaffected.** There is nothing to upgrade to.
+  `serialize-javascript@^6.0.2`. The advisory needs `>7.0.4`, and **`serialize-javascript@7.1.0` is
+  published** — mocha's `^6.0.2` pin is the blocker.
+- `@wdio/utils` requires `@puppeteer/browsers@^2.2.0`, which resolves to 2.13.2 → `extract-zip@^2.0.1`, whose
+  advisory range is `<=2.0.1` (2.0.1 being `extract-zip`'s latest, so there is nothing newer on that package
+  itself). The interesting part: **`@puppeteer/browsers@3.2.1` dropped `extract-zip` entirely** — its deps are
+  `{yargs, modern-tar}` — so the chain *is* fixed upstream, and the real gate is `@wdio/utils`'s `^2.2.0`
+  range, not the absence of a fix.
 
-So there is no `@wdio/*` major migration to schedule. What npm *offers* as a fix for these is a **downgrade**
-— `@wdio/local-runner@7.40.0`, `@wdio/cli@8.14.6` against an installed 9.31.4 — i.e. walking backwards to a
-tree that predates the advisory. `npm audit fix --force` would have taken it, silently regressing the harness
-that guards the whole GUI verification leg by two major versions. That is the concrete reason the no-`--force`
-rule is structural here rather than stylistic.
+So there is no `@wdio/*` major migration to schedule — the whole `@wdio/*` 9.31.4 line is already current, and
+what npm *offers* instead is a **downgrade**. Measured on a scratch copy, `npm audit fix --force` here:
+
+- downgrades `@wdio/local-runner` 9.31.4 → **7.40.0**, `@wdio/cli` 9.31.4 → **7.40.0**,
+  `@wdio/mocha-framework` 9.31.2 → **8.14.0** — walking backwards to trees that predate the advisories;
+- **rewrites `package.json`'s pins** to match (`"@wdio/cli": "^7.40.0"`, `"@wdio/local-runner": "^7.40.0"`,
+  `"@wdio/mocha-framework": "^8.14.0"`), so it is not even lockfile-local;
+- leaves an incoherent **v7/v8/v9 mix** — `@wdio/types` stays at 9.29.1, `webdriverio`/`webdriver` stay 9.31.4;
+- and takes the project from **15 advisories to 28**.
+
+It makes the number worse while silently regressing the harness that guards the whole GUI verification leg by
+two major versions. That is the concrete reason the no-`--force` rule is structural here rather than
+stylistic.
 
 This ticket's scope therefore stands unchanged and genuinely separate: **CPE-1443 owns the four root
 dev-toolchain majors, which DO have forward fixes available.** `gui-smoke/`'s residue needs no decision from
-us, only an upstream release; `npm-audit-sweep` in ci.yml will notice the day one lands, because it fails on
-an unapplied non-major fix.
+us, only an upstream range bump; `npm-audit-sweep` in ci.yml will notice the day one lands, because it fails
+on an unapplied non-major fix. (That deferral rests on the sweep being trustworthy, which is why its
+false-green hole — npm's `--json` error payload parsing as a clean report — was closed and regression-tested
+before this note was written.)
 
 Related: **CPE-1926** (the non-major half, done), **CPE-1904** (package-lock drift backstop),
 **CPE-1945** (`gui-smoke/` audited for the first time; the repo-wide npm sweep).

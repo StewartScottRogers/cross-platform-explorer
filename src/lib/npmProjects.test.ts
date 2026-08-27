@@ -25,7 +25,11 @@ import { join } from "node:path";
 // implementation of the enumeration, so this test pins the real thing rather than a TS copy that could
 // drift out of agreement with what CI actually runs. (`npm run check` type-checks the .mjs through
 // this import, which is why it carries JSDoc types.)
-import { discoverNpmProjects, MIN_EXPECTED_NPM_PROJECTS } from "../../scripts/audit-npm-projects.mjs";
+import {
+  discoverNpmProjects,
+  MIN_EXPECTED_NPM_PROJECTS,
+  isUsableAuditReport,
+} from "../../scripts/audit-npm-projects.mjs";
 
 const REPO_ROOT = process.cwd();
 
@@ -75,5 +79,54 @@ describe("npm project enumeration (CPE-1945)", () => {
   it("ci.yml still runs the sweep", () => {
     const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
     expect(ci).toContain("scripts/audit-npm-projects.mjs");
+  });
+});
+
+// The sweep's own false-green, found in review of the PR that added it, and the sharpest possible
+// version of the defect: the guard built to stop "audited one project, reported it as the repo's"
+// reproduced exactly that.
+//
+// `npmAuditJson` originally accepted any output `JSON.parse` could read. But npm's `--json` FAILURE
+// path emits well-formed JSON with no `metadata` — so an unreachable registry parsed fine, every
+// project summed to zero, and the sweep printed "0 vulnerabilities across 2 npm projects" and exited
+// 0. With one lockfile corrupt it was worse still: the broken project contributed `{}` and the
+// surviving project's ROOT-ONLY number was printed as the repo-wide sum.
+//
+// A flaky registry is the likeliest failure mode of this job on CI, and the deferral recorded in
+// CPE-1443 ("no follow-up ticket — the sweep will red when upstream ships") is only as trustworthy as
+// this check. These are its regression tests, kept offline: the payloads are npm's real output,
+// captured from `npm audit --json --registry=http://127.0.0.1:9/`.
+describe("audit reports are distinguished from npm error payloads (CPE-1945 review)", () => {
+  it("rejects npm's error payload — well-formed JSON, no metadata", () => {
+    expect(
+      isUsableAuditReport({
+        message: "request to http://127.0.0.1:9/-/npm/v1/security/audits/quick failed, reason: connect ECONNREFUSED 127.0.0.1:9",
+        error: { summary: "", detail: "" },
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects the shapes a corrupt or unreadable lockfile produces", () => {
+    expect(isUsableAuditReport({})).toBe(false);
+    expect(isUsableAuditReport(undefined)).toBe(false);
+    expect(isUsableAuditReport(null)).toBe(false);
+    expect(isUsableAuditReport({ metadata: {} })).toBe(false);
+    expect(isUsableAuditReport({ vulnerabilities: {} })).toBe(false);
+  });
+
+  it("accepts a real report, including a genuinely clean one", () => {
+    const clean = { vulnerabilities: {}, metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } } };
+    expect(isUsableAuditReport(clean)).toBe(true);
+
+    const dirty = { vulnerabilities: { "brace-expansion": {} }, metadata: { vulnerabilities: { info: 0, low: 0, moderate: 1, high: 16, critical: 0, total: 17 } } };
+    expect(isUsableAuditReport(dirty)).toBe(true);
+  });
+
+  it("a clean report and a failed audit are not the same value", () => {
+    // The literal confusion that produced the false green: both "looked like" zero vulnerabilities.
+    const clean = { metadata: { vulnerabilities: { total: 0 } } };
+    const failed = { message: "connect ECONNREFUSED", error: {} };
+    expect(isUsableAuditReport(clean)).toBe(true);
+    expect(isUsableAuditReport(failed)).toBe(false);
   });
 });
