@@ -121,3 +121,41 @@ there. `manual-test-mvd` (16) matches its own header; the drift inside that ledg
 
 **Red-proofed both ways** with real runs of the exact script CI runs — output pasted in the PR body.
 `evaluate` is pure, so both directions are also driven as unit tests rather than observed once by hand.
+
+**2026-08-27 — review round 2 (CHANGES REQUESTED on PR #1052).** Three findings, all the same shape:
+**the guard went green while a baseline was raised** — the exact defect this ticket exists to close.
+Rebased on `main` at `f15d9f29` first. The Reviewer independently re-derived the enumeration with a
+wider vocabulary and found nothing missed, re-did the recount (85 / 277), and verified the CODEOWNERS
+argument as fact rather than taking it on trust; all of that stands. What did not stand:
+
+- **F1 — the measurers misread rather than fail, and misread in the direction that passes.**
+  `const BASELINE_TOTAL_HEX_OCCURRENCES = 200 + 78;` is a real 277→278 raise; the old
+  `=\s*(\d[\d_]*)` took the first integer, measured 200, and printed `277 -> 200 LOWERED` at exit 0.
+  Same class on the array side: four `KNOWN_GAPS_ALLOWLIST` entries replaced by `...MORE_GAPS`
+  (6 names) is a real 14→17 and reported `14 -> 12 LOWERED`. Fixed: `numericConst` requires the
+  **whole** initialiser to be one integer, `splitTopLevel` throws on a spread, and a literal that is
+  not the whole initialiser (`[...].concat(X)`) is refused. **Why it slipped is the lesson:** round 1
+  proved the *safe* variant (a plain rename reds) and never tried the dangerous one.
+- **F2 — a ledger row was a permanent, reusable licence.** Every doc said "the same diff adds a row",
+  but the code read only the working-tree ledger. Commit the row at the base with no baseline change,
+  raise later, exit 0 under someone else's ticket — realistic, since `hex-occurrences` went 276→277
+  last week. Fixed: the ledger is parsed at the base ref too, and a row present there authorises
+  nothing. The overstated claim in `CLAUDE.md` and `RATCHETS.md` is now true rather than removed, and
+  a test asserts both docs and the code agree.
+- **F3 — base-side unmeasurable was a silent green while head-side was red**, so a rename reset the
+  ratchet. Fixed: git's own rename detection is followed at the base ref (which catches the
+  Reviewer's `git mv` input and turns it back into a visible 14→17 raise), and anything still
+  unresolved is an error that must be declared as `| id | new -> N | CPE-NNNN | why |`.
+
+Cheap fixes in the same round: `main()` can no longer emit a bare Node stack trace; `git show`'s
+expected "fatal: path does not exist" no longer leaks into the CI log beside real `::error::` lines;
+`RATCHET_SHAPED` gained 15 more names (OFFENDER, SUPPRESS, TOLERAT, WAIVER, OPTOUT, EXEMPT, EXCLUD,
+DEBT, GRANDFATHER, LEGACY_, REGISTRY, CEILING, THRESHOLD, PENDING, EXISTING) so a future
+`const FOO_OFFENDERS` in a **new** file cannot escape — `APP_MARKUP_OFFENDERS` had been covered only
+by the accident of sharing a file with an `*_ALLOWLIST`; the non-vacuity floor now derives from the
+registry (the scan must match every registered file and every excluded file) instead of a magic 8;
+and the counts-not-identities limitation moved from the PR body into `RATCHETS.md`.
+
+Every sabotage is now a permanent fixture in `src/lib/ratchetBaselines.test.ts` under a
+`SABOTAGE F1/F1b/F2/F3` block, with the Reviewer's exact input quoted in each comment — they belong
+in the test table, not in a transcript. 53 tests in that file; 4745 across the suite.

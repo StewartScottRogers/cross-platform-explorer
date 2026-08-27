@@ -752,6 +752,10 @@ function showAtRef(ref, file) {
       cwd: REPO_ROOT,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
+      // A missing path is an EXPECTED outcome here (renames, genuinely new files), so git's own
+      // "fatal: path ... does not exist" must not leak into the CI log alongside the real `::error::`
+      // lines. The absence is reported by returning null, and the caller decides what it means.
+      stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
     return null;
