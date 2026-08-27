@@ -363,15 +363,14 @@ mod sys {
         Ok(unsafe { File::from_raw_handle(h.0 as RawHandle) })
     }
 
-    /// `IO_REPARSE_TAG_NAME_SURROGATE` — the high bit Microsoft sets on exactly those reparse tags
-    /// that make a name **stand in for another name**: `IO_REPARSE_TAG_SYMLINK` (`0xA000000C`),
-    /// `IO_REPARSE_TAG_MOUNT_POINT` (`0xA0000003`, junctions), and the other surrogates. It is *not*
-    /// set on tags that merely decorate an object that is still itself — OneDrive Files-On-Demand
-    /// placeholders (`IO_REPARSE_TAG_CLOUD*`), NTFS dedup, WOF/WIM compression, ProjFS, app-exec links.
-    const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
-
     /// Is this directory handle a name surrogate — a link, junction or mount point — as opposed to
     /// merely carrying *some* reparse tag?
+    ///
+    /// The bit and the query live in [`crate::batch_media::reparse_name_surrogate`], which
+    /// `fsutil::copy_file_onto_destination_handle`'s final-component guard also asks (CPE-1896 round 3,
+    /// F5): two guards, one owner, so the rule cannot drift between them. This wrapper exists to hold
+    /// the one thing that legitimately differs — the default when the description cannot be read —
+    /// and the reason for it.
     ///
     /// **The distinction is a shipped-behaviour bug, measured on both sides** (PR #1043 Security
     /// Auditor). The first cut of this walk refused on `FILE_ATTRIBUTE_REPARSE_POINT` alone. On
@@ -395,30 +394,37 @@ mod sys {
     /// check entirely and re-running the CPE-1889 junction harm test — still refused). What this
     /// buys is the sentence that names the link, one component earlier.
     ///
-    /// **Not staged in a test**, and said plainly rather than implied: a non-surrogate directory
-    /// reparse point needs OneDrive, dedup or ProjFS to create, none of which a unit test can stage on
-    /// a CI runner. The surrogate side is covered (every junction test in this crate goes through this
-    /// branch); the non-surrogate side rests on the documented meaning of the bit.
+    /// # It is NECESSARY, NOT SUFFICIENT — and that is measured, not asserted
+    ///
+    /// An earlier revision of this comment said a non-surrogate directory reparse point "needs
+    /// OneDrive, dedup or ProjFS to create, none of which a unit test can stage on a CI runner". That
+    /// was **wrong**, and PR #1043's Security Auditor disproved it by doing exactly that: a
+    /// **non-Microsoft GUID reparse point**, planted with `FSCTL_SET_REPARSE_POINT` and a
+    /// `REPARSE_GUID_DATA_BUFFER`, needs no privilege, no filter driver and no OneDrive.
+    /// `cpe_1896_a_non_surrogate_reparse_point_is_traversed_not_refused` now stages one on every
+    /// Windows run. The four measured shapes:
+    ///
+    /// ```text
+    /// component                          tag          surrogate  outcome
+    /// junction -> inside the root        0xA000000C   set        refused (by this check)
+    /// junction -> outside the root       0xA000000C   set        refused (by this check)
+    /// non-MS tag, directory bit SET      0x10001234   clear      ALLOWED, the write landed inside
+    /// non-MS tag, directory bit CLEAR    0x00001234   clear      refused by NT, NOT by this check
+    /// ```
+    ///
+    /// The last row is the "not sufficient" half: for a non-surrogate tag the **outcome is decided by
+    /// NT and by whatever filter driver owns the tag**, not here. With the directory bit clear the
+    /// descent fails whatever this returns. A `false` therefore means "this check does not object",
+    /// never "the walk will succeed".
+    ///
+    /// The detail the stated motivation actually turns on is measured too: `IO_REPARSE_TAG_CLOUD`
+    /// (`0x9000001A`) has the surrogate bit **clear** and the directory bit **set** — the same shape as
+    /// the `0x10001234` row — so OneDrive Files-On-Demand *directory* placeholders are genuinely
+    /// unblocked rather than merely believed to be.
     fn name_surrogate_at(dir: &File) -> bool {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Storage::FileSystem::{
-            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
-            FILE_ATTRIBUTE_TAG_INFO,
-        };
-        // SAFETY: `dir` is a live `File` whose handle is only borrowed; `info` is a correctly-sized
-        // out-parameter matching the information class. Read-only query, nothing closed here.
-        unsafe {
-            let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
-            let ok = GetFileInformationByHandleEx(
-                HANDLE(dir.as_raw_handle() as isize),
-                FileAttributeTagInfo,
-                std::ptr::addr_of_mut!(info).cast(),
-                u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>()).unwrap_or(0),
-            )
-            .is_ok();
-            ok && info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-                && info.ReparseTag & IO_REPARSE_TAG_NAME_SURROGATE != 0
-        }
+        // `unwrap_or(false)` — fail OPEN. See the shared helper's doc for why this caller takes the
+        // opposite default from the final-component guard in `fsutil`.
+        crate::batch_media::reparse_name_surrogate(dir).unwrap_or(false)
     }
 
     /// NT status codes are not Win32 error codes, and `io::Error` speaks Win32. Translating means a
@@ -880,6 +886,78 @@ mod tests {
     /// It also guards the wording split that made the sibling assertions meaningful: while
     /// [`refuse`]'s shared tail still contained the phrase "is a link", *every* refusal matched
     /// `contains("is a link")` and both link tests passed for any failure at all.
+    #[test]
+    /// CPE-1896 round 3: a reparse point that is **not a name surrogate** must be traversed, not
+    /// refused — the OneDrive Files-On-Demand case, staged for real.
+    ///
+    /// This test exists because the comment it replaces was wrong. `name_surrogate_at` used to say a
+    /// non-surrogate directory reparse point could not be staged on a CI runner without OneDrive,
+    /// dedup or ProjFS, so the whole motivation for reading the tag rather than the attribute bit
+    /// rested on documentation. It can be staged: a **non-Microsoft** tag (top bit clear) with a
+    /// `REPARSE_GUID_DATA_BUFFER` needs no privilege and no filter driver.
+    ///
+    /// Both directions are asserted in one test on purpose — a junction beside the placeholder, on the
+    /// same volume in the same run — because the claim is that the two **diverge**, and either half
+    /// alone would pass under a guard that always answered the same way.
+    ///
+    /// The tag carries bit 28 (`0x1000_0000`, "may be set on a directory"): without it NT refuses the
+    /// descent whatever this guard decides, which is the "necessary, not sufficient" limit recorded on
+    /// `name_surrogate_at`.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1896_a_non_surrogate_reparse_point_is_traversed_not_refused() {
+        /// Non-Microsoft (bit 31 clear), directory-capable (bit 28 set), NOT a surrogate (bit 29 clear)
+        /// — the same shape as `IO_REPARSE_TAG_CLOUD` (`0x9000001A`), which is what OneDrive
+        /// Files-On-Demand directory placeholders carry.
+        const NON_SURROGATE_DIR_TAG: u32 = 0x1000_1234;
+
+        let d = scratch("surrogate");
+        let (placeholder, real) = (d.join("ph"), d.join("real"));
+        std::fs::create_dir_all(&placeholder).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+
+        if !crate::fsutil::make_guid_reparse_point(&placeholder, NON_SURROGATE_DIR_TAG, true) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1896_a_non_surrogate_reparse_point_is_traversed_not_refused: could not \
+                 plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                 non-surrogate (OneDrive placeholder) case, which is the half that keeps backups to \
+                 OneDrive working."
+            );
+            return;
+        }
+        // Liveness: the fixture must really carry the reparse attribute, or the test proves nothing —
+        // it would just be asserting that an ordinary directory is traversable.
+        assert!(
+            std::os::windows::fs::MetadataExt::file_attributes(
+                &std::fs::symlink_metadata(&placeholder).unwrap()
+            ) & 0x400
+                != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder"
+        );
+
+        let root = open_root(&d).unwrap();
+
+        // The non-surrogate placeholder: TRAVERSED. The write lands, inside the root.
+        let mut o = create_beneath(&root, Path::new("ph/inside.txt")).expect(
+            "a reparse point that is not a name surrogate must be traversed — refusing it is what \
+             would stop backups to a OneDrive folder working",
+        );
+        o.file.write_all(b"landed").unwrap();
+        drop(o);
+
+        // The surrogate junction, same volume, same run: REFUSED.
+        if crate::fsutil::make_dir_link(&real, &d.join("junc")) {
+            let e = create_beneath(&root, Path::new("junc/x.txt")).unwrap_err();
+            assert!(
+                e.contains("is a link"),
+                "a junction IS a name surrogate and must still be refused — the two cases have to \
+                 diverge, or the tag check is doing nothing: {e}"
+            );
+        }
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_plain_file_where_a_directory_belongs_is_refused_but_not_called_a_link() {
         let d = scratch("notdir");

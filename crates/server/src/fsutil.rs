@@ -1549,10 +1549,31 @@ pub(crate) fn copy_file_onto_destination_handle(
     let mut written: Option<crate::batch_media::FileIdentity> = None;
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         written = Some(facts.id);
-        let why = if facts.is_reparse_point {
+        // CPE-1896 round 3 (F5): refuse a reparse point only when it is a **name surrogate** — a tag
+        // whose whole purpose is to make this name mean another name. The bare
+        // `FILE_ATTRIBUTE_REPARSE_POINT` bit that used to sit here is set by a great deal that is not a
+        // link, and the case that matters is not hypothetical: a **dehydrated OneDrive
+        // Files-On-Demand file** carries it, OneDrive dehydrates exactly the files it has already
+        // synced, and those are exactly what an incremental backup's `update` list lands on. This guard
+        // was therefore turning "back up a folder inside OneDrive" into a per-file refusal reading
+        // "this name is a reparse point … never writes through one".
+        //
+        // `handle_is_name_surrogate` is asked **only** when the reparse bit is already set, so the
+        // ordinary case pays nothing, and it **fails closed** — an unreadable tag counts as a surrogate.
+        // The security property is unchanged: a non-surrogate tag does not redirect the name, so the
+        // bytes still land in the object this handle names, which is the only thing this guard ever
+        // claimed. The symlink/junction/mount-point cases it exists for all carry the bit.
+        //
+        // Measured (CPE-1896 PR #1043) with a synthetic non-Microsoft GUID reparse point planted by
+        // `FSCTL_SET_REPARSE_POINT` — refused before this change, written and read back after. **Not**
+        // measured against a live OneDrive placeholder: that has a filter driver in the path and no CI
+        // runner has one. What is measured is that the tag discriminates; what is inferred from
+        // Microsoft's documented meaning of the bit is that the placeholder behaves like the synthetic
+        // one. Recorded rather than implied.
+        let why = if facts.is_reparse_point && crate::batch_media::reparse_name_surrogate(&w).unwrap_or(true) {
             Some(format!(
-                "this name is a reparse point (a link, junction or stand-in for another name), and {} \
-                 never writes through one",
+                "this name is a reparse point that stands in for another name (a symlink, junction or \
+                 mount point), and {} never writes through one",
                 wording.verb
             ))
         } else if facts.is_dir {
@@ -4574,6 +4595,91 @@ fn make_dangling_link_inner(link: &Path) -> bool {
 #[track_caller]
 pub fn make_dir_link(target: &Path, link: &Path) -> bool {
     require_staged("make_dir_link", true, make_dir_link_inner(target, link))
+}
+
+/// Attach a **non-Microsoft GUID reparse point** to an existing file or directory — a reparse point
+/// that is deliberately **not** a name surrogate (CPE-1896 round 3).
+///
+/// This exists to disprove a comment. `open_beneath::sys::name_surrogate_at` used to say a
+/// non-surrogate reparse point "needs OneDrive, dedup or ProjFS to create, none of which a unit test
+/// can stage on a CI runner", so the OneDrive-placeholder motivation for the surrogate-bit check rested
+/// on the documented meaning of a bit rather than on a measurement. PR #1043's Security Auditor showed
+/// otherwise: `FSCTL_SET_REPARSE_POINT` with a `REPARSE_GUID_DATA_BUFFER` and a tag whose top bit is
+/// clear (non-Microsoft) needs **no privilege, no filter driver and no OneDrive**.
+///
+/// `tag`'s bits are load-bearing and the caller picks them deliberately:
+/// - bit 31 (`0x8000_0000`) **clear** = non-Microsoft, which is what makes the GUID form legal;
+/// - bit 29 (`0x2000_0000`) = `IO_REPARSE_TAG_NAME_SURROGATE`, the bit under test;
+/// - bit 28 (`0x1000_0000`) = "may be set on a directory" — **required** for a directory, and NT
+///   refuses the descent without it regardless of what any guard decides.
+///
+/// Windows-only: reparse points do not exist elsewhere, and every caller is `#[cfg(windows)]`.
+/// Returns whether the attribute really landed, so a `false` is a skip a test must announce rather
+/// than an assertion it can quietly drop. `supported_here = false`: an over-strict antivirus filter or
+/// a non-NTFS scratch volume can legitimately refuse this, unlike a junction.
+#[cfg(windows)]
+#[track_caller]
+pub fn make_guid_reparse_point(path: &Path, tag: u32, is_dir: bool) -> bool {
+    require_staged("make_guid_reparse_point", false, guid_reparse_inner(path, tag, is_dir))
+}
+
+#[cfg(windows)]
+fn guid_reparse_inner(path: &Path, tag: u32, is_dir: bool) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    /// `FSCTL_SET_REPARSE_POINT`.
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // `REPARSE_GUID_DATA_BUFFER`: tag (4) + data length (2) + reserved (2) + GUID (16) = 24-byte
+    // header, then the payload. Built by hand rather than through a binding, because the `windows`
+    // crate models it as a variable-length struct that is awkward to construct and this is 24 bytes.
+    let payload: [u8; 8] = *b"CPE-1896";
+    let mut buf = Vec::with_capacity(24 + payload.len());
+    buf.extend_from_slice(&tag.to_le_bytes());
+    buf.extend_from_slice(&u16::try_from(payload.len()).unwrap_or(0).to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    // A stable, arbitrary GUID identifying "this test planted it". Any non-null GUID is legal for a
+    // non-Microsoft tag; a null one is rejected.
+    buf.extend_from_slice(&[
+        0x2f, 0x1e, 0x96, 0x18, 0x44, 0x3c, 0x4b, 0x7a, 0x9d, 0x11, 0x0c, 0x5e, 0x7a, 0x63, 0x18, 0x96,
+    ]);
+    buf.extend_from_slice(&payload);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    if is_dir {
+        // A directory handle needs backup semantics, and `write(true)` alone cannot open one.
+        opts.read(true).write(false).custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        opts.access_mode(0x0002 | 0x0100 | 0x0080 | 0x0010_0000); // WRITE_DATA|WRITE_ATTRS|READ_ATTRS|SYNCHRONIZE
+    }
+    let Ok(f) = opts.open(path) else { return false };
+
+    let Ok(len) = u32::try_from(buf.len()) else { return false };
+    // SAFETY: `f` is a live `File` whose handle is only borrowed; `buf` outlives the call and `len` is
+    // its real length. `FSCTL_SET_REPARSE_POINT` takes no output buffer.
+    let ok = unsafe {
+        DeviceIoControl(
+            HANDLE(f.as_raw_handle() as isize),
+            FSCTL_SET_REPARSE_POINT,
+            Some(buf.as_ptr().cast()),
+            len,
+            None,
+            0,
+            None,
+            None,
+        )
+    }
+    .is_ok();
+    drop(f);
+    // Confirm the attribute really landed rather than trusting the ioctl's verdict.
+    ok && std::fs::symlink_metadata(path)
+        .map(|m| std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0)
+        .unwrap_or(false)
 }
 
 /// Put a **live FILE link** at `link` pointing at the existing file `target` (CPE-1765) — the exact slot
@@ -8479,6 +8585,91 @@ mod tests {
     /// **The fixture's liveness is proved before anything is asserted about the code under test**, and
     /// proved the only way a hard link can be: content is written through ONE name and read back
     /// through the OTHER. A test whose fixture is two unrelated files certifies nothing at all.
+    /// CPE-1896 round 3 (F5): the **final component**'s reparse guard must refuse a name surrogate and
+    /// allow everything else — the same split the directory walk got, at the place the bytes land.
+    ///
+    /// The user-visible case is not hypothetical. A **dehydrated OneDrive Files-On-Demand file** carries
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`, OneDrive dehydrates exactly the files it has already synced, and
+    /// those are exactly what an incremental backup's `update` list writes onto. While this guard tested
+    /// the bare attribute bit, backing up into a OneDrive folder refused every one of them with "this
+    /// name is a reparse point … never writes through one" — so the OneDrive motivation written on
+    /// `open_beneath` was only half-delivered by fixing the directory walk.
+    ///
+    /// Both directions in one test, on the same volume in the same run, because the claim is that they
+    /// **diverge**: a non-surrogate tag is written through, a symlink is not.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1896_a_non_surrogate_reparse_point_at_the_leaf_is_written_not_refused() {
+        /// Non-Microsoft (bit 31 clear), NOT a surrogate (bit 29 clear) — a file-shaped placeholder.
+        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1234;
+
+        let d = scratch("cpe1896-leaf-surrogate");
+        let src = d.path().join("src.txt");
+        let dst = d.path().join("placeholder.txt");
+        std::fs::write(&src, b"BACKUP SOURCE").unwrap();
+        std::fs::write(&dst, b"stale").unwrap();
+
+        if !make_guid_reparse_point(&dst, NON_SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1896_a_non_surrogate_reparse_point_at_the_leaf_is_written_not_refused: \
+                 could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                 dehydrated-OneDrive-file case at the final component."
+            );
+            return;
+        }
+        // Liveness: without the attribute this is just a test that an ordinary file can be overwritten.
+        assert!(
+            std::os::windows::fs::MetadataExt::file_attributes(
+                &std::fs::symlink_metadata(&dst).unwrap()
+            ) & 0x400
+                != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the destination"
+        );
+
+        let outcome = copy_file_onto_no_follow(&src, &dst);
+        assert!(
+            outcome.is_ok(),
+            "a reparse point that does not stand in for another name must be written through — \
+             refusing it is what turned every dehydrated OneDrive file into a failed backup entry: \
+             {outcome:?}"
+        );
+        // Read back through a **no-follow handle**, which is how the bytes went in — not by ordinary
+        // path. A plain `fs::read` here fails with `ERROR_CANT_ACCESS_FILE (1920)`, and that is a
+        // property of the *fixture*, not of the code under test: a reparse tag with no filter driver
+        // registered has nothing to service an ordinary open, whereas a real OneDrive placeholder has
+        // the cloud filter in the path and reads normally. Measured, and recorded rather than worked
+        // around, because it is the honest limit of what a synthetic tag can prove: this asserts the
+        // bytes reached the object, not that a driverless placeholder is generally usable.
+        let mut back = String::new();
+        std::io::Read::read_to_string(
+            &mut crate::batch_media::open_existing_no_follow_read(&dst).unwrap(),
+            &mut back,
+        )
+        .unwrap();
+        assert_eq!(
+            back, "BACKUP SOURCE",
+            "the bytes must actually land in the object, not merely be reported as written"
+        );
+
+        // The surrogate half, same run: a symlink at the final component is still refused.
+        let victim = d.path().join("victim.txt");
+        std::fs::write(&victim, b"USER DATA").unwrap();
+        let link = d.path().join("link.txt");
+        if make_file_link(&victim, &link) {
+            let refused = copy_file_onto_no_follow(&src, &link);
+            assert!(
+                refused.is_err(),
+                "a symlink IS a name surrogate and must still be refused — the two cases have to \
+                 diverge, or the tag check is doing nothing: {refused:?}"
+            );
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"USER DATA",
+                "HARM: the copy wrote through a symlink at the final component"
+            );
+        }
+    }
+
     #[test]
     fn cpe_1857_a_hard_linked_destination_is_never_written_through() {
         let d = scratch("cpe1857-hardlink-dest");
