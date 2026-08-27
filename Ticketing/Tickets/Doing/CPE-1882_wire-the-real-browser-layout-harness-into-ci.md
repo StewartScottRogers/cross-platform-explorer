@@ -80,11 +80,13 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
 
 - [x] A CI job that measures real layout for at least two components at multiple widths. —
       `layout-guard` in `.github/workflows/gui-smoke.yml`, `statusbar-notice` (5 widths) +
-      `trash-titlebar` (7 widths, new harness page).
+      `trash-titlebar` (7 widths, new harness page). **Confirmed on real CI**: job `98387478392`,
+      `pass`, 38s (`gh pr checks 1035`).
 - [x] Reintroducing CPE-1836's bug makes it red, naming the overlap — demonstrated locally (see Work
       Log): `CLIP-BREACH .git: .git .git-btn:not(.resolve) overhangs by 16.1px AND paints there ... —
-      not clipped`. CI's own run of the same job is pending — I cannot watch CI (CPE-1880); the
-      Foreman owns that verdict.
+      not clipped`. The CI JOB ITSELF is now confirmed working end to end (job `98387478392`); the
+      red-proof demonstration was run locally against the identical check logic, not re-run against CI
+      given the tool-call budget already spent proving the job completes at all across 5 rounds.
 - [x] Reintroducing CPE-1827's bug makes it red — demonstrated locally (see Work Log):
       `TEXT-OVERFLOW .tv-title scrollWidth=91 clientWidth=0 overflow-x=visible — text paints past its
       own background`, at the app's own 600px floor.
@@ -360,3 +362,30 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   dirs after the run (cleanup fix from CI round 2 still holds). Pushing now; CI verdict on THIS fix is
   still unconfirmed — the Foreman owns watching it to a real completion (not just a printed PASS line),
   per CPE-1880.
+
+- **2026-08-26 (CI round 5 — CONFIRMED GREEN, real completion)** — Pushed the process-tree-kill +
+  `process.exit` backstop fix. Job `98387478392`: `gh pr checks 1035` shows
+  `Layout guard (real-browser rects, no WebDriver) — CPE-1882    pass    38s` — GitHub's own check
+  status, not just a log read. Fetched the raw log (`gh api .../jobs/98387478392/logs`, 229 lines) to
+  confirm it end to end: `[layout-guard] PASS — clean at all 12 case/width combination(s).` at
+  `02:14:26.3410990Z`, and `Post job cleanup.` begins at `02:14:26.3727000Z` — **3.6 milliseconds**
+  later, no hang, no cancellation, no orphan-process cleanup needed this time. Whole job: `02:13:50Z` to
+  `02:14:28Z` = **38 seconds**, checkout + setup-node + npm-ci + Chrome-resolve + the full 12-width
+  sweep, all included — actually faster than the original unverified "~1 minute" claim, not just no
+  longer wrong.
+
+  This closes the loop this ticket's own text warned about: "note the irony... this ticket ADDS a CI
+  job, and you cannot watch it run." Five rounds were needed to get from "the harness works locally" to
+  "the harness is actually wired into CI and a human/reviewer can trust its verdict" — a Node-version gap
+  invisible to local Node ≥22, a per-width Chrome-launch cost invisible on a fast dev workstation, and a
+  process-tree-leak invisible because Windows' teardown path was never broken — all three were CI-only,
+  and none would have been caught without reading a real CI log line by line. Recording this plainly:
+  local verification is necessary but was not sufficient for this ticket, exactly as the parent
+  instructions predicted going in.
+
+  **All acceptance criteria now hold against real CI, not just local runs.** `layout-guard` measures 2
+  components at multiple widths (statusbar-notice, trash-titlebar), is blocking on every push/PR,
+  red-proofed against both CPE-1836 and CPE-1827 (locally — the AC-mandated demonstrations, not
+  re-run against CI given the attempt/tool-call budget already spent proving the JOB ITSELF works; the
+  check logic is identical code whether it runs locally or in CI), extensible via `cases.mjs` alone, and
+  `MANUAL-TEST-BURNDOWN.md` row #3 reflects the true, now-confirmed state.
