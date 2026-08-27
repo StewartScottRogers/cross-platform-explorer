@@ -3,7 +3,7 @@ id: CPE-1933
 title: sweep for **provenance claims in comments** — "mirrors `release.yml`", "same as X" — which are untested by construction and decay silently
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -260,3 +260,63 @@ decorative.
 `CLAUDE.md` → **Guards and ratchets** gains *"Derive provenance, don't claim it (CPE-1933)"* with
 **three** rules, not two: enumerate case-insensitively; anchor on code via the shared stripper (never
 hand-roll, and never a whole-line filter); red-proof it.
+
+## Closed 2026-08-27 — merged as PR #1060, after three rounds
+
+**Reviewer APPROVE.**
+
+**Enumeration:** the seed grep gave 550 hits; broadening to 30 phrasings **and adding `*.yml`/`*.yaml`/
+`*.toml`/`*.js`** gave 1,583; **running it case-insensitively** gave 1,807. Final: **215 candidates
+across 156 files, each read — 20 HARD, 7 derived here, 183 SOFT** (SOFT defined as the residual, so
+the buckets partition by construction). Sixteen remaining filed as **CPE-1950**, blast-radius ordered.
+
+### The ticket's own search could not have found its founding instance
+
+Two structural gaps, both found by the Reviewer:
+
+1. **The sweep was case-sensitive.** All 30 phrasings were lower-case and grep ran without `-i` — but
+   this repo's comments start sentences. Adding one flag surfaced **+57 candidates in 56 files**,
+   eight of them HARD, **including a fourth copy of the exact claim this ticket exists to kill, in the
+   same crate**: `artifact_binding.rs:719`, *"Exactly as `release-sidecar.yml` invokes it"*, missed for
+   a capital `E`. The PR had said "three claims"; there were four.
+2. **The stated reason for widening the file set was itself a false provenance claim.** The PR said
+   the seed omits `*.yml` *"which is exactly where CPE-1872's defect lived"*. It lived in
+   `release_guard.rs`, a `.rs` file the seed already covered; the workflow was only the *referenced*
+   file. Measured: the seed missed those claims through **phrasing and line-wrapping** (`same\n/// as`,
+   and grep is line-based), and the file-set widening contributed **0 of 20** HARD hits.
+
+### Two claims were already false when found
+
+- `release_guard.rs:815`, `:854` and `hostile_manifests.rs:687` claimed to mirror
+  `release-sidecar.yml`. The real job passes `--manifest` and `--expect-url-prefix`; the helper never
+  did. **CPE-1872's decay recurring in the crate CPE-1917 had corrected one comment in.**
+- `connect.rs:236` mirrors the *old* `join_remote`, and `paths.ts:21` already disagrees with
+  `Sidebar.svelte`'s `norm` on trailing slashes. Both confirmed at file:line, neither overstated.
+
+### The comment-stripper, and what the shared oracle proved
+
+The first attempt hand-rolled a fifth shell-comment stripper — and the assertion written to *replace*
+the three prose claims **passed while reading a flag out of a trailing comment**. Replaced by
+`crates/updater-verify/src/workflow_scan.rs`, a port of `shellScriptLines.ts`, with both languages run
+against a new shared `src/lib/shellScriptLines.cases.json` that the Rust test reads at run time — so
+the port does not *claim* fidelity.
+
+**The oracle immediately earned itself**: it caught a live bug in the module it was ported from.
+`HEREDOC_START`'s `(?!<)` only refuses a match at the **first** `<` of `<<<`, so the engine retries
+from the second and opens a phantom heredoc, swallowing the rest of the script — a false negative in
+the direction that module's own header calls unsafe. Fixed as `(?<!<)<<(?!<)`; the Reviewer attacked
+the fix with eight over-refusal probes and found it closes a **wider** class than the case that
+exposed it. **The Rust port needed no edit — the TypeScript side converged onto it.**
+
+And it found the technique's limit: `<<` inside a **quoted string** opens a phantom heredoc in **both**
+implementations, so the oracle *agrees* rather than flagging it. **A shared case file catches
+divergence, not shared blindness.** Recorded against CPE-1936.
+
+### One disputed finding, resolved cleanly
+
+The Reviewer reported `MacroRunConfirm.test.ts` had no runtime derivation. Measured: 357 lines with no
+`readFileSync` at its round-1 base; 548 lines with it at `:15` after **#1056 landed mid-review**. Its
+grep was right for the tree it was given. The citation stands, and the walker was hardened besides.
+
+`CLAUDE.md` gained *"Derive provenance, don't claim it"* under **Guards and ratchets** — now a
+three-part rule: enumerate **case-insensitively**, anchor on code via the shared stripper, red-proof it.
