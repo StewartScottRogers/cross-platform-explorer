@@ -100,6 +100,17 @@ export type RevertSummary = {
   advisesManualDelete: boolean;
   /** The genuine failures, each with its own (distinct) reason. */
   failures: { path: string; error: string }[];
+  /**
+   * **CPE-1881.** The shared explanation for a whole group of write refusals with the SAME cause
+   * (currently only the hard-link rule) — stated once, the write-side counterpart to {@link reason}.
+   * `""` when nothing was grouped. The refused paths themselves are already in {@link failures} (each
+   * with its own short per-path fact, e.g. "this file has 3 names (it is hard-linked)" — the backend
+   * shortened these once the shared paragraph moved here, so nothing duplicates and nothing is lost);
+   * this is purely the paragraph {@link failures}' short per-path text alone cannot state economically.
+   */
+  writeRefusalReason: string;
+  /** How many of {@link failures} the {@link writeRefusalReason} paragraph covers. `0` when `""`. */
+  writeRefusalCount: number;
 };
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
@@ -138,5 +149,7 @@ export function summarizeRevert(outcome: RevertOutcome): RevertSummary {
     allHeldBackPaths: heldBackPaths.map((p) => p.path),
     advisesManualDelete: held?.advises_manual_delete ?? false,
     failures,
+    writeRefusalReason: outcome.write_refusal?.reason ?? "",
+    writeRefusalCount: outcome.write_refusal?.count ?? 0,
   };
 }

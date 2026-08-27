@@ -103,11 +103,17 @@ The cases you may meet:
   space only once — deduplicating backup programs, package managers and a few sync clients all do it.
   These are not shortcuts: every name is the file, equally, and there is no way to tell by looking at a
   path that a second name exists or where it lives. Writing to one of them changes what you see at all of
-  them, including any that sit outside the folder you are reverting, so that entry is held back and named
-  rather than written. This one is also permanent until you act: a file does not lose its other names by
-  your running the revert again. To restore it anyway, give it a name of its own first — copy the file to
-  a new name, delete the original, and rename the copy back — then run the revert again. Everything else
-  in the same revert still restores; only that entry waits.
+  them, including any that sit outside the folder you are reverting, so that entry is refused rather than
+  written. This one is also permanent until you act: a file does not lose its other names by your running
+  the revert again. To restore it anyway, give it a name of its own first — copy the file to a new name,
+  delete the original, and rename the copy back — then run the revert again. Everything else in the same
+  revert still restores; only that entry waits.
+
+  A tree hard-linked wholesale — a backup made with `rsync --link-dest`, a Time Machine-style dedup, a
+  package manager's store — can refuse hundreds or thousands of entries this way in one revert. Like the
+  held-back deletions above, the explanation is shown **once for the whole group**, not copied onto every
+  file: one paragraph, a count, then the file names (the first few, then a count) — never hundreds of
+  identical paragraphs stacking up on screen.
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
   temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
   revert also hit one of the permanent cases above, running it again clears only the temporary half — the

@@ -129,6 +129,20 @@
     </div>
   {/if}
 
+  {#if summary.writeRefusalReason}
+    <!-- CPE-1881: the shared explanation for a whole group of write refusals (currently only the
+         hard-link rule), stated once — the write-side counterpart to `.ro-held` above. The refused paths
+         themselves are still listed individually below in `.ro-failures`, each with its own short
+         per-path fact; this block is only the paragraph that used to be repeated on every one of them. -->
+    <div class="ro-held" data-testid="{testid}-write-refusal">
+      <!-- Wrapped defensively (the CPE-1757 bidi-escape guard's own suggested fix for a new raw render):
+           unlike `f.error` above, this text never embeds a path today — `revert_engine.rs` builds it from
+           a count and static wording only — but there is no structural guarantee that stays true, so this
+           costs nothing and closes the gap before it can open. -->
+      <div class="ro-held-reason">{displaySafeName(summary.writeRefusalReason)}</div>
+    </div>
+  {/if}
+
   {#if summary.failures.length}
     <ul class="ro-failures" data-testid="{testid}-failures">
       {#each summary.failures as f (f.path)}

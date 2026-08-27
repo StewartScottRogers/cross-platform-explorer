@@ -36,6 +36,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         retryable: true,
         advises_manual_delete: false,
       },
+      write_refusal: null,
     };
     const s = summarizeRevert(outcome);
     // Not "2 skipped". One failed, one held back — different things, counted separately.
@@ -58,6 +59,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         retryable: true,
         advises_manual_delete: false,
       },
+      write_refusal: null,
     });
     const permanent = summarizeRevert({
       applied: 0,
@@ -70,6 +72,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         retryable: false,
         advises_manual_delete: true,
       },
+      write_refusal: null,
     });
     expect(retryable.retryable).toBe(true);
     expect(permanent.retryable).toBe(false);
@@ -97,6 +100,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         retryable: false,
         advises_manual_delete: true,
       },
+      write_refusal: null,
     });
     expect(s.heldBack).toBe(200);
     // ONE copy of the paragraph reaches the screen, not 200 (which was ~185 KB).
@@ -113,7 +117,7 @@ describe("summarizeRevert (CPE-1845)", () => {
   });
 
   it("says nothing about a hold-back when there was none", () => {
-    const s = summarizeRevert({ applied: 3, skipped: [], held_back: null });
+    const s = summarizeRevert({ applied: 3, skipped: [], held_back: null, write_refusal: null });
     expect(s.headline).toBe("Applied 3 changes.");
     expect(s.reason).toBe("");
     expect(s.nextStep).toBe("");
@@ -122,6 +126,35 @@ describe("summarizeRevert (CPE-1845)", () => {
     // CPE-1869: no affordance and nothing to copy when nothing was held back.
     expect(s.advisesManualDelete).toBe(false);
     expect(s.allHeldBackPaths).toEqual([]);
+    // CPE-1881: nothing to say about grouped write refusals either.
+    expect(s.writeRefusalReason).toBe("");
+    expect(s.writeRefusalCount).toBe(0);
+  });
+
+  it("CPE-1881: collapses 200 identical hard-link write refusals to one paragraph plus a count", () => {
+    // Every refused write is STILL a normal `failed` entry in `skipped` (unlike a delete hold-back,
+    // grouping a write refusal doesn't change its `outcome`) — this proves the shared paragraph is
+    // ADDITIVE, not a replacement for per-path visibility: all 200 paths are still in `failures`, each
+    // with its own (now short) per-path fact, and the paragraph reaches the screen exactly once.
+    const reason =
+      "200 checkpoint entries could not be written because the destination is hard-linked " + "x".repeat(300);
+    const skipped = Array.from({ length: 200 }, (_, i) =>
+      op(`f${i}.txt`, "failed", `this file has 2 names (it is hard-linked)`),
+    );
+    const s = summarizeRevert({
+      applied: 0,
+      skipped,
+      held_back: null,
+      write_refusal: { reason, count: 200 },
+    });
+    expect(s.failed).toBe(200);
+    expect(s.failures).toHaveLength(200);
+    expect(s.failures.every((f) => f.error === "this file has 2 names (it is hard-linked)")).toBe(true);
+    // ONE copy of the shared paragraph reaches the screen, not 200.
+    expect(s.writeRefusalReason).toBe(reason);
+    expect(s.writeRefusalCount).toBe(200);
+    const rendered = s.writeRefusalReason.length + s.failures.map((f) => f.error.length).reduce((a, b) => a + b, 0);
+    expect(rendered).toBeLessThan(20_000);
   });
 
   it("carries the per-path detail the backend produces, and only when there is one", () => {
@@ -142,6 +175,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         // The alias/collision hold-back — CPE-1869's own "must not get the affordance" case.
         advises_manual_delete: false,
       },
+      write_refusal: null,
     });
     expect(s.listed).toEqual([
       { path: "A.txt", detail: 'same file as checkpoint entry "a.txt"' },
@@ -169,6 +203,7 @@ describe("summarizeRevert (CPE-1845)", () => {
           retryable: false,
           advises_manual_delete: true,
         },
+        write_refusal: null,
       });
 
     const exactly = held(MAX_LISTED);
@@ -205,6 +240,7 @@ describe("summarizeRevert (CPE-1845)", () => {
         retryable: false,
         advises_manual_delete: true,
       },
+      write_refusal: null,
     });
     expect(s.applied).toBe(1);
     expect(s.failed).toBe(1);

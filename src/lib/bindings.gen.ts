@@ -5903,7 +5903,15 @@ skipped: OpResult[];
  * Present when the revert deliberately held its deletions back: the single explanation, the count,
  * and a next step honest about whether re-running can help. `None` when nothing was held back.
  */
-held_back: HeldBackSummary | null }
+held_back: HeldBackSummary | null; 
+/**
+ * Present when one or more writes were refused for the SAME reason (CPE-1881) — currently only the
+ * CPE-1857 hard-link rule. The single explanation and the count; the refused paths themselves are
+ * already in [`skipped`](RevertOutcome::skipped) (each with `outcome: "failed"` and a short
+ * per-path reason), so nothing is duplicated here beyond the one paragraph. `None` when nothing was
+ * grouped — an ungrouped write refusal is unaffected and still just a `skipped` entry.
+ */
+write_refusal: WriteRefusalSummary | null }
 /**
  * A preview of what reverting to a checkpoint would do: the restore-plan summary plus a **drift** report.
  * 
@@ -6458,6 +6466,21 @@ export type WatchAction = { kind: string; resolved: string }
  * The workbench's view of a folder (CPE-526/535): whether it's a git repo, the branch, and the diff.
  */
 export type WorkbenchDiff = { is_repo: boolean; branch: string | null; diff: string }
+/**
+ * The one statement behind a whole group of grouped write refusals (CPE-1881), the write-side
+ * counterpart to [`HeldBackSummary`]. Measured on a 200-file all-hard-linked revert: the un-grouped
+ * `skipped` reasons alone totalled 84,180 bytes (~420 bytes/entry), extrapolating to ~8.2 MiB for 20,000
+ * entries. This states the shared explanation once.
+ */
+export type WriteRefusalSummary = { 
+/**
+ * The shared explanation, stated once.
+ */
+reason: string; 
+/**
+ * How many writes this covers.
+ */
+count: number }
 
 /** tauri-specta globals **/
 
