@@ -1362,7 +1362,7 @@
     padding: 12px;
     white-space: pre-wrap;
     word-break: break-word;
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: 12px;
   }
   /* Wrap toggle (CPE-565): off = preserve code indentation with horizontal scroll. */
@@ -1615,7 +1615,7 @@
     border: none;
     outline: none;
     padding: 12px;
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: 12px;
     line-height: 1.5;
     color: var(--text);
@@ -1638,6 +1638,6 @@
     border-radius: var(--radius);
     overflow-x: auto;
   }
-  .preview-markdown :global(code) { font-family: var(--mono, ui-monospace, monospace); }
+  .preview-markdown :global(code) { font-family: var(--mono); }
   .preview-markdown :global(a) { color: var(--accent); }
 </style>

@@ -187,7 +187,7 @@
   .wb-edge.error .wb-edge-h { color: #e0706b; }
 
   .wb-body { flex: 1; overflow: auto; padding: 10px 12px;
-    font-family: var(--mono, ui-monospace, Consolas, monospace); font-size: 12px; }
+    font-family: var(--mono); font-size: 12px; }
   .file { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
   .file-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
     padding: 6px 10px; background: var(--surface-alt); border-bottom: 1px solid var(--border);

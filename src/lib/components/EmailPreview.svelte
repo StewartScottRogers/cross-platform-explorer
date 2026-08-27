@@ -129,7 +129,7 @@
   .email-pill-size { color: var(--text-dim); flex: none; }
   .email-body {
     margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--surface-alt); font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+    background: var(--surface-alt); font-family: var(--mono); font-size: 11.5px;
     white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto;
   }
 </style>
