@@ -13,6 +13,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 
+// Mirrors MacroRunConfirm.svelte's own `genericizeReason` (CPE-1891, Visual Critic round 3): the
+// hoisted per-kind sentence strips the leading `"<path>" ` clause, since the hoisted sentence is
+// shared across possibly-many collisions and must not look tied to just the first one's path.
+const genericized = (reason: string) => reason.replace(/^"[^"]*"\s*/, "This destination ");
+
 const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
 vi.mock("../invoke", () => ({
   invoke: (...a: unknown[]) => (invokeMock as (...x: unknown[]) => unknown)(...a),
@@ -222,16 +227,53 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     const reasons = screen.getAllByTestId("blocked-reason").map((el) => el.textContent);
 
     expect(reasons).toHaveLength(2);
-    expect(reasons).toContain(BLOCKED_COLLISION.reason);
-    expect(reasons).toContain(CONVERT_BLOCKED_COLLISION.reason);
-    expect(reasons).not.toContain(MOVE_BLOCKED_COLLISION.reason);
+    expect(reasons).toContain(genericized(BLOCKED_COLLISION.reason));
+    expect(reasons).toContain(genericized(CONVERT_BLOCKED_COLLISION.reason));
+    // Genericizing BLOCKED_COLLISION and MOVE_BLOCKED_COLLISION's reasons yields the IDENTICAL string
+    // (same "destroys it" wording, only their raw paths differed) -- which is exactly the point: they
+    // share one bucket and therefore one rendered sentence, so there is nothing further to assert about
+    // MOVE_BLOCKED_COLLISION's reason specifically once its path is stripped.
+    expect(genericized(MOVE_BLOCKED_COLLISION.reason)).toEqual(genericized(BLOCKED_COLLISION.reason));
     // The two variants must actually read differently -- a shared generic sentence would defeat the
     // point (rename/move "destroys" the link; convert "writes THROUGH" it).
     expect(screen.getByTestId("blocked-collisions").textContent).toContain("destroys it");
     expect(screen.getByTestId("blocked-collisions").textContent).toContain("writes THROUGH it");
+    // Visual Critic round 3: the hoisted sentence must not name any ONE collision's own path -- with
+    // several blocked items that made the sentence look tied to just the first one.
+    for (const reason of reasons) {
+      expect(reason).not.toContain(BLOCKED_COLLISION.to);
+      expect(reason).not.toContain(CONVERT_BLOCKED_COLLISION.to);
+      expect(reason).toMatch(/^This destination /);
+    }
     // All three PATHS still appear in the plain path list below the reason(s), including the
     // move-kind item whose own reason text was folded into the rename/move sentence above.
     expect(screen.getByTestId("blocked-collisions").textContent).toContain("/work/Archive/c.txt");
+  });
+
+  it("shows a dim note stating why Run is blocked, next to the button, when a link collision is present", async () => {
+    // CPE-1891, Visual Critic round 3: the red box's explanation lives two panels above the button --
+    // this states the SAME fact right where the user is looking when they wonder why Run won't light.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "macro_plan") return PLAN;
+      if (cmd === "macro_preflight") return [BLOCKED_COLLISION];
+      return null;
+    });
+
+    render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/a.txt"], root: "/work" });
+    await screen.findByTestId("blocked-collisions");
+    expect(screen.getByTestId("run-blocked-note").textContent).toContain("Run is blocked by 1 link above");
+  });
+
+  it("does NOT show the run-blocked note when there is nothing blocking Run", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "macro_plan") return PLAN;
+      if (cmd === "macro_preflight") return [CONFIRMABLE_COLLISION];
+      return null;
+    });
+
+    render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/a.txt"], root: "/work" });
+    await screen.findByTestId("confirmable-collisions");
+    expect(screen.queryByTestId("run-blocked-note")).toBeNull();
   });
 
   it("copies every blocked destination name to the clipboard from its own copy button", async () => {

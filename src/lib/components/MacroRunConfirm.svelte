@@ -103,6 +103,18 @@
   $: blockedPreview = preview(blocked);
   $: confirmablePreview = preview(confirmable);
 
+  /** Strips the leading `"<path>" ` clause off a backend `reason` string (CPE-1891, Visual Critic
+   *  round 3): every `reason` embeds ITS OWN collision's path first (`"<to>" is a link, and…`), which
+   *  reads redundantly even with a single blocked item (the sentence names the path and the bullet
+   *  three lines below repeats it) and reads actively WRONG with several — the hoisted sentence would
+   *  name only the first collision's path while the list beneath shows others, making the sentence
+   *  look mismatched to its own list. The per-KIND mechanism is what the hoisted sentence is for; the
+   *  paths are already the list's job below it. Generalises to `"This destination …"` rather than
+   *  leaving the sentence unexpectedly path-free. */
+  function genericizeReason(reason: string): string {
+    return reason.replace(/^"[^"]*"\s*/, "This destination ");
+  }
+
   /** One representative `reason` sentence per DISTINCT hazard the blocked set contains (CPE-1891
    *  Visual Critic pass): every `rename`/`move` collision shares the same "destroys the link" wording
    *  (both are refused by the same backend guard, `symlink_slot_refusal`) and every `convert` collision
@@ -117,7 +129,7 @@
       const bucket = c.kind === "convert" ? "convert" : "rename-move";
       if (!seenKinds.has(bucket)) {
         seenKinds.add(bucket);
-        out.push(c.reason);
+        out.push(genericizeReason(c.reason));
       }
     }
     return out;
@@ -286,6 +298,14 @@
 
       {#if runError}<div class="err" data-testid="run-error">{runError}</div>{/if}
       <div class="actions">
+        {#if blocked.length}
+          <!-- CPE-1891, Visual Critic round 3: why Run won't light was inferable (the red box two
+               panels up) but never STATED at the moment the user is looking at the button itself —
+               most concretely after they've just ticked the confirm box and nothing responded. -->
+          <span class="run-blocked-note" data-testid="run-blocked-note">
+            Run is blocked by {blocked.length} link{blocked.length === 1 ? "" : "s"} above
+          </span>
+        {/if}
         <button class="btn" on:click={() => dispatch("close")} disabled={running}>Cancel</button>
         <button class="btn primary" data-testid="run-btn" on:click={doRun} disabled={running || !canRun}>
           {runLabel}
@@ -370,7 +390,11 @@
      checkbox itself at 13×13px inside a 17px row). */
   .confirm-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; min-height: 24px; cursor: pointer; }
   .irreversible-note { margin-top: 4px; font-size: 11.5px; line-height: 1.4; color: var(--text-dim); }
-  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
+  .actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: auto; }
+  /* CPE-1891, Visual Critic round 3: states plainly why Run won't light, right next to the button that
+     doesn't. `margin-right: auto` pushes it to the opposite end from Cancel/Run rather than crowding
+     them — the actions row's own `justify-content: flex-end` otherwise has nothing to push against. */
+  .run-blocked-note { margin-right: auto; font-size: 11.5px; color: var(--text-dim); }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn:disabled { opacity: 0.5; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
