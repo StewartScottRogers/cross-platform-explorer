@@ -1793,3 +1793,27 @@ Its external-tool sweep of the whole file also produced the right general test: 
 assertion (`release not found`) is safe because **that string is the test's own `gh` stub speaking** —
 a fixture the test controls, not a claim about how any released `gh` words it. *Own the string or
 don't assert on it.*
+
+## 2026-08-27 — a suite-size number in a comment is stale before it is committed
+
+PR #1066's worker wrote sabotage results into code comments as **absolute suite sizes** ("the whole
+2,423-test lib suite stayed green"). Over the course of one PR that number moved four times — 4,857 →
+4,883 → 4,923 → **4,932** for the frontend suite, and 2,423 → 2,425 for `crates/server` — **none of
+them caused by its own code.** Other PRs merging is enough.
+
+Its own `batch_media` sabotage figure was already one behind by the time it was reviewed (2,423 vs the
+merged state's 2,424), which cost a round of reconciliation.
+
+**Rule: record the DELTA, not the absolute.** *"disabling it leaves the suite unchanged"* stays true
+forever. *"leaves 2,423/0"* is true for one afternoon. Where an absolute genuinely helps, stamp it —
+"measured at 2,425 on merge" — so a reader knows whether the drift is theirs.
+
+This is [[record-evidence-in-its-durable-form]] again, one layer down: the merge-base version was
+about *repository state*, this one is about *the test suite*, and both move faster than the code the
+comment is attached to.
+
+Related, from the same PR: **writing the number at the site is itself the rule.** Its `CLAUDE.md`
+entry says to run the two sabotages and write the numbers into the comment — and four of its own sites
+argued the measurement in the PR body while the code comment merely asserted. On a ticket whose
+thesis is that an argument is not a measurement, that was the one place the diff argued where it
+could have measured.
