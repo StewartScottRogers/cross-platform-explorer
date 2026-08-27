@@ -3,7 +3,7 @@ id: CPE-1882
 title: wire the real-browser layout harness into CI, so a clipping regression goes red instead of needing a human
 type: task
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23

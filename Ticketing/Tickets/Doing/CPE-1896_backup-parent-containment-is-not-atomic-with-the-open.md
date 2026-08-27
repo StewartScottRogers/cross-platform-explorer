@@ -349,3 +349,38 @@ Related: **CPE-1889** (the static case, closed), **CPE-1897** (the second check'
   `copy_file_onto_no_follow`. Every attack ran inside a self-cleaning scratch tree with the escape
   target a sibling directory *inside* it; the probe was run with `TMP`/`TEMP` redirected inside the
   worktree, and both scratch roots were checked empty of leftover junctions afterwards.
+
+## Status 2026-08-26 — the MITIGATION HALF shipped; this ticket stays open
+
+PR #1037 merged as `074e7267`. **The race is not fixed.** The three-syscall window between the
+containment check and the destination open is unchanged, and bytes still escape at the measured rate.
+What changed is that the engine no longer calls an escape a success.
+
+Deliberately scoped that way: the full fix needs `openat2(RESOLVE_BENEATH)` on Linux and an
+`O_NOFOLLOW` per-component walk (or `NtCreateFile` with `FILE_OPEN_REPARSE_POINT`) on Windows, which is
+a large platform-specific change and the wrong thing to attempt under an attempt cap.
+
+**What shipped:** a post-write `landed_inside` that compares **file identity** — did the bytes go into
+the object we wrote? — rather than comparing paths. The destination handle was already being asked for
+its facts by an existing guard, so the identity costs no extra syscall. The verify leg now hashes the
+resolved, identity-confirmed path instead of the plan-relative name, which is what stopped verification
+laundering the escape by re-reading the redirected file and agreeing with itself. The check runs in
+**both** verify modes, because the original 73/1200 was measured with `verify = false`.
+
+**Proven closed by A/B**, same racer, same 400 trials, minutes apart: identity comparison neutralised →
+206 escapes, **9 reported `ok: true`**; live → 214 escapes, **0 reported `ok: true`**, swap-back
+completing 214 times in both. The attack landed equally; only the engine's ability to be lied to
+changed.
+
+## What the atomic half should build first
+
+A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a
+test can perform the swap with no thread and no timing. That converts this whole class from a
+probability into a certainty and is the only way to test a between-two-syscalls swap deterministically.
+
+And read **CPE-1915** before choosing an approach: `GetFinalPathNameByHandleW` / `F_GETPATH` on the open
+handle is strictly better than identity — it answers containment directly rather than by proxy, works on
+volumes that report no usable file index, and would close **CPE-1912** for free by letting the handle's
+real path be compared against the *plan* path rather than only against the root.
+
+Related, all filed from this work: **CPE-1912**, **CPE-1913**, **CPE-1915**.
