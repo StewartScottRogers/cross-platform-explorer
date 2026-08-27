@@ -32,7 +32,7 @@
    *   the same paragraph once per path, so this hoists it out instead: one explanation, paths stay a
    *   plain list below it.
    *
-   * **Neither list is fully reversible once run (Blocker 3, PR 1044 review round 2).** A confirmed
+   * **Neither list is fully reversible once run (Blocker 3, PR #1044 review round 2).** A confirmed
    * overwrite replaces the occupant's bytes with nothing preserved anywhere — Undo (and a mid-run
    * rollback) can restore the NAME, never that content. The warning next to the checkbox says so before
    * the run, not after.
@@ -160,7 +160,7 @@
     running = true;
     runError = "";
     try {
-      // Only the destinations actually shown and confirmed — never a blanket flag (CPE-1891, PR 1044
+      // Only the destinations actually shown and confirmed — never a blanket flag (CPE-1891, PR #1044
       // review round 2, Blocker 2): the backend only bypasses the occupancy guard at a `to` in this
       // exact list, so a stray extra collision the user never saw still refuses.
       const confirmedDestinations = confirmOverwrite ? confirmable.map((c) => c.to) : [];
