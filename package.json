@@ -17,6 +17,8 @@
     "harness:statusbar-notice": "vite --config vite.harness.statusbar.config.ts",
     "harness:sidebar-drop-stack-overlap": "node scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs",
     "harness:revert-heldback-copy": "vite --config vite.harness.revert-heldback.config.ts",
+    "harness:layout-guard-server": "vite --config vite.harness.layout-guard.config.ts",
+    "harness:layout-guard": "node scripts/dev-harness/layout-guard/run.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

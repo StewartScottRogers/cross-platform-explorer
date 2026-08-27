@@ -3,7 +3,7 @@ id: CPE-1882
 title: wire the real-browser layout harness into CI, so a clipping regression goes red instead of needing a human
 type: task
 priority: High
-status: Backlog
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-23
@@ -111,3 +111,17 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   See CPE-1884's Work Log for the full writeup (repro screenshots, before/after evidence, the fix
   itself) and `gui-smoke/known-failing.json`'s four `trash-titlebar.smoke.ts` entries (tag `CPE-1822`)
   it could not itself clear (same msedgedriver/WebKitGTK gap this ticket exists to route around).
+
+- **2026-08-26 (Worker)** — Picked up. Plan: generalise `statusbar-notice`'s prototype into
+  `scripts/dev-harness/layout-guard/` (a CDP-driving engine with four composable check kinds —
+  `siblingOverlap`, `clipProbe`, `textOverflow`, `selfPaint` — reusing `sidebar-drop-stack-overlap`'s
+  CDP-over-`chrome.exe --headless=new` shape rather than the outer/iframe `--dump-dom` shape, since
+  `Emulation.setDeviceMetricsOverride` sets the real CSS viewport directly and needs no iframe trick), a
+  `cases.mjs` manifest (the one file a future ticket touches to add a case), and ONE shared dev server
+  (`vite.harness.layout-guard.config.ts`) with a generic, pluggable backend mock
+  (`shared-mocks/invoke.ts`'s `registerRawInvoke`) so a new case never needs a bespoke mock file either.
+  Two cases: `statusbar-notice` (reuses the existing harness page, red-proofs CPE-1836) and a new
+  `trash-titlebar` (new harness page mounting the real `TrashView.svelte`, red-proofs CPE-1827). Wiring
+  into `.github/workflows/gui-smoke.yml` as a new job, unconditional on every push/PR (measured cost:
+  under a minute end to end — cheap enough that path-filtering isn't worth the CPE-1893-shaped risk of a
+  silently-skipped check).
