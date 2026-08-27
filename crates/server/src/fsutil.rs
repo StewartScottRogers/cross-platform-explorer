@@ -1385,6 +1385,26 @@ impl LinkGuardWording {
                  itself) and run the backup again.",
     };
 
+    /// CPE-1913: `transfer::download_tree`. The remedy is the one CPE-1881 wrote for this leg's own
+    /// hard-link skip, moved here verbatim rather than left behind when that guard became the shared
+    /// one — a download's other name really can be broken safely, unlike a backup destination that may
+    /// be a deliberate deduplicating store.
+    pub const DOWNLOAD: Self = Self {
+        verb: "a download",
+        scope: "the download folder",
+        remedy: "Break the link at that local name first (copy the file over itself, or delete it) \
+                 and download again.",
+    };
+
+    /// CPE-1913: the archive extractors. `scope` matches the noun `archive::escaped_dest_message` and
+    /// `multiply_linked_message` already use, so an extraction's refusals read as one voice whichever
+    /// guard produced them.
+    pub const EXTRACT: Self = Self {
+        verb: "an extraction",
+        scope: "the extraction folder",
+        remedy: "Remove or rename that name in the extraction folder and extract again.",
+    };
+
     /// The explanation behind a hard-link write refusal using this wording, with the destination and its
     /// link count left out — the shared half [`copy_file_onto_no_follow_with_wording`]'s per-path message
     /// is built from below, and the same half `revert_engine::execute_restore` states ONCE for a whole
@@ -1442,7 +1462,7 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
     copy_file_onto_destination_handle(src, dst, wording, || {
         crate::batch_media::open_no_follow(dst)
             .map(|(file, created)| crate::open_beneath::Opened { file, created })
-            .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))
+            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: could not open the destination for writing: {e}", dst.display())))
     })
 }
 
@@ -1482,7 +1502,7 @@ pub(crate) fn copy_file_onto_destination_handle(
     src: &Path,
     dst: &Path,
     wording: LinkGuardWording,
-    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, String>,
+    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
 ) -> Result<CopiedOnto, String> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
@@ -1511,7 +1531,58 @@ pub(crate) fn copy_file_onto_destination_handle(
         );
     }
 
-    let crate::open_beneath::Opened { file: mut w, created } = open_dst()?;
+    let ClaimedDestination { file: mut w, written } = claim_destination_handle(dst, wording, open_dst).map_err(|r| r.why)?;
+    // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
+    // the copy buffer, but taking it from the handle keeps this function free of a second path question.
+    let copied =
+        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
+    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    carry_file_times(&meta, &w);
+    Ok(CopiedOnto { bytes: copied, written })
+}
+
+/// What [`claim_destination_handle`] hands back: the write handle every guard has already passed, and
+/// the identity of the object it names (see [`CopiedOnto::written`] for what `None` and a degenerate
+/// value mean — this is the same value, read off the same handle).
+pub(crate) struct ClaimedDestination {
+    /// Open for writing, truncated, and proven not to be a link, a directory or a hard link.
+    pub(crate) file: std::fs::File,
+    /// Identity of the object the bytes are about to enter, off the handle. `None` on a platform
+    /// whose identity model [`crate::batch_media::handle_facts`] does not know.
+    pub(crate) written: Option<crate::batch_media::FileIdentity>,
+}
+
+/// **Claim a destination to write into — the whole handle-side gate, in one place (CPE-1913).**
+///
+/// This is the block that used to live inside [`copy_file_onto_destination_handle`] and nowhere else.
+/// CPE-1896 built it for the backup engine; CPE-1913 is the ticket filed because *four other* write
+/// legs in this crate — archive extract, transfer download, revert apply, copilot apply — reached the
+/// same silent-success shape and none of them could reuse it, because it was welded to a
+/// source-file-to-destination-file copy. Splitting it out is that ticket's "one implementation and N
+/// call sites" acceptance criterion: a caller with bytes from a **stream** (an archive entry, a remote
+/// file body) now gets the identical guards and the identical wording rather than a fifth
+/// re-derivation.
+///
+/// `open_dst` is the caller's open — in production always
+/// [`crate::open_beneath::create_beneath`], which resolves the destination one component at a time
+/// against a held root handle, so the containment is atomic with the open. What this function adds is
+/// everything that can only be asked **of the handle that open returned**: is the object a name
+/// surrogate, a directory, or a second name for a file that may live anywhere.
+///
+/// On return the handle is at offset 0 and the file is truncated, so the caller writes its bytes and
+/// nothing of a previous, longer occupant survives.
+///
+/// # Errors
+///
+/// Every refusal ends "Nothing was written for this entry" and, when this call created the name, the
+/// name is removed again — so a refused entry leaves no empty file behind for the user to puzzle over.
+pub(crate) fn claim_destination_handle(
+    dst: &Path,
+    wording: LinkGuardWording,
+    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
+) -> Result<ClaimedDestination, crate::open_beneath::Refusal> {
+    let crate::open_beneath::Opened { file: w, created } = open_dst()?;
 
     // THE authority on Windows, where a junction is a reparse point that `is_symlink` (the path check,
     // now BELOW this block since CPE-1896 round 4) may or may not report depending on its tag:
@@ -1609,7 +1680,12 @@ pub(crate) fn copy_file_onto_destination_handle(
             if created {
                 let _ = std::fs::remove_file(dst);
             }
-            return Err(format!("{}: {why}. Nothing was written for this entry", dst.display()));
+            // `policy: true` throughout this function's refusals — every one of them is a verdict
+            // about what is sitting at the name, not an I/O failure. See `open_beneath::Refusal`.
+            return Err(crate::open_beneath::Refusal {
+                why: format!("{}: {why}. Nothing was written for this entry", dst.display()),
+                policy: true,
+            });
         }
         // CPE-1857 — the hard-link hole, refused on the handle. See the "Multiply-linked destinations"
         // section above for the decision, its cost, and the two alternatives that were rejected.
@@ -1624,13 +1700,16 @@ pub(crate) fn copy_file_onto_destination_handle(
             // its doc — so this per-entry message and the summary a caller states once for a whole GROUP
             // of these refusals (`revert_engine::execute_restore`'s `WriteRefusalGroup`) are built from
             // the same two words and cannot say different things.
-            return Err(format!(
-                "{}: this file has {} names (it is hard-linked), and {} Nothing was written for this \
-                 entry",
-                dst.display(),
-                facts.links,
-                wording.hard_link_reason()
-            ));
+            return Err(crate::open_beneath::Refusal {
+                why: format!(
+                    "{}: this file has {} names (it is hard-linked), and {} Nothing was written for \
+                     this entry",
+                    dst.display(),
+                    facts.links,
+                    wording.hard_link_reason()
+                ),
+                policy: true,
+            });
         }
     }
 
@@ -1682,25 +1761,28 @@ pub(crate) fn copy_file_onto_destination_handle(
         if created {
             let _ = std::fs::remove_file(dst);
         }
-        return Err(format!(
-            "{}: this name is a link, and {} never writes through one — a link's target can be \
-             re-pointed after any check. Nothing was written for this entry",
-            dst.display(),
-            wording.verb
-        ));
+        return Err(crate::open_beneath::Refusal {
+            why: format!(
+                "{}: this name is a link, and {} never writes through one — a link's target can be \
+                 re-pointed after any check. Nothing was written for this entry",
+                dst.display(),
+                wording.verb
+            ),
+            policy: true,
+        });
     }
 
     // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
     // A partial destination is left behind on a mid-copy error, exactly as `fs::copy` leaves one.
-    w.set_len(0).map_err(|e| format!("{}: could not truncate the destination: {e}", dst.display()))?;
-    // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
-    // the copy buffer, but taking it from the handle keeps this function free of a second path question.
-    let copied =
-        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
-    // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
-    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
-    carry_file_times(&meta, &w);
-    Ok(CopiedOnto { bytes: copied, written })
+    // `policy: false` — unlike everything above it, a failed truncate is the filesystem saying no, and
+    // the entry the user asked for was not written.
+    w.set_len(0).map_err(|e| {
+        crate::open_beneath::Refusal::failure(format!(
+            "{}: could not truncate the destination: {e}",
+            dst.display()
+        ))
+    })?;
+    Ok(ClaimedDestination { file: w, written })
 }
 
 /// Recursively copy `src` into `dst`, claiming **every** directory and file name it creates

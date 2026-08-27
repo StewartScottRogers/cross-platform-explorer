@@ -438,110 +438,22 @@ pub fn guarded_join(base: &Path, rel: &str) -> Option<PathBuf> {
     }
 }
 
-/// The longest ancestor of `path` (inclusive) that currently exists on disk as *some* node — file,
-/// directory, or symlink — using `symlink_metadata` so a symlink is detected without being followed.
-/// `Ok(None)` only if nothing up the chain (not even a root) resolves. Used to canonicalize-and-verify
-/// the real, already-existing portion of a to-be-created path BEFORE creating anything, so a pre-existing
-/// symlink pointing outside the download root is caught before any `mkdir` follows it (CPE-1461).
-///
-/// **`Err` = "this chain cannot be inspected" (CPE-1696).** The walk used to be
-/// `if p.symlink_metadata().is_ok() { return Some(..) }`, which treats *every* `lstat` failure as "this
-/// level doesn't exist" and keeps climbing. That is a fail-open in a security guard: a level whose `lstat`
-/// is refused (permission denied, a dead mount, an I/O error) is skipped, so the containment check lands
-/// on a **shallower** ancestor, and if the skipped level is a symlink pointing out of the download root
-/// then `create_dir_all` follows it with nothing having verified it. Only a genuine `NotFound` means "not
-/// here, keep climbing"; anything else returns `Err` and the caller fails closed by skipping the entry.
-///
-/// (Mitigation note, recorded per the ticket: a path you cannot `lstat` you very probably cannot traverse
-/// either, so in practice the subsequent `create_dir_all` would fail anyway and no escape would occur.
-/// That is a *probable* consequence of one OS's permission model, not an invariant. `symlink_metadata`
-/// and `create_dir_all` are separate syscalls whose access requirements are independent, so the outcome
-/// of one cannot be inferred from the other — and not every `lstat` failure is a permission failure at
-/// all: a dead network mount, an `EIO`, or a transient resolve failure produces the same fail-open with
-/// no permission model behind it to save us. (The tempting stronger claim — that Windows *breaks* the
-/// coincidence, because the ACL refusing an attributes query is not the one refusing a directory create —
-/// does not hold here: a Windows deny ACE cannot refuse `symlink_metadata` at all, since it opens with a
-/// desired-access mask of `0`, so on Windows the ACL precondition is simply unreachable and there is no
-/// coincidence there to break.) A guard whose correctness rests on a different call happening to fail
-/// later is not a guard, so it is closed here rather than argued about.)
-fn existing_ancestor(path: &Path) -> Result<Option<PathBuf>, String> {
-    let mut cur = Some(path);
-    while let Some(p) = cur {
-        match classify_ancestor_probe(p.symlink_metadata().map(|_| ()).map_err(|e| e.kind())) {
-            AncestorProbe::Here => return Ok(Some(p.to_path_buf())),
-            AncestorProbe::KeepClimbing => {}
-            AncestorProbe::Uninspectable => {
-                return Err(format!(
-                    "could not inspect {} while locating the deepest existing ancestor",
-                    p.display()
-                ))
-            }
-        }
-        cur = p.parent();
-    }
-    Ok(None)
-}
-
-/// What one level's `lstat` outcome means to [`existing_ancestor`]'s walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AncestorProbe {
-    /// Something is here — this is the deepest existing ancestor.
-    Here,
-    /// Genuinely nothing here; try the parent.
-    KeepClimbing,
-    /// The `lstat` failed for a reason other than absence, so we cannot say this level is empty and must
-    /// not silently step over it (CPE-1696).
-    Uninspectable,
-}
-
-/// The pure classifier behind [`existing_ancestor`]'s per-level decision, split out so the
-/// `NotFound`-vs-everything-else taxonomy of a **security** guard is unit-testable on every OS and account:
-/// the real conditions that produce a non-`NotFound` `lstat` failure are platform- and
-/// privilege-dependent (inert as root; and on Windows a deny ACE does not refuse `symlink_metadata` at
-/// all, since it opens with a desired-access mask of `0` — PR #874's measurement), so an ACL-based test
-/// alone would leave this taxonomy unverified on some machines. Mirrors
-/// `crate::dispatch::classify_path_error`'s own rationale.
-fn classify_ancestor_probe(lstat: Result<(), std::io::ErrorKind>) -> AncestorProbe {
-    match lstat {
-        Ok(()) => AncestorProbe::Here,
-        Err(std::io::ErrorKind::NotFound) => AncestorProbe::KeepClimbing,
-        Err(_) => AncestorProbe::Uninspectable,
-    }
-}
-
-/// What the leaf-level `lstat` in [`download_tree`] means for the CPE-1461 leaf-symlink guard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LeafProbe {
-    /// Nothing there, or a real non-symlink node — safe to create.
-    SafeToWrite,
-    /// A pre-existing symlink. Writing through it could land outside the download root; skip the entry.
-    PreExistingSymlink,
-    /// The `lstat` failed for a reason other than absence, so we cannot say the leaf is not a symlink
-    /// (CPE-1696).
-    Uninspectable,
-}
-
-/// The pure classifier behind [`download_tree`]'s leaf-symlink check — the second half of the same
-/// CPE-1461 guard [`classify_ancestor_probe`] serves, and split out for the same reason, which here is
-/// not merely convenient but **necessary**: this taxonomy is not reachable through an ACL on either CI
-/// platform, so a permission-based test could not cover it anywhere. On Windows a deny ACE cannot refuse
-/// `symlink_metadata` at all (it opens with a desired-access mask of `0` — PR #874's measurement); on
-/// Unix the only lever is `chmod 0o000` on the parent, which equally refuses the `create_dir_all` /
-/// `fs::write` that follow, so the entry never reaches this check. A pure classifier is the only shape
-/// that can be driven red at all.
-///
-/// `lstat` is `Ok(is_symlink)`, or the `ErrorKind` of the failure. The bug (PR #889 review, R2) was that
-/// the pre-CPE-1696 code read `if let Ok(md) = symlink_metadata(..)` with **no `else`**: every failure —
-/// permission-denied, a dead mount, `EIO` — fell straight through to `fs::write`, skipping the guard
-/// entirely. Only a genuine `NotFound` means "no leaf here, safe to create".
-fn classify_leaf_probe(lstat: Result<bool, std::io::ErrorKind>) -> LeafProbe {
-    match lstat {
-        Ok(true) => LeafProbe::PreExistingSymlink,
-        Ok(false) => LeafProbe::SafeToWrite,
-        Err(std::io::ErrorKind::NotFound) => LeafProbe::SafeToWrite,
-        Err(_) => LeafProbe::Uninspectable,
-    }
-}
+// **`existing_ancestor` / `AncestorProbe` / `LeafProbe` / `classify_leaf_probe` lived here and are
+// gone (CPE-1913).** All four were by-PATH probes standing in front of the write: canonicalise the
+// deepest existing ancestor and compare it to the root (CPE-1461/1696), `lstat` the leaf for a
+// pre-existing symlink (CPE-1461/1696), then `batch_media::name_links` for a hard link (CPE-1857).
+// `download_tree` now opens the destination through `open_beneath::create_beneath` against a root
+// handle held for the whole transfer and asks `fsutil::claim_destination_handle` the same three
+// questions **of the handle it opened**, where no rename can change the answer afterwards.
+//
+// They were deleted rather than kept as belt-and-braces on purpose. A path question standing in front
+// of a handle question is not redundancy, it is a shadow: it answers first, so the handle guard can
+// be disabled with the whole suite still green and no fixture can be built that reaches it. That is
+// CPE-1929, generalised from CPE-1896 round 4, where exactly this shape hid a live guard behind an
+// `is_symlink` check for four review rounds. The reporting they fed is unchanged — a policy refusal
+// is still a `DownloadReport::skipped` entry and an I/O refusal still lands in `undelivered` and
+// fails the transfer — but the verdict now comes from `open_beneath::Refusal::policy`, set by the
+// guard that fired, instead of from which probe happened to run.
 
 /// The length of `path` as an ordinary Win32 application would spell it — without the `\\?\` verbatim
 /// prefix that [`download_tree`]'s canonicalized root carries on Windows. That prefix is what exempts
@@ -712,6 +624,15 @@ pub fn download_tree(
     // resolved to a leaf, are not CPE-1857's shape, and are unchanged here — out of this ticket's scope.
     let mut skipped: Vec<String> = Vec::new();
 
+    // CPE-1913: hold the resolved download root **open** for the whole transfer, once — the same
+    // anchor `backup::apply_backup_plan_walk` opens. Every write below is resolved
+    // component-by-component against this handle instead of by re-parsing a path, which is what
+    // makes each entry's containment atomic with its own open. A root that resolves but will not
+    // open fails the whole transfer, for the same reason an unresolvable one does: with no anchor
+    // there is no containment question that can be answered.
+    let root_handle = crate::open_beneath::open_root(&canonical_root, "download folder")
+        .map_err(|e| format!("{}: the download folder could not be opened ({e}), so nothing can be written into it in a way that can be checked", canonical_root.display()))?;
+
     walk(provider, remote_root, cancel, |entry| {
         if hard_err.is_some() {
             return;
@@ -722,181 +643,109 @@ pub fn download_tree(
             eprintln!("transfer: skipped unsafe entry name from remote (path traversal): {}", entry.path);
             return;
         };
-        // The directory to materialize: the entry itself if a dir, else the file's parent.
-        let dir_to_make: &Path = if entry.is_dir { local.as_path() } else { local.parent().unwrap_or(&canonical_root) };
+        // **Everything from here is answered against the HELD ROOT HANDLE, never against a path**
+        // (CPE-1913). `rel_local` is what `guarded_join` just built, minus the root — always a plain
+        // relative path of `Component::Normal` parts, because that is the only thing `guarded_join`
+        // can produce, and it has already applied `local_safe_segment` to every one of them (which is
+        // the Windows name-normalisation obligation `open_beneath::create_beneath` records for a new
+        // caller: a name the NT layer and the Win32 layer disagree about never gets this far).
+        let Ok(rel_local) = local.strip_prefix(&canonical_root) else {
+            // Unreachable: `guarded_join` built `local` by pushing onto `canonical_root`. Refused
+            // rather than unwrapped, because an unreachable case that silently writes is worse than
+            // one that silently skips.
+            eprintln!("transfer: skipped entry whose local path left the download root: {}", entry.path);
+            return;
+        };
+        let rel_local = rel_local.to_path_buf();
 
-        // VALIDATE BEFORE MUTATING (CPE-1461 defect fix): canonicalize the longest *already-existing*
-        // ancestor of the target and confirm it is still under the root, so `create_dir_all` can never
-        // follow a pre-existing symlink out of the root before the check runs. The portion we then create
-        // is brand-new (no symlinks), rooted at a verified-contained real directory. Fail closed on a
-        // dangling/unresolvable ancestor (skip the entry with a surfaced notice).
-        let ancestor = match existing_ancestor(dir_to_make) {
-            Ok(a) => a,
-            // CPE-1696: an `lstat` that failed for a reason OTHER than absence used to be silently
-            // skipped, moving the containment check onto a shallower ancestor. Fail closed instead.
-            //
-            // **Deliberate asymmetry (PR #894 UAT, recorded here per its request rather than left to be
-            // rediscovered): an uninspectable ANCESTOR skips silently and the transfer still ends `Ok`,
-            // while an uninspectable LEAF (below) is pushed into `undelivered` and ends the whole
-            // transfer `Err` (CPE-1709 F1).** Defensible, not an oversight: the leaf is the actual
-            // delivery target — the user asked for THAT file and genuinely did not get it — while an
-            // ancestor is scaffolding on the way there, and "we could not even confirm the containing
-            // directory chain" is closer in kind to the traversal/symlink security refusals just above
-            // (not writing is the correct, safe response) than to a delivery failure. One real
-            // consequence worth naming plainly: a permission-denied leaf `lstat` now FAILS the whole
-            // transfer where it used to be silent — judged an improvement (the old behaviour could report
-            // success for a batch that quietly dropped files), not a defect, but it is a visible
-            // behaviour change for anyone relying on the old silence.
+        // What a refusal means for the report. The two buckets were already here (CPE-1709 F1 and
+        // CPE-1881); what changed is where the answer comes from — `Refusal::policy` is set by the
+        // guard that fired rather than inferred from its wording. `policy` = "not writing is the
+        // correct outcome" (a link, a hard link, a directory in the way) and stays a per-entry skip;
+        // anything else is a file the user asked for and did not get, so it fails the transfer.
+        macro_rules! record {
+            ($r:expr) => {{
+                let r = $r;
+                if r.policy {
+                    let why = format!("{}: {}", entry.path, r.why);
+                    eprintln!("transfer: skipped entry — {why}");
+                    skipped.push(why);
+                } else {
+                    let why = describe_undeliverable(&entry.path, &local, &r.why);
+                    eprintln!("transfer: FAILED to deliver {why}");
+                    undelivered.push(why);
+                }
+            }};
+        }
+
+        if entry.is_dir {
+            // Was `create_dir_all(dir_to_make)` behind a `canonicalize` of the deepest existing
+            // ancestor. `create_dir_all` walks a junction like any other directory, so the check and
+            // the creation were two different questions about a path that could change in between —
+            // and the check could not see a junction pointing *inside* the root at all (CPE-1912).
+            // `create_dir_beneath` opens each level relative to the level above it and refuses a link
+            // at every one.
+            if let Err(r) = crate::open_beneath::create_dir_beneath(&root_handle, &rel_local) {
+                record!(r);
+            }
+            return;
+        }
+
+        // **The remote body is fetched BEFORE the destination is claimed, and the order is the point.**
+        // It used to be the other way round: every local check ran, then `provider.read` fetched an
+        // entire file over the network, and only then did `fs::write` resolve the local path again.
+        // That put a whole network transfer inside the check-to-write window — the widest of the five
+        // windows CPE-1913 was filed for. Fetching first means the claim below is the *last* thing
+        // before the bytes go in, and it also keeps the pre-existing property that a failed fetch
+        // leaves whatever was already at the local name untouched (the claim truncates).
+        let data = match provider.read(&entry.path) {
+            Ok(d) => d,
             Err(e) => {
-                eprintln!(
-                    "transfer: skipped entry whose existing ancestors could not be inspected ({e}): {}",
-                    entry.path
-                );
+                hard_err = Some(e);
                 return;
             }
         };
-        match ancestor.as_deref().map(std::fs::canonicalize) {
-            Some(Ok(c)) if c.starts_with(&canonical_root) => {}
-            Some(Ok(_)) => {
-                eprintln!("transfer: skipped entry escaping the download root (symlinked dir?): {}", entry.path);
+
+        // ONE gate, shared with the backup and restore legs (`fsutil::claim_destination_handle`).
+        // It opens the destination one component at a time against the root handle, then asks the
+        // handle itself — never the path again — whether the object is a link, a directory, or a
+        // second name for a file that may live anywhere.
+        //
+        // **The three by-path probes that used to stand here are gone, not kept as belt-and-braces.**
+        // `existing_ancestor` + `canonicalize` (containment), the leaf `symlink_metadata` probe, and
+        // `batch_media::name_links` all asked, by path, questions this gate answers by handle. Left in
+        // front they would have made the handle guards unreachable for every refusal — the exact shape
+        // CPE-1929 names, and the reason CPE-1896 ended by *reordering* rather than adding: a guard
+        // that can be deleted with the suite still green is not a guard.
+        let mut claimed = match crate::fsutil::claim_destination_handle(
+            &local,
+            crate::fsutil::LinkGuardWording::DOWNLOAD,
+            || crate::open_beneath::create_beneath(&root_handle, &rel_local),
+        ) {
+            Ok(c) => c,
+            Err(r) => {
+                record!(r);
                 return;
             }
-            _ => {
-                eprintln!("transfer: skipped entry with an unresolvable parent under the root: {}", entry.path);
-                return;
-            }
-        }
-        if let Err(e) = std::fs::create_dir_all(dir_to_make) {
-            hard_err = Some(format!("{}: {e}", dir_to_make.display()));
+        };
+        if let Err(e) = std::io::Write::write_all(&mut claimed.file, &data) {
+            hard_err = Some(format!("{}: {e}", local.display()));
             return;
         }
-        if !entry.is_dir {
-            // A pre-existing leaf that is itself a symlink must NOT be followed on write (it could point
-            // outside the root). Skip it — fail closed (CPE-1461 leaf-symlink defect fix).
-            //
-            // CPE-1696: this was `if let Ok(md) = symlink_metadata(&local)` with no `else`, so an `lstat`
-            // that failed for a reason other than absence skipped the symlink check entirely and fell
-            // through to `fs::write` — the same fail-open as `existing_ancestor`'s, in the same guard. Only
-            // a genuine `NotFound` means "no leaf there, safe to create".
-            let leaf = std::fs::symlink_metadata(&local).map(|md| md.file_type().is_symlink());
-            match classify_leaf_probe(leaf.as_ref().copied().map_err(|e| e.kind())) {
-                LeafProbe::SafeToWrite => {
-                    // **CPE-1857 — the one shape the probe above passes and is right to pass.** A hard
-                    // link is not a symlink: `lstat` reports an ordinary regular file, because that is
-                    // what it is. It is a second NAME for an object that may live anywhere, so
-                    // `fs::write` below lands the remote server's bytes at that other name — outside the
-                    // download root, past `guarded_join` and past the containment walk, none of which
-                    // can see it, because a hard link resolves to itself. The entry path is chosen by
-                    // the **remote server**, so this is the untrusted-name half of the shape CPE-1857
-                    // measured on a checkpoint manifest.
-                    //
-                    // **An `eprintln` skip, exactly like the symlinked-leaf arm below, and NOT an
-                    // `undelivered` entry — decided, not defaulted.** `undelivered` makes the WHOLE
-                    // `download_tree` call return `Err`, which is right for the class it exists for
-                    // ("this filesystem refused this name", CPE-1709 F1) and wrong for this one: a
-                    // hard-linked leaf is a per-entry *policy* skip, and one collided name must not cost
-                    // the user every other file in the tree. The first cut of this did use `undelivered`
-                    // and its own test reddened on it — see the test's doc for the measurement.
-                    //
-                    // **CPE-1857 Security-Auditor finding 1: this is a GATE, so `Unknown` must refuse.**
-                    // The `bool` form of this question folds "could not tell" into "no" — right at the
-                    // revert engine's refusal *classifier*, where the write is already settled, and a
-                    // fail-open here, where the bytes have not moved yet. `Unknown` therefore goes down
-                    // the same route `LeafProbe::Uninspectable` already takes: recorded in
-                    // `undelivered`, so the transfer cannot report `Ok(n)` for a tree it did not deliver.
-                    match crate::batch_media::name_links(&local) {
-                        crate::batch_media::NameLinks::Many(names) => {
-                            // CPE-1881: was `eprintln!` only, with nothing reaching the caller — see
-                            // `DownloadReport::skipped`'s doc. Pushed here, still `eprintln!`'d too, so
-                            // stderr keeps carrying the same trace it always did.
-                            // CPE-1881 round 2 (UAT): the message used to stop at "nothing was written
-                            // for this entry" — true, but not actionable. The remedy mirrors the revert
-                            // engine's own hard-link paragraph in shape (name the fix, then "and run/
-                            // download again"), though it is composed fresh here rather than shared
-                            // through `fsutil::LinkGuardWording` — that type's wording is written for the
-                            // restore/backup domain ("the folder being restored" / "the backup root"),
-                            // and forcing a third, unrelated caller through it would be the wrong kind of
-                            // reuse. A future fourth caller with the identical need is the point to widen
-                            // it, not this one.
-                            let why = format!(
-                                "{}: this local path already has {names} names (it is hard-linked); its \
-                                 other names may live outside the download folder, so nothing was written \
-                                 for this entry. Break the link at that local name first (copy the file \
-                                 over itself, or delete it) and download again.",
-                                entry.path
-                            );
-                            eprintln!("transfer: skipped entry — {why}");
-                            skipped.push(why);
-                            return;
-                        }
-                        crate::batch_media::NameLinks::Unknown(why) => {
-                            let why = format!(
-                                "{}: could not check how many names the local path \"{}\" has, so \
-                                 nothing was written for it — refusing to guess rather than risk \
-                                 writing through a hard link into a file outside the download folder: \
-                                 {why}",
-                                entry.path,
-                                local.display()
-                            );
-                            eprintln!("transfer: FAILED to deliver {why}");
-                            undelivered.push(why);
-                            return;
-                        }
-                        crate::batch_media::NameLinks::One
-                        | crate::batch_media::NameLinks::NoFileHere => {}
-                    }
-                }
-                LeafProbe::PreExistingSymlink => {
-                    // CPE-1881: same fix, same reason, as the hard-link arm just above — this was its
-                    // "adjacent symlink arm" the ticket named explicitly. See `DownloadReport::skipped`.
-                    // CPE-1881 round 2 (UAT): same "name the remedy, not just the cause" fix as the
-                    // hard-link arm above.
-                    let why = format!(
-                        "{}: the local path is a pre-existing symlink, and a download never writes \
-                         through one, so nothing was written for this entry. Remove or rename the \
-                         symlink and download again.",
-                        entry.path
-                    );
-                    eprintln!("transfer: skipped entry — {why}");
-                    skipped.push(why);
-                    return;
-                }
-                LeafProbe::Uninspectable => {
-                    // CPE-1709 (F1): this arm used to `return` silently, so a file the local filesystem
-                    // refused — an over-long encoded name being the reachable case — left
-                    // `download_tree` reporting `Ok(n)` for a tree it had NOT delivered. That is this
-                    // ticket's own bug one layer up: the transfer says it worked and the file is not
-                    // there. Record it, and describe it accurately rather than blaming a symlink probe.
-                    let cause = leaf.err().map(|e| e.to_string()).unwrap_or_default();
-                    let why = describe_undeliverable(&entry.path, &local, &cause);
-                    eprintln!("transfer: FAILED to deliver {why}");
-                    undelivered.push(why);
-                    return;
-                }
-            }
-            match provider.read(&entry.path) {
-                Ok(data) => match std::fs::write(&local, data) {
-                    Ok(()) => {
-                        files += 1;
-                        // CPE-1709 (F4): the file IS delivered — the verbatim root exempts our own write
-                        // from MAX_PATH — but an application without long-path support cannot open it
-                        // afterwards. Encoding grows a name by up to 3x, so this transfer makes a
-                        // pre-existing hazard materially likelier. A notice, not a failure: calling a
-                        // delivered, long-path-readable file a failure would be its own wrong answer.
-                        if cfg!(windows) && win32_visible_len(&local) > MAX_WINDOWS_PATH {
-                            eprintln!(
-                                "transfer: delivered {} at a {}-character path, past Windows' \
-                                 {MAX_WINDOWS_PATH}-character MAX_PATH — applications without \
-                                 long-path support will not be able to open it",
-                                entry.path,
-                                win32_visible_len(&local)
-                            );
-                        }
-                    }
-                    Err(e) => hard_err = Some(format!("{}: {e}", local.display())),
-                },
-                Err(e) => hard_err = Some(e),
-            }
+        files += 1;
+        // CPE-1709 (F4): the file IS delivered — the verbatim root exempts our own write from
+        // MAX_PATH — but an application without long-path support cannot open it afterwards.
+        // Encoding grows a name by up to 3x, so this transfer makes a pre-existing hazard materially
+        // likelier. A notice, not a failure: calling a delivered, long-path-readable file a failure
+        // would be its own wrong answer.
+        if cfg!(windows) && win32_visible_len(&local) > MAX_WINDOWS_PATH {
+            eprintln!(
+                "transfer: delivered {} at a {}-character path, past Windows' \
+                 {MAX_WINDOWS_PATH}-character MAX_PATH — applications without long-path support \
+                 will not be able to open it",
+                entry.path,
+                win32_visible_len(&local)
+            );
         }
     })?;
 
@@ -1520,6 +1369,118 @@ mod tests {
         }
     }
 
+    /// A provider serving one file in a subdirectory the remote server names — `sub/target.txt`.
+    /// Separate from [`OneFile`] because the whole point of CPE-1913's transfer harm test is that the
+    /// **remote** chooses an intermediate path component, which is what a junction planted locally can
+    /// then redirect.
+    struct OneNestedFile;
+    impl FileSystemProvider for OneNestedFile {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            match path {
+                "" => Ok(vec![ProviderEntry { name: "sub".into(), is_dir: true, size: 0 }]),
+                "sub" => {
+                    Ok(vec![ProviderEntry { name: "target.txt".into(), is_dir: false, size: 11 }])
+                }
+                _ => Ok(vec![]),
+            }
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(b"REMOTE BYTES".to_vec())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    /// **CPE-1913's harm test for the transfer leg, in both directions a junction can point.**
+    ///
+    /// A directory junction is planted at `dl/sub` — the exact component the remote server names — and
+    /// the transfer is run twice: once with the junction leading **outside** the download folder, once
+    /// with it leading to another folder **inside** it.
+    ///
+    /// Both cases passed every guard this leg had before CPE-1913, for different reasons and with the
+    /// same outcome (`Ok`, the file elsewhere, nothing said):
+    ///
+    /// - **Outside** — the containment check canonicalised the deepest *existing* ancestor. For a file
+    ///   entry that ancestor is `dl/sub`, whose canonical form is the junction's target, so
+    ///   `starts_with(root)` was false and the entry was skipped — with an `eprintln!` and an `Ok`
+    ///   verdict, which is the silent-success shape this ticket is named for. The **directory** entry
+    ///   that precedes it was skipped the same way, so the transfer reported success for a tree it had
+    ///   not delivered.
+    /// - **Inside** — `dl/other` is under the root, so containment was satisfied and the write went
+    ///   through, `files += 1`, `Ok`. This is CPE-1912's shape at the transfer leg: no race, no thread,
+    ///   nothing any path check can see.
+    ///
+    /// Now every component is opened relative to the one before it, so a junction at `sub` stops the
+    /// entry wherever it points, and the refusal reaches the caller in `DownloadReport::skipped`
+    /// instead of stderr.
+    #[test]
+    fn cpe_1913_a_junction_inside_the_download_folder_never_redirects_an_entry() {
+        for point_outside in [true, false] {
+            let d = crate::fsutil::scratch_dir("cpe1913-xfer-junction");
+            let dl = d.join("dl");
+            let elsewhere =
+                if point_outside { d.join("outside") } else { dl.join("other") };
+            std::fs::create_dir_all(&dl).unwrap();
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            if !crate::fsutil::make_dir_link(&elsewhere, &dl.join("sub")) {
+                crate::skip_notice!(
+                    "SKIPPING cpe_1913_a_junction_inside_the_download_folder_never_redirects_an_entry: \
+                     could not stage a directory link. NOTHING on this run covered the transfer leg's \
+                     redirected-component hole"
+                );
+                return;
+            }
+            // Liveness: the fixture must really redirect, or the test certifies nothing.
+            std::fs::write(dl.join("sub/liveness.txt"), b"through").unwrap();
+            assert_eq!(
+                std::fs::read(elsewhere.join("liveness.txt")).ok().as_deref(),
+                Some(&b"through"[..]),
+                "fixture is inert: the junction at dl/sub does not redirect (point_outside={point_outside})"
+            );
+            std::fs::remove_file(dl.join("sub/liveness.txt")).unwrap();
+
+            let cancel = AtomicBool::new(false);
+            let report = download_tree(&OneNestedFile, "", &dl, &cancel);
+
+            // HARM FIRST, off the filesystem, before any verdict is inspected.
+            assert!(
+                !elsewhere.join("target.txt").exists(),
+                "HARM: the download wrote the remote server's bytes through a junction at dl/sub into \
+                 {}, which the user never named (point_outside={point_outside})",
+                elsewhere.display()
+            );
+            // And the refusal must REACH THE CALLER. `eprintln!` + `Ok` is the shape CPE-1913 exists
+            // to remove: a transfer that says it worked and did not.
+            let skipped: Vec<String> = match &report {
+                Ok(r) => r.skipped.clone(),
+                Err(e) => vec![e.clone()],
+            };
+            assert!(
+                skipped.iter().any(|m| m.contains("target.txt") && m.contains("is a link")),
+                "the refusal must reach the caller and name the redirecting component as a link \
+                 (point_outside={point_outside}): {report:?}"
+            );
+            assert_eq!(
+                report.as_ref().map(|r| r.files).unwrap_or(0),
+                0,
+                "nothing was delivered, so nothing may be counted as delivered: {report:?}"
+            );
+        }
+    }
+
     /// **CPE-1857, the transfer half — and unlike its symlink sibling below this one runs everywhere**,
     /// because a hard link needs no privilege on any of the three platforms CI builds on.
     ///
@@ -1589,18 +1550,26 @@ mod tests {
         );
     }
 
-    /// **CPE-1857 Security-Auditor finding 1, at the transfer gate.** Both halves, from one fixture.
+    /// **CPE-1857 Security-Auditor finding 1, at the transfer gate — re-aimed by CPE-1913.**
     ///
-    /// - A **degenerate identity** (a network redirector's zero file index) used to discard a perfectly
-    ///   readable link count and answer "not multiply linked", so a download to a share wrote through a
-    ///   pre-existing hard link with the guard present and silent.
-    /// - A genuinely **unreadable** probe must refuse, not pass. Folding "could not tell" into "no" is
-    ///   right at the revert engine's refusal classifier, where the write is already settled; here the
-    ///   bytes have not moved, so it fails open. It goes into `undelivered`, the route
-    ///   `LeafProbe::Uninspectable` already takes, so the transfer cannot report `Ok(n)` for a tree it
-    ///   did not deliver.
+    /// The finding was that the transfer's hard-link gate asked `batch_media::name_links`, a **path**
+    /// probe, and folded two of its answers wrongly: a degenerate identity (a network redirector's
+    /// zero file index) discarded a perfectly readable link count, and a genuinely unreadable probe
+    /// fell through to the write. Both were staged through `ProbeInjection`, a test seam on the path
+    /// probe, because neither shape can be conjured on CI.
+    ///
+    /// **CPE-1913 removed the question rather than re-answering it.** The count now comes off the
+    /// **write handle** (`fsutil::claim_destination_handle` → `batch_media::handle_facts`), which is
+    /// the same object the bytes would enter, so there is no second path lookup to be blinded and no
+    /// identity to be degenerate — `facts.links` is read directly. This test is therefore no longer a
+    /// taxonomy check on the classifier; it is a **liveness check on the seam that used to matter**:
+    /// arm each injection, and confirm the refusal happens anyway.
+    ///
+    /// That is a strictly stronger property than the one it replaces, and it is the reason the test is
+    /// kept rather than deleted with the classifier: an injection that no longer changes the outcome is
+    /// evidence the outcome no longer depends on the thing injected.
     #[test]
-    fn cpe_1857_the_transfer_gate_refuses_when_it_cannot_read_the_link_count() {
+    fn cpe_1913_the_path_probe_injections_can_no_longer_blind_the_transfer_hard_link_gate() {
         let d = crate::fsutil::scratch_dir("cpe-transfer-1857-blind");
         let root = d.join("root");
         let outside = d.join("outside");
@@ -1610,8 +1579,8 @@ mod tests {
         std::fs::write(&victim, b"placeholder").unwrap();
         if std::fs::hard_link(&victim, root.join("target.txt")).is_err() {
             crate::skip_notice!(
-                "SKIPPING cpe_1857_the_transfer_gate_refuses_when_it_cannot_read_the_link_count: no \
-                 hard-link support here — NOTHING on this run covered either fail-open"
+                "SKIPPING cpe_1913_the_path_probe_injections_can_no_longer_blind_the_transfer_hard_link_gate: \
+                 no hard-link support here — NOTHING on this run covered either fail-open"
             );
             return;
         }
@@ -1622,44 +1591,37 @@ mod tests {
             "fixture is inert: the leaf and the outside file are not one object"
         );
 
-        // Leg 1 — degenerate identity: the count is readable and must be used.
         let cancel = AtomicBool::new(false);
-        let n = {
-            let _reset = crate::batch_media::ProbeReset::arm(
-                crate::batch_media::ProbeInjection::DegenerateIdentity,
+        for injection in [
+            crate::batch_media::ProbeInjection::DegenerateIdentity,
+            crate::batch_media::ProbeInjection::Unreadable,
+        ] {
+            let report = {
+                let _reset = crate::batch_media::ProbeReset::arm(injection);
+                download_tree(&OneFile, "", &root, &cancel)
+                    .expect("a hard-linked leaf is a per-entry skip, not a whole-transfer failure")
+            };
+            // HARM FIRST, off the filesystem.
+            assert_eq!(
+                std::fs::read(&victim).ok().as_deref(),
+                Some(&b"original"[..]),
+                "HARM: the download wrote the remote server's bytes through a hard link into a file \
+                 outside the download root"
             );
-            download_tree(&OneFile, "", &root, &cancel)
-                .expect("a hard-linked leaf is a skip, not a failure")
-                .files
-        };
-        assert_eq!(
-            std::fs::read(&victim).ok().as_deref(),
-            Some(&b"original"[..]),
-            "HARM: on a volume whose identity is degenerate — a network share — the download wrote the \
-             remote server's bytes through a hard link into a file outside the download root. The link \
-             COUNT was readable throughout; an identity gate that has nothing to do with this question \
-             threw it away"
-        );
-        assert_eq!(n, 0, "the hard-linked leaf must be skipped, not counted as delivered");
-
-        // Leg 2 — the probe genuinely cannot answer: refuse, and say so in `undelivered`.
-        let err = {
-            let _reset =
-                crate::batch_media::ProbeReset::arm(crate::batch_media::ProbeInjection::Unreadable);
-            download_tree(&OneFile, "", &root, &cancel).expect_err(
-                "a leaf whose link count could not be read must be recorded as undelivered, not written \
-                 and not silently dropped",
-            )
-        };
-        assert_eq!(
-            std::fs::read(&victim).ok().as_deref(),
-            Some(&b"original"[..]),
-            "HARM: the gate could not read how many names the leaf has and wrote through it anyway"
-        );
-        assert!(
-            err.contains("could not check how many names"),
-            "and it must be THIS guard's wording, not an incidental failure from elsewhere: {err}"
-        );
+            assert_eq!(report.files, 0, "the hard-linked leaf must never be counted as delivered");
+            assert_eq!(
+                report.skipped.len(),
+                1,
+                "the skip must be reported, not silent: {report:?}"
+            );
+            assert!(
+                report.skipped[0].contains("target.txt")
+                    && report.skipped[0].contains("hard-linked"),
+                "the refusal must come from the HANDLE's link count, naming the entry and the reason \
+                 — a message about an unreadable probe would mean the path probe is still in the \
+                 decision: {report:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1772,98 +1734,18 @@ mod tests {
         assert!(err.contains("safety cap"), "expected a safety-cap abort, got: {err}");
     }
 
-    // ---- CPE-1696: the CPE-1461 symlink-escape guard must not step over a level it cannot lstat -----
+    // **CPE-1696's four unit tests lived here and went with the code they pinned (CPE-1913).** They
+    // asserted the taxonomies of `classify_ancestor_probe` and `classify_leaf_probe` — that an `lstat`
+    // which failed for any reason other than `NotFound` must never be read as "nothing here". Both
+    // classifiers are deleted: `download_tree` no longer `lstat`s anything before writing, because it
+    // no longer writes by path. The property they existed to protect — a level that cannot be
+    // inspected must not be stepped over — is now structural rather than classified: the walk in
+    // `open_beneath` opens every component, and a component it cannot open stops the entry. There is
+    // no "keep climbing" branch left to get wrong.
     //
-    // `existing_ancestor` climbed on `p.symlink_metadata().is_ok()` being false, which is true both for
-    // "nothing here" and for "I was refused" — so a level whose lstat failed was silently skipped, the
-    // containment check landed on a SHALLOWER ancestor, and a symlink at the skipped level went unverified
-    // before `create_dir_all` followed it. The taxonomy is asserted here rather than through an ACL,
-    // because on Windows a deny ACE does not refuse `symlink_metadata` at all (it opens with a
-    // desired-access mask of 0 — PR #874's measurement) and on Unix the mechanism is inert as root, so a
-    // permission-based test would be unverified on some of CI's three OSes. See the PR body for the
-    // written-out reasoning on this guard, including its practical mitigation.
-
-    #[test]
-    fn cpe_1696_an_uninspectable_ancestor_level_is_never_treated_as_absent() {
-        assert_eq!(classify_ancestor_probe(Ok(())), AncestorProbe::Here);
-        assert_eq!(
-            classify_ancestor_probe(Err(std::io::ErrorKind::NotFound)),
-            AncestorProbe::KeepClimbing,
-            "a genuine absence is the ONLY reason to keep climbing"
-        );
-        for kind in [
-            std::io::ErrorKind::PermissionDenied,
-            std::io::ErrorKind::Other,
-            std::io::ErrorKind::TimedOut,
-            std::io::ErrorKind::NotADirectory,
-        ] {
-            assert_eq!(
-                classify_ancestor_probe(Err(kind)),
-                AncestorProbe::Uninspectable,
-                "{kind:?} must stop the walk, not be mistaken for an empty level — stepping over it is \
-                 what leaves a symlink at that level unverified"
-            );
-        }
-    }
-
-    /// **The leaf half of the same CPE-1461 guard (PR #889 review, R2).** The pre-CPE-1696 code was
-    /// `if let Ok(md) = symlink_metadata(&local)` with no `else`, so any non-`NotFound` `lstat` failure
-    /// skipped the symlink check outright and fell through to `fs::write`. The first cut of this fix
-    /// shipped the correction with **no test at all** — reverting it alone left the whole crate green,
-    /// which is precisely the hole this ticket exists to close. See `classify_leaf_probe`'s doc comment
-    /// for why an ACL cannot reach this taxonomy on either CI platform, making the pure classifier the
-    /// only shape that can be driven red.
-    #[test]
-    fn cpe_1696_a_leaf_that_cannot_be_lstatted_is_never_assumed_not_to_be_a_symlink() {
-        assert_eq!(
-            classify_leaf_probe(Ok(true)),
-            LeafProbe::PreExistingSymlink,
-            "a real symlink is still refused — the CPE-1461 behaviour this guard exists for"
-        );
-        assert_eq!(
-            classify_leaf_probe(Ok(false)),
-            LeafProbe::SafeToWrite,
-            "a real non-symlink leaf is still writable"
-        );
-        assert_eq!(
-            classify_leaf_probe(Err(std::io::ErrorKind::NotFound)),
-            LeafProbe::SafeToWrite,
-            "a genuine absence is the ONLY failure that means safe-to-create"
-        );
-        for kind in [
-            std::io::ErrorKind::PermissionDenied,
-            std::io::ErrorKind::Other,
-            std::io::ErrorKind::TimedOut,
-            std::io::ErrorKind::NotADirectory,
-        ] {
-            assert_eq!(
-                classify_leaf_probe(Err(kind)),
-                LeafProbe::Uninspectable,
-                "{kind:?} must skip the entry, not be mistaken for \"no leaf here\" — falling through \
-                 writes straight through a symlink that may point outside the download root"
-            );
-        }
-    }
-
-    /// The honest cases against real syscalls, on every OS: the deepest existing ancestor of a
-    /// partly-existing path is found, and an entirely-present path returns itself.
-    #[test]
-    fn cpe_1696_existing_ancestor_still_finds_the_deepest_real_level() {
-        let d = std::env::temp_dir().join(format!("cpe-xfer-anc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("real")).unwrap();
-        assert_eq!(
-            existing_ancestor(&d.join("real").join("nope").join("deeper")).unwrap(),
-            Some(d.join("real")),
-            "the deepest level that actually exists must still be found"
-        );
-        assert_eq!(
-            existing_ancestor(&d.join("real")).unwrap(),
-            Some(d.join("real")),
-            "a path that exists is its own deepest existing ancestor"
-        );
-        let _ = std::fs::remove_dir_all(&d);
-    }
+    // What replaces them as coverage is a harm test, not a taxonomy test:
+    // `cpe_1913_a_junction_inside_the_download_folder_never_redirects_an_entry` asserts on where the
+    // bytes went.
 
     // ---------------------------------------------------------------------------------------------
     // CPE-1709: a name the LOCAL filesystem cannot hold must not silently lose the file's contents.

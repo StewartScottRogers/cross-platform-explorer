@@ -101,6 +101,11 @@ pub(crate) struct RootDir {
     path: PathBuf,
     /// The open directory handle every component is resolved against.
     dir: File,
+    /// What to call this root in a refusal — "backup destination", "extraction folder", "download
+    /// folder", "folder being restored" (CPE-1913). One sentence template, one owner, and the noun
+    /// comes from the caller so a user who is extracting an archive is not told about a backup
+    /// destination they never chose.
+    noun: &'static str,
 }
 
 /// What [`create_beneath`] opened: the handle, and whether **this call** created it.
@@ -151,8 +156,8 @@ fn tick() {}
 /// mirror mode already lists it) and loud rather than silent, so it is recorded here rather than
 /// worked around. If it ever turns up in the field, the fix is `FILE_TRAVERSE`-only on Windows and
 /// `O_PATH` on Linux, neither of which macOS has an equivalent for.
-pub(crate) fn open_root(real_root: &Path) -> std::io::Result<RootDir> {
-    Ok(RootDir { path: real_root.to_path_buf(), dir: sys::open_root_dir(real_root)? })
+pub(crate) fn open_root(real_root: &Path, noun: &'static str) -> std::io::Result<RootDir> {
+    Ok(RootDir { path: real_root.to_path_buf(), dir: sys::open_root_dir(real_root)?, noun })
 }
 
 /// Open `root/rel` for writing — creating the file, and any missing directories along the way — without
@@ -191,34 +196,129 @@ pub(crate) fn open_root(real_root: &Path) -> std::io::Result<RootDir> {
 /// was a link (the attack shape) or simply could not be opened (a permission, sharing or vanished-name
 /// problem). Both are refusals: this module never guesses. The two are distinguished by asking the
 /// filesystem, never by the errno — see `sys::link_at` on Unix and `sys::name_surrogate_at` on Windows.
-pub(crate) fn create_beneath(root: &RootDir, rel: &Path) -> Result<Opened, String> {
+pub(crate) fn create_beneath(root: &RootDir, rel: &Path) -> Result<Opened, Refusal> {
+    let parts = plain_components(root, rel)?;
+    let Some((last, dirs)) = parts.split_last() else {
+        return Err(Refusal {
+            why: format!(
+                "refusing to open {rel:?} inside {:?}: it names the destination root itself, not a \
+                 file inside it",
+                root.path
+            ),
+            policy: true,
+        });
+    };
+    sys::walk(root, dirs, last)
+}
+
+/// Create — or open, if it is already there — a **directory** beneath `root` at `rel`, by the same
+/// per-component handle-relative walk [`create_beneath`] uses for a file's missing parents (CPE-1913).
+///
+/// A file write does not need this: `create_beneath` materialises the whole parent chain on its way to
+/// the leaf. It exists for the callers that have to materialise a directory **for its own sake** — an
+/// archive's directory records and a remote tree's empty folders — which otherwise reach for
+/// `fs::create_dir_all`, a by-path call that walks a junction like any other directory and is exactly
+/// the escape route [`create_beneath`] removed from the file leg. `archive::extract_zip_archive_stream`
+/// and `transfer::download_tree` both had one.
+///
+/// Nothing is returned: the handle is closed immediately, because the directory's *existence* is the
+/// whole product. Every containment guarantee and every refusal wording is [`create_beneath`]'s, shared
+/// rather than re-derived — the walk is one function.
+pub(crate) fn create_dir_beneath(root: &RootDir, rel: &Path) -> Result<(), Refusal> {
+    let parts = plain_components(root, rel)?;
+    if parts.is_empty() {
+        // The root itself, which the caller has already opened. Creating it is a no-op rather than an
+        // error: an archive whose directory records include the root's own name (`./`) is ordinary,
+        // and `create_beneath`'s equivalent case is an error only because a *file* cannot be the root.
+        return Ok(());
+    }
+    sys::walk_dirs(root, &parts)
+}
+
+/// The one place `rel` is turned into components, so [`create_beneath`] and [`create_dir_beneath`]
+/// cannot come to disagree about what a legal relative path is.
+///
+/// `rel` must be a plain relative path; anything with a root, a prefix or a `..` is refused here rather
+/// than sanitised, because a caller handing this a `..` has a bug that a silent fix would hide.
+///
+/// **[`Component::CurDir`] is the one exception, and it is skipped rather than refused** (CPE-1913). A
+/// lone `.` means "here", carries none of `..`'s hazard, and both new callers can produce one from
+/// input they have already validated: `archive::entry_name_is_safe` explicitly passes a `.` segment
+/// through untouched, and `Path::components` preserves a leading `./`. Refusing it would turn a
+/// perfectly ordinary archive entry into a skip for no security gain.
+fn plain_components<'a>(root: &RootDir, rel: &'a Path) -> Result<Vec<&'a OsStr>, Refusal> {
     let mut parts: Vec<&OsStr> = Vec::new();
     for c in rel.components() {
         match c {
             Component::Normal(p) => parts.push(p),
+            Component::CurDir => {}
+            // `policy: true` — refusing a name that is not a plain relative path is a verdict, not an
+            // I/O failure: nothing about the filesystem went wrong and not writing is correct.
             _ => {
-                return Err(format!(
-                    "refusing to open {rel:?} inside {:?}: it is not a plain relative path, so it \
-                     cannot be resolved one component at a time",
-                    root.path
-                ))
+                return Err(Refusal {
+                    why: format!(
+                        "refusing to open {rel:?} inside {:?}: it is not a plain relative path, so it \
+                         cannot be resolved one component at a time",
+                        root.path
+                    ),
+                    policy: true,
+                })
             }
         }
     }
-    let Some((last, dirs)) = parts.split_last() else {
-        return Err(format!(
-            "refusing to open {rel:?} inside {:?}: it names the destination root itself, not a file \
-             inside it",
-            root.path
-        ));
-    };
-    sys::walk(root, dirs, last)
+    Ok(parts)
+}
+
+/// Why an entry was refused, and **which kind of answer that is** (CPE-1913).
+///
+/// CPE-1896 needed only the sentence, because the backup engine's per-entry vocabulary has exactly one
+/// failure bucket. The legs CPE-1913 wires this into have two, and they are not interchangeable:
+///
+/// - `archive` distinguishes `EntrySlotAction::Skip` (a policy verdict about one entry — the rest of
+///   the archive still extracts) from `EntrySlotAction::Abort` (an I/O answer nobody can act on, which
+///   takes the run down rather than silently dropping a file the user asked for).
+/// - `transfer` distinguishes [`crate::transfer::DownloadReport::skipped`] (same meaning) from
+///   `undelivered`, which makes the whole `download_tree` call return `Err`.
+///
+/// A refusal string cannot be asked which it is, and **making the caller pattern-match on wording is
+/// exactly how this repo has previously shipped guards that proved nothing** (CPE-1896 round 4: two
+/// assertions matched a phrase that appeared in every refusal's shared boilerplate, so they passed for
+/// any failure at all). So the answer is carried as data next to the sentence rather than encoded in
+/// it.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    /// The sentence a user sees.
+    pub(crate) why: String,
+    /// `true` when **not writing is the correct outcome** — a link stood at a component, the name is a
+    /// hard link, a directory is in the way. `false` when the entry could not be written for a reason
+    /// that is nobody's policy: a permission error, a sharing violation, a name this filesystem will
+    /// not accept. The second kind means the user asked for a file and did not get it.
+    pub(crate) policy: bool,
+}
+
+impl Refusal {
+    /// An I/O answer: the entry was not delivered, and nothing chose that.
+    pub(crate) fn failure(why: String) -> Self {
+        Self { why, policy: false }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl From<Refusal> for String {
+    fn from(r: Refusal) -> String {
+        r.why
+    }
 }
 
 /// The refusal wording, shared by every arm so the sentence a user sees does not depend on which
 /// platform refused. `at` is the failing component's path **relative to the root**, which is the part
 /// the user can act on.
-fn refuse(root: &Path, at: &Path, why: &str) -> String {
+fn refuse(root: &RootDir, at: &Path, why: &str) -> Refusal {
     // **The tail must not contain the words any test uses to identify a CAUSE.** It used to end
     // "…a component that is a link, or that cannot be opened, stops the entry", which put the literal
     // phrase `is a link` into *every* refusal this module produces — so
@@ -226,26 +326,42 @@ fn refuse(root: &Path, at: &Path, why: &str) -> String {
     // file sitting where a directory should be. Two tests were asserting exactly that and proving
     // nothing; the Linux harness for PR #1043 round 2 caught it by asserting the *negative* case.
     // Keep boilerplate and diagnosis lexically disjoint.
-    format!(
-        "refusing to write inside the backup destination {root:?}: the path component {at:?} {why}. \
+    Refusal::failure(format!(
+        "refusing to write inside the {noun} {path:?}: the path component {at:?} {why}. \
          Nothing was written for this entry — each component is opened relative to the one before it \
          so that nothing can be swapped in underneath the write, and any component that cannot be \
-         opened, or that stands in for another name, stops the entry rather than being resolved."
-    )
+         opened, or that stands in for another name, stops the entry rather than being resolved.",
+        noun = root.noun,
+        path = root.path,
+    ))
 }
 
-/// The wording for the one case that is an attack rather than an accident, kept separate so it reads
-/// as the specific finding it is.
-const WHY_LINK: &str =
-    "is a link (a symlink, junction or other reparse point), and a link inside a backup destination \
-     redirects the write to wherever it points";
+/// The one case that is an attack rather than an accident, worded separately so it reads as the
+/// specific finding it is — and flagged `policy: true`, because refusing a link is a **verdict**, not
+/// an I/O failure. That distinction is what lets `archive` count it as a skip and `transfer` keep the
+/// rest of the tree, rather than every caller having to recognise this sentence (CPE-1913).
+fn refuse_link(root: &RootDir, at: &Path) -> Refusal {
+    Refusal {
+        why: refuse(
+            root,
+            at,
+            &format!(
+                "is a link (a symlink, junction or other reparse point), and a link inside the {} \
+                 redirects the write to wherever it points",
+                root.noun
+            ),
+        )
+        .why,
+        policy: true,
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Windows: NtCreateFile with RootDirectory = the parent handle.
 // ---------------------------------------------------------------------------------------------
 #[cfg(windows)]
 mod sys {
-    use super::{refuse, tick, Opened, RootDir, WHY_LINK};
+    use super::{refuse, refuse_link, tick, Opened, Refusal, RootDir};
     use std::ffi::OsStr;
     use std::fs::File;
     use std::os::windows::ffi::OsStrExt;
@@ -446,9 +562,11 @@ mod sys {
         std::io::Error::from_raw_os_error(win32 as i32)
     }
 
-    pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, String> {
+    /// Descend (creating as needed) through `dirs`, returning the deepest handle — `None` when `dirs`
+    /// is empty and the root itself is the parent. Shared by [`walk`] and [`walk_dirs`] so the file leg
+    /// and the directory leg cannot drift apart about what a traversable component is (CPE-1913).
+    fn descend(root: &RootDir, dirs: &[&OsStr], sofar: &mut PathBuf) -> Result<Option<File>, Refusal> {
         let mut held: Option<File> = None;
-        let mut sofar = PathBuf::new();
 
         for name in dirs {
             sofar.push(name);
@@ -474,7 +592,7 @@ mod sys {
                 ),
             )
             .map_err(|s| {
-                refuse(&root.path, &sofar, &format!("could not be opened ({})", io_err(s)))
+                refuse(root, &sofar, &format!("could not be opened ({})", io_err(s)))
             })?;
             // `FILE_OPEN_REPARSE_POINT` means a junction here was opened **as the reparse point
             // itself** rather than followed, so nothing has escaped — but continuing through it would
@@ -494,10 +612,23 @@ mod sys {
             // names the cause. That is also why failing open (`is_some_and`) is acceptable here.
             tick();
             if name_surrogate_at(&dir) {
-                return Err(refuse(&root.path, &sofar, WHY_LINK));
+                return Err(refuse_link(root, &sofar));
             }
             held = Some(dir);
         }
+        Ok(held)
+    }
+
+    /// Every component of `parts` as a directory — [`create_dir_beneath`](super::create_dir_beneath)'s
+    /// arm. The handle is dropped on return; the directory's existence is the product.
+    pub(super) fn walk_dirs(root: &RootDir, parts: &[&OsStr]) -> Result<(), Refusal> {
+        let mut sofar = PathBuf::new();
+        descend(root, parts, &mut sofar).map(|_| ())
+    }
+
+    pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, Refusal> {
+        let mut sofar = PathBuf::new();
+        let held = descend(root, dirs, &mut sofar)?;
 
         let parent = held.as_ref().unwrap_or(&root.dir);
         sofar.push(last);
@@ -512,7 +643,7 @@ mod sys {
             Err(_) => match nt_child(parent, last, access, FILE_OPEN, options) {
                 Ok(file) => Ok(Opened { file, created: false }),
                 Err(s) => Err(refuse(
-                    &root.path,
+                    root,
                     &sofar,
                     &format!("could not be opened for writing ({})", io_err(s)),
                 )),
@@ -526,7 +657,7 @@ mod sys {
 // ---------------------------------------------------------------------------------------------
 #[cfg(unix)]
 mod sys {
-    use super::{refuse, tick, Opened, RootDir, WHY_LINK};
+    use super::{refuse, refuse_link, tick, Opened, Refusal, RootDir};
     use std::ffi::{CString, OsStr};
     use std::fs::File;
     use std::os::unix::ffi::OsStrExt;
@@ -767,7 +898,48 @@ mod sys {
         call(base).ok().map(|fd| (unsafe { File::from_raw_fd(fd) }, false))
     }
 
-    pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, String> {
+    /// Descend (creating as needed) through `dirs`, returning the deepest handle — `None` when `dirs`
+    /// is empty and the root itself is the parent. Shared by [`walk`] and [`walk_dirs`] so the file leg
+    /// and the directory leg cannot drift apart about what a traversable component is (CPE-1913).
+    ///
+    /// There is deliberately **no `openat2` fast path here**: `RESOLVE_BENEATH` answers a whole
+    /// multi-component *open*, and this walk's product is a chain of `mkdirat`s. The fast path stays
+    /// where it pays, on the file leaf.
+    fn descend(root: &RootDir, dirs: &[&OsStr], sofar: &mut PathBuf) -> Result<Option<File>, Refusal> {
+        let mut held: Option<File> = None;
+        for name in dirs {
+            sofar.push(name);
+            let c = cname(name).map_err(|()| {
+                refuse(root, &sofar, "contains a NUL byte, which no filesystem name can hold")
+            })?;
+            let parent = match held.as_ref() {
+                Some(f) => f.as_raw_fd(),
+                None => root.dir.as_raw_fd(),
+            };
+            let dir = child_dir(parent, &c).map_err(|e| {
+                // Classified by asking the filesystem, NOT by reading the errno — see [`link_at`].
+                // A symlink at an intermediate component reports `ENOTDIR` on Linux and macOS, and so
+                // does a plain file sitting where a directory should be; they need different
+                // sentences and the errno cannot tell them apart.
+                if link_at(parent, &c) {
+                    refuse_link(root, &sofar)
+                } else {
+                    refuse(root, &sofar, &format!("could not be opened ({e})"))
+                }
+            })?;
+            held = Some(dir);
+        }
+        Ok(held)
+    }
+
+    /// Every component of `parts` as a directory — [`create_dir_beneath`](super::create_dir_beneath)'s
+    /// arm. The handle is dropped on return; the directory's existence is the product.
+    pub(super) fn walk_dirs(root: &RootDir, parts: &[&OsStr]) -> Result<(), Refusal> {
+        let mut sofar = PathBuf::new();
+        descend(root, parts, &mut sofar).map(|_| ())
+    }
+
+    pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, Refusal> {
         #[cfg(target_os = "linux")]
         {
             let mut rel = PathBuf::new();
@@ -780,34 +952,12 @@ mod sys {
             }
         }
 
-        let mut held: Option<File> = None;
         let mut sofar = PathBuf::new();
-        for name in dirs {
-            sofar.push(name);
-            let c = cname(name).map_err(|()| {
-                refuse(&root.path, &sofar, "contains a NUL byte, which no filesystem name can hold")
-            })?;
-            let parent = match held.as_ref() {
-                Some(f) => f.as_raw_fd(),
-                None => root.dir.as_raw_fd(),
-            };
-            let dir = child_dir(parent, &c).map_err(|e| {
-                // Classified by asking the filesystem, NOT by reading the errno — see [`link_at`].
-                // A symlink at an intermediate component reports `ENOTDIR` on Linux and macOS, and so
-                // does a plain file sitting where a directory should be; they need different
-                // sentences and the errno cannot tell them apart.
-                if link_at(parent, &c) {
-                    refuse(&root.path, &sofar, WHY_LINK)
-                } else {
-                    refuse(&root.path, &sofar, &format!("could not be opened ({e})"))
-                }
-            })?;
-            held = Some(dir);
-        }
+        let held = descend(root, dirs, &mut sofar)?;
 
         sofar.push(last);
         let c = cname(last).map_err(|()| {
-            refuse(&root.path, &sofar, "contains a NUL byte, which no filesystem name can hold")
+            refuse(root, &sofar, "contains a NUL byte, which no filesystem name can hold")
         })?;
         let parent = match held.as_ref() {
             Some(f) => f.as_raw_fd(),
@@ -821,9 +971,9 @@ mod sys {
             // would have been wrong on a third platform, which is the argument for asking the
             // filesystem instead of the error code.
             if link_at(parent, &c) {
-                refuse(&root.path, &sofar, WHY_LINK)
+                refuse_link(root, &sofar)
             } else {
-                refuse(&root.path, &sofar, &format!("could not be opened for writing ({e})"))
+                refuse(root, &sofar, &format!("could not be opened for writing ({e})"))
             }
         })?;
         Ok(Opened { file, created })
@@ -844,7 +994,7 @@ mod tests {
     #[test]
     fn opens_and_creates_the_whole_chain_inside_the_root() {
         let d = scratch("chain");
-        let root = open_root(&d).unwrap();
+        let root = open_root(&d, "backup destination").unwrap();
         let mut o = create_beneath(&root, Path::new("a/b/c/file.txt")).unwrap();
         assert!(o.created, "a name that did not exist is reported as created");
         o.file.write_all(b"hello").unwrap();
@@ -862,13 +1012,13 @@ mod tests {
     #[test]
     fn refuses_a_relative_path_that_is_not_plain() {
         let d = scratch("notplain");
-        let root = open_root(&d).unwrap();
+        let root = open_root(&d, "backup destination").unwrap();
         for bad in ["../out.txt", "a/../../out.txt"] {
             let e = create_beneath(&root, Path::new(bad)).unwrap_err();
-            assert!(e.contains("not a plain relative path"), "{bad}: {e}");
+            assert!(e.why.contains("not a plain relative path"), "{bad}: {e}");
         }
         let e = create_beneath(&root, Path::new("")).unwrap_err();
-        assert!(e.contains("names the destination root itself"), "{e}");
+        assert!(e.why.contains("names the destination root itself"), "{e}");
         drop(root);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -890,10 +1040,10 @@ mod tests {
             let _ = std::fs::remove_dir_all(&d);
             return;
         }
-        let root = open_root(&std::fs::canonicalize(&root_dir).unwrap()).unwrap();
+        let root = open_root(&std::fs::canonicalize(&root_dir).unwrap(), "backup destination").unwrap();
         let e = create_beneath(&root, Path::new("sub/victim.txt")).unwrap_err();
-        assert!(e.contains("is a link"), "the refusal must name the cause: {e}");
-        assert!(e.contains("sub"), "the refusal must name the component: {e}");
+        assert!(e.why.contains("is a link"), "the refusal must name the cause: {e}");
+        assert!(e.why.contains("sub"), "the refusal must name the component: {e}");
         assert_eq!(
             std::fs::read(outside.join("victim.txt")).unwrap(),
             b"USER DATA",
@@ -951,7 +1101,7 @@ mod tests {
             "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder"
         );
 
-        let root = open_root(&d).unwrap();
+        let root = open_root(&d, "backup destination").unwrap();
 
         // The non-surrogate placeholder: TRAVERSED. The write lands, inside the root.
         let mut o = create_beneath(&root, Path::new("ph/inside.txt")).expect(
@@ -965,7 +1115,7 @@ mod tests {
         if crate::fsutil::make_dir_link(&real, &d.join("junc")) {
             let e = create_beneath(&root, Path::new("junc/x.txt")).unwrap_err();
             assert!(
-                e.contains("is a link"),
+                e.why.contains("is a link"),
                 "a junction IS a name surrogate and must still be refused — the two cases have to \
                  diverge, or the tag check is doing nothing: {e}"
             );
@@ -991,15 +1141,15 @@ mod tests {
     fn a_plain_file_where_a_directory_belongs_is_refused_but_not_called_a_link() {
         let d = scratch("notdir");
         std::fs::write(d.join("sub"), b"i am a file, not a directory").unwrap();
-        let root = open_root(&d).unwrap();
+        let root = open_root(&d, "backup destination").unwrap();
         let e = create_beneath(&root, Path::new("sub/x.txt")).unwrap_err();
         assert!(
-            !e.contains("is a link"),
+            !e.why.contains("is a link"),
             "a plain file at a directory component must NOT be reported as a link — that is the \
              classification this module gets from `fstatat`, not from the errno, because both cases \
              report ENOTDIR: {e}"
         );
-        assert!(e.contains("sub"), "the refusal must still name the component: {e}");
+        assert!(e.why.contains("sub"), "the refusal must still name the component: {e}");
         assert!(!d.join("sub").is_dir(), "nothing may have replaced the file with a directory");
         drop(root);
         let _ = std::fs::remove_dir_all(&d);
@@ -1023,7 +1173,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&d);
             return;
         }
-        let root = open_root(&std::fs::canonicalize(&root_dir).unwrap()).unwrap();
+        let root = open_root(&std::fs::canonicalize(&root_dir).unwrap(), "backup destination").unwrap();
         // `junc` is a directory link; asking for it as a FILE must not end up writing into the far
         // side's directory under any name.
         let _ = create_beneath(&root, Path::new("junc"));
@@ -1042,7 +1192,7 @@ mod tests {
         }
 
         let d = scratch("cost");
-        let root = open_root(&d).unwrap();
+        let root = open_root(&d, "backup destination").unwrap();
         std::fs::create_dir_all(d.join("a/b")).unwrap();
 
         // Depth 3 (`a/b/f`), the shape of an ordinary backup entry, with the chain already present —
