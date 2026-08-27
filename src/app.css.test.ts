@@ -12,7 +12,7 @@
 //       hex instead of reaching for a token.
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 const SRC = join(process.cwd(), "src");
 const APP_CSS_PATH = join(SRC, "app.css");
@@ -281,19 +281,34 @@ describe("component hard-coded-hex ratchet (CPE-1534)", () => {
     const files = walkSvelte(SRC);
     let filesWithHex = 0;
     let totalOccurrences = 0;
+    const perFile: { file: string; count: number }[] = [];
     for (const f of files) {
       const hits = hexColourSites(readFileSync(f, "utf8"));
       if (hits.length) {
         filesWithHex++;
         totalOccurrences += hits.length;
+        perFile.push({ file: relative(SRC, f).split("\\").join("/"), count: hits.length });
       }
     }
-    expect(filesWithHex, "files containing a hard-coded hex literal in a style position").toBeLessThanOrEqual(
-      BASELINE_FILES_WITH_HEX,
-    );
-    expect(totalOccurrences, "total hard-coded hex literal occurrences in style positions").toBeLessThanOrEqual(
-      BASELINE_TOTAL_HEX_OCCURRENCES,
-    );
+    // CPE-1931 UAT round: a bare "N > baseline" number tells a developer the ratchet moved but not
+    // WHERE or WHAT TO DO — they'd have to go diff their own change against this list by hand. Name
+    // the files (sorted so the biggest offenders read first) and the remedy in the failure message
+    // itself, so fixing the real colour is the path of least resistance, not raising the baseline.
+    perFile.sort((a, b) => b.count - a.count || a.file.localeCompare(b.file));
+    const offenders = perFile.map(({ file, count }) => `  ${file} (${count})`).join("\n");
+    const remedy =
+      "Move the new hex literal(s) onto a semantic theme token instead (defined in BOTH the bare " +
+      ':root and :root[data-theme="light"]/[data-theme="dark"] blocks in app.css) — never leave a ' +
+      "new hard-coded hex in a <style> block or style= attribute. Files currently carrying " +
+      `hard-coded hex in a style position, most first:\n${offenders}`;
+    expect(
+      filesWithHex,
+      `files containing a hard-coded hex literal in a style position: ${filesWithHex} > baseline ${BASELINE_FILES_WITH_HEX}. ${remedy}`,
+    ).toBeLessThanOrEqual(BASELINE_FILES_WITH_HEX);
+    expect(
+      totalOccurrences,
+      `total hard-coded hex literal occurrences in style positions: ${totalOccurrences} > baseline ${BASELINE_TOTAL_HEX_OCCURRENCES}. ${remedy}`,
+    ).toBeLessThanOrEqual(BASELINE_TOTAL_HEX_OCCURRENCES);
   });
 });
 
