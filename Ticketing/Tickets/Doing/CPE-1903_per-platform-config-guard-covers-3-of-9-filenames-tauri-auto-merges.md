@@ -227,3 +227,108 @@ path matters here).
 
   **Not in scope, untouched:** CPE-1900 (`CONFIG_CHAIN` is a hand-copied literal with no drift guard)
   and CPE-1901 (`--skip-pin-check`, and the secret-gated step).
+
+- **2026-08-26 (Worker) — attempt 2, PR #1034 came back SEC FINDINGS.** The independent Security
+  Auditor confirmed the derivation itself held — it attacked the 15-name count (verified independently
+  in `tauri-utils-2.9.3/src/platform.rs`), the shape match, the case argument, the textual JSON5/TOML
+  scan, JSON-vs-JSON5 parser divergence (checked against this repo's own `@tauri-apps/cli 2.11.4`),
+  trailing dots/spaces, 8.3 names, ADS, junctions, and could not get past any of them; all CPE-1873
+  regressions stayed red. Its verdict: *"this is the first version of this guard I could not beat on
+  its own terms."* Two findings remained, both about what the scan does with an entry once it has one.
+
+  **Finding 8 (BLOCKING, DEMONSTRATED against the real CLI) — a symlink named like a per-platform
+  config was skipped by both guards and followed by Tauri.** Two committed files: an innocuous
+  `src-tauri/innocent-looking-resource.json` carrying the attacker `plugins.updater` block, and a
+  symlink `src-tauri/tauri.linux.conf.json → innocent-looking-resource.json`. Both guards filtered on
+  an lstat-shaped predicate *before* reading — Rust's `DirEntry::file_type()` and Node's
+  `Dirent.isFile()` neither of which traverses — so the entry was dropped before the content check
+  ever saw it, while Tauri's `read_platform` (`path.exists()` + `read_to_string`, both of which
+  follow) merged the payload: `npx tauri info` reported `frontendDist: ../PWNED-VIA-SYMLINK` with
+  `cargo test` at exit 0 and vitest 15/15. Git stages such a link as mode `120000`, so it materialises
+  as a real symlink on the ubuntu and macOS runners — and `verify-updater-pin`, the job gating
+  `release-sidecar`'s build/sign/publish matrix, is `runs-on: ubuntu-latest`, exactly where it is real
+  and therefore was invisible. `tauri.linux.conf.json` / `tauri.macos.conf.json` are the tokens that
+  matter on those legs, and the live manifest's `linux-x86_64` / `darwin-aarch64` entries point at
+  sidecar assets, so those are real users on the real auto-update channel.
+
+  The detail worth keeping: the module doc said *"A file this guard cannot read as text is a refusal,
+  not a skip: failing closed is the only safe default on this surface."* The read **was** fail-closed.
+  The file-type probe two lines above it was fail-**open** — `unwrap_or(false)` skipped on error too.
+  The right default was stated and then not applied to the predicate gating it.
+
+  **Fix (it deletes code):** no file-type probe at all, on either side. `read_to_string` /
+  `readFileSync` follow links exactly as Tauri does, and a directory, junction or otherwise unreadable
+  entry now becomes a refusal through the already-correct fail-closed branch instead of a silent skip.
+  The TypeScript side gained the matching `try`/`catch` so its read has the same semantics.
+
+  **Finding 9 (DEMONSTRATED) — `{"plugins":null}` deletes the updater block and was allowed.** A
+  17-byte `src-tauri/tauri.linux.conf.json` containing exactly `{"plugins":null}`: `cargo test` exit 0,
+  vitest 15/15, no refusal. The content rule was `json.pointer("/plugins/updater")`, which on a null
+  `plugins` cannot index `updater` and returns `None` — but under RFC 7396 a `null` at `plugins`
+  deletes the **entire** plugins block from the merged config, updater included. That is this guard's
+  own stated principle one level up: it refuses `{"plugins":{"updater":null}}` precisely because a null
+  deletes the block, and deleting the parent deletes the child. Lower severity — update *suppression*
+  (the app ships with no updater config and silently stops receiving security fixes) rather than
+  root-of-trust replacement — but it is the freeze/downgrade harm class the endpoints pin exists for,
+  and it landed with every guard green.
+
+  **Fix:** the refusal now applies at every level a null can reach — a non-object **root** (an RFC 7396
+  patch that replaces the whole config), a non-object or null **`plugins`**, and the `plugins.updater`
+  key itself.
+
+  **Red-proof, both findings, all three legs, each fixture planted alone and deleted after.**
+
+  | fixture | leg 1 `#[test]` | leg 2 tag-path binary | leg 3 vitest |
+  |---|---|---|---|
+  | symlink `tauri.linux.conf.json` → `innocent-looking-resource.json` | EXIT=101 | EXIT=1 | 1 failed of 16 |
+  | `tauri.linux.conf.json` = `{"plugins":null}` | EXIT=101 | EXIT=1 | 1 failed of 16 |
+
+  The symlink leg's message reads `` `tauri.linux.conf.json` exists and sets a `plugins.updater` key ``
+  — i.e. the guard read *through* the link and parsed the target's JSON, which is the whole point. The
+  null leg reads `` sets `plugins` to something other than an object … update suppression, which
+  freezes every install on the build it already has ``.
+
+  **Before/after on this host, to prove the fix is what changed the outcome.** With the same symlink
+  fixture in place, the attempt-1 code (`git checkout 68898320 -- <the two files>`) gives `cargo-test
+  EXIT=0 / vitest 15 passed` — the bypass reproduced — and the attempt-2 code gives `cargo-test
+  EXIT=101 / vitest 1 failed | 15 passed`. Same shape for `{"plugins":null}`: attempt 1 EXIT=0 /
+  15 passed, attempt 2 EXIT=101 / 1 failed. Also confirmed the fixture is what the auditor described:
+  `git ls-files -s` reports `120000 c43befab… src-tauri/tauri.linux.conf.json`, so it does survive a
+  commit as a real symlink.
+
+  **Benign paths re-confirmed, unbroken.**
+  - A **directory** named `tauri.linux.conf.json` is now a refusal through the fail-closed branch, as
+    intended: `exists but could not be read as text (Access is denied. (os error 5))` on Windows,
+    `(EISDIR: illegal operation on a directory, read)` on the Node side — a refusal, never a silent
+    skip.
+  - `tauri.windows.conf.json` with only `plugins.cli` + `bundle.targets`: leg 1 EXIT=0, leg 3 16/16.
+  - `Tauri.windows.toml` with only `[plugins.cli]`: leg 1 EXIT=0, leg 3 16/16.
+
+  **CPE-1873 regressions re-run after the fix; all still red.** Overlay chain with an attacker pubkey
+  in `tauri.sidecar.conf.json`: vitest `3 failed | 13 passed`, one per shipped OS. Overlay endpoints:
+  same, `3 failed | 13 passed`. Base-config pubkey rotated: `cargo test` EXIT=101 with `SECURITY
+  (CPE-1873): the updater's root-of-trust public key changed.`, binary EXIT=1. Base-config endpoints
+  repointed: EXIT=101 / EXIT=1, `the updater's manifest endpoint(s) changed.` Restored via `git
+  checkout --` after each; clean tree, vitest back to 16/16.
+
+  **A Linux-side execution was attempted and is honestly reported as NOT run.** WSL Ubuntu has cargo
+  but no `cc` (no build-essential), so every `cargo test` there failed at `error: linker \`cc\` not
+  found` — those exit-101s are build failures, not guard verdicts, and are not counted as evidence.
+  Installing a toolchain is a machine-global change this run is barred from making. What stands
+  instead: the fix is filesystem-agnostic *by construction* — there is no file-type probe left to
+  behave differently, and `read_to_string`/`readFileSync` follow symlinks on every platform — and the
+  new `scan_follows_a_symlink_named_like_a_platform_config` unit test builds a real symlink
+  (`std::os::unix::fs::symlink` on Unix, `symlink_file` on Windows) and runs on the Linux and macOS CI
+  legs, reporting rather than passing vacuously if the fixture cannot be created.
+
+  **Verification, attempt 2.** `crates/updater-verify`: `cargo clippy --locked --all-targets -- -D
+  warnings` clean; `cargo test --locked` **56/56** (38 lib + 2 pinned-pubkey + 1 platform-config + 15
+  release_guard). Frontend: `npm run check` 0 errors / 0 warnings; `npx vitest run` (full suite) 4583
+  passed, with **3 pre-existing Windows-only failures in two files that this work never touched** —
+  2 in `src/lib/msrvSync.test.ts` (CPE-1902, open in Backlog: the MSRV guard is not CRLF-safe) and 1 in
+  `src/lib/sprintStallControls.test.ts` (CPE-1880's `scripts/**/*.mjs` LF checkout guard, same Windows
+  CRLF class). Both pass on the Linux runners. No private key material generated, printed or
+  committed; every attacker file and the symlink deleted, `git status --short` clean.
+
+  Branch had been rebased by the Foreman (merge commit `68898320`, keeping this PR's whole-crate
+  `cargo test --locked` over `main`'s minimal `--locked` fix to the same line); pulled before starting.
