@@ -1848,3 +1848,39 @@ Two things the sweep found that nobody had reported:
 `.preview-pane`'s background and `.jt-row:hover`'s fill, and **throws if either stops setting one**, so
 it cannot grade against a colour nobody paints. Same shape as the provenance rule: derive it, or do
 not claim it.
+
+## 2026-08-27 — the re-run reflex had ALREADY let a real regression through
+
+CPE-1955 was filed because `gui-smoke` shard 2 died seven times in one day, always reporting
+**"0 new failing cases"**, always green on re-run. The ticket's stated worry was that this *trains the
+crew to reach for `gh run rerun` on a red GUI shard — the habit that eventually lets a real regression
+through.*
+
+It already had.
+
+PR #1068 found the "0 new failing cases" was a **second, independent defect**: the spec-attribution
+variable advanced only on the reset's *success* path, so when recovery threw, attribution froze on
+spec #1. The other thirteen specs still ran, still failed, and **were never written to disk** —
+confirmed against the stored artifact, which held one result file for a shard that visibly executed
+fourteen.
+
+The first CI run of that fix, on its own PR:
+
+    14/14 spec file(s) reported, 26 case(s) — 23 passed, 1 failed
+    NEW GUI REGRESSION: "macro-param-prompt.smoke.ts :: running a bound {ask:suffix} macro
+      opens MacroParamPrompt before any dry-run confirm" — not listed in known-failing.json
+    FAILED — 1 new failing case(s), incomplete=false
+
+A **named** failing case in a **named** spec, not listed as known-failing, where seven previous runs
+had said "0 new failing cases".
+
+Three things to carry:
+
+1. **"0 new failures" from a suite that did not complete is not information.** The ratchet was right
+   to red on `incomplete=true`; the number beside it was meaningless and read as reassurance.
+2. **An intermittent infra failure can be a mask.** Every re-run that "fixed" shard 2 also discarded
+   thirteen specs' results. The flake was not merely costing CI cycles — it was **suppressing
+   evidence**, and the standing "re-run once, then investigate" rule is what eventually surfaced it.
+3. **Do not exempt the thing your tool just found in order to land the tool.** Adding
+   `macro-param-prompt` to `known-failing.json` to get #1068 green would have destroyed the finding.
+   It gets its own ticket; the harness fix stays a harness fix.
