@@ -122,6 +122,9 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
 - **Enumerate, don't recall (CPE-1932).** Any guard over "all the X in this repo" derives its list at
   run time (`git ls-files`, a tree walk) and fails loudly when the list comes back near-empty — a
   hard-coded list of the instances someone remembered is how seventeen Cargo.lock files became two.
+  Two jobs enforce this for the two lockfile families, and a third instance gets a third job rather
+  than a note: `lockfile-preflight` (`cargo metadata --locked` over every `Cargo.lock`) and
+  **`npm-audit-sweep`** (`scripts/audit-npm-projects.mjs`, `npm audit` over every `package-lock.json`).
 - **Derive provenance, don't claim it (CPE-1933).** A comment asserting that code here reproduces
   something *there* — *"exactly the way `release.yml` invokes it"*, *"byte-identical to X"*,
   *"transcribed from Y"*, *"copied verbatim from Z"* — is **untested by construction**, and it is
@@ -155,9 +158,6 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   workflows' argv and **executes** the real binary with it), `src/lib/keymap.test.ts` (joins two data
   modules), `src/lib/components/MacroRunConfirm.test.ts` (walks a `format!` literal out of
   `fsutil.rs`, comments stripped first), `src/lib/channelPurityCoverage.test.ts`.
-  Two jobs enforce this for the two lockfile families, and a third gets a third job, not a note:
-  `lockfile-preflight` (`cargo metadata --locked` over every `Cargo.lock`) and **`npm-audit-sweep`**
-  (`scripts/audit-npm-projects.mjs`, `npm audit` over every `package-lock.json`).
 - **There are TWO npm projects (CPE-1945).** The root, and **`gui-smoke/`** — which has its own
   `package.json`, its own `package-lock.json`, its own advisories, and its own CI job. Any
   dependency/advisory statement must say which project it covers, or cover both: `gui-smoke/` went
