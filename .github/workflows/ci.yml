@@ -196,6 +196,21 @@ jobs:
     # went unregenerated and unnoticed until CI hit them one at a time. Reading the list from
     # `git ls-files` instead of memory means a new crate's lockfile is covered the day it lands,
     # with no step here to update.
+    #
+    # Two more guards, both added after UAT/review found the job could lie about its own coverage:
+    #  - A near-zero `${#locks[@]}` (git missing, wrong cwd, a future refactor of this step) must
+    #    fail loudly, not silently pass as "0 stale of 0 checked" — that is a zero-enumeration false
+    #    green, the exact anti-pattern this ticket exists to stop. Floor of 10 chosen deliberately
+    #    below today's real count (17) so removing several crates over time doesn't need this bumped,
+    #    while still catching a near-total enumeration loss (0/1/2 files found).
+    #  - `cargo metadata --locked` failing does not always mean "stale": an invalid Cargo.toml (typo,
+    #    bad merge) fails the same command for an unrelated reason, and the two are trivially
+    #    distinguishable by cargo's own stderr — a genuine staleness failure names `--locked`
+    #    explicitly ("... because --locked was passed to prevent this"); a manifest parse error does
+    #    not. Classify on that text instead of assuming every failure is staleness, and keep the real
+    #    cargo error inside the `::group::` log instead of discarding it to /dev/null, so a broken
+    #    manifest gets a message that actually helps (fix the syntax) instead of bad advice
+    #    (regenerate a lockfile that was never the problem).
     name: Lockfile pre-flight — cargo metadata --locked (no compilation)
     runs-on: ubuntu-latest
     steps:
@@ -207,37 +222,64 @@ jobs:
       - name: cargo metadata --locked over every Cargo.lock in the tree
         shell: bash
         run: |
-          set -uo pipefail  # deliberately no -e: one stale lockfile must not stop the sweep of the rest
+          set -uo pipefail  # deliberately no -e: one stale/broken lockfile must not stop the sweep of the rest
 
           mapfile -t locks < <(git ls-files '*Cargo.lock')
           echo "Found ${#locks[@]} Cargo.lock file(s) via 'git ls-files *Cargo.lock':"
           printf '  %s\n' "${locks[@]}"
           echo
 
+          # Enumeration sanity floor: if this finds (near-)nothing, the job would otherwise report a
+          # vacuous "0 stale of 0 checked" success while having verified nothing at all.
+          if [ "${#locks[@]}" -lt 10 ]; then
+            echo "::error::only ${#locks[@]} Cargo.lock file(s) found via 'git ls-files *Cargo.lock' -- expected at least 10 in this tree. This almost always means enumeration itself is broken (git missing or misconfigured, wrong working directory) rather than lockfiles actually having been removed. A guard that finds nothing and reports success is exactly the failure CPE-1932 exists to prevent -- fix the enumeration, don't relax this floor to make it pass."
+            exit 1
+          fi
+
           stale=()
+          broken=()
           for lock in "${locks[@]}"; do
             dir="$(dirname "$lock")"
             echo "::group::cargo metadata --locked -- ${dir}"
-            if cargo metadata --locked --format-version 1 --manifest-path "${dir}/Cargo.toml" > /dev/null 2>&1; then
+            err="$(cargo metadata --locked --format-version 1 --manifest-path "${dir}/Cargo.toml" 2>&1 1>/dev/null)"
+            status=$?
+            if [ "$status" -eq 0 ]; then
               echo "ok: ${lock} matches ${dir}/Cargo.toml"
             else
-              echo "STALE: ${lock} does not match ${dir}/Cargo.toml"
-              stale+=("$lock")
+              echo "$err"
+              if printf '%s' "$err" | grep -q -- "--locked was passed to prevent this"; then
+                echo "STALE: ${lock} does not match ${dir}/Cargo.toml"
+                stale+=("$lock")
+              else
+                echo "BROKEN: ${dir}/Cargo.toml does not parse -- not a staleness problem, see the cargo error above"
+                broken+=("$lock")
+              fi
             fi
             echo "::endgroup::"
           done
 
-          if [ "${#stale[@]}" -gt 0 ]; then
+          if [ "${#stale[@]}" -gt 0 ] || [ "${#broken[@]}" -gt 0 ]; then
             echo
-            echo "::error::${#stale[@]} of ${#locks[@]} Cargo.lock file(s) are stale (Cargo.toml changed but the lockfile wasn't regenerated to match):"
-            for lock in "${stale[@]}"; do
-              echo "::error file=${lock}::${lock} is stale — its Cargo.toml no longer matches this lockfile"
-            done
-            cat <<'EOF'
+            if [ "${#stale[@]}" -gt 0 ]; then
+              echo "::error::${#stale[@]} of ${#locks[@]} Cargo.lock file(s) are stale (Cargo.toml changed but the lockfile wasn't regenerated to match):"
+              for lock in "${stale[@]}"; do
+                echo "::error file=${lock}::${lock} is stale — its Cargo.toml no longer matches this lockfile"
+              done
+            fi
+            if [ "${#broken[@]}" -gt 0 ]; then
+              echo "::error::${#broken[@]} Cargo.toml manifest(s) do not parse (see each one's cargo error in the matching '::group::' above -- this is NOT a lockfile-staleness problem):"
+              for lock in "${broken[@]}"; do
+                dir="$(dirname "$lock")"
+                echo "::error file=${dir}/Cargo.toml::${dir}/Cargo.toml does not parse — fix the syntax error shown in the '${dir}' log group above, then re-run"
+              done
+            fi
 
-          To fix each file listed above: run `cargo metadata` (no arguments beyond that) in its
-          directory to regenerate the lockfile. That is resolve-only and picks the same dependency
-          versions your Cargo.toml change already implies.
+            if [ "${#stale[@]}" -gt 0 ]; then
+              cat <<'EOF'
+
+          STALE lockfile(s) listed above -- to fix each one: run `cargo metadata` (no arguments
+          beyond that) in its directory to regenerate the lockfile. That is resolve-only and picks
+          the same dependency versions your Cargo.toml change already implies.
 
           Do NOT run `cargo update` to fix this — it re-resolves to the newest allowed versions of
           EVERYTHING, turning a build fix into an unreviewed, unrelated dependency bump.
@@ -249,6 +291,18 @@ jobs:
           dependency changes, revert the version line back to `3` by hand before committing
           (CPE-1896 hit this twice).
           EOF
+            fi
+
+            if [ "${#broken[@]}" -gt 0 ]; then
+              cat <<'EOF'
+
+          BROKEN manifest(s) listed above -- these are NOT stale lockfiles. `cargo metadata` failed
+          because the Cargo.toml itself doesn't parse (a typo, a bad merge). Regenerating a lockfile
+          will not fix this: fix the Cargo.toml syntax error shown in that directory's log group
+          above, then re-run.
+          EOF
+            fi
+
             exit 1
           fi
 
@@ -1064,6 +1118,7 @@ jobs:
     # BLOCKING — never `continue-on-error`. Making this job non-blocking (or deleting it) later is a
     # burndown regression under the QA charter's rule 2; see .claude/qa-architecture/README.md.
     name: Network E2E (ubuntu-latest, real servers)
+    needs: lockfile-preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

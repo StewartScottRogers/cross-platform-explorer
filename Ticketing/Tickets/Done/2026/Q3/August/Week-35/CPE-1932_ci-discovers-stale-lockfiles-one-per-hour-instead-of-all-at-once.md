@@ -111,3 +111,63 @@ script asserting the version string in all five locations agrees, run in CI (or 
 way this ticket does for lockfiles. Filing that as a follow-up rather than fixing it here — out of
 scope for CPE-1932, which is lockfiles specifically. Related also: CPE-1904 (`package-lock.json` drift
 has no build-time backstop either), named in this ticket's own Notes.
+
+## Work Log (round 2 — UAT + Reviewer follow-up)
+
+UAT ran the real scenario (`itertools` added to `crates/server/Cargo.toml`) and confirmed all 9
+`cpe-server`-pinning lockfiles named in one shot, 11.4s, and that the `version = 3` -> `4` format
+trap fires on every one of them with cargo 1.98.0 (not hypothetical) and reverts cleanly by hand.
+Reviewer independently re-verified the red-proof via PyYAML extraction and found three real gaps,
+all fixed here:
+
+**Gap 1 — `net-e2e` was ungated.** `backend`/`crates`/`sidecar`/`msrv` got `needs: lockfile-preflight`
+in round 1; `net-e2e` (the Docker/real-SFTP/WebDAV/FTP interop job, which builds `crates/net` and
+`crates/vfs` with `--locked`) was missed. Added `needs: lockfile-preflight` to it.
+
+**Full enumeration of every `--locked`-running job (done via `grep -nE '^  [a-zA-Z0-9_-]+:$'` — the
+first attempt at this enumeration used `[a-zA-Z_-]` without digits and silently skipped `net-e2e`
+because "net-e2e" contains a digit; re-running with the corrected class is what surfaced it):
+- `backend` — gated
+- `crates` — gated
+- `net-e2e` — gated (fixed this round)
+- `sidecar` — gated
+- `msrv` — gated
+- `ffmpeg-pin-guard` — NOT gated, correctly: verified it has no `dtolnay/rust-toolchain` step and
+  installs no Rust at all; its only `--locked` text is inside a long comment narrating a historical
+  one-off manual probe (`cargo +1.88.0 check --locked ...` someone ran by hand outside CI), not a
+  `run:` step. Confirmed via PyYAML that `ffmpeg-pin-guard.needs` is unset and no `cargo` command
+  appears in any of its actual steps. Left ungated deliberately — do not "helpfully" add `needs:`
+  here, there is nothing for it to wait on.
+- `frontend`, `lockfile-preflight` — no cargo at all; `lockfile-preflight` itself carries no `needs:`
+  so it runs in parallel with `frontend`, not serialized behind it.
+
+**Gap 2 — stale vs. broken manifest were conflated.** The `2>&1` on the `cargo metadata` call
+discarded stderr, so ANY failure (a genuine stale lockfile, or an unrelated Cargo.toml syntax error)
+was reported as "STALE" with regenerate-the-lockfile advice — actively wrong advice for a syntax
+error. Fixed: capture stderr, classify on cargo's own distinguishing text
+(`--locked was passed to prevent this` = genuine staleness; anything else = broken manifest), keep
+the real cargo error inside the `::group::` log instead of discarding it, and give two different
+remediation messages. Red-proofed both paths against the actual YAML-extracted script:
+  - Stale (2 independent lockfiles, `crates/s3` + `crates/updater-verify`): both correctly
+    classified STALE, both named, exit 1.
+  - Broken (`this is not valid toml [[[` appended to `crates/vfs/Cargo.toml`): correctly classified
+    BROKEN (not STALE) for both `crates/vfs` (direct) and `src-tauri` (cascade, since it path-deps
+    on `cpe-vfs`) — src-tauri's cargo error text differs ("failed to get `cpe-vfs` as a dependency
+    of package...") but correctly falls to BROKEN since it also lacks the staleness string. Message
+    correctly says "NOT a lockfile-staleness problem... fix the syntax error", not the lockfile
+    regeneration advice. Real cargo error visible in the group log in both cases.
+
+**Gap 3 — zero-enumeration false green.** If `git ls-files` returns nothing (git missing, wrong
+cwd, a future refactor of this step), the job checked 0 files and reported "All 0 Cargo.lock files
+are up to date" — a false green covering nothing. Fixed with a floor check: fewer than 10 lockfiles
+found fails the job outright with a message explaining why (repo has 17 today; 10 is a deliberately
+conservative floor that survives removing several crates without needing to be bumped, while still
+catching near-total enumeration loss). Chose a floor over a bare non-zero check per the reviewer's
+suggestion, specifically so a partially-broken enumeration (e.g. only 2-3 files found due to some
+other bug) is caught too, not just a totally-broken one. Red-proofed by stripping `git` from PATH:
+`git: command not found` -> `Found 0 Cargo.lock file(s)` -> `::error::only 0 Cargo.lock file(s)
+found ... expected at least 10` -> exit 1 (previously this path exited 0).
+
+All four scenarios (clean / 2-stale / 2-broken / zero-enumeration) re-verified against the script
+extracted from the final committed YAML via PyYAML, matching how GitHub Actions itself parses the
+block scalar.
