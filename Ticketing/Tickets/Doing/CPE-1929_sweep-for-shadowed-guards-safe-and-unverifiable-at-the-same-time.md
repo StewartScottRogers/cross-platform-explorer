@@ -306,11 +306,10 @@ so far was found that way. None was found by reading the code** — including bo
 - `crates/server` Windows: **2,425 passed / 0 failed / 11 ignored**.
 - `crates/server` Linux (WSL, sources touched first): **2,410 passed / 0 failed / 11 ignored**.
 - `cargo clippy --all-targets -- -D warnings` clean; same with `--all-features`.
-- `npm run check`: 0 errors, 0 warnings. `npm test`: **344 files / 4,923 passed, 2 skipped** at this
-  branch's head. The figure moved twice while this ticket was open (4,857 → 4,883 → 4,923) purely
-  because `main` landed twelve PRs underneath it, which is the same reason the in-code sabotage
-  comments now state a **delta** rather than an absolute: a suite size is a fact about a moment, and
-  citing one as if it were a fact about the code is how a comment starts lying without anyone editing
-  it.
+- `npm run check`: 0 errors, 0 warnings. `npm test`: **4,932 passed, 2 skipped** at this branch's head.
+  The figure moved three times while this ticket was open (4,857 → 4,883 → 4,923 → 4,932) purely
+  because `main` landed fourteen PRs underneath it. That is exactly why the in-code sabotage comments
+  now state a **delta** rather than an absolute: a suite size is a fact about a moment, and citing one
+  as though it were a fact about the code is how a comment starts lying without anyone editing it.
 - `src-tauri` `cargo test --lib`: **230 passed / 0 failed**. Added on review — this PR changes refusal
   *wording*, and `src-tauri` asserts on some of it, so clippy alone was not enough there.
