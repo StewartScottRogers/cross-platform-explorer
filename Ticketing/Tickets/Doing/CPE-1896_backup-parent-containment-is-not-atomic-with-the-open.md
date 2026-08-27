@@ -52,10 +52,10 @@ file**.
 
 ## Acceptance criteria
 
-- [ ] Make the containment atomic with the open, per component. `std` cannot do this. It needs
+- [x] Make the containment atomic with the open, per component. `std` cannot do this. It needs
       `openat2(RESOLVE_BENEATH)` on Linux and an `O_NOFOLLOW` directory walk (or `NtCreateFile` with
       `FILE_OPEN_REPARSE_POINT` per component) on Windows. CPE-1889's own doc comment already names
-      this; start from there rather than re-deriving it.
+      this; start from there rather than re-deriving it. — **Built: `crates/server/src/open_beneath.rs`.**
 - [x] Land the auditor's race probe as a repeatable test — `#[ignore]`d if it must be, but in the
       tree — so the fix has something that goes red without it. A fix for a race with no racing test
       is unverifiable, and this repo's recurring defect is guards that prove nothing.
@@ -66,8 +66,9 @@ file**.
       (archive extract, revert apply, copilot apply, transfer download). The auditor confirmed all of
       them check before `create_dir_all`, but none of them are atomic either. — **Recorded in the Work
       Log below; deliberately not fixed here.**
-- [ ] Weigh the syscall cost of a per-component walk against PURPOSE.md's tiebreaker and record it.
-      Correctness outranks speed here, but the number should be known — see CPE-1895.
+- [x] Weigh the syscall cost of a per-component walk against PURPOSE.md's tiebreaker and record it.
+      Correctness outranks speed here, but the number should be known — see CPE-1895. — **Counted and
+      wall-clocked in the Work Log below; the walk is not the cost, the pre-existing landing check is.**
 
 ## Notes
 
@@ -371,6 +372,162 @@ laundering the escape by re-reading the redirected file and agreeing with itself
 206 escapes, **9 reported `ok: true`**; live → 214 escapes, **0 reported `ok: true`**, swap-back
 completing 214 times in both. The attack landed equally; only the engine's ability to be lied to
 changed.
+
+## 2026-08-27 — THE ATOMIC HALF (AC1 + AC5), branch `cpe-1896-atomic-containment`
+
+**The race is closed, not narrowed.** Read the red/green numbers before anything else: same probe, same
+machine, same afternoon, 400 trials each.
+
+| build | escaped | refused | wrote-inside-normally | probe verdict |
+|-------|---------|---------|-----------------------|---------------|
+| **this branch (atomic walk live)** | **0** | 394 | 6 | **PASS** |
+| this branch, second run | **0** | 397 | 3 | PASS |
+| sabotaged: walk swapped for the pre-fix path open, **CPE-1889 checks (1)+(2) restored** — main's shape | **369** (185 one-phase, 184 two-phase) | 3 | 28 | FAIL |
+| sabotaged: walk swapped for the pre-fix path open, no path checks at all | **397** (199 / 198) | 1 | 2 | FAIL |
+
+The third row is the honest comparison — it is what `main` does today — and it escaped on **92% of
+trials**. (The ticket's original 73/1200 was measured against a 19-byte source; this probe uses 1 MiB,
+so the window is far wider. The rate is a property of the probe and the volume, not of the fix.) The
+fix was committed **before** any sabotage, and each sabotage was reverted with `git checkout --` against
+a clean commit — never over uncommitted work.
+
+- **2026-08-27 (Worker) — what was built: `crates/server/src/open_beneath.rs`.**
+
+  - **The mechanism, in one sentence:** the run canonicalises the destination root once and **holds it
+    open**, and every plan entry is then opened one path component at a time, each component resolved
+    **relative to the handle of the component before it**. There is no second lookup of any parent, so
+    the racing rename has nothing left to redirect. The handle the bytes go through is beneath the root
+    *by construction* rather than by a check that could be stale.
+  - **Windows: `NtCreateFile` with `OBJECT_ATTRIBUTES.RootDirectory` = the parent handle**, plus
+    `FILE_OPEN_REPARSE_POINT` and `FILE_DIRECTORY_FILE` per intermediate component and
+    `FILE_NON_DIRECTORY_FILE` for the leaf. Win32 has **no** handle-relative open — `CreateFileW`
+    re-parses a full path from a drive letter every time — so the NT layer is not a preference, it is
+    the only route. Directories are created with `FILE_OPEN_IF`, i.e. inside the handle we hold, which
+    is why a refusal still cannot leave directory debris outside the root (CPE-1889 check (1)'s whole
+    reason to exist, now structural).
+  - **Linux: `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`** as a one-syscall fast path, with an
+    `openat`/`mkdirat` + `O_NOFOLLOW` per-component walk behind it. **Any** failure of the fast path
+    falls through to the walk, which then produces the authoritative answer *including the authoritative
+    refusal* — so the fast path cannot weaken anything and no errno classification is performed at all
+    (the one real hazard of hand-rolling a syscall). It cannot replace the walk either: creating a
+    missing directory chain still needs `mkdirat` per level, and `openat2` is absent before Linux 5.6
+    and blocked by some seccomp policies. macOS and every other Unix use the walk.
+  - **`fsutil::copy_file_onto_destination_handle`** is the split-out body of
+    `copy_file_onto_no_follow_with_wording`: same function, same three handle-read guards (reparse
+    point, directory, `links > 1`), but the destination opener arrives as a **closure**. That is not
+    style — the source must still be opened and described *first*, or an unreadable source would leave
+    behind an empty file this call had just created at `dst`, a new silent way for a failed entry to
+    change the user's tree. The old `pub` entry point `copy_file_onto_no_follow` is untouched and every
+    other caller is unchanged.
+  - **`backup::copy_one_verified` no longer resolves any path before the write.** CPE-1889's checks (1)
+    and (2) are behind `if !open_beneath::ATOMIC`, a `const` that is `false` on every platform this
+    ships on, so they compile out. They are kept in the source because on a target with no
+    handle-relative open the walk degrades to a path open and they are then the only containment there
+    is.
+
+- **2026-08-27 (Worker) — the residual, because there is exactly one and it is specific.**
+
+  The walk holds a handle on each intermediate directory. An actor who **renames one of those directory
+  objects out of the root** while the copy is in flight takes the write with it — we keep writing into
+  the object we hold, wherever it now lives. This is strictly weaker than the bug it replaces: the
+  attacker can only relocate a directory the backup itself owns, so the bytes cannot be aimed at a
+  pre-existing `.ssh` or Startup folder the way a planted junction aimed them, and `rename` cannot put
+  a directory *onto* an existing non-empty one. `openat2(RESOLVE_BENEATH)` is immune (it re-resolves
+  from the root fd every call and the kernel enforces the property), so on Linux this exists only on
+  the fallback walk. **`landed_inside` catches it after the fact on every platform** — which is the main
+  reason it is kept rather than deleted as redundant, and is recorded on both functions.
+
+- **2026-08-27 (Worker) — AC5, the cost. The walk is not the cost. Bisected rather than quoted.**
+
+  **Syscalls, counted exactly** by a thread-local counter around every syscall the walk makes
+  (`open_beneath::tests::cpe_1896_report_the_walk_syscall_cost`), for the ordinary `a/b/name.txt` shape
+  with the chain already present: **5 syscalls/file creating a new name** (2 dirs x (open +
+  `GetFileInformationByHandle`) + 1 create), **6 overwriting an existing one** (the exclusive create
+  loses to the file being there, then the plain open). Those are *handle-relative* opens — one name
+  against one open directory object, not a path walk from a drive letter — against the previous shape's
+  2 `canonicalize` + 1 `metadata` + 1 open. So the count went up while the per-operation work went down.
+  *(A first attempt used a process-wide `AtomicU64` and reported 5.16 syscalls/file for a shape that can
+  only cost a whole number: libtest runs tests in parallel and the sibling tests were adding their own
+  walks. Thread-local is exact.)*
+
+  **Wall clock, `cpe_1889_measure_the_guard_cost`, 2,000 files, guarded engine vs the pre-fix shape:**
+
+  ```text
+  engine as it ships (walk + landing check)   +920.5  +1093.2  +945.7  +960.8  us/file
+  landing check minus its identity probe       +71.2   +101.9   +92.5          us/file
+  landing check removed entirely (walk only)  +100.9   -51.1    +19.6          us/file  <- both signs
+  ```
+
+  So: **the per-component walk measures below the copy's own noise floor** (both signs, exactly as
+  CPE-1889's own A/B behaved), and **~850 us/file is `landed_inside`'s identity probe** — the read-only
+  second open of the file just written.
+
+  **And that ~850 us is not syscall time, it is antivirus.** `canonicalize` opens the destination for
+  *attributes* (~80 us); the identity probe opens it for *read data*, and the first read-open of a
+  just-written file is what makes Windows Defender's real-time scanner scan it synchronously. Two opens
+  of the same file, one ~80 us and one ~850 us, is the giveaway. Recorded as measured rather than filed
+  as a syscall cost, because tuning syscalls would not move it.
+
+  **Against PURPOSE.md's fast/small/predictable tiebreaker:** this change is **cost-negative** — it
+  removes two `canonicalize` calls per file and adds a walk that does not measure. The ~950 us/file is
+  **inherited from PR #1037**, not introduced here, and this is the first time anyone has measured it;
+  it is ~95 s on a 100,000-file backup. The obvious follow-up is deleting the identity probe, which the
+  atomic walk makes redundant (it existed to catch a swap-back that can no longer redirect the write) —
+  **deliberately not done here**, because removing an auditor-mandated guard belongs in its own reviewed
+  change and not in the same PR as ~800 lines of new platform FFI. CPE-1915's `GetFinalPathNameByHandleW`
+  route would remove both re-opens at once. **Recommend the Foreman file that follow-up.**
+
+  **Host and tooling, since none of these numbers travel:** Windows 11 Pro 10.0.26200, x86_64, local
+  NTFS (`%TEMP%`); `rustc`/`cargo` **1.98.0** (`x86_64-pc-windows-msvc`) — determined by `rustc -Vv` and
+  `cargo -V` on the `~/.cargo/bin` toolchain this worktree builds with, not by assumption; Defender
+  real-time protection **on**, antimalware engine **4.18.26070.9** (`Get-MpComputerStatus`); `cargo test`
+  **debug** profile. CPE-1895 still owns re-measuring against a network destination, where each
+  resolution is a round trip and the balance between those rows changes completely.
+
+- **2026-08-27 (Worker) — decide-and-log assumptions.**
+
+  1. **`openat2` is a fast path, not the Linux implementation.** The AC names it; the walk is what
+     actually carries the guarantee on every Unix. Reasoning above: directory creation needs `mkdirat`
+     per level regardless, `openat2` is not universally available, and falling through to the walk on
+     *any* failure is what makes the fast path incapable of weakening the result. This is also the
+     lowest-risk shape for code I **cannot execute locally** — this is a Windows machine, so CI's
+     ubuntu and macOS legs are the first execution of the Unix arm.
+  2. **`landed_inside` kept, not deleted**, despite being ~99% of the guard cost and largely redundant.
+     Reasons in the residual section above; the removal is a separate reviewed change.
+  3. **Two Cargo feature/dependency additions, no new crate.** `windows` 0.56 gains
+     `Wdk_Foundation` + `Wdk_Storage_FileSystem` + `Win32_System_IO` (the same already-vendored crate,
+     three more feature flags); `libc` is named directly under `[target.'cfg(unix)'.dependencies]` and
+     was already resolved in **both** lockfiles via `xattr`/`rayon`/`rusqlite`. `cargo tree` gains
+     nothing. Both `Cargo.lock`s regenerated (`crates/server` and `src-tauri`) — one added `libc` line
+     each, and the `version = 3` → `4` format bump cargo 1.98 wanted was reverted in both.
+  4. **One existing assertion changed, deliberately made stronger.**
+     `cpe_1889_a_junction_at_the_parent_never_redirects_the_write_outside_the_root` asserted
+     `error.contains("outside")`, which was all a path resolution could establish. The walk never
+     resolves the whole path, so the refusal now names the exact component: the assertion is
+     `contains("\"sub\"") && contains("is a link")`. The harm assertions in that test are untouched.
+
+- **2026-08-27 (Worker) — the probe's assertion, and why a quiet run still proves little in one
+  direction only.** `assert_eq!(escaped, 0)` is added, exactly as this ticket said it should be once the
+  atomic half landed. The asymmetry matters and is written at the test: a **zero** count on the *pre*-fix
+  code proved nothing (the window was hit a few times per 600 and the rate swung by an order of magnitude
+  between volumes), which is why the probe was previously labelled an observation instrument; a
+  **nonzero** count on the post-fix code is a defect in the walk, because the property no longer depends
+  on winning a race. It stays `#[ignore]`d on cost alone — 400 trials x 1 MiB x a thread and a junction
+  each is **~64-90 s** here. The per-run deterministic cover for the same mechanism is
+  `open_beneath::tests::refuses_a_link_at_an_intermediate_component_and_writes_nothing_through_it`, which
+  needs no thread and no timing and asserts the victim's bytes are untouched.
+
+- **2026-08-27 (Worker) — guardrails.** `cargo test` in `crates/server`: **2401 passed, 0 failed, 10
+  ignored** (2396 before; the five new ones are `open_beneath`'s), plus every integration binary green.
+  `cargo clippy --all-targets -- -D warnings` clean in **three** modes: plain, `--features index`,
+  `--features specta`. No new dependency crate. No `specta::Type` struct touched, so no
+  `bindings.gen.ts` regeneration; no frontend TypeScript touched, so no `npm run check` needed. No
+  public API change — `open_beneath` is `pub(crate)`, `copy_file_onto_no_follow` is unchanged, and a
+  repo-wide grep confirms `src-tauri` and the sidecars name none of the changed items. `src/docs/safety-undo.md`
+  updated: the bullet that told the user the instant-of-the-write swap was *not* covered now says it is,
+  and names the renamed-folder residual that replaces it. Every attack ran inside the crate's
+  self-cleaning `ScratchDir` guard with the escape target a sibling directory *inside* it; nothing was
+  installed or changed machine-wide.
 
 ## What the atomic half should build first
 
