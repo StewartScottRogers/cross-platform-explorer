@@ -1112,6 +1112,69 @@ written at the constant so the next person adds the gate rather than rediscoveri
   and `x86_64-apple-darwin` via the extraction harnesses. One `#[cfg(windows)]` attribute and its
   explanatory comment; no logic touched.
 
+## 2026-08-27 — ROUND 7: seven stale lockfiles. The multiple-lockfiles trap, at its full width.
+
+The `#[cfg(windows)]` fix cleared the dead-code error and a second failure surfaced behind it:
+
+```text
+error: cannot update the lock file crates/net/Cargo.lock because --locked was passed to prevent this
+```
+
+`crates/net/Cargo.lock` is a **third** independent lockfile that transitively pins `cpe-server`, and it
+never received the `libc` edge round 1 added. CI builds with `--locked`, so a stale lockfile is a hard
+failure rather than the silent rewrite the same drift causes locally.
+
+- **2026-08-27 (Worker) — it was not one file, it was seven.** `git ls-files '*Cargo.lock'` finds
+  **seventeen** lockfiles in this repo; **nine** pin `cpe-server`. Re-derived on this branch rather than
+  trusted from a scan of `main`:
+
+  | lockfile | before | action |
+  |---|---|---|
+  | `crates/ftp/Cargo.lock` | stale | regenerated |
+  | `crates/mdns/Cargo.lock` | stale | regenerated |
+  | `crates/net/Cargo.lock` | stale (the one CI named) | regenerated |
+  | `crates/s3/Cargo.lock` | stale | regenerated |
+  | `crates/server/Cargo.lock` | correct (round 1) | untouched |
+  | `crates/sftp/Cargo.lock` | stale | regenerated |
+  | `crates/vfs/Cargo.lock` | stale | regenerated |
+  | `crates/webdav/Cargo.lock` | stale | regenerated |
+  | `src-tauri/Cargo.lock` | correct (round 1) | untouched |
+
+  `crates/net` was simply the first the matrix reached; fixing only it would have cost six more CI
+  rounds. The two that were already correct are the two round 1 knew about — which is precisely the
+  shape of the standing rule: a dependency change in `crates/server` must regenerate **every** lockfile
+  that transitively pins it, and "the two I knew about" is not that set.
+
+- **2026-08-27 (Worker) — the delta is seven lines, and that is verifiable in one command.**
+  `git diff -U0 | grep '^[+-]'` over the whole change yields exactly:
+
+  ```text
+        7 +  "libc",
+  ```
+
+  No version bumps, no transitive churn, nothing but the edge the change actually introduced.
+  Regenerated with `cargo metadata` (resolve-only, no build, no `--locked`), never `cargo update`, which
+  would have turned a build fix into an unreviewed dependency bump. Cargo wanted to bump each file's
+  format `version = 3` → `4` as a side effect; that was reverted in each, same as round 1, so the
+  format bump does not ride in on a build fix either.
+
+- **2026-08-27 (Worker) — verified with CI's own test, on all seventeen.** The reliable check is the one
+  CI runs: `cargo metadata --locked` either succeeds or names the stale lockfile, and it needs no
+  compilation. **All nine `cpe-server` pinners pass**, and so do the other eight
+  (`crates/contract`, `crates/security`, `crates/updater-verify`, and the five under `sidecar/`) — those
+  do not pin `cpe-server` so this change could not have touched them, but checking cost seconds and the
+  alternative was another round-trip to find out.
+
+- **2026-08-27 (Worker) — the standing lesson, sharpened.** The repo rule already said "regenerate every
+  lockfile that pins it". What round 1 got wrong was not the rule but the *enumeration*: it updated the
+  two obvious ones and never asked how many there were. The mechanical form of the rule is
+  `git ls-files '*Cargo.lock'` → grep each for the changed package → `cargo metadata --locked` in each
+  directory. Three commands, no build, and it is complete by construction rather than by memory.
+
+- **2026-08-27 (Worker) — not mine, tracked by the Foreman:** GUI smoke shard 2 red on the same run
+  (CPE-1910 WebDriver socket flakiness, being re-run). Network E2E was red for this same lockfile
+  reason and should clear with this commit.
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a

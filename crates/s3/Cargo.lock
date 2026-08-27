@@ -770,6 +770,7 @@ dependencies = [
  "iso9660",
  "junction",
  "kamadak-exif",
+ "libc",
  "midly",
  "objc2-app-kit",
  "oid-registry 0.7.1",
