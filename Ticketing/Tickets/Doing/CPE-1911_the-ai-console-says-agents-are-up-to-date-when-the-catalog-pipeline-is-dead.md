@@ -122,3 +122,55 @@ warnings` clean, same clean without the feature; `cargo clippy --all-targets -- 
 `msrvSync.test.ts` gap on `main`, not touched here); `npm run check` clean. No new deps, no
 `specta::Type` structs touched, no new user-facing section (existing surface, wording fix only) so no
 `src/docs/*.md` change needed.
+
+### Round 2 (PR #1040 review — CHANGES REQUESTED)
+
+Independent Reviewer upheld the round-1 claims (trust engine untouched, clippy clean both feature
+modes, no new deps, no specta drift) but found the bug still reachable a different way, plus two
+smaller gaps. All addressed on the same branch/PR:
+
+**F1 (blocker) — fixed.** `staleRejected` only counted `ApplyOutcome::Rollback`. When the index
+verifies fine but every *listed entry* fails its own integrity check (`ContentMismatch` /
+`MissingManifest` / `MissingSignature` / `BadSignature` — e.g. the pipeline signs the index but
+botches signing an entry), that produced `indexOk:true, applied:0, staleRejected:0`, which fell
+through every branch straight into "Agents are already up to date." — the same lie, a different
+trigger. Added `integrityRejected` through the same pipe (`do_fetch_catalog` → `CatalogFetch` →
+`handle_catalog_refresh` → `launcher.html`) and its own honest branch: *"The published catalog looks
+corrupted or mis-signed, so nothing was installed. Your existing agents are untouched and safe to use
+— no action needed on your end."* `Pinned` stays excluded from both counts — user's own choice, not a
+lie.
+
+**F2 — fixed in this PR (not deferred).** `setMsg(m, ok)` only had two colours; all four "nothing
+changed, no action needed" branches (error, offline, stale, integrity, plus the pre-existing
+signature-invalid catch-all) painted in the same alarm red as an actionable error like "needs an API
+key". Chose to fix now rather than file a follow-up: the change is small (one ternary → one
+three-way branch, reusing the `#d08a1a` amber already used for `STATE_META`'s "blocked" dot elsewhere
+in this file) and the round-1 fix doesn't land as *intended* without it — the words say "no action
+needed" but red said the opposite, which is exactly the kind of mixed signal this ticket exists to
+remove.
+
+**Pipe now pinned end to end with Rust-side tests** (the gap the Reviewer identified: the jsdom tests
+only ever fed `refreshCatalog()` a hand-built JSON blob and could never catch a field dropped in
+Rust):
+- `broker_client::tests::fetch_catalog_parses_the_full_rejection_and_error_breakdown` — host JSON →
+  `CatalogFetch` parse, both a "rejections happened" shape and an "offline + error" shape.
+- `console::tests::catalog_refresh_route_forwards_the_full_rejection_and_error_breakdown` — a
+  scripted `CatalogRefreshDialogs` POSTs `/api/catalog/refresh` and asserts the response JSON carries
+  `staleRejected`/`integrityRejected`/`offline`/`error` verbatim.
+
+Red-then-green (fix committed first, then each probe reverted and restored):
+- Removed the `integrityRejected` branch from `refreshCatalog()` → new JS test failed
+  (`"Agents are already up to date."` instead of the corrupted/mis-signed message) → restored.
+- Reverted `setMsg` to the old two-colour ternary → 4 of the 5 colour-pinning JS tests failed (green
+  where amber was expected) → restored.
+- Hard-coded `integrity_rejected: 0, error: None` in `BrokerDialogs::fetch_catalog` → the new
+  `broker_client` test failed (`left: 0, right: 3`) → restored.
+- Dropped `"offline"` from `handle_catalog_refresh`'s emitted JSON → the new `console` route test
+  failed (`left: Null, right: false`) → restored.
+- `git diff` confirmed byte-identical to the committed state after every restore.
+
+Re-verification after round 2: `cargo clippy` clean in both feature modes for
+`cross-platform-explorer` and in `sidecar/ai-console` (caught and fixed one new
+`cloned_ref_to_slice_refs` lint from the new test); `cargo test --lib` in `sidecar/ai-console` —
+384/384 (was 382, +2 new); `npx vitest run src/lib/ai-console-launcher.test.ts` — 79/79 (was 78, +1
+new); `npm run check` clean; `sidecar/host/` confirmed zero-diff against `origin/main`.
