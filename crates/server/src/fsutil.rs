@@ -6098,6 +6098,18 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"NEW CONVERTED BYTES");
     }
 
+    /// **Round 5 correction:** this test originally asserted `e.contains("is a link")`
+    /// unconditionally, which reddened `macos-latest` while `ubuntu-latest`/`windows-latest` stayed
+    /// green — the exact class of bug [`overwrite_confirmed_no_follow`]'s own doc comment already
+    /// names and already has a measured fix pattern for ("The `ELOOP` half of that is measured, not
+    /// reasoned"): on Windows the no-follow open succeeds on the reparse point and the post-open
+    /// `symlink_metadata` check is what refuses, wording it "is a link"; on Unix `O_NOFOLLOW` makes
+    /// the open ITSELF fail (`ELOOP`) before either post-open check is ever reached, so the wording
+    /// there is `open_no_follow`'s own `"could not open for writing: ..."` wrapper instead. The
+    /// refusal is real on every platform — nothing is ever written through the link, proven below on
+    /// the filesystem, not just the `Result` — only the SENTENCE is platform-specific, so only the
+    /// Windows leg pins it, per that doc comment's own prescription: "assert the class ... freely;
+    /// gate any assertion on the sentence itself behind `cfg!(windows)`."
     #[test]
     fn overwrite_confirmed_no_follow_never_writes_through_a_dangling_link() {
         let d = scratch("confirmed-write-link");
@@ -6118,7 +6130,9 @@ mod tests {
         let e = overwrite_confirmed_no_follow(&link, b"NEW CONVERTED BYTES")
             .expect_err("a link must be refused even with a confirmed overwrite");
 
-        assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        if cfg!(windows) {
+            assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        }
         assert!(
             !target.exists(),
             "the link's target must not have been conjured by a write-through (result was refused: {e})"

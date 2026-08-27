@@ -242,3 +242,40 @@ be argued in the work log.
   clean. `cargo clippy --all-targets -- -D warnings` clean in both feature modes for both `crates/server`
   (default, and `--features pdf-thumb,video-thumb,waveform,dicom-thumb`) and `src-tauri` (default, and
   `--features sidecar-platform`).
+
+- **2026-08-27 — Round 5: `3205cb9c` went green on all three of round 4's fixes, but surfaced a fourth,
+  macOS-only failure in this PR's own round-2 security work** —
+  `fsutil::tests::overwrite_confirmed_no_follow_never_writes_through_a_dangling_link` panicked on
+  `macos-latest` at its `assert!(e.contains("is a link"), ...)` line; Ubuntu and Windows stayed green.
+
+  **Diagnosed from the code path, not guessed.** `overwrite_confirmed_no_follow`'s OWN doc comment
+  (this same file, above it) already names and measures this exact class of bug from CPE-1846: "on
+  Unix `O_NOFOLLOW` makes the `open` itself fail with `ELOOP`, so neither [post-open] check ever
+  runs" — and records that an earlier revert test which pinned the Windows-only "is a link" wording
+  unconditionally **reddened `Server crates` on ubuntu and macOS both**, with
+  `could not open the destination for writing: Too many levels of symbolic links (os error 40)`. The
+  new test's `overwrite_confirmed_no_follow(&link, ..)` call opens `link` through the exact same
+  `batch_media::open_no_follow` primitive, the exact same way, against the exact same
+  `make_dangling_link` fixture — so it is the identical bug class, not a new one: on Windows the
+  no-follow open succeeds on the reparse point and the post-open `symlink_metadata` check is what
+  refuses (wording it "is a link"); on Unix the open itself refuses first (`ELOOP`), before that
+  check is ever reached, so the wording is `open_no_follow`'s own "could not open for writing: ..."
+  wrapper instead. **The refusal is real on every platform** — the hard-link sibling test in this
+  same block (`overwrite_confirmed_no_follow_refuses_a_hard_linked_destination`) is unaffected, since
+  a hard link is not a symlink and isn't blocked by `O_NOFOLLOW`, so its open succeeds and
+  `handle_facts`'s `links > 1` check catches it identically on every platform (its assertion was
+  already written portably: `e.contains("hard-linked") || e.contains("names")`) — only the dangling-
+  link leg's SENTENCE is platform-specific, which is precisely what CPE-1846's own doc comment
+  already prescribes handling: "assert the class (refused, permanent, victim untouched) freely; gate
+  any assertion on the sentence itself behind `cfg!(windows)`."
+
+  **Fix, following that prescription to the letter:** the "is a link" wording assertion is now gated
+  behind `cfg!(windows)`; the two platform-agnostic assertions already present and unchanged (the
+  link's target was never created, and the link itself survives) still run on every platform and are
+  what actually prove the write-through never happened. Added a doc comment on the test itself
+  pointing at the precedent so a future reader does not have to re-derive this. Verified locally on
+  Windows (the only platform reachable here): `cargo test --lib fsutil::` — 98 passed, 0 failed, 1
+  ignored, including this test with `--nocapture` showing no skip notice (the link genuinely staged
+  and the refusal genuinely fired) — and `cargo clippy --all-targets -- -D warnings` clean, both
+  feature modes, both `crates/server` and `src-tauri` (re-run after this change; a `#[cfg(test)]`-only
+  edit, so `src-tauri`'s clean run was a formality but run anyway rather than assumed).
