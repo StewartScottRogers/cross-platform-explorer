@@ -3,7 +3,7 @@ id: CPE-1931
 title: the hard-coded-hex ratchet counts `#1044`-style PR references in comments as colours
 type: bug
 priority: Medium
-status: Open
+status: In Progress
 tags: ready
 estimate: S
 created: 2026-08-27
