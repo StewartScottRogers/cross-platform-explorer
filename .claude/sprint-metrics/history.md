@@ -1508,3 +1508,17 @@ CPE-1822 mid-stream gui-smoke case failed on CI not because anything broke — 2
 run produced zero AssertionErrors from the app — but because the app finished streaming 2,500 items
 faster than the poll caught the loading state. A test whose only failure mode is "I was too slow"
 reds forever on fast runners and trains the crew to re-run rather than read.
+
+**Second override recorded (per CPE-1835):** CPE-1896 / PR #1043 was also allowed a **4th**
+build→check attempt. Same reasoning as CPE-1881 — converging, nothing re-found — and round 4's single
+finding was a test half that proves nothing: the Reviewer disabled the leaf surrogate guard entirely
+and the **full 2404-test suite stayed green**, because a symlink at the leaf is refused ~50 lines
+earlier by an unrelated path check. That is the repo's signature defect and the cap must not be the
+reason it ships.
+
+**Pattern worth carrying: a fixture can be structurally unable to test the thing it is cited for.**
+CPE-1896's synthetic reparse point proves the code reads the *tag* rather than the attribute — real,
+and correctly measured. It cannot prove anything about a real OneDrive placeholder, because
+`FILE_FLAG_OPEN_REPARSE_POINT` exists to **bypass the handler that owns the tag**, and the synthetic
+tag has no handler. The one structural difference between fixture and reality is exactly the variable
+being inferred. Honest at the code comment; the user-facing doc had promoted it to fact.
