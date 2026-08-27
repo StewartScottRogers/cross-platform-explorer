@@ -264,8 +264,11 @@
     text-overflow: ellipsis;
   }
 
-  /* CPE-1708: `--accent` is this app's INFO tone (app.css: "ERROR/INFO reuse --danger/--accent") — never
-     `--danger`, which would read as "this folder failed to load" when it didn't. Same overflow strategy
+  /* CPE-1708: the accent is this app's INFO tone (app.css: "ERROR/INFO reuse --danger/--accent") — never
+     `--danger`, which would read as "this folder failed to load" when it didn't. CPE-1919: the tone is
+     unchanged, but this is a full sentence of 12px body text, so it takes `--accent-text` (the accent's
+     body-text role, >=4.5:1 on every painted surface) rather than `--accent` (the fill/icon/ring role,
+     which measured 3.21:1 here in dark). Same overflow strategy
      as `.notice` below (CPE-1660): truncate to an ellipsis, with the SAME sentence (`filteredHiddenText`
      above) plus the "loaded successfully" reassurance always readable via the `title` tooltip
      (`filteredHiddenTitle`) — so a narrow window that ellipsis-truncates the visible text never loses
@@ -286,7 +289,7 @@
   }
 
   /* CPE-1780: same overflow/truncation strategy as `.filtered-hidden` above (same reasoning — a narrow
-     window must still show the count via `title`), but `--warn` instead of `--accent`: an unreadable row
+     window must still show the count via `title`), but `--warn` instead of the accent: an unreadable row
      is a genuine read FAILURE for that one row, distinct from a successful, intentional name filter.
      `position: relative` — see the identical note on `.filtered-hidden` above. */
   .unreadable {
@@ -383,15 +386,21 @@
           bottom-flush with the bar's own edge (0.5px clear below, 4.5px above), shadow dying into the
           window boundary. `top: 50%; transform: translateY(-50%);` centres it in the bar instead,
           matching how a deliberate popover reads rather than a mis-anchored one.
-       3. Dark-theme contrast: no `color` here means this inherits the PILL's `var(--accent)` — dark
-          `--accent` on `--surface` measures 3.21:1 for a full sentence of 12px body text, under
-          the 4.5:1 AA floor (light is 5.5:1, fine). `--accent` is correctly a NON-text accent by design
-          (focus rings, icons — see `app.css.dark-contrast.test.ts:270`, which only asserts >=3:1 on
-          purpose), so that guard has no reason to catch a full sentence of body text using it — its
-          blind spot, same family as CPE-1919/CPE-1921 (also guard-blind color-as-text uses), not a bug
-          in the guard itself. The pill underneath KEEPS `--accent`/`--warn` (unaffected, still correct
-          for a short truncated label); only the reveal — precisely the low-vision affordance this whole
-          ticket is about — gets `color: var(--text)` instead.
+       3. Dark-theme contrast: no `color` here would mean inheriting the PILL's colour. When CPE-1883
+          measured that, the pill was `var(--accent)` — 3.21:1 on `--surface` in dark, under the 4.5:1
+          AA floor for a full sentence of 12px body text (light was 5.5:1, fine) — and this comment
+          recorded that `--accent` was correctly a NON-text accent by design (focus rings, icons), so
+          `app.css.dark-contrast.test.ts`'s deliberate >=3:1 assertion had no reason to catch a
+          sentence of body text using it.
+          CPE-1919 has since fixed the underlying token split: `--accent` keeps the fill/icon/ring
+          role, a new `--accent-text` owns the body-text role, and `.filtered-hidden` (the pill) now
+          uses `--accent-text` — 5.03:1 on `--surface` in dark, pinned by
+          `src/app.css.accent-text-contrast.test.ts`. So the inherit-from-the-pill hazard this item
+          was written about no longer exists, and the pill is no longer a guard blind spot.
+          `color: var(--text)` STAYS on the reveal anyway, for its own reason rather than as a
+          workaround: this box is precisely the low-vision affordance the whole ticket is about, and a
+          full sentence there earns the highest-contrast text tone the theme has (12.76:1 dark), not
+          merely a passing one.
        4. `::after` is part of its originating element for hit-testing, so while focused this box (up to
           367px wide) can paint over `.git`'s Pull/Push/Sync buttons and swallow their first click (it
           blurs the note instead of pressing the button). `pointer-events: none` removes that entirely —

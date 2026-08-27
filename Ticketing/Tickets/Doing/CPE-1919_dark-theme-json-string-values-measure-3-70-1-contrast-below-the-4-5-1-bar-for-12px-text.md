@@ -133,3 +133,66 @@ Docs: `src/docs/35-appearance.md` gains an "Accent-coloured text stays readable"
 convention under UI conventions.
 
 `npm run check` clean; `npm test` 346 files / 4932 passing.
+
+### 2026-08-27 — review round on #1069: seven more text sites, and the sweep that finds them
+
+The Visual Critic returned three findings. All three were real, and chasing them found four more of
+the same class.
+
+**1. `RepoBrowser.svelte` `.repo-crumb`** — left on `--accent` four lines below `.repo-status.ok`,
+which had been migrated. Both 12px body text, ~20px apart in the same panel, separated by a
+hairline: the panel rendered **two different blues**, with the clickable breadcrumb path the duller
+one at 3.21:1. Fixed.
+
+**2. `UserCommandsDialog.svelte` `.pill.surf`** — 10px pill label on `--surface-alt` at **3.43:1**:
+smaller text at worse contrast than the JSON case this ticket was filed for. `color` moved; the
+border correctly stays `--accent`.
+
+**3. Stale provenance in `StatusBar.svelte`.** Moving `.filtered-hidden` to `--accent-text` made the
+CPE-1883 block ~110 lines below false — it still asserted "the pill underneath KEEPS `--accent`" and
+quoted 3.21:1 as a live condition, with a green test beside it. Rewritten to record what CPE-1883
+measured, what CPE-1919 changed, and why `color: var(--text)` stays on the reveal for its **own**
+reason (the low-vision affordance earns the highest-contrast tone, 12.76:1) rather than as a
+workaround for a hazard that no longer exists. Two neighbouring comments naming `--accent` were
+corrected the same way.
+
+**Four more, found only by widening the spelling.** The original sweep grepped bare
+`color: var(--accent)`. Five sites use `var(--accent, <fallback>)` and were invisible to it — and
+one used `--accent-hover`:
+
+| site | text | before |
+|---|---|---|
+| `AgentTimeline .tl-expand` | "Open full diff ⤢" button, 10.5px on `--surface-alt` | 3.43:1 |
+| `AgentTimeline .rp-play` | "Play"/"Pause" — a word, not a glyph | 3.21:1 |
+| `AgentTimeline .rp-speed-btn.active` | "1×" / "Cost" / "Tokens" | 3.21:1 |
+| `IcalPreview .cp-badge` | 10px uppercase badge label | 3.21:1 |
+| `SidecarManager .logs-toggle.repair` | "Repair" button label | 3.21:1 |
+| `AboutDialog .link:hover` | link hover used `--accent-hover` | 4.10:1 |
+
+The first five moved to `--accent-text`. `.link:hover` went to `--text` instead of inventing an
+`--accent-text-hover` for its single call site: brightening to the full text tone is a clearer hover
+affordance than a half-step, and it passes trivially in every theme.
+
+**The sweep (the coordinator's suggestion, and the real answer).** The per-surface guard cannot see
+any of these — it only measures surfaces someone thought to point it at, which is the same blind
+spot as measuring a token at the loosest of its bars. So the guard now inverts the default: it finds
+**every** `color:` in `src/` resolving to `--accent`/`--accent-hover`, in both spellings, and fails
+on each unless its selector is declared in `ICON_ROLES` with a note saying which glyph it paints.
+An allowlist rather than a heuristic, because nothing in CSS distinguishes a checkmark from a word,
+and a guard that guesses "icon" is no guard. A third test fails on any `ICON_ROLES` row that stops
+matching anything, so an exemption can't outlive the thing it excuses.
+
+The 11 surviving `--accent` colour sites are all genuine glyphs (`.iconbtn.on`, `.menu .check`,
+`ContextMenu .check`, `MenuBar .mb-check`/`.check`, `.pin.pinned`, three `.ic` icon cells,
+`VaultBadge`, `VaultBanner`) — exactly the set the Critic independently arrived at.
+
+**Red-proofs, all run.** Reverting `.repo-crumb` and `.pill.surf` fails naming both by file,
+selector and remedy. Adding a bogus `ICON_ROLES` row fails naming the stale row.
+
+Also confirmed by the Critic and worth keeping on the record: light is **byte-identical** before and
+after (same md5, not merely "unchanged"), the dark string glyphs are the only pixels that move, row
+hover *raises* contrast to ~5.38:1 (`--surface-alt` is darker than `--surface`), and the
+`--accent-text`-inside-an-`--accent`-border pairing at `CardDetailDialog .cd-id` reads as an ordinary
+outline chip.
+
+Ratchets still all 12 unchanged. `npm run check` clean; `npm test` 346 files / 4940 passing.

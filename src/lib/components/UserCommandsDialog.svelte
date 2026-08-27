@@ -150,7 +150,7 @@
   .row-tpl { font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row-tags { display: flex; flex-wrap: wrap; gap: 4px; }
   .pill { white-space: nowrap; flex: 0 0 auto; font-size: 10px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface-alt); }
-  .pill.surf { color: var(--accent); border-color: var(--accent); }
+  .pill.surf { color: var(--accent-text); border-color: var(--accent); }
   .row-actions { display: flex; gap: 3px; flex: 0 0 auto; }
   .mini { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-alt); color: var(--text-dim); }
   .mini:hover:not(:disabled) { color: var(--text); background: rgba(128,128,128,0.14); }

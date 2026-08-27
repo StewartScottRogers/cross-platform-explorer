@@ -108,7 +108,7 @@
     text-decoration: underline;
     background: transparent;
   }
-  .link:hover { color: var(--accent-hover); background: transparent; }
+  .link:hover { color: var(--text); background: transparent; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   .btn {
     height: 32px;

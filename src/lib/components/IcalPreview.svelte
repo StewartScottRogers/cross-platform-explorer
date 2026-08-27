@@ -136,7 +136,7 @@
   .cp-badge {
     font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
     padding: 1px 7px; border-radius: 999px; background: var(--accent-soft, var(--surface));
-    color: var(--accent, var(--text-dim)); border: 1px solid var(--border); white-space: nowrap; flex: 0 0 auto;
+    color: var(--accent-text, var(--text-dim)); border: 1px solid var(--border); white-space: nowrap; flex: 0 0 auto;
   }
   .cp-badge-soft { color: var(--text-dim); background: var(--surface); }
   .cp-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }

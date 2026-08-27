@@ -1349,7 +1349,7 @@
     border: 1px solid var(--border, #3a3a3a);
     border-radius: 4px;
     background: var(--surface-alt, transparent);
-    color: var(--accent, #2f6fed);
+    color: var(--accent-text, #2f6fed);
     font-size: 10.5px;
     cursor: pointer;
   }
@@ -1415,7 +1415,7 @@
     cursor: default;
   }
   .rp-play {
-    color: var(--accent, #2f6fed);
+    color: var(--accent-text, #2f6fed);
     border-color: var(--accent, #2f6fed);
   }
   /* Speed selector (CPE-1104): a small segmented control, reflowing per the tick-tack convention
@@ -1449,7 +1449,7 @@
     background: rgba(128, 128, 128, 0.18);
   }
   .rp-speed-btn.active {
-    color: var(--accent, #2f6fed);
+    color: var(--accent-text, #2f6fed);
     border-color: var(--accent, #2f6fed);
     font-weight: 600;
   }

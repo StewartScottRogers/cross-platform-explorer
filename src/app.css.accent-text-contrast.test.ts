@@ -42,7 +42,7 @@
 //       1.4.11's 3:1 UI floor — so the inverse misuse is a real regression, and this is the same
 //       "a token calibrated for one role, used in another" mistake that caused CPE-1919 itself.
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC = join(process.cwd(), "src");
@@ -326,5 +326,110 @@ describe("JSON preview palette (CPE-1919): every colour role, every surface, eve
       }
     });
     expect(collisions, collisions.join("\n")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1919 review round: the app-wide sweep.
+//
+// The guards above measure the JSON preview, because that is where the defect was reported. That is
+// not where the defect LIVES. `--accent` was painted as body text at ~30 call sites across the app,
+// and the reported one was neither the smallest text nor the worst ratio. The review round found
+// `.repo-crumb` (12px, 3.21:1, sitting directly under a sibling that HAD been migrated, so one panel
+// showed two different blues) and `.pill.surf` (10px on --surface-alt, 3.43:1 — smaller text at
+// worse contrast than the case the ticket was filed for); widening the sweep past the bare
+// `var(--accent)` spelling then found five more hiding behind the `var(--accent, <fallback>)` idiom.
+//
+// A per-surface guard could never have found those: it can only measure surfaces someone thought to
+// point it at, which is the same shape of blind spot as measuring a token at the loosest of its
+// bars. So this sweep inverts the default. It finds EVERY `color:` declaration in `src/` that
+// resolves to `--accent`/`--accent-hover` and fails on each one, unless the exact selector is listed
+// in ICON_ROLES below as a glyph. New code that paints accent-coloured text fails here on the day it
+// lands, whether or not anyone remembers this ticket, and the only ways to pass are to use
+// `--accent-text` or to make an explicit, reviewed claim that the site is an icon.
+//
+// Why an allowlist rather than a heuristic: nothing in CSS distinguishes a checkmark glyph from a
+// word — both are `color:` on an inline box. Any heuristic (font-size, element name, class naming)
+// would be guessing, and a guard that guesses "icon" is silently back to being no guard at all. A
+// named list is a claim a reviewer can check against the markup, and adding to it costs a diff.
+const ICON_ROLES: { file: string; selector: string; note: string }[] = [
+  { file: "app.css", selector: ".iconbtn.on", note: "density-toggle icon, pressed state (CPE-1529)" },
+  { file: "app.css", selector: ".menu .check", note: "trailing checkmark glyph (MENUS.md)" },
+  { file: "ContextMenu.svelte", selector: ".check", note: "trailing checkmark glyph (MENUS.md)" },
+  { file: "MenuBar.svelte", selector: ".mb-check", note: "menu-bar checkmark glyph" },
+  { file: "MenuBar.svelte", selector: ".check", note: "menu-bar checkmark glyph" },
+  { file: "HomeView.svelte", selector: ".pin.pinned", note: "pin glyph, pinned state" },
+  { file: "KeyboardBindingsDialog.svelte", selector: ".ic", note: "leading icon cell (CPE-748)" },
+  { file: "NavCheatsheet.svelte", selector: ".ic", note: "leading icon cell (CPE-748)" },
+  { file: "ShortcutsDialog.svelte", selector: ".ic", note: "leading icon cell (CPE-748)" },
+  { file: "VaultBadge.svelte", selector: ".vault-badge.unlocked", note: "lock glyph, unlocked state" },
+  { file: "VaultBanner.svelte", selector: ".vb-icon", note: "banner icon glyph" },
+];
+
+/** Every `color:` declaration in a stylesheet/component whose value references `--accent` or
+ *  `--accent-hover`, in either spelling (bare `var(--accent)` or `var(--accent, <fallback>)` — the
+ *  second spelling is where five of this round's seven findings were hiding), paired with the
+ *  selector of the rule it sits in. `--accent-text`/`--accent-fg`/`--accent-2` are different tokens
+ *  and deliberately do not match (the `[,)]` terminator is what excludes them).
+ *  `border-color`/`background-color`/`outline-color` are excluded by the lookbehind — those are the
+ *  non-text roles `--accent` exists for. */
+function accentColorRoles(label: string, source: string): { file: string; selector: string; decl: string }[] {
+  const clean = stripComments(source);
+  const out: { file: string; selector: string; decl: string }[] = [];
+  const declRe = /(?<![-\w])color\s*:\s*[^;{}]*var\(\s*--accent(?:-hover)?\s*[,)]/g;
+  let m: RegExpExecArray | null;
+  while ((m = declRe.exec(clean)) !== null) {
+    const open = clean.lastIndexOf("{", m.index);
+    if (open < 0) continue;
+    const prev = Math.max(clean.lastIndexOf("}", open), clean.lastIndexOf("{", open - 1));
+    const selector = clean.slice(prev + 1, open).replace(/\s+/g, " ").trim();
+    const end = clean.indexOf(";", m.index);
+    out.push({ file: label, selector, decl: clean.slice(m.index, end < 0 ? m.index + 60 : end).trim() });
+  }
+  return out;
+}
+
+function walkStyleSources(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) walkStyleSources(p, out);
+    else if (name.endsWith(".svelte") || name.endsWith(".css")) out.push(p);
+  }
+  return out;
+}
+
+describe("app-wide accent-as-text sweep (CPE-1919 review round)", () => {
+  const found = walkStyleSources(SRC).flatMap((p) =>
+    accentColorRoles(p.split(/[\\/]/).pop()!, readFileSync(p, "utf8")),
+  );
+
+  it("found accent `color:` declarations to classify (the sweep is not silently matching nothing)", () => {
+    expect(
+      found.length,
+      `the accent-as-color sweep found ${found.length} declarations across src/ — it is probably broken`,
+    ).toBeGreaterThanOrEqual(ICON_ROLES.length);
+  });
+
+  it("every accent `color:` in src/ is a declared icon role — text roles must use --accent-text", () => {
+    const allowed = new Set(ICON_ROLES.map((e) => `${e.file}|${e.selector}`));
+    const offenders = found
+      .filter((r) => !allowed.has(`${r.file}|${r.selector}`))
+      .map(
+        (r) =>
+          `${r.file}  ${r.selector} { ${r.decl} }  — accent-coloured TEXT. Use var(--accent-text) ` +
+          `(--accent measures 3.21:1 on --surface in dark), or add this selector to ICON_ROLES with ` +
+          `a note saying which glyph it paints.`,
+      );
+    expect(offenders, `accent used as text:\n${offenders.join("\n")}`).toEqual([]);
+  });
+
+  it("every ICON_ROLES entry still matches a real declaration (no stale allowlist rows)", () => {
+    const present = new Set(found.map((r) => `${r.file}|${r.selector}`));
+    const stale = ICON_ROLES.filter((e) => !present.has(`${e.file}|${e.selector}`)).map(
+      (e) => `${e.file} ${e.selector} (${e.note})`,
+    );
+    // An allowlist that outlives the thing it excuses is how an exemption quietly becomes permanent
+    // policy: the row stops being reviewed because nothing points at it any more.
+    expect(stale, `ICON_ROLES rows matching nothing in src/: ${stale.join(", ")}`).toEqual([]);
   });
 });
