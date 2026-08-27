@@ -151,7 +151,7 @@
   .cp-rows > div { display: flex; gap: 10px; align-items: baseline; }
   .cp-rows dt { color: var(--text-dim); width: 90px; flex: none; }
   .cp-rows dd { flex: 1; overflow-wrap: anywhere; }
-  .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; }
+  .mono { font-family: var(--mono); font-size: 11.5px; }
   .wrap { overflow-wrap: anywhere; }
   .cp-badge {
     display: inline-flex; align-items: center; margin-left: 8px; padding: 1px 8px;
@@ -161,7 +161,7 @@
   .cp-sig { margin: 0; color: var(--text); }
   .cp-json {
     margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--surface-alt); font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+    background: var(--surface-alt); font-family: var(--mono); font-size: 11.5px;
     white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto;
   }
 </style>

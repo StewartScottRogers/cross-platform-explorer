@@ -308,21 +308,14 @@ function discoverFallbackTokens(): { discovered: Map<string, string[]>; allSeen:
 // token still shows up in `npx vitest` output (search this file's describe title), and the "stale
 // entry" check below fails the moment an owning ticket actually fixes its token and someone forgets
 // to delete the entry, so the list can't quietly go stale in either direction (silently grow OR
-// silently outlive its bug). Disposition chosen over splitting the work: CPE-1876 already exists
-// and owns `--mono` end to end (~24 call sites — a real, scoped follow-up); re-deriving that fix
-// inside this coverage ticket would duplicate that ticket's scope for no benefit, and an unlisted
-// new token still fails immediately, which is the property this ticket exists to establish.
-const ALLOWLIST: { token: string; ticket: string; added: string; note: string }[] = [
-  {
-    token: "--mono",
-    ticket: "CPE-1876",
-    added: "2026-08-26",
-    note: "font-family fallback (`ui-monospace, monospace`) masks an undefined token at ~24 call " +
-      "sites across the app — the sixth occurrence of the CPE-1810/1821 defect shape, surfaced by " +
-      "this ticket's detector. CPE-1876 owns defining --mono (or retokenizing its call sites) in " +
-      "all five theme blocks.",
-  },
-];
+// silently outlive its bug).
+//
+// CPE-1876 closed the one entry this list ever carried (`--mono`, ~24 call sites) by defining the
+// token in all five theme blocks and stripping every `var(--mono, <fallback>)` call site down to a
+// bare `var(--mono)` — see MONO_GUARDED_TOKENS below, which is why this list is empty rather than
+// removed outright: it's still the right home for the NEXT undefined-token-with-a-literal-fallback
+// this detector finds, whatever shape that turns out to be.
+const ALLOWLIST: { token: string; ticket: string; added: string; note: string }[] = [];
 const ALLOWLISTED_TOKENS = new Set(ALLOWLIST.map((e) => e.token));
 
 // Explicit, CLOSED allowlist of genuinely COMPONENT-LOCAL custom properties — tokens a component
@@ -575,5 +568,87 @@ describe("--danger/--warn clear WCAG against --bg-dim's OWN resolved background,
       expect(warnRatio, `--warn (${warn}) on --bg-dim (${bgDim}) in ${label} = ${warnRatio.toFixed(2)}:1, want >=${floor}:1`).toBeGreaterThanOrEqual(floor);
     });
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1876: `--mono` was the sixth instance of the CPE-1810/1821 defect shape — referenced at ~24
+// call sites across ~20 components as `var(--mono, ui-monospace, monospace)` (and several
+// near-variant fallback chains) but never defined anywhere in app.css, so the inline font-family
+// list was the only stack that ever rendered, in every theme. It was found by CPE-1875's generic
+// detector above (see the ALLOWLIST entry this ticket added and then removed once fixed) but that
+// detector can only ASSERT resolution via resolveHex/HEX_RE — a monospace stack is not a hex colour
+// and will never match `/^#[0-9a-fA-F]{3,8}$/`, so once the fallback is stripped from every call
+// site (leaving a bare `var(--mono)`, which `discoverFallbackTokens` structurally can't see — it
+// only scans the 2-argument `var(token, fallback)` idiom) the generic describe block above simply
+// has nothing left to check for `--mono`. This block is `--mono`'s own dedicated, parallel guard —
+// same shape as GUARDED_TOKENS' resolution + no-dead-fallback checks above, just built around a
+// font-family string instead of a hex.
+//
+// Deliberately theme-invariant (see app.css's own comment on --mono): a monospace typeface choice
+// has no light/dark/contrast dimension, so unlike --warn/--text-muted/etc. (which differ per theme)
+// this asserts the SAME literal value in all five blocks — if a future edit accidentally forks it
+// per theme, that's worth surfacing as a real question, not silently allowed to drift.
+const MONO_TOKEN = "--mono";
+
+/** The raw declared value of a token in a theme block — no var()/hex resolution, since --mono's
+ *  value is a literal font-family list, not something that routes through the --pal-* colour
+ *  layer the way every other guarded token here does. */
+function rawDecl(semanticDecls: Map<string, string>, token: string): string | undefined {
+  return semanticDecls.get(token);
+}
+
+describe("--mono resolves to a real font-family stack in every theme, identically (CPE-1876)", () => {
+  const values: Record<string, string | undefined> = {};
+
+  for (const { label, selector } of THEMES) {
+    const semanticDecls = semanticDeclsFor(label, selector);
+    it(`${label} defines --mono as a monospace font-family list`, () => {
+      const value = rawDecl(semanticDecls, MONO_TOKEN);
+      values[label] = value;
+      expect(value, `--mono is not declared in ${label}`).toBeDefined();
+      // Must at minimum end in a generic "monospace" fallback, same as every one of the
+      // per-call-site fallbacks it replaces did — a real font-family list, not a hex/var()/empty
+      // string standing in for one.
+      expect(value, `--mono in ${label} does not look like a font-family list: ${JSON.stringify(value)}`).toMatch(/monospace\s*$/);
+    });
+  }
+
+  it("resolves to the SAME value in all five themes (a monospace typeface has no light/dark/contrast dimension)", () => {
+    const distinct = new Set(Object.values(values));
+    expect(distinct.size, `--mono differs across themes: ${JSON.stringify(values)}`).toBe(1);
+  });
+});
+
+// Matches `var(--mono` immediately followed by a fallback comma — the exact CPE-1810/1821/1876
+// idiom, scoped to --mono. Deliberately NOT built with the `g` flag: `.test()` on a global regex
+// carries `lastIndex` across calls, which would silently skip a real offender in a later file once
+// an earlier file already advanced it past position 0 — the exact kind of guard-goes-blind failure
+// mode this file's own `stripLineComments` header comment warns against for a different reason.
+const MONO_FALLBACK_IDIOM_RE = /var\(\s*--mono\s*,/;
+// Separate `g`-flagged pattern for counting real (fallback-free) call sites below, where repeated
+// matches within ONE string (via `.match()`, which doesn't carry state across calls) are the point.
+const MONO_CALL_SITE_RE = /var\(\s*--mono\s*[,)]/g;
+
+describe("no .svelte component falls back to a hard-coded font-family for --mono (CPE-1876)", () => {
+  it("no `var(--mono` call site carries a fallback", () => {
+    const offenders: string[] = [];
+    for (const f of walkSvelte(SRC)) {
+      // Same comment-stripping as the GUARDED_TOKENS check above — a doc comment quoting the old
+      // idiom by name must not trip this guard.
+      const raw = readFileSync(f, "utf8");
+      const content = raw.replace(/<!--[\s\S]*?-->/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+      if (MONO_FALLBACK_IDIOM_RE.test(content)) offenders.push(f.replace(SRC, "src").replace(/\\/g, "/"));
+    }
+    expect(offenders, `component(s) still using var(--mono, <fallback>) instead of the real token: ${offenders.join(", ")}`).toEqual([]);
+  });
+
+  it("--mono still has at least one real call site (this guard would be silently pointless if every component stopped referencing it)", () => {
+    let siteCount = 0;
+    for (const f of walkSvelte(SRC)) {
+      const content = readFileSync(f, "utf8");
+      siteCount += (content.match(MONO_CALL_SITE_RE) ?? []).length;
+    }
+    expect(siteCount, "no .svelte file references var(--mono) at all — is this guard still needed?").toBeGreaterThan(0);
+  });
 });
 

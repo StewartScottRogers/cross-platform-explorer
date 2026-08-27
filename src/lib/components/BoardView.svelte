@@ -467,7 +467,7 @@
   .board-noproject { align-content: center; gap: 6px; text-align: center; padding: 24px; }
   .board-noproject .np-title { font-size: 15px; font-weight: 600; color: var(--text); margin: 0; }
   .board-noproject .np-body { margin: 0; font-size: 13px; }
-  .board-noproject .np-path { margin: 0; font-size: 12px; color: var(--text); font-family: var(--mono, monospace);
+  .board-noproject .np-path { margin: 0; font-size: 12px; color: var(--text); font-family: var(--mono);
     background: rgba(128,128,128,0.12); padding: 6px 10px; border-radius: 6px; max-width: 90%;
     overflow-wrap: anywhere; }
   .board-noproject .np-choose { margin-top: 8px; height: 32px; }

@@ -205,7 +205,7 @@
   .nb-raw-fallback {
     background: var(--surface-alt); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
-    font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+    font-family: var(--mono); font-size: 11.5px;
   }
   .nb-cells { display: flex; flex-direction: column; gap: 12px; }
   .nb-cell { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
@@ -215,7 +215,7 @@
     font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em;
   }
   .nb-cell-badge { font-weight: 600; }
-  .nb-exec-count { margin-left: auto; text-transform: none; font-family: var(--mono, ui-monospace, monospace); }
+  .nb-exec-count { margin-left: auto; text-transform: none; font-family: var(--mono); }
   .nb-markdown { padding: 10px 12px; line-height: 1.5; overflow-wrap: anywhere; color: var(--text); }
   .nb-markdown :global(h1),
   .nb-markdown :global(h2),
@@ -224,11 +224,11 @@
   .nb-markdown :global(pre) {
     background: var(--surface-alt); padding: 8px; border-radius: var(--radius); overflow-x: auto;
   }
-  .nb-markdown :global(code) { font-family: var(--mono, ui-monospace, monospace); }
+  .nb-markdown :global(code) { font-family: var(--mono); }
   .nb-markdown :global(a) { color: var(--accent); }
   .nb-code, .nb-raw {
     margin: 0; padding: 10px 12px; overflow-x: auto; white-space: pre; overflow-wrap: normal;
-    font-family: var(--mono, ui-monospace, monospace); font-size: 12px; color: var(--text);
+    font-family: var(--mono); font-size: 12px; color: var(--text);
   }
   .nb-outputs { border-top: 1px dashed var(--border); padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 6px; }
   /* CPE-1616 Visual Critic finding: an unbounded output (e.g. a 300-line stream, well within the
@@ -243,7 +243,7 @@
   .nb-output {
     margin: 0; padding: 6px 8px; background: var(--surface-alt); border-radius: var(--radius);
     white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto;
-    font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; color: var(--text-dim);
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
     max-height: 260px; overflow-y: auto; resize: vertical;
   }
   .nb-stream.stderr { color: var(--danger); }
@@ -268,6 +268,6 @@
   .nb-error-head { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
   .nb-traceback {
     margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto;
-    font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+    font-family: var(--mono); font-size: 11.5px;
   }
 </style>
