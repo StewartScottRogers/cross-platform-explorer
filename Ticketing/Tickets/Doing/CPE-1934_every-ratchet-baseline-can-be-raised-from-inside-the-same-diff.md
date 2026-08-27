@@ -159,3 +159,45 @@ and the counts-not-identities limitation moved from the PR body into `RATCHETS.m
 Every sabotage is now a permanent fixture in `src/lib/ratchetBaselines.test.ts` under a
 `SABOTAGE F1/F1b/F2/F3` block, with the Reviewer's exact input quoted in each comment — they belong
 in the test table, not in a transcript. 53 tests in that file; 4745 across the suite.
+
+**2026-08-27 — review round 3 (CHANGES REQUESTED again).** Round 2's three fixes all held under
+re-run, but the narrow re-review found two more. Rebased on `main` at `70c6d7db` first.
+
+- **R2-F1c — F1 a third time, in a different costume.** The measurers were strict about the
+  *initialiser* but the declaration **search** still ran on raw source and took the first match:
+  `stripComments` was only ever applied to the captured value, never before the search. `[ \t]*`
+  before `const` made a `//`-commented decoy safe, but a `/* … */` block or a template literal was
+  not — a real 277→278 raise read as `277 unchanged`, exit 0, with vitest fully green. Same on the
+  array side (a live 5-entry array measured 2; a live 3-entry array measured 1), always in the
+  direction that turns a raise into a lowering. **Two-part fix**, and the second half is the durable
+  one: `maskNonCode()` blanks comment bodies and string/template interiors to same-length spaces
+  before any search (so indices stay valid and only live code is visible), and `findSoleDeclaration()`
+  makes **more than one matching declaration a red in itself** — that removes the question "which one
+  did I pick?" rather than answering it, so it also covers decoy shapes no masker understands.
+  Masking incidentally fixed a latent hazard in `recordOfArraysTotal`, where a `[` inside a KEY string
+  could be mistaken for the value array's opening bracket.
+- **R2-F2b — round 2's fix over-corrected.** `licence()` asked whether the base ledger *contained* a
+  row for the movement, so the same `from → to` could never legitimately happen twice: a base row
+  `277 -> 278 | CPE-1111` blocked a fresh 277→278 declared under CPE-2222, telling the author to do
+  what they had already done and leaving deletion or falsification of the historical row as the only
+  way through. That is the realistic path here — hex went 276→277 the week before. Rows are now
+  **counted, not found**: authorised when the working tree holds strictly more rows for that
+  `(id, from, to)` than the base did. The error text says APPEND and says the historical row is kept.
+  The round-2 test that "passed" this scenario only covered a *different* `(from, to)` pair, which is
+  why it missed.
+
+Also this round: the derived non-vacuity floor could itself be made vacuous by narrowing `SCAN_ROOTS`
+(the requirement was filtered by the same list), so `SCAN_ROOTS` must now provably **cover** the
+registry *and* cover a non-trivial number of files — round 1's absolute floor would have caught this
+head-on, which is worth remembering before replacing an absolute check with a derived one.
+`RATCHETS.md` property 3 was updated **with** the fix rather than left over-claiming (the same
+doc-ahead-of-code shape flagged in round 1), and the scanner's untracked **regex literals** are now
+documented, with the reasoning for why that gap fails closed: an unmasked regex can only *add*
+apparent entries, which over-reports debt.
+
+**Process note worth keeping.** Twice this ticket I unwound a throwaway red-proof commit with
+`git reset --hard` and took real, uncommitted fixes with it (recovered both times — once by redoing
+the edits, once from the reflog). When a temp commit is used to stage a red-proof, unwind it with
+`--soft` and restore only the sabotaged files.
+
+67 tests in `ratchetBaselines.test.ts`; 340 files / 4759 across the suite.
