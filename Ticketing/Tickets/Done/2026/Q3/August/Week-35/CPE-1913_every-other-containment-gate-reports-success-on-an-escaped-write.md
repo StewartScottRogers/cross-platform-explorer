@@ -264,7 +264,7 @@ wins the window is reported as a success. Same shape as CPE-1896, four more plac
 ## Round 2 — PR #1050: Reviewer CHANGES REQUESTED (3 findings) + Security Auditor (1 to fix, 3 filed), UAT PASS
 
 - **2026-08-27 (Worker) — the enumeration in this ticket was WRONG, and correcting it is the first
-  entry because it changes what the PR claims. There are SEVEN legs, not five.** The Security Auditor
+  entry because it changes what the PR claims. There are EIGHT legs, not five.** The Security Auditor
   found the two this ticket never listed, and one of them is destructive and reaches outside the root:
 
   | leg | status after round 2 |
