@@ -495,6 +495,66 @@ describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-cop
     throw new Error("unterminated Rust string literal");
   }
 
+  /** Blanks Rust line comments and block comments, preserving every offset (comment bytes become
+   *  spaces) so indices into the result still address the original file.
+   *
+   *  CPE-1933. `linkRefusalTemplate` anchors on "the first `format!(` after the fn", and PR #1056's
+   *  Reviewer found the one adversarial source that beats that anchor **silently**: a comment
+   *  sitting between the signature and the real call, containing the text `format!(` and quoting the
+   *  OLD message. The extractor reads the comment, the fixture still matches it, and the derivation
+   *  certifies a message the backend no longer emits — this file's whole purpose, inverted. Every
+   *  other adversarial shape the Reviewer tried failed loudly; this one did not.
+   *
+   *  Stripping comments before scanning kills the class rather than that one shape, and is the same
+   *  rule `crates/updater-verify/src/workflow_scan.rs` applies to workflows: **anchor on code, never
+   *  on text a comment can also contain.** Quote-aware, so a `//` inside a string literal (a URL in a
+   *  message) is left alone.
+   *
+   *  Known limitation, deliberate: this tracks `"` string literals but not Rust CHAR literals, so a
+   *  `'"'` sitting before the target fn would open a phantom string and swallow what follows. The
+   *  failure direction is **loud** — the extractor then finds the wrong `format!` or none at all, and
+   *  the byte-equality assertion below fails — never the silent wrong-message pass this stripping
+   *  exists to prevent. `fsutil.rs` contains no such literal today; add char-literal handling if one
+   *  ever appears, rather than trusting this note. */
+  function stripRustComments(src: string): string {
+    const out = src.split("");
+    let i = 0;
+    let quote: '"' | null = null;
+    while (i < src.length) {
+      const ch = src[i];
+      if (quote) {
+        if (ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === quote) quote = null;
+        i += 1;
+        continue;
+      }
+      if (ch === '"') {
+        quote = '"';
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && src[i + 1] === "/") {
+        while (i < src.length && src[i] !== "\n") {
+          out[i] = " ";
+          i += 1;
+        }
+        continue;
+      }
+      if (ch === "/" && src[i + 1] === "*") {
+        const end = src.indexOf("*/", i + 2);
+        const stop = end < 0 ? src.length : end + 2;
+        for (let j = i; j < stop; j += 1) if (out[j] !== "\n") out[j] = " ";
+        i = stop;
+        continue;
+      }
+      i += 1;
+    }
+    return out.join("");
+  }
+
   /** The `Ok(true)` (it IS a link) arm's `format!` template out of the named function. */
   function linkRefusalTemplate(src: string, fnName: string): string {
     const fnStart = src.indexOf(`pub fn ${fnName}`);
@@ -504,7 +564,38 @@ describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-cop
     return rustStringLiteralAfter(src, fmt);
   }
 
-  const FSUTIL = readFileSync(join(process.cwd(), "crates", "server", "src", "fsutil.rs"), "utf8");
+  const FSUTIL = stripRustComments(
+    readFileSync(join(process.cwd(), "crates", "server", "src", "fsutil.rs"), "utf8"),
+  );
+
+
+  // CPE-1933: the adversarial source PR #1056's Reviewer found that beat the anchor SILENTLY. A
+  // comment between the signature and the real `format!(`, quoting the OLD message. Without
+  // `stripRustComments` the extractor returns the stale text and the fixture "derives" clean.
+  it("a comment quoting the OLD message cannot be mistaken for the real format! call", () => {
+    const hostile = [
+      "pub fn classify_symlink_slot(x: u8) -> Result<bool> {",
+      '    // Historical note: this used to be format!("the OLD wording {}", dst).',
+      '    Ok(format!("the CURRENT wording {}", dst))',
+      "}",
+    ].join("\n");
+    const derived = linkRefusalTemplate(stripRustComments(hostile), "classify_symlink_slot");
+    expect(
+      derived,
+      "the extractor read the message out of a COMMENT -- exactly the hole this stripping closes",
+    ).toEqual("the CURRENT wording {}");
+  });
+
+  it("a // inside a string literal is not mistaken for a comment", () => {
+    const withUrl = [
+      "pub fn classify_create_slot(x: u8) -> Result<bool> {",
+      '    Ok(format!("see https://example.com/docs {}", dst))',
+      "}",
+    ].join("\n");
+    expect(linkRefusalTemplate(stripRustComments(withUrl), "classify_create_slot")).toEqual(
+      "see https://example.com/docs {}",
+    );
+  });
 
   it("the rename/move fixture is byte-identical to `classify_symlink_slot`'s own message", () => {
     const derived = linkRefusalTemplate(FSUTIL, "classify_symlink_slot").replace("{}", BLOCKED_COLLISION.to);

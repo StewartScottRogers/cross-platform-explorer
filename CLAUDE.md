@@ -122,6 +122,39 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
 - **Enumerate, don't recall (CPE-1932).** Any guard over "all the X in this repo" derives its list at
   run time (`git ls-files`, a tree walk) and fails loudly when the list comes back near-empty — a
   hard-coded list of the instances someone remembered is how seventeen Cargo.lock files became two.
+- **Derive provenance, don't claim it (CPE-1933).** A comment asserting that code here reproduces
+  something *there* — *"exactly the way `release.yml` invokes it"*, *"byte-identical to X"*,
+  *"transcribed from Y"*, *"copied verbatim from Z"* — is **untested by construction**, and it is
+  worse than no comment because the surrounding green test reads as vouching for it. CPE-1872's
+  `release_guard.rs` carried three such claims; they were true for exactly one commit, then round 2
+  moved the check and changed the arguments, and every test kept passing. So: **either read the
+  referenced source at run time and assert against it, or do not make the claim.** Deriving is
+  usually cheap — both sides are already data (`keymap.test.ts` joins `ACTIONS` to
+  `SHORTCUT_GROUPS`), or the source is a file you can parse
+  (`crates/updater-verify/tests/release_workflow_wiring.rs` reads both release workflows' argv and
+  **executes** the real binary with it). Prioritise by blast radius: release plumbing and security
+  guards earn a real derivation; a UI helper's claim is usually better simply deleted. If a claim is
+  genuinely underivable, say **at the site** that it is unverified and why, so the next reader treats
+  it as folklore rather than fact.
+  **Three rules for writing one.**
+  1. ***Enumerate case-insensitively.*** Comments start sentences — "Mirrors…", "Must match…",
+     "Verbatim from…", "Exactly as…". CPE-1933's own first sweep ran `grep` without `-i` and missed
+     **57 candidates in 56 files**, one of them a *fourth* copy of the very claim it was killing, in
+     the same crate. A capital letter is not a hiding place; use `-i`.
+  2. ***Anchor on code, never on prose.*** A scanner that finds "the first `format!(` after the fn",
+     or "lines containing `gh release download`", will happily parse a **comment** that quotes the old
+     value and pass **silently**. Do not hand-roll the stripper: `src/lib/shellScriptLines.ts` (TS) and
+     `crates/updater-verify/src/workflow_scan.rs` (its Rust port, pinned to it by the shared
+     `shellScriptLines.cases.json`) already handle quotes, escapes, trailing comments and heredoc
+     bodies. A whole-line-comment filter is *not* enough — a **trailing** comment walks straight
+     through it, which is how CPE-1933's first draft reintroduced the hole it was closing.
+  3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
+     never actually re-reads its source is the same defect with extra steps.
+
+  Worked examples: `crates/updater-verify/tests/release_workflow_wiring.rs` (reads both release
+  workflows' argv and **executes** the real binary with it), `src/lib/keymap.test.ts` (joins two data
+  modules), `src/lib/components/MacroRunConfirm.test.ts` (walks a `format!` literal out of
+  `fsutil.rs`, comments stripped first), `src/lib/channelPurityCoverage.test.ts`.
 
 ## Docs
 

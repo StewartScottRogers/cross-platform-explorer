@@ -1,0 +1,82 @@
+[
+  {
+    "name": "a whole-line comment is dropped",
+    "input": "echo one\n# echo two\necho three",
+    "expected": ["echo one", "echo three"]
+  },
+  {
+    "name": "a TRAILING comment is stripped, not just a whole-line one",
+    "input": "cargo run -- --expect-url-prefix \"https://x/\"  # was: --expect-channel sidecar",
+    "expected": ["cargo run -- --expect-url-prefix \"https://x/\""]
+  },
+  {
+    "name": "a backslash continuation is joined into one logical line",
+    "input": "cargo run -- \\\n  --conf a.json \\\n  --expect-channel sidecar",
+    "expected": ["cargo run -- --conf a.json --expect-channel sidecar"]
+  },
+  {
+    "name": "a comment on a continued line does not leak its text into the joined line",
+    "input": "cargo run -- \\\n  --conf a.json \\\n  --search dir # --expect-channel sidecar",
+    "expected": ["cargo run -- --conf a.json --search dir"]
+  },
+  {
+    "name": "a heredoc body is inert data, never a shell statement",
+    "input": "cat <<'EOF'\ncargo run -- --expect-channel sidecar\nEOF\necho after",
+    "expected": ["cat <<'EOF'", "echo after"]
+  },
+  {
+    "name": "a here-string opens no body and does not swallow the following lines",
+    "input": "done <<< \"$names\"\necho after",
+    "expected": ["done <<< \"$names\"", "echo after"]
+  },
+  {
+    "name": "a quoted # is data, not a comment",
+    "input": "curl \"https://example.com/page#anchor\" --fail",
+    "expected": ["curl \"https://example.com/page#anchor\" --fail"]
+  },
+  {
+    "name": "a # mid-word does not open a comment",
+    "input": "echo abc#def",
+    "expected": ["echo abc#def"]
+  },
+  {
+    "name": "an apostrophe mid-word does not open a quote that swallows a real comment",
+    "input": "echo don't do that # --expect-channel sidecar",
+    "expected": ["echo don't do that"]
+  },
+  {
+    "name": "an escaped quote inside a double-quoted string does not close it early",
+    "input": "echo \"a \\\" b\" # --expect-channel sidecar",
+    "expected": ["echo \"a \\\" b\""]
+  },
+  {
+    "name": "a # inside a single-quoted string is data",
+    "input": "echo 'hash # here' --flag",
+    "expected": ["echo 'hash # here' --flag"]
+  },
+  {
+    "name": "blank lines are dropped",
+    "input": "echo one\n\n\necho two",
+    "expected": ["echo one", "echo two"]
+  },
+  {
+    "name": "an unquoted heredoc delimiter opens a body too",
+    "input": "cat <<EOF\nsecret\nEOF\necho after",
+    "expected": ["cat <<EOF", "echo after"]
+  },
+  {
+    "name": "a dash-heredoc opens a body",
+    "input": "cat <<-END\nbody\nEND\necho after",
+    "expected": ["cat <<-END", "echo after"]
+  },
+  {
+    "name": "a here-string whose word is a quoted LITERAL opens no body either (CPE-1933)",
+    "input": "done <<< \"names\"\necho after",
+    "expected": ["done <<< \"names\"", "echo after"]
+  },
+  {
+    "name": "a here-string and a real heredoc on one line: only the heredoc opens a body",
+    "input": "echo a <<<\"lit\" && cat <<EOF\nbody\nEOF\necho after",
+    "expected": ["echo a <<<\"lit\" && cat <<EOF", "echo after"]
+  }
+]

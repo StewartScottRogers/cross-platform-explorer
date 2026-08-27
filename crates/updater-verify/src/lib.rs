@@ -41,6 +41,12 @@ pub use platform_config_guard::{
 // anti-rollback decision (findings 1) and the platform-key -> payload-kind decision (finding 2).
 // See that module's doc for the auditor's signed-downgrade walkthrough and the macOS exception.
 pub mod artifact_binding;
+
+// CPE-1933 — the one shell-aware scanner every Rust guard that reads `.github/workflows/*.yml`
+// shares, so a comment or heredoc body can never be parsed as a live invocation. A faithful port of
+// `src/lib/shellScriptLines.ts`, pinned to it by a shared case file rather than by a claim.
+pub mod workflow_scan;
+
 pub use artifact_binding::{
     basename_of_url, bind_signed_artifact, platform_os_of_key,
     platforms_with_wrong_extension_for_key, product_token, trusted_comment_file, ExtensionFault,

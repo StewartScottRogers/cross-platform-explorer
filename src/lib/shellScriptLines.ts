@@ -86,9 +86,27 @@ export function stripShellComment(line: string): string {
 }
 
 /** Matches a shell heredoc redirection that STARTS a body (`<<DELIM`, `<<'DELIM'`, `<<"DELIM"`,
- *  `<<-DELIM`), never a here-string (`<<<...`, excluded by the `(?!<)`). Group 2 is the delimiter a
- *  terminator line must match exactly (trimmed) to close the body. */
-const HEREDOC_START = /<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+ *  `<<-DELIM`), never a here-string (`<<<...`, excluded by the `(?<!<)`/`(?!<)` PAIR -- see below).
+ *  Group 2 is the delimiter a terminator line must match exactly (trimmed) to close the body.
+ *
+ *  CPE-1933: the here-string exclusion needs BOTH guards. `(?!<)` alone only stops a match that
+ *  begins at the FIRST `<` of `<<<`; the engine then retries from the SECOND one, where `<<`
+ *  consumes chars 2-3, the lookahead sees the following space and passes, and the `\1`
+ *  backreference closes happily on a quoted word. So `done <<< "names"` -- a here-string whose word
+ *  is a quoted LITERAL rather than a `$var` -- opened a phantom heredoc named `names` and swallowed
+ *  every subsequent line of the script. `(?<!<)` refuses a match starting one char into a `<<<`.
+ *
+ *  This was a FALSE NEGATIVE, the direction this module's header calls unsafe for a
+ *  presence-implies-coverage ratchet: a real unhardened `apt-get`, or a real `--expect-channel`,
+ *  sitting after such a line would drop out of the scan entirely and the guard would report clean.
+ *  Latent rather than live -- no such shape exists in the repo today, and the `$names` form at
+ *  `release-sidecar.yml:760` never matched (`$` is not `[A-Za-z_]`). Found by the cross-language
+ *  oracle added with `shellScriptLines.cases.json`: the Rust port scans `<<` by hand and skipped
+ *  the whole `<<<` correctly, so the two halves disagreed and the case file said so. Belongs to
+ *  CPE-1936's family (heredoc gaps in this module) -- that ticket's owner can treat this shape as
+ *  already closed.
+ */
+const HEREDOC_START = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
 
 /** Splits a `run` script into LOGICAL shell lines: backslash continuations joined, `#` comments
  *  stripped, HEREDOC BODIES skipped entirely, before anything looks for a flag or a value. Without

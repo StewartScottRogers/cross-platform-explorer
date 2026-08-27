@@ -20,6 +20,7 @@ import {
   type Keymap,
   type ActionId,
 } from "./keymap";
+import { SHORTCUT_GROUPS } from "./shortcuts";
 
 /** A minimal `KeyboardEvent`-shaped object, matching what `chordFromEvent`/`hotkeyFromEvent`
  *  expect — only the fields they read. */
@@ -417,5 +418,138 @@ describe("keymap exportKeymap / importKeymap (CPE-1550)", () => {
     const result = importKeymap(payload, base);
     expect(result.keymap.copy).toBe("Ctrl+Alt+C");
     expect(result.keymap.cut).toBe("Ctrl+Alt+X"); // preserved from base, not reset to default
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1933: derive the transcription claim instead of asserting it in prose.
+//
+// `keymap.ts`'s header says `defaultChord` values "are transcribed from that group's `keys` column"
+// in `shortcuts.ts`, and an inline note repeats it for the arrow-glyph cases. Both were provenance
+// claims that nothing checked: `keymap.test.ts` never imported `shortcuts.ts` and `shortcuts.test.ts`
+// never imported `ACTIONS`, so all 34 chords could drift from the cheat sheet with every test green.
+// That is not hypothetical for this pair -- the inline note records that a CPE-1547 review already
+// caught 4 of the 34 transcribed wrong.
+//
+// The consequence of drift is quiet and user-visible in the worst way: the Shortcuts dialog shows one
+// key while `actionForChord` / `findConflicts` / the remap default use another, so the documented
+// shortcut simply does not work and the sheet still says it does.
+//
+// The join is by `description`, the only field the two files genuinely share. The chord is compared
+// after translating the sheet's DISPLAY glyphs into the `KeyboardEvent.key` forms a live keystroke
+// actually produces -- the one deliberate, documented difference between the two representations.
+// ---------------------------------------------------------------------------------------------
+describe("ACTIONS defaults are derived from the shortcuts cheat sheet (CPE-1933)", () => {
+  /** The display -> event-form translations `keymap.ts`'s note documents. */
+  const GLYPH_TO_EVENT_KEY: Record<string, string> = {
+    "←": "ArrowLeft",
+    "→": "ArrowRight",
+    "↑": "ArrowUp",
+    "↓": "ArrowDown",
+    Esc: "Escape",
+  };
+
+  const toEventForm = (keys: string): string =>
+    Object.entries(GLYPH_TO_EVENT_KEY).reduce(
+      (acc, [glyph, key]) => acc.split(glyph).join(key),
+      keys,
+    );
+
+  /** Every cheat-sheet `keys` string, grouped by the description it documents. */
+  const sheetKeysByDescription = (): Map<string, string[]> => {
+    const byDesc = new Map<string, string[]>();
+    for (const group of SHORTCUT_GROUPS) {
+      for (const item of group.items) {
+        byDesc.set(item.description, [...(byDesc.get(item.description) ?? []), item.keys]);
+      }
+    }
+    return byDesc;
+  };
+
+  it("reads a non-empty cheat sheet, so the join below can never pass vacuously", () => {
+    // Enumerate-don't-recall (CPE-1932): a derivation whose source comes back empty must fail loudly
+    // rather than satisfy every "for each" assertion with zero iterations.
+    expect(SHORTCUT_GROUPS.length).toBeGreaterThan(0);
+    expect(ACTIONS.length).toBeGreaterThan(0);
+    expect(sheetKeysByDescription().size).toBeGreaterThanOrEqual(ACTIONS.length);
+  });
+
+  it("every action's description appears verbatim in SHORTCUT_GROUPS", () => {
+    const byDesc = sheetKeysByDescription();
+    const orphans = ACTIONS.filter((a) => !byDesc.has(a.description)).map((a) => a.id);
+    expect(
+      orphans,
+      "these actions describe themselves differently from the cheat sheet, so the two files no " +
+        "longer document the same command. Reword both or neither.",
+    ).toEqual([]);
+  });
+
+  it("every action's group names a real SHORTCUT_GROUPS title", () => {
+    const titles = new Set(SHORTCUT_GROUPS.map((g) => g.title));
+    const strays = ACTIONS.filter((a) => !titles.has(a.group)).map((a) => `${a.id}:${a.group}`);
+    expect(strays, "ActionDef.group is documented as matching a SHORTCUT_GROUPS title").toEqual([]);
+  });
+
+  it("every action's defaultChord is one of the cheat sheet's own keys for that description", () => {
+    const byDesc = sheetKeysByDescription();
+    const drifted: string[] = [];
+    for (const action of ACTIONS) {
+      const documented = byDesc.get(action.description) ?? [];
+      const asChords = documented.map((keys) => normalizeChord(toEventForm(keys)));
+      if (!asChords.includes(action.defaultChord)) {
+        drifted.push(
+          `${action.id}: keymap says ${JSON.stringify(action.defaultChord)}, shortcuts.ts ` +
+            `documents ${JSON.stringify(documented)} (= ${JSON.stringify(asChords)})`,
+        );
+      }
+    }
+    expect(
+      drifted,
+      "a binding changed on one side only. The cheat sheet would advertise a key the app does not " +
+        "honour, or the app would honour a key the sheet never mentions -- silently, because " +
+        "nothing used to compare them (CPE-1933).",
+    ).toEqual([]);
+  });
+
+  it("and it is the PRIMARY chord -- the first one the sheet lists, per the registry's own rule", () => {
+    // CPE-1933 review residual: accepting *any* documented alternate is weaker than `keymap.ts`'s
+    // stated rule ("only the primary chord shown first in SHORTCUT_GROUPS is modeled -- this
+    // registry tracks one fixed binding per action"). Without this, `back` could point at
+    // `Backspace` while the file says it models `Alt+ArrowLeft`, and the looser check above would
+    // shrug. Asserting the documented rule is the point of deriving at all.
+    const byDesc = sheetKeysByDescription();
+    const notPrimary: string[] = [];
+    for (const action of ACTIONS) {
+      const documented = byDesc.get(action.description) ?? [];
+      const primary = documented[0];
+      if (primary === undefined) continue; // already reported by the orphan test above
+      const expected = normalizeChord(toEventForm(primary));
+      if (action.defaultChord !== expected) {
+        notPrimary.push(
+          `${action.id}: defaultChord ${JSON.stringify(action.defaultChord)} is not the sheet's ` +
+            `FIRST key for this action (${JSON.stringify(primary)} -> ${JSON.stringify(expected)})`,
+        );
+      }
+    }
+    expect(notPrimary).toEqual([]);
+  });
+
+  it("the glyph table still covers every non-ASCII key the sheet uses for a modeled action", () => {
+    // If the cheat sheet grows a new display glyph, `toEventForm` leaves it untranslated and the
+    // chord comparison above fails with a confusing message. Fail here with a clear one instead.
+    const byDesc = sheetKeysByDescription();
+    const modeled = new Set(ACTIONS.map((a) => a.description));
+    const untranslated = new Set<string>();
+    for (const [description, keysList] of byDesc) {
+      if (!modeled.has(description)) continue;
+      for (const ch of toEventForm(keysList.join(" "))) {
+        if (ch.charCodeAt(0) > 126) untranslated.add(ch);
+      }
+    }
+    expect(
+      [...untranslated],
+      "shortcuts.ts uses a display glyph GLYPH_TO_EVENT_KEY does not know how to turn into a " +
+        "KeyboardEvent.key form. Add it there.",
+    ).toEqual([]);
   });
 });
