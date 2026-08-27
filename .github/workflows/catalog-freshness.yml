@@ -44,17 +44,36 @@ name: agent catalog freshness check
 # of staleness, but never silently swallowed as a pass either (fails loud instead), mirroring
 # ffmpeg-pin-freshness.yml's three-way verdict (CPE-1763) and its stated reasoning.
 #
-# ── Threshold: 7 days, chosen deliberately ─────────────────────────────────────────────────────
-# This repo cuts tagged releases roughly daily (observed pace, see CPE-1894's Work Log), and
-# release.yml's `catalog` job runs on every one of them once the coupling fix above lands — so a
-# healthy catalog is almost always well under 48h old. 7 days is generous enough to absorb a quiet
-# stretch (a weekend, a short lull between releases) without a false alarm, while still catching a
-# real gap with roughly three weeks of runway before it would silently reach this ticket's own
-# 31-day gap. Checked DAILY (not weekly, unlike ffmpeg-pin-freshness.yml's canary): this check is a
-# single cheap GET + a timestamp compare (no multi-asset HEAD sweep, no upstream API pagination), so
-# there is no cost reason to wait a week between checks, and a daily cadence means a breach is
-# caught within ~24h of crossing the threshold instead of waiting up to a week for the next
-# scheduled run.
+# ── Threshold: 14 days, chosen deliberately from the PLAIN channel's own cadence ──────────────
+# `catalog` lives in release.yml, whose tag trigger is `["v*", "!v*-sidecar"]` (CPE-1894) -- it
+# fires ONLY on plain tags. release-sidecar.yml is workflow_dispatch-only and never runs `catalog`
+# at all. So the number below has to be based on how often a PLAIN tag actually gets cut, not how
+# often this repo ships overall (the sidecar channel is close to daily, but that is a DIFFERENT
+# channel gated on a DIFFERENT trigger, and applying its pace here would be measuring the wrong
+# thing -- an earlier draft of this check picked 7 days on exactly that wrong measurement). Read
+# directly from this repo's own plain-channel tags (`git log -1 --format=%aI <tag>`):
+#   v0.57.32  2026-07-24            v0.57.37  2026-07-26
+#   v0.57.33  2026-07-24            v0.57.69  2026-08-23   <- 28 days after v0.57.37
+# That 28-day gap is the plain channel's own ordinary pace -- separate from, and in addition to,
+# this ticket's 31-day verify-driven outage.
+#
+# Neither 7 nor 14 is free of false-alarm risk against a gap that size, and this comment does not
+# pretend otherwise: against the observed 28-day gap, a 7-day threshold goes red at day 8 (red for
+# ~20 of the 28 days -- "roughly three weeks", the shape that gets an alarm muted within a week and
+# defeats the point of having one); 14 goes red at day 15 (red for ~13 of the 28 days -- roughly
+# HALF as much false-alarm exposure, not zero). 14 is chosen as the better available compromise,
+# not a false-alarm-free number: it still catches a REAL outage at this ticket's own 31-day scale
+# with ~17 days of runway (31 - 14) before reaching that scale, while roughly halving how much of
+# an ordinary-paced gap it would flag red. Keeping 7 (or going lower) is only defensible alongside
+# an explicit, written commitment that a plain release gets cut at least that often -- nothing
+# enforces that today, so 14 is the honest number for the cadence this channel actually has, not
+# the cadence it would need to have to justify something tighter. If the plain channel's cutting
+# pace changes, re-derive this number from its tags again rather than reusing this constant on
+# faith. Checked DAILY regardless (not weekly, unlike ffmpeg-pin-freshness.yml's canary): this
+# check is a single cheap GET + a timestamp compare (no multi-asset HEAD sweep, no upstream API
+# pagination), so there is no cost reason to wait between checks, and a daily cadence means a
+# breach is caught within ~24h of crossing the threshold instead of waiting up to a week for the
+# next scheduled run.
 #
 # ── Notification: a GitHub issue AND a red run ─────────────────────────────────────────────────
 # Same shape as ffmpeg-pin-freshness.yml (CPE-1763) and release-pipeline-watchdog.yml (CPE-1872):
@@ -82,7 +101,7 @@ permissions:
 
 env:
   CATALOG_REPO: ${{ github.repository }}
-  DEFAULT_THRESHOLD_DAYS: 7
+  DEFAULT_THRESHOLD_DAYS: 14
 
 jobs:
   check-catalog-freshness:

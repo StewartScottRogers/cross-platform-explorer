@@ -200,3 +200,32 @@ auto-update pipeline this job publishes for).
     files touched by this ticket, so no clippy run needed.
 
   Opening the PR.
+
+- **2026-08-26 USMST — UAT round 1 correction (attempt 2 of 3).** Foreman/UAT independently verified
+  all five acceptance criteria and confirmed the consumer investigation end to end (verbatim UI
+  strings, the exact `console.rs:1342` line that drops the `error` field, the live 404, all four
+  freshness-script cases) — none of that was touched. One factual error in the threshold's stated
+  justification was caught and had to be fixed: the workflow's comment claimed "this repo cuts
+  tagged releases roughly daily (see CPE-1894's Work Log)" as grounds for a 7-day threshold. That
+  statistic is real but belongs to the **sidecar** channel — CPE-1894's Work Log explicitly carries
+  that qualifier and I dropped it when I wrote the comment. `catalog` lives in `release.yml`, whose
+  trigger (`["v*", "!v*-sidecar"]`, CPE-1894) fires **only** on plain tags; the sidecar channel's
+  pace has no bearing on how often `catalog` actually gets a chance to run. The Foreman read the
+  plain-channel tags directly (`v0.57.32`/`v0.57.33` 2026-07-24, `v0.57.37` 2026-07-26, `v0.57.69`
+  2026-08-23 — a 28-day gap after `v0.57.37`) and I independently reproduced the same dates via
+  `git log -1 --format=%aI <tag>` before touching anything, rather than taking either the UAT or my
+  own prior work on faith.
+  **Fix applied**: widened `DEFAULT_THRESHOLD_DAYS` 7 → **14**, and rewrote the threshold comment in
+  `catalog-freshness.yml` to derive the number from the plain channel's own observed 28-day gap,
+  named explicitly so the next person can re-derive it. Caught and corrected my own first draft of
+  that rewrite before committing: an early version claimed 14 days "clears the 28-day gap with room
+  to spare," which is backwards — 14 < 28, so a real gap that size would still trigger red partway
+  through (at day 15). The final comment says so plainly: neither 7 nor 14 is false-alarm-free
+  against a 28-day gap (7 red for ~20 of 28 days, "roughly three weeks"; 14 red for ~13 of 28 days,
+  roughly half as much exposure, not zero) — 14 is presented as the better available compromise
+  given nothing today enforces a faster plain-channel cadence, not as a number that eliminates false
+  alarms. Re-verified the freshness script's boundary behavior at the new threshold directly (bash,
+  fixed epochs): published 13 days ago → fresh, exit 0; published 15 days ago → STALE, exit 1.
+  `npx vitest run src/lib/catalogPublishFreshnessGuard.test.ts` — 15/15 (the test only asserts the
+  threshold is a positive integer, so no test code needed to change for the new value).
+  `npm run check` — 0 errors. Confirmed `main` had not moved (no rebase needed). Pushing the fix.
