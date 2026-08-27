@@ -33,6 +33,12 @@
 //      Text might not fit its own box and could paint outside it?   -> textOverflow.
 //      A button/control might get squeezed or covered and become
 //      unclickable?                                                 -> selfPaint.
+//      A revealed/expanded box (focus, hover, ...) should grow WIDE
+//      up to its own max-width, not stack into a tall column?       -> rectBounds (maxHeight) on the
+//                                                                      element, from a harness page
+//                                                                      that already put it in that
+//                                                                      state (see statusbar-notice's
+//                                                                      `?focus=` param).
 //
 //    Note: removing flex-wrap alone does NOT reliably trigger siblingOverlap — a wrap regression
 //    usually needs a clipProbe (if the row's container clips) or a manual visual check. A case can mix
@@ -70,6 +76,37 @@ export const CASES = [
       },
       // The repo's pill/chip rule, second half: text never overflows its own background.
       { kind: "textOverflow", selectors: [".notice", ".item-count", ".disk", ".git-branch"] },
+    ],
+  },
+  {
+    // CPE-1883 red-proof case: "the status bar's focus-reveal box ignores its own max-width and stacks
+    // one word per line". `?focus=filtered-hidden` (see inner-main.ts's header) programmatically
+    // focuses `.filtered-hidden` before this engine ever measures it, engaging its `:focus-visible`
+    // reveal rule (`max-width: min(90vw, 420px)`) — the compound busy row (`busy=1`) is the ticket's
+    // own worst-measured case (148px tall at 600px pre-fix). `height: 300` gives the pre-fix column
+    // room to render its full (broken) height rather than being clipped by a too-small viewport, which
+    // would have hidden the very defect this case exists to catch.
+    name: "statusbar-focus-reveal",
+    path: "/scripts/dev-harness/statusbar-notice/inner.html?notice=short&git=on&disk=on&busy=1&focus=filtered-hidden",
+    height: 300,
+    widths: [600, 900],
+    readySelector: ".filtered-hidden:focus-visible",
+    checks: [
+      // The AC itself, measured on the `::after` pseudo-element that actually renders the reveal (the
+      // fix moved it there — see StatusBar.svelte's own CPE-1883 comment for why resizing the real span
+      // directly, tried first, either reproduced the stacking bug or broke `.git`/`.disk`). `pseudo:
+      // "::after"` — see rectBounds' own doc above and engine.mjs's implementation note: pseudo-element
+      // geometry has no getBoundingClientRect, so this reads getComputedStyle(el, "::after") instead,
+      // width/height only (no position). The fixed box measures 16px tall (one line — this notice's
+      // fixed sentence fits under 420px at its own natural width) at both 600px and 900px, never the
+      // 148px a one-word-per-line column produces. `maxHeight: 90` is comfortably above single- or
+      // double-line prose (allowing a future longer sentence to wrap once) and comfortably below the
+      // broken-state 148px. `minWidth: 100` closes the OTHER failure shape maxHeight alone would miss:
+      // if a future edit removes the `::after` rule entirely (or its `content` goes empty), the pseudo
+      // renders at 0×0 — a maxHeight-only check would read that as a trivial pass, so minWidth catches
+      // "the reveal silently stopped rendering at all" as its own distinct regression. See the ticket's
+      // work log for the exact before/after numbers.
+      { kind: "rectBounds", selector: ".filtered-hidden", pseudo: "::after", maxHeight: 90, minWidth: 100 },
     ],
   },
   {

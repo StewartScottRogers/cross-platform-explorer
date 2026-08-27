@@ -141,8 +141,12 @@
     <!-- svelte-ignore a11y-no-noninteractive-tabindex -- deliberate: a plain focusable static-text span
          is the WCAG "reveal truncated content on focus" technique (mirrors LogPreview.svelte's
          `.log-body` SCR29 precedent for the same lint rule). Without this the text is permanently
-         truncated for any keyboard user with no mouse to hover the `title` with. -->
-    <span class="filtered-hidden" title={filteredHiddenTitle} tabindex="0">
+         truncated for any keyboard user with no mouse to hover the `title` with.
+         CPE-1883: `data-reveal` duplicates this span's own text for the `:focus-visible::after` overlay
+         (see that rule's own comment for why the reveal is a SEPARATE generated-content box rather than
+         resizing this span itself) — `content: attr(...)` can only read a plain attribute, not this
+         span's text-node children, so the same string has to exist both places. -->
+    <span class="filtered-hidden" title={filteredHiddenTitle} tabindex="0" data-reveal={filteredHiddenText}>
       {filteredHiddenText}
     </span>
   {/if}
@@ -153,7 +157,7 @@
          one IS a real read failure, not just an intentional/successful name filter. CPE-1833:
          `tabindex="0"` — see the comment on `.filtered-hidden` above; same reasoning applies here. -->
     <!-- svelte-ignore a11y-no-noninteractive-tabindex -- see the comment on `.filtered-hidden` above. -->
-    <span class="unreadable" title={unreadableTitle} tabindex="0">
+    <span class="unreadable" title={unreadableTitle} tabindex="0" data-reveal={unreadableText}>
       {unreadableText}
     </span>
   {/if}
@@ -266,8 +270,12 @@
      above) plus the "loaded successfully" reassurance always readable via the `title` tooltip
      (`filteredHiddenTitle`) — so a narrow window that ellipsis-truncates the visible text never loses
      either the count or the reassurance, and the status bar's fixed height never grows for a long count.
-     `--priority-shrink` (see the ordering comment above `.dim`) — this is a SHRINKS-FIRST element. */
+     `--priority-shrink` (see the ordering comment above `.dim`) — this is a SHRINKS-FIRST element.
+     `position: relative` unconditionally (not just on focus): CPE-1883's `:focus-visible::after` reveal
+     needs a STABLE containing block that is never itself resized by focus — see that rule's own comment
+     for why. */
   .filtered-hidden {
+    position: relative;
     color: var(--accent);
     max-width: 45%;
     min-width: 0;
@@ -279,8 +287,10 @@
 
   /* CPE-1780: same overflow/truncation strategy as `.filtered-hidden` above (same reasoning — a narrow
      window must still show the count via `title`), but `--warn` instead of `--accent`: an unreadable row
-     is a genuine read FAILURE for that one row, distinct from a successful, intentional name filter. */
+     is a genuine read FAILURE for that one row, distinct from a successful, intentional name filter.
+     `position: relative` — see the identical note on `.filtered-hidden` above. */
   .unreadable {
+    position: relative;
     color: var(--warn);
     max-width: 45%;
     min-width: 0;
@@ -295,15 +305,88 @@
      / `.unreadable` makes each Tab-reachable, and this rule reveals the whole sentence on focus for a
      sighted keyboard user who has no mouse to hover with — the visual truncation these pills otherwise
      apply is a rendering choice, not a loss of the underlying text, so focus simply turns that clipping
-     back off. `position: relative` + `z-index` so the revealed box draws OVER whatever neighbour it would
-     otherwise be clipped against, rather than reflowing the row (reflow-on-focus would itself be a
-     usability trap — the bar's fixed height is load-bearing, see the ordering comment above `.dim`). */
+     back off. `position: relative` (kept on the base rule below, unconditionally — not just on focus) so
+     the reveal has a stable anchor: see the `::after` rule's own comment for why the reveal is generated
+     content on a pseudo-element rather than a resize of this span itself.
+     CPE-1883 diagnosis: `max-width` above was never the whole story. The FIRST fix tried was resizing
+     THIS span directly on `:focus-visible` (`overflow: visible; white-space: normal; max-width: ...`) —
+     it never worked, for two DIFFERENT reasons tried in sequence:
+       1. As shipped (no flex override): the base rule's `flex: 0 var(--priority-shrink) auto` (a
+          SHRINKS-FIRST item, see the ordering comment above `.dim`) still applied, so the flex algorithm
+          kept squeezing the item toward its shrink-allocated share of the row regardless of `max-width`
+          sitting unreached above it — and once `white-space: normal` legalised wrapping, that squeeze
+          bottomed out at the single longest WORD's min-content width, producing the ticket's tall
+          one-word-per-line column instead of a wide box.
+       2. Tried `flex: 0 0 auto` (stop shrinking) to fix #1 — it DOES stop the column, but by giving the
+          box real layout width inside the flex row at the moment it's needed most (a crowded busy row),
+          which squeezes `.git`/`.disk` (both SHRINKS-FIRST too, later in priority) toward ZERO width
+          while a note is focused — measured, not assumed: at 600px busy `.git`/`.disk` both collapsed to
+          `width: 0`. Fixing this ticket's bug by breaking a neighbour is exactly what this component's
+          rules forbid. Also tried `position: absolute` directly on the span (removing it from flex
+          layout entirely, so it can't squeeze siblings) — that solves the squeeze but trades it for a
+          WORSE regression: Chromium's static-position computation for an absolutely-positioned FLEX
+          CHILD does not reliably reproduce its in-flow location (a documented cross-browser rough edge,
+          not a mistaken assumption on this codebase's part) — measured jumping to `left: 0` (the row's
+          own padding edge) regardless of how many earlier siblings (`.item-count`, `.selected-count`,
+          `.dim`) it should have sat after, covering them instead of the neighbours to its right the
+          original design intended to overlay.
+     Both attempts share the same root problem: THIS element's own box is a flex item whose size/position
+     depends on its siblings, so restyling it directly can never cleanly detach it from the row without
+     one of the above trade-offs. The actual fix moves the reveal to a `::after` PSEUDO-element instead
+     (below) — its containing block is this span (via `position: relative`, kept always-on so the
+     anchor never changes across DOM updates), and that span's own box is NEVER resized by focus, so it
+     never re-enters the flex-shrink negotiation and `.git`/`.disk` never lose anything; the pseudo is
+     `position: absolute; left: 0; top: 0;` relative to that STABLE anchor (a plain relative-parent
+     absolute-child, not a flex-child static position — no ambiguity), so it starts exactly where the
+     narrow pill visually sits and grows to the right, over whatever neighbour it would otherwise be
+     clipped against — the original design's own intent, now actually achieved. */
+  /* CPE-1883: the reveal itself. `content: attr(data-reveal)` reads the SAME sentence the markup already
+     puts in this span's own title/text (see the markup comment on `data-reveal` for why a duplicate
+     attribute is needed — generated content can only read a plain attribute, never text-node children).
+     `overflow: visible` on the BASE rule's sibling above would defeat its own `text-overflow: ellipsis`
+     (which requires `overflow: hidden` to do anything), so it is set HERE, scoped to focus, and only
+     matters for letting this pseudo-element's box paint past its (unmoved) parent's clip region — the
+     parent's own text stays correctly ellipsis-clipped underneath, invisible only because this opaque
+     box paints after it (`::after` = last-painted) and fully covers it (same anchor corner, one string,
+     so their extents coincide).
+     `width: max-content` turned out to be load-bearing, not decorative — its absence was a THIRD way to
+     reproduce this exact ticket, discovered measuring this very attempt: `position: absolute; left: 0;`
+     with `width` left at its default `auto` still computes a "shrink-to-fit" width CONSTRAINED BY THE
+     CONTAINING BLOCK's own remaining space (CSS2.1 §10.3.7) — and the containing block here is this
+     narrow, still flex-shrunk SPAN (58px at 600px busy), so the pseudo dutifully wrapped to fit inside
+     ITS PARENT's 58px, reproducing the identical one-word-per-line column one level down. `width:
+     max-content` bypasses that: it is not `auto`, so the shrink-to-fit-within-containing-block algorithm
+     never runs, and the box sizes to its own max-content width instead — `max-width` then still clamps
+     that, exactly as intended, independent of the narrow parent.
+     Measured before/after via `scripts/dev-harness/layout-guard` (statusbar-focus-reveal case, which
+     measures this `::after` box via `getComputedStyle` — pseudo-elements have no
+     `getBoundingClientRect()`) and the ticket's own work log: 600px compound-busy went 63.9x148px (the
+     span itself, pre-fix) -> 367.3x16px (this `::after` box, a single readable line); 900px went
+     157x52px -> the same 367.3x16px — both with `.git`/`.disk`/`.item-count`/`.selected-count` measured
+     BYTE-FOR-BYTE identical to their unfocused rects (the span's own box, and therefore the row's flex
+     layout, is never touched by any of this).
+     Known narrow edge case, measured and left open rather than silently hidden (out of THIS ticket's
+     scope — no AC covers it, and fixing it needs viewport-aware JS positioning, not a CSS tweak): at the
+     app's own 600px width floor WITH the full compound-busy row (every advisory note + a selection +
+     hidden-shown all crowded before this pill), `.filtered-hidden` sits far enough right that even this
+     367px box runs past the 600px viewport edge by ~100px — `body { overflow: hidden }` (app.css) clips
+     it rather than adding a scrollbar, so the tail of the sentence goes invisible in that one specific
+     combination. Every other measured combination (900px busy, either width uncrowded) stays fully
+     on-screen. */
   .filtered-hidden:focus-visible,
   .unreadable:focus-visible {
-    position: relative;
-    z-index: 1;
     overflow: visible;
+  }
+  .filtered-hidden:focus-visible::after,
+  .unreadable:focus-visible::after {
+    content: attr(data-reveal);
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 1;
+    display: inline-block;
     white-space: normal;
+    width: max-content;
     max-width: min(90vw, 420px);
     background: var(--surface);
     border-radius: 4px;

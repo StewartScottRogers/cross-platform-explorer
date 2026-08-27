@@ -103,7 +103,17 @@ function formatProblems(r) {
   for (const m of r.textOverflows) lines.push(`    TEXT-OVERFLOW  ${m}`);
   for (const m of r.unpainted) lines.push(`    UNREACHABLE    ${m}`);
   for (const m of r.missing) lines.push(`    MISSING        ${m}`);
+  for (const m of r.boundsViolations ?? []) lines.push(`    BOUNDS         ${m}`);
   return lines;
+}
+
+// CPE-1883: `rectBoundsInfo` is recorded whether its check passed or failed — printed unconditionally
+// (not gated on `problems.length > 0`) so a ticket's measured before/after numbers come straight out of
+// this console output instead of a bespoke one-off script.
+function formatRectInfo(r) {
+  return (r.rectBoundsInfo ?? []).map(
+    (m) => `    rect  ${m.selector} width=${m.width}px height=${m.height}px`,
+  );
 }
 
 async function main() {
@@ -149,6 +159,7 @@ async function main() {
     let failures = 0;
     for (const r of results) {
       const problems = formatProblems(r);
+      const rectInfo = formatRectInfo(r);
       if (problems.length > 0) {
         failures++;
         console.error(`[layout-guard] ${r.case} @ ${r.width}px: FAIL`);
@@ -156,6 +167,7 @@ async function main() {
       } else {
         console.log(`[layout-guard] ${r.case} @ ${r.width}px: OK`);
       }
+      for (const line of rectInfo) console.log(line);
     }
 
     if (failures > 0) {

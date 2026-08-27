@@ -18,7 +18,7 @@
 // to "the harness crashed" rather than "a real layout bug" — if you see it, check `node --version`
 // first.
 //
-// Four independent, composable check kinds (a case's `checks` array picks whichever apply — see
+// Five independent, composable check kinds (a case's `checks` array picks whichever apply — see
 // cases.mjs's own decision table for which kind catches which class of bug, and its header for real
 // examples):
 //
@@ -49,10 +49,30 @@
 //    actually clickable" check generalised: a control that still LAYS OUT somewhere doesn't mean it's
 //    still reachable once an ancestor clips it or another element paints on top.
 //
+//  - `rectBounds` — does a single element's OWN rendered box stay within simple width/height limits
+//    (`maxHeight`, `minWidth`, either or both)? This is CPE-1883 ("the status bar's focus-reveal box
+//    ignores its own max-width and stacks one word per line"): a `max-width` CSS declaration existing
+//    in the source (which is all jsdom can ever confirm) proves nothing about whether the FLEX
+//    ALGORITHM ever lets the box reach it — a flex item can keep shrinking toward its content's
+//    min-content width regardless of `max-width` sitting unreached above it, and when that min-content
+//    width is a single word (because `white-space: normal` allows wrapping), the box collapses to a
+//    tall one-word-per-line column instead of the wide, readable box `max-width` implies. `maxHeight`
+//    catches exactly that shape (a column is tall for its width); `minWidth` catches the companion
+//    failure of a box that never grows outward at all. Needs the element already in the state under
+//    test (e.g. focused) BEFORE this engine measures it — that is the harness PAGE's job (see
+//    `scripts/dev-harness/statusbar-notice/inner-main.ts`'s `?focus=` param), not this engine's; unlike
+//    the other four kinds, `rectBounds` cannot discover the interaction that produces the state itself.
+//    Optional `pseudo` (e.g. `"::after"`) measures a GENERATED-CONTENT box instead of `selector` itself
+//    — CPE-1883's actual fix renders its reveal on `::after` (not the real element, to avoid disturbing
+//    flex siblings), and a pseudo-element has no `getBoundingClientRect()` (querySelector can't even
+//    select one), so this path reads `getComputedStyle(el, pseudo)` instead — width/height only, no
+//    position.
+//
 // `siblingOverlap`/`clipProbe`/`textOverflow` catch a decorative element BLEEDING onto something else;
-// `selfPaint` catches an interactive element BECOMING UNREACHABLE. Both are real, distinct failure
-// shapes on record in this repo (CPE-1836 is the first kind, CPE-1827/CPE-1884 are the second) — a
-// generic harness needs both, not just one.
+// `selfPaint` catches an interactive element BECOMING UNREACHABLE; `rectBounds` catches an element's OWN
+// box growing the wrong SHAPE. All are real, distinct failure shapes on record in this repo (CPE-1836 is
+// the first kind, CPE-1827/CPE-1884 are the second, CPE-1883 is the third) — a generic harness needs
+// all three, not just one or two.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -156,6 +176,12 @@ function buildProbeExpression(checks) {
     var textOverflows = [];
     var unpainted = [];
     var missing = [];
+    var boundsViolations = [];
+    // CPE-1883: always recorded (pass OR fail), unlike the violation arrays above — this is the actual
+    // measured evidence a ticket's work log wants, not just a yes/no. One entry per rectBounds check.
+    // NOTE: no backtick characters allowed in this comment or anywhere else in this probe string — see
+    // the textOverflow check's own identical warning below; this file already broke that rule once.
+    var rectBoundsInfo = [];
 
     for (var i = 0; i < checks.length; i++) {
       var check = checks[i];
@@ -257,9 +283,50 @@ function buildProbeExpression(checks) {
             );
           }
         }
+      } else if (check.kind === 'rectBounds') {
+        var rbsel = check.selector;
+        var rbel = document.querySelector(rbsel);
+        if (!rbel) { missing.push('rectBounds: not found: ' + rbsel); continue; }
+        // CPE-1883 addition: check.pseudo (e.g. "::after") measures a GENERATED-CONTENT box instead of
+        // the real element -- pseudo-elements are not DOM nodes, so getBoundingClientRect() cannot
+        // target one directly (querySelector cannot even select one). getComputedStyle(el, pseudo) is
+        // the one API that DOES resolve a pseudo-element's actual rendered width/height in real Chrome;
+        // it has no left/top/right/bottom equivalent, which is why this path only ever reports
+        // width/height, never position -- exactly what this check's maxHeight/minWidth need and no more.
+        // NOTE: no backtick characters allowed anywhere in this probe string -- see the textOverflow
+        // check's identical warning above; this file has broken that rule twice already.
+        var rbr;
+        if (check.pseudo) {
+          var pcs = getComputedStyle(rbel, check.pseudo);
+          rbr = { width: parseFloat(pcs.width) || 0, height: parseFloat(pcs.height) || 0 };
+        } else {
+          rbr = rectOf(rbel);
+        }
+        var rbLabel = rbsel + (check.pseudo ? check.pseudo : '');
+        rectBoundsInfo.push({ selector: rbLabel, width: Number(rbr.width.toFixed(1)), height: Number(rbr.height.toFixed(1)) });
+        if (typeof check.maxHeight === 'number' && rbr.height > check.maxHeight) {
+          boundsViolations.push(
+            rbLabel + ' height=' + rbr.height.toFixed(1) + 'px exceeds maxHeight=' + check.maxHeight +
+            'px (width=' + rbr.width.toFixed(1) + 'px) — looks like a stacked column, not a wide box'
+          );
+        }
+        if (typeof check.minWidth === 'number' && rbr.width < check.minWidth) {
+          boundsViolations.push(
+            rbLabel + ' width=' + rbr.width.toFixed(1) + 'px is below minWidth=' + check.minWidth +
+            'px (height=' + rbr.height.toFixed(1) + 'px) — never grew outward'
+          );
+        }
       }
     }
-    return { overlaps: overlaps, clipBreaches: clipBreaches, textOverflows: textOverflows, unpainted: unpainted, missing: missing };
+    return {
+      overlaps: overlaps,
+      clipBreaches: clipBreaches,
+      textOverflows: textOverflows,
+      unpainted: unpainted,
+      missing: missing,
+      boundsViolations: boundsViolations,
+      rectBoundsInfo: rectBoundsInfo,
+    };
   })()
   `;
 }
@@ -389,6 +456,17 @@ export async function runAllCases({ cases, devServerBase, chromePath, cdpPort = 
     });
     const client = makeCdpClient(ws);
     await client.send("Page.enable");
+    // CPE-1883 finding: a headless tab navigated via `Page.navigate` never becomes the OS-level
+    // "active" window, so `document.hasFocus()` is false and — because `:focus`/`:focus-visible` both
+    // require DOCUMENT focus, not merely `document.activeElement`, per spec — a harness page's own
+    // `el.focus()` call sets `activeElement` but neither pseudo-class ever matches, silently. That
+    // surfaced as a real case ("statusbar-focus-reveal") hanging on its own `readySelector` for the
+    // full 40s below rather than measuring anything. `Emulation.setFocusEmulationEnabled` is CDP's own
+    // purpose-built fix: it makes the page report itself as focused/active regardless of real window
+    // activation state. Enabled once for the whole session (harmless for cases that never call
+    // `.focus()` — it only changes what `document.hasFocus()`/`:focus-visible` report, nothing about
+    // layout) rather than per-case, so any future focus-dependent case gets it for free.
+    await client.send("Emulation.setFocusEmulationEnabled", { enabled: true });
 
     const results = [];
     for (const kase of cases) {
