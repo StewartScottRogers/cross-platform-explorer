@@ -1,6 +1,14 @@
 //! CLI: build + sign the agent-catalog bundle for a release (CPE-377).
 //!
 //! Usage: `catalog-sign <agents-dir> <out-dir> <version>`
+//!
+//! `<version>` is the anti-rollback counter stamped on every entry (CPE-372). It is **not** a
+//! publish timestamp and must never be computed from a clock here or by the caller: it used to be
+//! `date +%s` in release.yml, which meant re-running the workflow on an old tag signed that tag's
+//! stale manifests with a number newer than anything installed, and the trust engine accepted the
+//! downgrade (CPE-1941). Releases derive it from the tagged commit via
+//! `.github/workflows/scripts/catalog-version.sh`, which also owns the installed-base floor; this
+//! binary deliberately keeps no second copy of that rule and just signs what it is given.
 //! The ed25519 signing key (a 32-byte seed, hex) is read from `CPE_CATALOG_SIGNING_KEY`.
 //! Emits `catalog-index.json` (+ `.sig`) and each `<id>.json` (+ `.sig`) into `<out-dir>`, ready to
 //! upload as release assets next to the installer. Output verifies under the seed's public key —

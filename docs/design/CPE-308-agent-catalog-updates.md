@@ -80,6 +80,27 @@ primitive) — same principle as `host.verify_key`.
   disables refresh entirely (ties into CPE-310). A failed fetch never degrades the working catalog.
 - **Anti-rollback:** entries carry a monotonic `version`; a fetched entry older than the installed one
   is refused unless the user explicitly rolls back. Prevents a signed-but-stale replay.
+- **Where that `version` comes from (CPE-1941):** the **committer timestamp of the tagged commit**,
+  computed by `.github/workflows/scripts/catalog-version.sh` from the checkout the release job
+  already has — never `date +%s` at publish time. The difference is the whole of anti-rollback's
+  soundness: a publish-time clock records *when the workflow ran*, so re-running the release workflow
+  on an **old tag** stamped that tag's old manifests with a number newer than anything installed and
+  the engine accepted them — a content downgrade with every signature, hash, and schema check intact,
+  reachable with no key compromise by anyone able to re-run an Actions job. A commit timestamp is a
+  property of the content: re-running an old tag reproduces that tag's own, older number, which is
+  refused. Demonstrated both ways in `sidecar/host/tests/catalog_republish_downgrade.rs`; the
+  workflow wiring is pinned by `src/lib/catalogPublishVersion.test.ts`.
+  - *Installed-base transition:* both schemes emit Unix epochs, so the numbering is continuous.
+    `CATALOG_VERSION_FLOOR` in that script is a **fatal** publish-time check that the derived version
+    exceeds the highest version any client can hold (`1784951108` — the value on all 12 entries of
+    the last published index, release `v0.57.32`), so the scheme change can never emit a number the
+    installed base would reject. A repo-committed counter was rejected precisely here: restarting at
+    a small integer against an installed base holding ~1.79 billion would refuse every future
+    release, permanently.
+  - *Residual:* re-running a tag cut **before** this change runs that tag's own copy of
+    `release.yml`, which still reads a clock. That window closes operationally — rotate
+    `CPE_CATALOG_SIGNING_KEY` (an old tag's `catalog` job then finds no key and publishes nothing),
+    restrict who may re-run workflows, or raise the floor above any number a stale re-run stamped.
 - **Schema migration (CPE-300):** an entry with an older `schema_version` is migrated up before
   validation; unknown-future schema is skipped (as today).
 
@@ -91,7 +112,7 @@ A remote catalog is **egress + supply-chain**, so `docs/security/threat-model.md
 |--------|--------|-----------|
 | Tampering / EoP | Malicious/tampered manifest → RCE via install/run commands. | Signature-verified against a trusted key *before* any command is eligible; unsigned/third-party stays consent-gated (CPE-296). |
 | Spoofing / SSRF | Sidecar coerces a fetch to an attacker URL. | Host holds the URL (configured/allow-listed); no general fetch exposed — as with `host.verify_key`. |
-| Rollback | Signed-but-stale catalog replayed to reintroduce a bad recipe. | Monotonic `version`, anti-downgrade unless explicit rollback. |
+| Rollback | Signed-but-stale catalog replayed to reintroduce a bad recipe. | Monotonic `version`, anti-downgrade unless explicit rollback. The `version` is derived from the **tagged commit**, not from publish time, so re-publishing an old tag cannot advance it (CPE-1941). |
 | DoS | Hostile/slow source wedges startup. | Timeout + last-known-good fallback; refresh is async/off the launch path. |
 | Info disclosure | Catalog fetch leaks which agents/enterprise. | First-party/configured source only; no per-user telemetry; key in transit only via TLS CONNECT (CPE-369). |
 
