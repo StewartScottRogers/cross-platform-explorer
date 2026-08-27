@@ -181,6 +181,30 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   and fail closed on the latter. Related: npm's `fixAvailable: true` is optimistic and cannot be trusted
   as "there is something to do" — the sweep measures a real `npm audit fix --package-lock-only` instead
   of believing that flag.
+- **Shadowed guards: two green sabotages on one guard mean it is unreachable (CPE-1929).** A guard
+  cannot be given test coverage while an *earlier* guard answers on the same underlying fact — every
+  input that would trip the later one trips the earlier one first, so it is **safe** and
+  **unverifiable** at once, and those two are easy to mistake for each other. The tell is a **pair**:
+  disabling the guard (`if false && …`) leaves the suite green, **and** forcing its predicate to lie
+  changes no behaviour. Separately each reads as evidence of safety; together they mean *nothing can
+  reach it*, and the next question is **which earlier check is shadowing it**. Run the pair by hand —
+  do not reason about it, and do not trust a "Finished in 0.5s" cargo run on `/mnt/z` (touch the
+  sources first). Measured instances: `batch_media::open_output_verified`'s handle-side reparse
+  refusal (2,423 tests green with it disabled, no behaviour change with the predicate lying — the
+  `symlink_metadata` path check in front of it reads the same Windows name-surrogate bit), and
+  CPE-1896's leaf surrogate refusal before it. **The fix is reorder or delete — leaving it shadowed is
+  the one wrong answer, because it reads as coverage.** Reorder when the later guard asks the more
+  trustworthy question (a handle cannot be substituted after the open; a path can); delete when it is
+  genuinely redundant. A guard kept **deliberately** as an unreachable backstop must say so at the
+  site *and* say that it is untestable and why, so the next person's green sabotage is expected rather
+  than alarming.
+  **Not worth mechanising in full, and here is the honest reason:** the "disable it" half is
+  automatable (mutation testing — `cargo-mutants` would flag exactly this as a surviving mutant), but
+  the "force the predicate to lie" half needs a human to know *what a lie means* for that predicate,
+  and the conclusion — *which* earlier check shadows it, and whether to reorder or delete — is not
+  mechanisable at all. What IS cheap and is the actual ask: whenever you add or move a refusal, run
+  the two sabotages once and write the numbers into the comment at the site. Every shadowed guard
+  found so far was found that way, and none of them was found by reading the code.
 
 ## Docs
 

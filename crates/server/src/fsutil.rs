@@ -2726,23 +2726,34 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
     use std::io::Write;
     let (mut file, created) = crate::batch_media::open_no_follow(target)
         .map_err(|e| format!("{}: could not open for writing: {e}", target.display()))?;
-    if std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        drop(file);
-        if created {
-            let _ = std::fs::remove_file(target);
-        }
-        return Err(format!(
-            "{}: is a link, and writing to a link's name writes THROUGH it — refusing even though \
-             overwrite was confirmed, because a confirm authorises overwriting a plain file, never \
-             writing through a link",
-            target.display()
-        ));
-    }
+    // **CPE-1929: handle first, path second — the same reorder CPE-1896 made at
+    // `claim_destination_handle` and CPE-1929 made at `batch_media::open_output_verified`.** These
+    // refusals used to sit BELOW the `symlink_metadata(target)` check that now follows them, and that
+    // ordering made them unreachable for every fixture in the crate: on Windows `std`'s `is_symlink`
+    // reads the same name-surrogate bit, so every symlink, junction and mount point was refused by the
+    // path check first. Measured on CPE-1929 — disabling BOTH refusals here
+    // (`if false && facts.is_reparse_point`, `else if false && facts.is_dir`) left the lib suite
+    // **unchanged** — 2,424 passed / 0 failed, the whole suite at that moment — and forcing
+    // `is_reparse_point` to a lying `false` failed only the *leaf* test at
+    // `copy_file_onto_destination_handle`, never anything reaching here: the two-sabotage tell that this
+    // guard could not be the decider for anything. On the merged state the same sabotage is **2,424
+    // passed / 1 failed**, the one failure being the test added below.
+    //
+    // The reorder came with the CPE-1896 **narrowing** the sibling already had, because reordering
+    // without it would have made a real bug reachable rather than merely latent: the bare
+    // `is_reparse_point` bit is true of a great deal that is not a link — dehydrated OneDrive
+    // placeholders, dedup, WOF, ProjFS — and the *only* input that could ever reach this branch past the
+    // path check was exactly one of those. Refusing them is the regression CPE-1896 removed from
+    // `copy_file_onto_destination_handle`; `reparse_name_surrogate(..).unwrap_or(true)` asks the narrow
+    // "does this name stand in for another name" question instead, and fails closed on an unreadable
+    // tag. See that function's doc for why the `unwrap_or` default belongs at the call site.
     if let Some(facts) = crate::batch_media::handle_facts(&file) {
-        let why = if facts.is_reparse_point {
+        let why = if facts.is_reparse_point
+            && crate::batch_media::reparse_name_surrogate(&file).unwrap_or(true)
+        {
             Some(
-                "is a reparse point (a link, junction or stand-in for another name), and writing to it \
-                 writes THROUGH it"
+                "is a link that stands in for another name — a symlink, junction or mount point — and \
+                 writing to it writes THROUGH it"
                     .to_string(),
             )
         } else if facts.is_dir {
@@ -2769,6 +2780,34 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
                 target.display()
             ));
         }
+    }
+    // **Second net, and now genuinely a fallback rather than the decider.** It is reachable in exactly
+    // two situations, neither of which any shipped test can stage, so do not be alarmed when sabotaging
+    // it leaves the suite green (CPE-1929): (a) `handle_facts` returned `None` — a platform whose
+    // identity model `batch_media` does not know — in which case this path question is the whole
+    // defence, which is the case the block above's original doc argued for; and (b) a Unix that is
+    // neither Linux, macOS nor a listed BSD, where `batch_media`'s `O_NOFOLLOW` is compiled as `0`, the
+    // open follows the link, and `is_reparse_point` is hard-coded `false`. On Windows the handle check
+    // above has already refused every name-surrogate reparse point, which is precisely the set `std`
+    // calls a symlink. Kept rather than deleted because on both of those platforms the alternative is
+    // writing through a link; untestable by construction rather than merely untested.
+    //
+    // **The number, because this ticket's own rule is that an argument is not a measurement.** With
+    // this backstop and its twin in `batch_media::open_output_verified` BOTH disabled
+    // (`if false && std::fs::symlink_metadata(..)`), the lib suite is **2,425 passed / 0 failed / 11
+    // ignored** — identical to baseline. Both disabled together, so the figure covers each of them
+    // individually as well. That green is the expected result here, not a missing test.
+    if std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        drop(file);
+        if created {
+            let _ = std::fs::remove_file(target);
+        }
+        return Err(format!(
+            "{}: is a link, and writing to a link's name writes THROUGH it — refusing even though \
+             overwrite was confirmed, because a confirm authorises overwriting a plain file, never \
+             writing through a link",
+            target.display()
+        ));
     }
     file.set_len(0).map_err(|e| format!("{}: could not truncate: {e}", target.display()))?;
     file.write_all(bytes).map_err(|e| format!("{}: could not write: {e}", target.display()))?;
@@ -6496,6 +6535,96 @@ mod tests {
             .expect("a confirmed overwrite of a plain file must succeed");
 
         assert_eq!(std::fs::read(&target).unwrap(), b"NEW CONVERTED BYTES");
+    }
+
+    /// **CPE-1929 — the test `overwrite_confirmed_no_follow`'s handle-side refusals never had, plus the
+    /// narrowing that made the one reachable case correct.** Both refusals were shadowed: disabling
+    /// them outright (`if false && facts.is_reparse_point`, `else if false && facts.is_dir`) left the
+    /// lib suite **unchanged** — 2,424 passed / 0 failed, the whole suite at that moment — because the
+    /// `symlink_metadata(target)` path check that used to
+    /// stand in front of them reads the same Windows name-surrogate bit and took every symlink,
+    /// junction and mount point first. The only input that could ever have reached the reparse refusal
+    /// was a **non-surrogate** reparse point — a dehydrated cloud placeholder, dedup, WOF — which is
+    /// exactly the case CPE-1896 established must be **written, not refused**. So the guard was
+    /// unreachable and, in its one reachable case, wrong.
+    ///
+    /// This is the two-halves fixture CPE-1896 used at the leaf, pointed at this function: the two
+    /// destinations differ in **exactly one bit** (`0x2000_1929` is `0x0000_1929` with
+    /// `IO_REPARSE_TAG_NAME_SURROGATE` set), which is the only arrangement that lets the test claim the
+    /// *tag* is what decides. The surrogate half asserts on the handle refusal's own wording ("stands
+    /// in for another name") rather than on the word "link", because the path check below it says
+    /// "link" too and would satisfy a looser assertion for free.
+    ///
+    /// `make_guid_reparse_point` needs no privilege and no filter driver, so this cannot silently
+    /// degrade into a skip on an ordinary runner. Windows-only by construction:
+    /// `HandleFacts::is_reparse_point` is hard-coded `false` on Unix.
+    ///
+    /// **This test is the red-proof for both halves of the change**, and both were run rather than
+    /// argued. Disabling the handle refusal gives **2,424 passed / 1 failed** — and the panic prints
+    /// the surviving *path* check answering "is a link, and writing to a link's name writes THROUGH
+    /// it", which is the direct proof that the `"stands in for another name"` assertion below is
+    /// load-bearing: a `contains("is a link")` would have passed for free. Un-narrowing back to the
+    /// bare `is_reparse_point` bit also gives **2,424 / 1**, failing on the non-surrogate half — so
+    /// "reordering alone would have made a real bug live" is measured, not reasoned.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point() {
+        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1929;
+        const SURROGATE_FILE_TAG: u32 = 0x2000_1929;
+
+        let d = scratch("cpe1929-confirmed-surrogate");
+        let placeholder = d.join("placeholder.txt");
+        std::fs::write(&placeholder, b"stale").unwrap();
+        if !make_guid_reparse_point(&placeholder, NON_SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point: \
+                 could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                 handle-side reparse refusal in overwrite_confirmed_no_follow."
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        // Liveness: without the attribute this is a test that an ordinary file can be overwritten.
+        assert!(
+            std::os::windows::fs::MetadataExt::file_attributes(
+                &std::fs::symlink_metadata(&placeholder).unwrap()
+            ) & 0x400
+                != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the placeholder"
+        );
+        // The control that makes the non-surrogate half mean anything: neither the path check nor a
+        // surrogate test can see this object, so nothing but the narrowed tag check decides it.
+        assert!(
+            !std::fs::symlink_metadata(&placeholder).unwrap().file_type().is_symlink(),
+            "fixture is shadowed: std calls the non-surrogate placeholder a symlink"
+        );
+
+        overwrite_confirmed_no_follow(&placeholder, b"CONVERTED BYTES").expect(
+            "a reparse point that does not stand in for another name must be written through — \
+             refusing it is what turned every dehydrated cloud file into a failed operation",
+        );
+
+        // The surrogate half, differing in exactly one bit.
+        let surrogate = d.join("surrogate.txt");
+        std::fs::write(&surrogate, b"stale").unwrap();
+        if !make_guid_reparse_point(&surrogate, SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPING the surrogate half of \
+                 cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point: \
+                 could not plant a surrogate GUID reparse point on this volume."
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let e = overwrite_confirmed_no_follow(&surrogate, b"CONVERTED BYTES")
+            .expect_err("a name-surrogate reparse point must be refused even with a confirmed overwrite");
+        assert!(
+            e.contains("stands in for another name"),
+            "the HANDLE-side surrogate refusal must be the one that fired — the path check below it \
+             also says \"is a link\", so asserting on that word would pass for free: {e}"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// **Round 5 correction:** this test originally asserted `e.contains("is a link")`

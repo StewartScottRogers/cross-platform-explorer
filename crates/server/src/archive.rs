@@ -1863,6 +1863,18 @@ fn sweep_stale_sessions(
         }
         // `symlink_metadata`, never `metadata`: the question is what the NAME is, not what it points at.
         let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        // **CPE-1929: `is_symlink()` here is subsumed by `!is_dir()` and can never be the decider.**
+        // `std`'s `FileType::is_dir` is false for a link on every platform (on Windows it is defined as
+        // "a directory and NOT a name-surrogate reparse point"), so on a `symlink_metadata` result
+        // `is_symlink() => !is_dir()`: deleting the first disjunct changes no behaviour anywhere, and no
+        // fixture can make it the reason a name is skipped. It is kept as a **statement of intent**, not
+        // as a second net — the intent being that a symlinked directory is never descended into by this
+        // sweep, which is what stops someone later relaxing `symlink_metadata` to `metadata` and
+        // silently following links. Untestable on its own, deliberately, and recorded here so a green
+        // sabotage on it reads as expected rather than as a missing test. **Measured, not just read off
+        // `std`'s definitions:** with this disjunct and its twin in `vault_manager`'s staging-prefix
+        // cleanup BOTH deleted, the lib suite is **2,425 passed / 0 failed / 11 ignored** — identical to
+        // baseline.
         if meta.file_type().is_symlink() || !meta.is_dir() {
             continue;
         }
