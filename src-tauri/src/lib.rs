@@ -15720,39 +15720,46 @@ mod tests {
     /// expressed: there was no way to confirm one op without confirming all of them.
     #[test]
     fn cpe_1891_confirming_one_collision_does_not_disarm_the_occupancy_guard_on_a_sibling_op() {
+        // Both `a` and `b` collide with a REAL pre-existing occupied file, so a blanket "any confirmed
+        // name exists ⇒ treat every op as confirmed" bug is directly observable: it would silently
+        // overwrite b's victim too. Calls `macro_apply_run` directly, bypassing `macro_refuse_
+        // unconfirmed_collisions` — standing in for the TOCTOU shape the reviewer named (a collision
+        // that was not there when the confirm gate ran) and proving `macro_apply_run` itself, not just
+        // the pre-check, keeps per-op scoping.
         let config = tempfile::tempdir().unwrap();
         let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
         let work = tempfile::tempdir().unwrap();
-        // `a` collides with a pre-existing `taken.txt` and WILL be confirmed.
         let a = work.path().join("a.txt");
         fs::write(&a, b"A-NEW").unwrap();
-        let taken = work.path().join("taken.txt");
-        fs::write(&taken, b"A-OLD").unwrap();
-        // `b` does NOT collide — nothing sits at its planned destination.
+        let a_victim = work.path().join("a-renamed.txt");
+        fs::write(&a_victim, b"A-VICTIM").unwrap();
         let b = work.path().join("b.txt");
         fs::write(&b, b"B-NEW").unwrap();
+        let b_victim = work.path().join("b-renamed.txt");
+        fs::write(&b_victim, b"B-VICTIM").unwrap();
 
         let mac = cpe_server::action_macro::ActionMacro {
             name: "r".into(),
-            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "{stem}-renamed.{ext}".into() }],
         };
         let root = work.path().to_string_lossy().to_string();
-        // `a` renames onto the real collision `taken.txt`; `resolve`'s own dedupe then sends `b` to
-        // `taken-2.txt` (free) rather than re-colliding — exercising the ordinary, uncomplicated
-        // sibling op this test is actually about.
         let inputs = vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()];
         let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
-        assert_eq!(resolved.ops[0].to, taken.to_string_lossy());
-        let b_dest = Path::new(&resolved.ops[1].to).to_path_buf();
-        assert_ne!(b_dest, taken, "sanity: b's destination must be distinct from a's collision");
+        assert_eq!(Path::new(&resolved.ops[0].to), a_victim);
+        assert_eq!(Path::new(&resolved.ops[1].to), b_victim);
 
-        // Confirm ONLY `a`'s collision.
-        let confirmed = vec![taken.to_string_lossy().to_string()];
-        macro_apply_run(&ctx, resolved, &confirmed).unwrap();
+        // Confirm ONLY a's collision.
+        let confirmed = vec![resolved.ops[0].to.clone()];
+        let err = macro_apply_run(&ctx, resolved, &confirmed).unwrap_err();
 
-        assert_eq!(fs::read(&taken).unwrap(), b"A-NEW", "a's confirmed overwrite must have applied");
-        assert!(b_dest.exists(), "b's ordinary (unconfirmed) rename must still have succeeded on its own merits");
-        assert_eq!(fs::read(&b_dest).unwrap(), b"B-NEW");
+        // With correct per-op scoping, b's op (unconfirmed, occupied) refuses — failing the whole
+        // all-or-nothing run — and b's victim must never have been touched.
+        assert!(err.contains("b-renamed.txt"), "the failure must be b's unconfirmed collision: {err}");
+        assert_eq!(
+            fs::read(&b_victim).unwrap(),
+            b"B-VICTIM",
+            "b's victim must survive untouched — a blanket confirm would have silently overwritten it"
+        );
     }
 
     /// **PR #1044 review round 2, should-fix: the destination divergence.** A Rename template's
