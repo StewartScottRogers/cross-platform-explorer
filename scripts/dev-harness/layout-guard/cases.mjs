@@ -107,6 +107,14 @@ export const CASES = [
       // "the reveal silently stopped rendering at all" as its own distinct regression. See the ticket's
       // work log for the exact before/after numbers.
       { kind: "rectBounds", selector: ".filtered-hidden", pseudo: "::after", maxHeight: 90, minWidth: 100 },
+      // CPE-1883 round 2 (Visual Critic UAT): `rectBounds` above proves the SHAPE is right but nothing
+      // proves WHERE it lands — the first shipped CSS anchored via `left: 0` (grow rightward), which ran
+      // this exact box ~100px past a 600px viewport with the compound-busy row, silently clipped by
+      // `body { overflow: hidden }` with no ellipsis/scroll/cue — WORSE than the original bug (fewer
+      // words visible than the one-word-per-line column showed). Fixed by anchoring `right: 0` instead
+      // (grows leftward from the pill, which is always on-screen) — this check proves that holds at
+      // both tested widths, not just at the one width it happened to fit.
+      { kind: "pseudoOnScreen", anchorSelector: ".filtered-hidden", pseudo: "::after", edge: "right" },
     ],
   },
   {

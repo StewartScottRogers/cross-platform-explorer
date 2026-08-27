@@ -68,11 +68,35 @@
 //    select one), so this path reads `getComputedStyle(el, pseudo)` instead — width/height only, no
 //    position.
 //
+//  - `pseudoOnScreen` — CPE-1883 round 2 (Visual Critic UAT): `rectBounds` proves the reveal box is the
+//    right SHAPE (wide, not a column) but says nothing about WHERE it lands — the shipped-then-reverted
+//    `left: 0` anchor grew the box off the RIGHT edge of a 600px window with the compound-busy row, and
+//    `body { overflow: hidden }` (app.css) silently clipped the sentence's tail with no ellipsis, no
+//    scroll, no visual cue at all. Anchoring the OPPOSITE edge (`right: 0; left: auto`) fixes it by
+//    construction (the anchor element itself is always on-screen, so growing toward the anchor's own
+//    side can only run off the FAR edge, never the near one) — this check proves that by construction is
+//    actually true, not assumed: given `anchorSelector` (the real, still-narrow flex item) + `pseudo`, it
+//    reads the pseudo's ACTUAL resolved `left`/`right` offset from `getComputedStyle` (which DOES
+//    resolve these to used pixel values for an absolutely positioned pseudo-element, even though it has
+//    no `getBoundingClientRect()`) to determine which edge it is really anchored to, combines that with
+//    the anchor's real `getBoundingClientRect()` and the pseudo's computed width, and fails if the FAR
+//    edge falls outside `[0, window.innerWidth]`. Went through TWO corrections, both found red-proofing
+//    it against the reverted `left: 0`, not assumed correct on the first pass: (1) a first version
+//    computed the position from the OPTIONAL `edge` config field instead of measuring it, so reverting
+//    the CSS anchor didn't change what got measured — fixed to measure the true anchor and only
+//    cross-check `edge` as a declared expectation now (a mismatch is itself flagged). (2) the "measure
+//    it" fix above then assumed only ONE of computed `left`/`right` would resolve to a definite number —
+//    false: BOTH resolve to definite numbers for a fully-determined box (width + one authored offset),
+//    the un-authored side is algebraically DERIVED and can drift several px from the authored anchor
+//    (sub-pixel rounding) — so this check now trusts whichever side computes to (near) zero, since this
+//    CSS pattern always authors its anchor as an exact `0` offset.
+//
 // `siblingOverlap`/`clipProbe`/`textOverflow` catch a decorative element BLEEDING onto something else;
 // `selfPaint` catches an interactive element BECOMING UNREACHABLE; `rectBounds` catches an element's OWN
-// box growing the wrong SHAPE. All are real, distinct failure shapes on record in this repo (CPE-1836 is
-// the first kind, CPE-1827/CPE-1884 are the second, CPE-1883 is the third) — a generic harness needs
-// all three, not just one or two.
+// box growing the wrong SHAPE; `pseudoOnScreen` catches the right shape landing in the wrong PLACE. All
+// are real, distinct failure shapes on record in this repo (CPE-1836 is the first kind, CPE-1827/CPE-1884
+// are the second, CPE-1883 is the third and fourth) — a generic harness needs all four, not just one two
+// or three.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -182,6 +206,9 @@ function buildProbeExpression(checks) {
     // NOTE: no backtick characters allowed in this comment or anywhere else in this probe string — see
     // the textOverflow check's own identical warning below; this file already broke that rule once.
     var rectBoundsInfo = [];
+    var offScreen = [];
+    // CPE-1883 round 2: same always-recorded-not-just-on-failure convention as rectBoundsInfo above.
+    var pseudoOnScreenInfo = [];
 
     for (var i = 0; i < checks.length; i++) {
       var check = checks[i];
@@ -316,6 +343,64 @@ function buildProbeExpression(checks) {
             'px (height=' + rbr.height.toFixed(1) + 'px) — never grew outward'
           );
         }
+      } else if (check.kind === 'pseudoOnScreen') {
+        var posel = document.querySelector(check.anchorSelector);
+        if (!posel) { missing.push('pseudoOnScreen: anchor not found: ' + check.anchorSelector); continue; }
+        var anchorR = rectOf(posel);
+        var poscs = getComputedStyle(posel, check.pseudo);
+        var posW = parseFloat(poscs.width) || 0;
+        var posLabel = check.anchorSelector + check.pseudo;
+        // Reviewer finding (CPE-1883 round 2): the FIRST version of this check trusted check.edge
+        // alone and computed a position from it, so reverting the CSS anchor (e.g. right: 0 back to
+        // left: 0) did NOT change what got measured -- the check silently re-asserted its own
+        // configured expectation instead of the page's actual rendered state, so it could never have
+        // caught that exact regression. Fixed: read the REAL resolved left/right offset from computed
+        // style (getComputedStyle DOES resolve these to used pixel values for an absolutely positioned
+        // pseudo-element, even though it has no getBoundingClientRect()) and derive the anchor edge from
+        // THAT, not from check.edge. check.edge is now only a declared expectation, cross-checked
+        // against the measured edge below rather than substituted for it.
+        // NOTE: no backtick characters allowed anywhere in this probe string -- see textOverflow's own
+        // identical warning above; this file has broken that rule three times now.
+        var rightPx = parseFloat(poscs.right);
+        var leftPx = parseFloat(poscs.left);
+        // Reviewer-motivated correction #2, found red-proofing the fix above: getComputedStyle resolves
+        // BOTH left AND right to definite numbers for a fully-determined absolutely positioned box
+        // (width + exactly one of left/right authored), not just the authored side -- the un-authored
+        // side is algebraically DERIVED and measured up to ~8px off the authored side's exact anchor
+        // (sub-pixel layout rounding), so trusting whichever side happens to parse as a number is not
+        // reliable; both always do. This CSS pattern always anchors with an offset of exactly 0 on the
+        // authored side (right: 0, or the pre-fix left: 0) -- so the side whose computed value is at (or
+        // essentially at) 0 is the one actually authored, and that is what this check trusts.
+        var farLeft, farRight, actualEdge;
+        if (Math.abs(rightPx) < 0.5) {
+          farRight = anchorR.right - rightPx;
+          farLeft = farRight - posW;
+          actualEdge = 'right';
+        } else if (Math.abs(leftPx) < 0.5) {
+          farLeft = anchorR.left + leftPx;
+          farRight = farLeft + posW;
+          actualEdge = 'left';
+        } else {
+          missing.push('pseudoOnScreen: ' + posLabel + ' -- neither left (' + poscs.left + ') nor right (' + poscs.right + ') computed near 0; this check only supports a 0-offset anchor');
+          continue;
+        }
+        pseudoOnScreenInfo.push({
+          selector: posLabel, edge: actualEdge, left: Number(farLeft.toFixed(1)), right: Number(farRight.toFixed(1)),
+          innerWidth: window.innerWidth,
+        });
+        if (farLeft < -0.5 || farRight > window.innerWidth + 0.5) {
+          offScreen.push(
+            posLabel + ' (measured anchor: ' + actualEdge + ': 0) spans left=' + farLeft.toFixed(1) +
+            ' right=' + farRight.toFixed(1) + 'px, outside the viewport [0, ' + window.innerWidth +
+            '] — part of the revealed sentence would be clipped by body { overflow: hidden } with no cue'
+          );
+        }
+        if (check.edge && check.edge !== actualEdge) {
+          offScreen.push(
+            posLabel + ' expected to anchor via "' + check.edge + '" but computed style measured "' +
+            actualEdge + '" instead — the CSS anchor direction itself changed'
+          );
+        }
       }
     }
     return {
@@ -326,6 +411,8 @@ function buildProbeExpression(checks) {
       missing: missing,
       boundsViolations: boundsViolations,
       rectBoundsInfo: rectBoundsInfo,
+      offScreen: offScreen,
+      pseudoOnScreenInfo: pseudoOnScreenInfo,
     };
   })()
   `;
@@ -466,6 +553,13 @@ export async function runAllCases({ cases, devServerBase, chromePath, cdpPort = 
     // activation state. Enabled once for the whole session (harmless for cases that never call
     // `.focus()` — it only changes what `document.hasFocus()`/`:focus-visible` report, nothing about
     // layout) rather than per-case, so any future focus-dependent case gets it for free.
+    // Reviewer note (CPE-1883 round 2): confirmed global rather than per-case is SAFE today — grepped
+    // every scripts/dev-harness/*/{inner-,}main.ts and cases.mjs, nothing else calls `.focus()` or
+    // depends on autofocus/`:hover`/`:focus-visible`, and the full 14-case suite re-ran clean with this
+    // enabled. It is a standing caveat for whoever adds the next case, though: a FUTURE case whose page
+    // autofocuses an element on load (no explicit `?focus=` param needed) will now engage
+    // `:focus-visible` styling where it previously would not have, simply because this flag makes
+    // `document.hasFocus()` true for every case's page, not just ones that ask for it.
     await client.send("Emulation.setFocusEmulationEnabled", { enabled: true });
 
     const results = [];

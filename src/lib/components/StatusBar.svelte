@@ -365,33 +365,93 @@
      157x52px -> the same 367.3x16px — both with `.git`/`.disk`/`.item-count`/`.selected-count` measured
      BYTE-FOR-BYTE identical to their unfocused rects (the span's own box, and therefore the row's flex
      layout, is never touched by any of this).
-     Known narrow edge case, measured and left open rather than silently hidden (out of THIS ticket's
-     scope — no AC covers it, and fixing it needs viewport-aware JS positioning, not a CSS tweak): at the
-     app's own 600px width floor WITH the full compound-busy row (every advisory note + a selection +
-     hidden-shown all crowded before this pill), `.filtered-hidden` sits far enough right that even this
-     367px box runs past the 600px viewport edge by ~100px — `body { overflow: hidden }` (app.css) clips
-     it rather than adding a scrollbar, so the tail of the sentence goes invisible in that one specific
-     combination. Every other measured combination (900px busy, either width uncrowded) stays fully
-     on-screen. */
+     ROUND 2 (Visual Critic UAT, real Chrome re-render of the shipped CSS at 600x26/900x26, both
+     themes) caught four more defects `npm run check`/jsdom structurally cannot see, all fixed here:
+       1. `left: 0` anchored the box's LEFT edge to the pill, so it grew RIGHTWARD — at the app's own
+          600px width floor WITH the full compound-busy row, that ran the box ~100px past the viewport
+          edge, and `body { overflow: hidden }` (app.css) silently clipped the SENTENCE'S TAIL — no
+          ellipsis, no scroll, just gone. Measured: "…their names could" visible, "not be shown safely"
+          not. That is WORSE than the original bug: the one-word-per-line column was ugly but showed
+          every word. Fixed by anchoring the opposite edge instead — `right: 0; left: auto` — so the box
+          grows LEFTWARD from the pill's right edge. Unconditional (not just a 600px media query): the
+          pill always sits in the right half of a busy row (after item-count/selected-count/hidden-shown,
+          before .git/.disk), so growing leftward runs over those ALREADY-TRUNCATED counts rather than
+          off the right edge of the window — see the ticket's work log for the re-measured on-screen
+          rects at both widths.
+       2. Vertical alignment: `top: 0` anchors to the pill's 16px text box, then this rule's own 2px
+          padding + the 1px ring pushed the visible box 5px down inside the 26px bar — measured
+          bottom-flush with the bar's own edge (0.5px clear below, 4.5px above), shadow dying into the
+          window boundary. `top: 50%; transform: translateY(-50%);` centres it in the bar instead,
+          matching how a deliberate popover reads rather than a mis-anchored one.
+       3. Dark-theme contrast: no `color` here means this inherits the PILL's `var(--accent)` — dark
+          `#0078e0` on `--surface #2b2b2b` measures 3.21:1 for a full sentence of 12px body text, under
+          the 4.5:1 AA floor (light is 5.5:1, fine). `--accent` is correctly a NON-text accent by design
+          (focus rings, icons — see `app.css.dark-contrast.test.ts:270`, which only asserts >=3:1 on
+          purpose), so that guard has no reason to catch a full sentence of body text using it — its
+          blind spot, same family as CPE-1919/CPE-1921 (also guard-blind color-as-text uses), not a bug
+          in the guard itself. The pill underneath KEEPS `--accent`/`--warn` (unaffected, still correct
+          for a short truncated label); only the reveal — precisely the low-vision affordance this whole
+          ticket is about — gets `color: var(--text)` instead.
+       4. `::after` is part of its originating element for hit-testing, so while focused this box (up to
+          367px wide) can paint over `.git`'s Pull/Push/Sync buttons and swallow their first click (it
+          blurs the note instead of pressing the button). `pointer-events: none` removes that entirely —
+          a hover/focus reveal has no interactive content of its own, so nothing is lost by letting
+          clicks fall through to whatever it's covering.
+     NOT changed, confirmed correct by the same UAT: `width: max-content` (still load-bearing, see
+     above), the 1px `--border-strong` ring — do NOT "simplify" that away, it is carrying ALL of the
+     visual separation in dark theme, where the box's `--surface` fill is only two steps off
+     `.statusbar`'s own `--surface` background and would otherwise read as barely-there. */
+  /* CPE-1883 round 2 fix, found capturing evidence for THIS round: `overflow: visible` here lets the
+     span's OWN raw text (still `white-space: nowrap`, unaffected by anything else in this rule) paint
+     unclipped past its own narrow box — with the original `left: 0` anchor that coincided with where the
+     `::after` box also grew (both rightward from the same point), so the opaque overlay happened to
+     cover it. `right: 0` (the round-2 fix above) grows the OVERLAY leftward while the raw underlying
+     text still flows rightward as always — the two no longer occupy the same horizontal range, so the
+     span's own unclipped text bleeds out to the right of the overlay, visible as a second, ellipsis-less
+     copy of the sentence in the pill's own colour. `color: transparent` removes it from view entirely
+     (safe for a11y the same way the rest of this component already treats colour-only hiding: the DOM
+     text node, the accessible name computed from it, and the separate always-mounted `.sr-only` live
+     region are all untouched by `color`) rather than trying to keep the overlay's geometry chasing the
+     raw text's, which — given the raw text has no width constraint of its own — cannot be made to work
+     in general. */
   .filtered-hidden:focus-visible,
   .unreadable:focus-visible {
     overflow: visible;
+    color: transparent;
   }
   .filtered-hidden:focus-visible::after,
   .unreadable:focus-visible::after {
     content: attr(data-reveal);
     position: absolute;
-    left: 0;
-    top: 0;
+    right: 0;
+    left: auto;
+    top: 50%;
+    transform: translateY(-50%);
     z-index: 1;
     display: inline-block;
     white-space: normal;
     width: max-content;
     max-width: min(90vw, 420px);
     background: var(--surface);
+    color: var(--text);
     border-radius: 4px;
+    /* Do not drop this ring — see the comment above: in dark theme it is the ONLY thing separating this
+       box from the bar behind it. */
     box-shadow: 0 0 0 1px var(--border-strong), 0 2px 6px rgba(0, 0, 0, 0.35);
     padding: 2px 4px;
+    /* CPE-1883 round 2: a hover/focus reveal has no interactive content of its own — without this, the
+       box (up to 367px wide) can sit over `.git`'s Pull/Push/Sync buttons while focused and swallow
+       their first click (it blurs the note instead of pressing the button underneath). Verified via a
+       real-Chrome hit-test sweep (`document.elementsFromPoint` over all three `.git-btn` centres at
+       900px busy): every button is topmost/reachable with this in place, none are shadowed by the
+       reveal.
+       Open question, not a regression, left unexamined rather than silently assumed either way: `::after`
+       generated content is not a text node, so it cannot be drag-selected, and the real `<span>`'s own
+       text sits UNDER this opaque overlay — whether a sighted mouse user can still select the sentence
+       by dragging across it is browser-dependent and untested here. Not a regression from this fix's own
+       baseline: pre-fix there was no readable box to select from in the first place (a one-word-per-line
+       column), so this doesn't take away a capability that existed before CPE-1883. */
+    pointer-events: none;
   }
 
   /* CPE-1833: the persistent announcer for both advisory notes. ALWAYS mounted (see the markup comment

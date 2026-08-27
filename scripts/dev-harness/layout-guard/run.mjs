@@ -104,16 +104,23 @@ function formatProblems(r) {
   for (const m of r.unpainted) lines.push(`    UNREACHABLE    ${m}`);
   for (const m of r.missing) lines.push(`    MISSING        ${m}`);
   for (const m of r.boundsViolations ?? []) lines.push(`    BOUNDS         ${m}`);
+  for (const m of r.offScreen ?? []) lines.push(`    OFF-SCREEN     ${m}`);
   return lines;
 }
 
-// CPE-1883: `rectBoundsInfo` is recorded whether its check passed or failed — printed unconditionally
-// (not gated on `problems.length > 0`) so a ticket's measured before/after numbers come straight out of
-// this console output instead of a bespoke one-off script.
+// CPE-1883: `rectBoundsInfo`/`pseudoOnScreenInfo` are recorded whether their check passed or failed —
+// printed unconditionally (not gated on `problems.length > 0`) so a ticket's measured before/after
+// numbers come straight out of this console output instead of a bespoke one-off script.
 function formatRectInfo(r) {
-  return (r.rectBoundsInfo ?? []).map(
+  const lines = (r.rectBoundsInfo ?? []).map(
     (m) => `    rect  ${m.selector} width=${m.width}px height=${m.height}px`,
   );
+  for (const m of r.pseudoOnScreenInfo ?? []) {
+    lines.push(
+      `    pos   ${m.selector} (${m.edge}:0) left=${m.left}px right=${m.right}px viewport=[0, ${m.innerWidth}]`,
+    );
+  }
+  return lines;
 }
 
 async function main() {

@@ -145,3 +145,111 @@ red-proofable by reverting the fix.
   the other 4 `StatusBar.*.test.ts` files (34 more tests): all green, unchanged. Screenshots (600px,
   busy row, both themes) at `.claude/sprint-metrics/visual-evidence/cpe-1883-{light,dark}-{before,
   after}.png`.
+
+- **2026-08-27 (round 2) — Worker, same branch.** Visual Critic + Reviewer UAT on PR #1045 both
+  fetched the shipped CSS and re-rendered it themselves in real headless Chrome, independent of my
+  screenshots. Findings and fixes, all measured before/after — commits before probing each time:
+
+  1. **Screenshot staleness (Critic blocker 1).** My round-1 "after" screenshots turned out to show a
+     REJECTED intermediate attempt (`position: absolute` directly on the span, before the final `::after`
+     pseudo-element design), not the shipped commit — a file-path/ordering slip while iterating through
+     three fix attempts and re-shooting screenshots each time, not a defect in the shipped code itself
+     (confirmed: the Critic's own from-source re-render matched my Work Log's numbers, not the stale
+     screenshots'). All four screenshots recaptured this round from the actual current source, with the
+     embedded harness diag inside each image cross-checked against the measured table below before
+     treating them as done.
+
+  2. **600px viewport overflow — real, and worse than the original bug (Critic blocker 2, confirmed by
+     Reviewer).** The shipped `left: 0` anchor grows the box RIGHTWARD; at the app's 600px width floor
+     with the full compound-busy row, that ran the box ~100px past the viewport edge, and
+     `body { overflow: hidden }` (app.css) silently clipped the sentence's TAIL — no ellipsis, no scroll,
+     no cue. Visible text: "4 entries were hidden because their names could" — "not be shown safely" simply
+     gone. Worse than the pre-fix column, which showed every word. **Fix**: `right: 0; left: auto`
+     (unconditional) — the pill always sits in the right half of a busy row, so the box now grows
+     LEFTWARD from the pill's right edge, which is always on-screen.
+     Re-measured, both widths, `scripts/dev-harness/layout-guard` (`statusbar-focus-reveal` case):
+
+     | width | box span | viewport | on-screen? |
+     |---|---|---|---|
+     | 600px busy | left=25.7 right=393.0 | [0, 600] | yes, fully |
+     | 900px busy | left=126.4 right=493.8 | [0, 900] | yes, fully |
+
+     Did NOT file a follow-up ticket for the clipping — the Foreman's instruction was to fix it outright
+     with `right: 0`, and it is now measured fully on-screen at both tested widths, so there is nothing
+     left to track.
+
+  3. **Vertical alignment (Critic).** Measured pre-fix: hairline top y=4.5, bottom y=25.5 in a 26px bar —
+     bottom-flush, shadow dying into the window edge. Cause: `top: 0` anchored to the pill's 16px text
+     box, then this rule's own 2px padding + 1px ring pushed the visible box 5px down. **Fix**:
+     `top: 50%; transform: translateY(-50%);` — centres the box in the bar.
+
+  4. **Dark-theme contrast (Critic).** No `color` here meant the reveal inherited the PILL's
+     `var(--accent)` — dark `#0078e0` on `--surface #2b2b2b` measured 3.21:1 for a full sentence of 12px
+     body text, under the 4.5:1 AA floor (light was 5.5:1, fine). `--accent` is correctly a non-text
+     accent by design (`app.css.dark-contrast.test.ts:270` only asserts >=3:1 on purpose — focus
+     rings/icons, not body text), so this is a **guard blind spot**, same family as **CPE-1919** and
+     **CPE-1921** (already filed) — colour-as-text uses the guard has no reason to catch. Not a bug in
+     the guard; a gap in what it was ever asked to cover. **Fix**: `color: var(--text)` on the `::after`
+     only — the pill underneath keeps `--accent`/`--warn`, correct for its own short truncated label.
+
+  5. **Click-swallow on `.git`'s Pull/Push/Sync buttons (Critic + independently, Reviewer's own CDP
+     hit-test probe).** `::after` is part of its originating element for hit-testing, so the reveal (up
+     to 367px wide) could sit over those buttons while focused and absorb their first click — confirmed
+     by the Reviewer at multiple widths, not only 600px as first assumed. **Fix**: `pointer-events: none`
+     on both `:focus-visible::after` rules. Re-verified via a real-Chrome hit-test sweep
+     (`document.elementsFromPoint` over each `.git-btn` centre at 900px busy): all three buttons are
+     topmost/reachable with the fix in place.
+
+  6. **New defect found capturing THIS round's own evidence, not flagged by either reviewer**: with
+     `right: 0` anchoring the overlay leftward while the base span's own (now-unclipped, `overflow:
+     visible`) raw text still flows rightward as always, the two no longer occupy the same horizontal
+     range — the span's raw text bled out to the right of the opaque overlay, visible as a second,
+     ellipsis-less copy of the sentence in the pill's own colour. **Fix**: `color: transparent` on the
+     base `:focus-visible` rule (span only; the `::after`'s own explicit `color: var(--text)` is
+     unaffected — pseudo-element colour is not "inherited transparency" once explicitly set). Safe for
+     AT the same way every other colour-only-hiding technique in this file already is: the DOM text node,
+     the accessible name computed from it, and the separate always-mounted `.sr-only` live region are
+     untouched by `color`.
+
+  7. **Red-proof narrative correction (Reviewer point #1)**: my round-1 Work Log claimed reverting the
+     WHOLE `::after` block reproduces "the documented 148px stacked column" — it does fail the guard, but
+     via the `0x0 / minWidth` "reveal vanished" path (the check is hard-wired to `pseudo: "::after"`,
+     which the pre-CPE-1883 rule doesn't have), not the actual stacked-column shape. Re-ran correctly
+     this time: removing ONLY `width: max-content` (keeping the rest of the `::after` architecture)
+     reproduces the real failure mode — `height=160.0px exceeds maxHeight=90px` **and**
+     `width=50.4px is below minWidth=100px` at 600px busy, both violations, matching the Reviewer's own
+     numbers exactly. Restored `width: max-content`, reran clean.
+
+  **CI guard extended**, not just re-verified — a new `pseudoOnScreen` check kind
+  (`scripts/dev-harness/layout-guard/engine.mjs`), added specifically to catch class 2 above happening
+  again. Went through two of its own corrections, each found by red-proofing it rather than trusting the
+  first version:
+    - v1 computed the pseudo's on-screen position from the check's own `edge` config field instead of
+      measuring it, so reverting the CSS anchor didn't change what got measured — it could never have
+      caught the regression it exists for. Fixed to read `getComputedStyle`'s actual resolved
+      `left`/`right`.
+    - v2 then assumed only ONE of computed `left`/`right` would resolve to a definite number — false:
+      BOTH resolve to definite numbers for a fully-determined absolutely-positioned box (the un-authored
+      side is algebraically derived, drifted ~8px from the authored anchor in testing). Fixed to trust
+      whichever side computes to (near) zero, since this CSS pattern always authors its anchor as an
+      exact `0` offset.
+  Both corrections were themselves found by red-proofing: reverting `right: 0` back to `left: 0` and
+  confirming the check actually goes red (it now does, at both widths — 600px shows a real viewport
+  overflow violation AND an anchor-direction mismatch; 900px shows the anchor-direction mismatch even
+  though that width happens not to overflow).
+
+  Also documented but not changed: `Emulation.setFocusEmulationEnabled` (engine.mjs) is enabled once
+  globally, not per-case — confirmed safe today (grepped every harness page, nothing else calls
+  `.focus()`), but noted as a standing caveat for a future autofocusing case. And an open, honestly
+  unexamined question in the CSS comment: `::after` generated content isn't a text node, so whether a
+  sighted mouse user can still drag-select the sentence (with the real span's text now sitting under an
+  opaque, non-drag-selectable overlay) is browser-dependent and untested — not a regression (pre-fix
+  there was no readable box to select from either), just unverified either way.
+
+  **Final verification**: `npm run check` clean. `npm run harness:layout-guard` 14/14 clean, including
+  the new `pseudoOnScreen` check at both widths. All 43 `StatusBar.*.test.ts` tests green, unchanged.
+  Screenshots recaptured from the actual final source and spot-verified two ways: visually (embedded
+  harness diag readout inside each PNG cross-checked against the table above) AND by decoding the raw
+  PNG pixel bytes directly (bypassing any viewer-side rendering) at several points inside the reveal box
+  — dark theme reads `[43, 43, 43]` (`--surface` dark), light reads `[255, 255, 255]`, both exactly
+  matching `getComputedStyle`'s own reported background for each theme.
