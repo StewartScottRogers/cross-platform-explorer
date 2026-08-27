@@ -1,7 +1,13 @@
-//! Slice B end-to-end (CPE-1058): drive the `verify-release-artifacts` binary exactly as `release.yml`
-//! does — a real `tauri.conf.json` (pubkey + version), a real `latest.json`, and a real artifact on disk,
+//! Slice B end-to-end (CPE-1058): drive the `verify-release-artifacts` binary over realistic inputs —
+//! a real `tauri.conf.json` (pubkey + version), a real `latest.json`, and a real artifact on disk,
 //! all encoded in the same double-base64 shape Tauri uses — and assert the binary's exit status. Proves
 //! the plumbing the unit tests can't reach: conf reading, artifact discovery by basename, and the exit code.
+//!
+//! CPE-1917: this file's argv is written by hand and does NOT track `release.yml`'s (it used to claim
+//! it did; see `run_repo_layout`). The workflow's own invocation — read out of the YAML and executed
+//! against a tree laid out by the workflow's own download step — is pinned in
+//! `tests/release_workflow_wiring.rs`. Keep the two concerns separate: this file is about what the
+//! binary does, that one is about what the release pipeline asks it to do.
 
 use std::process::Command;
 
@@ -76,6 +82,10 @@ fn run(dir: &std::path::Path) -> std::process::Output {
 /// working-directory, i.e. the repo root), `<root>/src-tauri/tauri.conf.json`, and the artifact under
 /// `<root>/src-tauri/target/...` — the same relative shape as `--conf src-tauri/tauri.conf.json`
 /// `--manifest latest.json` `--search src-tauri/target` run from the repo root (CPE-1872).
+///
+/// CPE-1917: that argv is CPE-1872's round-1 shape, not what `release.yml` runs today — see
+/// `run_repo_layout`'s own comment, and `tests/release_workflow_wiring.rs` for the argv the workflow
+/// actually uses, read from the YAML rather than restated here.
 fn scaffold_repo_layout(signed_bytes: &[u8], artifact_on_disk: &[u8]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -119,9 +129,18 @@ fn scaffold_repo_layout(signed_bytes: &[u8], artifact_on_disk: &[u8]) -> tempfil
     dir
 }
 
-/// Runs the binary exactly the way `release.yml` invokes it post-CPE-1872: from the repo root, with
-/// `--manifest` pointed at the known tauri-action write location instead of relying on `--search`
-/// discovery to stumble onto it.
+/// Runs the binary from the repo root with `--manifest` pointed at tauri-action's known write
+/// location instead of relying on `--search` discovery to stumble onto it.
+///
+/// CPE-1917, correcting this comment: it used to claim this was "exactly the way `release.yml`
+/// invokes it post-CPE-1872". That was true for one commit. CPE-1872 round 2 moved the check out of
+/// the matrix into the post-matrix `verify-published-manifest` job, which downloads the PUBLISHED
+/// manifest and its assets and runs `--manifest release-assets/latest.json --search release-assets`
+/// — and this hard-coded argv was never updated, so a test advertising itself as the workflow's
+/// mirror had quietly stopped tracking the workflow at all. What it still legitimately proves is the
+/// *binary's* behaviour when the manifest lives outside every `--search` dir, which is worth keeping
+/// on its own terms. The workflow's real argv is pinned — read out of `release.yml` and executed —
+/// in `tests/release_workflow_wiring.rs`.
 fn run_repo_layout(root: &std::path::Path) -> std::process::Output {
     Command::new(BIN)
         .current_dir(root)
@@ -191,9 +210,17 @@ fn manifest_at_repo_root_is_not_found_by_search_under_target_alone() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no latest.json found"));
 }
 
-/// CPE-1872 (GREEN, the fix): same repo-root layout, but invoked the way the fixed `release.yml` now
-/// invokes it — `--manifest latest.json` pointed straight at tauri-action's actual write location, run
-/// from the repo root. The signature must verify over the real artifact bytes under `src-tauri/target`.
+/// CPE-1872 (GREEN, round 1's fix): same repo-root layout, but with `--manifest latest.json` pointed
+/// straight at tauri-action's actual write location, run from the repo root. The signature must verify
+/// over the real artifact bytes under `src-tauri/target`.
+///
+/// CPE-1917 round 2 (Reviewer): this used to say "invoked the way the fixed `release.yml` now invokes
+/// it". It is not — today's invocation is `--manifest release-assets/latest.json --search
+/// release-assets` over assets downloaded from the draft release, and has been since CPE-1872 round 2
+/// moved the check into `verify-published-manifest`. Same species of stale provenance claim corrected
+/// elsewhere in this file; the workflow's real argv is read from the YAML and executed in
+/// `tests/release_workflow_wiring.rs`. What this test still proves on its own terms is that an
+/// explicit `--manifest` outside every `--search` dir is found and verified.
 #[test]
 fn manifest_at_repo_root_is_found_and_verified_via_explicit_manifest_flag() {
     let bytes = b"the real installer bytes";
