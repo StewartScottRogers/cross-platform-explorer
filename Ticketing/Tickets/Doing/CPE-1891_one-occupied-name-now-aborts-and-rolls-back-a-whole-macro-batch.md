@@ -3,7 +3,7 @@ id: CPE-1891
 title: one occupied name now aborts and rolls back a whole macro batch, with no way to say "yes, overwrite"
 type: bug
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: M
 created: 2026-08-25
