@@ -1806,11 +1806,11 @@ async function relaunch(s) {
   if (ok) $("history-overlay").hidden = true;
 }
 // --- Catalog refresh (CPE-374/376): fetch + apply the signed agent catalog, then re-render. ---
-// CPE-1911: "nothing changed" is NOT one situation — it's genuinely-current, a stale/broken
-// publishing pipeline, a corrupt/mis-signed publish, or an outright failed/offline fetch, and the
-// user must be able to tell those apart instead of always reading the same reassuring "up to date"
-// line. None of the "nothing changed" outcomes below are something the user needs to fix — their
-// existing agents are untouched and safe to use — so they render in the neutral "warn" colour, not
+// CPE-1911: "nothing changed" is NOT one situation — it's genuinely-current, a corrupt/mis-signed
+// publish, or an outright failed/offline fetch, and the user must be able to tell those apart
+// instead of always reading the same reassuring "up to date" line. The failure/corruption states
+// below are real "heads up" moments — their existing agents are untouched and safe to use, but
+// something about the *pipeline* needs a look — so they render in the neutral "warn" colour, not
 // the same red as an actionable error (review round 2).
 async function refreshCatalog() {
   closeManageMenu();
@@ -1829,12 +1829,23 @@ async function refreshCatalog() {
     } else if (r.indexOk && r.integrityRejected > 0) {
       // The index verified fine, but every listed entry failed its OWN integrity check (bad/missing
       // manifest signature, or content that doesn't match the index) — a corrupt or mis-signed
-      // publish, not "nothing to apply". Distinct from the anti-rollback/stale case below.
+      // publish, not "nothing to apply".
       setMsg("The published catalog looks corrupted or mis-signed, so nothing was installed. Your existing agents are untouched and safe to use — no action needed on your end.", "warn");
     } else if (r.indexOk && r.staleRejected > 0) {
-      // The index verified fine, but every entry is no newer than what's installed — the
-      // *published* catalog is stale, which is different from "you're current".
-      setMsg("The published catalog isn't newer than what's installed, so nothing changed. If this doesn't clear up on its own, the publishing pipeline may be stuck — no action needed on your end.", "warn");
+      // CPE-1911 review round 3: this used to warn "the publishing pipeline may be stuck", but that
+      // is NOT what staleRejected>0 means. anti-rollback (sidecar/host/src/catalog.rs,
+      // EntryVerdict::Rollback / is_upgrade_over) fires whenever a listed entry's version is not
+      // STRICTLY GREATER than what's installed — i.e. it can't tell "==" (you already have the
+      // latest — the routine, healthy outcome of checking again before the next release) from "<"
+      // (the index regressed to something older — genuinely broken). Under the release pipeline's
+      // timestamp-based versioning (.github/workflows/release.yml, VERSION=$(date +%s), stamped
+      // uniformly per run), "==" is the overwhelmingly common case: everyone who checks twice
+      // between releases hits this branch. So say only what's true in BOTH cases and diagnose
+      // neither, and treat it as the routine "you're current" outcome it almost always is — not a
+      // warning. A real fix needs sidecar/host/src/catalog.rs to report the regressed-vs-current
+      // distinction itself; that's a trust-engine change and deliberately out of scope for this PR
+      // (tracked as a follow-up ticket, filed separately).
+      setMsg("Nothing newer than what you have is currently published, so nothing was installed — your agents are unchanged.", true);
     } else if (r.indexOk) {
       setMsg("Agents are already up to date.", true);
     } else {

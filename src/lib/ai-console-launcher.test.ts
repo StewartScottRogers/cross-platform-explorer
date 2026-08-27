@@ -738,7 +738,14 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.style.color).toBe(GREEN);
     });
 
-    it("index verifies but every entry is no newer than installed — reports a stale published catalog, not 'up to date', in amber not red", async () => {
+    // CPE-1911 review round 3: anti-rollback (sidecar/host/src/catalog.rs) can't tell "you already
+    // have the latest" (==) from "the index regressed to something older" (<) — both produce
+    // staleRejected>0, and under the release pipeline's timestamp versioning, "==" (routine,
+    // healthy — you already checked since the last release) vastly outnumbers "<" (genuinely
+    // broken). So this branch must say only what's true in both cases, diagnose neither, and render
+    // calm (green), not amber — an amber "may be stuck" banner on every routine check is exactly
+    // the kind of alarm the user can't act on that this ticket exists to prevent.
+    it("index verifies but every entry is no newer than installed — states the fact without diagnosing a cause, calm not amber", async () => {
       const { w } = await mountLauncher((path) =>
         path === "/api/catalog/refresh"
           ? { indexOk: true, applied: 0, agents: 1, staleRejected: 2, integrityRejected: 0 }
@@ -746,9 +753,11 @@ describe("Agent Deck launcher — catalog controls", () => {
       );
       await w.refreshCatalog();
       const msg = w.document.getElementById("msg");
-      expect(msg.textContent).toMatch(/isn't newer than what's installed/i);
-      expect(msg.textContent).not.toBe("Agents are already up to date.");
-      expect(msg.style.color).toBe(AMBER);
+      expect(msg.textContent).toMatch(/nothing newer than what you have/i);
+      expect(msg.textContent).not.toMatch(/may be stuck/i);
+      expect(msg.textContent).not.toMatch(/isn't newer than what's installed/i); // the old, retracted wording
+      expect(msg.style.color).toBe(GREEN);
+      expect(msg.style.color).not.toBe(AMBER);
       expect(msg.style.color).not.toBe(RED);
     });
 
