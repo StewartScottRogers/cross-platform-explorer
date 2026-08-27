@@ -198,3 +198,55 @@ and "say nothing" — **the third option was not considered.**
   - Re-ran the full suite after every change: `cpe-server` (2397 tests), `cargo clippy --all-targets -D
     warnings` (both feature modes), `npm run check`, and the full `vitest` suite (4605/4607 — the same 2
     pre-existing unrelated `msrvSync.test.ts` failures as round 2). All green.
+- **2026-08-27 (round 4, Visual Critic, explicit 3-attempt-limit override) USMST** — **The coordinator
+  explicitly overrode their own stated 3-attempt review limit for this round and recorded why, here, so
+  the decision is checkable by someone who wasn't in the conversation (the gap CPE-1835 is open about):
+  each review round's findings have been strictly finer-grained than the last (round 2: docs + missing
+  remedies; round 3: layout/colour/headline; round 4: a count/row mismatch plus contrast measurements),
+  nothing has been RE-found across rounds, and two of round 4's five findings are correctness/
+  accessibility defects rather than taste — not a case of an open-ended review loop, a converging one.**
+  Findings and fixes:
+  1. **`Refused (N)` undercounted its own list whenever a genuine failure was mixed in with grouped
+     refusals** — the heading counted only `write_refusal.count` while the `<ul>` below it rendered ALL
+     of `summary.failures` (round 3's own doc comment said as much: "genuine failures AND grouped write
+     refusals together"). Root cause of round 3's finding 5 too (colour-only split in one shared list).
+     Fixed by splitting into two separately-headed boxes — `Failed (N)` (genuine, `--warn`) and
+     `Refused (N)` (grouped, `--text-dim`) — computed in `RevertOutcomePanel.svelte` as
+     `genuineFailures`/`groupedFailures`, filtered on `f.grouped` (still read off `write_refusal.paths`
+     membership, never `error`'s wording). Each box's own count is now exactly what it contains, and the
+     distinction between the two kinds is now structural (which box) rather than colour-dependent —
+     closing finding 5 as a side effect, as intended rather than accidentally: colour-only separation
+     measured hue-only at matched lightness in light theme (a colour-vision check away from invisible)
+     and INVERTED in dark theme (the quiet colour was the one row worth reading).
+  2. **The scroll region's default browser scrollbar thumb measured 2.24:1 on `--surface-alt` in light
+     theme** — below the WCAG 3:1 UI-component minimum, and the only remaining scroll cue there once the
+     half-clipped last row is discounted (dark theme measured 9.62:1, no problem). Styled explicitly:
+     `scrollbar-color`/`scrollbar-width` (Firefox) plus `::-webkit-scrollbar-*` (Chromium/WebView2, what
+     this app ships on) off `--border-strong`, which already clears 3:1 in both themes.
+  3. **Both the explanation paragraph and the list below it were labelled "Refused"** — the round-2 fix
+     for the held-back/write-refusal ambiguity reintroduced the identical ambiguity one box over. The
+     paragraph is now labelled `WHY`; the list keeps `Refused (N)`. Also: none of round 3's four
+     screenshots exercised the "Held back" box at all, so the original distinction was unverified by the
+     evidence — a new scenario (`held-back-and-refused`, both a held-back delete group AND a grouped
+     write refusal in the same result) was captured this round specifically to prove `Held back` and
+     `WHY`/`Refused (N)` read as distinct boxes side by side.
+  4. **The long-path-wrap fixture's 89-char hash fit the row width to the pixel and wrapped at a space
+     before an em dash — a separator, not inside the token** — so it proved the token doesn't overflow,
+     not that `overflow-wrap: anywhere` breaks mid-token. Lengthened to 124 characters (no separators);
+     re-captured, the wrap now lands inside the hash itself.
+  5. Closed by finding 1's split (see above), not by a colour swap — the coordinator's own call, made
+     explicitly so the reasoning survives without a follow-up question: "structural, not chromatic" beats
+     patching the colours again, since a THIRD colour pairing could just as easily fail a THIRD contrast
+     check in one theme or the other. The split makes the distinction visible in greyscale and to a
+     colour-vision-deficient reader without depending on hue at all.
+  - **Decided without a round-trip (per the coordinator, recorded here rather than re-litigated):** the
+    scroll region stays at ~10 rows / `max-height: 200px` as shipped — the Critic's own offered range was
+    6/10/16, and 10 was already built and keeps the explanation primary while the list still reads as
+    obviously substantial.
+  - **Housekeeping the coordinator did on their side, recorded so it isn't rediscovered as a mystery:**
+    the six `cpe-1881-*.png` working-tree files were stale pre-round-3 images sitting at the same paths
+    this PR adds — removed on the coordinator's end; this branch's committed versions are authoritative.
+  - Re-captured all six screenshots (the four from round 3, plus two new for finding 3's held-back
+    coexistence proof) via the same temporary, uncommitted harness pattern as round 3 (built fresh each
+    round, deleted after use). `npm run check` and the full `vitest` suite (4605/4607 — same 2
+    pre-existing unrelated `msrvSync.test.ts` failures) green; no Rust files touched this round.
