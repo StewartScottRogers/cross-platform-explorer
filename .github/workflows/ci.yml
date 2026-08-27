@@ -179,7 +179,84 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  lockfile-preflight:
+    # CPE-1932: this repo has 17 independent Cargo.lock files (9 of them pinning cpe-server), and
+    # every Rust job below runs `cargo ... --locked`, so a single stale lockfile is a hard failure.
+    # Discovering that serially — one stale lockfile per hour-long matrix run — is what this job
+    # exists to stop: `cargo metadata --locked` is RESOLVE-ONLY (no compilation), so checking every
+    # lockfile in the tree costs seconds, not an hour, and can report every stale file in one pass.
+    # `needs:` on the matrix jobs below makes that saving real — a repo-wide stale-lockfile problem
+    # is caught here before the expensive 3-OS builds even start, instead of alongside or after them.
+    #
+    # Lockfiles are enumerated with `git ls-files '*Cargo.lock'` — NEVER a hardcoded list. CPE-1932's
+    # own root cause was an enumeration failure, not a forgotten rule: a dependency bump regenerated
+    # the two lockfiles everyone remembered (`crates/server`, `src-tauri`) and both reviewers verified
+    # those two were fine — they were. Nothing asked "how many lockfiles are there", so the other
+    # seven (crates/ftp, crates/mdns, crates/net, crates/s3, crates/sftp, crates/vfs, crates/webdav)
+    # went unregenerated and unnoticed until CI hit them one at a time. Reading the list from
+    # `git ls-files` instead of memory means a new crate's lockfile is covered the day it lands,
+    # with no step here to update.
+    name: Lockfile pre-flight — cargo metadata --locked (no compilation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo metadata --locked over every Cargo.lock in the tree
+        shell: bash
+        run: |
+          set -uo pipefail  # deliberately no -e: one stale lockfile must not stop the sweep of the rest
+
+          mapfile -t locks < <(git ls-files '*Cargo.lock')
+          echo "Found ${#locks[@]} Cargo.lock file(s) via 'git ls-files *Cargo.lock':"
+          printf '  %s\n' "${locks[@]}"
+          echo
+
+          stale=()
+          for lock in "${locks[@]}"; do
+            dir="$(dirname "$lock")"
+            echo "::group::cargo metadata --locked -- ${dir}"
+            if cargo metadata --locked --format-version 1 --manifest-path "${dir}/Cargo.toml" > /dev/null 2>&1; then
+              echo "ok: ${lock} matches ${dir}/Cargo.toml"
+            else
+              echo "STALE: ${lock} does not match ${dir}/Cargo.toml"
+              stale+=("$lock")
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "${#stale[@]}" -gt 0 ]; then
+            echo
+            echo "::error::${#stale[@]} of ${#locks[@]} Cargo.lock file(s) are stale (Cargo.toml changed but the lockfile wasn't regenerated to match):"
+            for lock in "${stale[@]}"; do
+              echo "::error file=${lock}::${lock} is stale — its Cargo.toml no longer matches this lockfile"
+            done
+            cat <<'EOF'
+
+          To fix each file listed above: run `cargo metadata` (no arguments beyond that) in its
+          directory to regenerate the lockfile. That is resolve-only and picks the same dependency
+          versions your Cargo.toml change already implies.
+
+          Do NOT run `cargo update` to fix this — it re-resolves to the newest allowed versions of
+          EVERYTHING, turning a build fix into an unreviewed, unrelated dependency bump.
+
+          Format-version trap: regenerating can silently rewrite the lockfile's leading
+          `version = 3` to `version = 4` as a side effect, even though nothing about your change
+          asked for that. Diff the regenerated file — if only the version line moved and nothing
+          else you intended changed, that's suspicious; if the header bumped alongside real
+          dependency changes, revert the version line back to `3` by hand before committing
+          (CPE-1896 hit this twice).
+          EOF
+            exit 1
+          fi
+
+          echo
+          echo "All ${#locks[@]} Cargo.lock files are up to date with their Cargo.toml."
+
   backend:
+    needs: lockfile-preflight
     # Compile on every OS we actually SHIP. Linux alone never compiles
     # `#[cfg(windows)]` code or Windows-only deps (the registry crate), and
     # neither Linux nor Windows catches macOS-only breakage — yet release.yml
@@ -458,6 +535,7 @@ jobs:
     # `sidecar/contract`). Pure Rust, but we lint+test on every shipped OS to match the rest of
     # the Rust matrix.
     name: Server crates (${{ matrix.os }}) — clippy + test
+    needs: lockfile-preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -1386,6 +1464,7 @@ jobs:
     # validated cross-platform (CPE-302; first half of the CPE-272 delete-test guard —
     # the app CI here never references the sidecar crates, proving the one-way boundary).
     name: Sidecar platform (${{ matrix.os }}) — clippy + test
+    needs: lockfile-preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -1650,6 +1729,7 @@ jobs:
   # level up.
   msrv:
     name: MSRV (1.88.0) compiles on every manifest
+    needs: lockfile-preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
