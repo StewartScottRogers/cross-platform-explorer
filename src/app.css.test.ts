@@ -159,6 +159,43 @@ describe("app.css theme-token layering (CPE-1534)", () => {
 // and out of scope for CPE-1534 (a pure app.css refactor) — this is a growth guard, not a
 // zero-tolerance rule.
 const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
+
+// CPE-1931: a colour can only ever land in a `.svelte` file in a CSS value position — inside a
+// `<style>` block or an inline `style="..."` attribute. The pre-CPE-1931 matcher ran HEX_LITERAL
+// over the WHOLE FILE TEXT, comments included, so a `// PR #1044` or `<!-- see #1892 -->` counted
+// a ticket/PR reference as a hard-coded colour the moment its digits happened to all be valid hex
+// — which is every PR/ticket number from here on, now that this repo is in the CPE-1900s. Fixed by
+// narrowing the scan to the two places a colour can actually appear, and stripping CSS `/* */`
+// comments from each before matching (this file's own `stripComments` helper, reused rather than
+// re-derived, matches the same shape used above for app.css's own semantic-layer check).
+//
+// SVG icon `fill="#.."` / `stroke="#.."` are markup attributes, not `style=`, so they fall outside
+// this scan too — that is not a new exemption, just this file's existing "icons are intentional and
+// out of scope" note (above) now enforced structurally instead of by accident.
+const STYLE_BLOCK = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+const STYLE_ATTR = /\bstyle\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/gi;
+
+/** Every hex-literal match sitting in a real CSS value position in `.svelte` source: inside
+ *  `<style>` block bodies and inline `style="..."`/`style='...'` attribute values, each with CSS
+ *  comments stripped first so a comment inside a `<style>` block can't be miscounted either. */
+function hexColourSites(source: string): string[] {
+  const sites: string[] = [];
+  let m: RegExpExecArray | null;
+  const styleBlockRe = new RegExp(STYLE_BLOCK.source, STYLE_BLOCK.flags);
+  while ((m = styleBlockRe.exec(source)) !== null) {
+    const clean = stripComments(m[1]);
+    const hits = clean.match(HEX_LITERAL);
+    if (hits) sites.push(...hits);
+  }
+  const styleAttrRe = new RegExp(STYLE_ATTR.source, STYLE_ATTR.flags);
+  while ((m = styleAttrRe.exec(source)) !== null) {
+    const value = m[1] !== undefined ? m[1] : (m[2] ?? "");
+    const clean = stripComments(value);
+    const hits = clean.match(HEX_LITERAL);
+    if (hits) sites.push(...hits);
+  }
+  return sites;
+}
 // CPE-1810 ratcheted these down in two passes:
 //  1. Migrating AgentTimeline/ConsentSheet/ExplorerPane/ImageCompareView/SidecarManager off the
 //     undefined `--warn` token's `var(--warn, <hex>)` fallback idiom (onto the now-real
@@ -210,8 +247,25 @@ const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 //     of the five touched files (AgentTimeline/ConsultedFiles/FileList/BackupDashboard/
 //     SidecarManager) still carries unrelated hex literals out of this ticket's scope. Brought it to
 //     86/399 (423 − 24).
-const BASELINE_FILES_WITH_HEX = 86;
-const BASELINE_TOTAL_HEX_OCCURRENCES = 399;
+//  6. CPE-1931: the matcher above (steps 1-5) ran HEX_LITERAL over the raw WHOLE-FILE text,
+//     comments included, so a comment citing a ticket/PR number whose digits are all valid hex
+//     (`PR #1044`, and every `#19NN` ticket from here on) counted as a hard-coded colour. This
+//     stopped being a hypothetical the moment the repo's ticket numbers crossed into all-hex
+//     territory: it sent PR #1044 red on two comments, not a colour, in the CPE-1900s. Replaced the
+//     whole-file scan with `hexColourSites()` (above), which only looks where a colour can actually
+//     land — `<style>` block bodies and inline `style="..."` attribute values — stripping CSS
+//     comments from each first, so a `/* ... #1044 ... */` inside a `<style>` block can't be
+//     miscounted either. Re-baselined from scratch per the ticket's explicit instruction (recount,
+//     don't patch the old total forward by subtracting the two known false positives — CPE-1922's
+//     failure mode): walked every `.svelte` file fresh with the new matcher. Icon.svelte dropped out
+//     of the "has hex" set entirely — its hex was always in SVG `fill=`/`stroke=` attributes, never
+//     a `style=` value, so it was never really in this ratchet's stated scope (consistent with this
+//     file's pre-existing "icons are intentional and out of scope" note above — now enforced
+//     structurally instead of by luck). New baseline: 85 files / 276 occurrences (399 − 123; the gap
+//     is comments, doc examples, and non-`style=` attributes the old whole-file regex was never
+//     entitled to count as colours).
+const BASELINE_FILES_WITH_HEX = 85;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 276;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -228,16 +282,55 @@ describe("component hard-coded-hex ratchet (CPE-1534)", () => {
     let filesWithHex = 0;
     let totalOccurrences = 0;
     for (const f of files) {
-      const matches = readFileSync(f, "utf8").match(HEX_LITERAL);
-      if (matches && matches.length) {
+      const hits = hexColourSites(readFileSync(f, "utf8"));
+      if (hits.length) {
         filesWithHex++;
-        totalOccurrences += matches.length;
+        totalOccurrences += hits.length;
       }
     }
-    expect(filesWithHex, "files containing a hard-coded hex literal").toBeLessThanOrEqual(BASELINE_FILES_WITH_HEX);
-    expect(totalOccurrences, "total hard-coded hex literal occurrences").toBeLessThanOrEqual(
+    expect(filesWithHex, "files containing a hard-coded hex literal in a style position").toBeLessThanOrEqual(
+      BASELINE_FILES_WITH_HEX,
+    );
+    expect(totalOccurrences, "total hard-coded hex literal occurrences in style positions").toBeLessThanOrEqual(
       BASELINE_TOTAL_HEX_OCCURRENCES,
     );
+  });
+});
+
+// CPE-1931: lock in hexColourSites()'s two directions directly, on synthetic input, rather than
+// relying on the whole-repo count above to happen to exercise both. A regression in either
+// direction is dangerous in a different way: missing a real `<style>` hex silently lets new
+// hard-coded colour ship (the growth guard goes blind); counting a comment's ticket/PR reference
+// re-breaks CI on every future ticket number, which is the exact defect this ticket exists to fix.
+describe("hexColourSites() matches only CSS value positions (CPE-1931)", () => {
+  it("still catches a hard-coded hex literal inside a <style> block", () => {
+    const svelte = `<div class="x" />\n<style>\n  .x { color: #ff00aa; }\n</style>\n`;
+    expect(hexColourSites(svelte)).toEqual(["#ff00aa"]);
+  });
+
+  it("still catches a hard-coded hex literal inside an inline style= attribute", () => {
+    const svelte = `<div style="background: #123456;" />\n`;
+    expect(hexColourSites(svelte)).toEqual(["#123456"]);
+  });
+
+  it("does not count a PR/ticket reference in a // comment as a colour", () => {
+    const svelte = `<script>\n  // PR #1044 review round 2\n</script>\n<div />\n`;
+    expect(hexColourSites(svelte)).toEqual([]);
+  });
+
+  it("does not count a PR/ticket reference in an <!-- --> comment as a colour", () => {
+    const svelte = `<!-- see #1892 for context -->\n<div />\n`;
+    expect(hexColourSites(svelte)).toEqual([]);
+  });
+
+  it("does not count a /* */ comment inside a <style> block as a colour", () => {
+    const svelte = `<style>\n  /* was #1044, migrated off */\n  .x { color: var(--text); }\n</style>\n`;
+    expect(hexColourSites(svelte)).toEqual([]);
+  });
+
+  it("does not count an SVG fill=/stroke= attribute (out of this ratchet's scope, same as Icon.svelte)", () => {
+    const svelte = `<svg><path fill="#ffd166" stroke="#e0a800" /></svg>\n`;
+    expect(hexColourSites(svelte)).toEqual([]);
   });
 });
 
