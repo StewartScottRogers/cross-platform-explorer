@@ -3504,9 +3504,26 @@ fn extract_zip_stream(
 /// reason. Rare, loud rather than silent, and the same trade CPE-1896 recorded for the backup
 /// destination.
 ///
-/// **What is still by path:** the `#[cfg(unix)]` permission pass at the bottom, which `set_permissions`
-/// each written path after the loop. It can only affect names this loop already wrote *beneath the
-/// root*, so it cannot move bytes; it is noted because it is the last path-addressed write here.
+/// # What is still addressed BY PATH in this loop — two things, and the first doc of this said one
+///
+/// Round 1 called the permission pass "the last path-addressed write here". That was wrong, and PR
+/// #1050's Reviewer and Security Auditor found the two halves of why. Both are **unchanged from
+/// `main`** — this PR neither introduced nor worsened either — and both are recorded rather than
+/// claimed away, because a doc that says the loop is clean is worse than no doc.
+///
+/// 1. **The symlink-entry branch.** An entry that declares itself a link goes to
+///    [`materialise_entry_symlink`], which calls `create_entry_symlink` and, on a retry,
+///    `fs::remove_file` — **both by path**. It is not converted because it is not a byte write: there
+///    is no handle to open, and `symlinkat`/`unlinkat` relative to the parent handle are primitives
+///    [`crate::open_beneath`] does not have yet. Its own containment question ([`link_target_action`],
+///    CPE-1774) is unchanged and still runs before it.
+/// 2. **The `#[cfg(unix)]` permission pass at the bottom**, which `set_permissions` each written path
+///    after the loop, with the mode the *archive* chose. It cannot move bytes — every path in `modes`
+///    is one this loop already wrote beneath the root — but `set_permissions` **follows links**, so a
+///    racing component swap between the write and the pass could apply an archive-chosen mode,
+///    **setuid bits included**, to a path outside the root. Raised by PR #1050's Security Auditor;
+///    byte-identical to `main`, unverified on Windows (the pass does not compile there), and out of
+///    this ticket's scope, but it is a real residual and not an inert tail.
 fn extract_zip_archive_stream(
     archive: &mut zip::ZipArchive<fs::File>,
     dest: &Path,
@@ -4356,6 +4373,95 @@ mod tests {
             fs::read(&slot).ok().as_deref(),
             Some(&b"OUTSIDE CONTENT"[..]),
             "HARM: the slot was written too — the skip must land before any byte moves"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1913 round 2, security-audit finding F1: a directory junction at a FILE entry's name is a
+    /// per-entry skip, not a whole-run abort — and the rest of the archive still extracts.**
+    ///
+    /// Round 1 made this a regression on Windows, and only on Windows. The leaf open carries
+    /// `FILE_NON_DIRECTORY_FILE`, so a junction sitting at `note.txt` comes back
+    /// `STATUS_FILE_IS_A_DIRECTORY` — nothing link-shaped — and the unclassified refusal was
+    /// `policy: false`, which this loop turns into `return Err`. Measured by the Security Auditor on a
+    /// two-entry zip:
+    ///
+    /// ```text
+    /// main   Ok((done 1, skipped 1, [...is a link...]))   second entry delivered = true
+    /// branch Err("...could not be opened for writing")    second entry delivered = FALSE
+    /// ```
+    ///
+    /// Containment was never affected — 7,890 planted-link trials, zero escapes — so this is
+    /// availability and a half-extracted folder, not an escape. It is still attacker-triggerable with
+    /// the same precondition as the original bug, which is why it is fixed rather than recorded.
+    ///
+    /// **The bystander assertion is the whole test.** `ok.txt` is what separates "skipped the poisoned
+    /// entry" from "abandoned the run"; a check on the refusal alone would have passed throughout the
+    /// regression, because the refusal was there — it just took the archive down with it.
+    ///
+    /// Windows-gated: on Unix a directory at a leaf is refused by `child_file`'s `EISDIR` and a symlink
+    /// by `link_at`, which has always classified correctly. This is the arm that had no classifier.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1913_a_junction_at_a_file_entrys_name_skips_that_entry_and_extracts_the_rest() {
+        let d = scratch("cpe1913-zip-leaf-junction");
+        let dest = d.join("out");
+        let elsewhere = d.join("elsewhere");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        // The junction stands where the archive's `note.txt` entry wants to land.
+        if !crate::fsutil::make_dir_link(&elsewhere, &dest.join("note.txt")) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1913_a_junction_at_a_file_entrys_name_skips_that_entry_and_extracts_the_rest: \
+                 could not stage a directory link. NOTHING on this run covered the leaf-junction \
+                 abort regression"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let stage = d.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("note.txt"), b"ARCHIVED NOTE").unwrap();
+        fs::write(stage.join("ok.txt"), b"ARCHIVED OK").unwrap();
+        let archive = d.join("in.zip");
+        compress_to_zip(
+            &[
+                stage.join("note.txt").to_string_lossy().to_string(),
+                stage.join("ok.txt").to_string_lossy().to_string(),
+            ],
+            &archive.to_string_lossy(),
+        )
+        .unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = extract_archive_streamed(
+            &archive.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &cancel,
+            |_| {},
+        );
+
+        // HARM FIRST: nothing may have gone through the junction.
+        assert!(
+            !elsewhere.join("note.txt").exists() && fs::read_dir(&elsewhere).unwrap().count() == 0,
+            "HARM: the extraction wrote through the junction standing at the entry's own name: \
+             {outcome:?}"
+        );
+        let report = outcome.expect(
+            "a link at ONE entry's name is a per-entry skip — aborting costs the user every other \
+             entry and leaves a half-extracted folder (CPE-1913 round 2, F1)",
+        );
+        assert_eq!(report.skipped, 1, "the poisoned entry must be counted as skipped: {report:?}");
+        assert!(
+            report.errors.iter().any(|e| e.contains("is a link (a symlink, junction or other reparse point)")),
+            "and refused as a LINK, which is what it is — an unclassified 'could not be opened' is the \
+             refusal that carried policy: false and took the run down: {report:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("ok.txt")).ok().as_deref(),
+            Some(&b"ARCHIVED OK"[..]),
+            "THE POINT: a skip costs ONE entry. ok.txt missing means the run was abandoned: {report:?}"
         );
         let _ = fs::remove_dir_all(&d);
     }

@@ -260,3 +260,201 @@ wins the window is reported as a success. Same shape as CPE-1896, four more plac
   (they share `entry_sink_action` and both need a third-party unpacker replaced) and one for
   **`copilot::apply_op`** (which needs `renameat`/`unlinkat` in `open_beneath` first, and is worth
   filing as that primitive rather than as the call site).
+
+## Round 2 — PR #1050: Reviewer CHANGES REQUESTED (3 findings) + Security Auditor (1 to fix, 3 filed), UAT PASS
+
+- **2026-08-27 (Worker) — the enumeration in this ticket was WRONG, and correcting it is the first
+  entry because it changes what the PR claims. There are SEVEN legs, not five.** The Security Auditor
+  found the two this ticket never listed, and one of them is destructive and reaches outside the root:
+
+  | leg | status after round 2 |
+  |---|---|
+  | `transfer::download_tree` | converted |
+  | `revert_engine::apply_write` | converted |
+  | `archive::extract_zip_archive_stream` | converted |
+  | `archive::tar_unpack_with` | deferred — third-party unpacker |
+  | `archive::extract_7z_safe`/`_stream` | deferred — third-party unpacker |
+  | `copilot::apply_op` | deferred — needs `renameat`/`unlinkat` |
+  | **`revert_engine::apply_delete`** | **deferred → CPE-1937.** Not in the original five at all. |
+  | **`snapshot_capture::restore`** | **deferred → CPE-1937.** Not in the original five at all. |
+
+  **`apply_delete` is the worst of the eight and this ticket never mentioned it.** It resolves by path
+  through `safe_target` → `confined_to` → `fs::remove_file`, and `confined_to` cannot see a junction
+  pointing *inside* the root. The Reviewer staged the static case — one `RestoreOp::Delete`, a junction
+  `<dest>/sub -> <dest>/other`, and `RestoreReport { applied: 1, skipped: [], held_back: None }` with a
+  bystander destroyed. The Auditor then raced it: **596 bystander files destroyed OUTSIDE the root
+  across 200 trials**, every one counted in `applied`, none skipped, no error. That is this ticket's own
+  silent-success shape at a *destructive* leg, and the Foreman has raised **CPE-1937** for it.
+  `snapshot_capture::restore` has the same shape (public API, no production caller, verified by grep)
+  and is recorded there too.
+
+  Round 1's Work Log said "all five still had the defect; none had been fixed incidentally", which was
+  true and beside the point: the enumeration itself was short. The lesson is the one this repo keeps
+  paying for — an enumeration taken from the ticket rather than derived from the code is a claim about
+  the ticket, not about the crate. The table above is derived from every call site that mutates a path
+  under a user-chosen root, not from the five the ticket named.
+
+- **2026-08-27 (Worker) — FINDING A (Reviewer): I turned a fail-closed into a fail-open, and nothing
+  pinned it. Fixed and red-proofed.**
+
+  Every question in `claim_destination_handle` — surrogate, `is_dir`, `links > 1` — sits inside
+  `if let Some(facts) = handle_facts(&w)`. Round 1 gave it no `else`, so a `None` fell straight through
+  **to the write**. The code round 1 deleted refused on exactly this condition: `transfer`'s
+  `NameLinks::Unknown` went to `undelivered`, `archive`'s `entry_slot_action` `Unknown` arm aborted, and
+  the deleted test's own doc read *"a gate that cannot tell must REFUSE… It is a fail-open here, where
+  the bytes have not moved."* Moving the question onto the handle was right; dropping its "cannot tell"
+  answer with it was not.
+
+  - **The arm carries `policy: false`, which is a deliberate departure from the `policy: true` the
+    review suggested, and the reason is consistency rather than preference.** Both deleted arms *failed
+    the call*; `policy: true` would make this a per-entry skip the run still reports `Ok` for. One of
+    those arms is still live — the tar and 7z legs go on aborting through `entry_sink_action`'s
+    `Unknown` arm, pinned by `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`
+    — so a zip entry that skipped where a tar entry aborts would be a new disagreement inside one module
+    about one condition, and it would weaken CPE-1709 F1's rule that a file the user asked for and did
+    not get must not leave the transfer `Ok`. This restores the deleted behaviour exactly rather than
+    approximately.
+  - **Pinned through a new seam, for the reason its two siblings exist.**
+    `ProbeInjection::HandleUndescribable` makes `handle_facts` return `None` on both platform arms;
+    neither `GetFileInformationByHandle` on a handle the OS just returned nor `File::metadata` on a live
+    fd can be made to fail on a filesystem a test can reach. Two tests, at the two legs where the harm
+    is visible: `transfer::…cpe_1913_a_destination_whose_handle_cannot_be_described_is_never_written_through`
+    (fixture is a real hard link to a file outside the download folder) and
+    `archive::…cpe_1913_an_undescribable_destination_handle_aborts_the_zip_extraction` (fixture is an
+    ordinary occupied slot, deliberately: nothing about it is a link, so the cannot-describe arm is the
+    only thing that can refuse it).
+  - **Red-proof.** Deleting the `else` arm: **2 FAILED**, and the red is the HARM assertion, not the
+    verdict —
+    `Ok(DownloadReport { files: 1, skipped: [] })` with the outside file overwritten by the remote
+    server's bytes. Restored: 2415 passed.
+  - **The compiler now holds the invariant.** `written` is declared `let written: Option<…>;` with no
+    initialiser, so the `else` arm cannot be made to fall through again without a compile error. A
+    `= None` default would have compiled silently. One consequence, stated at the site:
+    `CopiedOnto::written` can no longer be `None` on any production path, so
+    `backup::landed_inside`'s `written == None` branch is now a directly-unit-tested backstop rather
+    than a reachable one. Kept, not deleted — it is data flow, not a guard.
+  - **Both false comments corrected.** `batch_media.rs`'s `NameLinks` doc claimed `transfer` records
+    `Unknown` in `undelivered` "matching `LeafProbe::Uninspectable`" — `LeafProbe` is gone and neither
+    converted leg asks that function any more; it now says where those two gates went and that the
+    outcomes are deliberately unchanged. The `#[cfg(not(any(windows, unix)))]` arm's *"fail closed on a
+    platform whose identity model this module does not know"* was backwards about the **consumer**:
+    `None` is a value, and whether it fails closed is decided where it is read. Reworded as an
+    obligation on the reader, which is where it actually lives.
+
+- **2026-08-27 (Worker) — FINDING B (Reviewer): the directory guard was red-proofed only in the
+  direction already covered. Fixed; it now reddens on its own sabotage.**
+
+  Round 1's table claimed the harm tests reddened on "+ `create_dir_beneath` → `create_dir_all`". That
+  sabotage was **cumulative** with the `create_beneath` one. Applied alone the Reviewer measured
+  **1 FAILED** — `row18`, the outside case that was already covered — with all four CPE-1913/1912 harm
+  tests green. The cause was fixture shape: the only directory entry in either fixture was `sub/`
+  itself, which already exists *as the junction*, so a by-path `create_dir_all` had nothing to build on
+  the far side and left no debris to assert on.
+
+  Both fixtures now carry a **nested** directory entry — `stage/sub/deeper/` in the archive, a
+  `sub/deeper` dir row in `OneNestedFile::list` — and both harm tests assert
+  `!elsewhere.join("deeper").exists()` with a message that says why a directory entry's harm is invisible
+  to the file assertion beside it (`create_dir_all` is not destructive; it silently builds the tree's
+  *shape* somewhere the user never named, and the deeper the tree the more of it goes out there).
+
+  **Re-measured after the fix: sabotaging `create_dir_beneath` ALONE now reddens 3 tests, was 1** —
+  `row18` plus both new inside-the-root harm tests. Restored: green.
+
+- **2026-08-27 (Worker) — FINDING F1 (Security Auditor): a link at a file entry's name aborted the run
+  where `main` skipped the entry. Fixed, Windows-only, and it was a regression I introduced.**
+
+  The Windows leaf open carries `FILE_NON_DIRECTORY_FILE`, so a **directory junction sitting at a file
+  entry's name** comes back `STATUS_FILE_IS_A_DIRECTORY` — nothing link-shaped — and the unclassified
+  refusal was `Refusal::failure`, `policy: false`. `archive` turns that into `return Err` and `transfer`
+  into `undelivered`. The `claim_destination_handle` arms that would have said `policy: true` are
+  unreachable on Windows, because the open never returns a handle to reach them with. Measured, 2-entry
+  zip:
+
+  ```text
+  main   Ok((done 1, skipped 1, [...is a link...]))   second entry delivered = true
+  branch Err("...could not be opened for writing")    second entry delivered = FALSE
+  ```
+
+  Containment was never affected — 7,890 planted-link trials, zero escapes — so this was availability
+  and a half-extracted folder. Still attacker-triggerable on the original bug's precondition, so fixed
+  rather than recorded.
+
+  - **Classified by asking the filesystem, never the errno**, which is this module's standing rule and
+    the reason `link_at` exists on the Unix side. On leaf-open failure the walk makes one more
+    `NtCreateFile` — same parent handle, same single component, but as a *directory* and still
+    `FILE_OPEN_REPARSE_POINT` — and asks the resulting handle `name_surrogate_at`. One syscall, on a
+    path that is already refusing.
+  - **Only the LINK case becomes a policy skip.** A plain directory at the leaf keeps `policy: false`,
+    because `main` aborts for that too and widening it would be a behaviour change beyond the
+    regression. **Foreman: this is the answer to your CPE-1935 question — I fixed the link case and
+    deliberately left the plain-directory case aborting, so CPE-1935's "the abort is pre-existing" claim
+    is correct for a read-only or directory occupant and should be narrowed to exclude a link at the
+    leaf, which this PR no longer aborts on.**
+  - It also restores **parity with the Unix arm**, which has always classified a symlink at the leaf
+    through `link_at` and refused it with `refuse_link`. This was a per-platform divergence, not only a
+    regression.
+  - **Pinned and red-proofed.** `archive::…cpe_1913_a_junction_at_a_file_entrys_name_skips_that_entry_and_extracts_the_rest`
+    asserts the bystander entry `ok.txt` still extracted — which is the whole test, because a check on
+    the refusal alone passed throughout the regression: the refusal was there, it just took the archive
+    down with it. Forcing the classifier to `false` reddens it with the verbatim regression
+    (`Err("…could not be opened for writing (Access is denied…)")`); restored, green.
+
+- **2026-08-27 (Worker) — what the Security Auditor established that this branch did NOT have to fix,
+  recorded because it is the evidence the core claim rests on.** It ran its harness against
+  `origin/main` **first** to prove the harness was live — on main all three converted legs redirect
+  through an inside-pointing junction and report success; on this branch all six cases (3 legs ×
+  outside/inside) refuse loudly, naming the component, with the refusal reaching the caller's report.
+  Then: **1,120 race trials, ~19,000 hostile links planted, 0 escapes.** The double-rename swap that
+  opened CPE-1896 lands 21/250 on main at the zip leg, 35/250 at download, 10/250 at revert-write, and
+  **0/250 on each** here; a junction raced into the exact directory name being created, 15,048 planted
+  over 60 trials × 40 levels, is 12/60 on main and **0** here; 26 hostile entry names (`..`, UNC,
+  `\?\`, `NUL`, `:stream`, U+202E, trailing dot/space) put **zero bytes outside**. It also confirmed
+  independently that no `policy: true` site can present a *failure* as a *skip*: every one is a
+  pre-write verdict with the handle dropped and no bytes moved.
+
+  Filed by the Foreman, not fixed here: **CPE-1937** (`apply_delete` and `snapshot_capture::restore`).
+  **F4, the tar residual, is now measured rather than reasoned** — `Ok((done 1, skipped 0, errors []))`
+  while the victim holds the archive's payload — and is **byte-identical on `main` and this branch**, so
+  this PR neither fixed nor worsened it. The 7z leg is **inferred, not demonstrated**: it shares the
+  code path but the auditor could not craft a `.7z` fixture on this machine and said so. Both are stated
+  that way in `src/docs/safety-undo.md` rather than rolled together.
+
+- **2026-08-27 (Worker) — the three wording corrections.**
+
+  - **D.** `extract_zip_archive_stream`'s doc called the `#[cfg(unix)]` permission pass "the last
+    path-addressed write here". False twice over, and both halves are now written out: the
+    **symlink-entry branch** calls `materialise_entry_symlink` → `create_entry_symlink`/`fs::remove_file`
+    **by path** (not converted, because it is not a byte write — `symlinkat`/`unlinkat` relative to the
+    parent handle are primitives `open_beneath` does not have), and the permission pass itself
+    **follows links**, so a racing component swap between the write and the pass could apply an
+    archive-chosen mode — **setuid bits included** — to a path outside the root. Both unchanged from
+    `main`; recorded rather than claimed away, because a doc that says the loop is clean is worse than
+    no doc.
+  - **E.** The PR body's reason for deferring Copilot — "not a byte-writing leg at all" — was
+    inaccurate: `FileOp::Copy` copies content through `copy_file_into_claimed_slot`/`copy_recursive`,
+    with interior components resolved by path. The **decision** to defer stands; the real reason is that
+    four of its five ops (`mkdir`, `rename`, `move`, `trash`) are name operations needing
+    `renameat`/`unlinkat`, so converting only the copy arm would leave the leg half-safe under one
+    guard. Corrected in the PR body and in the "what was left" entry above.
+  - **F.** Doc rot from round 1's deletions, all fixed: two unresolved intra-doc links in `transfer.rs`
+    (`LeafProbe::PreExistingSymlink`, `classify_ancestor_probe`), `backup.rs`'s list of sibling
+    resolve-then-write legs (which still described `download_tree` as walking ancestors with
+    `classify_ancestor_probe`, and now also names `apply_delete` as the one that genuinely still
+    belongs there), and two stale claims in `fsutil.rs` — the `classify_ancestor_probe` contrast, and
+    `confined_to`'s "containment has one answer in this crate, and it is here", which is now qualified
+    to *path* questions with the four handle-question callers named.
+
+- **2026-08-27 (Worker) — one note the Reviewer raised and did not require.** The transfer harm test
+  accepts `Ok(r).skipped` **or** `Err(e)`, so it alone does not pin skip-vs-fail at that leg. Left as
+  written: the property is pinned by
+  `cpe_1913_a_destination_whose_handle_cannot_be_described_is_never_written_through` (must be `Err`) and
+  `cpe_1913_the_path_probe_injections_can_no_longer_blind_the_transfer_hard_link_gate` (must be `Ok`
+  with one `skipped`), which are the two sides of it. Narrowing the harm test would pin the bucket in a
+  test whose subject is the bytes.
+
+- **2026-08-27 (Worker) — round 2 guardrails.** `cargo test` in `crates/server`: **2416 passed, 0
+  failed, 10 ignored**. `cargo clippy --all-targets -- -D warnings` clean in plain, `--features index`
+  and `--features specta`, **and** on `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin` through the
+  extraction harness — regenerated for round 2, because F1 added Windows-only code to the arm the
+  harness exists to check, and proved red first again before its green was trusted. `cargo check` clean
+  in `src-tauri`; `npm run check` 0/0; docs guard tests green.

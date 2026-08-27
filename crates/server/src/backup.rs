@@ -590,11 +590,16 @@ fn landed_inside(
 /// - `archive::entry_sink_action` / `entry_dir_action` — resolve **every intermediate component** via
 ///   [`crate::fsutil::confined_to`], and deliberately *before* their `create_dir_all(parent)` for the
 ///   same no-debris reason as check (1) above (CPE-1744/CPE-1759).
-/// - `transfer::download_tree` — walks the ancestors with its own `classify_ancestor_probe` before
-///   `create_dir_all`, which is where its deliberately different `NotADirectory` stance comes from
-///   (CPE-1742).
-/// - `revert_engine::apply_write` — asks [`crate::fsutil::confined_to`] before `create_dir_all` and
-///   before touching the blob source (CPE-1750).
+/// - `transfer::download_tree` — **no longer in this list** (CPE-1913). It walked the ancestors with
+///   its own `classify_ancestor_probe` before `create_dir_all`, which is where its deliberately
+///   different `NotADirectory` stance came from (CPE-1742); it now opens the download folder once and
+///   resolves every component against that handle, exactly as this function does, so it has no
+///   ancestor walk and no `create_dir_all` left to run one before.
+/// - `revert_engine::apply_write` — **also no longer in this list** (CPE-1913), for the same reason and
+///   in the same way. It asked [`crate::fsutil::confined_to`] via `safe_target` before `create_dir_all`
+///   and before touching the blob source (CPE-1750); it now asks `open_beneath`. Its sibling
+///   `revert_engine::apply_delete` still does resolve by path and **is** still in this list — see
+///   CPE-1937, which measured that leg destroying bystander files outside the root.
 /// - `copilot::apply_op` — asks it on every path field of every op, final component included.
 /// - `batch_media` — resolves the computed `out_dir` against the input's directory rather than
 ///   comparing text, after PR #828 measured the text fast path being bypassed three ways (CPE-1623).

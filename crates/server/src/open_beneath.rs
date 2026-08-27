@@ -642,11 +642,61 @@ mod sys {
             Ok(file) => Ok(Opened { file, created: true }),
             Err(_) => match nt_child(parent, last, access, FILE_OPEN, options) {
                 Ok(file) => Ok(Opened { file, created: false }),
-                Err(s) => Err(refuse(
-                    root,
-                    &sofar,
-                    &format!("could not be opened for writing ({})", io_err(s)),
-                )),
+                // **Classify before refusing — CPE-1913 round 2, security audit finding F1.**
+                //
+                // The open above carries `FILE_NON_DIRECTORY_FILE`, so a **directory junction sitting
+                // at a file entry's name** comes back `STATUS_FILE_IS_A_DIRECTORY` rather than as
+                // anything link-shaped, and an unclassified refusal here is `policy: false` — which
+                // `archive` turns into `return Err` (the whole extraction aborts, leaving a
+                // half-extracted folder) and `transfer` turns into `undelivered` (the whole call ends
+                // `Err`). On `main` the same fixture was a **per-entry skip**: `Ok`, one entry
+                // reported, every other entry still delivered. Measured by PR #1050's Security
+                // Auditor over 7,890 planted links — containment was never affected, but one junction
+                // named like any entry in the archive could abort the run.
+                //
+                // The `claim_destination_handle` arms that would have said `policy: true` for this —
+                // the surrogate check and `facts.is_dir` — are unreachable on Windows, because the
+                // open never returns a handle to reach them with. `fsutil`'s own comment says so.
+                // So the classification has to happen here, where the failure is.
+                //
+                // **Asked of the filesystem, never of the errno**, which is this module's standing
+                // rule (see `link_at` on the Unix side and the ENOTDIR/ELOOP measurements that put it
+                // there). A second `NtCreateFile` — same parent handle, same single component, but as
+                // a *directory* and still `FILE_OPEN_REPARSE_POINT` — either yields a handle we can
+                // ask [`name_surrogate_at`], or does not, and either way nothing is written and the
+                // entry is refused. It costs one syscall on a path that is already refusing.
+                //
+                // **Only the LINK case becomes a policy skip. A plain directory at the leaf keeps
+                // `policy: false`**, deliberately: `main` aborts for that too (`fs::File::create` on
+                // a directory is a hard error at every one of these call sites), so widening it would
+                // be a behaviour change beyond the regression this fixes, and CPE-1935 records the
+                // plain-directory abort as pre-existing. This restores parity with the Unix arm as
+                // well, which has always classified a symlink at the leaf through `link_at` and
+                // refused it with `refuse_link`.
+                Err(s) => {
+                    let dir_options = NTCREATEFILE_CREATE_OPTIONS(
+                        FILE_DIRECTORY_FILE.0
+                            | FILE_OPEN_REPARSE_POINT.0
+                            | FILE_SYNCHRONOUS_IO_NONALERT.0,
+                    );
+                    let is_link = nt_child(
+                        parent,
+                        last,
+                        FILE_ACCESS_RIGHTS(FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0),
+                        FILE_OPEN,
+                        dir_options,
+                    )
+                    .is_ok_and(|d| name_surrogate_at(&d));
+                    if is_link {
+                        Err(refuse_link(root, &sofar))
+                    } else {
+                        Err(refuse(
+                            root,
+                            &sofar,
+                            &format!("could not be opened for writing ({})", io_err(s)),
+                        ))
+                    }
+                }
             },
         }
     }

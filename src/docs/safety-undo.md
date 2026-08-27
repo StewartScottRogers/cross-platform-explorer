@@ -149,11 +149,12 @@ Three details are worth knowing, because they are deliberate:
     with source and destination swapped) — and there, the destination is your **live** file tree, where
     a pre-existing second name is more likely than on a fresh backup destination.
 
-- **Three more operations write the same careful way now: extracting an archive, downloading a folder
-  from a server, and reverting to a checkpoint** (CPE-1913). They all used to check where a file was
-  going and then, some moments later, write it by name — the same shape the backup job had. Each now
-  opens the folder you chose once and opens every folder along the way *inside the one before it*,
-  refusing any shortcut it meets, and asks about the destination file itself rather than about its name.
+- **Three more operations write the same careful way now: extracting a `.zip`, downloading a folder
+  from a server, and putting a checkpoint's *file contents* back** (CPE-1913). They all used to check
+  where a file was going and then, some moments later, write it by name — the same shape the backup job
+  had. Each now opens the folder you chose once and opens every folder along the way *inside the one
+  before it*, refusing any shortcut it meets, and asks about the destination file itself rather than
+  about its name.
   - **What this refuses that it used to allow.** A folder shortcut — a junction or symbolic link —
     sitting inside your extraction folder, your download folder, or the folder you are reverting, now
     stops the entries underneath it instead of silently sending them somewhere else. **Including one
@@ -168,10 +169,17 @@ Three details are worth knowing, because they are deliberate:
   - **New failure mode, small but real:** these three now need to be able to *open* the folder you
     chose, not only write into it. A folder that can be written but not opened used to work and now
     fails with a message saying so. It is rare and it is loud rather than silent.
-  - **Not yet converted, and named rather than implied:** extracting a `.tar`, `.tar.gz` or `.7z`
-    archive still uses the older by-name check, and so does the AI Copilot's apply step. Both still
-    refuse a shortcut that leads *outside* the folder you chose — that guard is unchanged and has been
-    there since earlier work — but neither can see one that points at a different folder *inside* it.
+  - **Not yet converted, and named rather than implied.** All of these still use the older by-name
+    check. It refuses a shortcut leading *outside* the folder you chose — unchanged, and there since
+    earlier work — but none of them can see one pointing at a different folder *inside* it:
+    - extracting a `.tar`, `.tar.gz` or `.7z` archive;
+    - the AI Copilot's apply step;
+    - **the part of a revert that DELETES files.** Worth saying separately, because it is the one that
+      destroys rather than writes: a revert removes files the checkpoint says should not be there, and
+      a folder shortcut inside the folder being reverted can point those deletions at a different
+      folder. Measured on the current code: files that nothing in the plan named were deleted and the
+      revert reported complete success. It is tracked for a fix, and it is not fixed here — the
+      paragraph above covers a revert *writing a file's contents back*, not this.
 
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you

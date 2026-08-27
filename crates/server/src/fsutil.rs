@@ -3789,8 +3789,18 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 /// `parent_confined` that inspected only the path's *parent* chain and treated a dangling link's
 /// `NotFound` as "this name does not exist yet", so it answered *confined* for `root/dangling`,
 /// `root/dangling/x.txt` and `root/live` while this function answers *not confined* for all three. If a
-/// fifth copy is ever proposed, that measurement is the reason not to write one: containment has one
-/// answer in this crate, and it is here. **Extend this; do not fork it.**
+/// fifth copy is ever proposed, that measurement is the reason not to write one: for a guard that has
+/// to answer about a **path**, containment has one answer in this crate and it is here.
+/// **Extend this; do not fork it.**
+///
+/// **What CPE-1913 changed, since "one answer in this crate" is no longer the whole picture.** Three
+/// write legs — `backup::copy_one_verified`, `transfer::download_tree`, `revert_engine::apply_write` —
+/// and the zip extraction loop stopped asking a path question at all: they open the destination one
+/// component at a time against a held root handle ([`crate::open_beneath`]) and ask the **handle** what
+/// it got. That is strictly better where it applies, because it is atomic with the open, and it is not
+/// a fifth copy of this walk — it is a different question. This function remains the right and only
+/// answer for every caller that must judge a path *before* it acts and has no handle to ask:
+/// `copilot::apply_op`, `revert_engine::apply_delete`, `archive`'s tar and 7z legs, and the rigs.
 ///
 /// # Containment is not equality, and the difference is the whole ticket
 ///
@@ -3835,9 +3845,11 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 ///    (`root/link/x` where `link` points outside), which needs neither `..` nor an absolute path and is
 ///    invisible to any purely textual check.
 /// 2. On `NotFound` — **or `NotADirectory`, CPE-1742 round 4: a component below a plain file cannot
-///    exist either, so the same reasoning applies** (see the guard's own inline comment for why this is
-///    a deliberately different stance from `transfer.rs`'s `classify_ancestor_probe`, which treats the
-///    same `ErrorKind` as "stop, do not step over") — drop the last component and try again. The
+///    exist either, so the same reasoning applies** — drop the last component and try again. The
+///    contrast this used to draw, against `transfer.rs`'s `classify_ancestor_probe` treating the same
+///    `ErrorKind` as "stop, do not step over", is **gone with that function** (CPE-1913):
+///    `download_tree` no longer walks ancestors by path at all, so there is no second stance left to
+///    differ from. The reasoning below stands on its own and always did. The
 ///    components dropped this way provably **do not exist**, so none of them can be a symlink, so
 ///    nothing about them can redirect the path elsewhere — which is why appending them back to a
 ///    contained ancestor is sound without further checks. The probe is normalised through

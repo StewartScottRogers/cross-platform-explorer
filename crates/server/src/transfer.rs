@@ -2099,13 +2099,16 @@ mod tests {
     /// **This exercises only the traversal branch of the three security refusals** (PR #894 UAT,
     /// CPE-1712 fold-in): traversal names, a pre-existing symlink, and an uninspectable ancestor. It is
     /// not a happy-path assertion — it mixes a refused entry with a deliverable one and pins `n == 1`, so
-    /// it does distinguish the two categories — but a future change that moved
-    /// [`LeafProbe::PreExistingSymlink`] into `undelivered` would still pass THIS test alone, because it
-    /// never exercises that branch. [`cpe_1712_a_preexisting_symlink_refusal_still_reports_ok`] below
-    /// closes that gap (unix-gated: creating a symlink on Windows needs admin/developer-mode). The third
-    /// category, an uninspectable ancestor, is covered at the classifier level by
-    /// [`classify_ancestor_probe`]'s own tests — see `cpe_1696_an_uninspectable_ancestor_level_is_never_
-    /// treated_as_absent`.
+    /// it does distinguish the two categories — but a future change that moved the pre-existing-symlink
+    /// refusal into `undelivered` would still pass THIS test alone, because it never exercises that
+    /// branch. [`cpe_1712_a_preexisting_symlink_refusal_still_reports_ok`] below closes that gap
+    /// (unix-gated: creating a symlink on Windows needs admin/developer-mode).
+    ///
+    /// **The third category no longer exists as a category** (CPE-1913). "An uninspectable ancestor"
+    /// was `classify_ancestor_probe`'s verdict, and that classifier is gone with the by-path ancestor
+    /// walk it served: `download_tree` no longer inspects an ancestor before writing, because it no
+    /// longer writes by path. A component it cannot open now stops the entry structurally, inside
+    /// `open_beneath`'s walk, and there is no "keep climbing" branch left to classify.
     #[test]
     fn cpe_1709_a_security_refusal_still_reports_ok() {
         let base = std::env::temp_dir().join(format!("cpe-1709-refusal-{}", std::process::id()));
@@ -2122,7 +2125,10 @@ mod tests {
     /// The second of the three security-refusal categories (PR #894 UAT fold-in, closed while touching
     /// this file for CPE-1712): a pre-existing leaf symlink must be SKIPPED, not delivered and not
     /// treated as an undelivered failure — `n == 1` (only the legitimate file) with the transfer still
-    /// `Ok` is what proves `LeafProbe::PreExistingSymlink` stayed out of `undelivered`. Unix-gated for
+    /// `Ok` is what proves the pre-existing-symlink refusal stayed out of `undelivered` — a property
+    /// that outlived the guard that used to carry it: since CPE-1913 the refusal comes from the write
+    /// handle (`open_beneath`'s `O_NOFOLLOW` leaf, classified by `link_at`) rather than from a
+    /// `LeafProbe`, and this test is what pins that the *bucket* did not change with it. Unix-gated for
     /// the same reason `download_tree_does_not_follow_a_preexisting_symlinked_leaf_on_write` is: creating
     /// a symlink on Windows needs admin/developer-mode privilege this CI runner does not have.
     #[cfg(unix)]
