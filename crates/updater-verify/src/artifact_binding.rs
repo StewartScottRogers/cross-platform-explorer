@@ -716,12 +716,16 @@ mod tests {
     /// 0, which is the assertion below going red.
     #[test]
     fn the_real_published_manifest_yields_exactly_five_channel_offenders_for_the_sidecar_job() {
-        // Exactly as `release-sidecar.yml` invokes it: --conf is the BASE (plain) config.
-        let offenders = crate::platforms_with_mismatched_channel(
-            &live_manifest_json(),
-            crate::Channel::Sidecar,
-            "Cross-Platform Explorer",
-        );
+        // CPE-1933: this used to hard-code `Channel::Sidecar` + "Cross-Platform Explorer" under a
+        // comment claiming it was "Exactly as `release-sidecar.yml` invokes it". That was the
+        // fourth copy of the same untested provenance claim in this crate, and the sweep that found
+        // the other three missed it for one reason: the claim starts with a capital E and the grep
+        // was case-sensitive. Both halves are now read out of the real files, so the workflow
+        // changing its `--expect-channel` or pointing `--conf` at the sidecar overlay reds this
+        // test instead of leaving it asserting a shape that no longer ships.
+        let (channel, product_name) = sidecar_jobs_real_channel_check();
+        let offenders =
+            crate::platforms_with_mismatched_channel(&live_manifest_json(), channel, &product_name);
         let mut named: Vec<&str> = offenders.iter().map(|(p, _)| p.as_str()).collect();
         named.sort_unstable();
         assert_eq!(
@@ -765,6 +769,90 @@ mod tests {
                 "{platform} must be named as a SIDECAR asset"
             );
         }
+    }
+
+    /// The `(channel, --conf productName)` pair `release-sidecar.yml`'s verify step actually runs
+    /// its channel-purity check with — **read out of the workflow and the config it names**, never
+    /// restated here (CPE-1933).
+    ///
+    /// The pairing is the load-bearing part and the one a well-meaning "fix" breaks: the sidecar job
+    /// asks for `--expect-channel sidecar` while pointing `--conf` at the BASE
+    /// `src-tauri/tauri.conf.json`, whose `productName` is the PLAIN one. It needs that file for the
+    /// pinned pubkey and the version, which the sidecar overlay (a partial) does not carry. Point
+    /// `--conf` at the overlay instead and the channel classifier reads every honest sidecar asset as
+    /// plain, rejecting 100% of real sidecar releases (CPE-1908) — while a hard-coded copy of this
+    /// pair sat here going green.
+    ///
+    /// Scanned via [`crate::workflow_scan`], so a `--expect-channel` sitting in a comment or a
+    /// heredoc body cannot be mistaken for the live flag.
+    fn sidecar_jobs_real_channel_check() -> (crate::Channel, String) {
+        let repo_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+
+        let workflow = repo_root.join(".github").join("workflows").join("release-sidecar.yml");
+        let text = std::fs::read_to_string(&workflow)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", workflow.display()));
+
+        let invocations: Vec<String> = crate::workflow_scan::logical_lines(&text)
+            .into_iter()
+            .filter(|l| l.contains("--bin verify-release-artifacts"))
+            .collect();
+        assert_eq!(
+            invocations.len(),
+            1,
+            "release-sidecar.yml must invoke verify-release-artifacts exactly once; found {}. \
+             None means the sidecar release gate is gone entirely.",
+            invocations.len()
+        );
+
+        let toks: Vec<String> = invocations[0]
+            .split_whitespace()
+            .map(|t| t.trim_matches(|c| c == '"' || c == '\'').to_string())
+            .collect();
+        let flag = |name: &str| -> Option<String> {
+            let hits: Vec<usize> =
+                toks.iter().enumerate().filter(|(_, t)| t.as_str() == name).map(|(i, _)| i).collect();
+            assert!(hits.len() <= 1, "release-sidecar.yml passes {name} {} times", hits.len());
+            hits.first().and_then(|i| toks.get(i + 1)).cloned()
+        };
+
+        let channel_arg = flag("--expect-channel").expect(
+            "release-sidecar.yml no longer passes --expect-channel. CPE-1894's channel-purity check \
+             then has nothing to check against on the channel that actually reaches users, and the \
+             five plain assets this test counts would ride out unflagged.",
+        );
+        let channel: crate::Channel = channel_arg.parse().unwrap_or_else(|_| {
+            panic!("release-sidecar.yml passes --expect-channel {channel_arg:?}, which this crate's \
+                    own FromStr rejects -- the workflow and the binary disagree (CPE-1908)")
+        });
+        assert_eq!(
+            channel,
+            crate::Channel::Sidecar,
+            "release-sidecar.yml is expected to check the SIDECAR channel; it now asks for \
+             {channel_arg:?}. If that is deliberate, this whole fixture (five PLAIN offenders in a \
+             sidecar manifest) is measuring the wrong thing and must be rewritten, not re-pointed."
+        );
+
+        let conf_rel = flag("--conf").expect("release-sidecar.yml passes no --conf");
+        let conf_path = repo_root.join(&conf_rel);
+        let conf_text = std::fs::read_to_string(&conf_path).unwrap_or_else(|e| {
+            panic!("release-sidecar.yml points --conf at {conf_rel}, which cannot be read: {e}")
+        });
+        let conf: serde_json::Value = serde_json::from_str(&conf_text).expect("conf json");
+        let product_name = conf["productName"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{conf_rel} declares no productName"))
+            .to_string();
+        assert!(
+            !product_name.to_ascii_lowercase().contains("sidecar"),
+            "release-sidecar.yml's --conf ({conf_rel}) now declares productName {product_name:?}, \
+             which reads as the SIDECAR product. The job must pass the BASE (plain) config: the \
+             plain token is a strict prefix of the sidecar one, so anchoring on a sidecar \
+             productName makes every plain asset look legitimate and this check reports 0 offenders \
+             on a manifest that really has five (SEC-2, CPE-1908)."
+        );
+
+        (channel, product_name)
     }
 
     /// This repo's real `latest.json`, as published on the `v0.57.69-sidecar` release. Reproduced

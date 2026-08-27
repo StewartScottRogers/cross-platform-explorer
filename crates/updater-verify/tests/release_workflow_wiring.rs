@@ -93,41 +93,29 @@ fn workflow_text(file: &str) -> String {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
-/// The workflow's lines with **comment-only lines blanked** (kept, not removed, so line indices and
-/// backslash continuations still line up).
+/// The workflow's **logical shell lines**: `#` comments stripped (quote-, escape- and word-boundary
+/// aware), backslash continuations joined, heredoc bodies skipped.
 ///
 /// CPE-1933: every scanner below anchors on a substring — `gh release download`,
-/// `--bin verify-release-artifacts`. A *comment* containing that substring is then parsed as if it
-/// were the real thing. This is not hypothetical: `release-sidecar.yml` has two prose comments
-/// (`:665`, `:734`) that mention `gh release download` while discussing it, and extending this guard
-/// to that workflow without this filter parses them as calls. The same trap sank the sibling
-/// derivation in `src/lib/components/MacroRunConfirm.test.ts` (CPE-1928/PR #1056): a comment sitting
-/// between the anchor and the real code, quoting the *old* value, passes silently. Anchor on code,
-/// never on text that a comment can also contain.
+/// `--bin verify-release-artifacts`. A *comment* containing that substring is otherwise parsed as if
+/// it were the real thing. Not hypothetical: `release-sidecar.yml` has two prose comments (`:665`,
+/// `:734`) that mention `gh release download` while discussing it, and a `<<'EOF'` heredoc at `:71`.
 ///
-/// One rule covers both comment kinds here, because a `#` line inside a `run: |` block is a *shell*
-/// comment and a `#` line outside one is a *YAML* comment, and neither is ever the invocation.
-fn code_lines(text: &str) -> Vec<&str> {
-    text.lines()
-        .map(|l| if l.trim_start().starts_with('#') { "" } else { l })
-        .collect()
-}
-
-/// Collapse a backslash-continued shell command starting at `lines[start]` into one logical line.
-fn logical_line(lines: &[&str], start: usize) -> String {
-    let mut out = String::new();
-    let mut i = start;
-    loop {
-        let raw = lines[i].trim_end();
-        let body = raw.strip_suffix('\\').unwrap_or(raw);
-        out.push_str(body.trim());
-        out.push(' ');
-        if !raw.ends_with('\\') || i + 1 >= lines.len() {
-            break;
-        }
-        i += 1;
-    }
-    out
+/// This delegates to [`cpe_updater_verify::workflow_scan`] rather than filtering here. CPE-1933's
+/// first draft did filter here, and blanked only comment-*only* lines — so a **trailing** comment
+/// walked straight through it:
+///
+/// ```text
+/// --expect-url-prefix "https://…/${TAG}/"  # was: --expect-channel sidecar
+/// ```
+///
+/// read the flag out of the comment and passed, which is PR #1056's hole reproduced in the very
+/// assertion written to close it. The repo already had the right stripper
+/// (`src/lib/shellScriptLines.ts`, extracted at CPE-1849 and hardened through CPE-1908 rounds 2/3
+/// precisely so a second hand-rolled one could not disagree with it); `workflow_scan` is its Rust
+/// port, pinned to it by a shared case file.
+fn logical_lines(text: &str) -> Vec<String> {
+    cpe_updater_verify::workflow_scan::logical_lines(text)
 }
 
 /// Split a shell-ish command into tokens, dropping the quoting around each one. No token in the
@@ -151,14 +139,12 @@ fn tokens(line: &str) -> Vec<String> {
 /// next tag with no artifact bytes to verify: the identical class of outage this file exists to
 /// prevent, and a hole the Reviewer walked straight through.
 fn download_calls(wf: &str, text: &str) -> Vec<(bool, String)> {
-    let lines = code_lines(text);
+    let lines = logical_lines(text);
     let calls: Vec<(bool, String)> = lines
         .iter()
-        .enumerate()
-        .filter(|(_, l)| l.contains("gh release download"))
-        .map(|(i, _)| {
-            let line = logical_line(&lines, i);
-            let toks = tokens(&line);
+        .filter(|l| l.contains("gh release download"))
+        .map(|line| {
+            let toks = tokens(line);
             let dir = toks
                 .iter()
                 .position(|t| t == "--dir")
@@ -206,12 +192,10 @@ fn download_dir(wf: &str, text: &str) -> String {
 
 /// The argv `wf` hands to `verify-release-artifacts`, `${REPO}`/`${TAG}` resolved.
 fn verify_argv(wf: &str, text: &str) -> Vec<String> {
-    let lines = code_lines(text);
-    let hits: Vec<usize> = lines
+    let lines = logical_lines(text);
+    let hits: Vec<&String> = lines
         .iter()
-        .enumerate()
-        .filter(|(_, l)| l.contains("--bin verify-release-artifacts"))
-        .map(|(i, _)| i)
+        .filter(|l| l.contains("--bin verify-release-artifacts"))
         .collect();
     assert_eq!(
         hits.len(),
@@ -221,7 +205,7 @@ fn verify_argv(wf: &str, text: &str) -> Vec<String> {
          that is the union of all three legs, and reported success on it); none means the release \
          gate is gone entirely."
     );
-    let toks = tokens(&logical_line(&lines, hits[0]));
+    let toks = tokens(hits[0]);
     let dashdash = toks
         .iter()
         .position(|t| t == "--")

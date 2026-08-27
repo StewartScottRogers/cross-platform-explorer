@@ -687,10 +687,14 @@ fn run_expecting_channel(dir: &Path, tag: &str, channel: &str) -> Output {
 /// The real sidecar release shape: plain `productName` in `--conf`, `--expect-channel sidecar`,
 /// genuine sidecar-named assets including the versionless macOS one. Must pass whole.
 ///
-/// CPE-1933: this used to say "invoked exactly as `release-sidecar.yml` invokes it". It is not --
-/// the real job also passes `--manifest release-assets/latest.json`, and this helper's `--search`
-/// points at a tempdir rather than the job's staging directory. The claim was untested by
-/// construction and drifting. The workflow's actual argv is now derived from
+/// CPE-1933: this used to say "invoked exactly as `release-sidecar.yml` invokes it". It is not.
+/// The divergence that matters is `--skip-pin-check`: this helper passes it (its fixtures sign with
+/// a throwaway keypair unrelated to the repo's real pinned pubkey) and the real job must **never**
+/// pass it, because on the tag path that flag would disarm the CPE-1873 pubkey/endpoints pin on the
+/// one invocation guarding a real release. `--search` also points at a tempdir here rather than the
+/// job's staging directory. The claim was untested by construction and already inaccurate. The
+/// workflow's actual argv — including an assertion that it never passes `--skip-pin-check` — is now
+/// derived from
 /// `.github/workflows/release-sidecar.yml` and executed against a scaffolded release in
 /// `tests/release_workflow_wiring.rs`; what this test contributes is the richer *fixture* (three
 /// platforms, RPM and versionless-macOS naming), which is worth keeping on its own terms.

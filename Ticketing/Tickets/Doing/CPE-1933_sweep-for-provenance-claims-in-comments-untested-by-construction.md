@@ -64,88 +64,137 @@ built the deriving guard).
 
 ## Work Log
 
-**2026-08-27 — swept, classified, derived the two highest-blast-radius, filed the rest as CPE-1950.**
+**2026-08-27 — swept, classified, derived the high-blast-radius set, filed the rest as CPE-1950.**
+**Round 2 (Reviewer: three blockers) — re-swept case-insensitively, replaced the hand-rolled comment
+stripper with the repo's existing one, and corrected a false justification.**
 
 ### How the enumeration was done (not from memory)
 
-The ticket's seed grep returned **550** hits — far too many, and mostly noise, because `same as ` and
-`mirrors ` match ordinary design-kinship prose. So the sweep ran in three widening/narrowing passes:
+The ticket's seed grep returned **550** hits — mostly noise, because `same as ` and `mirrors ` match
+ordinary design-kinship prose. The sweep ran in three passes, and then a fourth after review:
 
 1. **Seed**, verbatim from the ticket: 550 hits across `*.rs|*.ts|*.mjs|*.svelte`.
 2. **Broadened** the phrasing to 30 patterns once the real hits were visible — adding `identical to`,
    `copied from`, `verbatim`, `byte-identical`, `lifted from`, `parity with`, `must match`,
    `same list/set/order/values as`, `reproduces`, `duplicates`, `1:1 with`, `same argv/flags`,
-   `char-for-char`, `keep in sync` — and widened the file set to `*.js|*.yml|*.yaml|*.toml`
-   (the seed's file list omits **workflows**, which is exactly where CPE-1872's defect lived).
-   Excluded `node_modules`, `target`, `dist`, and the generated `bindings.gen.ts`: **1,583** hits.
-3. **Narrowed to the defect shape.** The dangerous class is not "mirrors X" in general — it is a
-   comment claiming a concrete artifact *here* reproduces one in *another named file*. Stripping the
-   `path:lineno:` prefix (so the grep's own filename does not match the filter) and keeping only hits
-   whose **comment body** names a file, workflow, or lockfile: **156** candidates across 118 files.
+   `char-for-char`, `keep in sync` — and widened the file set to `*.js|*.yml|*.yaml|*.toml`.
+   Excluded `node_modules`, `target`, `dist`, `bindings.gen.ts`: **1,583** hits.
+3. **Narrowed to the defect shape** — a comment claiming a concrete artifact *here* reproduces one in
+   *another named file*. Stripping the `path:lineno:` prefix (so the grep's own filename does not
+   match the filter) and keeping only hits whose **comment body** names a file, workflow or lockfile:
+   **156** candidates across 118 files, each read and classified.
+4. **Round 2: re-ran pass 2 with `-i`.** All 30 phrasings were lower-case, and this repo's comments
+   start sentences: "Mirrors…", "Must match…", "Verbatim from…", "Exactly as…". Case-insensitively:
+   1,807 raw hits, and pass 3 yields **215 candidates — a delta of 57 in 56 files** that the sweep
+   as first run **could not reach**. Eight of the 57 are HARD, including a **fourth** copy of the
+   exact claim this ticket exists to kill, in the same crate as the other three
+   (`artifact_binding.rs:719`, "Exactly as `release-sidecar.yml` invokes it") — missed for one
+   reason: a capital E.
 
-Those 156 were then classified individually: **12 HARD**, **4 already derived / self-annulled**,
-**108 SOFT (not defects)**. The full breakdown is in the PR body.
+Final classification across both passes: **20 HARD**, **7 already derived / self-annulled**,
+**150 SOFT (not defects)**. Full breakdown in the PR body.
+
+**Correcting a claim this Work Log itself made.** Round 1 justified widening the file set by saying
+the seed "omits `*.yml`, which is exactly where CPE-1872's defect lived". That is **false**, and it
+was itself a provenance claim of the kind this ticket exists to eliminate. CPE-1872's stale claims
+lived in `crates/updater-verify/tests/release_guard.rs` — a `.rs` file the seed already covered; the
+workflow was only the *referenced* file. Measured: the seed missed them because of **phrasing and
+line-wrapping** (`"same as "` is present at `:815` but wrapped as `same\n/// as`, and grep is
+line-based; `"exactly as"` was never in the seed at all). The file-set widening contributed **0 of
+the 20 HARD hits** — every one is `.rs`, `.ts` or `.svelte`. Broadening the phrasings was the right
+move; the reason given for it was not.
 
 ### What was derived
 
-**1. Release plumbing — three live claims about `release-sidecar.yml` (highest blast radius).**
-`release_guard.rs:815`, `release_guard.rs:854` and `hostile_manifests.rs:687` each claimed a
-hard-coded argv reproduced the sidecar job's. CPE-1917 corrected one comment in this very file and
-left these three. Two were **already false**: the real job also passes `--manifest
-release-assets/latest.json` and `--expect-url-prefix`, neither of which
-`run_with_expect_channel` passes at all — CPE-1872's decay, again, in the same crate.
+**1. Release plumbing — four claims about `release-sidecar.yml` (highest blast radius).**
+`release_guard.rs:815`, `release_guard.rs:854`, `hostile_manifests.rs:687` and (round 2)
+`artifact_binding.rs:719` each claimed a hard-coded argv or argument pair reproduced the sidecar
+job's. CPE-1917 corrected one comment in this same crate and left these four.
 
-Extended `crates/updater-verify/tests/release_workflow_wiring.rs` (CPE-1917's proven pattern) to read
-**`release-sidecar.yml`** as well as `release.yml`: 6 new tests that derive the download dir and the
-verify argv from the workflow and **execute the real binary** with them. The load-bearing invariant
-is the *pairing* — `--conf` at the BASE plain-productName `tauri.conf.json` **together with**
-`--expect-channel sidecar` — which is what a well-meaning "fix" would break while every hard-coded
-unit test stayed green. The three prose claims now point at the derivation and say what they still
-prove on their own terms.
+Three were **already inaccurate**, in two different ways:
+- `release_guard.rs`'s `run_with_expect_channel` passes neither `--manifest` nor
+  `--expect-url-prefix`, both of which the real job passes.
+- `hostile_manifests.rs`'s `run_expecting_channel` *does* pass `--manifest` (to a tempdir); its real
+  divergence is **`--skip-pin-check`**, which it passes and the workflow must never pass — that flag
+  would disarm the CPE-1873 pin on the one invocation guarding a real release. (Round 1's replacement
+  comment named the wrong divergence here; corrected.)
+
+`crates/updater-verify/tests/release_workflow_wiring.rs` (CPE-1917's proven pattern) now reads
+**`release-sidecar.yml`** as well as `release.yml`: 6 new tests derive the download dir and the verify
+argv from the workflow and **execute the real binary** with them. `artifact_binding.rs` derives its
+`(channel, --conf productName)` pair by reading `--expect-channel` out of the workflow and
+`productName` out of the config that workflow's `--conf` actually names. The load-bearing invariant is
+the *pairing* — base plain-`productName` `--conf` **with** `--expect-channel sidecar` — which a
+well-meaning "fix" would break while every hard-coded unit test stayed green.
 
 **2. `keymap.ts` ↔ `shortcuts.ts` — 34 chords, with a documented prior failure.**
-`keymap.ts` claimed its `defaultChord` values "are transcribed from that group's `keys` column" in
-`shortcuts.ts`. Nothing checked it: `keymap.test.ts` never imported `shortcuts.ts` and vice versa —
-yet the file's own inline note records that a CPE-1547 review caught **4 of the 34 transcribed
-wrong**. Drift is quiet and user-facing: the Shortcuts dialog advertises a key the app does not
-honour. `keymap.test.ts` now joins the two by `description` and asserts every chord against the sheet
-(display glyphs translated to `KeyboardEvent.key` form). The join is currently **34/34 clean**.
+Nothing compared them: `keymap.test.ts` never imported `shortcuts.ts`, or vice versa — yet the file's
+own inline note records a CPE-1547 review catching **4 of the 34 transcribed wrong**. `keymap.test.ts`
+now joins by `description` and asserts each chord against the sheet (glyphs translated to
+`KeyboardEvent.key` form), **and** that it is the sheet's FIRST key — the registry's own stated rule
+that only the primary chord is modeled. 34/34 clean.
 
-### Anchor hardening (the CPE-1928 trap, hit for real)
+### Anchor hardening — round 1 got this wrong, twice
 
-The scanners anchor on substrings (`gh release download`, `--bin verify-release-artifacts`).
-`release-sidecar.yml` contains **two prose comments** that mention `gh release download` while
-discussing it — so extending the guard to that workflow without a comment filter parses them as
-calls. Added `code_lines()`, which blanks comment-only lines (keeping indices so continuations still
-align); one rule covers both YAML comments and shell comments inside `run: |`. **Proved
-load-bearing**: with the filter removed, 4 tests fail with
-`a gh release download call passes no --dir: # Same contents: write inheritance note …`.
+Round 1 added `code_lines()`, which blanked only comment-**only** lines. The Reviewer showed a
+**trailing** comment walking straight through it:
 
-### Red-proofs (each derivation was made to go red)
+```
+--expect-url-prefix "https://…/${TAG}/"  # was: --expect-channel sidecar
+```
+
+`the_sidecar_job_checks_the_sidecar_channel_using_the_base_plain_conf` — the assertion written
+specifically to replace the prose claims — **passed**, reading the flag out of the comment. That is
+PR #1056's hole reproduced inside the fix for it.
+
+The repo already shipped the right stripper: **`src/lib/shellScriptLines.ts`**, extracted at CPE-1849
+and hardened through CPE-1908 rounds 2 and 3 *precisely so a second hand-rolled stripper could not
+disagree with the first on an edge case*. `code_lines` was a fifth one implementing the weakest of its
+three rules. Replaced with **`crates/updater-verify/src/workflow_scan.rs`**, a faithful Rust port
+(quote-, escape-, word-boundary- and heredoc-aware; here-strings excluded, which matters —
+`release-sidecar.yml:760` has `done <<< "$names"`), used by **both** Rust consumers so there is one
+Rust implementation, not two.
+
+And the port does not merely *claim* fidelity: both languages run against
+**`src/lib/shellScriptLines.cases.json`**, a shared 14-case file the Rust test reads at run time. Add
+a case on either side and both are held to it.
+
+The same lesson was applied to `MacroRunConfirm.test.ts`, which CLAUDE.md cites as a worked example:
+its walker anchored on "the first `format!(` after the fn", and PR #1056's Reviewer had found the one
+adversarial source that beat it **silently** — a comment quoting the old message. It now strips Rust
+comments (quote-aware) before scanning, killing the class rather than that one shape.
+
+### Red-proofs (each derivation made to go red by changing the referenced source)
 
 | # | Change to the referenced source | Result |
 |---|---|---|
-| 1 | `release-sidecar.yml`: `--conf` → `tauri.sidecar.conf.json` | `the_sidecar_job_checks_the_sidecar_channel_using_the_base_plain_conf` **FAILED** |
-| 2 | `release-sidecar.yml`: `--search release-assets` → `src-tauri/target` | 2 FAILED, incl. the **executable** test — proves it re-reads the source |
-| 3 | `release-sidecar.yml`: delete `--expect-channel sidecar` | 3 FAILED; the verifier then infers "plain" from the conf and **rejects a genuine sidecar release** |
-| 4 | Remove the comment filter from `code_lines` | 4 FAILED on a comment parsed as a call |
-| 5 | `shortcuts.ts`: `Ctrl+L` → `Ctrl+E` for "Edit address" | `editAddress: keymap says "Ctrl+L", shortcuts.ts documents ["Ctrl+E","Alt+D"]` **FAILED** |
-| 6 | `shortcuts.ts`: rename description "New tab" → "Open a new tab" | 2 FAILED (orphan + chord) |
+| 1 | `release-sidecar.yml`: `--conf` → `tauri.sidecar.conf.json` | pairing test **FAILED** |
+| 2 | `release-sidecar.yml`: `--search release-assets` → `src-tauri/target` | **2 FAILED**, incl. the *executable* test |
+| 3 | `release-sidecar.yml`: delete `--expect-channel sidecar` | **3 FAILED**; verifier infers "plain" and rejects a genuine sidecar release |
+| 4 | `shortcuts.ts`: `Ctrl+L` → `Ctrl+E` | **FAILED**, naming the exact drift |
+| 5 | `shortcuts.ts`: rename a description | **2 FAILED** (orphan + chord) |
+| 6 | **R2** `release-sidecar.yml`: `--expect-channel` moved into a **trailing comment** | `artifact_binding` **FAILED** ("no longer passes --expect-channel"); wiring test **FAILED** with `left: None` — the flag is no longer read out of the comment. Pre-fix this passed. |
+| 7 | **R2** `MacroRunConfirm.test.ts`: comment stripping disabled | **FAILED**: extracted `'the OLD wording {}'` from a comment |
+| 8 | **R2** delete the shared case file / truncate it | Rust port test fails loudly rather than agreeing vacuously |
 
-All sources restored; `git diff --numstat` confirms zero residue in `release-sidecar.yml` and
-`shortcuts.ts`.
+All sources restored; `git diff --numstat` clean, no whole-file rewrites.
 
 ### Left undone, deliberately
 
-Seven remaining HARD hits (RepoBrowser↔`clone_host`, `replayFold.test.ts`'s hand-copied Rust oracle,
-`batchMedia.ts`↔`batch_media.rs`, s3↔webdav XML-depth guard, `entrySearch.ts`↔`date_filter.rs`, two
-gui-smoke fixture-name pairs, the revert dev-harness wire text) are filed as **CPE-1950** with the
-classification, blast radius and suggested fix for each. This follows the ticket's own scope-control
-clause: the sweep sprawls, so the high-blast-radius ones were done properly rather than all twelve
-shallowly. The 108 SOFT hits are not defects and need no action.
+The lower-blast-radius HARD hits are **classified, not derived**, and filed as **CPE-1950** with
+blast radius and a suggested fix each. Two of them (`connect.rs:236`, `paths.ts:21`) are **already
+factually wrong today** — the drift has happened and nobody noticed — which makes them the cheapest
+wins in that ticket. The 150 SOFT hits are not defects and need no action.
+
+### A Reviewer claim that did not hold
+
+The review asked me to drop `MacroRunConfirm.test.ts` from CLAUDE.md's worked examples on the grounds
+that it "contains no runtime derivation (`grep readFileSync` → nothing)". It does: `readFileSync` at
+line 15, and the derivation at lines 470-548 reads `crates/server/src/fsutil.rs` and asserts
+byte-equality. The citation is kept — and the walker hardened so it earns the citation.
 
 ### Pattern recorded
 
-`CLAUDE.md` → **Guards and ratchets** gains *"Derive provenance, don't claim it (CPE-1933)"*, next to
-CPE-1932's *"Enumerate, don't recall"* — including the two rules that make a derivation real (anchor
-on code not prose; red-proof it) and the worked examples to copy from.
+`CLAUDE.md` → **Guards and ratchets** gains *"Derive provenance, don't claim it (CPE-1933)"* with
+**three** rules, not two: enumerate case-insensitively; anchor on code via the shared stripper (never
+hand-roll, and never a whole-line filter); red-proof it.

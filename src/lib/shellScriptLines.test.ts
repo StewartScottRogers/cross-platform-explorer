@@ -7,6 +7,7 @@
 // (still-valid) quote-vs-`#`-truncation property tests this module was extracted from.
 import { describe, it, expect } from "vitest";
 import { stripShellComment, logicalLines } from "./shellScriptLines";
+import sharedCases from "./shellScriptLines.cases.json";
 
 /** A byte-for-byte reproduction of `stripShellComment()`'s PRE-R2-2 body (no backslash-escape
  *  handling, no word-boundary rule for opening a quote) -- kept here, not in production code, purely
@@ -101,5 +102,33 @@ describe("logicalLines() skips heredoc bodies (CPE-1908 round 3, R2-1/R2-2)", ()
   it("a here-string (`<<<`) is not mistaken for a heredoc start", () => {
     const run = ['names="a"', 'while IFS= read -r name; do echo "$name"; done <<< "$names"', 'echo done'].join("\n");
     expect(logicalLines(run)).toEqual(['names="a"', 'while IFS= read -r name; do echo "$name"; done <<< "$names"', "echo done"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1933: the shared cross-language case file.
+//
+// `crates/updater-verify/src/workflow_scan.rs` is a Rust PORT of this module — the Rust guards that
+// scan `.github/workflows/*.yml` cannot import a `.ts` module, so one cross-language copy is
+// unavoidable. What is avoidable is the copy quietly diverging, which is the very defect CPE-1933
+// exists to kill. So neither side merely *claims* fidelity: both run against
+// `shellScriptLines.cases.json`, and that Rust test reads this exact file at run time.
+//
+// Add a case here and both languages are held to it. If you change behaviour on one side only, the
+// other side's suite goes red.
+// ---------------------------------------------------------------------------------------------
+describe("the shared case file both implementations are held to (CPE-1933)", () => {
+  interface SharedCase {
+    name: string;
+    input: string;
+    expected: string[];
+  }
+
+  it("is non-empty, so agreement across languages can never be vacuous", () => {
+    expect(sharedCases.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it.each(sharedCases as SharedCase[])("$name", ({ input, expected }) => {
+    expect(logicalLines(input)).toEqual(expected);
   });
 });

@@ -511,6 +511,29 @@ describe("ACTIONS defaults are derived from the shortcuts cheat sheet (CPE-1933)
     ).toEqual([]);
   });
 
+  it("and it is the PRIMARY chord -- the first one the sheet lists, per the registry's own rule", () => {
+    // CPE-1933 review residual: accepting *any* documented alternate is weaker than `keymap.ts`'s
+    // stated rule ("only the primary chord shown first in SHORTCUT_GROUPS is modeled -- this
+    // registry tracks one fixed binding per action"). Without this, `back` could point at
+    // `Backspace` while the file says it models `Alt+ArrowLeft`, and the looser check above would
+    // shrug. Asserting the documented rule is the point of deriving at all.
+    const byDesc = sheetKeysByDescription();
+    const notPrimary: string[] = [];
+    for (const action of ACTIONS) {
+      const documented = byDesc.get(action.description) ?? [];
+      const primary = documented[0];
+      if (primary === undefined) continue; // already reported by the orphan test above
+      const expected = normalizeChord(toEventForm(primary));
+      if (action.defaultChord !== expected) {
+        notPrimary.push(
+          `${action.id}: defaultChord ${JSON.stringify(action.defaultChord)} is not the sheet's ` +
+            `FIRST key for this action (${JSON.stringify(primary)} -> ${JSON.stringify(expected)})`,
+        );
+      }
+    }
+    expect(notPrimary).toEqual([]);
+  });
+
   it("the glyph table still covers every non-ASCII key the sheet uses for a modeled action", () => {
     // If the cheat sheet grows a new display glyph, `toEventForm` leaves it untranslated and the
     // chord comparison above fails with a confusing message. Fail here with a clear one instead.
