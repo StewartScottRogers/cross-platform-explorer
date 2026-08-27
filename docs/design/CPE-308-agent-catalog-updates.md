@@ -92,15 +92,35 @@ primitive) — same principle as `host.verify_key`.
   workflow wiring is pinned by `src/lib/catalogPublishVersion.test.ts`.
   - *Installed-base transition:* both schemes emit Unix epochs, so the numbering is continuous.
     `CATALOG_VERSION_FLOOR` in that script is a **fatal** publish-time check that the derived version
-    exceeds the highest version any client can hold (`1784951108` — the value on all 12 entries of
-    the last published index, release `v0.57.32`), so the scheme change can never emit a number the
-    installed base would reject. A repo-committed counter was rejected precisely here: restarting at
-    a small integer against an installed base holding ~1.79 billion would refuse every future
-    release, permanently.
-  - *Residual:* re-running a tag cut **before** this change runs that tag's own copy of
-    `release.yml`, which still reads a clock. That window closes operationally — rotate
-    `CPE_CATALOG_SIGNING_KEY` (an old tag's `catalog` job then finds no key and publishes nothing),
-    restrict who may re-run workflows, or raise the floor above any number a stale re-run stamped.
+    exceeds the highest version any client can hold, so the scheme change can never emit a number the
+    installed base would reject. Measured across all 65 releases carrying a catalog index: the
+    highest version on a **published** release is `1784894333` (`v0.57.31-sidecar`) — the real
+    installed base, since clients fetch `releases/latest/download/`. `v0.57.32` carries a higher
+    `1784951108` but is a **draft** (`published_at: null`), so its assets were never served and no
+    client ever held it; the floor clears both. That sequence is monotone across all 65, so there is
+    no evidence the old-tag republish was ever exercised in the wild. A repo-committed counter was
+    rejected precisely here: restarting at a small integer against an installed base holding ~1.79
+    billion would refuse every future release, permanently.
+  - *Residual (pre-fix tags), and it is narrower than it first looks:* re-running a tag cut **before**
+    this change runs that tag's own copy of `release.yml`, which still reads a clock. But the re-run
+    uploads to the **old tag's own release**, and the default client fetch is
+    `releases/latest/download/`, which does not resolve to it. So a stale re-run reaches the default
+    update path only when that tag already *is* `latest` (republishing its own current content — no
+    downgrade), or when the user drives the CPE-383 rollback picker, which fetches
+    `releases/download/<tag>/` explicitly and passes `allow_downgrade` — i.e. the user opted in.
+    Closing it entirely is operational, **cheapest first**: (1) restrict who may re-run workflows — a
+    repo setting, and it costs installed clients nothing; (2) raise the floor above any number a
+    stale re-run stamped. Rotating `CPE_CATALOG_SIGNING_KEY` is the **expensive last resort**, not
+    the first move: `CATALOG_TRUSTED_KEYS` is a **compile-time** list, so rotation makes every
+    already-installed client reject *every* bundle — legitimate ones included — until it app-updates,
+    and the same secret signs the model snapshot (CPE-450/451), so it breaks that catalog too.
+  - *Known gap the fix introduces (follow-up ticket):* the floor is a **static** ratchet, not a
+    monotonic one, and nothing on the publish side compares against the **last published** version.
+    A release cut from an older commit — a hotfix on a maintenance branch, or `git tag` on a non-tip
+    commit — stamps a `%ct` below the live catalog's while still clearing the floor, so the release
+    goes green and every client silently returns `Rollback`. `date +%s` could not do this, since
+    publish order *was* version order. Ordinary releases are cut from the tip (`release.ps1` pushes
+    `HEAD --tags`), so it only bites a deliberate off-tip tag.
 - **Schema migration (CPE-300):** an entry with an older `schema_version` is migrated up before
   validation; unknown-future schema is skipped (as today).
 

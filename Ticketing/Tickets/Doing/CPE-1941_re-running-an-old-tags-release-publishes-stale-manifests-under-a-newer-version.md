@@ -133,3 +133,60 @@ CPE-1940 (PR #1058), so it is deliberately out of scope here.
 `model-snapshot.yml` deliberately keeps `date -u +%s`: its content is scraped live on every run, so
 publish time genuinely is content time there, and a commit timestamp would freeze the snapshot at its
 first published version. That reason is now written next to it and pinned by a test.
+
+**2026-08-27 — review round 1 (SEC findings, non-blocking; Reviewer APPROVE). All folded in.**
+
+*Corrections to what I wrote, each verified against the code before folding in:*
+
+- **`v0.57.32` is a DRAFT** (`isDraft: true`, `published_at: null` — confirmed via the API). Draft
+  assets are never served from `releases/latest/download/`, so **no client ever held `1784951108`**.
+  The true public high-water mark is `1784894333` (`v0.57.31-sidecar`, confirmed by downloading its
+  index: 12 entries, all at that version). The floor clears both, so the conclusion is unchanged — but
+  the wording is corrected in all five places that stated it (script header, design doc, threat model,
+  the Rust constant's doc, the TS constant's comment). The draft number is deliberately **kept** as
+  the constant: it errs high, and it is what a plain `max` over the releases API returns, so the next
+  person to re-measure lands on the same value.
+- **The legacy-tag residual is narrower than I stated.** A re-run uploads to the **old tag's own**
+  release (`gh release upload "${{ github.ref_name }}"`), and the default client fetch is
+  `catalog_url()` → `releases/latest/download/`, which does not resolve to it. So it reaches the
+  default update path only when that tag already *is* `latest` (no downgrade), or via the CPE-383
+  rollback picker, which uses `catalog_url_for_tag()` and passes `allow_downgrade` — user opt-in.
+  Corrected in the script, the design doc and the threat model.
+- **"Rotate the signing key" was mis-ordered as the primary mitigation.** `CATALOG_TRUSTED_KEYS`
+  (`src-tauri/src/lib.rs`) is a **compile-time** `&[&str]`, so rotating makes every already-installed
+  client reject *every* bundle until it app-updates; and `model-snapshot.yml` signs with the same
+  secret, so rotation breaks the model catalog too. The menu is now ordered cheapest-first with
+  **restrict who may re-run workflows** (a repo setting, zero client impact) as the option to reach
+  for, and rotation named as an expensive last resort. My judgement not to rename the secret was
+  upheld — it would have produced `has=false` on the *fixed* workflow as well.
+- **The bash probe-and-skip was incoherent with this file's own argument.** Nine executed tests
+  returned early when bash was absent, passing vacuously — the exact pattern the same file rejects for
+  the fixture repository. Now `requireBash()` throws, with the reasoning at the site.
+- **Sabotage count: both numbers are real, for different sabotages.** Swapping only the version source
+  (`VERSION=$(date +%s)` in place of the script call) reds **4 of 17**; a full revert to the original
+  pre-fix shape — no derive step, version computed inline in the sign step, no `set -euo pipefail` —
+  reds **5 of 17**, the fifth being `neither the derive nor the sign step is allowed to fail softly`.
+  Measured both rather than taking either on trust. Full suite is now **4851** tests / 343 files.
+- **The sha256 test is documentation, not evidence.** Its assertions only show two contents hash
+  differently; the load-bearing half — that `VersionMap` is an `id → u64` map with nowhere to record a
+  hash — is a **type-level** fact no test can execute. Said so at the site, and the PR body now cites
+  the type rather than the test.
+
+*Rebased onto merged #1058 (CPE-1940), which changed the public API:* `apply_bundle` is gone and
+`apply_bundle_with` is now `pub(crate)`; the production entry point is `apply_bundle_at`, which owns
+the load/apply/save cycle against a persisted version map. The reproduction is migrated onto it, which
+makes it **stronger**: the sequence now runs through the real entry point with the anti-rollback
+baseline actually persisted to disk between publishes, and the seeded installed-base tests write their
+baseline with `save_versions` the way a real client would. The floor red-proof was re-run against the
+migrated harness (still reds).
+
+*Closed the two items the auditor flagged as inferred rather than executed:* the derive step now
+**asserts** `git rev-parse HEAD == ${{ github.sha }}` and fails the job if they differ, so "the
+checkout's HEAD is the tagged commit" is enforced instead of assumed (release.yml is `push: tags:`
+only, so `github.sha` is the tagged commit by definition); and the script was syntax-checked and
+exercised under real Linux bash (WSL Ubuntu), now stated in the PR body.
+
+*Left open deliberately (follow-up ticket, filed by the Foreman):* the floor is a **static** ratchet.
+A release cut from an older commit stamps a `%ct` below the live catalog's while clearing the floor,
+so it publishes green and every client silently refuses it. A paragraph documenting it is now in the
+script header and the design doc. Preferred fix shape is in the PR body.

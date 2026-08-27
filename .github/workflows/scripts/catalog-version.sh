@@ -42,17 +42,51 @@
 # ## The floor, and the installed-base transition
 #
 # The one way a version-scheme change bricks updates is by emitting numbers **below** what clients
-# already have installed: anti-rollback would then refuse every future release forever. The real
-# installed base is measurable — the last published catalog-index.json (release v0.57.32) carries
-# `version: 1784951108` (2026-07-25T03:45:08Z) on all 12 entries — and every value the old scheme
-# could ever have produced is a `date +%s` taken at some past publish, so all of them are below
-# "now". A commit timestamp is the same kind of number, and any commit that can *contain this file*
-# is necessarily newer than this file, so the new scheme starts strictly above the old one.
+# already have installed: anti-rollback would then refuse every future release forever.
+#
+# The real installed base is measurable, and it was measured across all 65 releases carrying a
+# catalog index. Two numbers matter, and the difference between them is a trap worth writing down:
+#   * `1784894333` (2026-07-24T11:58:53Z, release `v0.57.31-sidecar`) — the highest version on any
+#     **published** release. This is the true high-water mark: the one a client can actually be
+#     holding, because the default fetch is `releases/latest/download/`.
+#   * `1784951108` (2026-07-25T03:45:08Z, release `v0.57.32`) — higher, but `v0.57.32` is a
+#     **DRAFT** (`isDraft: true`, `published_at: null`). Draft assets are never served from
+#     `latest/download/`, so no client ever fetched this number. Anyone re-measuring the floor by
+#     taking a plain max over the API will land on it; that is safe (it errs high) but it is not
+#     the installed base.
+# The version sequence is monotone across all 65 of those releases, so there is no evidence the
+# old-tag republish was ever exercised in the wild.
+#
+# Every value the old scheme could produce is a `date +%s` taken at some past publish, so all of
+# them are below "now". A commit timestamp is the same kind of number, and any commit that can
+# *contain this file* is necessarily newer than this file, so the new scheme starts strictly above
+# the old one.
 #
 # CATALOG_VERSION_FLOOR turns that from an argument into an enforced, fatal check: a release whose
 # derived version is below it fails the job instead of publishing a bundle the installed base would
-# reject. It is set above the highest version any client can be holding (1784951108) and below the
-# commit that introduced it, so it can never fire for a legitimately-cut release.
+# reject. It clears both numbers above — the real one and the draft one — and sits below the commit
+# that introduced it, so it can never fire for a legitimately-cut release.
+#
+# ## What this floor does NOT catch: a release cut from an OLDER commit
+#
+# The floor is a **static** ratchet, not a monotonic one: it is a fixed constant, and nothing on the
+# publish side compares the derived version against the **last published** one. That leaves a real
+# gap this scheme introduced and the old one did not have.
+#
+# Cut a release from a commit older than the previous release's — a hotfix on a maintenance branch,
+# a revert branch, or `git tag` on a non-tip commit — and `%ct` comes out BELOW the live catalog's
+# version while still clearing the floor by a mile. Everything then passes: floor ok, future-date
+# check ok, signatures verify, sha256 binds, the release goes green. And every client returns
+# `Rollback`, writes nothing, and says nothing, because from their side that is indistinguishable
+# from a stale republish. The failure is invisible until somebody notices clients stopped updating.
+# Under `date +%s` this could not happen, since publish order and version order were the same thing.
+#
+# Mitigating, but not a fix: scripts/release.ps1 pushes `HEAD --tags`, so ordinary releases are cut
+# from the tip of main and stay monotone; this only bites a deliberate off-tip tag.
+# Filed as a follow-up (CPE-1941 SEC/reviewer finding, both gates found it independently). The
+# preferred shape is a publish-time lower-bound check against the currently published index rather
+# than a hand-maintained counter — see the PR body for the reasoning; do NOT close it by widening
+# this floor, which would only move the same static ratchet.
 #
 # Bump it only for a deliberate, understood reason (e.g. after an old-tag re-run stamped a large
 # `date +%s` on the live catalog — see "Residual" below); never to make a failing release pass.
@@ -61,12 +95,33 @@ CATALOG_VERSION_FLOOR=1787000000 # 2026-08-16T21:33:20Z
 # ## Residual: tags cut BEFORE this change
 #
 # Re-running a **pre-existing** tag executes that tag's own copy of release.yml, which still says
-# `date +%s`. No edit here can reach it. This change makes every tag cut from now on immune; the
-# legacy window is closed operationally instead — by rotating CPE_CATALOG_SIGNING_KEY (a pre-fix
-# tag's `catalog` job then finds no key and publishes nothing), by restricting who may re-run
-# workflows, or, if a stale bundle does get published, by bumping the floor above the number it
-# stamped and cutting a fresh release. Recorded in the PR body and in
-# docs/design/CPE-308-agent-catalog-updates.md rather than left implicit.
+# `date +%s`. No edit here can reach it, so every tag cut from now on is immune and older ones are
+# not.
+#
+# How much that is actually worth, measured rather than assumed (CPE-1941 SEC review, F3): a re-run
+# uploads with `gh release upload "${{ github.ref_name }}"`, i.e. to the **old tag's own release**.
+# The default client fetch is `https://github.com/<repo>/releases/latest/download/`
+# (`catalog_url()`, src-tauri/src/lib.rs), and `latest` does not resolve to an older tag's release.
+# So a stale re-run reaches the default update path in only two situations, neither of which is the
+# downgrade this ticket is about:
+#   * the re-run tag already IS `latest` — it republishes its own current content, so nothing goes
+#     backwards; or
+#   * the user drives the CPE-383 rollback picker, which fetches `releases/download/<tag>/`
+#     explicitly and passes `allow_downgrade` for the agents named — i.e. the user has already
+#     opted into installing an older version on purpose.
+# The residual is real but narrow. Do not carry it forward at the wrong size.
+#
+# Closing it entirely is operational, cheapest first:
+#   1. **Restrict who may re-run workflows** (repo setting). Targeted, and it costs installed clients
+#      NOTHING. This is the option to reach for.
+#   2. If a stale bundle did get published, raise CATALOG_VERSION_FLOOR above the number it stamped
+#      and cut a fresh release.
+#   3. Rotating CPE_CATALOG_SIGNING_KEY is the **expensive last resort**, not the first move, and the
+#      cost is easy to understate: CATALOG_TRUSTED_KEYS (src-tauri/src/lib.rs) is a **compile-time**
+#      `&[&str]`, so rotating makes every ALREADY-INSTALLED client reject *every* catalog bundle —
+#      legitimate ones included — until it app-updates. The same secret also signs the model snapshot
+#      (model-snapshot.yml, CPE-450/451), so rotation breaks that catalog too.
+# Also recorded in docs/design/CPE-308-agent-catalog-updates.md and docs/security/threat-model.md.
 
 # catalog_version_validate <candidate> [now_epoch]
 #   Echo <candidate> if it is a usable catalog version; otherwise print why on stderr and return

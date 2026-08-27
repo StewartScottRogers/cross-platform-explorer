@@ -453,11 +453,26 @@ jobs:
         if: steps.k.outputs.has == 'true'
         id: cv
         shell: bash
+        env:
+          TAG_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          VERSION=$(bash .github/workflows/scripts/catalog-version.sh HEAD .)
+          # "the checkout's HEAD *is* the tagged commit" was the one link in this chain that was
+          # inferred rather than executed (CPE-1941 SEC review). Inferred no longer: this workflow
+          # triggers on `push: tags:` ONLY, so `github.sha` is by definition the commit the tag
+          # points at, and `actions/checkout@v4` with no `ref:` checks out `github.ref`. Assert the
+          # two agree rather than trusting they do -- if a future checkout change (an added `ref:`,
+          # or a trigger that produces a merge commit) ever made HEAD something other than the
+          # tagged commit, this job would otherwise version the WRONG commit in silence, which is
+          # the exact class of bug this ticket exists to close.
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "::error::checkout HEAD ${HEAD_SHA} is not the tagged commit ${TAG_SHA} -- refusing to version a commit other than the one being released"
+            exit 1
+          fi
+          VERSION=$(bash .github/workflows/scripts/catalog-version.sh "$TAG_SHA" .)
           STAMPED=$(date -u -d "@${VERSION}" +%Y-%m-%dT%H:%M:%SZ)
-          echo "catalog version ${VERSION} (${STAMPED}) — committer timestamp of $(git rev-parse HEAD)"
+          echo "catalog version ${VERSION} (${STAMPED}) — committer timestamp of ${TAG_SHA}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build + sign the catalog bundle

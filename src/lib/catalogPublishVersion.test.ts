@@ -138,9 +138,29 @@ describe("release.yml stamps the catalog with a version derived from the tag, no
 
 // --- Executed: the script's own arithmetic -------------------------------------------------------
 
-function bashAvailable(): boolean {
+/**
+ * bash is a REQUIREMENT here, not a probe-and-skip (CPE-1941 review, F4).
+ *
+ * The sibling catalogPublishFreshnessGuard.test.ts skips when bash is absent, and copying that was
+ * the obvious move -- but this file argues, a few describes down, that a test which silently skips
+ * "would guard nothing in the place it matters most", and it would be incoherent to reject that
+ * pattern for the fixture repository and then use it for bash. Nine vacuous passes on a bash-less
+ * machine is exactly the failure mode this repo keeps re-finding.
+ *
+ * Requiring it is safe: every environment that can check this repo out already has bash (it ships
+ * with Git for Windows; CI's frontend job is ubuntu-latest), and the thing under test is a shell
+ * script that only ever runs on ubuntu-latest. So a missing bash is a broken environment, worth one
+ * loud failure rather than a green suite that proved nothing.
+ */
+function requireBash(): void {
   const probe = spawnSync("bash", ["--version"], { stdio: "ignore" });
-  return !probe.error && probe.status === 0;
+  if (probe.error || probe.status !== 0) {
+    throw new Error(
+      "bash is required to execute .github/workflows/scripts/catalog-version.sh -- these tests " +
+        "run the real script rather than asserting about it, so a missing bash is a broken " +
+        "environment, not a reason to pass.",
+    );
+  }
 }
 
 function runScript(...args: string[]) {
@@ -154,17 +174,17 @@ function floorFromScript(): number {
   return Number(m![1]);
 }
 
-// The measured high-water mark of the installed base: every one of the 12 entries in the last
-// published catalog-index.json (release v0.57.32, read 2026-08-27) carries version 1784951108
-// (2026-07-25T03:45:08Z). A version scheme that can emit anything at or below this would be refused
-// as a rollback by every client that has ever refreshed its catalog.
+// The measured high-water mark of the installed base, across all 65 releases carrying a catalog
+// index (read 2026-08-27). The highest version on any PUBLISHED release is 1784894333
+// (2026-07-24T11:58:53Z, v0.57.31-sidecar) -- the true installed base, since clients fetch
+// releases/latest/download/. The value below, 1784951108, comes from v0.57.32, which is a DRAFT
+// (isDraft: true, published_at: null), so no client ever fetched it. It is used here deliberately:
+// it errs HIGH -- a floor clearing it necessarily clears the real one -- and it is what a plain max
+// over the releases API returns, so anyone re-measuring this later lands on the same value.
 const HIGHEST_INSTALLED_UNDER_THE_OLD_SCHEME = 1_784_951_108;
 
 describe("catalog-version.sh, executed (CPE-1941)", () => {
-  let hasBash = false;
-  beforeAll(() => {
-    hasBash = bashAvailable();
-  });
+  beforeAll(() => requireBash());
 
   it("the floor clears the installed base, so the first commit-derived release is an upgrade", () => {
     expect(floorFromScript()).toBeGreaterThan(HIGHEST_INSTALLED_UNDER_THE_OLD_SCHEME);
@@ -176,15 +196,13 @@ describe("catalog-version.sh, executed (CPE-1941)", () => {
   });
 
   it("a version at the floor is accepted", () => {
-    if (!hasBash) return;
     const floor = floorFromScript();
     const r = runScript("--validate", String(floor), String(floor + 60));
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe(String(floor));
   });
 
-  it("the last published version is now BELOW the floor and is refused (exit 3)", () => {
-    if (!hasBash) return;
+  it("the highest pre-existing catalog version is now BELOW the floor and is refused (exit 3)", () => {
     const r = runScript("--validate", String(HIGHEST_INSTALLED_UNDER_THE_OLD_SCHEME));
     expect(r.status).toBe(3);
     expect(r.stderr).toContain("BELOW the floor");
@@ -192,7 +210,6 @@ describe("catalog-version.sh, executed (CPE-1941)", () => {
   });
 
   it("a far-future version is refused rather than published (exit 4)", () => {
-    if (!hasBash) return;
     // A commit date can be set outright (GIT_COMMITTER_DATE), and a version far in the future would
     // block every LATER release as a rollback. Fatal at publish time, not a warning.
     const now = floorFromScript() + 1000;
@@ -203,7 +220,6 @@ describe("catalog-version.sh, executed (CPE-1941)", () => {
   });
 
   it("a non-integer, an empty value, and a leading-zero value are all refused (exit 2)", () => {
-    if (!hasBash) return;
     for (const bad of ["abc", "", "01787000001", "17.87e9", "-1787000001"]) {
       const r = runScript("--validate", bad);
       expect(r.status, `"${bad}" must be refused`).toBe(2);
@@ -212,7 +228,6 @@ describe("catalog-version.sh, executed (CPE-1941)", () => {
   });
 
   it("an unresolvable ref yields no version at all (exit 5)", () => {
-    if (!hasBash) return;
     const r = runScript("refs/tags/definitely-not-a-real-tag", ROOT);
     expect(r.status).toBe(5);
     expect(r.stdout.trim()).toBe("");
@@ -225,7 +240,6 @@ describe("catalog-version.sh, executed (CPE-1941)", () => {
 // checkout's own history: CI's frontend job checks out shallow, so `HEAD~1` is not reliably present,
 // and a test that silently skips there would guard nothing in the place it matters most.
 describe("an older ref always yields a smaller version, however late you ask (CPE-1941)", () => {
-  let hasBash = false;
   let tmp = "";
   let ok = false;
   const older = 1_787_100_000; // both above the floor, so the floor check is not what is under test
@@ -253,8 +267,7 @@ describe("an older ref always yields a smaller version, however late you ask (CP
   }
 
   beforeAll(() => {
-    hasBash = bashAvailable();
-    if (!hasBash) return;
+    requireBash();
     // Kept inside the repo (and inside the gitignored worktrees dir) per house rule; removed after.
     // `.claude/worktrees/` is gitignored, so it does NOT exist in a fresh CI checkout — create it,
     // or `mkdtempSync` throws ENOENT there and this whole describe fails on the one machine that
@@ -289,14 +302,12 @@ describe("an older ref always yields a smaller version, however late you ask (CP
   }
 
   it("the two tags produce their own commits' timestamps", () => {
-    if (!hasBash) return;
     expect(ok, "fixture repo must have been created").toBe(true);
     expect(versionFor("v-old").stdout.trim()).toBe(String(older));
     expect(versionFor("v-new").stdout.trim()).toBe(String(newer));
   });
 
   it("re-running the OLD tag much later reproduces the old number -- it never advances", () => {
-    if (!hasBash) return;
     expect(ok).toBe(true);
     // The re-run, a year on. Under the old scheme this is where `date +%s` handed the stale bundle a
     // number bigger than everything installed; the whole fix is that this value does not move.
@@ -307,7 +318,6 @@ describe("an older ref always yields a smaller version, however late you ask (CP
   });
 
   it("the number is a property of the ref, not of when it is asked for", () => {
-    if (!hasBash) return;
     expect(ok).toBe(true);
     const a = versionFor("v-old", newer + 10).stdout.trim();
     const b = versionFor("v-old", newer + 10_000_000).stdout.trim();
