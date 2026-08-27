@@ -3,7 +3,7 @@ id: CPE-1940
 title: a corrupt `versions.json` makes anti-rollback fail **open**, and an unverified attacker-controlled `entry.id` reaches a fetch URL and a staging path before `verify_index` runs
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -168,3 +168,64 @@ is checked **before** the `applied > 0` / else pair.
 
 Deferred to **CPE-1949** (filed by the Foreman): sanitising `entry.id` post-verify, the absent-map
 route, the `pub` visibility sweep, and the predictable staging dir.
+
+## Closed 2026-08-27 — merged as PR #1058, after two rounds
+
+**Reviewer APPROVE + Security Auditor SEC PASS.**
+
+**F-A shipped.** `load_versions -> Result<VersionMap, VersionMapError>`: absent ⇒ `Ok(empty)` (a genuine
+first run), present-but-corrupt/unreadable ⇒ `Err`. A new `apply_bundle_at` owns load/apply/save, so a
+refused run **cannot** rewrite the map — enforced by construction (`?` bails before both the apply and
+the save), not by a caller remembering. Deliberately **not** self-healing.
+
+Pre-fix state, reproduced independently by the Reviewer:
+
+    out/claude.json = {"id":"claude","v":"ANCIENT"}   (was GOOD-v9)
+    versions.json   = {"claude":1}                    (was {"claude":9})
+
+**F-B was demonstrated, not left inferred.** Nothing upstream constrains `entry.id` — `from_json` is
+plain serde over a free-form `String`. With `"id": "../../pwned"` and a garbage signature, the write
+landed **two directories above staging**, before `verify_index` ran. Fixed by **reordering**, not
+sanitising: a `VerifiedIndex` newtype whose only constructor verifies first, so an unverified index
+yields no fields to misuse. The Auditor **compile-tested** four bypasses — `E0423` on the tuple
+constructor, `E0277` on `Default`/`From`/`Deserialize` — and confirmed `open` calls the *same*
+`verify_index`, not a weaker re-implementation.
+
+**The enumeration found a second pre-verify use nobody had named:** `index.entries`'s length drove an
+unbounded fetch loop before verification. Both Reviewer and Auditor re-derived the field list
+independently and found **no third**.
+
+**31 hostile `versions.json` shapes** all returned `Err` — zero-length, truncated, wrong value types,
+negative, float, overflow, `NaN`, BOM-prefixed, non-UTF-8, NUL-padded, a **directory** at the path, a
+file **locked by another process**. Two land in "absent" and were correctly judged non-escalations: a
+dangling symlink (you cannot link over an existing file, so the attacker must delete the real one
+first — and deletion alone already gives the empty baseline) and duplicate keys (anyone who can write
+that file can write `{"claude":1}` directly).
+
+### The blocker was the fix's own defect, one route over
+
+Round 1 threaded the new `versionMapUnreadable` flag through the **refresh** route only.
+`/api/catalog/rollback` runs the identical `do_fetch_catalog` → `apply_bundle_at` and refuses
+identically, but `handle_catalog_rollback` dropped both the flag **and** `error`. Measured:
+
+    {"agents":12,"applied":0,"indexOk":false,"tag":"v0.1.0"}
+    -> launcher renders GREEN: "Nothing changed (that version may not include this agent)."
+
+Blaming the published version for a fault on the user's own machine, with no recovery step, forever.
+And it is a state **this PR created** — pre-fix, a corrupt map made rollback silently *succeed*
+(`allow_downgrade` + empty baseline ⇒ `Newer` ⇒ `Accept`).
+
+The author's own diagnosis is the durable part: *"I fixed the reporting on refresh and never asked
+which other callers reach the same code — the same 'fix what I read, don't enumerate' failure the
+ticket's last AC exists to prevent."* Now pinned at all four hops, with the branch checked **before**
+the `applied > 0` / else pair. The Reviewer verified it by **rendering** — amber, naming the recovery
+step — rather than by confirming the JSON carries a field.
+
+Two smaller ones worth carrying: the F-A test's filesystem assertions **never fired** under the
+regression they guarded (the `expect_err` panicked first), now reordered so on-disk damage is what
+reddens; and `apply_bundle`/`apply_bundle_with` went `pub(crate)`/test-helper — the author extended
+that past the literal ask because `apply_bundle` carried the identical `&mut VersionMap` hazard, and
+**flagged the extension rather than doing it silently.**
+
+Residuals filed as **CPE-1949**: `entry.id` still interpolated into five paths post-verification (key
+compromise ⇒ arbitrary file write); the absent-map route; the predictable staging dir.
