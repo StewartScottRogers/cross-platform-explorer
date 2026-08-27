@@ -582,3 +582,111 @@ fn matching_prefix_url_still_passes_with_url_prefix_check_enforced() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// -- CPE-1894: channel-purity guard, end-to-end through the real binary ---------------------------
+//
+// release.yml's `v*` tag trigger used to match `-sidecar` tags too, so the plain-build workflow fired
+// on a sidecar tag push and merged its plain installers into the SAME draft release the sidecar
+// workflow was populating -- one manifest naming assets from two different products. `--conf` here is
+// always `src-tauri/tauri.conf.json`, the plain config, so a platform asset whose basename carries
+// "sidecar" is exactly that defect recurring and must fail the guard by name.
+
+/// Like `scaffold_with_url`, but also lets the caller set `tauri.conf.json`'s `productName` -- needed
+/// to exercise the channel-purity check, which reads it to decide the manifest's expected channel.
+fn scaffold_with_url_and_product_name(signed_bytes: &[u8], url: &str, product_name: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let kp = KeyPair::generate_unencrypted_keypair().expect("keypair");
+    let pubkey_config = B64.encode(kp.pk.to_box().expect("pk box").into_string().as_bytes());
+
+    let sig = minisign::sign(
+        Some(&kp.pk),
+        &kp.sk,
+        std::io::Cursor::new(signed_bytes),
+        Some("trusted"),
+        Some("untrusted"),
+    )
+    .expect("sign");
+    let signature_field = B64.encode(sig.into_string().as_bytes());
+
+    // The local artifact file must be named after the url's OWN basename (matching by basename is
+    // exactly how the real download/verify pipeline works, per `scaffold_with_url` above) -- not the
+    // fixed `ARTIFACT_NAME`, since these tests deliberately vary the basename to carry (or not carry)
+    // the "sidecar" marker the channel check keys on.
+    let basename = url.rsplit('/').next().expect("url has a basename");
+    std::fs::write(root.join(basename), signed_bytes).expect("write artifact");
+
+    let manifest = serde_json::json!({
+        "version": VERSION,
+        "platforms": {
+            "windows-x86_64": { "signature": signature_field, "url": url }
+        }
+    });
+    std::fs::write(root.join("latest.json"), manifest.to_string()).expect("write manifest");
+
+    let conf = serde_json::json!({
+        "version": VERSION,
+        "productName": product_name,
+        "plugins": { "updater": { "pubkey": pubkey_config } }
+    });
+    std::fs::write(root.join("tauri.conf.json"), conf.to_string()).expect("write conf");
+
+    dir
+}
+
+/// RED, reproducing the live bug at the binary level: `--conf` declares the plain product name (as
+/// `release.yml` always does), but the one platform's asset url names a sidecar-built installer. This
+/// must fail, and the failure text must name the offending platform.
+#[test]
+fn a_sidecar_asset_in_a_plain_manifest_is_rejected_by_name() {
+    let bytes = b"the real installer bytes";
+    let sidecar_url = format!(
+        "https://example.com/releases/download/v{VERSION}/Cross-Platform.Explorer_(Sidecar)_{VERSION}_x64-setup.nsis.zip"
+    );
+    let dir = scaffold_with_url_and_product_name(bytes, &sidecar_url, "Cross-Platform Explorer");
+    let out = run(dir.path());
+    assert!(
+        !out.status.success(),
+        "a sidecar-channel asset in a plain-channel manifest must fail the guard; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("mixes release channels"), "stderr={stderr}");
+    assert!(stderr.contains("windows-x86_64"), "must name the offending platform; stderr={stderr}");
+}
+
+/// Control: the SAME sidecar-named asset, but `--conf` now declares the sidecar product name too --
+/// channel-consistent, so this check must pass (the crypto/version checks below it still run as usual).
+#[test]
+fn a_sidecar_asset_in_a_sidecar_manifest_passes_the_channel_check() {
+    let bytes = b"the real installer bytes";
+    let sidecar_url = format!(
+        "https://example.com/releases/download/v{VERSION}/Cross-Platform.Explorer_(Sidecar)_{VERSION}_x64-setup.nsis.zip"
+    );
+    let dir = scaffold_with_url_and_product_name(bytes, &sidecar_url, "Cross-Platform Explorer (Sidecar)");
+    let out = run(dir.path());
+    assert!(
+        out.status.success(),
+        "a channel-consistent sidecar manifest must pass; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Control: an ordinary plain asset under the ordinary plain product name -- the common case -- must
+/// keep passing. Guards against the channel check breaking normal releases.
+#[test]
+fn a_plain_asset_in_a_plain_manifest_passes_the_channel_check() {
+    let bytes = b"the real installer bytes";
+    let plain_url = format!("https://example.com/releases/download/v{VERSION}/{ARTIFACT_NAME}");
+    let dir = scaffold_with_url_and_product_name(bytes, &plain_url, "Cross-Platform Explorer");
+    let out = run(dir.path());
+    assert!(
+        out.status.success(),
+        "a channel-consistent plain manifest must pass; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

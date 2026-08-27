@@ -15,6 +15,12 @@
 //! points at this repo's own release rather than a foreign host or the wrong tag serving an
 //! identically-named asset.
 //!
+//! Also asserts (CPE-1894, unconditional) that every platform's asset is from the SAME release
+//! channel as `--conf`'s own `productName` — the guard for "release.yml's tag trigger fired on the
+//! wrong channel's tag and merged its installers into this draft release", the live bug that shipped
+//! `v0.57.69`'s manifest with two platforms pointing at sidecar assets and two at plain ones. See
+//! [`cpe_updater_verify::platforms_with_mismatched_channel`].
+//!
 //! Usage:
 //! ```text
 //! verify-release-artifacts [--conf <tauri.conf.json>] [--search <dir>]... [--manifest <latest.json>] [--expect-url-prefix <prefix>]
@@ -97,6 +103,13 @@ fn main() -> ExitCode {
         Some(v) => v.to_string(),
         None => return fail("tauri.conf.json has no top-level version"),
     };
+    // CPE-1894: which channel THIS conf builds — release.yml always passes the plain
+    // `src-tauri/tauri.conf.json` here, so this resolves to `Channel::Plain` in real runs; derived
+    // from `productName` rather than hard-coded so the same binary/check works unchanged if a
+    // sidecar-channel job is ever pointed at `tauri.sidecar.conf.json` instead (out of scope for
+    // this ticket — release-sidecar.yml does not run this binary today).
+    let product_name = conf_json.get("productName").and_then(|v| v.as_str()).unwrap_or("");
+    let expected_channel = cpe_updater_verify::expected_channel_from_product_name(product_name);
 
     // CPE-1873 round 2 (independent reviewer, attempt 1's rejection): the `#[test]` guard in
     // `tests/pinned_pubkey_guard.rs` only runs where `cargo test -p cpe-updater-verify` runs --
@@ -205,6 +218,32 @@ fn main() -> ExitCode {
         Err(e) => return fail(&format!("cannot read {}: {e}", manifest_path.display())),
     };
 
+    // CPE-1894: the guard this ticket adds. `release.yml`'s `v*` tag trigger used to match
+    // `-sidecar` tags too, so the PLAIN workflow fired on a sidecar tag push and merged its plain
+    // installers into the SAME draft release the sidecar workflow was populating -- one manifest
+    // naming assets from two different products. That is now impossible for a NEW manifest to
+    // reach this check (the tag triggers are disjoint), but this asserts on the manifest itself,
+    // not the workflow YAML that used to cause it -- a test that only read the tag pattern would
+    // have agreed with the very pattern that was wrong. Unconditional (not gated behind a flag,
+    // unlike `--expect-url-prefix`): it costs nothing and needs no external GitHub context, only
+    // this checkout's own `tauri.conf.json` (already being read above) and the manifest.
+    let channel_offenders = cpe_updater_verify::platforms_with_mismatched_channel(&manifest, expected_channel);
+    if !channel_offenders.is_empty() {
+        let detail = channel_offenders
+            .iter()
+            .map(|(name, channel)| format!("{name} -> {channel}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return fail(&format!(
+            "manifest mixes release channels (CPE-1894) -- {} declares productName '{product_name}', \
+             so every platform's asset must be from the '{expected_channel}' channel, but the following \
+             platform(s) are not: {detail}. This is the exact shape of the CPE-1894 defect (a workflow's \
+             tag trigger firing on the wrong channel's tag and merging its installers into this release) \
+             -- do not publish this manifest.",
+            conf.display(),
+        ));
+    }
+
     // CPE-1872 round 3 (security-audit finding B): the crypto check below only ever proves the ARTIFACT
     // BYTES behind a `url` are genuine -- it never looks at the url's host or path, because the loader
     // matches purely by basename. A manifest can carry a perfectly-signed artifact under a `url` that
@@ -235,6 +274,7 @@ fn main() -> ExitCode {
     println!("verify-release-artifacts (CPE-1058)");
     println!("  config     : {}", conf.display());
     println!("  version    : {version}");
+    println!("  channel    : {expected_channel} (product name: '{product_name}')");
     println!("  manifest   : {}", manifest_path.display());
     println!("  search dirs: {}", search_dirs.len());
     if let Some(prefix) = &expect_url_prefix {
