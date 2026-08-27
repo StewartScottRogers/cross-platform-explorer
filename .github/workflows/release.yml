@@ -273,15 +273,49 @@ jobs:
           workspaces: "./crates/updater-verify -> target"
 
       # Guarded by the signing-key secret, mirroring the OS-code-signing/catalog pattern elsewhere in
-      # this file, so fork/PR runs (and any run where updater signing isn't configured) stay green
-      # instead of failing on a manifest that was never signed in the first place.
+      # this file, so a run where updater signing isn't configured stays green instead of failing on
+      # a manifest that was never signed in the first place.
+      #
+      # CPE-1923 finding 4 — that gate used to be unconditional, and it made this whole job a
+      # VACUOUS SUCCESS the moment the secret went missing: both real steps below are `if:
+      # steps.sig.outputs.has == 'true'`, so with `TAURI_SIGNING_PRIVATE_KEY` unset the job ran,
+      # skipped both, and concluded `success` — and RELEASING.md's publish gate reads that
+      # conclusion as proof the manifest was verified. Deleting one repo secret silently converted
+      # the release-integrity gate into a green no-op, which is indistinguishable in the run summary
+      # from a gate that actually checked something.
+      #
+      # This workflow is triggered ONLY by a version tag push (see `on:` at the top), so on the tag
+      # path there is no legitimate "nothing to verify" state: a tag means a release is being cut,
+      # and a release being cut without a signing key is a broken release, not an exempt one. The
+      # step therefore FAILS on a tag with no key rather than emitting `has=false`.
+      #
+      # The `has=false` arm is kept, not dead code: it is what a non-tag trigger (should one ever be
+      # added — a `pull_request` smoke run, a manual dispatch) would take, and it keeps the two
+      # downstream `if:` conditions unchanged. That matters because they are pinned from two
+      # directions: `src/lib/releaseVerifyWiringGuard.test.ts` asserts the download and verify steps
+      # share one gate, and CPE-1908's coverage ratchet pins the literal condition. Failing HERE
+      # closes finding 4 without touching either — the gate a guard depends on stays exactly as it
+      # was, and what changed is that reaching it with no key is now fatal.
       - name: Detect updater signing key
         id: sig
         shell: bash
         env:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # "Is this run cutting a release?" This workflow is triggered only by a version-tag push,
+          # so a tag ref IS a release being cut. release-sidecar.yml answers the same question from
+          # its own trigger (see there) and then runs a BYTE-IDENTICAL script.
+          RELEASE_BUILD: ${{ github.ref_type == 'tag' }}
         run: |
-          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+          set -euo pipefail
+          if [ -n "${KEY:-}" ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${RELEASE_BUILD:-}" = "true" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set, but this run is CUTTING A RELEASE. Without it the manifest verification below would SKIP and this job would still report success, which RELEASING.md's publish gate reads as proof the release was verified (CPE-1923 finding 4). Set the secret, or do not publish this release. This step will not report a green no-op."
+            exit 1
+          fi
+          echo "has=false" >> "$GITHUB_OUTPUT"
 
       # Download the manifest that is ACTUALLY on the draft release, plus every asset any platform
       # entry's `url` names — not `--pattern '*'` (which would silently succeed on a manifest naming an

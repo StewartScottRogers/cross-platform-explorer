@@ -683,13 +683,46 @@ jobs:
       # Same secret-gated pattern as release.yml's verify-published-manifest -- stays green on a
       # checkout where updater signing was never configured, rather than failing on a manifest that
       # was never signed in the first place.
+      #
+      # CPE-1923 finding 4, sidecar half. Both real steps below are gated on
+      # `steps.sig.outputs.has == 'true'`, so with `TAURI_SIGNING_PRIVATE_KEY` unset this job ran,
+      # skipped both, and concluded `success` -- a release-integrity gate reporting green over zero
+      # verification, indistinguishable in the run summary from one that actually checked something.
+      # Deleting one repo secret silently converted BOTH channels' gates into no-ops.
+      #
+      # Fixed the same way as release.yml: fail HERE, before the gate, leaving the two downstream
+      # `if:` conditions untouched. That is load-bearing rather than stylistic -- CPE-1908's
+      # `channelPurityCoverage.test.ts` pins the verify step's `if:` to exactly
+      # `steps.sig.outputs.has == 'true'` via `SIGNING_KEY_STEP_IF`, so changing that condition
+      # would make the coverage ratchet go red on its own remedy. Nothing about `SIGNING_KEY_STEP_IF`
+      # needs to change.
+      #
+      # The PREDICATE differs from release.yml's, and deliberately so: this workflow is
+      # `workflow_dispatch`-only, so `github.ref_type` is `branch` on every run and a verbatim copy
+      # of release.yml's `ref_type == 'tag'` test would be DEAD CODE here -- a guard that looks
+      # stronger than it is, which is the exact decay CPE-1933 is open about. Every dispatch of this
+      # workflow takes a REQUIRED release-tag input and creates/populates a release under it, so
+      # there is no "nothing to verify" state at all: the answer is unconditionally true. The
+      # `run:` script itself is byte-identical to release.yml's, and
+      # `src/lib/releaseVerifyWiringGuard.test.ts` executes it out of BOTH files and asserts that.
       - name: Detect updater signing key
         id: sig
         shell: bash
         env:
           KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # "Is this run cutting a release?" Dispatch-only with a required tag input: always yes.
+          RELEASE_BUILD: "true"
         run: |
-          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+          set -euo pipefail
+          if [ -n "${KEY:-}" ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${RELEASE_BUILD:-}" = "true" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set, but this run is CUTTING A RELEASE. Without it the manifest verification below would SKIP and this job would still report success, which RELEASING.md's publish gate reads as proof the release was verified (CPE-1923 finding 4). Set the secret, or do not publish this release. This step will not report a green no-op."
+            exit 1
+          fi
+          echo "has=false" >> "$GITHUB_OUTPUT"
 
       # Downloads by TAG (the workflow_dispatch input), not github.ref_name -- this workflow is
       # dispatch-only and checks out whatever ref it was run against, which is not the release tag.

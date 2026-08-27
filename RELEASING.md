@@ -232,6 +232,51 @@ kill-all before touching the installer.
   `updater.key` / `updater.pw` (both gitignored — never commit them).
 - Losing the private key OR password means you can no longer sign updates and
   auto-update breaks for existing installs.
+- **Deleting `TAURI_SIGNING_PRIVATE_KEY` no longer produces a green no-op (CPE-1923 finding 4).**
+  Both channels' verify jobs (`release.yml`'s `verify-published-manifest` and
+  `release-sidecar.yml`'s `verify-published-manifest-sidecar`) gate their real steps on that secret
+  being present, so with it unset each job used to run, skip both steps, and conclude `success` — a
+  release-integrity gate reporting green over zero verification, indistinguishable in the run
+  summary from one that actually checked something. One deleted secret disarmed both. Each
+  secret-detection step now **fails the job** when a run that is *cutting a release* finds no key.
+  If you see it, the fix is to restore the secret, never to publish the release anyway.
+  (The two workflows answer "is this cutting a release?" differently — `release.yml` from
+  `github.ref_type == 'tag'`, `release-sidecar.yml` unconditionally, since it is dispatch-only with
+  a required tag input — but run a byte-identical script, and a test asserts that equality.)
+
+### What the release gate does and does not prove
+
+`verify-release-artifacts` (run by `verify-published-manifest`) checks the manifest as **published on
+the draft release**, plus every asset it names, and refuses on: a signature that does not verify, a
+platform it could not fetch, a `url` outside this tag's download prefix, a mixed release channel, a
+platform key serving another OS's payload, and — the one an attacker with release-asset write but no
+signing key would otherwise walk through — **an artifact belonging to a different release than the
+one being shipped**.
+
+**Three of those refusals — release channel, platform/payload mapping, and artifact/release binding
+— are decided from the artifact's *signed* name** (the `file:` field of the minisign trusted comment,
+which the global signature covers), not from the name it was uploaded under. The distinction is the
+whole point, and getting it wrong was this gate's most recent real defect twice over: an asset-write
+attacker chooses the upload name freely, so earlier versions of the binding and the mapping check
+were each defeated by simply renaming the upload — the old genuinely-signed installer uploaded under
+a current-looking filename (a downgrade), and this release's genuine Linux `.deb` uploaded under a
+Windows platform key as `..._x64-setup.exe` (denial-of-update). Changing the signed name requires the
+signing key, which is exactly the capability that threat model withholds.
+
+The channel and mapping checks also run once over the uploaded names *before* download — that pass is
+cheap and gates what gets fetched, but it proves nothing on its own and is not what the gate rests on.
+
+The three checks added for this (channel, platform/payload mapping, artifact/release binding) prefix
+their refusals with `PROPERTY FAILED -- <property>`. The older refusals — pubkey pin, manifest-vs-config
+version mismatch, tampered artifact, missing manifest — predate that convention and do not carry the
+prefix; they still name what went wrong in prose.
+
+**One residual is deliberate and tracked as CPE-1942.** Tauri signs the macOS artifact as
+`<productName>.app.tar.gz`, with no version in the signed name either — verified against the real
+published `.sig` assets — so there is nothing to bind that one artifact kind against. It is admitted
+on its url prefix and signature alone. The exemption is narrow: it applies only to a `darwin-*`
+platform whose *signed* name ends `.app.tar.gz`, so other signed bytes cannot claim it by being
+renamed. The run prints every exemption it grants, with the signed name.
 
 ### OS installer code signing
 

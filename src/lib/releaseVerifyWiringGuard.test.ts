@@ -36,7 +36,9 @@
 // (CPE-1893) use, adopted after a review round found a regex-over-raw-text guard could be satisfied
 // by an unrelated neighbouring comment rather than the key it claimed to check.
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
 
@@ -242,5 +244,178 @@ describe("release.yml still fires on the tags it is supposed to fire on (CPE-191
     // is workflow_dispatch-only, so the overreach was ever one-directional.
     const sidecar = parseWorkflow("release-sidecar.yml");
     expect(triggers(sidecar).push).toBeUndefined();
+  });
+});
+
+// ── CPE-1923 finding 4 — the absent-secret vacuous success, in BOTH release workflows ──────────
+//
+// Both real steps of each verify job are gated on `steps.sig.outputs.has == 'true'`. With
+// `TAURI_SIGNING_PRIVATE_KEY` unset the job ran, skipped both, and concluded `success` — and
+// RELEASING.md's publish gate reads that conclusion as proof the manifest was verified. Deleting one
+// repo secret silently converted BOTH channels' release-integrity gates into green no-ops,
+// indistinguishable in the run summary from gates that actually checked something.
+//
+// The fix is that each sig-detect step FAILS when a run that is cutting a release finds no key,
+// leaving both downstream `if:` conditions untouched (they are pinned by the tests above and by
+// CPE-1908's `channelPurityCoverage.test.ts` via `SIGNING_KEY_STEP_IF`).
+//
+// These tests do not read the scripts' text and take their word for it — a guard asserting on a
+// string while the process still exits 0 is the exact defect this ticket is about. They EXTRACT
+// each step's `run` out of its YAML and EXECUTE it, asserting on the process exit code and on what
+// it actually wrote to `$GITHUB_OUTPUT`.
+//
+// Both workflows are covered explicitly rather than one being tested and the other assumed to
+// mirror it. "Mirrors the other workflow" is a provenance claim, and this repo has CPE-1933 open
+// about exactly that kind of claim decaying into a lie — the two workflows' triggers genuinely
+// differ (tag push vs `workflow_dispatch`), so a verbatim copy of the plain workflow's
+// `ref_type == 'tag'` predicate would be DEAD CODE in the sidecar one.
+describe("neither release workflow can report a green no-op when the signing secret is missing (CPE-1923)", () => {
+  interface SigCase {
+    /** Workflow file to read. */
+    file: string;
+    /** The job whose gate this step feeds. */
+    job: string;
+    /**
+     * The `env:` key holding "is this run cutting a release?", and the expression each workflow
+     * computes it from. They differ because the triggers differ; the `run:` script does not.
+     */
+    releaseBuildExpr: (value: string) => boolean;
+    /** How the workflow answers "not cutting a release", if it can at all. */
+    nonReleaseValue: string | null;
+  }
+
+  const CASES: SigCase[] = [
+    {
+      file: "release.yml",
+      job: "verify-published-manifest",
+      // Tag-push triggered: a tag ref IS a release being cut.
+      releaseBuildExpr: (v) => v.includes("github.ref_type") && v.includes("'tag'"),
+      nonReleaseValue: "false",
+    },
+    {
+      file: "release-sidecar.yml",
+      job: "verify-published-manifest-sidecar",
+      // workflow_dispatch-only with a REQUIRED release-tag input, so every run cuts a release and
+      // the predicate is hardcoded true. `github.ref_type` is `branch` on every run here, which is
+      // why copying the plain workflow's predicate verbatim would silently disarm this.
+      releaseBuildExpr: (v) => v.trim() === "true" || v.trim() === '"true"',
+      nonReleaseValue: null,
+    },
+  ];
+
+  /** The `sig` step of a workflow's verify job. */
+  function sigStepOf(c: SigCase): WorkflowStep | undefined {
+    const doc = parseWorkflow(c.file);
+    return steps(doc.jobs[c.job]).find((s) => s.id === "sig");
+  }
+
+  /**
+   * Execute a step's own `run` script under bash with a controlled environment, and report what the
+   * process actually did: its exit status and whatever it appended to `$GITHUB_OUTPUT`.
+   *
+   * Both steps declare `shell: bash`, so running them under bash is running them the way the runner
+   * does. The frontend test job is ubuntu-only (see ci.yml), and bash is present on Windows dev
+   * machines via Git Bash; a missing bash is reported as a failure rather than skipped, because a
+   * silently-skipped security guard is the thing this file exists to prevent.
+   */
+  function runScript(script: string, env: Record<string, string>): { status: number | null; outputs: string } {
+    const dir = mkdtempSync(join(tmpdir(), "cpe-1923-sig-"));
+    const outputFile = join(dir, "github_output");
+    writeFileSync(outputFile, "");
+    try {
+      const result = spawnSync("bash", ["-c", script], {
+        env: { ...process.env, ...env, GITHUB_OUTPUT: outputFile },
+        encoding: "utf8",
+      });
+      if (result.error) {
+        throw new Error(
+          `could not execute the sig step under bash (${result.error.message}). This guard must ` +
+            `run the script, not read it -- fix the environment rather than weakening the test.`,
+        );
+      }
+      return { status: result.status, outputs: readFileSync(outputFile, "utf8") };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("both verify jobs still have an id'd `sig` detection step", () => {
+    for (const c of CASES) {
+      const step = sigStepOf(c);
+      expect(
+        step,
+        `${c.file}'s ${c.job} has no \`sig\` step -- the step whose outputs gate the whole job is ` +
+          `gone, and whatever replaced it needs its own executable guard, because this one can no ` +
+          `longer find it`,
+      ).toBeDefined();
+      expect(typeof step?.run, `${c.file}: the sig step has no run: script`).toBe("string");
+    }
+  });
+
+  it("the two workflows run a byte-identical script, so neither can drift into a weaker rule", () => {
+    // This is what turns "the sidecar half mirrors release.yml" from a comment into a check. The
+    // per-workflow difference is confined to the RELEASE_BUILD env value, asserted separately below.
+    const [plain, sidecar] = CASES.map((c) => sigStepOf(c)?.run);
+    expect(sidecar).toBe(plain);
+  });
+
+  it("each workflow reads the key, and computes 'is this cutting a release?' from its own trigger", () => {
+    // The executable tests below inject KEY/RELEASE_BUILD as plain process env. That only proves
+    // anything if each real step is wired to real context values, so pin the mapping too -- and pin
+    // that each workflow's predicate suits ITS trigger rather than being copied from the other.
+    for (const c of CASES) {
+      const env = (sigStepOf(c)?.env ?? {}) as Record<string, string>;
+      expect(env.KEY, `${c.file}`).toContain("secrets.TAURI_SIGNING_PRIVATE_KEY");
+      expect(typeof env.RELEASE_BUILD, `${c.file} declares no RELEASE_BUILD`).toBe("string");
+      expect(
+        c.releaseBuildExpr(String(env.RELEASE_BUILD)),
+        `${c.file}'s RELEASE_BUILD (${env.RELEASE_BUILD}) is not the right predicate for its own ` +
+          `trigger. release.yml is tag-push triggered so it asks github.ref_type; ` +
+          `release-sidecar.yml is workflow_dispatch-only (ref_type is always 'branch' there) with a ` +
+          `required tag input, so it is unconditionally true. Copying one into the other produces a ` +
+          `branch that never fires -- a guard that looks stronger than it is.`,
+      ).toBe(true);
+    }
+  });
+
+  for (const c of CASES) {
+    it(`${c.file}: FAILS (non-zero exit) when cutting a release with no signing key`, () => {
+      const script = sigStepOf(c)?.run as string;
+      const { status, outputs } = runScript(script, { KEY: "", RELEASE_BUILD: "true" });
+      expect(
+        status,
+        `${c.file}: a release-cutting run with no signing key must FAIL here. Exiting 0 with ` +
+          `has=false makes the two verification steps skip and the job conclude \`success\` -- a ` +
+          `release-integrity gate that verified nothing while reporting green (CPE-1923 finding 4).`,
+      ).not.toBe(0);
+      expect(
+        outputs,
+        `${c.file}: it must not also emit has=true/false -- the run is over, and a downstream step ` +
+          `reading an output from a failed detection is exactly the ambiguity being removed`,
+      ).not.toContain("has=");
+    });
+
+    it(`${c.file}: passes and arms the gate when the signing key is present`, () => {
+      const script = sigStepOf(c)?.run as string;
+      const { status, outputs } = runScript(script, { KEY: "a-signing-key", RELEASE_BUILD: "true" });
+      expect(status, `${c.file}: the normal, correctly-configured release path must still succeed`).toBe(0);
+      expect(outputs).toContain("has=true");
+    });
+  }
+
+  it("release.yml still lets a non-tag run skip, so the rule is about cutting a release, not about the secret existing", () => {
+    // release.yml is tag-triggered today, so this arm is not reachable in production -- it is what a
+    // future non-tag trigger (a pull_request smoke run, a manual dispatch) would take. Keeping it is
+    // what makes the failure above precise ("a release is being cut without a key") rather than
+    // "this workflow now needs a secret to exist at all".
+    //
+    // release-sidecar.yml has no such arm to exercise: every dispatch of it cuts a release, so its
+    // RELEASE_BUILD is hardcoded true. That asymmetry is real and is asserted above, not papered over.
+    const plain = CASES[0];
+    expect(plain.nonReleaseValue).not.toBeNull();
+    const script = sigStepOf(plain)?.run as string;
+    const { status, outputs } = runScript(script, { KEY: "", RELEASE_BUILD: plain.nonReleaseValue as string });
+    expect(status).toBe(0);
+    expect(outputs).toContain("has=false");
   });
 });
