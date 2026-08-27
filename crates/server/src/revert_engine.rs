@@ -243,8 +243,38 @@ pub fn execute_restore(
     // list (round 3) is what lets a consumer tell a grouped refusal apart from a genuine failure by
     // structure — see `WriteRefusalGroup::paths`'s doc.
     let mut grouped_paths: Vec<String> = Vec::new();
+    // **CPE-1913: hold the destination root open for the whole restore, once.** Every write below is
+    // then resolved component-by-component against *this object*, so a link planted at any interior
+    // component cannot redirect one — the same anchor `backup::apply_backup_plan_walk` opens, and the
+    // reason `apply_write` no longer calls `create_dir_all` or resolves a path before writing.
+    //
+    // A root that will not resolve or will not open refuses **every** write with a permanent reason
+    // rather than aborting: this engine's contract is that each action is independent and reported, and
+    // "the folder you are restoring into cannot be opened" is a per-action truth as much as a global
+    // one. It is permanent because re-running does not make an unopenable folder open.
+    let root_handle = std::fs::canonicalize(dest_root_path)
+        .map_err(|e| {
+            format!(
+                "the folder being restored ({}) could not be resolved ({e}), so nothing can be \
+                 written into it in a way that can be checked",
+                dest_root_path.display()
+            )
+        })
+        .and_then(|real| {
+            crate::open_beneath::open_root(&real, "folder being restored").map_err(|e| {
+                format!(
+                    "the folder being restored ({}) could not be opened ({e}), so nothing can be \
+                     written into it in a way that can be checked",
+                    dest_root_path.display()
+                )
+            })
+        });
     for action in &writes {
-        match apply_write(action, dest_root_path, &blobs_dir, checkpoint) {
+        let outcome = match &root_handle {
+            Ok(root) => apply_write(action, dest_root_path, root, &blobs_dir, checkpoint),
+            Err(why) => Err(Refused::permanent(why.clone())),
+        };
+        match outcome {
             Ok(()) => report.applied += 1,
             Err(refused) => {
                 any_permanent_refusal |= refused.permanent;
@@ -949,13 +979,30 @@ fn segment_depth(rel: &str) -> usize {
 fn apply_write(
     action: &RestoreAction,
     dest_root: &Path,
+    root: &crate::open_beneath::RootDir,
     blobs_dir: &Path,
     checkpoint: &Snapshot,
 ) -> Result<(), Refused> {
     // Every `safe_target` refusal — `escapes dest_root` in its four textual forms, the Win32-unstable
     // name rule, and the resolved-containment failure — is a verdict on the checkpoint's own stored
     // spelling. It recurs identically on every run here, so none of them may be reported as retryable.
-    let target = safe_target(dest_root, &action.path).map_err(Refused::permanent)?;
+    // **`safe_segments`, not `safe_target` (CPE-1913).** The two differ in exactly one thing:
+    // `safe_target` also asks `fsutil::confined_to` whether the joined path *resolves* inside the root.
+    // That question is now answered — better, and atomically with the open — by the per-component walk
+    // below, and leaving the path version in front of it would make the walk's refusal unreachable for
+    // every case the path version already catches: a guard nothing can red-proof (CPE-1929).
+    //
+    // The textual half stays, because the walk does not replace it and `open_beneath::create_beneath`
+    // explicitly records the obligation: a caller must refuse the Win32-unstable names itself, or the
+    // NT layer will create an object the user cannot address. `safe_segments` is where that rule lives.
+    // `apply_delete` and `snapshot_capture::restore` still call `safe_target` unchanged — neither has a
+    // handle walk, so `confined_to` is still the best answer available to them.
+    let segments = safe_segments(&action.path).map_err(Refused::permanent)?;
+    let mut rel = std::path::PathBuf::new();
+    for seg in &segments {
+        rel.push(seg);
+    }
+    let target = dest_root.join(&rel);
     let Some(state) = checkpoint.get(&action.path) else {
         return Err(Refused::permanent("no checkpoint entry for this path"));
     };
@@ -973,10 +1020,11 @@ fn apply_write(
     // missing" is not this — it surfaces at the `fs::copy` below, and it is genuinely transient.)
     let blob =
         crate::snapshot_capture::blob_source(blobs_dir, &state.hash).map_err(Refused::permanent)?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| Refused::transient(format!("{}: {e}", parent.display())))?;
-    }
+    // `create_dir_all(target.parent())` stood here (CPE-1913). It walked a link at any interior
+    // component like an ordinary directory, and it ran *before* the containment question was settled
+    // against anything the write would actually use. The missing directories are now created by the
+    // same handle-relative walk that opens the leaf, inside the root handle held for the run, so a
+    // refused entry cannot leave directory debris outside the root either.
     // **CPE-1823 round 5 — a destructive NON-delete, structurally outside the delete stand-down.**
     // [`RestoreOp`] has three variants and every rule before this one guarded the third. A single
     // `Create` for `PAYROLL.CSV` against a live `payroll.csv` rewrote the user's file and reported
@@ -1054,10 +1102,34 @@ fn apply_write(
     // sentence. Re-resolving the destination by path is safe *here and only here*: by this point the
     // write has already happened or already been refused, so this decides WORDING and can no longer
     // decide where a byte goes. That is the one property that made the same call unsafe before the copy.
-    crate::fsutil::copy_file_onto_no_follow(&blob, &target).map_err(|why| {
-        let name_is_taken_by_a_link_or_dir = fs::symlink_metadata(&target)
-            .is_ok_and(|m| m.file_type().is_symlink() || m.is_dir());
-        if name_is_taken_by_a_link_or_dir {
+    crate::fsutil::copy_file_onto_destination_handle(
+        &blob,
+        &target,
+        crate::fsutil::LinkGuardWording::RESTORE,
+        // CPE-1913: the destination is opened one component at a time against the root handle this
+        // run holds, so the containment is atomic with the open and there is no path left for a
+        // racing rename — or a junction already sitting there — to redirect.
+        || crate::open_beneath::create_beneath(root, &rel),
+    )
+    .map(|_| ())
+    .map_err(|refusal| {
+        let why = refusal.why;
+        // **`refusal.policy` decides permanence now, and it is asked of the guard that fired rather
+        // than of the filesystem afterwards (CPE-1913).** The two `symlink_metadata`/`name_links`
+        // probes below used to make this decision, and after the walk landed they would make it
+        // *wrongly* for a containment refusal: `symlink_metadata(&target)` follows the junction that
+        // caused the refusal, finds an ordinary file on the far side, and the refusal would be
+        // reported **transient** — "try again" — for something re-running can never fix.
+        if refusal.policy {
+            // One exception, and it is a richer answer rather than a different one: the hard-link
+            // refusal carries a COUNT, which `Refused::hard_linked` needs for its short per-path
+            // reason and which CPE-1881's grouped `WriteRefusalGroup` is built from. The count is
+            // still asked of the filesystem here, after the write is settled, where it can only
+            // decide wording — the same property that made this call safe in the first place.
+            if let crate::batch_media::NameLinks::Many(links) = crate::batch_media::name_links(&target)
+            {
+                return Refused::hard_linked(links);
+            }
             return Refused::permanent(why);
         }
         // **CPE-1857 — the third permanent shape, and it is invisible to the check above.** A hard link
@@ -1072,13 +1144,10 @@ fn apply_write(
         // still asking the filesystem, never parsing `why`'s prose, just for a richer answer than "is
         // it multiply linked at all". `Unknown`/`One`/`NoFileHere` all fall through to `transient` below,
         // exactly as `name_is_multiply_linked` collapsing `Unknown` to `false` did before this change.
-        match crate::batch_media::name_links(&target) {
-            crate::batch_media::NameLinks::Many(links) => Refused::hard_linked(links),
-            _ => Refused::transient(format!(
-                "the checkpoint's stored copy of this file (blob {}) could not be written: {why}",
-                state.hash
-            )),
-        }
+        Refused::transient(format!(
+            "the checkpoint's stored copy of this file (blob {}) could not be written: {why}",
+            state.hash
+        ))
     })?;
     Ok(())
 }
@@ -1123,6 +1192,103 @@ mod tests {
         assert!(!group.reason.is_empty(), "a hold-back must state its reason once: {group:?}");
         assert!(!group.next_step.is_empty(), "a hold-back must offer a next step: {group:?}");
         group
+    }
+
+    /// **CPE-1913's harm test for the revert leg, in both directions a junction can point.**
+    ///
+    /// A checkpoint restores `sub/a.txt`. A directory junction is planted at `<dest>/sub` — an
+    /// *interior* component, chosen by the checkpoint manifest and not by the user — and the revert is
+    /// run twice: once with the junction leading **outside** the restore destination, once with it
+    /// leading to another folder **inside** it.
+    ///
+    /// Before CPE-1913 this leg answered containment with `safe_target`'s `fsutil::confined_to`, a path
+    /// question asked before `create_dir_all` and several syscalls before the write:
+    ///
+    /// - **Outside** — `confined_to` refused it, correctly, but only until something changed the
+    ///   meaning of `sub` in the window afterwards, which is CPE-1896's measured race one subsystem
+    ///   over.
+    /// - **Inside** — `confined_to` said yes, because `<dest>/other` *is* inside the destination. The
+    ///   checkpoint's bytes went to a path the plan never named and the entry reported `applied`. That
+    ///   is CPE-1912's shape, at the revert leg, with no race required at all.
+    ///
+    /// Both are now refused by the per-component walk, and — the property that matters most — the
+    /// refusal is reported as **permanent**, not "run it again": a junction does not stop being one
+    /// between runs, and `Refusal::policy` is what carries that fact out of the guard that fired.
+    #[test]
+    fn cpe_1913_a_junction_at_an_interior_component_never_redirects_a_restored_file() {
+        for point_outside in [true, false] {
+            let store = scratch("1913-junction-store");
+            fs::create_dir_all(store.join("blobs")).unwrap();
+            fs::write(store.join("blobs").join("1913aaaa"), b"CHECKPOINT BYTES").unwrap();
+
+            let root = scratch("1913-junction-root");
+            // The outside folder is its own `scratch` guard rather than a fixed name beside `root`.
+            // A fixed name is shared by every run of this test on the machine, so a run that panics
+            // before its cleanup leaves an `a.txt` behind that reddens the *next*, healthy run — which
+            // happened while red-proofing this very test and cost a confusing minute.
+            let outside = scratch("1913-junction-outside");
+            let elsewhere =
+                if point_outside { outside.to_path_buf() } else { root.join("other") };
+            fs::create_dir_all(&elsewhere).unwrap();
+            let elsewhere = fs::canonicalize(&elsewhere).unwrap();
+            if !crate::fsutil::make_dir_link(&elsewhere, &root.join("sub")) {
+                crate::skip_notice!(
+                    "SKIPPING cpe_1913_a_junction_at_an_interior_component_never_redirects_a_restored_file: \
+                     could not stage a directory link. NOTHING on this run covered the revert leg's \
+                     redirected-component hole"
+                );
+                let _ = fs::remove_dir_all(&elsewhere);
+                return;
+            }
+            // Liveness: the fixture must really redirect, or the test certifies nothing.
+            fs::write(root.join("sub").join("liveness.txt"), b"through").unwrap();
+            assert_eq!(
+                fs::read(elsewhere.join("liveness.txt")).ok().as_deref(),
+                Some(&b"through"[..]),
+                "fixture is inert: the junction at <dest>/sub does not redirect \
+                 (point_outside={point_outside})"
+            );
+            fs::remove_file(root.join("sub").join("liveness.txt")).unwrap();
+
+            let mut checkpoint = Snapshot::new();
+            checkpoint
+                .insert("sub/a.txt".to_string(), crate::restore_plan::FileState::new("1913aaaa", 16));
+            let report = execute_restore(
+                &[RestoreAction { path: "sub/a.txt".to_string(), op: RestoreOp::Overwrite }],
+                &root.to_string_lossy(),
+                &store.to_string_lossy(),
+                &checkpoint,
+            );
+
+            // HARM FIRST, off the filesystem, before any verdict is inspected.
+            assert!(
+                !elsewhere.join("a.txt").exists(),
+                "HARM: the revert wrote the checkpoint's bytes through a junction at <dest>/sub into \
+                 {}, which nothing in the plan named (point_outside={point_outside})",
+                elsewhere.display()
+            );
+            assert_eq!(report.applied, 0, "nothing landed, so nothing may be counted: {report:?}");
+            assert_eq!(report.skipped.len(), 1, "the refusal must be reported: {report:?}");
+            assert!(
+                report.skipped[0].1.contains("is a link"),
+                "the refusal must name a link as the cause, from the walk rather than from a path \
+                 resolution (point_outside={point_outside}): {report:?}"
+            );
+            // And it must be PERMANENT. Reported transient, the user is told to run a revert that will
+            // refuse identically forever — the loop CPE-1845 exists to stop, reached through the door
+            // CPE-1913 opened. `symlink_metadata(<dest>/sub/a.txt)` follows the junction and finds an
+            // ordinary absent name, so the old classifier would have said transient here.
+            let group = report.held_back.as_ref().unwrap_or_else(|| {
+                panic!("a refused write must arm the hold-back so the user is told: {report:?}")
+            });
+            assert!(
+                !group.outcome.retryable(),
+                "a junction refusal must be classed permanent, never \"try again\" — \
+                 symlink_metadata follows the junction and finds an ordinary absent name, so the \
+                 pre-CPE-1913 classifier would have said transient here: {group:?}"
+            );
+            let _ = fs::remove_dir_all(&elsewhere);
+        }
     }
 
     /// **The CPE-1845 x CPE-1846 merge, pinned.** The two tickets landed against each other: CPE-1845

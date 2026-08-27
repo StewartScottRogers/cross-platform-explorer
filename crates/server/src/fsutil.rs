@@ -832,9 +832,11 @@ pub fn copy_file_into_claimed_slot(src: &Path, dst: &Path) -> Result<u64, String
     // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
     // the copy buffer, but taking it from the handle keeps this function free of a second path question.
     let copied =
-        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
+        stream_bytes(&mut r, &mut w, meta.len())
+            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
-    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    w.set_permissions(meta.permissions())
+        .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     // Everything past this point acts on `w`, the claimed HANDLE. Nothing re-opens `dst` by path — see
     // `claim_file_slot`'s contract, and R2-F1 for what happened the one round something did.
     carry_file_times(&meta, &w);
@@ -1464,6 +1466,7 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
             .map(|(file, created)| crate::open_beneath::Opened { file, created })
             .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: could not open the destination for writing: {e}", dst.display())))
     })
+    .map_err(|r| r.why)
 }
 
 /// The same copy, onto a destination handle **the caller opens** (CPE-1896).
@@ -1503,7 +1506,7 @@ pub(crate) fn copy_file_onto_destination_handle(
     dst: &Path,
     wording: LinkGuardWording,
     open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
-) -> Result<CopiedOnto, String> {
+) -> Result<CopiedOnto, crate::open_beneath::Refusal> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
     // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
@@ -1514,30 +1517,36 @@ pub(crate) fn copy_file_onto_destination_handle(
     // needs highlighting either way, and a single rule beats one that quietly depends on `wording`. The
     // caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below: that is
     // the user's own tree, which is the half they need to see.
-    let mut r = std::fs::File::open(src).map_err(|e| format!("the source could not be opened: {e}"))?;
+    let mut r = std::fs::File::open(src).map_err(|e| crate::open_beneath::Refusal::failure(format!("the source could not be opened: {e}")))?;
     // Read from the OPEN HANDLE, not from a path stat that a swap could have invalidated — the same
     // authority `copy_file_into_claimed_slot` uses, and the reason a FIFO or directory substituted at
     // `src` after this open still cannot make this function write nonsense.
-    let meta = r.metadata().map_err(|e| format!("the source could not be described: {e}"))?;
+    let meta = r.metadata().map_err(|e| crate::open_beneath::Refusal::failure(format!("the source could not be described: {e}")))?;
     if !meta.is_file() {
         // Deliberately NOT `not_a_regular_file`, which names the source path — see the comment above.
         // That helper is shared with `copy_file_into_claimed_slot`, whose text does not reach a dialog,
         // so it is left exactly as it is rather than weakened for every caller to suit this one.
-        return Err(
-            "the source is not a regular file, so it was not copied — only ordinary files are copied \
-             by value (a device, socket, FIFO or directory would either block the copy or fill the \
-             destination volume)"
+        // `policy: true` — refusing to copy a device, socket, FIFO or directory *by value* is a
+        // verdict about what the source is, not an I/O failure, and it recurs identically next run.
+        return Err(crate::open_beneath::Refusal {
+            why: "the source is not a regular file, so it was not copied — only ordinary files are \
+                  copied by value (a device, socket, FIFO or directory would either block the copy or \
+                  fill the destination volume)"
                 .to_string(),
-        );
+            policy: true,
+        });
     }
 
-    let ClaimedDestination { file: mut w, written } = claim_destination_handle(dst, wording, open_dst).map_err(|r| r.why)?;
+    let ClaimedDestination { file: mut w, written } =
+        claim_destination_handle(dst, wording, open_dst)?;
     // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
     // the copy buffer, but taking it from the handle keeps this function free of a second path question.
     let copied =
-        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
+        stream_bytes(&mut r, &mut w, meta.len())
+            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
-    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    w.set_permissions(meta.permissions())
+        .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     carry_file_times(&meta, &w);
     Ok(CopiedOnto { bytes: copied, written })
 }
