@@ -1027,16 +1027,30 @@ async macroPreflight(macro: ActionMacro, inputs: string[], root: string) : Promi
  * before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
  * frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
  * 
- * **`confirmed_overwrite` (CPE-1891).** The engine itself refuses an unconfirmed collision, not just
- * the UI — the same posture `batch_execute::execute_plan_walk` already takes for the Batch-Media
- * engine (CPE-1599): a devtools call, a future automation surface, or a stale `MacroRunConfirm` that
- * skipped `macro_preflight` must not get a free overwrite just by setting the flag on a run that never
- * actually had a confirmable collision to begin with, and conversely must never be able to talk this
- * engine into writing through a link no matter what it passes. Nothing has been applied yet when this
- * check runs, so a refusal here costs nothing to roll back — it is the fix for the wasted-work half of
- * CPE-1891, independent of whatever the frontend does with the collision list.
+ * **`confirmed_overwrite` (CPE-1891, re-scoped in PR #1044 review round 2, Blocker 2).** A list of
+ * destination paths (`MacroCollision::to`) the user has explicitly confirmed overwriting — normally
+ * exactly the `to` values `macro_preflight` reported as `confirmable`, since `MacroRunConfirm`'s
+ * checkbox confirms the whole displayed set at once. **Not a blanket bool.** The first cut of this
+ * ticket took `confirmed_overwrite: bool` and handed the same `true` to every rename/move/convert op
+ * in the run — so ticking the box for the ONE collision a 200-file batch actually had also switched
+ * off the occupancy guard on the other 199 non-colliding ops, and a confirm made five minutes before
+ * Run authorised overwriting whatever happened to occupy those names BY THEN, not what the user was
+ * shown. Scoping to a set of names closes both: `macro_refuse_unconfirmed_collisions` re-derives
+ * collisions fresh at call time and only lets a `confirmable` one through when its OWN `to` is in this
+ * set, and `macro_apply_run` looks up each op's own `to` in the set individually rather than trusting
+ * one flag for the whole run — an op whose destination is not in `confirmed_overwrite` still goes
+ * through its ordinary (unconfirmed) primitive, which only ever succeeds there if the destination is
+ * actually free.
+ * 
+ * The engine itself refuses an unconfirmed (or now, un-matched) collision, not just the UI — the same
+ * posture `batch_execute::execute_plan_walk` already takes for the Batch-Media engine (CPE-1599): a
+ * devtools call, a future automation surface, or a stale `MacroRunConfirm` must not get a free
+ * overwrite just by naming a path that happens to match, and conversely must never be able to talk
+ * this engine into writing through a link no matter what it passes (`MacroCollision::confirmable` is
+ * never influenced by this list). Nothing has been applied yet when this check runs, so a refusal here
+ * costs nothing to roll back.
  */
-async macroRun(macro: ActionMacro, inputs: string[], root: string, confirmedOverwrite: boolean) : Promise<Result<ResolvedRun, string>> {
+async macroRun(macro: ActionMacro, inputs: string[], root: string, confirmedOverwrite: string[]) : Promise<Result<ResolvedRun, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("macro_run", { macro, inputs, root, confirmedOverwrite }) };
 } catch (e) {
@@ -1047,6 +1061,18 @@ async macroRun(macro: ActionMacro, inputs: string[], root: string, confirmedOver
 /**
  * Undo a previously-applied `ResolvedRun` (as returned by `macro_run`) by replaying its inverses
  * in reverse order.
+ * 
+ * **Does not restore a confirmed overwrite's victim (CPE-1891, PR #1044 review round 2, Blocker 3).**
+ * `run.inverses` only ever encodes "move this NAME back" — for a `rename`/`move` step that overwrote an
+ * occupied destination, the file that occupied it was replaced by `fs::rename`'s own atomic
+ * replace-on-rename with nothing preserved anywhere; undo restores the NAME `from` pointed to but
+ * cannot conjure back content that was never kept. A confirmed Convert is the same shape: the plain
+ * pre-existing file at `to` is truncated and overwritten in place (`overwrite_confirmed_no_follow`),
+ * not trashed the way the pre-convert original is, so undoing a confirmed convert restores the
+ * pre-convert original but does not restore whatever the confirmed write replaced. This is the
+ * documented, deliberate minimum for this ticket (see the ticket's Work Log for the reasoning against
+ * building a pre-overwrite checkpoint instead) — `MacroRunConfirm.svelte`'s confirm panel warns about
+ * it before the run, and `src/docs/organizing-macros.md`'s Undo section says so explicitly.
  */
 async macroUndo(run: ResolvedRun) : Promise<Result<null, string>> {
     try {

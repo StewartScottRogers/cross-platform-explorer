@@ -7002,14 +7002,28 @@ async fn macro_preflight(macro_: ActionMacro, inputs: Vec<String>, root: String)
 /// before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
 /// frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
 ///
-/// **`confirmed_overwrite` (CPE-1891).** The engine itself refuses an unconfirmed collision, not just
-/// the UI — the same posture `batch_execute::execute_plan_walk` already takes for the Batch-Media
-/// engine (CPE-1599): a devtools call, a future automation surface, or a stale `MacroRunConfirm` that
-/// skipped `macro_preflight` must not get a free overwrite just by setting the flag on a run that never
-/// actually had a confirmable collision to begin with, and conversely must never be able to talk this
-/// engine into writing through a link no matter what it passes. Nothing has been applied yet when this
-/// check runs, so a refusal here costs nothing to roll back — it is the fix for the wasted-work half of
-/// CPE-1891, independent of whatever the frontend does with the collision list.
+/// **`confirmed_overwrite` (CPE-1891, re-scoped in PR #1044 review round 2, Blocker 2).** A list of
+/// destination paths (`MacroCollision::to`) the user has explicitly confirmed overwriting — normally
+/// exactly the `to` values `macro_preflight` reported as `confirmable`, since `MacroRunConfirm`'s
+/// checkbox confirms the whole displayed set at once. **Not a blanket bool.** The first cut of this
+/// ticket took `confirmed_overwrite: bool` and handed the same `true` to every rename/move/convert op
+/// in the run — so ticking the box for the ONE collision a 200-file batch actually had also switched
+/// off the occupancy guard on the other 199 non-colliding ops, and a confirm made five minutes before
+/// Run authorised overwriting whatever happened to occupy those names BY THEN, not what the user was
+/// shown. Scoping to a set of names closes both: `macro_refuse_unconfirmed_collisions` re-derives
+/// collisions fresh at call time and only lets a `confirmable` one through when its OWN `to` is in this
+/// set, and `macro_apply_run` looks up each op's own `to` in the set individually rather than trusting
+/// one flag for the whole run — an op whose destination is not in `confirmed_overwrite` still goes
+/// through its ordinary (unconfirmed) primitive, which only ever succeeds there if the destination is
+/// actually free.
+///
+/// The engine itself refuses an unconfirmed (or now, un-matched) collision, not just the UI — the same
+/// posture `batch_execute::execute_plan_walk` already takes for the Batch-Media engine (CPE-1599): a
+/// devtools call, a future automation surface, or a stale `MacroRunConfirm` must not get a free
+/// overwrite just by naming a path that happens to match, and conversely must never be able to talk
+/// this engine into writing through a link no matter what it passes (`MacroCollision::confirmable` is
+/// never influenced by this list). Nothing has been applied yet when this check runs, so a refusal here
+/// costs nothing to roll back.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn macro_run(
@@ -7017,10 +7031,10 @@ async fn macro_run(
     macro_: ActionMacro,
     inputs: Vec<String>,
     root: String,
-    confirmed_overwrite: bool,
+    confirmed_overwrite: Vec<String>,
 ) -> Result<ResolvedRun, String> {
     let resolved = cpe_server::macro_run::resolve(&macro_, &inputs, &root).map_err(|errs| errs.join("; "))?;
-    macro_refuse_unconfirmed_collisions(&resolved, confirmed_overwrite)?;
+    macro_refuse_unconfirmed_collisions(&resolved, &confirmed_overwrite)?;
     // Every path a resolved op touches is the user's doing (CPE-1101), same as rename_entry/move_exact.
     note_app_op(&app, || {
         resolved
@@ -7030,45 +7044,50 @@ async fn macro_run(
             .collect()
     });
     let ctx = server_ctx::TauriCtx::new(&app);
-    tauri::async_runtime::spawn_blocking(move || macro_apply_run(&ctx, resolved, confirmed_overwrite))
+    tauri::async_runtime::spawn_blocking(move || macro_apply_run(&ctx, resolved, &confirmed_overwrite))
         .await
         .map_err(|e| e.to_string())?
 }
 
 /// The defensive re-check behind `macro_run`'s `confirmed_overwrite` gate (CPE-1891), split out so it
 /// is unit-testable without a live `tauri::AppHandle` (same reason every other fn in this section is
-/// split from its command wrapper). Scans `resolved` for collisions and decides which ones are still
-/// blocking given `confirmed_overwrite`:
+/// split from its command wrapper). Scans `resolved` for collisions **fresh, right now** — never trusts
+/// a caller-supplied verdict — and decides which ones are still blocking given the `confirmed` set of
+/// destination paths:
 ///
-/// - `confirmed_overwrite == false` — ANY collision blocks, confirmable or not, so the whole run
-///   refuses before a single op is applied.
-/// - `confirmed_overwrite == true` — only a non-confirmable collision (a link) still blocks; a plain
-///   occupied name is allowed through. CPE-1734's rule stays absolute regardless of the flag.
-fn macro_refuse_unconfirmed_collisions(resolved: &ResolvedRun, confirmed_overwrite: bool) -> Result<(), String> {
+/// - A `confirmable` collision (a plain occupied name) blocks unless its OWN `to` is present in
+///   `confirmed` — being in the set for a DIFFERENT collision does not authorise this one.
+/// - A non-confirmable collision (a link, live or dangling) blocks **unconditionally**, regardless of
+///   `confirmed` — CPE-1734's rule, unaffected by this ticket's re-scoping.
+fn macro_refuse_unconfirmed_collisions(resolved: &ResolvedRun, confirmed: &[String]) -> Result<(), String> {
+    let confirmed_set: std::collections::HashSet<&str> = confirmed.iter().map(String::as_str).collect();
     let blocking: Vec<MacroCollision> = macro_preflight_collisions(resolved)
         .into_iter()
-        .filter(|c| !confirmed_overwrite || !c.confirmable)
+        .filter(|c| !c.confirmable || !confirmed_set.contains(c.to.as_str()))
         .collect();
     if blocking.is_empty() {
         return Ok(());
     }
-    let names: Vec<String> = blocking.iter().map(|c| c.to.clone()).collect();
-    Err(if confirmed_overwrite {
-        format!(
-            "macro run refused: {} destination name(s) are links and can never be overwritten, \
-             confirmed or not: {}",
-            blocking.len(),
-            names.join(", "),
-        )
-    } else {
-        format!(
-            "macro run refused: {} destination name(s) already exist and were not confirmed for \
-             overwrite: {}. Call macro_preflight to see the full collision set, or re-run with \
-             confirmed_overwrite: true to overwrite the plain ones.",
-            blocking.len(),
-            names.join(", "),
-        )
-    })
+    let (links, unconfirmed): (Vec<&MacroCollision>, Vec<&MacroCollision>) =
+        blocking.iter().partition(|c| !c.confirmable);
+    let mut parts = Vec::new();
+    if !links.is_empty() {
+        parts.push(format!(
+            "{} destination name(s) are links and can never be overwritten, confirmed or not: {}",
+            links.len(),
+            links.iter().map(|c| c.to.clone()).collect::<Vec<_>>().join(", "),
+        ));
+    }
+    if !unconfirmed.is_empty() {
+        parts.push(format!(
+            "{} destination name(s) already exist and were not confirmed for overwrite: {}. Call \
+             macro_preflight to see the full collision set, or re-run naming these destinations in \
+             confirmed_overwrite to overwrite the plain ones.",
+            unconfirmed.len(),
+            unconfirmed.iter().map(|c| c.to.clone()).collect::<Vec<_>>().join(", "),
+        ));
+    }
+    Err(format!("macro run refused: {}", parts.join("; ")))
 }
 
 /// Real-filesystem collision scan behind `macro_preflight` and `macro_run`'s own defensive re-check
@@ -7126,6 +7145,18 @@ fn macro_preflight_collisions(run: &ResolvedRun) -> Vec<MacroCollision> {
 
 /// Undo a previously-applied `ResolvedRun` (as returned by `macro_run`) by replaying its inverses
 /// in reverse order.
+///
+/// **Does not restore a confirmed overwrite's victim (CPE-1891, PR #1044 review round 2, Blocker 3).**
+/// `run.inverses` only ever encodes "move this NAME back" — for a `rename`/`move` step that overwrote an
+/// occupied destination, the file that occupied it was replaced by `fs::rename`'s own atomic
+/// replace-on-rename with nothing preserved anywhere; undo restores the NAME `from` pointed to but
+/// cannot conjure back content that was never kept. A confirmed Convert is the same shape: the plain
+/// pre-existing file at `to` is truncated and overwritten in place (`overwrite_confirmed_no_follow`),
+/// not trashed the way the pre-convert original is, so undoing a confirmed convert restores the
+/// pre-convert original but does not restore whatever the confirmed write replaced. This is the
+/// documented, deliberate minimum for this ticket (see the ticket's Work Log for the reasoning against
+/// building a pre-overwrite checkpoint instead) — `MacroRunConfirm.svelte`'s confirm panel warns about
+/// it before the run, and `src/docs/organizing-macros.md`'s Undo section says so explicitly.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn macro_undo(app: tauri::AppHandle, run: ResolvedRun) -> Result<(), String> {
@@ -7148,18 +7179,24 @@ async fn macro_undo(app: tauri::AppHandle, run: ResolvedRun) -> Result<(), Strin
 /// snapshotted, and if the label was already present, that op's inverse is rewritten from `"untag"`
 /// to `"tag"` (a no-op restore) so undo never strips a label the user had before the run.
 ///
-/// `confirmed_overwrite` (CPE-1891) is threaded to every FORWARD op only — never to a rollback or undo
-/// inverse. Rollback/undo restores `from`, a name the forward op just vacated a moment ago, which
-/// should be free again by construction; if something else has since claimed it, that is a new,
-/// genuinely surprising collision worth surfacing as a rollback failure (the existing "ROLLBACK ALSO
-/// FAILED" path below), never something to silently force through.
-fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun, confirmed_overwrite: bool) -> Result<ResolvedRun, String> {
+/// `confirmed_overwrite` (CPE-1891, re-scoped per-op in PR #1044 review round 2, Blocker 2) is looked
+/// up PER OP against its own `to` — never a blanket flag handed to every op in the run. Only the
+/// specific op(s) whose destination is in the set get the confirmed bridge; every other op still goes
+/// through its ordinary (unconfirmed) primitive, which only succeeds there if that destination is
+/// genuinely free. This is threaded to every FORWARD op only — never to a rollback or undo inverse.
+/// Rollback/undo restores `from`, a name the forward op just vacated a moment ago, which should be free
+/// again by construction; if something else has since claimed it, that is a new, genuinely surprising
+/// collision worth surfacing as a rollback failure (the existing "ROLLBACK ALSO FAILED" path below),
+/// never something to silently force through.
+fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun, confirmed: &[String]) -> Result<ResolvedRun, String> {
+    let confirmed_set: std::collections::HashSet<&str> = confirmed.iter().map(String::as_str).collect();
     for applied in 0..run.ops.len() {
         let op = run.ops[applied].clone();
         if op.kind == "tag" && macro_tag_already_present(ctx, &op.from, &op.detail) {
             run.inverses[applied].kind = "tag".to_string();
         }
-        if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to, confirmed_overwrite) {
+        let op_confirmed = confirmed_set.contains(op.to.as_str());
+        if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to, op_confirmed) {
             // Roll back the already-applied ops in reverse. Collect any rollback failures rather
             // than discarding them: if an inverse itself fails (e.g. a file was externally moved
             // or locked between apply and rollback), the filesystem is left partially modified and
@@ -7170,12 +7207,36 @@ fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun, confirmed_overwrit
                     rollback_errs.push(re);
                 }
             }
+            // **PR #1044 review round 2, Blocker 3 (the "rolled back" wording half).** A rollback
+            // restores the NAME each already-applied op moved — it does not, and cannot, restore bytes
+            // a CONFIRMED overwrite among them already destroyed: `rename_into_confirmed_slot`'s
+            // `fs::rename` and `overwrite_confirmed_no_follow`'s truncate-and-write both replace the
+            // occupant's content the instant the forward op runs, with nothing preserved anywhere —
+            // whether the run later succeeds or is rolled back makes no difference to that file. Saying
+            // plain "(rolled back)" when one of the steps just rolled back was a confirmed overwrite
+            // would be true about the name and false about what the user actually lost.
+            let confirmed_overwrites_rolled_back = run.ops[..applied]
+                .iter()
+                .filter(|op| confirmed_set.contains(op.to.as_str()))
+                .count();
+            let irreversible_note = if confirmed_overwrites_rolled_back > 0 {
+                format!(
+                    "; NOTE: {confirmed_overwrites_rolled_back} of these were confirmed overwrites — the \
+                     file(s) they replaced were not preserved anywhere and cannot be recovered by this \
+                     rollback, only the name is restored"
+                )
+            } else {
+                String::new()
+            };
             if rollback_errs.is_empty() {
-                return Err(format!("macro run failed at step {}: {e} (rolled back)", applied + 1));
+                return Err(format!(
+                    "macro run failed at step {}: {e} (rolled back{irreversible_note})",
+                    applied + 1
+                ));
             }
             return Err(format!(
                 "macro run failed at step {}: {e}; ROLLBACK ALSO FAILED for {} of {} inverse op(s) \
-                 ({}) — the filesystem may be partially modified",
+                 ({}) — the filesystem may be partially modified{irreversible_note}",
                 applied + 1,
                 rollback_errs.len(),
                 applied,
@@ -7201,10 +7262,24 @@ fn macro_apply_inverses(ctx: &dyn ServerCtx, run: &ResolvedRun) -> Result<(), St
 ///
 /// `confirmed_overwrite` (CPE-1891) only ever affects `rename`/`move`/`convert`, and only ever
 /// bypasses the PLAIN-occupied refusal at `to` — never the link refusal (CPE-1734's absolute rule,
-/// unchanged). `rename`/`move` route through `macro_rename_bridge`, a bridge scoped to the macro engine
-/// alone rather than a new parameter on `rename_entry_impl`/`move_exact_impl` — those two also back the
-/// general-purpose `rename_entry`/`move_exact` commands, and this ticket is about the macro engine's
-/// own confirm-and-retry escape hatch, not every rename/move call site in the app.
+/// unchanged).
+///
+/// **`rename` and `move` both route through `macro_rename_bridge`, unconditionally — not just when
+/// confirmed (PR #1044 review round 2, should-fix).** The first cut only used the bridge for the
+/// confirmed branch and kept `rename_entry_impl` for the unconfirmed one, and that was a real bug, not
+/// just duplication: `rename_entry_impl` takes a bare NAME (`Path::new(to).file_name()`) and
+/// reconstructs the destination from `from`'s own parent, silently DROPPING any directory component a
+/// Rename template's literal text renders into `to` — while the confirmed branch used the FULL `to`.
+/// `action_macro::validate` does not reject a separator in a Rename template (only
+/// `macro_run::resolve`'s `within_root` scope check ever saw it, and that only checks the RESULT stays
+/// inside the root, not that it stays in the SAME folder), so `sub/{stem}.{ext}` sent the same macro to
+/// two different destinations depending on whether the confirm checkbox was ticked — and
+/// `macro_preflight_collisions` (which always uses the full `to`) was reporting on a path the
+/// unconfirmed run would never actually touch. Routing both through the one bridge means there is
+/// exactly one destination, always: the resolved `to`, exactly as `macro_preflight_collisions` and the
+/// confirm dialog already show it. `rename_entry_impl`/`move_exact_impl` remain unchanged and still back
+/// the general-purpose `rename_entry`/`move_exact` commands — this ticket's fix is scoped to the macro
+/// engine's own resolved-op application, not a new parameter on every rename/move call site in the app.
 fn macro_apply_op(
     ctx: &dyn ServerCtx,
     from: &str,
@@ -7214,30 +7289,7 @@ fn macro_apply_op(
     confirmed_overwrite: bool,
 ) -> Result<(), String> {
     match kind {
-        "rename" => {
-            if confirmed_overwrite {
-                macro_rename_bridge(ctx, from, to)
-            } else {
-                let new_name = Path::new(to)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .ok_or_else(|| format!("bad rename target {to:?}"))?
-                    .to_string();
-                rename_entry_impl(ctx, from.to_string(), new_name).map(|_| ())
-            }
-        }
-        "move" => {
-            if confirmed_overwrite {
-                macro_rename_bridge(ctx, from, to)
-            } else {
-                let results = move_exact_impl(ctx, vec![(from.to_string(), to.to_string())]);
-                match results.into_iter().next() {
-                    Some(r) if r.ok => Ok(()),
-                    Some(r) => Err(r.error),
-                    None => Err("move produced no result".to_string()),
-                }
-            }
-        }
+        "rename" | "move" => macro_rename_bridge(ctx, from, to, confirmed_overwrite),
         "convert" => macro_convert_in_place(from, to, detail, confirmed_overwrite),
         "restore_convert" => macro_restore_converted(from, to),
         "tag" => macro_add_tag(ctx, from, detail),
@@ -7246,13 +7298,41 @@ fn macro_apply_op(
     }
 }
 
-/// Apply one resolved `rename`/`move` op **with the user's explicit overwrite confirmation** (CPE-1891)
-/// — called only from `macro_apply_op`'s `confirmed_overwrite` branch. Mirrors
-/// `rename_entry_impl`/`move_exact_impl`'s tail exactly (guard, `fs::rename`, tag + schedule retag);
-/// the guard is `rename_into_confirmed_slot`, which still refuses a link unconditionally (CPE-1734) and
-/// only ever bypasses the plain-occupied refusal a confirm is allowed to bypass.
-fn macro_rename_bridge(ctx: &dyn ServerCtx, from: &str, to: &str) -> Result<(), String> {
-    cpe_server::fsutil::rename_into_confirmed_slot(Path::new(from), Path::new(to))?;
+/// Apply one resolved `rename`/`move` op onto its real primitive — the macro engine's own bridge for
+/// both kinds (CPE-1891; unified in PR #1044 review round 2, see `macro_apply_op`'s doc for why both
+/// the confirmed AND unconfirmed cases route through here now). Mirrors `move_exact_impl`'s tail
+/// exactly: both destination-path checks it makes (`require_local` on both ends, then the destination
+/// PARENT's own stat, in that order — CPE-1705's "the parent check comes first" ordering is load-bearing,
+/// see `move_exact_impl`'s own comment) before the slot guard, then the same tag/schedule retag.
+///
+/// The slot guard is the one place confirmed and unconfirmed genuinely differ: `confirmed_overwrite`
+/// selects `rename_into_confirmed_slot` (still refuses a link unconditionally — CPE-1734 — and only
+/// ever bypasses the plain-occupied refusal a confirm is allowed to bypass) over the ordinary
+/// `rename_into_slot`.
+///
+/// Deliberately does **not** call `valid_entry_name` (the bare-NAME character sanity check
+/// `rename_entry_impl` applies) — `to` here is a full resolved path, not a bare name, and
+/// `move_exact_impl` has never called it either for the identical reason; a rename step whose template
+/// renders an invalid character surfaces as the OS's own error from `fs::rename`, same as it always has
+/// for a macro Move.
+fn macro_rename_bridge(ctx: &dyn ServerCtx, from: &str, to: &str, confirmed_overwrite: bool) -> Result<(), String> {
+    let src = Path::new(from);
+    let dst = Path::new(to);
+    cpe_server::fs_route::require_local(from).and(cpe_server::fs_route::require_local(to))?;
+    if let Some(parent) = dst.parent() {
+        if let Some(e) = dest_parent_stat_error(parent.try_exists()) {
+            return Err(e);
+        }
+    }
+    if confirmed_overwrite {
+        cpe_server::fsutil::rename_into_confirmed_slot(src, dst)?;
+    } else {
+        cpe_server::fsutil::rename_into_slot(
+            src,
+            dst,
+            &format!("\"{}\" already exists", dst.file_name().unwrap_or_default().to_string_lossy()),
+        )?;
+    }
     let _ = cpe_server::tags::retag(ctx, from, to);
     let _ = cpe_server::snapshot_schedule::reschedule(ctx, from, to);
     Ok(())
@@ -14794,7 +14874,7 @@ mod tests {
             steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, &[]).unwrap();
 
         let store = cpe_server::tags::load(&ctx).unwrap();
         assert!(store.get(&input).unwrap().tags().contains(&"done".to_string()));
@@ -14826,7 +14906,7 @@ mod tests {
         let root = work.path().to_string_lossy().to_string();
         let input = file.to_string_lossy().to_string();
         let resolved = cpe_server::macro_run::resolve(&mac, &[input], &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, &[]).unwrap();
 
         let moved = dest.join("b.txt");
         assert!(moved.exists(), "file should have been renamed then moved");
@@ -14858,7 +14938,7 @@ mod tests {
         let inputs = vec![a.to_string_lossy().to_string(), missing.to_string_lossy().to_string()];
         let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
 
-        let err = macro_apply_run(&ctx, resolved, false).unwrap_err();
+        let err = macro_apply_run(&ctx, resolved, &[]).unwrap_err();
         assert!(err.contains("rolled back"), "got: {err}");
 
         // The first (successful) step's effect must have been rolled back.
@@ -14894,7 +14974,7 @@ mod tests {
             steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, &[]).unwrap();
         // The apply layer must have corrected the tag step's inverse to a no-op restore.
         assert_eq!(applied.inverses[0].kind, "tag", "pre-existing label ⇒ inverse must not be untag");
 
@@ -14930,7 +15010,7 @@ mod tests {
             steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, &[]).unwrap();
         assert_eq!(applied.inverses[0].kind, "untag", "no pre-existing label ⇒ inverse stays untag");
 
         macro_apply_inverses(&ctx, &applied).unwrap();
@@ -15304,7 +15384,7 @@ mod tests {
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
         assert_eq!(resolved.inverses[0].kind, "restore_convert");
-        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, &[]).unwrap();
 
         let converted = work.path().join("photo.jpg");
         assert!(converted.exists(), "converted file should exist");
@@ -15509,7 +15589,7 @@ mod tests {
         let inputs = vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()];
         let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
 
-        let e = macro_refuse_unconfirmed_collisions(&resolved, false).unwrap_err();
+        let e = macro_refuse_unconfirmed_collisions(&resolved, &[]).unwrap_err();
         assert!(e.contains("b-renamed.txt"), "must name the colliding destination: {e}");
 
         assert!(a.exists(), "op 0's input must be untouched — it never ran");
@@ -15534,9 +15614,36 @@ mod tests {
         let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
 
         assert!(
-            macro_refuse_unconfirmed_collisions(&resolved, true).is_ok(),
-            "a confirmed plain collision must pass the gate"
+            macro_refuse_unconfirmed_collisions(&resolved, &[existing.to_string_lossy().to_string()]).is_ok(),
+            "a plain collision confirmed by its OWN destination name must pass the gate"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **PR #1044 review round 2, Blocker 2.** Confirming one collision must not authorise a
+    /// DIFFERENT, unrelated collision — the set is per-destination, not a blanket switch. This is the
+    /// "collision appearing between preflight and run" shape: the confirmed set here is real (it names
+    /// an actual `to` from a real preflight), it is just the WRONG one for this run's own collision.
+    #[test]
+    fn macro_refuse_unconfirmed_collisions_does_not_let_a_confirmation_for_a_different_name_through() {
+        let d = scratch("guard-wrong-name-confirmed");
+        let a = d.join("a.txt");
+        fs::write(&a, b"hi").unwrap();
+        let existing = d.join("taken.txt");
+        fs::write(&existing, b"already here").unwrap();
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+
+        // The confirmed set names a plausible-looking but UNRELATED destination — not this run's own
+        // `taken.txt` collision.
+        let unrelated = d.join("some-other-file.txt").to_string_lossy().to_string();
+        let e = macro_refuse_unconfirmed_collisions(&resolved, &[unrelated]).unwrap_err();
+        assert!(e.contains("taken.txt"), "must still refuse THIS run's own collision: {e}");
+        assert_eq!(fs::read(&existing).unwrap(), b"already here", "must remain untouched");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -15562,8 +15669,10 @@ mod tests {
         let root = d.to_string_lossy().to_string();
         let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
 
-        let e = macro_refuse_unconfirmed_collisions(&resolved, true)
-            .expect_err("a link collision must stay refused even when confirmed_overwrite is true");
+        // The link's OWN name is in the confirmed set — CPE-1734's rule must still hold even when the
+        // confirmed set literally names this exact destination, not just when it's empty/unrelated.
+        let e = macro_refuse_unconfirmed_collisions(&resolved, &[link.to_string_lossy().to_string()])
+            .expect_err("a link collision must stay refused even when its own name is in the confirmed set");
         assert!(e.contains("links") && e.contains("never"), "got: {e}");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -15587,19 +15696,163 @@ mod tests {
 
         // Unconfirmed: refused up front, nothing touched (the full end-to-end flow a real
         // `macro_run` call makes: resolve, then the guard, before `macro_apply_run` ever runs).
-        let guard_err = macro_refuse_unconfirmed_collisions(&resolved, false).unwrap_err();
+        let guard_err = macro_refuse_unconfirmed_collisions(&resolved, &[]).unwrap_err();
         assert!(guard_err.contains("taken.txt"), "got: {guard_err}");
         assert!(a.exists());
         assert_eq!(fs::read(&existing).unwrap(), b"OLD CONTENT");
 
-        // Confirmed: the guard passes, and applying actually overwrites the target's bytes.
-        assert!(macro_refuse_unconfirmed_collisions(&resolved, true).is_ok());
-        macro_apply_run(&ctx, resolved, true).unwrap();
+        // Confirmed BY NAME: the guard passes, and applying actually overwrites the target's bytes.
+        let confirmed = vec![existing.to_string_lossy().to_string()];
+        assert!(macro_refuse_unconfirmed_collisions(&resolved, &confirmed).is_ok());
+        macro_apply_run(&ctx, resolved, &confirmed).unwrap();
         assert!(!a.exists(), "the source name is consumed by the rename");
         assert_eq!(
             fs::read(&existing).unwrap(),
             b"NEW CONTENT",
             "a confirmed overwrite must replace the target's bytes"
+        );
+    }
+
+    /// **PR #1044 review round 2, Blocker 2, the fix's own regression proof.** A run with TWO ops —
+    /// one collides and is confirmed, the other does NOT collide — must not have its occupancy guard
+    /// silently switched off for the non-colliding op just because the OTHER op's confirmation was
+    /// present. Pre-fix (`confirmed_overwrite: bool` handed to every op) this test could not even be
+    /// expressed: there was no way to confirm one op without confirming all of them.
+    #[test]
+    fn cpe_1891_confirming_one_collision_does_not_disarm_the_occupancy_guard_on_a_sibling_op() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        // `a` collides with a pre-existing `taken.txt` and WILL be confirmed.
+        let a = work.path().join("a.txt");
+        fs::write(&a, b"A-NEW").unwrap();
+        let taken = work.path().join("taken.txt");
+        fs::write(&taken, b"A-OLD").unwrap();
+        // `b` does NOT collide — nothing sits at its planned destination.
+        let b = work.path().join("b.txt");
+        fs::write(&b, b"B-NEW").unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+        };
+        let root = work.path().to_string_lossy().to_string();
+        // `a` renames onto the real collision `taken.txt`; `resolve`'s own dedupe then sends `b` to
+        // `taken-2.txt` (free) rather than re-colliding — exercising the ordinary, uncomplicated
+        // sibling op this test is actually about.
+        let inputs = vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()];
+        let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
+        assert_eq!(resolved.ops[0].to, taken.to_string_lossy());
+        let b_dest = Path::new(&resolved.ops[1].to).to_path_buf();
+        assert_ne!(b_dest, taken, "sanity: b's destination must be distinct from a's collision");
+
+        // Confirm ONLY `a`'s collision.
+        let confirmed = vec![taken.to_string_lossy().to_string()];
+        macro_apply_run(&ctx, resolved, &confirmed).unwrap();
+
+        assert_eq!(fs::read(&taken).unwrap(), b"A-NEW", "a's confirmed overwrite must have applied");
+        assert!(b_dest.exists(), "b's ordinary (unconfirmed) rename must still have succeeded on its own merits");
+        assert_eq!(fs::read(&b_dest).unwrap(), b"B-NEW");
+    }
+
+    /// **PR #1044 review round 2, should-fix: the destination divergence.** A Rename template's
+    /// literal text may embed a path separator (`action_macro::validate` does not reject one), which
+    /// resolves to a `to` whose directory differs from the input's own parent. Before this round's fix,
+    /// the unconfirmed path reconstructed the destination from `from`'s parent + `Path::new(to).file_
+    /// name()` (silently DROPPING the embedded subdirectory) while the confirmed path used the full
+    /// `to` — so the same macro sent the file to two different places depending on whether the confirm
+    /// checkbox was ticked. Both must now land at the identical, full `to` `macro_preflight_collisions`
+    /// already reports.
+    #[test]
+    fn cpe_1891_a_rename_template_with_a_separator_lands_at_the_same_full_to_confirmed_or_not() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        fs::create_dir_all(work.path().join("sub")).unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "sub/{stem}.{ext}".into() }],
+        };
+        let root = work.path().to_string_lossy().to_string();
+
+        // Unconfirmed leg: no collision at all, so this proves the DESTINATION, not just that a
+        // collision guard was bypassed.
+        let a = work.path().join("a.txt");
+        fs::write(&a, b"A-BYTES").unwrap();
+        let resolved_a = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+        let expected = work.path().join("sub").join("a.txt");
+        // `resolve()` appends the template's literal `/` as-is (it does not normalise separators), so
+        // compare structurally via `Path` rather than by exact string — `\` vs `/` is not the thing
+        // this sanity check is about.
+        assert_eq!(
+            Path::new(&resolved_a.ops[0].to),
+            expected,
+            "sanity: resolve() itself plans the full sub/ path"
+        );
+        macro_apply_run(&ctx, resolved_a, &[]).unwrap();
+        assert!(expected.exists(), "unconfirmed rename must land at the FULL resolved to, sub/ included");
+        assert!(!work.path().join("a.txt").exists(), "must not still be sitting at the old flat location");
+
+        // Confirmed leg: a genuine collision at the SAME full `sub/...` destination, so the two legs
+        // are directly comparable.
+        let b = work.path().join("b.txt");
+        fs::write(&b, b"B-NEW").unwrap();
+        fs::write(work.path().join("sub").join("b.txt"), b"B-OLD").unwrap();
+        let resolved_b = cpe_server::macro_run::resolve(&mac, &[b.to_string_lossy().to_string()], &root).unwrap();
+        let expected_b = work.path().join("sub").join("b.txt");
+        assert_eq!(Path::new(&resolved_b.ops[0].to), expected_b);
+        // Round-trips the ACTUAL `to` string `resolve()` produced — exactly what a real frontend does
+        // (it echoes back the same `MacroCollision.to` string `macro_preflight` gave it), not a
+        // separately-normalised path. `resolve()` doesn't normalise the template's literal `/`, so this
+        // is deliberately not `expected_b`'s own (backslash-normalised) string form.
+        let confirmed = vec![resolved_b.ops[0].to.clone()];
+        macro_apply_run(&ctx, resolved_b, &confirmed).unwrap();
+        assert_eq!(
+            fs::read(&expected_b).unwrap(),
+            b"B-NEW",
+            "confirmed rename must land at the same full sub/ destination the unconfirmed leg used"
+        );
+    }
+
+    /// **PR #1044 review round 2, missing test: what undo actually does to a confirmed overwrite's
+    /// victim.** Documents the Blocker-3 minimum-fix decision as a real assertion, not just prose: the
+    /// victim's original content is gone the instant the confirmed rename applies, and undo — which can
+    /// only replay `fs::rename` in reverse — restores the NAME, not those bytes. If a future change
+    /// makes this recoverable (e.g. a pre-overwrite checkpoint), this test is meant to go red and be
+    /// updated deliberately, not slide by unnoticed.
+    #[test]
+    fn cpe_1891_undo_after_a_confirmed_overwrite_does_not_recover_the_victims_original_bytes() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let a = work.path().join("a.txt");
+        fs::write(&a, b"NEW CONTENT").unwrap();
+        let existing = work.path().join("taken.txt");
+        fs::write(&existing, b"VICTIM ORIGINAL CONTENT").unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+        };
+        let root = work.path().to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+        let confirmed = vec![existing.to_string_lossy().to_string()];
+        let applied = macro_apply_run(&ctx, resolved, &confirmed).unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"NEW CONTENT");
+
+        macro_apply_inverses(&ctx, &applied).unwrap();
+
+        assert!(a.exists(), "undo DOES restore the name — the input path exists again");
+        assert_eq!(
+            fs::read(&a).unwrap(),
+            b"NEW CONTENT",
+            "but it carries the post-overwrite content, not the victim's"
+        );
+        assert!(
+            !existing.exists() || fs::read(&existing).unwrap() != b"VICTIM ORIGINAL CONTENT",
+            "the victim's original bytes are NOT recoverable by undo — this is the documented minimum \
+             fix for Blocker 3, not an oversight"
         );
     }
 

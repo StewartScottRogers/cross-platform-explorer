@@ -2408,6 +2408,23 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 /// `symlink_metadata` re-check mirrors [`copy_file_onto_no_follow`]'s belt-and-braces: a wrong or
 /// ignored no-follow flag on some platform must not be the only thing standing between a link and a
 /// write.
+///
+/// **The hard-link hole (CPE-1891 PR #1044 review round 2), closed the same way
+/// [`copy_file_onto_no_follow_with_wording`] closes it.** The `symlink_metadata` re-check above answers
+/// a PATH question and this function is the "claiming/writing" sibling of that one — CPE-1896's whole
+/// point was that a path re-check is never the last word once a handle is open, because a hard link is
+/// not a reparse point at all: `symlink_metadata` reports it as an utterly ordinary file, so the
+/// no-follow open above succeeds, the path check above passes, and without this the write would land at
+/// EVERY name the object has — including one outside the macro's scope root, which `within_root` cannot
+/// see because a hard link resolves to itself. Demonstrated on this ticket: a hard link from inside the
+/// macro root to a name outside it made a confirmed Convert write the new bytes at the outside name too,
+/// with `overwrite_confirmed_no_follow` reporting `Ok`. [`crate::batch_media::handle_facts`] reads the
+/// open handle's own identity (`GetFileInformationByHandle` on Windows / `fstat` on Unix) — a question a
+/// path swap cannot defeat — and refuses `is_reparse_point` (a junction that `is_symlink` may not tag as
+/// a link, per that function's own doc) and `links > 1` (a hard link), exactly as
+/// [`copy_file_onto_no_follow_with_wording`] does for its callers. `None` only on a platform whose
+/// identity model `batch_media` does not know, where the path check above is the whole defence, same as
+/// every other caller of `handle_facts`.
 pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let (mut file, created) = crate::batch_media::open_no_follow(target)
@@ -2423,6 +2440,38 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
              writing through a link",
             target.display()
         ));
+    }
+    if let Some(facts) = crate::batch_media::handle_facts(&file) {
+        let why = if facts.is_reparse_point {
+            Some(
+                "is a reparse point (a link, junction or stand-in for another name), and writing to it \
+                 writes THROUGH it"
+                    .to_string(),
+            )
+        } else if facts.is_dir {
+            Some("is a directory, so there is nothing here a file's bytes could replace".to_string())
+        } else if facts.links > 1 {
+            Some(format!(
+                "has {} names (it is hard-linked), and writing here would change the content at every \
+                 one of them — including any that live outside the macro's scope root, which no path \
+                 check can see because a hard link resolves to itself",
+                facts.links
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            drop(file);
+            if created {
+                let _ = std::fs::remove_file(target);
+            }
+            return Err(format!(
+                "{}: {why} — refusing even though overwrite was confirmed, because a confirm authorises \
+                 overwriting a plain file, never writing through a link or a name that resolves to more \
+                 than one entry",
+                target.display()
+            ));
+        }
     }
     file.set_len(0).map_err(|e| format!("{}: could not truncate: {e}", target.display()))?;
     file.write_all(bytes).map_err(|e| format!("{}: could not write: {e}", target.display()))?;
@@ -6077,6 +6126,49 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
             "the link must survive the refusal"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **PR #1044 review round 2, Blocker 1.** `symlink_metadata` alone cannot see this: a hard link is
+    /// not a reparse point, so it reads as an utterly ordinary file, and the pre-fix code confirmed
+    /// this writes through it — corrupting the OTHER name's content, including a name outside the
+    /// macro's scope root, which `within_root` cannot see either (a hard link resolves to itself).
+    /// Mirrors `batch_execute::tests::link_as_final_component_hard_link_alias_is_refused_even_with_confirmed_overwrite`,
+    /// the sibling engine's version of the identical proof.
+    #[test]
+    fn overwrite_confirmed_no_follow_refuses_a_hard_linked_destination() {
+        let d = scratch("confirmed-write-hardlink");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must not be touched".to_vec();
+        std::fs::write(&victim, &victim_original).unwrap();
+
+        // `link.jpg`'s NAME is the one the macro is about to write to; its DATA is the same file as
+        // `victim`, which lives OUTSIDE the scope this test is standing in for.
+        let link = d.join("link.jpg");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the hard-link leg of overwrite_confirmed_no_follow: this machine \
+                 could not create a hard link at {}. NOTHING in this test covered the hard-link route \
+                 on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = overwrite_confirmed_no_follow(&link, b"CONVERTED BYTES")
+            .expect_err("a hard-linked destination must be refused even with a confirmed overwrite");
+
+        assert!(e.contains("hard-linked") || e.contains("names"), "got: {e}");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            victim_original,
+            "the hard-linked victim's ACTUAL bytes on disk must be untouched — the whole point of this \
+             test is that a Result alone does not prove that (result was: {e})"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
