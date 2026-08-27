@@ -179,6 +179,48 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  ratchet-guard:
+    # CPE-1934: the guard that guards the ratchets.
+    #
+    # This repo's one-way ratchets (the hard-coded-hex counts in `src/app.css.test.ts`, the
+    # `gui-smoke/known-failing.json` case list, eight allowlists — the full enumeration is in
+    # `docs/design/RATCHETS.md`) each store their baseline as a plain literal INSIDE the file they
+    # guard. Nothing compared those literals against anything, so a PR that added an offender AND
+    # edited the number upward in the same diff passed trivially — the ratchet cannot see its own
+    # baseline move, and the only backstop was a reviewer noticing a number went up. That is exactly
+    # the move a one-way ratchet exists to prevent.
+    #
+    # This job measures every enumerated baseline in the working tree and at the base revision, and
+    # reds when one INCREASED. A raise stays possible (occasionally it is legitimate) but never
+    # quiet: it passes only when the same diff adds a row to `docs/design/RATCHETS.md` naming the
+    # baseline, the exact old and new values, the ticket, and why.
+    #
+    # Deliberately its OWN job, not a step in `frontend`: it needs `fetch-depth: 0` (which `frontend`
+    # does not) and it needs NO `npm ci` and no toolchain — plain `node` on the runner, zero
+    # dependencies. Measured end-to-end at well under a minute, essentially all of it the checkout,
+    # against a CI that otherwise takes about an hour. It runs in parallel with everything else, so
+    # it adds nothing to wall-clock.
+    #
+    # Both trigger shapes get a base revision. PRs use `base.sha`; pushes to `main` use
+    # `github.event.before` (this repo has no branch protection and `main` also moves via direct
+    # pushes — see the long note on the `pull_request` trigger above — so a PR-only guard would have
+    # a hole exactly where the ticket-file/sprint commits land). An unresolvable base makes the
+    # script exit non-zero rather than skip: a guard that compares nothing must not report success.
+    name: Ratchet guard — no baseline raised without a declaration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git show <base>:<file>` has to work for every baseline. A shallow checkout would make
+          # each one look "new at this revision", which is a silent all-green.
+          fetch-depth: 0
+
+      - name: Compare every ratchet baseline against the base revision
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/ratchet-baselines.mjs compare "$BASE_SHA"
+
   lockfile-preflight:
     # CPE-1932: this repo has 17 independent Cargo.lock files (9 of them pinning cpe-server), and
     # every Rust job below runs `cargo ... --locked`, so a single stale lockfile is a hard failure.

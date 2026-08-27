@@ -99,6 +99,30 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   `max-width`+ellipsis for a pill whose own text can be long). **Never** let text wrap inside a pill and
   overflow its background. Applies to context/capability/filter/agent chips everywhere.
 
+## Guards and ratchets
+
+- **Ratchets get their own guard for free (CPE-1934).** A *ratchet* is a stored count — or a stored
+  allowlist, which is a count wearing a coat — that a test compares today's measurement against, so a
+  defect class can't grow while the existing instances are burnt down (`BASELINE_TOTAL_HEX_OCCURRENCES`,
+  `gui-smoke/known-failing.json`, the eight `ALLOWLIST`/`ALLOWED_LINES`/`KNOWN_GAPS` lists). Every one
+  stores its baseline as a literal **inside the file it guards**, so a PR could raise the number in the
+  same diff that violated it and pass. `scripts/ratchet-baselines.mjs` + the `ratchet-guard` CI job now
+  measure every enumerated baseline against the merge base and **red on an increase**. Lowering always
+  sails through; a raise stays possible but must be declared as a row in `docs/design/RATCHETS.md`
+  naming the baseline, the exact old/new values, the ticket and the reason — and the raising diff must
+  **add** that row (one **not already present at the base** revision). A row is a one-time licence,
+  never a standing permit; rows are counted rather than looked up, so append a new one and leave the
+  history alone — you never need to delete or edit a row to get past the guard. Keep every baseline a
+  **plain literal** declared exactly once: an expression, a spread, a `.concat`, or a second
+  declaration of the same name is refused rather than guessed at, because a measurer that returns the
+  wrong number passes a raise, which is the whole defect.
+  **Adding a new ratchet needs no wiring** — `src/lib/ratchetBaselines.test.ts` fails CI if a
+  ratchet-shaped declaration appears in a file that is neither registered nor explicitly excluded with a
+  reason. Full standard + the enumeration: [docs/design/RATCHETS.md](docs/design/RATCHETS.md).
+- **Enumerate, don't recall (CPE-1932).** Any guard over "all the X in this repo" derives its list at
+  run time (`git ls-files`, a tree walk) and fails loudly when the list comes back near-empty — a
+  hard-coded list of the instances someone remembered is how seventeen Cargo.lock files became two.
+
 ## Docs
 
 - **In-app docs are self-maintaining (CPE-579).** Every feature that adds a user-facing **section** must
