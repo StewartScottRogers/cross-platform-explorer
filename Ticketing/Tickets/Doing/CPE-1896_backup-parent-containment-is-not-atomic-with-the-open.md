@@ -912,6 +912,60 @@ experiment stands in for the unanswerable-volume case.
   this round, and none in the Reviewer's 131.66 s run either; the `archive.rs` `EXTRACT_SEQ`/
   `SESSION_ROOT` candidate recorded in round 3 remains untouched and unfiled.
 
+## The generalisable finding from CPE-1896: two guards answering on one bit
+
+Worth lifting out of the round-4 narrative, because it is transferable and it is not obvious. Stated
+generally:
+
+> **A guard cannot be given test coverage while an earlier guard answers on the same underlying fact.**
+> No fixture can make the later one the decider, because every input that would trip it trips the
+> earlier one first. The later guard is then simultaneously *safe* (nothing gets through) and
+> *unverifiable* (nothing can prove it works) — and those two properties are easy to mistake for each
+> other.
+
+Concretely here: `fsutil::copy_file_onto_destination_handle`'s handle-based surrogate check reads the
+reparse tag's `IO_REPARSE_TAG_NAME_SURROGATE` bit, and `std::fs::FileType::is_symlink` on Windows
+**tracks that same bit** (measured independently and within the same hour by this ticket's Security
+Auditor, from three synthetic tags, and by the Worker, from a test that went red naming the wrong
+guard). While the `symlink_metadata(dst).is_symlink()` path check ran first, every surrogate was
+refused by it, so:
+
+- disabling the tag refusal entirely left **all 2,404 tests green** — it had zero coverage anywhere;
+- forcing the shared predicate to a lying `Some(false)` still let nothing through — which reads as
+  reassuring and was actually the *symptom*;
+- and the fix proposed in review ("a fixture refused by the tag check and nothing else") **could not be
+  built at all** while the ordering stood.
+
+**The tell to look for elsewhere in this crate:** a sabotage that leaves the suite green *and* a
+fault-injection that changes no behaviour, on the same guard. Taken separately each looks like evidence
+of safety; together they mean the guard is unreachable, and the next question is which earlier check is
+shadowing it. `batch_media::open_output_verified` has the same shape (a path check and a handle check
+answering about links at one name) and has not been examined for this.
+
+**The resolution here was to reorder, not to delete**, because the two guards are not redundant — they
+answer the same question by different means, one substitutable after the open and one not — and this
+ticket's whole thesis is *ask the handle, not the path*. A path question answering ahead of the handle
+checks was the inconsistency; putting it second made the handle check the decider and left the path
+check as an independent second net, which the new `cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit`
+tripwire now protects against silently disappearing under a future `std`.
+
+## Status 2026-08-27 — the reorder: DECIDED, KEEP, and under narrow review
+
+The Foreman's decision, recorded with its reasoning:
+
+- **It moves in the direction the ticket argues for.** The handle cannot be substituted after the open;
+  the path can. A path question deciding ahead of the handle checks was the inconsistency, not the fix.
+- **It creates no new window.** Both guards still run before `set_len(0)`, so nothing is written between
+  them; on Unix nothing changes at all (`is_reparse_point` is always `false` there); on Windows both
+  still refuse and only *which* one reports changes.
+- **The alternative was shipping a guard with zero coverage in 2,404 tests** — the defect this repo keeps
+  rediscovering, and the reason the 3-attempt cap was overridden to reach it.
+
+Because it is a security-guard reorder landing at round 4, that hunk specifically is out with the
+Reviewer and the Security Auditor for a narrow look: is the new ordering sound, does it admit anything
+the old ordering refused, and does the S3 sabotage now red for the right reason. Nothing further is
+pending from the Worker unless one of them raises something.
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a
