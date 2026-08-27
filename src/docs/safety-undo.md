@@ -98,11 +98,16 @@ Three details are worth knowing, because they are deliberate:
     measured, and it used to end in the worst possible way: the file landed outside your backup folder,
     overwriting whatever was already there, and the run reported it as a **success** with no error —
     including when "verify copies by checksum" was switched on, because the check re-read the same
-    redirected file and agreed with itself. Now, after each file is written, the app resolves where the
-    bytes actually went. If that is not inside the backup destination you chose, the entry is reported
-    as a **failure** naming both the file and the outside path it reached, so you know exactly what to
-    go and look at. **This does not prevent the redirect** — by then the bytes are already written — it
-    stops the job from calling it a success. Closing the gap itself is still open work.
+    redirected file and agreed with itself. Now, after each file is written, the app checks where the
+    bytes actually went — and not by re-reading the path, which anyone who can rename a folder can make
+    say whatever they like, but by confirming that the file now sitting there is *the very file it just
+    wrote*. If it is not, or if it sits outside the backup destination you chose, the entry is reported
+    as a **failure** naming the file, the outside path it reached, and which of your files' contents is
+    now sitting there — so you know exactly what to go and look at. **This does not prevent the
+    redirect** — by then the bytes are already written — it stops the job from calling it a success.
+    Closing the gap itself is still open work. One exception, worth knowing if you back up to a network
+    share: a few network filesystems cannot tell one file from another at all, and on those the app
+    falls back to the weaker path check, which a fast enough attacker can still fool.
   - **Backup copies do not currently carry Windows' "downloaded from the internet" mark
     (`Zone.Identifier`).** A file copied by File Explorer keeps that mark, so Windows still warns before
     opening it after a restore; a file copied by a backup job in this app currently does not carry it

@@ -1913,6 +1913,25 @@ mod tests {
     /// went, every path is once again exactly what it says it is. The source file is 1 MiB so that
     /// window exists at all. Both forms assert the same property.
     ///
+    /// # The two-phase leg does NOT win on Windows here, measured — and that is recorded, not hidden
+    ///
+    /// On this Windows volume the *swap-back* consistently loses: across 400 trials with the identity
+    /// comparison deliberately neutralised — the state in which a landed swap-back MUST have tripped the
+    /// harm assertion — **131 two-phase escapes produced zero `ok: true`**, meaning the rename-back never
+    /// completed before the engine looked. Retrying it (2,000 attempts, 10 µs apart) changed nothing
+    /// except the runtime: 20 s to 256 s, still zero. The likely cause is that the engine still holds the
+    /// escaped file open through the junction while it streams 1 MiB, and Windows refuses the directory
+    /// rename until that handle closes — which is roughly when the check runs.
+    ///
+    /// **So this test does not red-proof the identity comparison, and must not be cited as doing so.**
+    /// `cpe_1896_the_landing_check_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote` does, on
+    /// every run, on every platform, with no thread involved. The leg is kept anyway for two reasons: it
+    /// is the auditor's actual attack shape rather than a reconstruction of its end state, and POSIX
+    /// imposes no such restriction — `rename(2)` on a directory with open files inside it always
+    /// succeeds — so the CI Linux and macOS legs are where it has a real chance of landing. Do not delete
+    /// it on the strength of a Windows-only observation, and do not read a quiet Windows run as evidence
+    /// the swap-back is closed.
+    ///
     /// # What it asserts — the SAFETY PROPERTY, not the race outcome
     ///
     /// > **If a write escaped, it was never reported as a success.**
@@ -2006,6 +2025,9 @@ mod tests {
                         }
                         std::thread::yield_now();
                     }
+                    // One attempt, measured rather than assumed — see the "the two-phase leg does not
+                    // win on Windows" section of this test's doc comment. Retrying it (2,000 attempts,
+                    // 10 µs apart) was tried and changed nothing except the runtime, 20 s to 256 s.
                     let _ = fs::rename(&sub, &junc);
                     let _ = fs::rename(&old, &sub);
                 })

@@ -233,3 +233,119 @@ Related: **CPE-1889** (the static case, closed), **CPE-1897** (the second check'
   on Linux, `NtCreateFile` with `FILE_OPEN_REPARSE_POINT` per component (or an `O_NOFOLLOW` directory
   walk) on Windows, threaded down to `batch_media::open_no_follow` so the whole create-then-write class
   inherits it — then add `assert_eq!(escaped, 0)` to the probe already sitting in the tree.
+
+- **2026-08-26 (Worker) — ROUND 2, after the Security Auditor's blocking finding on PR #1037. The
+  scope note at the top still stands: this is still the mitigation half, the race is still open.**
+
+  - **What was blocked.** Round 1's landing check asked containment about `canonicalize(dst)` and
+    stopped. The auditor beat it by winning the same window **twice in opposite directions**: phase 1 is
+    the known race (junction in, the write escapes); it then watches `outside/victim.txt` grow past
+    4 KiB — proof the escaped write is streaming — and renames the innocent directory **back** before
+    the engine asks where the bytes went. `canonicalize(dst)` then resolves to a real, ordinary file
+    inside the root: on an `update` entry, the stale previous backup naturally already there.
+    Containment says yes. Measured, `verify = false`, 400 trials: **297 escaped, 38 reported
+    `ok: true`** — both harms at once, the escape *and* the backup silently not happening:
+
+    ```text
+    AUDIT A2 HARM trial 9: 2097152 bytes landed at "...\outside\victim.txt" (OUTSIDE the root) and the
+    engine reported OpResult { ok: true, error: "", outcome: Applied }; the file inside the root still
+    holds 21 bytes
+    ```
+
+  - **And round 1's own disclosure was FALSE about it**, which is the part that mattered most. It said
+    an attacker who swaps back still has to get past the sha256 read-back — but **there is no read-back
+    when `verify = false`**, which is precisely the configuration the check had been widened to cover,
+    three lines above, for exactly that reason. That clause is deleted, not softened.
+
+  - **The fix: the landing check is now a HANDLE question, not a second path question — and it needs no
+    `openat2`.** `fsutil::copy_file_onto_no_follow_with_wording` already calls
+    `batch_media::handle_facts` on the destination handle it writes through, for the reparse/directory
+    guard it has always had, so the identity of the object the bytes went into is available for **no
+    additional syscall**. It now returns that identity (new `CopiedOnto { bytes, written }`; the `pub`
+    `copy_file_onto_no_follow` entry point every other caller uses is unchanged and still returns
+    `u64`). `landed_inside` opens the contained path and compares. A swapped-back name is a *different
+    file object*, so the comparison refuses it. Renaming cannot forge an identity, and the hard-link
+    route to forging one is already refused upstream by that function's `facts.links > 1` branch.
+
+  - **New `batch_media::open_existing_no_follow_read`** — the read-only twin of
+    `open_existing_no_follow`. Read-only is load-bearing rather than tidy: the copy carries the source's
+    permissions onto the destination, so asking for write access would `PermissionDenied` on **every
+    read-only file in a backup** and turn the ordinary case into a reported failure.
+
+  - **The one place it degrades, stated as a live residual rather than glossed.** An identity that is
+    absent or **degenerate** (a zero volume or file index — `FileIdentity::is_degenerate`; several
+    network redirectors let `GetFileInformationByHandle` succeed and return one) falls back to the
+    containment answer alone, and the two-phase swap-back stays open **on those volumes**. The
+    crate-wide rule says refuse on a degenerate identity; this caller deliberately does not, because
+    refusing here does not mean "decline to act", it means **report every file of a backup as failed**,
+    and a backup destination is by design an external drive or a share. An open that *fails* still
+    refuses — "this attempt could not tell" is not the same as "this volume cannot answer". What would
+    close the degenerate case is the path *of the open handle itself* (`GetFinalPathNameByHandleW`,
+    `F_GETPATH` / `/proc/self/fd`), named on the function as the follow-up mechanism.
+
+  - **Message improvements the review asked for.** Every refusal now names the **source file whose
+    bytes are sitting at the escaped path** — a user told their file was destroyed but not what replaced
+    it has half an answer, and `src` was right there. (`fsutil` withholds `src` at its own call sites
+    for a stated reason about a private checkpoint store; that reason does not apply here, and the
+    difference is recorded.) And `safe_join` now builds the path component by component instead of
+    splicing the plan's forward slashes in, so paths stop rendering mixed (`...\dst\sub/victim.txt`) —
+    that string is what `OpResult::path` carries to the dashboard and what every refusal interpolates.
+
+- **2026-08-26 (Worker) — round 2 measurements.**
+
+  - **The probe now runs the two-phase form on half its trials**, uses a 1 MiB source (so the escaped
+    write actually streams) and an `update`-list entry (so the swap-back lands on a real file). With a
+    1 MiB source the window is far wider than round 1's 19-byte file: **400 trials, 273 escaped (132
+    one-phase, 141 two-phase), 0 reported `ok: true`.**
+
+  - **The two-phase leg does NOT win on Windows here, measured, and that is recorded rather than
+    hidden.** With the identity comparison deliberately neutralised — the state in which a landed
+    swap-back *must* have tripped the harm assertion — 400 trials gave **131 two-phase escapes and zero
+    `ok: true`**: the rename-back never completed before the engine looked. Retrying it (2,000 attempts
+    10 µs apart) changed nothing except the runtime, 20 s → 256 s, so the retry was reverted. The likely
+    cause is that the engine holds the escaped file open through the junction while it streams and
+    Windows refuses the directory rename until that handle closes. **So the probe does not red-proof the
+    identity comparison and must not be cited as doing so.** The leg is kept because it is the auditor's
+    actual attack shape and because POSIX imposes no such restriction (`rename(2)` on a directory with
+    open files inside always succeeds), so CI's Linux and macOS legs are where it has a real chance.
+
+  - **What DOES red-proof it, 100% of the time, on every `cargo test`:**
+    `cpe_1896_the_landing_check_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote`. The
+    post-swap-back state is fully stageable with no thread — that is the auditor's own demonstration —
+    because afterwards every path genuinely *is* what it says it is and only the **object** differs.
+    Neutralising the identity comparison reddens it every run; the other three CPE-1896 tests stay
+    green, which is what makes it a proof of *that* leg rather than of the file in general.
+
+  - **The admit test now covers both identity worlds**, including `written = None`, so the
+    degrade-don't-refuse policy for identity-less volumes is pinned by a test rather than asserted in a
+    comment.
+
+- **2026-08-26 (Worker) — the probe's role is now written down at the probe, because it is a trap.**
+  The reviewer measured its escape rate at **1 per 600 on the machine `TEMP` volume against 4, 4, 5 and
+  3 per 600 on the worktree volume** — same binary, same machine, same afternoon. At 1/600 a zero-escape
+  run is entirely plausible, so **a run of this test can go green against a removed fix**. Its doc now
+  says, at the top: it is an **observation instrument** for a still-open race, **not** the regression
+  gate; the deterministic landing-check tests are; and nobody should later "harden" it by asserting a
+  rate, which would buy nothing they do not already give in exchange for a test that reds at random.
+  Also recorded: it is markedly more sensitive with `TMP`/`TEMP` redirected to a fast local volume (the
+  reviewer got 4-of-4 sabotage detection that way against 2-of-3 at the default), so run it that way
+  when you want it to bite. The one rate-shaped assertion it should ever grow is `escaped == 0`, and
+  only once the atomic half lands.
+
+- **2026-08-26 (Worker) — noted for the atomic fix, NOT built here: a `#[cfg(test)]` synchronous
+  injection hook between check (1) and the destination open**, letting a test perform the swap with no
+  thread and no timing. That is what would make this whole class deterministically testable — including
+  the Windows two-phase leg that will not land in-process — and it would make verifying the eventual
+  `openat2`/`O_NOFOLLOW` fix far easier than racing it. Deliberately out of scope for a mitigation PR
+  (it is a production seam added for tests, which deserves its own review), but it is the first thing
+  the atomic ticket should build.
+
+- **2026-08-26 (Worker) — round 2 guardrails.** `cargo test` in `crates/server`: **2396 passed, 0
+  failed, 10 ignored**, plus every integration binary green. `cargo clippy --all-targets -- -D warnings`
+  clean in plain, `--features index` and `--features specta`. No new dependencies. No `specta::Type`
+  struct touched, so no `bindings.gen.ts` regeneration. `copy_file_onto_no_follow_with_wording` went
+  `pub` → `pub(crate)` because `CopiedOnto` carries a `pub(crate)` type; a repo-wide grep confirms
+  `backup::copy_one_verified` is its only caller anywhere and every other site calls the unchanged `pub`
+  `copy_file_onto_no_follow`. Every attack ran inside a self-cleaning scratch tree with the escape
+  target a sibling directory *inside* it; the probe was run with `TMP`/`TEMP` redirected inside the
+  worktree, and both scratch roots were checked empty of leftover junctions afterwards.
