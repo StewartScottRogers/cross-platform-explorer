@@ -85,11 +85,19 @@ actually in, rather than reporting every outcome as the same reassuring line:
 - *The published catalog looks corrupted or mis-signed* — signatures didn't check out, so nothing
   was installed. Again, your existing agents are untouched and safe to use.
 - *Couldn't check / you're offline* — the check never completed. Nothing changed; try again later.
+- *Your record of installed agent versions is unreadable* — the app keeps a small local file noting
+  which version of each agent you have. It is how updates are only ever accepted going forwards. If
+  that file is damaged, the app cannot tell an upgrade from a downgrade, so it **refuses the whole
+  check** rather than guessing — a guess here would mean happily reinstalling very old agents. This
+  is the one message in this list that points at your machine rather than the publishing side.
+  Nothing was changed or installed, and your agents keep working. **Reset to the shipped agents**
+  clears it, after which the next check installs the current published versions.
 
-**If you see the amber bar, there is nothing to fix on your machine.** Every one of those states
-leaves your installed agents exactly as they were, and they keep working. The problem is on the
-publishing side, and the message clears itself the next time a good, newer catalog is published —
-so the useful response is to carry on and check again later, not to reset or roll anything back.
+**Otherwise, if you see the amber bar there is nothing to fix on your machine.** Every one of the
+other states leaves your installed agents exactly as they were, and they keep working. The problem
+is on the publishing side, and the message clears itself the next time a good, newer catalog is
+published — so the useful response is to carry on and check again later, not to reset or roll
+anything back.
 
 ## Recent…
 

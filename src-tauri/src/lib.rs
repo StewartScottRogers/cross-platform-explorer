@@ -10310,9 +10310,36 @@ fn do_fetch_catalog(
     std::fs::write(staging.join("index.json"), &index_bytes).map_err(|e| e.to_string())?;
     std::fs::write(staging.join("index.json.sig"), &index_sig).map_err(|e| e.to_string())?;
 
-    // Each listed manifest + its signature.
-    let index = sidecar_host::catalog::CatalogIndex::from_json(&String::from_utf8_lossy(&index_bytes))?;
-    for entry in &index.entries {
+    // CPE-1940 (F-B): verify the index BEFORE any of its fields is used. Until the detached
+    // signature checks out against a trusted key, every field here — `id` above all, which is
+    // interpolated into both a fetch URL and a staging path below — is attacker-controlled input
+    // off the wire. `VerifiedIndex::open` verifies first and parses second, so an unverified index
+    // yields no entries at all; there is no id to escape the release path or traverse out of
+    // staging. This is a *reordering*, not a sanitiser: it fixes the class, so the next field
+    // someone reads off the index is behind the same gate for free.
+    //
+    // Not a second trust decision — `apply_bundle_with` re-verifies below and remains the
+    // enforcement point. This one governs only what may be fetched and written into staging.
+    let Some(verified) = sidecar_host::catalog::VerifiedIndex::open(
+        &index_bytes,
+        String::from_utf8_lossy(&index_sig).trim(),
+        &keys,
+    ) else {
+        let _ = std::fs::remove_dir_all(&staging);
+        // Same shape as the `index_ok == false` report `apply_bundle_with` would have produced —
+        // nothing fetched, nothing written, last-known-good stands.
+        return Ok(json!({
+            "indexOk": false,
+            "applied": [],
+            "rejected": 0,
+            "alreadyCurrent": 0,
+            "regressedRejected": 0,
+            "integrityRejected": 0,
+        }));
+    };
+
+    // Each listed manifest + its signature. Every `entry.id` below is now verified content.
+    for entry in verified.entries() {
         let m = catalog_http_get(&format!("{base}{}.json", entry.id))?;
         let s = catalog_http_get(&format!("{base}{}.json.sig", entry.id))?;
         std::fs::write(staging.join(format!("{}.json", entry.id)), &m).map_err(|e| e.to_string())?;
@@ -10320,18 +10347,40 @@ fn do_fetch_catalog(
     }
 
     // Apply with anti-rollback against the persisted version map (last-known-good on failure).
+    // CPE-1940 (F-A): `apply_bundle_at` owns the load/apply/save cycle so the baseline can only be
+    // read fail-closed. A `versions.json` that is present but corrupt means the anti-rollback
+    // baseline is *unknown*, not empty — it refuses the whole apply and leaves the map on disk
+    // untouched, rather than presenting an empty map that makes every entry look like a first
+    // install (which re-applied ancient bundles). Absent is still a legitimate first run.
     let vpath = dir.join("versions.json");
-    let mut versions = sidecar_host::catalog::load_versions(&vpath);
-    let report = sidecar_host::catalog::apply_bundle_with(
+    let report = sidecar_host::catalog::apply_bundle_at(
         &staging,
         &dir,
         &keys,
-        &mut versions,
+        &vpath,
         pinned,
         allow_downgrade,
     );
-    let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
     let _ = std::fs::remove_dir_all(&staging);
+    // A damaged local baseline is reported as its OWN state, not as a generic fetch error. The two
+    // need different words: a dead pipeline is "nothing to do, try again later", whereas this one
+    // is on the user's machine and will keep failing every check until they reset the catalog. The
+    // launcher branches on `versionMapUnreadable` to say so.
+    let report = match report {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(json!({
+                "indexOk": false,
+                "applied": [],
+                "rejected": 0,
+                "alreadyCurrent": 0,
+                "regressedRejected": 0,
+                "integrityRejected": 0,
+                "versionMapUnreadable": true,
+                "error": e.to_string(),
+            }))
+        }
+    };
     // CPE-1911: an index that verifies fine but whose entries are all no-newer-than-installed
     // (anti-rollback correctly refusing them) is not simply "up to date" — count those separately so
     // the UI can tell them apart instead of reporting everything identically.

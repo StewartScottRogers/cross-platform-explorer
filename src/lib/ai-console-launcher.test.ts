@@ -861,6 +861,39 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.style.color).not.toBe(RED);
     });
 
+    // CPE-1940: a damaged LOCAL versions.json makes the host refuse the apply (fail-closed). It
+    // arrives with an `error` set, so without its own branch it would fall into the generic fetch
+    // failure below — whose advice, "no action needed from you; try again later", is the opposite
+    // of the truth: this one is on the user's machine and repeats forever until they reset.
+    it("a damaged local version record is told apart from a dead pipeline, and gives the recovery step instead of 'try again later'", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: false,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 0,
+              regressedRejected: 0,
+              integrityRejected: 0,
+              versionMapUnreadable: true,
+              error: "installed-version map is corrupt: expected value at line 1 column 3",
+            }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/local record of installed agent versions/i);
+      expect(msg.textContent).toMatch(/Reset to the shipped agents/i);
+      expect(msg.textContent).toMatch(/agents are unchanged/i);
+      // Must NOT get the dead-pipeline wording, which would send the user away with bad advice.
+      expect(msg.textContent).not.toMatch(/no action needed from you/i);
+      expect(msg.textContent).not.toMatch(/try again later/i);
+      expect(msg.textContent).not.toBe("Agents are already up to date.");
+      // Nothing was broken by this — amber, not red.
+      expect(msg.style.color).toBe(AMBER);
+      expect(msg.style.color).not.toBe(RED);
+    });
+
     it("the fetch itself failed (e.g. a 404 from a dead pipeline) — surfaces the real reason in amber, not a generic 'no update' line in red", async () => {
       const { w } = await mountLauncher((path) =>
         path === "/api/catalog/refresh"

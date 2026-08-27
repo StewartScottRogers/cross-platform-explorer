@@ -1340,11 +1340,13 @@ impl ConsoleState {
     /// `POST /api/catalog/refresh` → ask the host to fetch + apply the signed catalog bundle
     /// (CPE-376), then hot-reload if anything changed. Returns
     /// `{ indexOk, applied, agents, alreadyCurrent, regressedRejected, integrityRejected, offline,
-    /// error }` — the last five exist purely so the launcher can tell "genuinely up to date" apart
-    /// from "you already have the latest published entries", "the published catalog has gone
-    /// backwards", "the pipeline published a corrupt/mis-signed catalog", and "the pipeline is
-    /// dead/unreachable", instead of reporting all of them as the same reassuring message
-    /// (CPE-1911; the already-current/regressed split is CPE-1924).
+    /// versionMapUnreadable, error }` — the last six exist purely so the launcher can tell
+    /// "genuinely up to date" apart from "you already have the latest published entries", "the
+    /// published catalog has gone backwards", "the pipeline published a corrupt/mis-signed
+    /// catalog", "the pipeline is dead/unreachable", and "your own local version record is
+    /// damaged", instead of reporting all of them as the same reassuring message (CPE-1911; the
+    /// already-current/regressed split is CPE-1924; the local-baseline refusal is CPE-1940, and is
+    /// the only one of them the user can act on).
     fn handle_catalog_refresh(&self) -> Response {
         let pinned = self.presets.load().pinned_agents;
         match self.dialogs.fetch_catalog(&pinned) {
@@ -1363,6 +1365,7 @@ impl ConsoleState {
                         "regressedRejected": res.regressed_rejected,
                         "integrityRejected": res.integrity_rejected,
                         "offline": res.offline,
+                        "versionMapUnreadable": res.version_map_unreadable,
                         "error": res.error,
                     })
                     .to_string(),
@@ -2502,6 +2505,7 @@ mod tests {
             regressed_rejected: 4,
             integrity_rejected: 3,
             offline: false,
+            version_map_unreadable: false,
             error: None,
         });
         assert_eq!(v["indexOk"], true);
@@ -2520,11 +2524,32 @@ mod tests {
             regressed_rejected: 0,
             integrity_rejected: 0,
             offline: true,
+            version_map_unreadable: false,
             error: Some("fetch failed: status code 404".into()),
         });
         assert_eq!(v["indexOk"], false);
         assert_eq!(v["offline"], true);
         assert_eq!(v["error"], "fetch failed: status code 404");
+        assert_eq!(v["versionMapUnreadable"], false);
+
+        // Shape 3 (CPE-1940): the LOCAL version record is damaged, so the host refused the apply.
+        // It must reach the launcher as its own flag, not just as another `error` string — the
+        // launcher's generic error wording ("try again later") is wrong for a state that repeats
+        // until the user resets.
+        let v = post(crate::broker_client::CatalogFetch {
+            index_ok: false,
+            applied: 0,
+            already_current: 0,
+            regressed_rejected: 0,
+            integrity_rejected: 0,
+            offline: false,
+            version_map_unreadable: true,
+            error: Some("installed-version map is corrupt: expected value".into()),
+        });
+        assert_eq!(v["versionMapUnreadable"], true);
+        assert_eq!(v["applied"], 0);
+        assert_eq!(v["indexOk"], false);
+        assert_eq!(v["offline"], false);
     }
 
     #[test]

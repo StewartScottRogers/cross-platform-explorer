@@ -130,6 +130,42 @@ pub fn verify_index(index_bytes: &[u8], signature_hex: &str, trusted_keys: &[Str
     trusted_keys.iter().any(|pk| trust::verify_signature(index_bytes, signature_hex, pk))
 }
 
+/// An index whose detached signature **has already been checked against a trusted key**, and whose
+/// schema this build understands.
+///
+/// This type exists to make the verify-before-use rule structural rather than a comment (CPE-1940,
+/// F-B). Every field of a [`CatalogEntry`] — `id` above all, which is interpolated into fetch URLs
+/// and staging paths — is attacker-controlled until the index signature verifies. The only way to
+/// construct a `VerifiedIndex` is [`Self::open`], which verifies *first* and parses *second*, so a
+/// caller holding one cannot have used an entry field too early: there was no parsed entry to use.
+///
+/// Fail-closed at every step: a bad/absent signature, non-UTF-8 or unparseable JSON, or an
+/// unsupported schema all yield `None` and therefore **no entries at all**.
+pub struct VerifiedIndex(CatalogIndex);
+
+impl VerifiedIndex {
+    /// Verify `index_bytes` against `trusted_keys`, then parse. `None` — and so no usable entry
+    /// field — unless the bytes are signed by a trusted key and name a supported schema.
+    pub fn open(index_bytes: &[u8], signature_hex: &str, trusted_keys: &[String]) -> Option<Self> {
+        // Verify BEFORE parse. Nothing below this line may move above it.
+        if !verify_index(index_bytes, signature_hex, trusted_keys) {
+            return None;
+        }
+        let text = std::str::from_utf8(index_bytes).ok()?;
+        let index = CatalogIndex::from_json(text).ok()?;
+        // Unknown-future schema is refused, as elsewhere in the subsystem.
+        index.is_supported().then_some(Self(index))
+    }
+    /// The verified index.
+    pub fn index(&self) -> &CatalogIndex {
+        &self.0
+    }
+    /// The verified entries — safe to use for URLs and paths, unlike a freshly parsed index.
+    pub fn entries(&self) -> &[CatalogEntry] {
+        &self.0.entries
+    }
+}
+
 /// The result of gating one incoming manifest against a (signature-verified) index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryVerdict {
@@ -194,10 +230,51 @@ pub fn gate_manifest_opt(
 /// The installed catalog `version` per agent id — persisted so anti-rollback survives restarts.
 pub type VersionMap = BTreeMap<String, u64>;
 
-/// Load the persisted version map (empty on any error — a missing/corrupt map just means
-/// "nothing installed yet", never a failure).
-pub fn load_versions(path: &Path) -> VersionMap {
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+/// Why the persisted version map could not be trusted as the anti-rollback baseline (CPE-1940).
+///
+/// Note what is **not** in here: "absent". A missing map is a legitimate first run, so it is an
+/// `Ok(empty)`, not an error. Collapsing the two was the defect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionMapError {
+    /// The file is there but could not be read (permissions, IO error, a directory in its place).
+    Unreadable(String),
+    /// The file is there but is not a parseable version map — damaged, truncated, or rewritten.
+    Corrupt(String),
+}
+
+impl std::fmt::Display for VersionMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(e) => write!(f, "installed-version map is unreadable: {e}"),
+            Self::Corrupt(e) => write!(f, "installed-version map is corrupt: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for VersionMapError {}
+
+/// Load the persisted version map, **failing closed** (CPE-1940).
+///
+/// The map is the anti-rollback baseline: every entry's `installed` version comes from it, and an
+/// absent entry reads as [`VersionStanding::Newer`] (a first install), which is the one applyable
+/// standing. So an empty map accepts *everything*, including an ancient replayed bundle. That makes
+/// the difference between the two ways of ending up with no data security-critical:
+///
+/// * **Absent** — nothing installed yet. Legitimately empty ⇒ `Ok(empty map)`.
+/// * **Present but corrupt/unreadable** — the baseline is *unknown*, not *empty*. Returning an empty
+///   map here would let anyone who can damage one local file defeat anti-rollback outright (no
+///   signing key, no network position). ⇒ `Err(..)`, and the caller must refuse the whole apply.
+///
+/// Deliberately not self-healing: a corrupt map is left exactly as found, so the failure keeps
+/// refusing until an operator resolves it rather than silently resetting the baseline to empty.
+pub fn load_versions(path: &Path) -> Result<VersionMap, VersionMapError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        // Absent is the one benign case: first run, nothing installed.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(VersionMap::new()),
+        Err(e) => return Err(VersionMapError::Unreadable(e.to_string())),
+    };
+    serde_json::from_str(&text).map_err(|e| VersionMapError::Corrupt(e.to_string()))
 }
 
 /// Persist the version map.
@@ -275,21 +352,18 @@ pub fn apply_bundle_with(
 ) -> ApplyReport {
     let mut report = ApplyReport::default();
 
-    // 1. Verify the index (governs the whole set). Any failure ⇒ touch nothing.
+    // 1. Verify the index (governs the whole set). Any failure ⇒ touch nothing. `VerifiedIndex`
+    //    checks the signature before it parses, so no entry field exists to be used too early.
     let Ok(index_bytes) = std::fs::read(staging.join("index.json")) else { return report };
     let Ok(index_sig) = std::fs::read_to_string(staging.join("index.json.sig")) else { return report };
-    if !verify_index(&index_bytes, index_sig.trim(), trusted_keys) {
+    let Some(verified) = VerifiedIndex::open(&index_bytes, index_sig.trim(), trusted_keys) else {
         return report;
-    }
-    let Ok(index_text) = String::from_utf8(index_bytes) else { return report };
-    let Ok(index) = CatalogIndex::from_json(&index_text) else { return report };
-    if !index.is_supported() {
-        return report;
-    }
+    };
+    let index = verified.index();
     report.index_ok = true;
 
     // 2. Gate + apply each entry.
-    for entry in &index.entries {
+    for entry in verified.entries() {
         // A pinned agent is intentionally frozen at its installed version (CPE-378).
         if pinned.iter().any(|p| p == &entry.id) {
             report.rejected.push((entry.id.clone(), ApplyOutcome::Pinned));
@@ -310,7 +384,7 @@ pub fn apply_bundle_with(
             continue;
         }
         let dg = allow_downgrade.iter().any(|a| a == &entry.id);
-        match gate_manifest_opt(&index, &entry.id, &bytes, installed.get(&entry.id).copied(), dg) {
+        match gate_manifest_opt(index, &entry.id, &bytes, installed.get(&entry.id).copied(), dg) {
             EntryVerdict::Accept => {
                 if write_entry(out, &entry.id, &bytes, sig.trim()).is_ok() {
                     installed.insert(entry.id.clone(), entry.version);
@@ -329,6 +403,37 @@ pub fn apply_bundle_with(
         }
     }
     report
+}
+
+/// [`apply_bundle_with`] against the version map **persisted at `versions_path`** — the whole
+/// load / apply / save cycle in one place so the anti-rollback baseline can only be read
+/// fail-closed (CPE-1940).
+///
+/// This does **not** decide what is applyable — [`VersionStanding::refusal`] remains the single
+/// version comparison and the single enforcement point. What this decides is a different question,
+/// one step earlier: whether the baseline those comparisons need is *known at all*. If
+/// [`load_versions`] cannot produce a trustworthy baseline, there is nothing to compare against, so
+/// the apply is refused **as a whole**:
+///
+/// * nothing is gated, nothing is written to `out`, and
+/// * `versions_path` is left byte-for-byte as it was found — a refused run never rewrites the map.
+///
+/// A missing map is not a failure (first run, `Ok` with an empty baseline).
+pub fn apply_bundle_at(
+    staging: &Path,
+    out: &Path,
+    trusted_keys: &[String],
+    versions_path: &Path,
+    pinned: &[String],
+    allow_downgrade: &[String],
+) -> Result<ApplyReport, VersionMapError> {
+    // Fail closed: no trustworthy baseline ⇒ refuse before anything is gated or written.
+    let mut installed = load_versions(versions_path)?;
+    let report = apply_bundle_with(staging, out, trusted_keys, &mut installed, pinned, allow_downgrade);
+    // Persist only on a run that actually got to gate entries. A save failure leaves the map behind
+    // the on-disk catalog, which merely re-offers the same bundle next time — never a rollback.
+    let _ = save_versions(versions_path, &installed);
+    Ok(report)
 }
 
 fn write_entry(out: &Path, id: &str, bytes: &[u8], sig: &str) -> std::io::Result<()> {
@@ -776,9 +881,133 @@ mod tests {
     fn version_map_round_trips_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("versions.json");
-        assert!(load_versions(&path).is_empty()); // missing → empty
+        assert!(load_versions(&path).unwrap().is_empty()); // missing → empty (first run)
         let map = VersionMap::from([("claude".to_string(), 7u64), ("aider".to_string(), 2)]);
         save_versions(&path, &map).unwrap();
-        assert_eq!(load_versions(&path), map);
+        assert_eq!(load_versions(&path).unwrap(), map);
+    }
+
+    // ---- CPE-1940 -------------------------------------------------------------------------
+
+    /// F-A, the auditor's exact route, asserted on the **filesystem and the map** rather than on a
+    /// verdict enum. Before the fix this test failed with `applied=["claude"]`,
+    /// `out/claude.json = {"id":"claude","v":"ANCIENT"}` and `versions.json = {"claude":1}` — the
+    /// on-disk baseline pushed backwards from 9 to 1 by damaging one local file.
+    #[test]
+    fn a_corrupt_version_map_refuses_the_apply_and_leaves_the_map_untouched_on_disk() {
+        let (k, pk) = keypair(1);
+        let out = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let vdir = tempfile::tempdir().unwrap();
+        let vpath = vdir.path().join("versions.json");
+
+        // Installed: claude at v9, good bytes on disk, baseline persisted.
+        std::fs::write(out.path().join("claude.json"), b"GOOD-v9").unwrap();
+        save_versions(&vpath, &VersionMap::from([("claude".to_string(), 9u64)])).unwrap();
+        // The attacker replays an ANCIENT — but perfectly signed — v1 bundle.
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude","v":"ANCIENT"}"#, 1)], &k);
+
+        // Leg 1 — intact map: refused. This is the anti-rollback rule working.
+        let r1 = apply_bundle_at(stage.path(), out.path(), std::slice::from_ref(&pk), &vpath, &[], &[])
+            .expect("an intact map must load");
+        assert!(r1.applied.is_empty(), "intact map: the ancient bundle must be refused");
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD-v9");
+        assert_eq!(load_versions(&vpath).unwrap().get("claude"), Some(&9));
+
+        // Leg 2 — corrupt the map on disk, replay the SAME bundle. The sabotage is one damaged
+        // local file: no signing key, no network position.
+        const SABOTAGE: &[u8] = b"{ this is not a version map";
+        std::fs::write(&vpath, SABOTAGE).unwrap();
+        let err = apply_bundle_at(stage.path(), out.path(), &[pk], &vpath, &[], &[])
+            .expect_err("a corrupt map must refuse the whole apply");
+        assert!(matches!(err, VersionMapError::Corrupt(_)), "got {err:?}");
+
+        // The two facts that matter, both read back off the disk.
+        assert_eq!(
+            std::fs::read(out.path().join("claude.json")).unwrap(),
+            b"GOOD-v9",
+            "the installed manifest was overwritten with ancient content"
+        );
+        assert_eq!(
+            std::fs::read(&vpath).unwrap(),
+            SABOTAGE,
+            "a refused run rewrote the version map on disk"
+        );
+    }
+
+    /// The other half of the same distinction: **absent** is not corrupt. A first run legitimately
+    /// has no map, must load as empty, and must still apply normally.
+    #[test]
+    fn an_absent_version_map_is_a_first_run_not_a_refusal() {
+        let (k, pk) = keypair(1);
+        let out = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let vdir = tempfile::tempdir().unwrap();
+        let vpath = vdir.path().join("versions.json");
+        assert!(!vpath.exists());
+        assert_eq!(load_versions(&vpath), Ok(VersionMap::new()));
+
+        stage_bundle(stage.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
+        let report = apply_bundle_at(stage.path(), out.path(), &[pk], &vpath, &[], &[]).unwrap();
+        assert_eq!(report.applied, vec!["claude".to_string()]);
+        assert!(out.path().join("claude.json").exists());
+        assert_eq!(load_versions(&vpath).unwrap().get("claude"), Some(&5)); // baseline now persisted
+    }
+
+    /// An unreadable (not merely absent) map is also a refusal — the baseline is *unknown*, and
+    /// "unknown" must never read as "empty".
+    #[test]
+    fn an_unreadable_version_map_is_a_refusal_too() {
+        let vdir = tempfile::tempdir().unwrap();
+        // A directory where the map should be: present, but not readable as a map.
+        let vpath = vdir.path().join("versions.json");
+        std::fs::create_dir(&vpath).unwrap();
+        assert!(matches!(load_versions(&vpath), Err(VersionMapError::Unreadable(_))));
+    }
+
+    /// F-B, **executed rather than inferred**. Leg 1 reproduces the primitive the pre-fix
+    /// `do_fetch_catalog` had: parse an unverified index, interpolate `entry.id` into a URL and a
+    /// staging path, and the bytes land outside staging. Leg 2 is the fix: routing the same bytes
+    /// through [`VerifiedIndex::open`] yields no index at all, so there is no `id` to use.
+    #[test]
+    fn an_unverified_index_yields_no_entry_id_for_a_url_or_a_path() {
+        let (_k, pk) = keypair(1);
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("a").join("stage");
+        std::fs::create_dir_all(&staging).unwrap();
+        let base = "https://github.com/o/r/releases/latest/download/";
+
+        // The index an attacker who can serve catalog assets supplies. Nothing has verified it.
+        let evil = r#"{"schema_version":1,"entries":[{"id":"../../pwned","schema_version":1,"sha256":"00","version":99}]}"#;
+        assert!(!verify_index(evil.as_bytes(), "00", std::slice::from_ref(&pk)));
+
+        // Leg 1 — the pre-fix order (parse, then use). Demonstrates the primitive is real: nothing
+        // upstream constrains `id`, so it escapes both the release path and the staging dir.
+        let parsed = CatalogIndex::from_json(evil).unwrap();
+        let id = &parsed.entries[0].id;
+        assert!(format!("{base}{id}.json").contains("../../"), "id escapes the fetch URL");
+        std::fs::write(staging.join(format!("{id}.json")), b"OWNED").unwrap();
+        assert!(root.path().join("pwned.json").exists(), "id escapes the staging dir");
+
+        // Leg 2 — the fix. Verification happens before the parse, so an unverified index produces
+        // no entries; there is no `id` to interpolate anywhere.
+        assert!(VerifiedIndex::open(evil.as_bytes(), "00", std::slice::from_ref(&pk)).is_none());
+        assert!(VerifiedIndex::open(evil.as_bytes(), "not hex", std::slice::from_ref(&pk)).is_none());
+        // …and a *signed* index of the same shape does open — the gate is the signature, not the id.
+        let signed = index_json("claude", "00", 1);
+        let sig = sign(&keypair(1).0, signed.as_bytes());
+        let ok = VerifiedIndex::open(signed.as_bytes(), &sig, &[pk]).expect("signed index opens");
+        assert_eq!(ok.entries().len(), 1);
+        assert_eq!(ok.index().entries[0].id, "claude");
+    }
+
+    /// An index signed by a trusted key but declaring a schema this build doesn't understand still
+    /// yields nothing — `VerifiedIndex` folds the schema check into the same fail-closed gate.
+    #[test]
+    fn a_future_schema_index_opens_to_nothing_even_when_signed() {
+        let (k, pk) = keypair(1);
+        let future = r#"{"schema_version":99,"entries":[{"id":"claude","schema_version":1,"sha256":"00","version":1}]}"#;
+        let sig = sign(&k, future.as_bytes());
+        assert!(VerifiedIndex::open(future.as_bytes(), &sig, &[pk]).is_none());
     }
 }

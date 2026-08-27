@@ -1821,6 +1821,14 @@ async function refreshCatalog() {
     if (r.applied > 0) {
       await load(); // re-render the agent list with the newly-applied manifests
       setMsg("Updated " + r.applied + " agent" + (r.applied === 1 ? "" : "s") + ".", true);
+    } else if (r.versionMapUnreadable) {
+      // CPE-1940: the LOCAL record of installed versions is damaged, so anti-rollback had no
+      // baseline and the host refused the whole apply (fail-closed — an empty baseline would make
+      // every entry look like a first install and happily reinstall ancient agents). Checked before
+      // the generic `r.error` branch because that branch's advice — "no action needed from you; try
+      // again later" — is precisely wrong here: this is on the user's machine and repeats on every
+      // check until they reset. Warn, not error: nothing was changed and their agents still work.
+      setMsg("Your local record of installed agent versions is unreadable, so the update was refused rather than guessed at — nothing was installed and your agents are unchanged and still working. Use Manage agents ▾ → “Reset to the shipped agents”, then check again.", "warn");
     } else if (r.error) {
       // The fetch itself failed (e.g. a 404 — the publishing pipeline is down), not just "nothing
       // new". Say so plainly and give the honest, non-alarming next step.
