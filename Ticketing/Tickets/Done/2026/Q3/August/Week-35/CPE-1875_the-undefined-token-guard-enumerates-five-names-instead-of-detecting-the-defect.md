@@ -3,7 +3,7 @@ id: CPE-1875
 title: the undefined-token guard enumerates five names instead of detecting the defect, so a sixth occurrence ships green
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-23
