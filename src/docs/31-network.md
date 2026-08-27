@@ -231,6 +231,20 @@ whole path. Files past that are written correctly and this app can read them, bu
 without long-path support may not be able to open them. The transfer prints a notice when it happens.
 Downloading into a shorter folder avoids it.
 
+### A pre-existing link at the destination name is skipped, and now reported
+
+If the local name a download would write to already exists as a **hard link** (a second name for a file
+that may live anywhere on disk) or a **symlink**, the app never writes through it — a hard link shares
+its content across every name it has, so writing there would change a file outside the folder you are
+downloading into, without you ever seeing it happen; a symlink could point anywhere at all. That entry is
+skipped rather than delivered.
+
+This is a *policy* skip, not a delivery failure: it does not fail the rest of the download, the same way a
+name Windows can't hold doesn't fail the rest of it either. Every other file in the tree still arrives.
+What changed is that the skip **used to be invisible** — nothing told you it happened, and the delivered
+count was silently one lower with no way to tell which file was missing or why. It is now counted and
+named, the same "tell you what happened, don't just fail silently" rule the rest of this page follows.
+
 ### Two things this rewriting does *not* do
 
 *Uploading does not undo it.* If you download `colon:name.txt` (arriving as `colon%3Aname.txt`) and later

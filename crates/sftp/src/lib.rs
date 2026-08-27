@@ -251,7 +251,7 @@ impl SftpProvider {
         remote_root: &str,
         local_dir: &std::path::Path,
         cancel: &AtomicBool,
-    ) -> Result<usize, String> {
+    ) -> Result<cpe_server::transfer::DownloadReport, String> {
         cpe_server::transfer::download_tree(self, remote_root, local_dir, cancel)
     }
 
@@ -1237,7 +1237,7 @@ mod tests {
 
         let out = scratch_dir("cpe-sftp-dl");
         let cancel = AtomicBool::new(false);
-        let files = provider.download_tree("/", &out, &cancel).expect("download");
+        let files = provider.download_tree("/", &out, &cancel).expect("download").files;
 
         assert_eq!(files, 2, "readme.txt + sub/nested.txt");
         assert_eq!(std::fs::read(out.join("readme.txt")).unwrap(), FILE_BODY);

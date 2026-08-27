@@ -1384,6 +1384,21 @@ impl LinkGuardWording {
                  on purpose -- leave the entry as it is. Otherwise, break the link (copy the file over \
                  itself) and run the backup again.",
     };
+
+    /// The explanation behind a hard-link write refusal using this wording, with the destination and its
+    /// link count left out — the shared half [`copy_file_onto_no_follow_with_wording`]'s per-path message
+    /// is built from below, and the same half `revert_engine::execute_restore` states ONCE for a whole
+    /// group of hard-link refusals instead of copying it onto every path (CPE-1881: measured at ~420
+    /// bytes/entry, ~8.2 MiB extrapolated for 20,000 refused entries in one revert). Both callers build
+    /// from these same `scope`/`remedy` fields, so the single-entry and grouped forms of the sentence can
+    /// never drift apart.
+    pub fn hard_link_reason(&self) -> String {
+        format!(
+            "writing here would change the content at every one of them — including any that live \
+             outside {}, which no path check can see because a hard link resolves to itself. {}",
+            self.scope, self.remedy
+        )
+    }
 }
 
 /// What [`copy_file_onto_no_follow_with_wording`] establishes about the copy it just performed
@@ -1522,14 +1537,16 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
         // question, which is the property the rest of this function is built on.
         if facts.links > 1 {
             drop(w);
+            // CPE-1881: the shared half of this sentence now lives in `wording.hard_link_reason()` — see
+            // its doc — so this per-entry message and the summary a caller states once for a whole GROUP
+            // of these refusals (`revert_engine::execute_restore`'s `WriteRefusalGroup`) are built from
+            // the same two words and cannot say different things.
             return Err(format!(
-                "{}: this file has {} names (it is hard-linked), and writing here would change the \
-                 content at every one of them — including any that live outside {}, which no path check \
-                 can see because a hard link resolves to itself. {} Nothing was written for this entry",
+                "{}: this file has {} names (it is hard-linked), and {} Nothing was written for this \
+                 entry",
                 dst.display(),
                 facts.links,
-                wording.scope,
-                wording.remedy
+                wording.hard_link_reason()
             ));
         }
     }

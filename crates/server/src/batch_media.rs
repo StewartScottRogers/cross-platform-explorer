@@ -1300,6 +1300,16 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
 /// Excluding directories costs nothing this exists for: a directory is not something a file's bytes can
 /// be written into, and every caller refuses one on its own terms already. This function's job is only
 /// the *hard link* question, which is a question about files.
+///
+/// **CPE-1881: no longer called from production code**, kept anyway rather than deleted. Its one
+/// production caller, `revert_engine::apply_write`'s refusal classifier, switched to calling
+/// [`name_links`] directly so it can also read the link COUNT (to report a grouped hard-link refusal
+/// without a second filesystem probe) — the same answer this function computes, just not thrown away.
+/// Retiring this function outright would also orphan the table immediately above, which several other
+/// modules' doc comments cross-reference by name; kept `#[allow(dead_code)]` with its own test still
+/// pinning the three-way answer (`One`/`Many`/`NoFileHere` via `name_links`, exercised through this
+/// wrapper) rather than moving or duplicating that documentation.
+#[allow(dead_code)]
 pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
     matches!(name_links(path), NameLinks::Many(_))
 }

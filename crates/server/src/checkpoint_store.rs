@@ -179,6 +179,31 @@ pub struct RevertOutcome {
     /// Present when the revert deliberately held its deletions back: the single explanation, the count,
     /// and a next step honest about whether re-running can help. `None` when nothing was held back.
     pub held_back: Option<HeldBackSummary>,
+    /// Present when one or more writes were refused for the SAME reason (CPE-1881) — currently only the
+    /// CPE-1857 hard-link rule. The single explanation and the count; the refused paths themselves are
+    /// already in [`skipped`](RevertOutcome::skipped) (each with `outcome: "failed"` and a short
+    /// per-path reason), so nothing is duplicated here beyond the one paragraph. `None` when nothing was
+    /// grouped — an ungrouped write refusal is unaffected and still just a `skipped` entry.
+    pub write_refusal: Option<WriteRefusalSummary>,
+}
+
+/// The one statement behind a whole group of grouped write refusals (CPE-1881), the write-side
+/// counterpart to [`HeldBackSummary`]. Measured on a 200-file all-hard-linked revert: the un-grouped
+/// `skipped` reasons alone totalled 84,180 bytes (~420 bytes/entry), extrapolating to ~8.2 MiB for 20,000
+/// entries. This states the shared explanation once.
+#[derive(Debug, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct WriteRefusalSummary {
+    /// The shared explanation, stated once.
+    pub reason: String,
+    /// How many writes this covers.
+    pub count: u32,
+    /// **CPE-1881 round 3.** The refused paths, in plan order — the structural way a consumer tells a
+    /// grouped write refusal apart from a genuine per-file failure in `skipped` (both carry
+    /// `outcome: "failed"`; only path membership here distinguishes them, never `error`'s wording). Backs
+    /// the frontend's "paint the grouped rows `--text-dim`, keep `--warn` for real failures" fix and its
+    /// "Copy all N refused paths" affordance, mirroring `HeldBackSummary`'s equivalent via `skipped`.
+    pub paths: Vec<String>,
 }
 
 /// The one statement behind a whole group of held-back deletes (CPE-1845), so 500 hold-backs cost one
@@ -231,7 +256,12 @@ impl RevertOutcome {
                 advises_manual_delete: group.advises_manual_delete,
             }
         });
-        Self { applied: report.applied as u32, skipped, held_back }
+        let write_refusal = report.write_refusal.map(|group| WriteRefusalSummary {
+            reason: group.reason,
+            count: group.count,
+            paths: group.paths,
+        });
+        Self { applied: report.applied as u32, skipped, held_back, write_refusal }
     }
 }
 

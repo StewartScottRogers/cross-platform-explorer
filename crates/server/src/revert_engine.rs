@@ -44,6 +44,43 @@ pub struct RestoreReport {
     /// Deletes this engine chose not to perform, and why — **one** explanation for the whole group
     /// (CPE-1845). `None` when nothing was held back.
     pub held_back: Option<HeldBack>,
+    /// Write refusals that share one root cause, stated once instead of copied per path (CPE-1881) — the
+    /// write-side counterpart to [`held_back`](RestoreReport::held_back). Currently the only groupable
+    /// write refusal is the CPE-1857 hard-link rule. `None` when nothing was grouped.
+    ///
+    /// **Every path this covers ALSO has its normal (now short) entry in [`skipped`](RestoreReport::skipped)**
+    /// — this does not remove anything from there, it only adds the one-time shared paragraph `skipped`
+    /// alone cannot state economically. So every existing reader of `skipped.len()` / `skipped.is_empty()`
+    /// (the "did any write fail, so no delete's premise can be trusted" logic just below) keeps working
+    /// completely unchanged; this field exists purely for a consumer that wants the grouped explanation.
+    pub write_refusal: Option<WriteRefusalGroup>,
+}
+
+/// One grouped write refusal — many destinations refused for the SAME reason, the paragraph stated once
+/// instead of copied onto every path (CPE-1881).
+///
+/// Measured on a 200-file all-hard-linked revert fixture: the un-grouped `skipped` entries alone totalled
+/// 84,180 bytes (~420 bytes/entry, the boilerplate hard-link explanation repeated verbatim), extrapolating
+/// to ~8.2 MiB for 20,000 entries. This states that explanation **once**; `skipped` still carries one short
+/// entry per path (see [`RestoreReport::write_refusal`]'s doc), so no per-path information is lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteRefusalGroup {
+    /// The shared explanation, stated once. Never copied per path.
+    pub reason: String,
+    /// How many writes this covers. Always `paths.len()`; kept as its own field (rather than derived at
+    /// every call site) because the count is quoted inside `reason` itself and callers that only need
+    /// the number (a UI heading, a copy-button label) shouldn't have to reconstruct it from a `Vec` len.
+    pub count: u32,
+    /// **CPE-1881 round 3.** The refused paths, in plan order. Added so a consumer can tell a GROUPED
+    /// write refusal apart from a genuine per-file failure **structurally** — by path membership here —
+    /// rather than by matching `reason`'s wording, which is exactly the coupling this crate's own
+    /// standing rule forbids (`revertHoldBack.ts`: "reads `outcome` discriminants only, never the wording
+    /// of `error`"). The Visual Critic's finding was that all 200 grouped rows were painted with the same
+    /// `--warn` weight as a genuine locked-file failure, drowning the one paragraph worth reading in
+    /// amber; the frontend needs a non-textual way to repaint only the grouped rows `--text-dim`, and this
+    /// is it. Also backs the "Copy all N refused paths" affordance CPE-1869 already built for held-back
+    /// deletes — the same shape, the same reason to want it.
+    pub paths: Vec<String>,
 }
 
 /// One stand-down, covering every delete it held back (CPE-1845).
@@ -125,19 +162,43 @@ pub(crate) struct Refused {
     reason: String,
     /// `true` when this refusal will be reached again, identically, on every re-run here.
     permanent: bool,
+    /// **CPE-1881.** `true` when this refusal is one `execute_restore` groups into
+    /// [`RestoreReport::write_refusal`] instead of leaving its full explanation only in `reason` here —
+    /// currently only [`Refused::hard_linked`]. Never inferred from `reason`'s text (this crate's
+    /// standing rule): the caller that constructs a grouped `Refused` already KNOWS why, from asking the
+    /// filesystem, so `reason` here is deliberately kept short (see that constructor) and the shared
+    /// paragraph lives once in the group instead.
+    grouped: bool,
 }
 
 impl Refused {
     /// An attempt that was made and failed: a locked file, a missing stored blob, a permission error, a
     /// directory that could not be created. Fix the cause and the same run succeeds.
     fn transient(reason: impl Into<String>) -> Self {
-        Self { reason: reason.into(), permanent: false }
+        Self { reason: reason.into(), permanent: false, grouped: false }
     }
     /// A judgement about the checkpoint's stored content — a path that escapes the root, a name this
     /// platform cannot address stably, a spelling that resolves onto a file the plan did not account
     /// for. Nothing about re-running changes a stored spelling.
     fn permanent(reason: impl Into<String>) -> Self {
-        Self { reason: reason.into(), permanent: true }
+        Self { reason: reason.into(), permanent: true, grouped: false }
+    }
+    /// CPE-1857's hard-link write refusal, CPE-1881 grouped: `reason` here is deliberately the SHORT
+    /// per-path fact (this destination's own link count) rather than the full boilerplate paragraph —
+    /// `execute_restore` states that paragraph once, in [`RestoreReport::write_refusal`], for every
+    /// `Refused` built this way in one run. Always permanent: a hard link does not stop being one between
+    /// runs (see `fsutil::copy_file_onto_no_follow_with_wording`'s doc on why re-running cannot help).
+    fn hard_linked(links: u64) -> Self {
+        Self {
+            // CPE-1881 round 5 (item 5) — shortened further: the box heading ("Refused (N)") and the
+            // WHY paragraph directly above the list already say what a hard link is and why it was
+            // refused; repeating "this file has N names (it is hard-linked)" on every one of up to 200
+            // rows restated both. The link COUNT is the one fact that genuinely differs per file and is
+            // worth keeping; the explanation is now said once, above the list, not per row.
+            reason: format!("{links} hard link{}", if links == 1 { "" } else { "s" }),
+            permanent: true,
+            grouped: true,
+        }
     }
 }
 
@@ -177,14 +238,39 @@ pub fn execute_restore(
     // than re-derived from the reason strings later — deriving it from prose is exactly the coupling
     // this ticket removes, and deriving it from "which branch fired" is what got it wrong first time.
     let mut any_permanent_refusal = false;
+    // CPE-1881: the write refusals this run grouped (currently only the hard-link rule) — collected
+    // here, alongside every `Refused`, rather than re-derived from `report.skipped` afterwards. The path
+    // list (round 3) is what lets a consumer tell a grouped refusal apart from a genuine failure by
+    // structure — see `WriteRefusalGroup::paths`'s doc.
+    let mut grouped_paths: Vec<String> = Vec::new();
     for action in &writes {
         match apply_write(action, dest_root_path, &blobs_dir, checkpoint) {
             Ok(()) => report.applied += 1,
             Err(refused) => {
                 any_permanent_refusal |= refused.permanent;
+                if refused.grouped {
+                    grouped_paths.push(action.path.clone());
+                }
+                // Every refused write still gets its own `skipped` entry, grouped or not — see
+                // `RestoreReport::write_refusal`'s doc on why this must not change: the "did any write
+                // fail, so no delete's premise can be trusted" logic below reads `skipped` alone, and a
+                // grouped refusal is still a refusal it must count.
                 report.skipped.push((action.path.clone(), refused.reason));
             }
         }
+    }
+    if !grouped_paths.is_empty() {
+        let grouped_refusals = grouped_paths.len() as u32;
+        let entries = if grouped_refusals == 1 { "entry" } else { "entries" };
+        report.write_refusal = Some(WriteRefusalGroup {
+            reason: format!(
+                "{grouped_refusals} checkpoint {entries} could not be written because the destination \
+                 is hard-linked (each has more than one name), and {}",
+                crate::fsutil::LinkGuardWording::RESTORE.hard_link_reason()
+            ),
+            count: grouped_refusals,
+            paths: grouped_paths,
+        });
     }
 
     // **A delete is only safe once the checkpoint state has actually been established (CPE-1823 round 3,
@@ -452,13 +538,24 @@ pub fn execute_restore(
         // wording used to do — points them at something that cannot succeed.
         Some(HeldBack::new(
             HeldBackOutcome::HeldBackByCheckpoint,
+            // CPE-1881 round 5 — the reason used to name only `unrestorable.len()` ("1 of this
+            // checkpoint's entries…") and leave the deletion count to the headline/copy-button alone,
+            // one box over. A reader scanning numbers saw 1, 2, 2 across three separate places and had
+            // to infer the connection themselves. Naming both counts in the SAME clause — "so N
+            // deletions are held back:" — states the causal chain (1 unrestorable name is why N
+            // deletions are withheld) instead of leaving it implicit, and the trailing colon now
+            // introduces the list rendered right below this paragraph.
             format!(
-                "{} of this checkpoint's entries cannot be restored on this computer ({}{}), so \"this \
-                 file is not in the checkpoint\" cannot be trusted — deleting it may destroy a file the \
-                 checkpoint does hold, under a name spelled differently here.",
+                "{} of this checkpoint's entries cannot be restored on this computer ({}{}) — \"this \
+                 file is not in the checkpoint\" cannot be trusted, and deleting on that premise may \
+                 destroy a file the checkpoint does hold under a name spelled differently here — so \
+                 {} deletion{} {} held back:",
                 unrestorable.len(),
                 named.join(", "),
-                if more > 0 { format!(", and {more} more") } else { String::new() }
+                if more > 0 { format!(", and {more} more") } else { String::new() },
+                deletes.len(),
+                if deletes.len() == 1 { "" } else { "s" },
+                if deletes.len() == 1 { "is" } else { "are" },
             ),
             &format!(
                 "There is no fix for this on this computer: those names are stored in the checkpoint \
@@ -960,20 +1057,27 @@ fn apply_write(
     crate::fsutil::copy_file_onto_no_follow(&blob, &target).map_err(|why| {
         let name_is_taken_by_a_link_or_dir = fs::symlink_metadata(&target)
             .is_ok_and(|m| m.file_type().is_symlink() || m.is_dir());
-        // **CPE-1857 — the third permanent shape, and it is invisible to the line above.** A hard link is
-        // not a symlink and not a directory: `symlink_metadata` reports an ordinary regular file, because
-        // that is exactly what it is. It has a second *name*, and the copier refuses it for that. A file
-        // does not shed its other names between runs, so "run the revert again" is the wrong advice —
-        // the same reason a planted link is permanent. Asked of the filesystem, never by matching our own
-        // wording, and asked only HERE, after the write is settled: see `name_is_multiply_linked`.
-        let name_has_other_names = crate::batch_media::name_is_multiply_linked(&target);
-        if name_is_taken_by_a_link_or_dir || name_has_other_names {
-            Refused::permanent(why)
-        } else {
-            Refused::transient(format!(
+        if name_is_taken_by_a_link_or_dir {
+            return Refused::permanent(why);
+        }
+        // **CPE-1857 — the third permanent shape, and it is invisible to the check above.** A hard link
+        // is not a symlink and not a directory: `symlink_metadata` reports an ordinary regular file,
+        // because that is exactly what it is. It has a second *name*, and the copier refuses it for
+        // that. A file does not shed its other names between runs, so "run the revert again" is the
+        // wrong advice — the same reason a planted link is permanent. Asked of the filesystem, never by
+        // matching our own wording, and asked only HERE, after the write is settled.
+        //
+        // **CPE-1881: reads `name_links` directly, not the bool-collapsing `name_is_multiply_linked`**,
+        // so the actual count is available to build [`Refused::hard_linked`]'s short per-path reason —
+        // still asking the filesystem, never parsing `why`'s prose, just for a richer answer than "is
+        // it multiply linked at all". `Unknown`/`One`/`NoFileHere` all fall through to `transient` below,
+        // exactly as `name_is_multiply_linked` collapsing `Unknown` to `false` did before this change.
+        match crate::batch_media::name_links(&target) {
+            crate::batch_media::NameLinks::Many(links) => Refused::hard_linked(links),
+            _ => Refused::transient(format!(
                 "the checkpoint's stored copy of this file (blob {}) could not be written: {why}",
                 state.hash
-            ))
+            )),
         }
     })?;
     Ok(())
@@ -1208,8 +1312,10 @@ mod tests {
         // Refused per file, loudly, with a reason — never silently skipped (CPE-1803/1804/1805/1816).
         assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
         assert_eq!(report.skipped[0].0, "h.txt", "the wrong entry was refused: {report:?}");
+        // CPE-1881 round 5 (item 5): the per-path reason is now the short "N hard links" fact alone —
+        // the "hard-linked"/"why" explanation lives once in `write_refusal.reason` instead.
         assert!(
-            report.skipped[0].1.contains("hard-linked"),
+            report.skipped[0].1.contains("hard link"),
             "the refusal must name the cause the user has to act on: {report:?}"
         );
         assert!(
@@ -1240,6 +1346,157 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&store);
+    }
+
+    /// **CPE-1881 — the ticket's own repro, measured.** CPE-1847's `HeldBackSummary` solved "one
+    /// explanation, not N copies" for held-back DELETES; write refusals never got the same treatment, so
+    /// a revert whose every refusal is the SAME hard-link cause carried the ~420-byte boilerplate
+    /// paragraph on every one of them — measured on a 200-file all-refused fixture at 84,180 bytes
+    /// (~420 bytes/entry), extrapolating to ~8.2 MiB for 20,000 entries (the ticket's own figures).
+    /// Reproduced here at the ticket's scale, with the before/after byte counts the acceptance criterion
+    /// asks for.
+    #[test]
+    fn cpe_1881_two_hundred_hard_linked_refusals_cost_one_paragraph_not_two_hundred() {
+        let d = scratch("1881-hardlink-200");
+        let root = d.join("root");
+        let outside = d.join("outside");
+        let store = scratch("1881-hardlink-200-store");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("1881beef"), b"CHECKPOINT-CONTENT").unwrap();
+
+        let victim = outside.join("victim.txt");
+        fs::write(&victim, b"placeholder").unwrap();
+
+        const N: usize = 200;
+        let mut checkpoint = Snapshot::new();
+        let mut plan = Vec::with_capacity(N);
+        for i in 0..N {
+            let name = format!("f{i}.txt");
+            if fs::hard_link(&victim, root.join(&name)).is_err() {
+                crate::skip_notice!(
+                    "SKIPPING cpe_1881_two_hundred_hard_linked_refusals_cost_one_paragraph_not_two_hundred: \
+                     no hard-link support on this filesystem — NOTHING on this run covered CPE-1881's own \
+                     repro"
+                );
+                return;
+            }
+            checkpoint.insert(name.clone(), crate::restore_plan::FileState::new("1881beef", 19));
+            plan.push(RestoreAction { path: name, op: RestoreOp::Overwrite });
+        }
+
+        let report =
+            execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+
+        // Every one of the 200 is the identical shape: refused, none applied.
+        assert_eq!(report.applied, 0, "{report:?}");
+        assert_eq!(report.skipped.len(), N, "no per-entry visibility must be lost: {report:?}");
+
+        // AFTER: the shared explanation is stated exactly ONCE, with the right count — this is the fix.
+        let group = report
+            .write_refusal
+            .as_ref()
+            .unwrap_or_else(|| panic!("200 identical hard-link refusals must be grouped: {report:?}"));
+        assert_eq!(group.count, N as u32, "{group:?}");
+        assert!(group.reason.contains("hard-linked"), "{group:?}");
+        assert!(group.reason.len() < 1000, "one paragraph, not several: {group:?}");
+        // CPE-1881 round 3: `paths` is the structural way a consumer tells this group's rows apart from
+        // a genuine failure — every refused path must be here, none lost, none invented.
+        assert_eq!(group.paths.len(), N, "{group:?}");
+        assert!(group.paths.contains(&"f0.txt".to_string()), "{group:?}");
+        assert!(group.paths.contains(&"f199.txt".to_string()), "{group:?}");
+
+        // The measured acceptance criterion: total bytes across the whole report, before vs after. Each
+        // per-path `skipped` reason is now the SHORT fact alone ("this file has N names…"), not the
+        // ~420-byte essay — summing them plus the one shared paragraph must land far under the ~84,180
+        // bytes the ticket measured for this exact fixture size pre-fix.
+        let per_path_bytes: usize = report.skipped.iter().map(|(_, why)| why.len()).sum();
+        let total_after = per_path_bytes + group.reason.len();
+        assert!(
+            total_after < 20_000,
+            "CPE-1881 acceptance criterion — one explanation, not 200: total {total_after} bytes for \
+             {N} entries (pre-fix measured 84,180 bytes on this exact fixture size): {report:?}"
+        );
+    }
+
+    /// **CPE-1881 round 5, item 3 — name both counts in one clause.**
+    ///
+    /// The unrestorable-name hold-back's reason paragraph named only `unrestorable.len()` ("1 of this
+    /// checkpoint's entries…"); the deletion count it withholds only ever showed up in the headline
+    /// ("2 deletions held back") and the copy-button label ("Copy all 2 held-back paths"), one grey box
+    /// over (`RevertOutcomePanel.svelte`). A reader scanning the panel saw 1, 2, 2 in three separate
+    /// places with nothing connecting them. This pins that both counts now appear together, in the
+    /// reason's own clause — the exact fixture shape (1 unrestorable name, 2 deletes) captured in
+    /// `.claude/sprint-metrics/visual-evidence/cpe-1881-{light,dark}-held-back-and-refused.png`.
+    ///
+    /// **`#[cfg(windows)]`, deliberately — same reason as the sibling `cpe_1823_a_trailing_space_entry_…`
+    /// and `cpe_1823_a_device_name_entry_…` tests above.** The fixture's colon in `"notes: draft.txt"`
+    /// only lands this entry in `unrestorable` because of `safe_segments`'s
+    /// `cfg!(windows) && (seg.contains(':') || seg.contains('\\'))` check, and that gate is deliberately
+    /// Windows-only (see that function's own doc comment): on Linux and macOS `:` is an ordinary filename
+    /// byte, so this exact key is fully restorable there. Found the hard way — CI red on ubuntu AND
+    /// macOS at `assert!(root.join("added-01.png").exists() && …)` (this test's own liveness check),
+    /// because on those platforms `unrestorable` stays empty, `hold` is `None`, and the two deletes
+    /// actually apply. That is not a bug in the fix; this test's precondition simply does not hold
+    /// outside Windows, so the correct move is gating the test to where it does — a passing assertion on
+    /// a platform where the condition it describes cannot occur would prove nothing, which is exactly
+    /// the shape this ticket has been fighting throughout.
+    ///
+    /// Not a `require_staged`/`require_staged_reason` case: those exist for a RUNTIME capability that
+    /// might fail to stage even on a platform that is supposed to support it (a symlink privilege, an ACL
+    /// deny — see `cpe_1846_a_link_at_the_destination_…` above for that exact shape in this file). Here
+    /// there is no staging step and no privilege to lose: a colon being Windows-only is a compile-time
+    /// fact of `safe_segments`, never a runtime observation, so `#[cfg(windows)]` — the same tool the two
+    /// CPE-1823 siblings above already use for an identical "Windows rejects this spelling" precondition
+    /// — is the right-shaped gate, not a hand-rolled `cfg!` check inside the test body.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1881_round5_unrestorable_reason_names_both_counts() {
+        let store = scratch("1881-r5-counts-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        let root = scratch("1881-r5-counts-root");
+        fs::write(root.join("added-01.png"), b"user file 1").unwrap();
+        fs::write(root.join("added-02.png"), b"user file 2").unwrap();
+
+        let mut checkpoint = Snapshot::new();
+        // One checkpoint key this platform cannot restore — the permanent hold-back.
+        checkpoint.insert(
+            "notes: draft.txt".to_string(),
+            crate::restore_plan::FileState::new("1881r5aaaa", 3),
+        );
+        let report = execute_restore(
+            &[
+                RestoreAction { path: "added-01.png".to_string(), op: RestoreOp::Delete },
+                RestoreAction { path: "added-02.png".to_string(), op: RestoreOp::Delete },
+            ],
+            &root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &checkpoint,
+        );
+
+        assert!(
+            root.join("added-01.png").exists() && root.join("added-02.png").exists(),
+            "fixture is inert: a delete actually ran, so nothing was held back: {report:?}"
+        );
+        let group = live_hold_back(&report);
+        assert_eq!(group.outcome, HeldBackOutcome::HeldBackByCheckpoint, "{group:?}");
+
+        // This fixture's unrestorable-entry count, "1".
+        assert!(
+            group.reason.contains("1 of this checkpoint's entries cannot be restored"),
+            "{group:?}"
+        );
+        // This fixture's deletion count, "2" — must be in the SAME reason string as the entry count,
+        // not left for the headline/copy-button to state alone.
+        assert!(
+            group.reason.contains("so 2 deletions are held back"),
+            "the reason must name the deletion count it withholds, in the same clause as the \
+             unrestorable-entry count that causes it: {group:?}"
+        );
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// **CPE-1845 review round 2 — a permanent refusal must not be reported as "run it again".**
