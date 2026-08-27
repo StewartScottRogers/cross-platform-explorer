@@ -3,11 +3,11 @@ id: CPE-1876
 title: --mono is the sixth undefined token, at ~24 call sites across ~20 components
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-23
-closed:
+closed: 2026-08-26
 ---
 
 ## Problem
