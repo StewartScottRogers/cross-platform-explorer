@@ -235,8 +235,91 @@ pub(crate) fn create_dir_beneath(root: &RootDir, rel: &Path) -> Result<(), Refus
     sys::walk_dirs(root, &parts)
 }
 
-/// The one place `rel` is turned into components, so [`create_beneath`] and [`create_dir_beneath`]
-/// cannot come to disagree about what a legal relative path is.
+/// Delete the file `root/rel` names — **without ever following a link at any component, and without
+/// ever resolving `rel` as a path** (CPE-1937).
+///
+/// # Why this had to be a new primitive rather than another caller of [`create_beneath`]
+///
+/// Every leg CPE-1896 and CPE-1913 wired into this module **writes**, and a write's whole product is a
+/// handle: open the leaf beneath the root and the bytes can only land inside it. A delete has no
+/// handle to hand back — its product is the *removal of a name* — so `std` has nothing to offer:
+/// [`std::fs::remove_file`] takes a path and re-resolves every component of it, which is exactly the
+/// by-path question this module exists to stop asking. CPE-1913's own enumeration listed
+/// `copilot::apply_op` as deferred for the same reason: `renameat`/`unlinkat` did not exist here.
+/// `unlinkat` does now, and it is the piece `apply_op` was waiting on.
+///
+/// # It OPENS the parent chain, it does not create it
+///
+/// [`create_beneath`]'s descent uses `FILE_OPEN_IF` / `mkdirat`, because a write legitimately
+/// materialises its own parents. A delete must never do that: `remove_file` on a missing chain is an
+/// error, and a delete that *creates* two directories on its way to failing would leave debris behind
+/// a destructive operation. So the descent is parameterised on [`Act`] — one walk, two dispositions —
+/// rather than copied, so the file leg and the delete leg cannot drift about what a traversable
+/// component is.
+///
+/// # The leaf is unlinked by NAME relative to the parent HANDLE, and never followed
+///
+/// - **Unix**: `unlinkat(parent_fd, name, 0)`. `unlinkat` never follows a symlink at the final
+///   component — it removes the name itself — which is both the never-follow discipline this module
+///   holds everywhere else and exactly what `fs::remove_file` already did at that one component.
+/// - **Windows**: `NtCreateFile` relative to the parent handle with `DELETE` access,
+///   `FILE_OPEN_REPARSE_POINT` (so a reparse point is opened as itself and never traversed) and
+///   `FILE_NON_DIRECTORY_FILE` (so a directory — junction included — is refused, as `remove_file`
+///   refuses one), then `SetFileInformationByHandle(FileDispositionInfo)` on that handle. The name is
+///   never presented to the filesystem again after the parent chain is opened.
+///
+/// # Errors
+///
+/// Same [`Refusal`] contract as [`create_beneath`], including `policy`: a link at a component is a
+/// **verdict** (`policy: true`, permanent — a junction does not stop being one between runs), while a
+/// vanished name, a permission problem or a sharing violation is an I/O answer (`policy: false`).
+/// `revert_engine::apply_delete` turns that distinction straight into `Refused::permanent` versus
+/// `Refused::transient`, so a planted junction never tells the user to "run the revert again".
+pub(crate) fn remove_file_beneath(root: &RootDir, rel: &Path) -> Result<(), Refusal> {
+    let parts = plain_components(root, rel)?;
+    let Some((last, dirs)) = parts.split_last() else {
+        return Err(Refusal {
+            why: format!(
+                "refusing to delete {rel:?} inside {:?}: it names the destination root itself, not a \
+                 file inside it",
+                root.path
+            ),
+            policy: true,
+        });
+    };
+    sys::unlink(root, dirs, last)
+}
+
+/// What the walk is on its way to do. Exactly two things differ between [`create_beneath`]'s descent
+/// and [`remove_file_beneath`]'s — whether a missing directory is **created** on the way down, and the
+/// **verb** in a refusal — and both are carried here rather than by a second copy of the walk. A user
+/// deleting files must not be told that "nothing was written", and a delete must not create anything.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Act {
+    Write,
+    Delete,
+}
+
+impl Act {
+    /// "write" / "delete" — the verb in the refusal's first clause and in its closing sentence.
+    fn verb(self) -> &'static str {
+        match self {
+            Act::Write => "write",
+            Act::Delete => "delete",
+        }
+    }
+
+    /// "written" / "deleted" — the participle in "Nothing was … for this entry".
+    fn past(self) -> &'static str {
+        match self {
+            Act::Write => "written",
+            Act::Delete => "deleted",
+        }
+    }
+}
+
+/// The one place `rel` is turned into components, so [`create_beneath`], [`create_dir_beneath`] and
+/// [`remove_file_beneath`] cannot come to disagree about what a legal relative path is.
 ///
 /// `rel` must be a plain relative path; anything with a root, a prefix or a `..` is refused here rather
 /// than sanitised, because a caller handing this a `..` has a bug that a silent fix would hide.
@@ -318,7 +401,7 @@ impl From<Refusal> for String {
 /// The refusal wording, shared by every arm so the sentence a user sees does not depend on which
 /// platform refused. `at` is the failing component's path **relative to the root**, which is the part
 /// the user can act on.
-fn refuse(root: &RootDir, at: &Path, why: &str) -> Refusal {
+fn refuse(root: &RootDir, act: Act, at: &Path, why: &str) -> Refusal {
     // **The tail must not contain the words any test uses to identify a CAUSE.** It used to end
     // "…a component that is a link, or that cannot be opened, stops the entry", which put the literal
     // phrase `is a link` into *every* refusal this module produces — so
@@ -326,11 +409,19 @@ fn refuse(root: &RootDir, at: &Path, why: &str) -> Refusal {
     // file sitting where a directory should be. Two tests were asserting exactly that and proving
     // nothing; the Linux harness for PR #1043 round 2 caught it by asserting the *negative* case.
     // Keep boilerplate and diagnosis lexically disjoint.
+    //
+    // **The verb comes from [`Act`], and that is not decoration** (CPE-1937). This module's first two
+    // callers only ever wrote, so the sentence hard-coded "write"; the delete leg reaches the identical
+    // walk, and telling a user that "nothing was written" when what was refused was a *deletion* is a
+    // message about the wrong operation. The refusal wording for every writing leg is byte-for-byte
+    // unchanged — the tests in `revert_engine`, `archive` and `transfer` that match it still match it.
     Refusal::failure(format!(
-        "refusing to write inside the {noun} {path:?}: the path component {at:?} {why}. \
-         Nothing was written for this entry — each component is opened relative to the one before it \
-         so that nothing can be swapped in underneath the write, and any component that cannot be \
+        "refusing to {verb} inside the {noun} {path:?}: the path component {at:?} {why}. \
+         Nothing was {past} for this entry — each component is opened relative to the one before it \
+         so that nothing can be swapped in underneath the {verb}, and any component that cannot be \
          opened, or that stands in for another name, stops the entry rather than being resolved.",
+        verb = act.verb(),
+        past = act.past(),
         noun = root.noun,
         path = root.path,
     ))
@@ -340,15 +431,17 @@ fn refuse(root: &RootDir, at: &Path, why: &str) -> Refusal {
 /// specific finding it is — and flagged `policy: true`, because refusing a link is a **verdict**, not
 /// an I/O failure. That distinction is what lets `archive` count it as a skip and `transfer` keep the
 /// rest of the tree, rather than every caller having to recognise this sentence (CPE-1913).
-fn refuse_link(root: &RootDir, at: &Path) -> Refusal {
+fn refuse_link(root: &RootDir, act: Act, at: &Path) -> Refusal {
     Refusal {
         why: refuse(
             root,
+            act,
             at,
             &format!(
                 "is a link (a symlink, junction or other reparse point), and a link inside the {} \
-                 redirects the write to wherever it points",
-                root.noun
+                 redirects the {} to wherever it points",
+                root.noun,
+                act.verb(),
             ),
         )
         .why,
@@ -361,7 +454,7 @@ fn refuse_link(root: &RootDir, at: &Path) -> Refusal {
 // ---------------------------------------------------------------------------------------------
 #[cfg(windows)]
 mod sys {
-    use super::{refuse, refuse_link, tick, Opened, Refusal, RootDir};
+    use super::{refuse, refuse_link, tick, Act, Opened, Refusal, RootDir};
     use std::ffi::OsStr;
     use std::fs::File;
     use std::os::windows::ffi::OsStrExt;
@@ -374,9 +467,12 @@ mod sys {
         FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
         NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS,
     };
-    use windows::Win32::Foundation::{RtlNtStatusToDosError, HANDLE, NTSTATUS, UNICODE_STRING};
+    use windows::Win32::Foundation::{
+        RtlNtStatusToDosError, BOOLEAN, HANDLE, NTSTATUS, UNICODE_STRING,
+    };
     use windows::Win32::Storage::FileSystem::{
-        FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
+        SetFileInformationByHandle, FileDispositionInfo, DELETE, FILE_ACCESS_RIGHTS,
+        FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         FILE_TRAVERSE, SYNCHRONIZE,
     };
@@ -565,7 +661,12 @@ mod sys {
     /// Descend (creating as needed) through `dirs`, returning the deepest handle — `None` when `dirs`
     /// is empty and the root itself is the parent. Shared by [`walk`] and [`walk_dirs`] so the file leg
     /// and the directory leg cannot drift apart about what a traversable component is (CPE-1913).
-    fn descend(root: &RootDir, dirs: &[&OsStr], sofar: &mut PathBuf) -> Result<Option<File>, Refusal> {
+    fn descend(
+        root: &RootDir,
+        act: Act,
+        dirs: &[&OsStr],
+        sofar: &mut PathBuf,
+    ) -> Result<Option<File>, Refusal> {
         let mut held: Option<File> = None;
 
         for name in dirs {
@@ -575,6 +676,13 @@ mod sys {
             // of `create_dir_all`, except that it can only ever create *inside the handle we hold*, so
             // a refused entry cannot leave directory debris outside the root the way a path-based
             // `create_dir_all` walking a junction did (CPE-1889 check (1)'s whole reason to exist).
+            //
+            // **`FILE_OPEN` for a delete** (CPE-1937): `remove_file` on a path whose parents do not
+            // exist is an error, and a destructive operation that silently *materialises* two
+            // directories on its way to failing leaves debris behind a delete. So the disposition is
+            // the one thing the two acts differ on here; everything below is shared, which is the
+            // point of parameterising rather than copying the walk.
+            let disposition = if act == Act::Write { FILE_OPEN_IF } else { FILE_OPEN };
             let dir = nt_child(
                 parent,
                 name,
@@ -586,13 +694,13 @@ mod sys {
                 FILE_ACCESS_RIGHTS(
                     FILE_LIST_DIRECTORY.0 | FILE_TRAVERSE.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0,
                 ),
-                FILE_OPEN_IF,
+                disposition,
                 NTCREATEFILE_CREATE_OPTIONS(
                     FILE_DIRECTORY_FILE.0 | FILE_OPEN_REPARSE_POINT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0,
                 ),
             )
             .map_err(|s| {
-                refuse(root, sofar, &format!("could not be opened ({})", io_err(s)))
+                refuse(root, act, sofar, &format!("could not be opened ({})", io_err(s)))
             })?;
             // `FILE_OPEN_REPARSE_POINT` means a junction here was opened **as the reparse point
             // itself** rather than followed, so nothing has escaped — but continuing through it would
@@ -612,7 +720,7 @@ mod sys {
             // names the cause. That is also why failing open (`is_some_and`) is acceptable here.
             tick();
             if name_surrogate_at(&dir) {
-                return Err(refuse_link(root, sofar));
+                return Err(refuse_link(root, act, sofar));
             }
             held = Some(dir);
         }
@@ -623,12 +731,102 @@ mod sys {
     /// arm. The handle is dropped on return; the directory's existence is the product.
     pub(super) fn walk_dirs(root: &RootDir, parts: &[&OsStr]) -> Result<(), Refusal> {
         let mut sofar = PathBuf::new();
-        descend(root, parts, &mut sofar).map(|_| ())
+        descend(root, Act::Write, parts, &mut sofar).map(|_| ())
+    }
+
+    /// Ask the filesystem — never the errno — whether `name` under `parent` is a link, for a name that
+    /// has already failed to open. Same rule and same reason as the Unix arm's `link_at`: a second
+    /// `NtCreateFile`, same parent handle, same single component, opened as a *directory* and still
+    /// `FILE_OPEN_REPARSE_POINT`, so the answer comes from an object rather than from a status code.
+    /// Nothing is written or deleted on the strength of it — the entry is refused either way — so it
+    /// decides the **sentence**, not the outcome.
+    fn leaf_is_link(parent: &File, last: &OsStr) -> bool {
+        let dir_options = NTCREATEFILE_CREATE_OPTIONS(
+            FILE_DIRECTORY_FILE.0 | FILE_OPEN_REPARSE_POINT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0,
+        );
+        nt_child(
+            parent,
+            last,
+            FILE_ACCESS_RIGHTS(FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0),
+            FILE_OPEN,
+            dir_options,
+        )
+        .is_ok_and(|d| name_surrogate_at(&d))
+    }
+
+    /// [`remove_file_beneath`](super::remove_file_beneath)'s arm — CPE-1937.
+    ///
+    /// Win32 has no handle-relative delete any more than it has a handle-relative open: `DeleteFileW`
+    /// takes a path and re-parses it from the drive letter, which is the by-path question this module
+    /// exists to remove. The two-step below is the `unlinkat` equivalent Windows does offer — open the
+    /// leaf **relative to the parent handle** with `DELETE` access, then set the disposition **on that
+    /// handle**. Between the two there is no name for anything to swap: the object marked for deletion
+    /// is the object opened.
+    ///
+    /// `FILE_NON_DIRECTORY_FILE` keeps this to files, exactly as `fs::remove_file` does, so a directory
+    /// junction standing at the leaf is refused rather than removed; `FILE_OPEN_REPARSE_POINT` means a
+    /// *file* symlink at the leaf is opened as the link itself and the link — not its target — is what
+    /// goes, which is also `remove_file`'s behaviour and the never-follow rule this module holds
+    /// everywhere else.
+    ///
+    /// **`FileDispositionInfo` is delete-on-close, and that is the same contract `DeleteFileW` has**:
+    /// the name goes when the last handle closes, and ours is dropped on return. If another process
+    /// holds the file open *without* `FILE_SHARE_DELETE` the open above fails with a sharing violation
+    /// — a `policy: false` refusal the revert reports as transient, which is what a locked file is.
+    pub(super) fn unlink(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<(), Refusal> {
+        let mut sofar = PathBuf::new();
+        let held = descend(root, Act::Delete, dirs, &mut sofar)?;
+        let parent = held.as_ref().unwrap_or(&root.dir);
+        sofar.push(last);
+
+        let file = nt_child(
+            parent,
+            last,
+            FILE_ACCESS_RIGHTS(DELETE.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0),
+            FILE_OPEN,
+            NTCREATEFILE_CREATE_OPTIONS(
+                FILE_NON_DIRECTORY_FILE.0 | FILE_OPEN_REPARSE_POINT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0,
+            ),
+        )
+        .map_err(|s| {
+            if leaf_is_link(parent, last) {
+                refuse_link(root, Act::Delete, &sofar)
+            } else {
+                refuse(
+                    root,
+                    Act::Delete,
+                    &sofar,
+                    &format!("could not be opened for deletion ({})", io_err(s)),
+                )
+            }
+        })?;
+
+        let info = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
+        tick();
+        // SAFETY: `file` is a live handle opened with `DELETE` access just above; `info` is a
+        // correctly-sized, correctly-typed input buffer for `FileDispositionInfo` and outlives the
+        // call. No ownership is transferred — the handle is still ours and is closed by `File`'s drop.
+        let set = unsafe {
+            SetFileInformationByHandle(
+                HANDLE(file.as_raw_handle() as isize),
+                FileDispositionInfo,
+                std::ptr::addr_of!(info).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>()).unwrap_or(1),
+            )
+        };
+        set.map_err(|e| {
+            refuse(
+                root,
+                Act::Delete,
+                &sofar,
+                &format!("could not be marked for deletion ({e})"),
+            )
+        })
     }
 
     pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, Refusal> {
         let mut sofar = PathBuf::new();
-        let held = descend(root, dirs, &mut sofar)?;
+        let held = descend(root, Act::Write, dirs, &mut sofar)?;
 
         let parent = held.as_ref().unwrap_or(&root.dir);
         sofar.push(last);
@@ -673,25 +871,17 @@ mod sys {
                 // plain-directory abort as pre-existing. This restores parity with the Unix arm as
                 // well, which has always classified a symlink at the leaf through `link_at` and
                 // refused it with `refuse_link`.
+                //
+                // The classification itself is [`leaf_is_link`], shared with the delete leg (CPE-1937)
+                // rather than spelled twice, for the same reason `descend` is shared: two copies of a
+                // security classification are two things that can drift.
                 Err(s) => {
-                    let dir_options = NTCREATEFILE_CREATE_OPTIONS(
-                        FILE_DIRECTORY_FILE.0
-                            | FILE_OPEN_REPARSE_POINT.0
-                            | FILE_SYNCHRONOUS_IO_NONALERT.0,
-                    );
-                    let is_link = nt_child(
-                        parent,
-                        last,
-                        FILE_ACCESS_RIGHTS(FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0),
-                        FILE_OPEN,
-                        dir_options,
-                    )
-                    .is_ok_and(|d| name_surrogate_at(&d));
-                    if is_link {
-                        Err(refuse_link(root, &sofar))
+                    if leaf_is_link(parent, last) {
+                        Err(refuse_link(root, Act::Write, &sofar))
                     } else {
                         Err(refuse(
                             root,
+                            Act::Write,
                             &sofar,
                             &format!("could not be opened for writing ({})", io_err(s)),
                         ))
@@ -707,7 +897,7 @@ mod sys {
 // ---------------------------------------------------------------------------------------------
 #[cfg(unix)]
 mod sys {
-    use super::{refuse, refuse_link, tick, Opened, Refusal, RootDir};
+    use super::{refuse, refuse_link, tick, Act, Opened, Refusal, RootDir};
     use std::ffi::{CString, OsStr};
     use std::fs::File;
     use std::os::unix::ffi::OsStrExt;
@@ -770,15 +960,22 @@ mod sys {
     /// be opened (Not a directory)" instead of naming the link, and two tests asserting the link
     /// wording reddened on ubuntu. Measured by PR #1043's reviewer on WSL2 kernel 6.6.87 and
     /// reproduced here. Classification is therefore [`link_at`]'s job, never the errno's.
-    fn child_dir(parent: RawFd, name: &CString) -> std::io::Result<File> {
-        tick();
-        // SAFETY: `parent` is borrowed from a live `File`; `name` is a NUL-terminated C string that
-        // outlives the call. Both syscalls are ordinary FFI with no ownership transfer.
-        let made = unsafe { libc::mkdirat(parent, name.as_ptr(), 0o777) };
-        if made != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(e);
+    ///
+    /// **`create` is false for a delete** (CPE-1937): `remove_file` on a missing parent chain is an
+    /// error, and a destructive operation that materialises directories on its way to failing leaves
+    /// debris. The `openat` below is identical either way — only the `mkdirat` is skipped — so the two
+    /// acts cannot come to disagree about what a traversable component is.
+    fn child_dir(parent: RawFd, name: &CString, create: bool) -> std::io::Result<File> {
+        if create {
+            tick();
+            // SAFETY: `parent` is borrowed from a live `File`; `name` is a NUL-terminated C string that
+            // outlives the call. Ordinary FFI with no ownership transfer.
+            let made = unsafe { libc::mkdirat(parent, name.as_ptr(), 0o777) };
+            if made != 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
             }
         }
         tick();
@@ -955,26 +1152,31 @@ mod sys {
     /// There is deliberately **no `openat2` fast path here**: `RESOLVE_BENEATH` answers a whole
     /// multi-component *open*, and this walk's product is a chain of `mkdirat`s. The fast path stays
     /// where it pays, on the file leaf.
-    fn descend(root: &RootDir, dirs: &[&OsStr], sofar: &mut PathBuf) -> Result<Option<File>, Refusal> {
+    fn descend(
+        root: &RootDir,
+        act: Act,
+        dirs: &[&OsStr],
+        sofar: &mut PathBuf,
+    ) -> Result<Option<File>, Refusal> {
         let mut held: Option<File> = None;
         for name in dirs {
             sofar.push(name);
             let c = cname(name).map_err(|()| {
-                refuse(root, sofar, "contains a NUL byte, which no filesystem name can hold")
+                refuse(root, act, sofar, "contains a NUL byte, which no filesystem name can hold")
             })?;
             let parent = match held.as_ref() {
                 Some(f) => f.as_raw_fd(),
                 None => root.dir.as_raw_fd(),
             };
-            let dir = child_dir(parent, &c).map_err(|e| {
+            let dir = child_dir(parent, &c, act == Act::Write).map_err(|e| {
                 // Classified by asking the filesystem, NOT by reading the errno — see [`link_at`].
                 // A symlink at an intermediate component reports `ENOTDIR` on Linux and macOS, and so
                 // does a plain file sitting where a directory should be; they need different
                 // sentences and the errno cannot tell them apart.
                 if link_at(parent, &c) {
-                    refuse_link(root, sofar)
+                    refuse_link(root, act, sofar)
                 } else {
-                    refuse(root, sofar, &format!("could not be opened ({e})"))
+                    refuse(root, act, sofar, &format!("could not be opened ({e})"))
                 }
             })?;
             held = Some(dir);
@@ -986,7 +1188,45 @@ mod sys {
     /// arm. The handle is dropped on return; the directory's existence is the product.
     pub(super) fn walk_dirs(root: &RootDir, parts: &[&OsStr]) -> Result<(), Refusal> {
         let mut sofar = PathBuf::new();
-        descend(root, parts, &mut sofar).map(|_| ())
+        descend(root, Act::Write, parts, &mut sofar).map(|_| ())
+    }
+
+    /// [`remove_file_beneath`](super::remove_file_beneath)'s arm — CPE-1937.
+    ///
+    /// `unlinkat(parent_fd, name, 0)` is the primitive this module was missing: the name is resolved
+    /// against **one already-open directory object**, so there is no interval in which a rename can
+    /// redirect it, and it **never follows a symlink at the final component** — it removes the name
+    /// itself. That is both this module's standing never-follow rule and exactly what
+    /// `fs::remove_file` already did at that one component, so the only behaviour that changes is
+    /// where the interior components are resolved.
+    ///
+    /// `AT_REMOVEDIR` is deliberately **not** passed: a directory (a symlink to one included, since
+    /// `unlinkat` does not traverse) is refused with `EISDIR`/`EPERM` rather than removed, matching
+    /// `fs::remove_file` and keeping a revert's delete leg to the files its plan named.
+    pub(super) fn unlink(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<(), Refusal> {
+        let mut sofar = PathBuf::new();
+        let held = descend(root, Act::Delete, dirs, &mut sofar)?;
+        sofar.push(last);
+        let c = cname(last).map_err(|()| {
+            refuse(root, Act::Delete, &sofar, "contains a NUL byte, which no filesystem name can hold")
+        })?;
+        let parent = match held.as_ref() {
+            Some(f) => f.as_raw_fd(),
+            None => root.dir.as_raw_fd(),
+        };
+        tick();
+        // SAFETY: `parent` is borrowed from a live `File` (or from the held root handle); `c` is a
+        // NUL-terminated C string that outlives the call. Ordinary FFI, no ownership transfer.
+        if unsafe { libc::unlinkat(parent, c.as_ptr(), 0) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(refuse(
+                root,
+                Act::Delete,
+                &sofar,
+                &format!("could not be deleted ({e})"),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, Refusal> {
@@ -1003,11 +1243,11 @@ mod sys {
         }
 
         let mut sofar = PathBuf::new();
-        let held = descend(root, dirs, &mut sofar)?;
+        let held = descend(root, Act::Write, dirs, &mut sofar)?;
 
         sofar.push(last);
         let c = cname(last).map_err(|()| {
-            refuse(root, &sofar, "contains a NUL byte, which no filesystem name can hold")
+            refuse(root, Act::Write, &sofar, "contains a NUL byte, which no filesystem name can hold")
         })?;
         let parent = match held.as_ref() {
             Some(f) => f.as_raw_fd(),
@@ -1021,9 +1261,9 @@ mod sys {
             // would have been wrong on a third platform, which is the argument for asking the
             // filesystem instead of the error code.
             if link_at(parent, &c) {
-                refuse_link(root, &sofar)
+                refuse_link(root, Act::Write, &sofar)
             } else {
-                refuse(root, &sofar, &format!("could not be opened for writing ({e})"))
+                refuse(root, Act::Write, &sofar, &format!("could not be opened for writing ({e})"))
             }
         })?;
         Ok(Opened { file, created })
@@ -1039,6 +1279,95 @@ mod tests {
     /// its own tree on drop rather than trusting a `remove_dir_all` at the end of a passing run.
     fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::scratch_dir(&format!("cpe-beneath-{tag}"))
+    }
+
+    /// [`remove_file_beneath`]'s four properties in one place (CPE-1937): it deletes a file inside the
+    /// root; it refuses a **link at an interior component**, whichever way that link points; it refuses
+    /// the root itself; and — the property that separates it from [`create_beneath`] — it **never
+    /// creates** the parent chain on its way to failing.
+    ///
+    /// The last one is not decoration. A delete whose descent used `FILE_OPEN_IF`/`mkdirat` would
+    /// materialise directories inside a user's tree as a *side effect of a failed deletion*, which is
+    /// debris behind a destructive operation and exactly the shape CPE-1889's check (1) existed to
+    /// stop.
+    #[test]
+    fn cpe_1937_removes_beneath_the_root_and_never_through_a_link_or_into_thin_air() {
+        let d = scratch("unlink");
+        let root = open_root(&d, "folder being restored").unwrap();
+
+        // 1. The happy path, one component deep and several.
+        std::fs::create_dir_all(d.join("a/b")).unwrap();
+        std::fs::write(d.join("a/b/gone.txt"), b"bye").unwrap();
+        std::fs::write(d.join("top.txt"), b"bye").unwrap();
+        remove_file_beneath(&root, Path::new("a/b/gone.txt")).unwrap();
+        remove_file_beneath(&root, Path::new("top.txt")).unwrap();
+        assert!(!d.join("a/b/gone.txt").exists(), "the named file is gone");
+        assert!(!d.join("top.txt").exists(), "the named file is gone");
+        assert!(d.join("a/b").is_dir(), "and only the file went — its parents are untouched");
+
+        // 2. A missing chain is refused, and NOTHING is created on the way to refusing it.
+        let missing = remove_file_beneath(&root, Path::new("no/such/dir/x.txt"));
+        assert!(missing.is_err(), "a delete under a chain that does not exist must fail");
+        assert!(
+            !d.join("no").exists(),
+            "a REFUSED delete created directories inside the root — a write's `create_dir_all` \
+             descent leaking into the destructive leg: {:?}",
+            missing.err()
+        );
+
+        // 3. The root itself is not a file inside itself.
+        assert!(remove_file_beneath(&root, Path::new("")).is_err());
+
+        // 4. A directory link at an interior component, pointing INSIDE the root (the case
+        //    `fsutil::confined_to` answers "yes" to) and OUTSIDE it.
+        for point_outside in [true, false] {
+            let outside = scratch("unlink-outside");
+            let elsewhere =
+                if point_outside { outside.to_path_buf() } else { d.join("other") };
+            let _ = std::fs::create_dir_all(&elsewhere);
+            let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
+            std::fs::write(elsewhere.join("victim.txt"), b"BYSTANDER").unwrap();
+            let link = d.join("sub");
+            let _ = std::fs::remove_dir_all(&link);
+            if !crate::fsutil::make_dir_link(&elsewhere, &link) {
+                crate::skip_notice!(
+                    "SKIPPING the link leg of cpe_1937_removes_beneath_the_root…: no directory-link \
+                     mechanism here. NOTHING on this run covered the delete walking a redirected \
+                     component."
+                );
+                let _ = std::fs::remove_dir_all(&elsewhere);
+                continue;
+            }
+            // Liveness: the link must redirect, through the same name the delete will use.
+            assert_eq!(
+                std::fs::read(link.join("victim.txt")).ok().as_deref(),
+                Some(&b"BYSTANDER"[..]),
+                "fixture is inert: the link does not redirect (point_outside={point_outside})"
+            );
+
+            let refused = remove_file_beneath(&root, Path::new("sub/victim.txt"))
+                .expect_err("a link at an interior component must stop the delete");
+            // HARM, off the filesystem, before the refusal's wording is looked at.
+            assert_eq!(
+                std::fs::read(elsewhere.join("victim.txt")).ok().as_deref(),
+                Some(&b"BYSTANDER"[..]),
+                "HARM: the delete went through the link (point_outside={point_outside})"
+            );
+            assert!(refused.policy, "refusing a link is a VERDICT, not an I/O failure: {refused:?}");
+            assert!(
+                refused.why.contains("is a link"),
+                "the refusal must name the link as the cause: {refused:?}"
+            );
+            assert!(
+                refused.why.contains("Nothing was deleted for this entry"),
+                "a refused DELETE must not be reported in the vocabulary of a write: {refused:?}"
+            );
+            let _ = std::fs::remove_dir_all(&link);
+            let _ = std::fs::remove_dir_all(&elsewhere);
+        }
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

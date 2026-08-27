@@ -749,7 +749,17 @@ pub fn execute_restore(
                         .push((action.path.clone(), format!("same file as checkpoint entry {key:?}")));
                     continue;
                 }
-                match apply_delete(action, dest_root_path) {
+                // **CPE-1937: the same root handle the writes were resolved against.** A delete is the
+                // one op that destroys rather than misplaces, so it gets the strongest containment
+                // available, not the weakest: the run's already-open root, walked one component at a
+                // time. A root that would not open refuses every delete *permanently* — re-running
+                // does not make an unopenable folder open — and, critically, refuses it rather than
+                // falling back to a by-path `remove_file`.
+                let outcome = match &root_handle {
+                    Ok(root) => apply_delete(action, root),
+                    Err(why) => Err(Refused::permanent(why.clone())),
+                };
+                match outcome {
                     Ok(()) => report.applied += 1,
                     Err(refused) => report.skipped.push((action.path.clone(), refused.reason)),
                 }
@@ -995,8 +1005,11 @@ fn apply_write(
     // The textual half stays, because the walk does not replace it and `open_beneath::create_beneath`
     // explicitly records the obligation: a caller must refuse the Win32-unstable names itself, or the
     // NT layer will create an object the user cannot address. `safe_segments` is where that rule lives.
-    // `apply_delete` and `snapshot_capture::restore` still call `safe_target` unchanged — neither has a
-    // handle walk, so `confined_to` is still the best answer available to them.
+    // **CPE-1937 finished this.** That sentence used to end "`apply_delete` and
+    // `snapshot_capture::restore` still call `safe_target` unchanged — neither has a handle walk". Both
+    // do now: `apply_delete` unlinks through `open_beneath::remove_file_beneath`, and `restore`'s
+    // pass-2 write goes through `create_beneath` against a root it holds open. There is no
+    // `safe_target` caller left in this crate that then touches the filesystem by that path.
     let segments = safe_segments(&action.path).map_err(Refused::permanent)?;
     let mut rel = std::path::PathBuf::new();
     for seg in &segments {
@@ -1152,12 +1165,65 @@ fn apply_write(
     Ok(())
 }
 
-fn apply_delete(action: &RestoreAction, dest_root: &Path) -> Result<(), Refused> {
-    let target = safe_target(dest_root, &action.path).map_err(Refused::permanent)?;
-    // A locked file or a permission error — transient by nature.
-    fs::remove_file(&target)
-        .map_err(|e| Refused::transient(format!("{}: {e}", target.display())))?;
-    Ok(())
+/// Remove one file the plan named, **resolved one component at a time against the run's root handle**
+/// (CPE-1937).
+///
+/// # What this used to be, and what it cost
+///
+/// `safe_target` → `fsutil::confined_to` → `fs::remove_file`. Three by-path operations in a row, and
+/// `confined_to` cannot see a junction that points **inside** the root: both `<dest>/sub/victim.txt`
+/// and the file `<dest>/sub -> <dest>/other` redirects it to are inside the destination, so the
+/// containment question answered *yes* and the `remove_file` landed on a file the plan never named.
+/// PR #1050's Reviewer staged that statically — one `RestoreOp::Delete`, `applied: 1`, `skipped: []`,
+/// `held_back: None`, and a bystander destroyed. Its Security Auditor then raced the same leg with
+/// CPE-1896's double-rename (`root/sub` <-> `root/junc -> OUTSIDE`) and measured **596 bystander files
+/// destroyed outside the destination across 200 trials**, every one counted `applied`.
+///
+/// # Why a delete needed a new primitive rather than another caller of `create_beneath`
+///
+/// Every leg CPE-1913 converted **writes**, and a write's product is a handle — open the leaf beneath
+/// the root and the bytes cannot land outside it. A delete's product is the *removal of a name*, and
+/// `std` offers no handle-relative way to remove one. So this ticket added
+/// [`crate::open_beneath::remove_file_beneath`] — `unlinkat` on Unix, `NtCreateFile(DELETE)` plus
+/// `SetFileInformationByHandle(FileDispositionInfo)` on Windows — with the same per-component,
+/// never-follow discipline as the rest of that module. It is also the primitive CPE-1913 named as the
+/// reason it deferred `copilot::apply_op`.
+///
+/// # `safe_segments`, not `safe_target` — the guard is not stacked, it is replaced
+///
+/// Exactly the swap `apply_write` made. The two differ in one thing: `safe_target` also asks
+/// `confined_to` whether the joined path *resolves* inside the root, and that question is now answered
+/// — better, and atomically with the unlink — by the walk. Leaving the path version in front would
+/// make the walk's refusal unreachable for every case the path version already catches, which is
+/// CPE-1929's shadowed guard: a new guard nothing can red-proof. The textual half stays, because the
+/// walk does not replace it (`create_beneath`'s doc records the obligation to refuse the
+/// Win32-unstable names before reaching the NT layer, and `safe_segments` is where that rule lives).
+///
+/// # Permanence comes from the guard that fired, never from the filesystem afterwards
+///
+/// Every refusal here used to be `transient` — "run the revert again". A junction at a component does
+/// not stop being one between runs, so `Refusal::policy` is what decides: a link (or a name that is
+/// not a plain relative path) is permanent, a locked file or a vanished name is transient. Same rule,
+/// and for the same reason, as `apply_write`'s.
+fn apply_delete(
+    action: &RestoreAction,
+    root: &crate::open_beneath::RootDir,
+) -> Result<(), Refused> {
+    let segments = safe_segments(&action.path).map_err(Refused::permanent)?;
+    let mut rel = std::path::PathBuf::new();
+    for seg in &segments {
+        rel.push(seg);
+    }
+    crate::open_beneath::remove_file_beneath(root, &rel).map_err(|refusal| {
+        // The refusal already names the destination root and the component it stopped at, relative to
+        // that root — the two things a user can act on — so the destination is deliberately not
+        // prefixed onto it a second time, which is why this no longer takes `dest_root` at all.
+        if refusal.policy {
+            Refused::permanent(refusal.why)
+        } else {
+            Refused::transient(refusal.why)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -2478,6 +2544,351 @@ mod tests {
         let _ = fs::remove_dir_all(&outside);
     }
 
+
+    /// **CPE-1937 — the delete leg's own harm test, in BOTH directions a junction can point.**
+    ///
+    /// The test above it looks like it covers this and does not, and the difference is the whole
+    /// ticket. Its plan carries a `Create` that is refused, so CPE-1823's stand-down holds **every**
+    /// delete in the plan back and `apply_delete` is never reached: it proves the stand-down, not the
+    /// containment. The fixture here is deliberately an **ordinary** plan — a non-empty, fully
+    /// restorable checkpoint whose one write succeeds — so the delete runs for real, which is exactly
+    /// the shape PR #1050's Reviewer and Security Auditor used.
+    ///
+    /// - **Outside** — `safe_target`'s `confined_to` refused this statically, and had done for ages.
+    ///   It is still staged, because the *race* below turns that static refusal into 596 destroyed
+    ///   files: a path check answered before a `remove_file` is a check that can be overtaken.
+    /// - **Inside** — `<dest>/sub -> <dest>/other`. Both paths are inside the destination, so
+    ///   `confined_to` answered **yes**, and the `remove_file` destroyed a bystander the plan never
+    ///   named while the report read `applied: 1, skipped: [], held_back: None`. This is the leg that
+    ///   slipped through twice: CPE-1912 closed it for backup, CPE-1913 for the writing legs, and the
+    ///   delete never got it.
+    ///
+    /// **Every assertion that matters is on the FILESYSTEM.** The defect's whole signature is a clean
+    /// `Result` beside a destroyed file, so a test that reads only the report passes against the bug —
+    /// the CPE-1896/CPE-1913 lesson, and the reason the bystander check comes first and the report
+    /// checks come after.
+    #[test]
+    fn cpe_1937_a_junction_at_an_interior_component_never_redirects_a_delete() {
+        const BYSTANDER: &[u8] = b"a file that has nothing to do with this checkpoint";
+        // **`false` first, deliberately.** The inside-pointing junction is the leg that slipped
+        // through twice; running it first means a regression reports the case that actually broke
+        // rather than the one a path check has covered for ages.
+        for point_outside in [false, true] {
+            let store = scratch("1937-del-store");
+            fs::create_dir_all(store.join("blobs")).unwrap();
+            fs::write(store.join("blobs").join("1937aaaa"), b"KEEP").unwrap();
+
+            let root = scratch("1937-del-root");
+            // Its own `scratch` guard rather than a fixed name beside `root`, for the reason
+            // `cpe_1913_…` records: a fixed name is shared by every run on the machine, so one panicking
+            // run reddens the next healthy one.
+            let outside = scratch("1937-del-outside");
+            let elsewhere = if point_outside { outside.to_path_buf() } else { root.join("other") };
+            fs::create_dir_all(&elsewhere).unwrap();
+            let elsewhere = fs::canonicalize(&elsewhere).unwrap();
+            fs::write(elsewhere.join("victim.txt"), BYSTANDER).unwrap();
+
+            if !crate::fsutil::make_dir_link(&elsewhere, &root.join("sub")) {
+                crate::skip_notice!(
+                    "SKIPPING cpe_1937_a_junction_at_an_interior_component_never_redirects_a_delete: \
+                     could not stage a directory link. NOTHING on this run covered the revert's \
+                     DESTRUCTIVE leg reaching through a redirected component."
+                );
+                let _ = fs::remove_dir_all(&elsewhere);
+                return;
+            }
+            // Liveness: the junction must really redirect, or this certifies nothing. Asked by reading
+            // the bystander back THROUGH the link, which is the exact resolution the delete would use.
+            assert_eq!(
+                fs::read(root.join("sub").join("victim.txt")).ok().as_deref(),
+                Some(BYSTANDER),
+                "fixture is inert: the junction at <dest>/sub does not redirect \
+                 (point_outside={point_outside})"
+            );
+
+            // An ORDINARY plan: one write that succeeds, one delete. Nothing here arms CPE-1823's
+            // stand-down — the checkpoint is non-empty, every key is restorable, and no write is
+            // refused — which is precisely why the mitigation does not save this leg.
+            fs::write(root.join("keep.txt"), b"stale").unwrap();
+            let mut checkpoint = Snapshot::new();
+            checkpoint.insert("keep.txt".to_string(), crate::restore_plan::FileState::new("1937aaaa", 4));
+            let report = execute_restore(
+                &[
+                    RestoreAction { path: "keep.txt".to_string(), op: RestoreOp::Overwrite },
+                    RestoreAction { path: "sub/victim.txt".to_string(), op: RestoreOp::Delete },
+                ],
+                &root.to_string_lossy(),
+                &store.to_string_lossy(),
+                &checkpoint,
+            );
+
+            // HARM FIRST, off the filesystem, byte-for-byte, before a single field of the report is
+            // inspected. On `main` this is what fails — with `applied: 2, skipped: [], held_back: None`.
+            assert_eq!(
+                fs::read(elsewhere.join("victim.txt")).ok().as_deref(),
+                Some(BYSTANDER),
+                "HARM: the revert DELETED a bystander at {} through a junction at <dest>/sub, which \
+                 nothing in the plan named (point_outside={point_outside}): {report:?}",
+                elsewhere.join("victim.txt").display()
+            );
+            // The fixture must have actually exercised the delete, or the harm assertion above is
+            // vacuous — the CPE-1844 inert-liveness shape. The write is the denominator: it proves the
+            // stand-down did NOT arm and the delete loop really ran.
+            assert_eq!(
+                report.applied, 1,
+                "fixture is inert: the plan's one legitimate write must have applied, or the delete \
+                 loop was never reached (point_outside={point_outside}): {report:?}"
+            );
+            assert_eq!(
+                fs::read(root.join("keep.txt")).ok().as_deref(),
+                Some(&b"KEEP"[..]),
+                "fixture is inert: the legitimate write did not land (point_outside={point_outside})"
+            );
+            assert!(
+                report.held_back.is_none(),
+                "fixture is inert: a hold-back means the CPE-1823 stand-down armed and this test is \
+                 measuring that instead of the delete's containment: {report:?}"
+            );
+            // Only now, the report. The delete must be REFUSED, and refused for the right cause.
+            assert_eq!(
+                report.skipped.len(),
+                1,
+                "the refused delete must be reported, never silently dropped: {report:?}"
+            );
+            assert_eq!(report.skipped[0].0, "sub/victim.txt", "{report:?}");
+            assert!(
+                report.skipped[0].1.contains("is a link"),
+                "the refusal must name the link as the cause, from the walk rather than from a path \
+                 resolution (point_outside={point_outside}): {report:?}"
+            );
+            // And it must read as a DELETE, not as a write. `open_beneath`'s sentence is shared with
+            // the writing legs, and telling a user that "nothing was written" when what was refused is
+            // a deletion describes a different operation than the one they asked for.
+            assert!(
+                report.skipped[0].1.contains("Nothing was deleted for this entry"),
+                "a refused DELETE must not be reported in the vocabulary of a write: {report:?}"
+            );
+
+            let _ = fs::remove_dir_all(&elsewhere);
+        }
+    }
+
+    /// **CPE-1937 — the delete leg RACED, not merely staged.** The static case above understated this
+    /// by two orders of magnitude: PR #1050's Security Auditor measured **596 bystander files destroyed
+    /// outside the destination across 200 trials**, every one counted `applied`, none in `skipped`, no
+    /// `held_back`, no error.
+    ///
+    /// The shape is CPE-1896's double rename. `<dest>/sub` is a real directory holding the files the
+    /// plan deletes; `<dest>/junc` is a junction to a folder **outside** the destination holding
+    /// identically-named bystanders. A racer thread swaps the two names — three renames, so `sub` *is*
+    /// the junction for a window — while the revert resolves `sub/vNNN.txt`. Every by-path containment
+    /// check is answered before the `remove_file` that trusts it, and that gap is the whole finding.
+    ///
+    /// **`#[ignore]`d**: it is a measurement, not a property, and it is expensive. The property is the
+    /// static test above, which runs on every CI job. Run this by hand:
+    ///
+    /// ```text
+    /// cargo test -p cpe-server --lib --release -- --ignored --nocapture cpe_1937_raced_delete
+    /// ```
+    ///
+    /// **A zero here is worthless without its positive control.** Put `safe_target` +
+    /// `fs::remove_file` back in `apply_delete` and re-run: that is what produced the numbers in this
+    /// ticket's Work Log, on this machine, in this run shape.
+    #[test]
+    #[ignore]
+    // `clippy.toml` bans bare `std::fs::rename` because it replaces its destination silently. Here the
+    // raw call **is the attack under test** — the double rename that swaps `sub` for a junction is
+    // precisely what CPE-1896 measured and what this harness reproduces — so any guarded wrapper would
+    // defeat the fixture. Nothing user-named is renamed: both names are the test's own scratch tree.
+    #[allow(clippy::disallowed_methods)]
+    fn cpe_1937_raced_delete_never_escapes_the_restore_root() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        const TRIALS: usize = 200;
+        const VICTIMS: usize = 24;
+        const PRISTINE: &[u8] = b"a bystander outside the restore root";
+
+        /// Is this name a link (symlink or junction) rather than a real directory? `is_symlink` is
+        /// true for any name-surrogate reparse point on Windows, junctions included, which is exactly
+        /// the question "which of the two names currently holds the real folder" needs.
+        fn is_link(p: &Path) -> bool {
+            fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+        }
+
+        let store = scratch("1937-race-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        fs::write(store.join("blobs").join("1937bbbb"), b"KEEP").unwrap();
+        let root = scratch("1937-race-root");
+        let outside = scratch("1937-race-outside");
+        let outside_real = fs::canonicalize(&outside).unwrap();
+        let (sub, junc, tmp) = (root.join("sub"), root.join("junc"), root.join("swaptmp"));
+        fs::create_dir_all(&sub).unwrap();
+
+        // The junction lives at a name BESIDE the one the plan uses, so the swap — not the plan — is
+        // what makes `sub` hostile. `junc` is never named by any action.
+        if !crate::fsutil::make_dir_link(&outside_real, &junc) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1937_raced_delete_never_escapes_the_restore_root: could not stage a \
+                 directory link. NOTHING on this run raced the revert's destructive leg."
+            );
+            return;
+        }
+
+        let mut checkpoint = Snapshot::new();
+        checkpoint.insert("keep.txt".to_string(), crate::restore_plan::FileState::new("1937bbbb", 4));
+        let plan: Vec<RestoreAction> = std::iter::once(RestoreAction {
+            path: "keep.txt".to_string(),
+            op: RestoreOp::Overwrite,
+        })
+        .chain((0..VICTIMS).map(|i| RestoreAction {
+            path: format!("sub/v{i:03}.txt"),
+            op: RestoreOp::Delete,
+        }))
+        .collect();
+
+        // **The racer PAUSES for staging, and that is not a convenience — it is what keeps the finding
+        // real.** With it running, `fs::write(root/sub/vNNN.txt)` during staging can itself land
+        // outside whenever `sub` currently *is* the junction, and the harness then reports its own
+        // writes as destroyed bystanders. That is the CPE-1846 2,681-false-escape shape, and the first
+        // cut of this test had it. So: pause, put the real folder back under `sub`, stage, assert the
+        // bystanders are pristine BEFORE the run, then let the racer go for the restore only.
+        let stop = Arc::new(AtomicBool::new(false));
+        let run = Arc::new(AtomicBool::new(false));
+        let idle = Arc::new(AtomicBool::new(true));
+        let swaps = Arc::new(AtomicU64::new(0));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let racer = {
+            let (stop, run, idle, swaps, attempts) =
+                (stop.clone(), run.clone(), idle.clone(), swaps.clone(), attempts.clone());
+            let (sub, junc, tmp) = (sub.clone(), junc.clone(), tmp.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if !run.load(Ordering::Relaxed) {
+                        idle.store(true, Ordering::Relaxed);
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    idle.store(false, Ordering::Relaxed);
+                    // The double rename, symmetric: whichever name holds the real folder, this puts
+                    // the other one there. Every step may fail — Windows refuses to rename a directory
+                    // while a descendant is open, which is one of the things being measured — and a
+                    // failed step is unwound rather than counted.
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    if fs::rename(&sub, &tmp).is_ok() {
+                        if fs::rename(&junc, &sub).is_ok() {
+                            if fs::rename(&tmp, &junc).is_ok() {
+                                swaps.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                let _ = fs::rename(&sub, &junc);
+                                let _ = fs::rename(&tmp, &sub);
+                            }
+                        } else {
+                            let _ = fs::rename(&tmp, &sub);
+                        }
+                    }
+                }
+                idle.store(true, Ordering::Relaxed);
+            })
+        };
+        // Stop the racer and wait until it has actually stopped, so staging cannot race it.
+        let quiesce = |run: &AtomicBool, idle: &AtomicBool| {
+            run.store(false, Ordering::Relaxed);
+            while !idle.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
+        };
+
+        let mut applied_total: u64 = 0;
+        let mut deleted_outside: u64 = 0;
+        let mut trials_run: u64 = 0;
+        let mut swapped_at_rest: u64 = 0;
+        for _ in 0..TRIALS {
+            quiesce(&run, &idle);
+            // Put the real folder back under `sub` if a swap left the junction there. Done while the
+            // racer is stopped, so what the staging below writes is not in question.
+            if is_link(&sub) {
+                swapped_at_rest += 1;
+                let _ = fs::rename(&sub, &tmp);
+                let _ = fs::rename(&junc, &sub);
+                let _ = fs::rename(&tmp, &junc);
+            }
+            if is_link(&sub) || !is_link(&junc) {
+                // Could not restore the two names to their staging positions — skip this trial rather
+                // than stage through an unknown one.
+                continue;
+            }
+
+            for i in 0..VICTIMS {
+                let _ = fs::write(outside_real.join(format!("v{i:03}.txt")), PRISTINE);
+            }
+            fs::write(root.join("keep.txt"), b"stale").unwrap();
+            let staged = (0..VICTIMS)
+                .filter(|i| fs::write(sub.join(format!("v{i:03}.txt")), b"in tree").is_ok())
+                .count();
+            if staged == 0 {
+                continue;
+            }
+            // FIXTURE POISONING CHECK, before the run: staging must not have touched a bystander.
+            for i in 0..VICTIMS {
+                assert_eq!(
+                    fs::read(outside_real.join(format!("v{i:03}.txt"))).ok().as_deref(),
+                    Some(PRISTINE),
+                    "FIXTURE POISONED: staging wrote through the junction, so any 'escape' this run \
+                     reports would be the harness's own (the CPE-1846 false-escape shape)"
+                );
+            }
+            trials_run += 1;
+
+            run.store(true, Ordering::Relaxed);
+            let report =
+                execute_restore(&plan, &root.to_string_lossy(), &store.to_string_lossy(), &checkpoint);
+            quiesce(&run, &idle);
+            applied_total += report.applied as u64;
+
+            // The finding, read off the filesystem: a bystander outside the destination that is gone,
+            // or whose bytes changed. Counted per trial and re-staged above, so the denominators are
+            // honest.
+            for i in 0..VICTIMS {
+                if fs::read(outside_real.join(format!("v{i:03}.txt"))).ok().as_deref() != Some(PRISTINE)
+                {
+                    deleted_outside += 1;
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = racer.join();
+
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!(
+                "\n[CPE-1937 delete raced out of the root]  trials={trials_run}  \
+                 FILES_DELETED_OUTSIDE={deleted_outside}  applied_total={applied_total}  \
+                 swaps={}/{} attempts  swapped_at_rest={swapped_at_rest}\n",
+                swaps.load(Ordering::Relaxed),
+                attempts.load(Ordering::Relaxed),
+            )
+            .as_bytes(),
+        );
+
+        // Denominators before the zero is believed: a run where nothing swapped, or nothing was
+        // applied, has not raced anything and its zero means nothing.
+        assert!(trials_run > 0, "no trial staged its fixture — nothing was raced");
+        assert!(
+            swaps.load(Ordering::Relaxed) > 0,
+            "the racer never completed a swap — the fixture is inert and a zero is meaningless"
+        );
+        assert!(applied_total > 0, "no action was ever applied — the revert never ran");
+        assert_eq!(
+            deleted_outside, 0,
+            "HARM: {deleted_outside} bystander files outside the restore root were destroyed across \
+             {trials_run} trials"
+        );
+
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_file(&junc);
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     /// **CPE-1823 round 5 — the stand-down keyed on SPELLING; the hazard is RESOLUTION.** `A.txt` and
     /// `a.txt` both pass `safe_segments` — neither is a device name, neither ends in a dot or space — so

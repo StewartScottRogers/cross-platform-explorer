@@ -169,17 +169,29 @@ Three details are worth knowing, because they are deliberate:
   - **New failure mode, small but real:** these three now need to be able to *open* the folder you
     chose, not only write into it. A folder that can be written but not opened used to work and now
     fails with a message saying so. It is rare and it is loud rather than silent.
-  - **Not yet converted, and named rather than implied.** All of these still use the older by-name
-    check. It refuses a shortcut leading *outside* the folder you chose — unchanged, and there since
-    earlier work — but none of them can see one pointing at a different folder *inside* it:
+  - **Not yet converted, and named rather than implied.** These still use the older by-name check. It
+    refuses a shortcut leading *outside* the folder you chose — unchanged, and there since earlier
+    work — but neither can see one pointing at a different folder *inside* it:
     - extracting a `.tar`, `.tar.gz` or `.7z` archive;
-    - the AI Copilot's apply step;
-    - **the part of a revert that DELETES files.** Worth saying separately, because it is the one that
-      destroys rather than writes: a revert removes files the checkpoint says should not be there, and
-      a folder shortcut inside the folder being reverted can point those deletions at a different
-      folder. Measured on the current code: files that nothing in the plan named were deleted and the
-      revert reported complete success. It is tracked for a fix, and it is not fixed here — the
-      paragraph above covers a revert *writing a file's contents back*, not this.
+    - the AI Copilot's apply step.
+
+- **The part of a revert that DELETES files is now careful in the same way** (CPE-1937). This is the
+  one that destroys rather than writes, so it gets its own paragraph. A revert removes files the
+  checkpoint says should not be there, and a folder shortcut inside the folder being reverted used to
+  point those deletions at a different folder — including one *inside* the same folder, which the
+  by-name check answers "yes" to because both places really are inside it. Measured on the previous
+  code: files that nothing in the plan named were deleted, and the revert reported complete success —
+  and under a folder being renamed underneath it at the same time, **596 files outside the folder
+  being reverted were destroyed across 200 attempts**, every one counted as applied.
+  - Each deletion now walks the folder you chose one level at a time, opening each folder inside the
+    one before it, and removes the file **through that opened folder** rather than by re-reading its
+    path. Nothing can be swapped in underneath it, because the name is never looked up a second time.
+  - **What this refuses that it used to allow.** A deletion whose path runs through a folder shortcut
+    is refused and reported against that path, instead of being carried out somewhere else. It is
+    reported as a refusal the app will make again — not "try again", which for a shortcut is advice
+    that can never work.
+  - A deletion that fails for an ordinary reason — the file is open in another program, or you do not
+    have permission — is still reported as something re-running can fix, exactly as before.
 
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you
