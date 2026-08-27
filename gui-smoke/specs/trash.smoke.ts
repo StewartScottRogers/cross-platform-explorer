@@ -269,7 +269,7 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
     expect(await $(".tv-degraded-note").isExisting(), "a genuinely empty Trash must not show the degraded note").to.equal(
       false,
     );
-    expect((await $$(".tv-row")).length, "a genuinely empty Trash has zero rows").to.equal(0);
+    expect(await $$(".tv-row").length, "a genuinely empty Trash has zero rows").to.equal(0);
 
     await setTheme("light");
     await snap("trash-empty-light");
@@ -287,7 +287,7 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
     const entries = fabricateManyDecodable(trashDir, 3, "populated");
     try {
       await openTrash();
-      await browser.waitUntil(async () => (await $$(".tv-row")).length === 3, {
+      await browser.waitUntil(async () => (await $$(".tv-row").length) === 3, {
         timeout: 15_000,
         timeoutMsg: "expected 3 rows in the populated Trash listing",
       });
@@ -345,7 +345,7 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
       );
       // The 30 decodable siblings must still list — degraded is driven by the flag alone, never inferred
       // from entries.length (CPE-1804/CPE-1805's whole point).
-      await browser.waitUntil(async () => (await $$(".tv-row")).length === 30, {
+      await browser.waitUntil(async () => (await $$(".tv-row").length) === 30, {
         timeout: 15_000,
         timeoutMsg: "expected the 30 decodable siblings to still list despite the one undecodable skip",
       });
@@ -428,7 +428,7 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
         await browser.waitUntil(
           async () => {
             if (!(await loadingSpan.isExisting())) return false;
-            return (await $$(".tv-row")).length > 0;
+            return (await $$(".tv-row").length) > 0;
           },
           {
             timeout: 20_000,
