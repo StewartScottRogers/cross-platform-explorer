@@ -3,7 +3,7 @@ id: CPE-1950
 title: derive the remaining cross-file provenance claims CPE-1933 classified but did not derive
 type: task
 priority: Medium
-status: Open
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -137,3 +137,62 @@ executes both workflows' scripts instead.
 
 Related: **CPE-1933** (the sweep), **CPE-1917** (built the deriving pattern), **CPE-1872** (where the
 stale claims lived), **CPE-1929** (shadowed guards), **CPE-1932** (rules from memory).
+
+## Work Log
+
+### 2026-08-27 — round 1: seven closed, nine left, deliberately
+
+Worked in blast-radius order and stopped rather than doing the rest shallowly. **Seven of the sixteen
+are closed** (items 1, 2, 3, 4, 7, 9, 15). Every one re-reads its source at run time or removes the
+duplication outright; every one was red-proofed by changing the referenced source and watching the
+test fail, and **the red-proof result is written at the site**, not only in the PR body.
+
+**THREE claims were already factually wrong**, not two. The ticket named items 1 and 2; item 7 turned
+out to be a third, found while fixing it.
+
+| # | site | classification | what landed |
+|---|---|---|---|
+| 1 | `crates/vfs/src/connect.rs:236` | **duplication deleted** | `join_remote` is now `pub`; `real_server_conformance.rs`'s `remote()`/`remote_dir()` **call it** instead of reimplementing it. Confirmed false at `real_server_conformance.rs:117` — the copy never appended the `is_dir` slash, i.e. it mirrored the PRE-CPE-1737 shape, so the E2E rig against OpenSSH/vsftpd/mod_dav tested a path shape production had stopped building. Red-proof: the compiler, on every build. |
+| 2 | `src/lib/paths.ts:21` | **claim corrected + derived** | Confirmed false at `Sidebar.svelte:261`: `norm("/") === ""` vs `canonicalPath("/") === "/"`. `norm` moved into `paths.ts` as `treePrefixPath` (one definition, Sidebar imports it); `paths.test.ts` derives the REAL relationship — agreement on every non-root input, deliberate divergence at the roots, plus an executed counterfactual showing why (`isAncestorOrSelf`'s `startsWith(a + "/")` needs the root to collapse). Red-proof: `treePrefixPath = canonicalPath` fails 2 of 4. |
+| 3 | `src/lib/sidecarBundleResources.test.ts:268` | **derived, two legs** | HIGHEST value item, and it is done properly. Leg 1: the TS platform-token list is now READ out of `platform_config_guard.rs`'s `TAURI_PLATFORM_TOKENS` (comments stripped), so a token added on one side reds with a SECURITY message and nobody has to write a case. Leg 2: new shared oracle `src/lib/platformConfigGuard.cases.json` (24 name cases + 20 refusal cases) executed by BOTH the TS suite and a new Rust `both_implementations_agree_on_every_shared_case`. Red-proofs: `+"visionos"` on the Rust const reds leg 1; making the Rust matcher demand an extra segment reds leg 2 on `Tauri.<t>.toml`. **Stated limit, at both sites:** a shared oracle catches divergence, not shared blindness — see the `<<`-in-a-quoted-string precedent from #1060. |
+| 4 | `RepoBrowser.svelte:2` | **derived** | `PROVIDER_HOSTS` is exported and `RepoBrowser.test.ts` reads `clone_host()`'s `if/else` chain out of `src-tauri/src/lib.rs`, comments stripped. Checks **both** directions — the backend-adds-a-provider direction is the one that matters — plus that the self-hosted providers are deliberately absent and that `stripRepoUrl` really consumes each derived host (incl. the lookalike-host anchoring). Red-proof: a `sourcehut` branch reds with `git.sr.ht`. |
+| 7 | `releaseHangHardening.test.ts:66,72` | **duplication deleted — and it was ALREADY FALSE** | The comment said "Verbatim from ciAptGetHardening.test.ts". It was not: CPE-1916 widened the command-word lookbehind there (`(?<![\w-])` → `(?<![\w\-/])`) and this copy never followed, so a `/etc/apt/…` path segment counted as an apt invocation in one suite and not the other. Two green suites, both claiming to hold the same regex, holding two. Both constants now live in `src/lib/aptGetHardening.ts`; both suites import. Red-proof: `Retries=3` → `=4` reds **both** (6/6 and 5/26). |
+| 9 | `gen_vault_fixture.rs:25` | **derived (text, cross-language)** | New `src/lib/guiSmokeFixtureLiterals.test.ts` reads the Rust example's `PASSPHRASE` and first sealed `TreeEntry` path (comments stripped) and compares them with `wdio.conf.ts`'s exported `VAULT_FIXTURE_PASSPHRASE` / `VAULT_FIXTURE_INNER_NAME`. Red-proof: `open-sesame-1250` reds. |
+| 15 | `vault-create.smoke.ts:27`, `trash-titlebar.smoke.ts:39` | **derived, NOT imported** | The ticket suggested importing wdio.conf.ts's exports. Rejected on purpose: that duplication is a documented runner/worker-boundary convention, gui-smoke cannot be run locally, and its CI leg is currently red for unrelated reasons (CPE-1955) — changing what the workers import, unverified, is worse than the claim. Instead the same new root-vitest guard compares the five declarations across the two files, anchored at **column 0 on a real `const`/`export const`** so a commented-out copy cannot match. Red-proof: renaming `SHRED_DIR_NAME` in `wdio.conf.ts` reds. |
+
+**New shared machinery** (so this does not become a fifth hand-rolled stripper):
+`src/lib/rustSource.ts` — `stripRustComments` + `rustStringLiteralAfter` lifted out of
+`MacroRunConfirm.test.ts` (which now imports them), plus a new `rustStrSliceAfter` for `&[&str]`
+consts. Tested in `src/lib/rustSource.test.ts`, including the adversarial "a comment quoting the OLD
+list" case. There is no Rust port of it, so unlike `shellScriptLines.ts` it is pinned by nothing
+cross-language — it is a *reader*, not a reimplementation, so there is no second copy to drift from.
+
+### Left for round 2 — nine items, and why
+
+Not "ran out of time" in every case; several are judgement calls worth restating.
+
+- **5. `replayFold.test.ts:7`** (MED). The hand-copied Rust oracle is the right shape of problem for a
+  *shared case file* (like item 3's), not for a source scan: the Rust tests are `assert_eq!` calls,
+  not data. Doing it properly means extracting the fixtures from `replay.rs`/`replay_view.rs` into a
+  shared JSON and rewriting both suites to consume it — a real change to two test suites, not a
+  bolt-on. **Do it next; it is the largest remaining MED.**
+- **6. `audit_journal.rs:18`** (MED). Blocked on a design question this ticket should not settle
+  alone: there are **three** live definitions of `AuditEvent` (specta → `bindings.gen.ts`, the
+  hand-written `auditExport.ts`, and the Rust record), bridged by an `as AuditEvent[]` cast in
+  `SessionHistoryDialog.svelte:64`. The fix is to delete one of the three, not to derive a comment.
+- **8. `batchMedia.ts:71,227,236`** (MED). Three sites, and the platform predicate genuinely differs
+  in *mechanism* (`cfg!(windows)` vs a `navigator` sniff), so it cannot be derived — only pinned by a
+  shared case file with an explicit platform axis. Same shape as item 5; do them together.
+- **10. `archive.rs:7038`** (MED→HIGH on a dep bump). Wants a `Cargo.lock`-reading assertion that the
+  `tar` version still is 0.4.46, which is a different (and useful) guard from the ones here. Small
+  and self-contained — good next pick after 5.
+- **11. `s3/provider.rs:544`** (LOW-MED). The ticket's own note is right: **extract** the shared
+  parser-DoS guard rather than derive a second copy. That is a code move across two crates and
+  belongs in its own ticket.
+- **12. `entrySearch.ts:159-163,205`**, **13. `spotlightSources.ts:162`**, **14.
+  `agentMetricsRollup.ts:94`**, **16. `revert-heldback-copy/main.ts:33`** (LOW). Left as the lowest
+  blast radius. Note for whoever takes 13: the ticket says the folds "already differ in kind" — that
+  is a **live behaviour bug**, not just a stale claim, and should probably be split out.
+
+Scope control was the instruction and it was followed: seven real derivations, each red-proofed,
+rather than sixteen shallow ones.
