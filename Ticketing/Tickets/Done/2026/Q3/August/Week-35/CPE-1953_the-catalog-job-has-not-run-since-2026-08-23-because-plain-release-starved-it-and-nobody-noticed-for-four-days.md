@@ -3,7 +3,7 @@ id: CPE-1953
 title: the catalog job has not run since 2026-08-23 — plain Release starved it for 23 consecutive runs, and the "fail loudly" guard that was supposed to catch this is untested
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -362,3 +362,74 @@ reported 343/4874 had drifted):
 - `npm run check` — 0 errors, 0 warnings.
 - Whole-file mutation vs `main`: **31 failed / 9 passed / 2 skipped**, unchanged by this round's edits.
 - Targeted mutation still kills exactly the right two tests per blocker.
+
+## Closed 2026-08-27 — merged as PR #1064, after three rounds
+
+**Reviewer APPROVE.** AC 1 (cut a release) was **deliberately not done** — that is outward-facing and
+the user's to authorise. Everything else shipped.
+
+### CPE-1893's guard was real but conditional, and that was the whole gap
+
+The job-level half (`if: !cancelled()`) was already closed. What it left is worse than a grey skip:
+**three ways the job ends green having published nothing** — and a green job is not even suspicious.
+
+1. **No signing key on a tag build.** Every real step was `if: steps.k.outputs.has == 'true'`, so with
+   the secret unset the job ran, skipped everything, and concluded `success`. *Identically* CPE-1923
+   finding 4, already fixed for `verify-published-manifest`'s detect step — `catalog` was never given
+   the same treatment. Fixed by reusing that exact mechanism, not a new one.
+2. **A zero-work sign** → new pre-upload step requiring a non-empty, parseable, signed index with ≥1 entry.
+3. **An upload that attached nothing useful** → new step re-reading the release's asset list from GitHub.
+
+Plus a terminal `if: always()` outcome gate — the one place deciding what "catalog: success" may mean.
+
+**`needs: release` was kept, and the reasoning is recorded in the workflow, not just the PR.** It is a
+genuine *data* dependency: the job's only publishing action is `gh release upload "$TAG"`, which needs
+the release object `tauri-action` creates. Decoupling would race that creation and trade a
+deterministic, diagnosable coupling for a nondeterministic upload failure that reads worse. The
+Reviewer confirmed the mechanics rather than the argument — the confirm step re-reads the same `$TAG`,
+and `on:` is `push: tags:` only, so `RELEASE_BUILD` is always true and the `has=false` arm is
+genuinely unreachable, exactly as the comment claims.
+
+### Both of its own new gates initially failed OPEN
+
+The ticket's defect class, inside its own fix, twice:
+
+- `[ "${entries:-0}" -lt 1 ]` exits **2** on non-integer `jq` output; an `if` cannot tell 2 from false,
+  so the zero-entry branch was **skipped**, the step exited 0, and it proceeded to upload. Fixed with
+  a `case` shape guard — deliberately `case` rather than a `grep` pipeline, to avoid a second instance
+  of the pipefail/SIGPIPE trap on the sibling step. 13/13 hostile inputs now reach the step's own
+  diagnostic.
+- The **honesty gate** — commented as *"the single place this job's honesty is decided"* — printed
+  *"this is not a tag build"* on a tag build with no key, the exact headline scenario. Now reads
+  `RELEASE_BUILD` directly, and the test asserts the two false clauses are **absent**.
+
+### A live bug found while writing the third check
+
+`printf … | grep -Fxq` under `pipefail` returns **141** when grep matches early and printf takes
+SIGPIPE — reporting an asset **missing precisely when it is present**. Rewritten as a herestring.
+Size-gated to ~28,912–88,912 bytes (~2,000–6,000 assets) so a real release's ~20 would have worked:
+**a latent inverted-verdict shape avoided before it shipped, not a bug that bit.**
+
+### And a third instance of the same shape, elsewhere
+
+The enumeration (all 11 `needs:`-chained jobs, derived at run time and pinned as a ratchet) found
+`ci.yml`'s five test jobs behind `lockfile-preflight` with no `if:` — filed as **CPE-1956**. The
+Reviewer verified the ratchet past its claim by **injecting an unguarded chain into a workflow file
+the old hard-coded list never opened**; it went red naming the injected job.
+
+### Record corrections
+
+The gap is **33 days**, not four: last publish **v0.57.33, 2026-07-25**. Only **2** of the 23 runs were
+plain tags (since CPE-1894 a `-sidecar` tag does not trigger `release.yml`). And `/releases/latest/`
+resolves to `v0.57.69-sidecar`, so **a plain release alone will not clear the live 404**.
+
+**The freshness backstop worked; the intake failed.** `catalog-freshness.yml` filed **issue #1062** ten
+seconds after detecting the 404, with a correct diagnosis, and it sat unread. `Ticketing/wiki.md`
+already specifies a Foreman `gh issue list` sweep — it simply never happened. The worker declined to
+add a second louder channel that would share the same failure mode, which was right. `gh issue list`
+is now part of the Foreman's first-thing-every-tick sweep.
+
+**Still unproven** because no release was cut: a real runner executing `catalog` end to end, and
+**whether `CPE_CATALOG_SIGNING_KEY` is still valid at all** — last evidence 2026-07-25. This PR turns
+an invalid key from *silent green* into *loud red* on the next tag, but cannot tell you beforehand.
+**Issue #1062 stays open until a catalog actually publishes.**
