@@ -592,7 +592,7 @@ mod sys {
                 ),
             )
             .map_err(|s| {
-                refuse(root, &sofar, &format!("could not be opened ({})", io_err(s)))
+                refuse(root, sofar, &format!("could not be opened ({})", io_err(s)))
             })?;
             // `FILE_OPEN_REPARSE_POINT` means a junction here was opened **as the reparse point
             // itself** rather than followed, so nothing has escaped — but continuing through it would
@@ -612,7 +612,7 @@ mod sys {
             // names the cause. That is also why failing open (`is_some_and`) is acceptable here.
             tick();
             if name_surrogate_at(&dir) {
-                return Err(refuse_link(root, &sofar));
+                return Err(refuse_link(root, sofar));
             }
             held = Some(dir);
         }
