@@ -82,3 +82,22 @@ block on this, since the PR halves the rate rather than causing it).
 Family: **CPE-1896** (the handle gate), **CPE-1913** (the containment gates), **CPE-1937**
 (`remove_file_beneath`, and the racer shape this used), **CPE-1929** (the reorder that surfaced it, PR
 #1066), **CPE-1957** (the three shadowed sites left unmeasured).
+
+
+## Correction 2026-08-27 — `batch_media` is NOT safe, and this ticket's premise was wrong
+
+This ticket said `batch_media::open_output_verified` *"measured 0 / 2,000 under the identical racer"*
+and asked whoever fixed `fsutil` to establish **why it was safe** rather than treating the difference
+as luck. That framing came from the Foreman and PR #1070's worker disproved it.
+
+**It is not safe — it is *shielded*, and only on Windows.** `classify_output_containment` runs
+**before** the open and refuses a flickering destination outright, so far fewer trials reach the
+identical check-then-use (681 `Ok` vs this site's 1,249 in the same run). A **path gauntlet, not
+containment.** Linux has no such shield and measures **~30 / 1,000**.
+
+That is CPE-1929's shape: a guard that survives because an earlier check happens to reject most of the
+attacker's attempts looks like a property and is a coincidence. **The instruction to find out why it
+was safe was the right instruction; the premise it rested on was not.**
+
+`claim_destination_handle` (`fsutil.rs:1734`) is live too — **45 / 2,000** Windows, **90 / 1,000**
+Linux. Both are now owned by **CPE-1961**.
