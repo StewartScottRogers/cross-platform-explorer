@@ -1339,7 +1339,7 @@ fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
 /// Every refusal names `dst` and says which rule refused it, in this module's usual loud style — a
 /// restore is *believed*, so a silently skipped entry is the CPE-1803/1804/1805/1816 defect again.
 pub fn copy_file_onto_no_follow(src: &Path, dst: &Path) -> Result<u64, String> {
-    copy_file_onto_no_follow_with_wording(src, dst, LinkGuardWording::RESTORE)
+    copy_file_onto_no_follow_with_wording(src, dst, LinkGuardWording::RESTORE).map(|c| c.bytes)
 }
 
 /// Wording for the three link-guard refusals below, since one function now backs writers with
@@ -1386,13 +1386,44 @@ impl LinkGuardWording {
     };
 }
 
+/// What [`copy_file_onto_no_follow_with_wording`] establishes about the copy it just performed
+/// (CPE-1896): the byte count every caller already used, plus the **identity of the object the bytes
+/// went into**, read off the write handle rather than from any path.
+///
+/// The identity is the whole reason this type exists. A landing check that re-resolves the destination
+/// path can be defeated by an attacker who swaps a junction *back* after the write — the path then
+/// resolves to a perfectly ordinary file inside the backup root (on an `update` entry, the stale
+/// previous backup that is naturally already sitting there), containment says yes, and the run reports
+/// success while the bytes are outside. Measured on CPE-1896's first attempt: 38 of 400 trials reported
+/// `ok: true` on an escaped write. Comparing the identity the write handle reported against the
+/// identity of whatever is at the contained path turns that second path question into a **handle**
+/// question, which no amount of renaming can answer wrongly: a swapped-back name is a *different file
+/// object*.
+///
+/// `written` is `None` only where [`crate::batch_media::handle_facts`] cannot describe the handle — a
+/// platform whose identity model that module does not know. It can also be present but **degenerate**
+/// (a zero volume or index, which several network redirectors return from
+/// `GetFileInformationByHandle`); this type carries the raw answer and leaves that judgement to the
+/// caller, which is where the policy about what to do with an unusable identity belongs. See
+/// [`crate::batch_media::FileIdentity::is_degenerate`] and `backup::landed_inside`.
+pub(crate) struct CopiedOnto {
+    /// Bytes streamed to the destination — what this function returned before CPE-1896.
+    pub(crate) bytes: u64,
+    /// Identity of the object written, off the write handle. See the type doc for `None`/degenerate.
+    pub(crate) written: Option<crate::batch_media::FileIdentity>,
+}
+
 /// The parameterised form -- see [`LinkGuardWording`] for why this exists and [`copy_file_onto_no_follow`]
 /// for the default-wording entry point every other caller uses unchanged.
-pub fn copy_file_onto_no_follow_with_wording(
+///
+/// `pub(crate)` since CPE-1896, because [`CopiedOnto`] carries a `pub(crate)` type. No caller outside
+/// this crate ever used it -- `backup::copy_one_verified` is the only one anywhere, and
+/// [`copy_file_onto_no_follow`] (still `pub`, still `Result<u64, _>`) is what every other site calls.
+pub(crate) fn copy_file_onto_no_follow_with_wording(
     src: &Path,
     dst: &Path,
     wording: LinkGuardWording,
-) -> Result<u64, String> {
+) -> Result<CopiedOnto, String> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
     // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
@@ -1453,7 +1484,17 @@ pub fn copy_file_onto_no_follow_with_wording(
     // directory or a reparse point would land here, and on the `handle_facts == None` platforms the path
     // check above is the only other thing standing. Deleting a refusal because one OS gets there first
     // is how the next platform gets none.
+    // CPE-1896: the identity of the object the bytes are about to go into, read off `w` — the handle
+    // this function writes through — and handed back to the caller. `handle_facts` is called here
+    // ANYWAY for the reparse/directory guard below, so this costs no additional syscall; what it buys
+    // is that `backup::landed_inside` can ask a HANDLE question ("is the file at the contained path
+    // the object I wrote?") rather than a second PATH question, which is exactly what an attacker
+    // swapping a junction back defeats. `None` on a platform whose identity model `batch_media` does
+    // not know; degenerate values are judged by the caller via `FileIdentity::is_degenerate`, never
+    // here — this function has no policy about them.
+    let mut written: Option<crate::batch_media::FileIdentity> = None;
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
+        written = Some(facts.id);
         let why = if facts.is_reparse_point {
             Some(format!(
                 "this name is a reparse point (a link, junction or stand-in for another name), and {} \
@@ -1503,7 +1544,7 @@ pub fn copy_file_onto_no_follow_with_wording(
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
     w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
     carry_file_times(&meta, &w);
-    Ok(copied)
+    Ok(CopiedOnto { bytes: copied, written })
 }
 
 /// Recursively copy `src` into `dst`, claiming **every** directory and file name it creates

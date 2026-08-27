@@ -36,6 +36,16 @@ use crate::model::OpResult;
 /// legitimately, and on Windows the whole backup destination used to be deleted.
 fn safe_join(root: &Path, rel: &str, entry: PlanEntry) -> Result<PathBuf, String> {
     let candidate = Path::new(rel);
+    // CPE-1896 review: built up component by component rather than `root.join(candidate)`, so the
+    // result carries the PLATFORM's separator throughout. `join` splices the plan string in verbatim,
+    // and plan paths are `/`-separated (they come from the frontend), so on Windows every joined path
+    // came out mixed — `...\dst\sub/victim.txt`. That string is not cosmetic: it is what
+    // `OpResult::path` carries to the dashboard and what every refusal in this module interpolates,
+    // including a landing-check refusal, which reaches a screen at the worst moment a backup has.
+    // `Path::components()` already normalises the separators away (it is what the loop below inspects),
+    // so pushing each component yields the same path with a consistent spelling — no new rule, nothing
+    // newly rejected.
+    let mut joined = root.to_path_buf();
     let mut named = 0usize;
     for comp in candidate.components() {
         use std::path::Component;
@@ -48,6 +58,7 @@ fn safe_join(root: &Path, rel: &str, entry: PlanEntry) -> Result<PathBuf, String
                          {rel:?}"
                     ));
                 }
+                joined.push(part);
                 named += 1;
             }
             _ => return Err(format!("unsafe path in plan: {rel}")),
@@ -56,7 +67,7 @@ fn safe_join(root: &Path, rel: &str, entry: PlanEntry) -> Result<PathBuf, String
     if named == 0 {
         return Err(format!("plan entry names the backup root itself, not a path inside it: {rel:?}"));
     }
-    Ok(root.join(candidate))
+    Ok(joined)
 }
 
 /// Which half of a backup plan an entry came from — both halves now get the SAME, Windows-only
@@ -136,11 +147,11 @@ fn parent_contained(parent: &Path, real_dst_root: &Path) -> Result<(), String> {
     ))
 }
 
-/// The CPE-1896 **landing check**: after the bytes are written, resolve the name they were written
-/// through and refuse to report success unless it really is inside the backup destination. Returns the
-/// **resolved** destination, which is then the only path the verify read-back is allowed to open.
+/// The CPE-1896 **landing check**: after the bytes are written, establish that they went into a file
+/// inside the backup destination — and that it is *the file this call just wrote*. Returns the resolved
+/// destination, which is then the only path the verify read-back is allowed to open.
 ///
-/// # What this is for, stated exactly — it is a MITIGATION, not the fix
+/// # What this is for, stated exactly — it is a MITIGATION, not the atomic fix
 ///
 /// [`copy_one_verified`]'s containment guard is not atomic with the destination open, and its doc
 /// records that. CPE-1896's Security Auditor turned the recorded residual into a measured one: exactly
@@ -159,50 +170,137 @@ fn parent_contained(parent: &Path, real_dst_root: &Path) -> Result<(), String> {
 /// the path it could not verify, and the verify leg reads back through the resolved, contained path
 /// rather than the plan-relative name that a swapped junction is still redirecting.
 ///
+/// # The check is a HANDLE question, not a second path question — and that distinction is the whole fix
+///
+/// The first version of this function asked containment about `canonicalize(dst)` and stopped there.
+/// **The auditor defeated that in one thread, and the numbers are the reason this paragraph exists.**
+/// The attack wins the same window *twice, in opposite directions*: phase 1 is the known race (swap a
+/// junction in, the write escapes); then it watches the outside file grow past 4 KiB — proof the escaped
+/// write is streaming — and renames the innocent directory **back** before the engine asks where the
+/// bytes went. `canonicalize(dst)` then resolves to a real, ordinary file inside the root: on an
+/// `update` plan entry, the stale previous backup that is naturally already sitting there. Containment
+/// says yes. Measured, `verify = false`, 400 trials: **297 escaped, 38 reported `ok: true`** — the
+/// escape *and* the backup silently not happening, both reported as success:
+///
+/// ```text
+/// AUDIT A2 HARM trial 9: 2097152 bytes landed at "…\outside\victim.txt" (OUTSIDE the root) and the
+/// engine reported OpResult { ok: true, error: "", outcome: Applied }; the file inside the root still
+/// holds 21 bytes
+/// ```
+///
+/// No path question can answer that, because after the swap-back every path *is* what it says it is.
+/// The question with an answer is about the **object**:
+/// [`crate::fsutil::copy_file_onto_no_follow_with_wording`] already calls
+/// [`crate::batch_media::handle_facts`] on the destination handle it writes through — for the
+/// reparse/directory guard it has always had — so the identity of the object the bytes went into is
+/// available for **no additional syscall**. This function opens the contained path and compares. A
+/// swapped-back name is a *different file object*, so the comparison refuses it. Renaming cannot forge
+/// an identity, and the hard-link route to forging one is already refused upstream by that function's
+/// `facts.links > 1` branch.
+///
 /// # What it does NOT do — read this before believing the write is safe
 ///
 /// **It does not stop the escape.** By the time this runs the bytes are already outside the root: the
-/// file out there has been overwritten, and this function cannot un-write it. What it converts is
-/// silent success into a loud, per-file failure that names the path — which is the whole of its value
-/// and the whole of its claim. Closing the window itself needs `openat2(RESOLVE_BENEATH)` on Linux and
-/// an `O_NOFOLLOW` per-component walk (or `NtCreateFile` with `FILE_OPEN_REPARSE_POINT`) on Windows,
-/// neither of which `std` offers; that half of CPE-1896 is **not** built and the ticket stays open for
-/// it. Do not let a later reader upgrade this to "backup is race-safe".
+/// file out there has been overwritten, and this function cannot un-write it — nor does it try. A
+/// backup engine deleting a file outside the destination it was pointed at would be committing the same
+/// violation it is reporting, with less excuse. What it converts is silent success into a loud, per-file
+/// failure that names the entry, the outside path, and the source file whose bytes are now sitting
+/// there. That is the whole of its value and the whole of its claim. Closing the window itself needs
+/// `openat2(RESOLVE_BENEATH)` on Linux and an `O_NOFOLLOW` per-component walk (or `NtCreateFile` with
+/// `FILE_OPEN_REPARSE_POINT`) on Windows, neither of which `std` offers; that half of CPE-1896 is
+/// **not** built and the ticket stays open for it. Do not let a later reader upgrade this to "backup is
+/// race-safe".
 ///
-/// **It is itself a path resolution, so it is itself racy.** An attacker who swaps the junction *back*
-/// between the write and this `canonicalize` gets a `Ok` here. That is a strictly narrower window than
-/// the one being mitigated (it now requires winning twice, in opposite directions), and the read-back
-/// still has to agree with the source's sha256 afterwards, but it is a window and it is stated rather
-/// than glossed. Nothing here is atomic with anything.
+/// **It degrades to the path question on a volume with no usable identity, and there the swap-back is
+/// NOT closed.** [`crate::batch_media::FileIdentity::is_degenerate`] documents the case: several network
+/// redirectors let `GetFileInformationByHandle` *succeed* and hand back a zero index, so every object on
+/// the volume carries the same identity. That crate-wide rule says a caller must refuse rather than
+/// compare a degenerate identity — and this caller deliberately does not, because refusing here does not
+/// mean "decline to act", it means **report every file of a backup as failed**, and a backup destination
+/// is by design an external drive or a share. Reddening every entry of every backup to such a volume is
+/// worse than the residual it would close. So an unusable identity (absent, or degenerate at either end)
+/// falls back to the containment answer alone — still strictly better than before CPE-1896, and still
+/// enough for the one-phase escape — and the two-phase swap-back remains open **on those volumes only**.
+/// Closing it there needs the path *of the open handle itself* (`GetFinalPathNameByHandleW` on Windows,
+/// `F_GETPATH` / `/proc/self/fd` on macOS/Linux), which is a different mechanism from identity and a
+/// separate change.
 ///
-/// # Failure policy: every uninspectable answer REFUSES
+/// **A failure to open what was just written REFUSES**, unlike the two cases above, and the split is
+/// principled rather than squeamish: a degenerate identity means *this volume cannot answer identity
+/// questions at all*, a platform property that must not break ordinary backups, whereas an open that
+/// fails now means *this particular attempt could not tell*, which is exactly the state that must never
+/// be reported as "backed up". The file itself is fine and a re-run copies it again, so the cost of
+/// being wrong here is one recoverable per-file failure, not lost data.
 ///
-/// Matching [`crate::fsutil::confined_to`]'s stance for the write direction, and for its reason: a
-/// `canonicalize` that fails after a successful write means the engine cannot say where the bytes
-/// landed, and "cannot say" must not report as "backed up". The file was just written, so this is an
-/// exceptional path, not the ordinary one.
+/// **It reads the destination once more, so it can touch the destination's access time.** The copy's
+/// `carry_file_times` has already run by then, so on a volume with access-time updates enabled the
+/// destination's atime will not match the source's. Nothing in the plan comparison looks at atime, so
+/// this is recorded rather than defended against.
 ///
 /// # Cost
 ///
-/// One `canonicalize` per file, on top of the two path resolutions CPE-1889's guard already adds. See
-/// the cost section on [`copy_one_verified`] — the number is stated there rather than measured again
-/// here, and CPE-1895 owns measuring it on a network destination where each resolution is a round trip.
-fn landed_inside(dst: &Path, real_dst_root: &Path) -> Result<PathBuf, String> {
+/// One `canonicalize` plus one open-and-describe per file, on top of the two path resolutions
+/// CPE-1889's guard already adds. See the cost section on [`copy_one_verified`] — the number is stated
+/// there rather than measured again here, and CPE-1895 owns measuring it on a network destination where
+/// each resolution is a round trip.
+fn landed_inside(
+    src: &Path,
+    dst: &Path,
+    real_dst_root: &Path,
+    written: Option<crate::batch_media::FileIdentity>,
+) -> Result<PathBuf, String> {
     let real = std::fs::canonicalize(dst).map_err(|e| {
         format!(
-            "refusing to report {dst:?} as backed up: the bytes were written, but the system would not \
-             say where that name actually leads ({e}), so nothing can confirm they landed inside the \
-             backup destination {real_dst_root:?}. Treat this entry as NOT backed up, and check the \
-             destination for a link or junction along that path."
+            "refusing to report {dst:?} as backed up: the bytes of {src:?} were written, but the system \
+             would not say where that name actually leads ({e}), so nothing can confirm they landed \
+             inside the backup destination {real_dst_root:?}. Treat this entry as NOT backed up, and \
+             check the destination for a link or junction along that path."
         )
     })?;
     if !real.starts_with(real_dst_root) {
         return Err(format!(
             "refusing to report {dst:?} as backed up: it resolves to {real:?}, which is OUTSIDE the \
-             backup destination {real_dst_root:?}. The bytes have ALREADY been written to {real:?} — a \
-             link or junction along the path was swapped in after this entry's containment check and \
-             before the file was opened, and that gap is not closed. Treat {real:?} as overwritten by \
-             this run, and treat this entry as not backed up."
+             backup destination {real_dst_root:?}. The bytes of {src:?} have ALREADY been written to \
+             {real:?}, replacing whatever was there — a link or junction along the path was swapped in \
+             after this entry's containment check and before the file was opened, and that gap is not \
+             closed. So {real:?} now holds this backup's copy of {src:?}; treat it as overwritten, and \
+             treat this entry as not backed up."
+        ));
+    }
+
+    // Identity unusable at the writing end — see the doc's "degrades to the path question" section for
+    // why this is a fallback and not a refusal. The containment answer above still stands.
+    let Some(written) = written.filter(|id| !id.is_degenerate()) else {
+        return Ok(real);
+    };
+
+    // The handle question. Read-only and never creating: the object must already be there, and this is
+    // an identity probe, not a write.
+    let probe = crate::batch_media::open_existing_no_follow_read(&real).map_err(|e| {
+        format!(
+            "refusing to report {dst:?} as backed up: the bytes of {src:?} were written, and {real:?} \
+             is inside the backup destination, but it could not be opened to confirm the bytes went \
+             into it ({e}). Nothing can say where they landed, so this entry is reported as not backed \
+             up rather than as a success — run the job again."
+        )
+    })?;
+    let Some(here) = crate::batch_media::handle_facts(&probe).map(|f| f.id) else {
+        // The platform has no identity model at all (`handle_facts` is `None` only off Unix and
+        // Windows). Same fallback as a degenerate identity, and for the same reason.
+        return Ok(real);
+    };
+    if here.is_degenerate() {
+        return Ok(real);
+    }
+    if here != written {
+        return Err(format!(
+            "refusing to report {dst:?} as backed up: it does now resolve to {real:?}, which IS inside \
+             the backup destination — but that is not the file this entry wrote. The bytes of {src:?} \
+             went into a different file object, so a link or junction along the path was swapped in \
+             during the copy and then swapped back before this check: the copied bytes are outside the \
+             destination and this check can no longer say where, while {real:?} still holds whatever it \
+             held before. Treat this entry as NOT backed up, and treat the destination as being \
+             modified by something else while the job runs."
         ));
     }
     Ok(real)
@@ -313,17 +411,23 @@ fn landed_inside(dst: &Path, real_dst_root: &Path) -> Result<PathBuf, String> {
 /// same redirected path, so it agreed with itself. Verification was not a neutral bystander there — it
 /// was *laundering* the escape, upgrading a silent success into a checksum-confirmed one.
 ///
-/// Check (3), [`landed_inside`], closes that half and only that half. After the write it resolves the
-/// name the bytes went through and refuses to report success unless the resolved path is inside
-/// `real_dst_root`; the verify leg then reads back through that **resolved** path instead of the plan
-/// name. An escaped write is now a per-file failure that names the file it could not verify and the
-/// outside path it must be assumed to have overwritten.
+/// Check (3), [`landed_inside`], closes that half and only that half. After the write it establishes
+/// where the bytes went and refuses to report success unless they went into a file inside
+/// `real_dst_root` **that is the very object this call wrote** — an identity comparison against the
+/// destination handle, not a second path resolution, because the auditor defeated the path-only form by
+/// winning the window twice in opposite directions (junction in, write escapes, junction back out
+/// before the check: 38 of 400 trials still reported `ok: true`). The verify leg then reads back
+/// through that resolved path instead of the plan name. An escaped write is now a per-file failure
+/// naming the entry, the outside path, and the source file whose bytes are sitting there.
 ///
 /// **What is still open, said plainly: the race.** The bytes still escape at the same rate; nothing
 /// here is atomic with the open, and a run that reports the failure has already overwritten a file
 /// outside the root. Closing the window needs `openat2(RESOLVE_BENEATH)` on Linux and an `O_NOFOLLOW`
 /// per-component walk (or `NtCreateFile` with `FILE_OPEN_REPARSE_POINT`) on Windows — unwritten, and
 /// CPE-1896 remains open for it. This function is now honest about the escape; it does not prevent it.
+/// [`landed_inside`] also records the one configuration where even the honesty degrades (a volume whose
+/// `GetFileInformationByHandle` returns a degenerate identity), and it is stated there rather than
+/// here so it cannot drift from the code that decides it.
 ///
 /// # Cost, since this is the backup engine's inner loop (CPE-1889 AC4)
 ///
@@ -335,16 +439,20 @@ fn landed_inside(dst: &Path, real_dst_root: &Path) -> Result<PathBuf, String> {
 /// absent level — then one confirming `canonicalize` after `create_dir_all`. So for a 100,000-file
 /// backup: ~200,000 extra path resolutions, plus roughly two or three more per new directory.
 ///
-/// **CPE-1896 adds one more, per file, in both verify modes**: check (3)'s `canonicalize(dst)`. So the
-/// common case is now **three** extra path resolutions per file rather than two — ~300,000 on a
-/// 100,000-file backup — and the guard's total cost is half again what the paragraph above measured.
-/// It is not gated on `verify`, deliberately: the escape it makes loud was measured at 73/1200 with
-/// verification **off**, so gating it would leave the default configuration silent. It replaces no
-/// existing work in the `verify = true` path (that leg's `sha256_file` now reads the resolved path
-/// instead of the plan path — same one open, a different argument). CPE-1895 owns re-measuring the
-/// whole guard against a network destination; nothing here re-measures wall clock, because the A/B
-/// below already showed the previous two resolutions sitting below the copy's own noise floor on local
-/// storage, and adding a third does not change what that measurement can resolve.
+/// **CPE-1896 adds one `canonicalize` and one open-and-describe, per file, in both verify modes.** So
+/// the common case is now **three** path resolutions per file rather than two — ~300,000 on a
+/// 100,000-file backup — plus one extra `open`/`GetFileInformationByHandle` (or `fstat`) pair, which is
+/// a handle operation rather than a path walk and is the cheaper half of the addition on any
+/// filesystem, local or remote. The identity of the *written* side costs nothing at all: it is read off
+/// the write handle by a `handle_facts` call `copy_file_onto_no_follow_with_wording` was already making
+/// for its reparse/directory guard. Not gated on `verify`, deliberately: the escape it makes loud was
+/// measured at 73/1200 with verification **off**, so gating it would leave the default configuration
+/// silent. It replaces no existing work in the `verify = true` path (that leg's `sha256_file` now reads
+/// the resolved path instead of the plan path — same one open, a different argument). CPE-1895 owns
+/// re-measuring the whole guard against a network destination; nothing here re-measures wall clock,
+/// because the A/B below already showed the previous two resolutions sitting below the copy's own noise
+/// floor on local storage, and adding a third plus an open does not change what that measurement can
+/// resolve.
 ///
 /// **Wall clock — measured, and the measurement's honest answer is "too small to see here".**
 /// `cpe_1889_measure_the_guard_cost` A/Bs the guarded engine against the pre-fix shape in one process
@@ -452,15 +560,22 @@ fn copy_one_verified(
         parent_contained(parent, real_dst_root)?;
     }
 
-    crate::fsutil::copy_file_onto_no_follow_with_wording(src, dst, crate::fsutil::LinkGuardWording::BACKUP)?;
+    let copied = crate::fsutil::copy_file_onto_no_follow_with_wording(
+        src,
+        dst,
+        crate::fsutil::LinkGuardWording::BACKUP,
+    )?;
 
     // (3) AFTER the write (CPE-1896): where did the bytes actually go? This is the only check in the
     // function that can answer that, because it is the only one that runs when the answer exists. It
     // runs in BOTH verify modes on purpose — the measured silent success was 73/1200 with `verify =
     // false` and 68/1200 with it on, so gating the honesty on a setting the user may not have ticked
-    // would leave the default configuration reporting `ok: true` on an escaped write. See
-    // [`landed_inside`] for what it does and, more importantly, what it does not.
-    let landed = landed_inside(dst, real_dst_root)?;
+    // would leave the default configuration reporting `ok: true` on an escaped write. `copied.written`
+    // is the identity of the object the bytes actually went into, read off the write handle for no
+    // additional syscall, and it is what makes this a HANDLE question rather than a second path
+    // question that a swap-back can answer wrongly. See [`landed_inside`] for what it does and, more
+    // importantly, what it does not.
+    let landed = landed_inside(src, dst, real_dst_root, copied.written)?;
 
     if verify {
         let a = sha256_file(src).map_err(|e| e.to_string())?;
@@ -1531,24 +1646,37 @@ mod tests {
     // open. Nothing below asserts that the write is prevented, because it is not.
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// The mitigation's own red-proof, staged **deterministically** — no thread, no timing.
+    /// Identity of whatever is at `path`, by the same route [`landed_inside`] uses. Test-side helper so
+    /// the deterministic legs can hand the check a *real* `written` identity — the whole point of those
+    /// legs after the CPE-1896 round-1 finding is that a fabricated one would prove nothing.
+    fn identity_of(path: &std::path::Path) -> Option<crate::batch_media::FileIdentity> {
+        crate::batch_media::open_existing_no_follow_read(path)
+            .ok()
+            .and_then(|f| crate::batch_media::handle_facts(&f))
+            .map(|f| f.id)
+    }
+
+    /// The mitigation's own red-proof for the **one-phase** escape, staged **deterministically** — no
+    /// thread, no timing.
     ///
     /// It stages the exact on-disk state an escaped write leaves behind: a directory junction at
-    /// `dst/sub` pointing outside the backup root, with the victim file sitting at the far end of it.
-    /// That is what check (3) meets when the race has just fired, and it is the only part of the race
-    /// that can be reproduced without one — a swap that happens *between* two syscalls cannot be staged
-    /// deterministically by any test, which is why the engine-level proof below has to race and this one
-    /// does not.
+    /// `dst/sub` pointing outside the backup root, with the victim file sitting at the far end of it,
+    /// and hands the check the identity of the file the bytes really went into. That is what check (3)
+    /// meets when the race has just fired and the attacker has *not* swapped back (the swap-back case is
+    /// the next test).
     ///
-    /// Two assertions, both load-bearing: the call **refuses**, and the refusal **names the path it
-    /// could not verify**. The second matters as much as the first here, because the bytes are already
-    /// out there — a refusal that does not say where is a user who cannot go and look.
+    /// Three assertions, all load-bearing: the call **refuses**; the refusal **names the outside path**;
+    /// and it **names the source file whose bytes are now sitting there**. The last two matter as much
+    /// as the first, because the bytes are already out there — a refusal that says neither where they
+    /// landed nor what now overwrites the user's file leaves them nothing to act on.
     #[test]
     fn cpe_1896_the_landing_check_refuses_a_destination_that_resolves_outside_the_root() {
         let d = scratch("cpe1896-landing-out");
-        let (dst, outside) = (d.join("dst"), d.join("outside"));
+        let (src, dst, outside) = (d.join("src"), d.join("dst"), d.join("outside"));
+        fs::create_dir_all(&src).unwrap();
         fs::create_dir_all(&dst).unwrap();
         fs::create_dir_all(&outside).unwrap();
+        fs::write(src.join("victim.txt"), b"BACKUP SOURCE BYTES").unwrap();
         fs::write(outside.join("victim.txt"), b"USER DATA").unwrap();
 
         if !crate::fsutil::make_dir_link(&outside, &dst.join("sub")) {
@@ -1562,20 +1690,100 @@ mod tests {
         }
 
         let real_root = fs::canonicalize(&dst).unwrap();
-        let err = landed_inside(&dst.join("sub/victim.txt"), &real_root).expect_err(
+        let escaped_to = outside.join("victim.txt");
+        let err = landed_inside(
+            &src.join("victim.txt"),
+            &dst.join("sub").join("victim.txt"),
+            &real_root,
+            identity_of(&escaped_to),
+        )
+        .expect_err(
             "a destination that resolves OUTSIDE the backup root must be refused — reporting it as \
              backed up is the silent-success shape CPE-1896 measured 73 times in 1200 trials",
         );
 
-        let real_outside = fs::canonicalize(outside.join("victim.txt")).unwrap();
+        let real_outside = fs::canonicalize(&escaped_to).unwrap();
         assert!(
             err.contains(&format!("{real_outside:?}")),
             "the refusal must NAME the outside path the bytes actually reached, or the user has no way \
              to find the file this run overwrote: {err}"
         );
         assert!(
-            err.contains("victim.txt"),
-            "the refusal must also name the entry it could not verify: {err}"
+            err.contains(&format!("{:?}", src.join("victim.txt"))),
+            "the refusal must name the SOURCE file whose bytes are now sitting at that outside path — \
+             telling a user their file was destroyed without saying what replaced it is half an answer \
+             (CPE-1896 round-1 review): {err}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The CPE-1896 round-1 blocking finding, as a deterministic test: the two-phase swap-back.**
+    ///
+    /// Round 1's landing check asked containment about `canonicalize(dst)` and stopped there. The
+    /// auditor beat it by winning the window **twice in opposite directions** — junction in, the write
+    /// escapes and streams past 4 KiB, then the innocent directory renamed *back* before the engine asks
+    /// where the bytes went. `canonicalize(dst)` then resolves to a real, ordinary file inside the root:
+    /// on an `update` entry, the stale previous backup that is naturally already sitting there. Path
+    /// containment says yes, and the run reported `ok: true` on an escaped write — 38 of 400 trials,
+    /// with `verify = false`, *both* harms at once (the escape, and the backup silently not happening).
+    ///
+    /// The post-swap-back state is fully stageable without a thread — that is the auditor's own
+    /// demonstration — because after the swap-back every path genuinely *is* what it says it is. What
+    /// distinguishes the two worlds is not any path but the **object**: the identity the write handle
+    /// reported is not the identity of the file now sitting at the contained path. This test stages
+    /// exactly that and asserts the refusal, so the round-2 fix has a gate that goes red without it on
+    /// **every** `cargo test`, not only when a race happens to fire.
+    #[test]
+    fn cpe_1896_the_landing_check_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote() {
+        let d = scratch("cpe1896-swapback");
+        let (src, dst, outside) = (d.join("src"), d.join("dst"), d.join("outside"));
+        fs::create_dir_all(&src).unwrap();
+        // The post-swap-back world: `dst/sub` is a perfectly ordinary directory again, and the file the
+        // plan named is really there — the stale previous backup an `update` entry always has.
+        fs::create_dir_all(dst.join("sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(src.join("victim.txt"), b"BACKUP SOURCE BYTES").unwrap();
+        fs::write(dst.join("sub").join("victim.txt"), b"the stale previous backup").unwrap();
+        // Where the bytes actually went while the junction was in place.
+        fs::write(outside.join("victim.txt"), b"BACKUP SOURCE BYTES").unwrap();
+
+        let real_root = fs::canonicalize(&dst).unwrap();
+        let written = identity_of(&outside.join("victim.txt"));
+        if written.is_none_or(|id| id.is_degenerate()) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1896_the_landing_check_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote: \
+                 this volume reports no usable file identity, which is the documented fallback case. \
+                 NOTHING on this run covered the two-phase swap-back refusal"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let err = landed_inside(
+            &src.join("victim.txt"),
+            &dst.join("sub").join("victim.txt"),
+            &real_root,
+            written,
+        )
+        .expect_err(
+            "the swapped-back path is inside the root and resolves cleanly, so PATH containment admits \
+             it — only the identity comparison can tell that it is not the object the bytes went into. \
+             Admitting it is the 38/400 `ok: true` the round-1 review blocked on",
+        );
+        assert!(
+            err.contains("not the file this entry wrote"),
+            "the refusal must say what is actually wrong — the path is fine, the object is not: {err}"
+        );
+        assert!(
+            err.contains(&format!("{:?}", src.join("victim.txt"))),
+            "…and must name the source file whose bytes are now somewhere else: {err}"
+        );
+        // The other half of the harm, asserted so it cannot be forgotten: the backup did NOT happen.
+        assert_eq!(
+            fs::read(dst.join("sub").join("victim.txt")).unwrap(),
+            b"the stale previous backup",
+            "the file inside the root is untouched — reporting this entry as a success would claim a \
+             backup that never took place"
         );
         let _ = fs::remove_dir_all(&d);
     }
@@ -1583,24 +1791,37 @@ mod tests {
     /// The other half of the red-proof, and the one that matters more in practice: the landing check
     /// must **admit** an ordinary destination and hand back the resolved path the verify leg then reads.
     /// A landing check that reds on healthy backups would be worse than the bug it closes — every run
-    /// would report failures nobody could act on, and users would switch verification off.
+    /// would report failures nobody could act on.
+    ///
+    /// Covers both identity worlds, because they are different code paths: a real `written` identity
+    /// that matches, and `None` — the documented fallback for a volume whose
+    /// `GetFileInformationByHandle` cannot supply a usable one (several network redirectors; see
+    /// [`landed_inside`]'s "degrades to the path question" section). The fallback must **admit**, not
+    /// refuse: refusing there would report every file of every backup to such a volume as failed.
     #[test]
     fn cpe_1896_the_landing_check_admits_an_ordinary_destination() {
         let d = scratch("cpe1896-landing-in");
-        let dst = d.join("dst");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(&src).unwrap();
         fs::create_dir_all(dst.join("sub")).unwrap();
-        fs::write(dst.join("sub/ok.txt"), b"ordinary content").unwrap();
+        fs::write(src.join("ok.txt"), b"ordinary content").unwrap();
+        fs::write(dst.join("sub").join("ok.txt"), b"ordinary content").unwrap();
 
         let real_root = fs::canonicalize(&dst).unwrap();
-        let landed = landed_inside(&dst.join("sub/ok.txt"), &real_root)
-            .expect("an ordinary file inside the backup root must be admitted");
-
-        assert!(landed.starts_with(&real_root), "the resolved path must be inside the root: {landed:?}");
-        assert_eq!(
-            fs::read(&landed).unwrap(),
-            b"ordinary content",
-            "the resolved path is what the verify leg reads back, so it has to address the real file"
-        );
+        let here = dst.join("sub").join("ok.txt");
+        for (label, written) in [("the real identity", identity_of(&here)), ("no identity at all", None)] {
+            let landed = landed_inside(&src.join("ok.txt"), &here, &real_root, written)
+                .unwrap_or_else(|e| panic!("an ordinary file inside the backup root must be admitted with {label}: {e}"));
+            assert!(
+                landed.starts_with(&real_root),
+                "the resolved path must be inside the root ({label}): {landed:?}"
+            );
+            assert_eq!(
+                fs::read(&landed).unwrap(),
+                b"ordinary content",
+                "the resolved path is what the verify leg reads back, so it has to address the real file"
+            );
+        }
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1650,43 +1871,60 @@ mod tests {
         }
     }
 
-    /// **The CPE-1896 race probe, landed as a repeatable test** — the auditor's recipe, in the tree, so
-    /// the atomic fix (still unwritten) has something that goes red without it.
+    /// **The CPE-1896 race probe — an OBSERVATION INSTRUMENT for a race that is still open. It is NOT
+    /// the regression gate, and it must never be turned into one.**
+    ///
+    /// Read that first, because the obvious "improvement" to this test is the wrong move and the round-1
+    /// review measured why.
+    ///
+    /// # Its role, and the trap
+    ///
+    /// The regression gate for the landing check is the three **deterministic** tests above
+    /// (`…_refuses_a_destination_that_resolves_outside_the_root`,
+    /// `…_refuses_a_swapped_back_path_that_is_not_the_file_it_wrote`,
+    /// `…_admits_an_ordinary_destination`). Sabotage `landed_inside` and they go red **100% of the
+    /// time, on every `cargo test`, on every runner** — no thread, no timing, no volume-dependence.
+    /// They are what stops this fix being deleted by accident.
+    ///
+    /// This test is the opposite kind of thing: it races the real engine to *observe* whether the window
+    /// is still reachable and what the engine says when it fires. Its escape rate is wildly
+    /// volume-dependent — the reviewer measured **1 per 600 trials on the machine `TEMP` volume against
+    /// 4, 4, 5 and 3 per 600 on the worktree volume**, same binary, same machine, same afternoon. At
+    /// 1/600 a zero-escape run is entirely plausible, so a run of this test can go **green against a
+    /// removed fix**. That is why it is not the gate, and why nobody should later "harden" it by
+    /// asserting a rate (`escaped > 0`, or any threshold): that would buy nothing the deterministic
+    /// tests do not already give, in exchange for a test that reds at random. It is markedly more
+    /// sensitive with `TMP`/`TEMP` redirected to a fast local volume — the reviewer got 4-of-4 sabotage
+    /// detection that way, against 2-of-3 at the default — so run it that way when you want it to bite.
     ///
     /// # The recipe, unchanged from the finding
     ///
     /// A junction is parked at `dst/junc` pointing outside the backup root, with a victim file at the
     /// far end. A racing thread does **two renames**: `dst/sub` → `dst/sub_old`, then `dst/junc` →
-    /// `dst/sub`. `rename` moves a **non-empty** directory, so `dst/sub` is deliberately populated —
-    /// the attacker never needs the slot free, which is what makes this reachable against a backup
-    /// destination that is already in use. If the swap lands inside the three-syscall window between
-    /// `copy_one_verified`'s check (1) and the destination open, the copy writes through the junction
-    /// and the victim file outside the root is overwritten with the source's bytes.
+    /// `dst/sub`. `rename` moves a **non-empty** directory, so `dst/sub` is deliberately populated (with
+    /// the stale previous backup an `update` entry always has) — the attacker never needs the slot free,
+    /// which is what makes this reachable against a backup destination already in use. If the swap lands
+    /// inside the three-syscall window between `copy_one_verified`'s check (1) and the destination open,
+    /// the copy writes through the junction and the file outside the root is overwritten.
+    ///
+    /// **Half the trials run the two-phase form** that beat round 1's path-only landing check: after the
+    /// swap the racer watches the outside file grow past 4 KiB — proof the escaped write is streaming —
+    /// and renames the innocent directory **back**, so that by the time the engine asks where the bytes
+    /// went, every path is once again exactly what it says it is. The source file is 1 MiB so that
+    /// window exists at all. Both forms assert the same property.
     ///
     /// # What it asserts — the SAFETY PROPERTY, not the race outcome
     ///
     /// > **If a write escaped, it was never reported as a success.**
     ///
-    /// It does **not** assert "the race fired at least once". That would be an assertion on a *rate*,
-    /// and a rate depends on the machine, the filesystem, the scheduler and the cache — exactly the
-    /// shape that produces a test which is green on the author's laptop and red on one CI runner every
-    /// third Tuesday. The property asserted here is a conditional: it is vacuously satisfied on a run
-    /// where nothing escapes, and it is violated the instant an escape is reported `ok: true`, which is
-    /// the whole of what CPE-1896's mitigation half claims. Nothing in the assertion depends on how
-    /// often the window is hit.
-    ///
-    /// **Observed rate on this branch, for the record and for nothing else:** the escape reproduces on
-    /// local NTFS at a few percent of trials — the auditor measured 73/1200 with `verify = false` and
-    /// 68/1200 with `verify = true`. Every escape this test observes is now reported as a per-file
-    /// failure naming the outside path. The counts are printed to stderr on each run so a future
-    /// reader can see whether the window is still being hit at all; **a run that reports 0 escapes
-    /// proves nothing** and must not be read as evidence the race is closed.
+    /// A conditional: vacuously satisfied on a run where nothing escapes, violated the instant an escape
+    /// comes back `ok: true`. Nothing in it depends on how often the window is hit — which is exactly
+    /// the property that lets an unreliable instrument still be worth keeping in the tree.
     ///
     /// # `#[ignore]`, deliberately
     ///
-    /// It spawns a racing thread per trial and sweeps a sub-millisecond window across hundreds of
-    /// trials, which costs seconds of wall clock and plants a directory junction each time — neither
-    /// belongs on every `cargo test`. Run it deliberately:
+    /// A thread and a junction per trial, ~1 MiB copied per trial, seconds of wall clock. Run it
+    /// deliberately:
     ///
     /// ```text
     /// cargo test --lib cpe_1896_a_parent_swapped_under_the_copy -- --ignored --nocapture
@@ -1694,26 +1932,34 @@ mod tests {
     ///
     /// **This test does not, and cannot, show the race being fixed** — the fix is not written. It shows
     /// the escape still happening and the engine no longer lying about it. When the `openat2`/
-    /// `O_NOFOLLOW` half lands, the assertion to *add* here is that `escaped == 0`; adding it today
-    /// would simply be red.
+    /// `O_NOFOLLOW` half lands, the assertion to *add* here is `escaped == 0`; adding it today would
+    /// simply be red. **That** is the one rate-shaped assertion this test should ever grow, and only
+    /// then, because at that point a nonzero count is a real defect rather than a scheduling accident.
     #[test]
     #[ignore = "race probe: spawns a racing thread per trial and sweeps a sub-millisecond window — see the doc comment; run with --ignored"]
     fn cpe_1896_a_parent_swapped_under_the_copy_is_never_reported_as_a_success() {
-        const TRIALS: usize = 600;
-        const SOURCE_BYTES: &[u8] = b"BACKUP SOURCE BYTES";
+        const TRIALS: usize = 400;
         const USER_BYTES: &[u8] = b"USER DATA THIS BACKUP WAS NEVER POINTED AT";
+        const STALE: &[u8] = b"the stale previous backup";
+        // Big enough that the escaped write STREAMS, which is what the two-phase leg needs to observe
+        // before it swaps back.
+        const SOURCE_LEN: usize = 1 << 20;
 
         let d = scratch("cpe1896-race");
         let (mut escaped, mut refused, mut normal) = (0usize, 0usize, 0usize);
+        let (mut escaped_one_phase, mut escaped_two_phase) = (0usize, 0usize);
 
         for trial in 0..TRIALS {
+            let two_phase = trial % 4 < 2;
             let t = d.join(format!("t{trial}"));
             let (src, dst, outside) = (t.join("src"), t.join("dst"), t.join("outside"));
             fs::create_dir_all(src.join("sub")).unwrap();
-            fs::write(src.join("sub/victim.txt"), SOURCE_BYTES).unwrap();
+            fs::write(src.join("sub/victim.txt"), vec![b'S'; SOURCE_LEN]).unwrap();
             fs::create_dir_all(dst.join("sub")).unwrap();
-            // Populated on purpose: `rename` moves a non-empty directory, so the attacker never has to
-            // wait for the slot to be free. A backup destination in everyday use is exactly this shape.
+            // Populated on purpose, twice over: `rename` moves a non-empty directory (so the attacker
+            // never waits for the slot to be free), and the entry's own stale previous copy is what the
+            // two-phase swap-back leaves the engine looking at.
+            fs::write(dst.join("sub/victim.txt"), STALE).unwrap();
             fs::write(dst.join("sub/already-backed-up.txt"), b"an existing backed-up file").unwrap();
             fs::create_dir_all(&outside).unwrap();
             fs::write(outside.join("victim.txt"), USER_BYTES).unwrap();
@@ -1731,8 +1977,9 @@ mod tests {
             let racer = {
                 let gate = std::sync::Arc::clone(&barrier);
                 let (junc, sub, old) = (dst.join("junc"), dst.join("sub"), dst.join("sub_old"));
+                let watch = outside.join("victim.txt");
                 // Sweep the offset instead of sampling one point of it: the whole copy is tens of
-                // microseconds, so a fixed delay would test the same instant 600 times.
+                // microseconds at the front, so a fixed delay would test the same instant 400 times.
                 let spins = (trial * 37) % 2048;
                 // `fs::rename` raw, and the `disallowed_methods` allow is the POINT of the test rather
                 // than an exemption from it. The lint exists because `rename` replaces its destination
@@ -1748,6 +1995,19 @@ mod tests {
                     }
                     let _ = fs::rename(&sub, &old);
                     let _ = fs::rename(&junc, &sub);
+                    if !two_phase {
+                        return;
+                    }
+                    // Phase 2: wait for proof the escaped write is streaming, then put the innocent
+                    // directory back so every path is honest again by the time the engine looks.
+                    for _ in 0..20_000 {
+                        if fs::metadata(&watch).is_ok_and(|m| m.len() > 4096) {
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                    let _ = fs::rename(&sub, &junc);
+                    let _ = fs::rename(&old, &sub);
                 })
             };
 
@@ -1755,11 +2015,13 @@ mod tests {
             let results = apply_backup_plan(
                 &src.to_string_lossy(),
                 &dst.to_string_lossy(),
+                &[],
+                // The `update` list, not `copy`: an entry whose destination already exists is what makes
+                // the two-phase swap-back land on a real, ordinary file.
                 &["sub/victim.txt".into()],
                 &[],
-                &[],
                 // Sweep BOTH verify modes: the finding measured the escape at 73/1200 with verification
-                // off and 68/1200 with it ON, and the second number is the one this branch exists for.
+                // off and 68/1200 with it ON, and the second number is what this branch exists for.
                 trial % 2 == 1,
                 true, // confirmed
             )
@@ -1768,16 +2030,23 @@ mod tests {
 
             assert_eq!(results.len(), 1, "one OpResult per plan entry: {results:?}");
             let r = &results[0];
-            let landed_outside =
-                fs::read(outside.join("victim.txt")).ok().as_deref() == Some(SOURCE_BYTES);
+            // Length, not content: the source is 1 MiB and reading it back 400 times would dominate the
+            // run. Any length other than the victim's own means the backup's bytes reached it.
+            let landed_outside = fs::metadata(outside.join("victim.txt"))
+                .is_ok_and(|m| m.len() != USER_BYTES.len() as u64);
 
             if landed_outside {
                 escaped += 1;
+                if two_phase {
+                    escaped_two_phase += 1;
+                } else {
+                    escaped_one_phase += 1;
+                }
                 assert!(
                     !r.ok && !r.error.is_empty(),
-                    "HARM (CPE-1896): trial {trial} wrote the backup's bytes to {:?}, OUTSIDE the \
-                     backup destination, and reported it as a SUCCESS with an empty error — the \
-                     silent-success shape this branch exists to close: {r:?}",
+                    "HARM (CPE-1896): trial {trial} (two_phase={two_phase}) wrote the backup's bytes to \
+                     {:?}, OUTSIDE the backup destination, and reported it as a SUCCESS with an empty \
+                     error — the silent-success shape this branch exists to close: {r:?}",
                     outside.join("victim.txt")
                 );
             } else if r.ok {
@@ -1793,9 +2062,12 @@ mod tests {
         let _ = writeln!(
             std::io::stderr(),
             "CPE-1896 race probe over {TRIALS} trials: ESCAPED (bytes written outside the root) \
-             {escaped}, refused {refused}, wrote-inside-normally {normal}. Every escape above was \
-             reported as a per-file FAILURE — that is the property asserted. The escapes themselves \
-             are NOT fixed; a 0 here means the window was not hit on this run, never that it is closed."
+             {escaped} ({escaped_one_phase} one-phase, {escaped_two_phase} two-phase swap-back), \
+             refused {refused}, wrote-inside-normally {normal}. Every escape above was reported as a \
+             per-file FAILURE — that is the property asserted. The escapes themselves are NOT fixed. \
+             This is an OBSERVATION INSTRUMENT, not the regression gate (the deterministic \
+             landing-check tests are): a 0 here means the window was not hit on this run, never that \
+             it is closed, and the rate swings by an order of magnitude between volumes."
         );
         let _ = fs::remove_dir_all(&d);
     }
