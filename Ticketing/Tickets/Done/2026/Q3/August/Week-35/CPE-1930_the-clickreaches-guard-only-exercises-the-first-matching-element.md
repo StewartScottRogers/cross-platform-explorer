@@ -3,7 +3,7 @@ id: CPE-1930
 title: the new `clickReaches` layout guard only ever exercises the **first** matching element, so a regression on the other two slips through
 type: bug
 priority: Low
-status: Open
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-27
@@ -60,3 +60,26 @@ follow-up rather than a blocker and was explicit that it is a testing-coverage n
 what ships.
 
 Related: **CPE-1883** (which added the check), **CPE-1882** (the layout-guard harness).
+
+## Work Log
+
+**2026-08-27 — closed inside PR #1045 (CPE-1883), not as its own change.**
+
+CPE-1883's worker fixed this in the same push that resolved its merge conflict, rather than
+leaving it filed: `clickReaches` now iterates every `.git-btn` match via `querySelectorAll` instead
+of testing only the first.
+
+Doing so immediately surfaced a second, smaller gap in its own first attempt — a pure viewport-bounds
+check wrongly treated `.git-btn[1]` (Push) as testable at 600px, when it is actually clipped by
+`.git`'s own pre-existing `overflow: hidden` (CPE-1836 territory, not this ticket's). Fixed with a
+geometric ancestor-clip walk, no hit-test API, and **deliberately not gated on element size** so a
+future zero-sized-button regression still gets a real dispatched click rather than a silent skip.
+
+Measured final state: **600px busy** — Pull `clicked=true`, Push/Sync correctly skipped as
+not-paintable; **900px busy** — all three `clicked=true`. Red-proofed by removing `pointer-events:
+none` again: now correctly caught at **both** widths, where round 3's single-target version only ever
+exercised Pull.
+
+The remaining acceptance criterion — sweeping `rectBounds` and `pseudoOnScreen` for the same
+one-element assumption — was **not** done and is worth a follow-up if either grows a multi-element
+selector.
