@@ -83,9 +83,29 @@ family the staging-dir item belongs to).
 
 ## Work Log
 
-**2026-08-27** — moved to `Doing/`. Branched off `cpe-1940-catalog-fail-closed` (PR #1058 was still
-open and unmerged at start and at push; this PR is stacked on it, not on `main`, so `VerifiedIndex`
-exists to extend rather than being reimplemented).
+**2026-08-27** — moved to `Doing/`. Branched off `cpe-1940-catalog-fail-closed`, because PR #1058
+was still open at start and at push; basing on it meant `VerifiedIndex` existed to extend rather
+than being reimplemented.
+
+**2026-08-27, later — rebased onto `main` after #1058 merged.** Recorded because it is the riskiest
+step in this ticket and an unrecorded rebase is how a reviewer and a worker end up disagreeing about
+what a file contains. #1058 **squash-merged**, so a plain `git rebase origin/main` tried to replay
+its two commits against content already in `main` and conflicted in four files. Those commits were
+not resolved, they were **dropped** — they had become the squash:
+
+    git rebase --onto origin/main 8727d190     # 8727d190 = the old base, #1058's head
+
+Result: one commit, five files, all CPE-1949's, +542/-91 (down from the +1318/-221 the stale base
+was showing). Straight after that rebase the merge base of the branch and `origin/main` was
+`6312b87b`, #1058's squash commit — the clean statement of why nothing was lost: the two commits
+were not deleted, they were replaced by the squash they had become. (That is a *moving* fact, not a
+standing one: a second rebase onto a newer `main` moved the merge base to `3d4276f8`. `6312b87b`
+remains an ancestor of HEAD, checked with `git merge-base --is-ancestor`, which is the durable
+form of the same claim.) Re-verified afterwards, because a
+rebase is exactly where these get reordered: the id check still sits at the **bottom** of
+`VerifiedIndex::open` (verify → utf8 → parse → schema → id), and the traversal red-proof was re-run
+on the rebased tree on **both** Windows and Linux, both failing on the harm assertion. Rebased onto
+`main` a second time before the review fixes below; no conflicts.
 
 ### The check
 
@@ -160,6 +180,37 @@ gated on the key secret). Consistent with CPE-1893's freshness backstop; not tou
    assumed: `open_beneath` is `pub(crate)` **inside `cpe-server`**, so `src-tauri`'s
    `do_fetch_catalog` cannot reach it at all, and **`remove_file_beneath` does not exist anywhere in
    the repo** (grepped `--include=*.rs --include=*.md`, zero hits).
+
+### Review round — four fixes after APPROVE + SEC PASS
+
+1. **The one branch this PR rewrites had no test.** `launcher.html`'s final `else` (`indexOk:false`
+   with no `error`, no `offline`, no `versionMapUnreadable`) was the only branch in that chain
+   without a case, while every sibling got one in CPE-1911/1924/1940. Added
+   `an index refused as a whole is amber and blames no specific cause — in particular, not the
+   signature`, which pins the **absence** as hard as the presence (no `/signature/i`, `/signed/i` or
+   `/schema/i`) and checks it did not fall through to a sibling. Red-proofed by restoring the old
+   copy: exactly 1 of 84 fails, on `expected 'The catalog couldn't be verified, so…' to match
+   /published catalog was refused/i`.
+2. **The code comment's cause list was one short** — a signed but non-UTF-8 or unparseable index is
+   a fourth reachable cause. Rewritten as an enumerated list read off `VerifiedIndex::open` rather
+   than recalled: **five failure exits, four distinct causes** (the parse step has two), counted with
+   a grep rather than by eye, since the first draft of the fix said "four early returns" and that was
+   itself wrong.
+3. **The docs over-claimed.** *"rejected before any part of it was read, so nothing was fetched or
+   written at all"* is false: `do_fetch_catalog` fetches the index and its `.sig` and writes both
+   into a staging temp dir **before** `VerifiedIndex::open` (`lib.rs:10317–10320`), discarding them
+   on refusal. Rewritten to say what is actually true — the listing is downloaded, and nothing that
+   follows from *trusting* it happens — and the fourth cause added there too.
+4. **This Work Log was stale about the rebase**, the riskiest step here; the entry above now records
+   it, including the `--onto` and why the two commits were dropped rather than resolved.
+
+**On the new guard's own limits** (raised in review, agreed, and *not* fixed here — they belong in
+the follow-up): the `load_versions(` + `.unwrap_or_default()` sweep matches **per line**, so a
+rustfmt-wrapped two-line pairing slips past it, and the `files.len() >= 5` floor is loose against the
+23 `.rs` files actually in `sidecar/host/src`. Both still catch the failure mode they were written
+for — a single-line reintroduction, and a walk that returns nothing at all — so the guard is not
+false comfort, just narrower than its name suggests. Widening it means a brace-matching or
+multi-line scan, which is a different kind of change from a one-charset-check diff.
 
 ### Verification
 

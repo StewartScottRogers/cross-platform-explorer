@@ -1874,12 +1874,18 @@ async function refreshCatalog() {
     } else if (r.indexOk) {
       setMsg("Agents are already up to date.", true);
     } else {
-      // Fetched, but the index itself was refused before any of it was used, so the trust engine
-      // left the previous catalog in place. Deliberately does NOT name the cause: `indexOk:false`
-      // covers a bad/missing signature, an unsupported schema, and (CPE-1949) a signed index naming
-      // an entry id that is not a usable filename. All three are publishing-side faults with the
-      // same user-side answer — nothing changed, nothing to do — and a message that names only the
-      // signature would be wrong for the other two.
+      // Fetched, but the index was refused as a whole, so nothing off it was applied and the trust
+      // engine left the previous catalog in place. Deliberately does NOT name the cause. Enumerated
+      // off `VerifiedIndex::open`'s five failure exits (four distinct causes, since the parse step
+      // has two), `indexOk:false` covers:
+      //   1. a bad or missing index signature          (verify_index)
+      //   2. bytes that are not UTF-8, or not parseable JSON  (from_utf8 / from_json)
+      //   3. a schema this build does not understand   (is_supported)
+      //   4. an entry id that is not a usable filename (CPE-1949, is_valid_entry_id)
+      // All four are publishing-side faults with the same user-side answer — nothing changed,
+      // nothing to do — and a message naming the signature would be wrong for three of the four.
+      // If a fifth early return is ever added there, it lands in this branch too; keep this list
+      // in step with that function, and note the message needs no change to stay true.
       setMsg("The published catalog was refused, so nothing was changed. Your existing agents are untouched and safe to use — there's nothing to do on your end.", "warn");
     }
   } catch (e) { setMsg("Update failed: " + e.message); }
