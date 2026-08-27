@@ -138,3 +138,63 @@ and "say nothing" — **the third option was not considered.**
   (only `cpe-sftp`/`cpe-webdav`'s thin wrappers and tests reach it) — wiring the existing remote
   commands through it is CPE-685, a separate attended step; this ticket's transfer half is a
   backend-correctness fix with no user-reachable surface yet.
+- **2026-08-27 (round 3, Visual Critic, attempt 3 of 3 — landed complete) USMST** — The Critic credited
+  the grouping structure (bold headline → bordered paragraph → bulleted detail) and confirmed the round-2
+  "Held back"/"Refused" labels independently, but returned four real findings on parts round 2 didn't
+  touch. All four addressed:
+  - **D1 (must fix) — the 200-row list read as guillotined, flush against the host dialog's own border
+    with no scroll cue, and `writeRefusalCount` was computed but never rendered.** The coordinator's
+    decision, taken as a deliberate hybrid rather than either of the Critic's two options: `.ro-failures`
+    now sits in its own bordered box (`.ro-failures-box`, matching `.ro-held`'s visual language) with a
+    **bounded ~200px/~10-row scroll region** — a real scrollbar, not a truncation — while the DATA stays
+    completely uncapped (every row is still in the DOM, `{#each summary.failures as f}` unchanged). Added
+    a `failuresHeading` ("Refused (200)" / "Failed (N)" when nothing was grouped) so the count is stated
+    explicitly rather than only implied by the paragraph's first three words, and a **"Copy all N refused
+    paths" button** mirroring the held-back block's CPE-1869 affordance.
+  - **Structural fix underneath D1/D3.** Distinguishing a grouped write refusal from a genuine per-file
+    failure needed a non-textual signal (`revertHoldBack.ts`'s standing rule: never infer from `error`'s
+    wording). Added `paths: Vec<String>` to `WriteRefusalGroup`/`WriteRefusalSummary` (Rust + wire type,
+    `bindings.gen.ts` regenerated) — the refused paths, in plan order — so the frontend can key `f.grouped`
+    off path membership in `write_refusal.paths`, never off text matching. This also backs the copy-all
+    button (same data, same reason to want it as CPE-1869's held-back one).
+  - **D3 (fix) — colour weight was inverted.** 200 identical, low-information grouped rows painted
+    `--warn` amber — the SAME weight a genuine locked-file failure earns — so the amber mass was the
+    visual impression at arm's length, burying the one paragraph worth reading. Grouped rows (`f.grouped`)
+    now render at `--text-dim`, matching the held-back list's weight for the same class of secondary
+    detail; an ungrouped `<li>` (a real failure) keeps `--warn`. Verified in a screenshot with both kinds
+    in the same list (see below) — "locked.docx — permission denied" reads amber, "photo1.jpg — this file
+    has 2 names…" reads dim, side by side.
+  - **D2 (fix) — the headline called a deliberate refusal a failure.** "applied 0 changes, 200 failed"
+    directly contradicted the paragraph one line below it explaining these were refused on purpose.
+    `summarizeRevert`'s headline now splits exactly like the held-back clause already does: genuine
+    failures (`failures.length - writeRefusalCount`) keep the word "failed"; the grouped count gets its
+    own "refused" clause. When everything is grouped (the common case), "failed" disappears entirely and
+    only "refused" shows; a mix of both (a locked file alongside grouped hard-link refusals) shows both
+    clauses. Pinned by a new test with a genuine failure mixed alongside two grouped refusals.
+  - **D4 — evidence fix, not a product fix.** The original long-path-wrap screenshots reused the 200-file
+    string against a 4-row fixture (mismatched count) and no path in that fixture actually exceeded the
+    row width, so `overflow-wrap: anywhere` went untested. Re-captured with a real unbreakable long
+    hash-like filename (no separators) and a matching count (2 grouped + 1 genuine = "1 failed, 2
+    refused", agreeing with the "2 checkpoint entries…" paragraph).
+  - **Measurements recorded, not acted on (per the Critic/coordinator):** contrast is fine in both themes;
+    `--surface-alt` measured 1–2% off the page background in both themes, so the `.ro-held`/
+    `.ro-failures-box` boxes' separation is carried almost entirely by their 1px `--border-strong` border
+    — recorded as a CSS comment on `.ro-failures-box` so a future edit doesn't soften/remove that border
+    without adding a second cue.
+  - **Screenshots re-captured**, both themes, both named scenarios: `cpe-1881-{light,dark}-host-dialog.png`
+    (200-row grouped case in real `CheckpointDialog`-width chrome) and
+    `cpe-1881-{light,dark}-long-path-wrap.png` (mixed grouped+genuine, real unbreakable long name),
+    landed in `.claude/sprint-metrics/visual-evidence/`. Captured via a temporary, uncommitted dev-harness
+    page (`scripts/dev-harness/cpe1881-panel/`, deleted after use — not a permanent addition) mounting the
+    real `RevertOutcomePanel.svelte`, driven through `claude-in-chrome` rather than a raw headless-Chrome
+    CLI invocation: a bare `chrome.exe --headless=new --screenshot=…` on this machine returned a screenshot
+    of an unrelated already-open window instead of rendering the target page (recorded here as a real
+    environment hazard, not a product concern) — switched to the sanctioned in-session browser tool, which
+    rendered correctly. Also discovered mid-capture: `vite.harness.revert-heldback.config.ts`'s hardcoded
+    port 4329 was already occupied by another agent's dev server on this shared machine (its SPA fallback
+    served the real app shell for any path, which is what the first mis-capture actually was — not a
+    hijacked screen, just an unrelated already-running server on the same port); the temporary harness
+    was run on a different port instead of touching that process.
+  - Re-ran the full suite after every change: `cpe-server` (2397 tests), `cargo clippy --all-targets -D
+    warnings` (both feature modes), `npm run check`, and the full `vitest` suite (4605/4607 — the same 2
+    pre-existing unrelated `msrvSync.test.ts` failures as round 2). All green.
