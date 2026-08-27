@@ -812,11 +812,21 @@ fn run_with_expect_channel(dir: &std::path::Path, channel: &str) -> std::process
         .expect("run verify-release-artifacts")
 }
 
-/// RED: this reproduces exactly what `release-sidecar.yml`'s job checks for -- a manifest that is
-/// SUPPOSED to be sidecar-pure (dispatched under the sidecar tag) but carries one plain-channel asset,
-/// checked with `--conf` pointed at the ordinary base conf (plain productName, as the real sidecar job's
-/// `--conf` always is) plus `--expect-channel sidecar`. Must fail and name the offending platform, same
-/// as CPE-1894's plain-side red-proof did for the mirror-image case.
+/// RED: a manifest that is SUPPOSED to be sidecar-pure (dispatched under the sidecar tag) but carries
+/// one plain-channel asset, checked with `--conf` pointed at the ordinary base conf (plain
+/// productName) plus `--expect-channel sidecar`. Must fail and name the offending platform, same as
+/// CPE-1894's plain-side red-proof did for the mirror-image case.
+///
+/// CPE-1933, correcting this comment: it used to claim this "reproduces exactly what
+/// `release-sidecar.yml`'s job checks for". That was a provenance claim nobody checked, and it was
+/// already false -- the real job also passes `--manifest release-assets/latest.json` and
+/// `--expect-url-prefix`, neither of which `run_with_expect_channel` passes at all. Exactly the
+/// CPE-1872 decay this crate was burned by once already. What this test still proves on its own terms
+/// -- that a mixed manifest is rejected BY NAME under a plain conf plus `--expect-channel sidecar` --
+/// is worth keeping. The claim about the workflow is now **derived and executed** in
+/// `tests/release_workflow_wiring.rs`
+/// (`a_plain_asset_is_rejected_under_the_sidecar_workflows_own_argv`), which reads the argv out of
+/// `release-sidecar.yml` rather than restating it.
 #[test]
 fn a_plain_asset_in_a_manifest_expected_sidecar_is_rejected_by_name() {
     let dir = scaffold_mixed_manifest("Cross-Platform Explorer"); // base conf's real productName
@@ -851,8 +861,15 @@ fn the_same_mixed_manifest_checked_as_expected_plain_names_the_other_platform() 
 }
 
 /// GREEN: the fix in its real shape -- a UNIFORM sidecar manifest (every asset sidecar-named), `--conf`
-/// still the base plain-productName conf (exactly as `release-sidecar.yml` invokes it), `--expect-channel
-/// sidecar`. This is what a healthy sidecar release checks clean against.
+/// still the base plain-productName conf, `--expect-channel sidecar`. This is what a healthy sidecar
+/// release checks clean against.
+///
+/// CPE-1933: the parenthetical "(exactly as `release-sidecar.yml` invokes it)" that used to sit on the
+/// `--conf` clause is gone. That pairing -- base plain conf + `--expect-channel sidecar` -- is real and
+/// load-bearing, which is precisely why it is now read out of the workflow and executed
+/// (`release_workflow_wiring.rs::the_sidecar_job_checks_the_sidecar_channel_using_the_base_plain_conf`
+/// and `..._accepts_a_genuine_sidecar_release`) instead of asserted here in prose that no test could
+/// ever contradict.
 #[test]
 fn a_uniform_sidecar_manifest_passes_with_expect_channel_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");

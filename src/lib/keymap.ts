@@ -132,7 +132,12 @@ export function chordFromEvent(e: {
  *  captured keypress would be useless to `actionForChord`/`findConflicts`/the future remap UI.
  *  Where a shortcut has a secondary alternate key (`Backspace` also does "up", `Alt+D` also does
  *  "edit address"), only the primary chord shown first in `SHORTCUT_GROUPS` is modeled — this
- *  registry tracks one fixed binding per action. */
+ *  registry tracks one fixed binding per action.
+ *
+ *  CPE-1933: "transcribed from" above is no longer just a claim. `keymap.test.ts` joins this
+ *  registry to `SHORTCUT_GROUPS` by `description` and asserts every `defaultChord` is one of the
+ *  keys the cheat sheet documents for it (glyphs translated), so a binding edited on one side only
+ *  fails CI instead of silently making the Shortcuts dialog advertise a key the app never honours. */
 export const ACTIONS: ActionDef[] = [
   // Navigation
   // NOTE: back/forward/up use the real `KeyboardEvent.key` form ("ArrowLeft"/"ArrowRight"/

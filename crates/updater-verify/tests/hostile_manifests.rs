@@ -684,9 +684,16 @@ fn run_expecting_channel(dir: &Path, tag: &str, channel: &str) -> Output {
         .expect("run verify-release-artifacts")
 }
 
-/// The real sidecar release shape, invoked exactly as `release-sidecar.yml` invokes it: plain
-/// `productName` in `--conf`, `--expect-channel sidecar`, genuine sidecar-named assets including
-/// the versionless macOS one. Must pass whole.
+/// The real sidecar release shape: plain `productName` in `--conf`, `--expect-channel sidecar`,
+/// genuine sidecar-named assets including the versionless macOS one. Must pass whole.
+///
+/// CPE-1933: this used to say "invoked exactly as `release-sidecar.yml` invokes it". It is not --
+/// the real job also passes `--manifest release-assets/latest.json`, and this helper's `--search`
+/// points at a tempdir rather than the job's staging directory. The claim was untested by
+/// construction and drifting. The workflow's actual argv is now derived from
+/// `.github/workflows/release-sidecar.yml` and executed against a scaffolded release in
+/// `tests/release_workflow_wiring.rs`; what this test contributes is the richer *fixture* (three
+/// platforms, RPM and versionless-macOS naming), which is worth keeping on its own terms.
 #[test]
 fn the_sidecar_jobs_own_invocation_shape_accepts_a_genuine_sidecar_release() {
     let tag = format!("v{VERSION}-sidecar");

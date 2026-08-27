@@ -77,15 +77,40 @@ const FIXTURE_VERSION: &str = "1.2.3";
 const ARTIFACT_NAME: &str = "Cross-Platform.Explorer_1.2.3_x64-setup.exe";
 const PRODUCT_NAME: &str = "Cross-Platform Explorer";
 
-fn workflow_text() -> String {
+/// The plain release workflow, and (CPE-1933) the sidecar one. Both are read by name so every
+/// assertion below is derived from the file it names rather than asserted about it in prose.
+const RELEASE_YML: &str = "release.yml";
+const RELEASE_SIDECAR_YML: &str = "release-sidecar.yml";
+
+fn workflow_text(file: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join(".github")
         .join("workflows")
-        .join("release.yml");
+        .join(file);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+/// The workflow's lines with **comment-only lines blanked** (kept, not removed, so line indices and
+/// backslash continuations still line up).
+///
+/// CPE-1933: every scanner below anchors on a substring — `gh release download`,
+/// `--bin verify-release-artifacts`. A *comment* containing that substring is then parsed as if it
+/// were the real thing. This is not hypothetical: `release-sidecar.yml` has two prose comments
+/// (`:665`, `:734`) that mention `gh release download` while discussing it, and extending this guard
+/// to that workflow without this filter parses them as calls. The same trap sank the sibling
+/// derivation in `src/lib/components/MacroRunConfirm.test.ts` (CPE-1928/PR #1056): a comment sitting
+/// between the anchor and the real code, quoting the *old* value, passes silently. Anchor on code,
+/// never on text that a comment can also contain.
+///
+/// One rule covers both comment kinds here, because a `#` line inside a `run: |` block is a *shell*
+/// comment and a `#` line outside one is a *YAML* comment, and neither is ever the invocation.
+fn code_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(|l| if l.trim_start().starts_with('#') { "" } else { l })
+        .collect()
 }
 
 /// Collapse a backslash-continued shell command starting at `lines[start]` into one logical line.
@@ -125,8 +150,8 @@ fn tokens(line: &str) -> Vec<String> {
 /// installers into `downloaded/` — left every assertion green while the real job would fail on its
 /// next tag with no artifact bytes to verify: the identical class of outage this file exists to
 /// prevent, and a hole the Reviewer walked straight through.
-fn download_calls(text: &str) -> Vec<(bool, String)> {
-    let lines: Vec<&str> = text.lines().collect();
+fn download_calls(wf: &str, text: &str) -> Vec<(bool, String)> {
+    let lines = code_lines(text);
     let calls: Vec<(bool, String)> = lines
         .iter()
         .enumerate()
@@ -149,13 +174,13 @@ fn download_calls(text: &str) -> Vec<(bool, String)> {
         .collect();
     assert!(
         calls.iter().any(|(is_manifest, _)| *is_manifest),
-        "release.yml no longer has a `gh release download … latest.json` call in \
+        "{wf} no longer has a `gh release download … latest.json` call in \
          verify-published-manifest -- if the published manifest is fetched some other way now, update \
          this guard to read the new shape rather than deleting it (CPE-1917)"
     );
     assert!(
         calls.iter().any(|(is_manifest, _)| !*is_manifest),
-        "release.yml no longer downloads the assets the manifest REFERENCES, only the manifest \
+        "{wf} no longer downloads the assets the manifest REFERENCES, only the manifest \
          itself. `--search` would then hold a manifest with no artifact bytes behind it, and every \
          platform would fail as unavailable (CPE-1917 round 2)."
     );
@@ -165,12 +190,12 @@ fn download_calls(text: &str) -> Vec<(bool, String)> {
 /// The one directory the whole `verify-published-manifest` job stages into. Panics if the download
 /// calls disagree — that disagreement *is* the bug, so it must never be quietly resolved to one of
 /// them.
-fn download_dir(text: &str) -> String {
-    let calls = download_calls(text);
+fn download_dir(wf: &str, text: &str) -> String {
+    let calls = download_calls(wf, text);
     let first = calls[0].1.clone();
     assert!(
         calls.iter().all(|(_, dir)| *dir == first),
-        "release.yml's `gh release download` calls stage into different directories ({:?}). The \
+        "{wf}'s `gh release download` calls stage into different directories ({:?}). The \
          manifest and the artifacts it names must land together: `--search` is a single directory, \
          and a manifest whose artifacts are somewhere else fails every platform as unavailable — \
          which is this ticket's outage wearing a different hat.",
@@ -179,9 +204,9 @@ fn download_dir(text: &str) -> String {
     first
 }
 
-/// The argv `release.yml` hands to `verify-release-artifacts`, `${REPO}`/`${TAG}` resolved.
-fn verify_argv(text: &str) -> Vec<String> {
-    let lines: Vec<&str> = text.lines().collect();
+/// The argv `wf` hands to `verify-release-artifacts`, `${REPO}`/`${TAG}` resolved.
+fn verify_argv(wf: &str, text: &str) -> Vec<String> {
+    let lines = code_lines(text);
     let hits: Vec<usize> = lines
         .iter()
         .enumerate()
@@ -191,7 +216,7 @@ fn verify_argv(text: &str) -> Vec<String> {
     assert_eq!(
         hits.len(),
         1,
-        "release.yml must invoke verify-release-artifacts exactly once. More than one means the \
+        "{wf} must invoke verify-release-artifacts exactly once. More than one means the \
          per-matrix-leg check CPE-1872 deleted has crept back (it verified a fragment of a manifest \
          that is the union of all three legs, and reported success on it); none means the release \
          gate is gone entirely."
@@ -217,7 +242,7 @@ fn verify_argv(text: &str) -> Vec<String> {
 /// re-opening CPE-1872's own round-2 finding — a stale, same-basename artifact in a second, dirty
 /// search dir shadowing the freshly-downloaded one. A repeated flag is never intentional in this
 /// invocation, so it is a hard failure rather than a silently-ignored extra.
-fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+fn flag_value<'a>(wf: &str, argv: &'a [String], flag: &str) -> Option<&'a str> {
     let hits: Vec<usize> = argv
         .iter()
         .enumerate()
@@ -226,7 +251,7 @@ fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
         .collect();
     assert!(
         hits.len() <= 1,
-        "release.yml passes {flag} {} times. Every flag in this invocation means exactly one thing; \
+        "{wf} passes {flag} {} times. Every flag in this invocation means exactly one thing; \
          a second copy either silently overrides the first or widens what the verifier will trust.",
         hits.len()
     );
@@ -237,7 +262,17 @@ fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
 /// its artifact under whatever directory the *download step* names, and the conf where `--conf`
 /// says. Signature is computed over `signed_bytes`; `artifact_on_disk` is what actually lands, so
 /// passing different values simulates tampering.
-fn scaffold(manifest_dir: &str, conf_rel: &str, signed_bytes: &[u8], artifact_on_disk: &[u8]) -> tempfile::TempDir {
+/// `asset_name` is the installer basename the manifest points at. It is a parameter (CPE-1933)
+/// because the *channel* a manifest belongs to is read off this name, so the sidecar half below
+/// needs a sidecar-named asset while `--conf`'s `productName` stays plain — which is precisely the
+/// pairing `release-sidecar.yml` uses and the pairing three prose comments used to merely claim.
+fn scaffold(
+    manifest_dir: &str,
+    conf_rel: &str,
+    asset_name: &str,
+    signed_bytes: &[u8],
+    artifact_on_disk: &[u8],
+) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
 
@@ -252,13 +287,13 @@ fn scaffold(manifest_dir: &str, conf_rel: &str, signed_bytes: &[u8], artifact_on
         std::io::Cursor::new(signed_bytes),
         // CPE-1923/SEC-1: the anti-rollback decision reads the trusted comment's `file:` field, so
         // this fixture carries the real shape a Tauri signature has.
-        Some(&format!("timestamp:1787496720	file:{ARTIFACT_NAME}")),
+        Some(&format!("timestamp:1787496720	file:{asset_name}")),
         Some("untrusted"),
     )
     .expect("sign");
     let signature_field = B64.encode(sig.into_string().as_bytes());
 
-    std::fs::write(assets.join(ARTIFACT_NAME), artifact_on_disk).expect("write artifact");
+    std::fs::write(assets.join(asset_name), artifact_on_disk).expect("write artifact");
 
     let manifest = serde_json::json!({
         "version": FIXTURE_VERSION,
@@ -266,7 +301,7 @@ fn scaffold(manifest_dir: &str, conf_rel: &str, signed_bytes: &[u8], artifact_on
             "windows-x86_64": {
                 "signature": signature_field,
                 "url": format!(
-                    "https://github.com/{FIXTURE_REPO}/releases/download/{FIXTURE_TAG}/{ARTIFACT_NAME}"
+                    "https://github.com/{FIXTURE_REPO}/releases/download/{FIXTURE_TAG}/{asset_name}"
                 )
             }
         }
@@ -305,11 +340,11 @@ fn run_with_workflow_argv(root: &Path, argv: &[String]) -> std::process::Output 
 
 #[test]
 fn the_verify_step_reads_the_manifest_from_the_directory_the_download_step_writes_it_to() {
-    let text = workflow_text();
-    let dir = download_dir(&text);
-    let argv = verify_argv(&text);
+    let text = workflow_text(RELEASE_YML);
+    let dir = download_dir(RELEASE_YML, &text);
+    let argv = verify_argv(RELEASE_YML, &text);
 
-    let manifest = flag_value(&argv, "--manifest").expect(
+    let manifest = flag_value(RELEASE_YML, &argv, "--manifest").expect(
         "the verify step passes no --manifest. Without it the binary falls back to \"newest \
          latest.json found under --search\", which is precisely the discovery-by-luck that failed \
          every run for 27 days (CPE-1917).",
@@ -322,7 +357,7 @@ fn the_verify_step_reads_the_manifest_from_the_directory_the_download_step_write
          failure verbatim."
     );
 
-    let search = flag_value(&argv, "--search").expect("the verify step passes no --search");
+    let search = flag_value(RELEASE_YML, &argv, "--search").expect("the verify step passes no --search");
     assert_eq!(
         search, dir,
         "--search must be the directory the referenced assets were downloaded into. `src-tauri/target` \
@@ -337,8 +372,8 @@ fn the_verify_step_reads_the_manifest_from_the_directory_the_download_step_write
 /// failure names the real problem.
 #[test]
 fn both_download_calls_stage_into_the_same_directory() {
-    let text = workflow_text();
-    let calls = download_calls(&text);
+    let text = workflow_text(RELEASE_YML);
+    let calls = download_calls(RELEASE_YML, &text);
     assert!(
         calls.len() >= 2,
         "expected at least two `gh release download` calls (the manifest, and the assets it \
@@ -351,14 +386,14 @@ fn both_download_calls_stage_into_the_same_directory() {
         "the manifest download and the referenced-asset download disagree on --dir: {dirs:?}"
     );
     // And the directory they agree on is the one the verifier is actually pointed at.
-    assert_eq!(flag_value(&verify_argv(&text), "--search"), Some(dirs[0]));
+    assert_eq!(flag_value(RELEASE_YML, &verify_argv(RELEASE_YML, &text), "--search"), Some(dirs[0]));
 }
 
 /// CPE-1917 round 2 (Reviewer, LOW-MED). `flag_value` only refuses a repeat of a flag some test
 /// happens to ask for; this refuses a repeat of ANY of them, including one nothing else reads.
 #[test]
 fn no_flag_is_passed_more_than_once() {
-    let argv = verify_argv(&workflow_text());
+    let argv = verify_argv(RELEASE_YML, &workflow_text(RELEASE_YML));
     let mut seen: Vec<&str> = Vec::new();
     for flag in argv.iter().filter(|a| a.starts_with("--")) {
         assert!(
@@ -373,10 +408,10 @@ fn no_flag_is_passed_more_than_once() {
 
 #[test]
 fn the_verify_step_keeps_its_url_binding_and_never_disarms_the_pin() {
-    let text = workflow_text();
-    let argv = verify_argv(&text);
+    let text = workflow_text(RELEASE_YML);
+    let argv = verify_argv(RELEASE_YML, &text);
 
-    let prefix = flag_value(&argv, "--expect-url-prefix").expect(
+    let prefix = flag_value(RELEASE_YML, &argv, "--expect-url-prefix").expect(
         "the verify step dropped --expect-url-prefix. Without it the crypto check only proves the \
          artifact BYTES are genuine, never that the url a real updater fetches points at this repo's \
          own release -- CPE-1872 round 3 finding B, reproduced at exit 0 against a foreign host and \
@@ -396,7 +431,7 @@ fn the_verify_step_keeps_its_url_binding_and_never_disarms_the_pin() {
     );
 
     assert_eq!(
-        flag_value(&argv, "--conf"),
+        flag_value(RELEASE_YML, &argv, "--conf"),
         Some("src-tauri/tauri.conf.json"),
         "--conf must be the plain channel's real config -- it is what supplies the pinned pubkey, the \
          version the manifest is checked against, and (CPE-1894) the channel the assets must belong to"
@@ -412,13 +447,13 @@ fn the_verify_step_keeps_its_url_binding_and_never_disarms_the_pin() {
 /// moves without the other.
 #[test]
 fn the_workflows_own_argv_verifies_a_tree_laid_out_by_the_workflows_own_download_step() {
-    let text = workflow_text();
-    let dir = download_dir(&text);
-    let argv = verify_argv(&text);
-    let conf = flag_value(&argv, "--conf").expect("--conf").to_string();
+    let text = workflow_text(RELEASE_YML);
+    let dir = download_dir(RELEASE_YML, &text);
+    let argv = verify_argv(RELEASE_YML, &text);
+    let conf = flag_value(RELEASE_YML, &argv, "--conf").expect("--conf").to_string();
 
     let bytes = b"the real installer bytes";
-    let tree = scaffold(&dir, &conf, bytes, bytes);
+    let tree = scaffold(&dir, &conf, ARTIFACT_NAME, bytes, bytes);
     let out = run_with_workflow_argv(tree.path(), &argv);
 
     assert!(
@@ -437,12 +472,12 @@ fn the_workflows_own_argv_verifies_a_tree_laid_out_by_the_workflows_own_download
 /// discriminating rather than passing on anything at all.
 #[test]
 fn a_manifest_left_under_src_tauri_target_is_not_found_by_the_current_argv() {
-    let text = workflow_text();
-    let argv = verify_argv(&text);
-    let conf = flag_value(&argv, "--conf").expect("--conf").to_string();
+    let text = workflow_text(RELEASE_YML);
+    let argv = verify_argv(RELEASE_YML, &text);
+    let conf = flag_value(RELEASE_YML, &argv, "--conf").expect("--conf").to_string();
 
     let bytes = b"the real installer bytes";
-    let tree = scaffold("src-tauri/target/release/bundle/nsis", &conf, bytes, bytes);
+    let tree = scaffold("src-tauri/target/release/bundle/nsis", &conf, ARTIFACT_NAME, bytes, bytes);
     let out = run_with_workflow_argv(tree.path(), &argv);
 
     assert!(
@@ -466,16 +501,189 @@ fn a_manifest_left_under_src_tauri_target_is_not_found_by_the_current_argv() {
 /// exist.
 #[test]
 fn a_tampered_artifact_still_fails_under_the_workflows_own_argv() {
-    let text = workflow_text();
-    let dir = download_dir(&text);
-    let argv = verify_argv(&text);
-    let conf = flag_value(&argv, "--conf").expect("--conf").to_string();
+    let text = workflow_text(RELEASE_YML);
+    let dir = download_dir(RELEASE_YML, &text);
+    let argv = verify_argv(RELEASE_YML, &text);
+    let conf = flag_value(RELEASE_YML, &argv, "--conf").expect("--conf").to_string();
 
-    let tree = scaffold(&dir, &conf, b"the real installer bytes", b"tampered bytes");
+    let tree = scaffold(&dir, &conf, ARTIFACT_NAME, b"the real installer bytes", b"tampered bytes");
     let out = run_with_workflow_argv(tree.path(), &argv);
 
     assert!(
         !out.status.success(),
         "a tampered artifact must fail the release gate under the workflow's own invocation"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1933: the same treatment for `release-sidecar.yml`
+//
+// Three comments claimed, in prose, that a hard-coded test argv reproduced the sidecar job's:
+//
+//   * `tests/release_guard.rs` -- "this reproduces exactly what `release-sidecar.yml`'s job
+//     checks for"
+//   * `tests/release_guard.rs` -- "`--conf` still the base plain-productName conf (exactly as
+//     `release-sidecar.yml` invokes it)"
+//   * `tests/hostile_manifests.rs` -- "invoked exactly as `release-sidecar.yml` invokes it"
+//
+// All three were untested by construction, and two of them were already drifting: the real job
+// passes `--manifest release-assets/latest.json` and `--expect-url-prefix`, neither of which
+// `release_guard.rs`'s `run_with_expect_channel` helper passes at all. That is CPE-1872's defect
+// verbatim -- a green test vouching for a claim nobody checks -- surviving in the very file CPE-1917
+// corrected one comment in.
+//
+// The load-bearing half of what those comments assert is a *pairing*, and it is the one a
+// well-meaning "fix" would break: the sidecar job points `--conf` at the BASE
+// `src-tauri/tauri.conf.json` (plain `productName`, because that is where the pinned pubkey and the
+// version live -- the sidecar overlay is a partial that touches neither) while asking for
+// `--expect-channel sidecar`. Swap `--conf` to a sidecar overlay and every hard-coded unit test
+// above still passes while the real job's channel check inverts. So it is derived and executed here
+// instead of described there.
+// ---------------------------------------------------------------------------------------------
+
+/// A genuine sidecar installer basename. Tauri's bundler renders the sidecar `productName`
+/// (`Cross-Platform Explorer (Sidecar)`) with its punctuation flattened, so the channel classifier
+/// reads `crossplatformexplorersidecar` off the front of this name.
+const SIDECAR_ARTIFACT_NAME: &str = "Cross-Platform.Explorer.Sidecar._1.2.3_x64-setup.exe";
+
+#[test]
+fn the_sidecar_verify_step_reads_the_manifest_from_the_directory_its_download_step_writes_it_to() {
+    let text = workflow_text(RELEASE_SIDECAR_YML);
+    let dir = download_dir(RELEASE_SIDECAR_YML, &text);
+    let argv = verify_argv(RELEASE_SIDECAR_YML, &text);
+
+    let manifest = flag_value(RELEASE_SIDECAR_YML, &argv, "--manifest").expect(
+        "the sidecar verify step passes no --manifest. Without it the binary falls back to \"newest \
+         latest.json found under --search\" -- the discovery-by-luck that failed every plain release \
+         for 27 days (CPE-1917), which the sidecar channel has no immunity to.",
+    );
+    assert_eq!(
+        manifest,
+        format!("{dir}/latest.json"),
+        "--manifest must name the file release-sidecar.yml's own download step fetched"
+    );
+    assert_eq!(
+        flag_value(RELEASE_SIDECAR_YML, &argv, "--search"),
+        Some(dir.as_str()),
+        "--search must be the directory release-sidecar.yml downloads the referenced assets into"
+    );
+}
+
+/// The pairing itself, read straight out of the workflow. This is the assertion that replaces
+/// `release_guard.rs`'s and `hostile_manifests.rs`'s prose.
+#[test]
+fn the_sidecar_job_checks_the_sidecar_channel_using_the_base_plain_conf() {
+    let text = workflow_text(RELEASE_SIDECAR_YML);
+    let argv = verify_argv(RELEASE_SIDECAR_YML, &text);
+
+    assert_eq!(
+        flag_value(RELEASE_SIDECAR_YML, &argv, "--expect-channel"),
+        Some("sidecar"),
+        "release-sidecar.yml must pass --expect-channel sidecar. Without it CPE-1894's channel-purity \
+         check has nothing to check against on the channel that actually reaches users, and a plain \
+         asset could ride out in a sidecar manifest at exit 0 -- the whole point of that job."
+    );
+    assert_eq!(
+        flag_value(RELEASE_SIDECAR_YML, &argv, "--conf"),
+        Some("src-tauri/tauri.conf.json"),
+        "release-sidecar.yml must point --conf at the BASE conf, not a sidecar overlay. \
+         `tauri.sidecar.conf.json` is a partial overlay that carries neither the pinned pubkey nor \
+         the version, and its `productName` would make the channel classifier read every honest \
+         sidecar asset as plain -- rejecting 100% of real sidecar releases (CPE-1908). Several unit \
+         tests scaffold a plain-productName conf specifically because this line says so; if this \
+         changes, they are testing a shape that no longer ships."
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--skip-pin-check"),
+        "release-sidecar.yml must never pass --skip-pin-check -- that flag exists only for this \
+         crate's throwaway-keypair fixtures and would disarm the CPE-1873 pin on a real release."
+    );
+    flag_value(RELEASE_SIDECAR_YML, &argv, "--expect-url-prefix").expect(
+        "the sidecar verify step dropped --expect-url-prefix, so its crypto check no longer proves \
+         the url a real updater fetches points at this repo's own release (CPE-1872 round 3).",
+    );
+}
+
+/// GREEN, executable. `release-sidecar.yml`'s own argv, run against a tree laid out by
+/// `release-sidecar.yml`'s own download step, carrying a genuine sidecar-named asset and the plain
+/// base conf. Exit 0. Move either half without the other and this goes red.
+#[test]
+fn the_sidecar_workflows_own_argv_accepts_a_genuine_sidecar_release() {
+    let text = workflow_text(RELEASE_SIDECAR_YML);
+    let dir = download_dir(RELEASE_SIDECAR_YML, &text);
+    let argv = verify_argv(RELEASE_SIDECAR_YML, &text);
+    let conf = flag_value(RELEASE_SIDECAR_YML, &argv, "--conf").expect("--conf").to_string();
+
+    let bytes = b"the real sidecar installer bytes";
+    let tree = scaffold(&dir, &conf, SIDECAR_ARTIFACT_NAME, bytes, bytes);
+    let out = run_with_workflow_argv(tree.path(), &argv);
+
+    assert!(
+        out.status.success(),
+        "release-sidecar.yml's own verify invocation failed against a workspace laid out by \
+         release-sidecar.yml's own download step (CPE-1933).\n\
+         --- argv ---\n{argv:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// RED, and the one that makes the GREEN above discriminating: the SAME plain base conf and the same
+/// workflow argv, but a PLAIN-named asset in the manifest. `--expect-channel sidecar` must reject it.
+/// This is what `release_guard.rs`'s hard-coded
+/// `a_plain_asset_in_a_manifest_expected_sidecar_is_rejected_by_name` asserts about a shape it
+/// invented; here the shape comes from the workflow.
+#[test]
+fn a_plain_asset_is_rejected_under_the_sidecar_workflows_own_argv() {
+    let text = workflow_text(RELEASE_SIDECAR_YML);
+    let dir = download_dir(RELEASE_SIDECAR_YML, &text);
+    let argv = verify_argv(RELEASE_SIDECAR_YML, &text);
+    let conf = flag_value(RELEASE_SIDECAR_YML, &argv, "--conf").expect("--conf").to_string();
+
+    let bytes = b"a plain installer smuggled into the sidecar release";
+    // ARTIFACT_NAME is the plain-channel basename -- everything else about this tree is honest.
+    let tree = scaffold(&dir, &conf, ARTIFACT_NAME, bytes, bytes);
+    let out = run_with_workflow_argv(tree.path(), &argv);
+
+    assert!(
+        !out.status.success(),
+        "a plain-channel asset in the sidecar release must fail under the sidecar job's own argv. \
+         Passing means --expect-channel is absent or inert in the real workflow.\n\
+         --- argv ---\n{argv:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("release channel"),
+        "the refusal must be the CHANNEL check, not an unrelated failure that happens to be \
+         non-zero -- otherwise this test would pass even with --expect-channel removed. stderr={stderr}"
+    );
+}
+
+/// RED. The signature check is still live under the sidecar job's real argv, so the GREEN test is
+/// not passing merely because the files exist.
+#[test]
+fn a_tampered_artifact_still_fails_under_the_sidecar_workflows_own_argv() {
+    let text = workflow_text(RELEASE_SIDECAR_YML);
+    let dir = download_dir(RELEASE_SIDECAR_YML, &text);
+    let argv = verify_argv(RELEASE_SIDECAR_YML, &text);
+    let conf = flag_value(RELEASE_SIDECAR_YML, &argv, "--conf").expect("--conf").to_string();
+
+    let tree = scaffold(&dir, &conf, SIDECAR_ARTIFACT_NAME, b"genuine bytes", b"tampered bytes");
+    let out = run_with_workflow_argv(tree.path(), &argv);
+
+    assert!(!out.status.success(), "a tampered sidecar artifact must fail the release gate");
+}
+
+/// Both release workflows are read by this file, and each must still be invoking the verifier. A
+/// workflow renamed or a gate deleted shows up here as a missing file rather than as a silently
+/// shrinking test suite (CPE-1933; the CPE-1929 "guard that cannot go red" family).
+#[test]
+fn both_release_workflows_still_gate_on_the_verifier() {
+    for wf in [RELEASE_YML, RELEASE_SIDECAR_YML] {
+        let text = workflow_text(wf);
+        let argv = verify_argv(wf, &text);
+        assert!(!argv.is_empty(), "{wf} invokes verify-release-artifacts with no arguments at all");
+    }
 }
