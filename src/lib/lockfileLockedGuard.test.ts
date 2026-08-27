@@ -58,6 +58,24 @@ const WORKFLOW_FILES = [
   ".github/workflows/model-snapshot.yml",
 ];
 
+/** The per-file invocation counts, pinned as **floors** (CPE-1929 review). `> 0` alone would not
+ *  catch a PARTIAL narrowing: if `parseYaml` ever silently dropped a job or a step, ci.yml could
+ *  fall from 66 real invocations to 3 and still read as "the detector works". These are the
+ *  numbers the old raw-text line scanner and the new structural one BOTH produced when the rewrite
+ *  was measured for parity — 66/3/7/2/1, 79 in total, with no line found by the old and missed by
+ *  the new — so the parity claim is an assertion here rather than a sentence in a comment.
+ *
+ *  A floor, not an equality: adding a genuine new cargo step must not fail this. Lowering one is
+ *  legitimate when a workflow really loses a step — edit the number, and only then, because the
+ *  failure message says which file moved and by how much. */
+const MIN_CARGO_INVOCATIONS: Record<string, number> = {
+  ".github/workflows/ci.yml": 66,
+  ".github/workflows/release.yml": 3,
+  ".github/workflows/release-sidecar.yml": 7,
+  ".github/workflows/gui-smoke.yml": 2,
+  ".github/workflows/model-snapshot.yml": 1,
+};
+
 /** The cargo subcommands that read and can silently REWRITE a `Cargo.lock`. `cargo install`,
  *  `cargo fmt` and friends are deliberately absent: they do not build this repo's own lockfiles. */
 const CARGO_INVOCATION = /\bcargo\s+(build|test|check|clippy|run)\b/;
@@ -130,13 +148,17 @@ describe("every real cargo build/test/check/clippy/run in CI + release is --lock
     it(`${file}: every real cargo invocation carries --locked`, () => {
       const invocations = cargoInvocations(parseWorkflow(file));
 
-      // Sanity check on the detector itself: every one of these files has at least one real
-      // invocation. A detector that stopped matching anything would otherwise pass this whole suite
-      // vacuously — the exact "green over zero coverage" shape this repo's other guards call out.
+      // Sanity check on the detector itself. A detector that stopped matching anything would pass
+      // this whole suite vacuously — the exact "green over zero coverage" shape this repo's other
+      // guards call out — and one that stopped matching MOST things would too, which is why this
+      // is a per-file floor rather than `> 0`. See `MIN_CARGO_INVOCATIONS`.
       expect(
         invocations.length,
-        `${file}: no real cargo invocation was found at all — the detector may be broken`,
-      ).toBeGreaterThan(0);
+        `${file}: found ${invocations.length} real cargo invocations, below the pinned floor of ` +
+          `${MIN_CARGO_INVOCATIONS[file]}. Either a workflow genuinely lost a cargo step (lower the ` +
+          `floor in MIN_CARGO_INVOCATIONS and say why), or the detector has silently narrowed and ` +
+          `is no longer seeing steps it used to — which is the failure this floor exists to catch.`,
+      ).toBeGreaterThanOrEqual(MIN_CARGO_INVOCATIONS[file]);
 
       const missing = invocations.filter(({ line }) => !line.includes("--locked"));
       expect(

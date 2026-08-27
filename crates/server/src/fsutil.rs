@@ -2732,10 +2732,12 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
     // ordering made them unreachable for every fixture in the crate: on Windows `std`'s `is_symlink`
     // reads the same name-surrogate bit, so every symlink, junction and mount point was refused by the
     // path check first. Measured on CPE-1929 — disabling BOTH refusals here
-    // (`if false && facts.is_reparse_point`, `else if false && facts.is_dir`) left the whole 2,424-test
-    // lib suite green, and forcing `is_reparse_point` to a lying `false` failed only the *leaf* test at
+    // (`if false && facts.is_reparse_point`, `else if false && facts.is_dir`) left the lib suite
+    // **unchanged** — 2,424 passed / 0 failed, the whole suite at that moment — and forcing
+    // `is_reparse_point` to a lying `false` failed only the *leaf* test at
     // `copy_file_onto_destination_handle`, never anything reaching here: the two-sabotage tell that this
-    // guard could not be the decider for anything.
+    // guard could not be the decider for anything. On the merged state the same sabotage is **2,424
+    // passed / 1 failed**, the one failure being the test added below.
     //
     // The reorder came with the CPE-1896 **narrowing** the sibling already had, because reordering
     // without it would have made a real bug reachable rather than merely latent: the bare
@@ -2789,6 +2791,12 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
     // above has already refused every name-surrogate reparse point, which is precisely the set `std`
     // calls a symlink. Kept rather than deleted because on both of those platforms the alternative is
     // writing through a link; untestable by construction rather than merely untested.
+    //
+    // **The number, because this ticket's own rule is that an argument is not a measurement.** With
+    // this backstop and its twin in `batch_media::open_output_verified` BOTH disabled
+    // (`if false && std::fs::symlink_metadata(..)`), the lib suite is **2,425 passed / 0 failed / 11
+    // ignored** — identical to baseline. Both disabled together, so the figure covers each of them
+    // individually as well. That green is the expected result here, not a missing test.
     if std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         drop(file);
         if created {
@@ -6532,7 +6540,8 @@ mod tests {
     /// **CPE-1929 — the test `overwrite_confirmed_no_follow`'s handle-side refusals never had, plus the
     /// narrowing that made the one reachable case correct.** Both refusals were shadowed: disabling
     /// them outright (`if false && facts.is_reparse_point`, `else if false && facts.is_dir`) left the
-    /// whole 2,424-test lib suite green, because the `symlink_metadata(target)` path check that used to
+    /// lib suite **unchanged** — 2,424 passed / 0 failed, the whole suite at that moment — because the
+    /// `symlink_metadata(target)` path check that used to
     /// stand in front of them reads the same Windows name-surrogate bit and took every symlink,
     /// junction and mount point first. The only input that could ever have reached the reparse refusal
     /// was a **non-surrogate** reparse point — a dehydrated cloud placeholder, dedup, WOF — which is
@@ -6549,6 +6558,14 @@ mod tests {
     /// `make_guid_reparse_point` needs no privilege and no filter driver, so this cannot silently
     /// degrade into a skip on an ordinary runner. Windows-only by construction:
     /// `HandleFacts::is_reparse_point` is hard-coded `false` on Unix.
+    ///
+    /// **This test is the red-proof for both halves of the change**, and both were run rather than
+    /// argued. Disabling the handle refusal gives **2,424 passed / 1 failed** — and the panic prints
+    /// the surviving *path* check answering "is a link, and writing to a link's name writes THROUGH
+    /// it", which is the direct proof that the `"stands in for another name"` assertion below is
+    /// load-bearing: a `contains("is a link")` would have passed for free. Un-narrowing back to the
+    /// bare `is_reparse_point` bit also gives **2,424 / 1**, failing on the non-surrogate half — so
+    /// "reordering alone would have made a real bug live" is measured, not reasoned.
     #[cfg(windows)]
     #[test]
     fn cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point() {

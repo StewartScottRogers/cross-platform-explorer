@@ -143,13 +143,17 @@ Made verifiable by a new test,
 `make_guid_reparse_point` (no privilege, no filter driver). Its control asserts `is_symlink()` is
 **false** on the fixture — without that the path check would satisfy the test for free, which is exactly
 how the pre-CPE-1896 fsutil test proved nothing. After the fix: **2,424 / 0**; with the guard disabled,
-**2,423 / 1** — the new test is the red-proof.
+**2,423 / 1** — the new test is the red-proof. (Both figures were taken before the `fsutil` test below
+existed. On the merged state, where the suite is **2,425**, the same sabotage is **2,424 / 1** — the
+security audit's correction, re-measured here and confirmed. The in-code comments now state the delta
+rather than an absolute that will read two low to the next person.)
 
 The `symlink_metadata` path check is **kept** as the second net and now documented as *deliberately
 unreachable on every shipped platform* — on Windows the handle check has already refused; on
 Linux/macOS/BSD `O_NOFOLLOW` fails the open first; only an exotic Unix compiling `O_NOFOLLOW` as `0`
-reaches it. Measured and recorded so the next green sabotage is expected: disabling it leaves
-**2,424 / 0**.
+reaches it. Measured and recorded **at the site**, so the next green sabotage is expected: with this
+backstop and its `fsutil` twin BOTH disabled, the suite is **2,425 / 0** on the merged state —
+identical to baseline, so the figure covers each of them individually too.
 
 **2. `fsutil::overwrite_confirmed_no_follow` — SHADOWED, found by the sweep, confirmed.** Same shape,
 not previously named.
@@ -236,6 +240,35 @@ different facts, none implying another), `transfer.rs`/`archive.rs` claim sites 
 removed), `fsutil::rename_slot_refusal` and `create_slot_refusal` (genuinely reachable, documented),
 `batch_execute` (confirmation gate, explicitly not the last line of defence).
 
+### Review round — five recording items, no structural change
+
+1. **The PR failed its own new rule at four sites.** The CLAUDE.md entry says to write the numbers into
+   the comment at the site; only the two *moved* refusals carried theirs. The two retained path
+   backstops and the two dead disjuncts argued where they could have measured — on a ticket whose whole
+   thesis is that an argument is not a measurement. Re-measured and recorded at all four: disabling
+   **both** path backstops → **2,425 / 0**; deleting **both** dead disjuncts → **2,425 / 0**.
+2. **In-code absolutes replaced by deltas.** The comments cited the suite size at the moment each was
+   measured (2,423 / 2,424); the merged suite is 2,425, so a future reader re-running the sabotage
+   would see numbers two higher than the comment. They now say "left the suite **unchanged** — N/0 at
+   the time of measurement" and give the merged-state red-proof figure alongside.
+3. **The doctrine split is now recorded at the `batch_media` site.** After this PR the two sites say
+   opposite things about the same input class: `fsutil` **writes** a non-surrogate reparse point (the
+   narrowing, on CPE-1896's dehydrated-placeholder rule) while `open_output_verified` still **refuses**
+   it on the bare bit — now cemented by the new test. Not a regression (it refused them before too),
+   but only one half was documented as a choice. The site now states the split, gives the one real
+   asymmetry (a refused batch item is *skipped* and the user keeps the input; a refused restore has
+   failed at the only thing it was asked to do), and says plainly that this has **not** been
+   established as the right answer — unresolved on purpose, pointing at CPE-1958.
+4. **CPE-1957 corrected**: `vault_manager` citations were `origin/main` numbers while `batch_media`'s
+   was post-merge, so the set would have been stale on arrival. All now post-merge, with the reason
+   stated in the ticket. Raised **Low → Medium**: site 1 carries the same bare-reparse-bit defect fixed
+   here, so a dehydrated cloud placeholder in a vault session dir makes the wipe refuse — a live
+   behaviour bug, not merely an unverifiable guard.
+5. **The 79-parity became an assertion instead of a comment.** `toBeGreaterThan(0)` would not catch a
+   *partial* narrowing — ci.yml could fall from 66 real invocations to 3 and still read as "the
+   detector works". Now a per-file floor (`MIN_CARGO_INVOCATIONS`, 66/3/7/2/1), red-proofed by
+   truncating each job's step list: **4 files fail**, each naming the file and the shortfall.
+
 ### Left, and filed as CPE-1957
 
 `vault_manager::overwrite_pinned_file` (strongest of the three — on Windows the earlier `probe.is_link`
@@ -245,6 +278,13 @@ re-check, and `revert_engine`'s Create-op occupancy check shadowing the write ga
 the line with the shadowing check named. **The two-sabotage results are the one thing not carried
 over — none was run against these three**, and saying otherwise would be exactly the "reads as
 coverage" failure this pattern is about.
+
+Separately, the security audit found and filed **CPE-1958 (High)**: `overwrite_confirmed_no_follow`'s
+`links > 1` guard is TOCTOU-racy and was measured destroying a file outside the root — **17 / 1,000**
+on this branch against **30 / 1,000** on a replica of `main`'s body in the same run, so the reorder
+**halves the window** but check-then-use remains. `batch_media` under the identical racer: **0 /
+2,000**. Deliberately not carried into this PR: re-checking the same racy fact cannot fix it — it needs
+claim-then-rename or a post-write handle-identity re-verify, which is a different change.
 
 ### Mechanisation (last acceptance item)
 
@@ -266,4 +306,11 @@ so far was found that way. None was found by reading the code** — including bo
 - `crates/server` Windows: **2,425 passed / 0 failed / 11 ignored**.
 - `crates/server` Linux (WSL, sources touched first): **2,410 passed / 0 failed / 11 ignored**.
 - `cargo clippy --all-targets -- -D warnings` clean; same with `--all-features`.
-- `npm run check`: 0 errors, 0 warnings. `npm test`: **343 files / 4,857 tests passing**.
+- `npm run check`: 0 errors, 0 warnings. `npm test`: **344 files / 4,923 passed, 2 skipped** at this
+  branch's head. The figure moved twice while this ticket was open (4,857 → 4,883 → 4,923) purely
+  because `main` landed twelve PRs underneath it, which is the same reason the in-code sabotage
+  comments now state a **delta** rather than an absolute: a suite size is a fact about a moment, and
+  citing one as if it were a fact about the code is how a comment starts lying without anyone editing
+  it.
+- `src-tauri` `cargo test --lib`: **230 passed / 0 failed**. Added on review — this PR changes refusal
+  *wording*, and `src-tauri` asserts on some of it, so clippy alone was not enough there.

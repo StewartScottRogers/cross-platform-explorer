@@ -1994,13 +1994,34 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // it, and that ordering made this refusal untestable for every fixture anyone had: on Windows
     // `std`'s `is_symlink` reads the same name-surrogate bit, so every symlink and junction was caught
     // by the path check first and this branch only ever saw reparse points nobody had a fixture for.
-    // Measured on CPE-1929: `if false && facts.is_reparse_point` left the whole 2,423-test lib suite
-    // green, and forcing `is_reparse_point` to a lying `false` changed no `batch_media` behaviour at all
+    // Measured on CPE-1929: `if false && facts.is_reparse_point` left the lib suite **unchanged** — 2,423
+    // passed / 0 failed at the time of measurement, which was the whole suite — and forcing
+    // `is_reparse_point` to a lying `false` changed no `batch_media` behaviour at all
     // — the two-sabotage tell for a shadowed guard. Handle-first is also the *more trustworthy* order:
     // the object this question is asked of is the one the bytes will land in and it cannot be
     // substituted after the open, whereas the name can be swapped either way in the window before a
     // `symlink_metadata`. Covered now by
-    // `cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`.
+    // `cpe_1929_a_non_surrogate_reparse_point_at_the_output_is_refused_by_the_handle_check`, and the
+    // same sabotage on the merged state is **2,424 passed / 1 failed** — that test is the red-proof.
+    //
+    // **This refusal reads the BARE reparse bit, and `fsutil` no longer does — record that split rather
+    // than let a reader assume the crate agrees with itself (CPE-1929 security audit).** After CPE-1929,
+    // `fsutil::overwrite_confirmed_no_follow` and `fsutil::copy_file_onto_destination_handle` narrow to
+    // `reparse_name_surrogate` and therefore **write** a non-surrogate reparse point — a dehydrated
+    // OneDrive placeholder, dedup, WOF — on CPE-1896's rule that refusing those turned every such file
+    // into a failed backup entry. This site still **refuses** it, and the test named above now cements
+    // that. It is not a regression: this site refused them before CPE-1929 too, and the reorder changed
+    // which check says so, not the verdict.
+    //
+    // The one real asymmetry, and it is an argument rather than a measurement, which is why it is
+    // recorded here instead of being acted on: a batch item that is refused is **skipped**, and the
+    // user still has every other item and the original input — whereas a restore or a backup that
+    // refuses has failed at the only thing it was asked to do. So the cost of over-refusing is
+    // asymmetric between the two callers, in the direction that makes this site's stricter answer
+    // cheap. **That has not been established as the right answer**, nobody has asked a user whose
+    // batch output landed on a cloud placeholder, and the two sites now say opposite things about the
+    // same input class. Unresolved on purpose; revisit alongside CPE-1958, which reopens the
+    // neighbouring `fsutil` guard.
     let facts = match handle_facts(&verified.file) {
         Some(f) if !f.id.is_degenerate() => f,
         _ => {
@@ -2030,6 +2051,12 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // hard-coded `false`. No such platform is built or tested, so this branch is untestable *by
     // construction* rather than merely untested. It is kept because the alternative on that platform is
     // writing through a link, and it is argued rather than demonstrated.
+    //
+    // **The number, because this ticket's own rule is that an argument is not a measurement.** With
+    // this backstop and its twin in `fsutil::overwrite_confirmed_no_follow` BOTH disabled
+    // (`if false && std::fs::symlink_metadata(..)`), the lib suite is **2,425 passed / 0 failed / 11
+    // ignored** — identical to baseline. Both disabled together, so the figure covers each of them
+    // individually as well. That green is the expected result here, not a missing test.
     if std::fs::symlink_metadata(output).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         verified.abandon(output);
         return Err(format!(
@@ -4739,8 +4766,9 @@ mod tests {
     }
 
     /// **CPE-1929 — the test the handle-side reparse refusal never had.** Sabotaging that refusal
-    /// (`if false && facts.is_reparse_point`) left the whole 2,423-test lib suite green, and forcing
-    /// `is_reparse_point` to a lying `false` changed nothing in `batch_media` either: the two-sabotage
+    /// (`if false && facts.is_reparse_point`) left the lib suite **unchanged** — 2,423 passed / 0 failed,
+    /// the whole suite at that moment — and forcing `is_reparse_point` to a lying `false` changed
+    /// nothing in `batch_media` either: the two-sabotage
     /// tell for a guard an earlier check is shadowing. The earlier check was the
     /// `symlink_metadata(output).is_symlink()` path check, which on Windows reads the **same
     /// name-surrogate bit**, so every symlink and junction anyone could stage was refused there and the
