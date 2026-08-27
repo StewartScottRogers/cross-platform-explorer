@@ -65,14 +65,24 @@ since the two channels carry different `identifier`s. Both outcomes are bad; the
 - [x] Decide what happens to a manual `gh release edit --draft=false`. The plain channel's only
       protection today is `run.md`'s check of the job's conclusion — a hand-run publish bypasses it
       entirely. Say whether that is acceptable and why, or close it.
-      **Decision: acceptable, documented, not closed as a separate gap.** Added the equivalent manual
-      check to RELEASING.md's sidecar publish section (there's no `/run`-style automated sidecar
-      publish flow to wire it into — sidecar releases are dispatched+published by hand per RELEASING.md
-      already). Same residual limitation as the plain channel: nothing on GitHub can force a human to
-      check a workflow conclusion before typing `gh release edit --draft=false`; CI can only make the
-      failure loud and impossible to silently miss, not physically unbypassable. Judged acceptable for
-      the same reason the plain channel's identical gap already is (rare, deliberate, manual action;
-      documented step-by-step check now exists where none did before).
+      **Decision (round 2, corrected): wired `/run` to cover it, rather than filing a follow-up.**
+      Round 1 of this ticket claimed "there's no `/run`-style automated sidecar publish flow to wire
+      it into" — that was a factual error a Reviewer caught: `run.md` step 1a always installs the
+      *latest* release regardless of channel, and this project's shipping strategy is sidecar-only, so
+      most tags `/run` reaches ARE `-sidecar` tags. `/run` *is* the de facto publish path for this
+      channel; it only failed safe by accident (a hard-coded `--workflow=release.yml` lookup that
+      throws on a sidecar tag instead of silently passing). Fixed: `release-sidecar.yml` now sets
+      `run-name: "Release (sidecar) ${{ inputs.tag }}"` (workflow_dispatch runs have no tag-bearing
+      `headBranch` to match on, unlike a tag-triggered run, so the tag has to be surfaced some other
+      way), and `run.md` step 1b-ii branches on the `-sidecar` tag suffix, resolving the run via
+      `displayTitle` and checking `verify-published-manifest-sidecar` instead of
+      `verify-published-manifest`. RELEASING.md's manual `gh` check (added round 1) stays, for
+      publishing outside `/run` entirely. Residual gap, same as the plain channel's always-had one:
+      nothing on GitHub can force a human to run either check before a fully manual
+      `gh release edit --draft=false` that bypasses both `/run` and RELEASING.md's own instructions —
+      accepted for the same reason the plain channel's identical gap is (a CI job can make the failure
+      loud, not physically unbypassable; the publish step is deliberate and manual either way). This is
+      narrower than round 1's claim, now that the common case (`/run`) is actually covered.
 
 ## Notes
 

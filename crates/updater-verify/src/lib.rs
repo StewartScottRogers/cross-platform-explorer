@@ -360,6 +360,39 @@ pub enum Channel {
     Plain,
 }
 
+impl Channel {
+    /// Every `Channel` variant, exactly once — the source of truth for `channel_display_fromstr_
+    /// round_trip_covers_every_variant` below, and (indirectly, via the string tokens it round-trips
+    /// through `Display`) for `channelPurityCoverage.test.ts`'s TS-side canonical channel list.
+    ///
+    /// CPE-1908 round 2 (Reviewer): a Rust-identifier RENAME (`Channel::Sidecar` →
+    /// `Channel::SidecarBuild`) is a legal, harmless refactor as long as `Display` keeps emitting the
+    /// same string — nothing about the CLI vocabulary `--expect-channel`/`FromStr` accepts changes.
+    /// But the TS ratchet used to read the Rust IDENTIFIER'S spelling (lowercased) as if it WERE the
+    /// accepted CLI token, so that harmless rename made it go red and then recommend
+    /// `--expect-channel sidecarbuild` — a value `FromStr` actually REJECTS, which would have broken
+    /// a real release. `ALL` + this exhaustiveness guard + the round-trip test below prove, IN RUST,
+    /// that `Display`'s output for every variant always parses back via `FromStr` to that same
+    /// variant, regardless of what the variant's Rust identifier is spelled — and the TS test now
+    /// reads `Display`'s string LITERALS (see `channelPurityCoverage.test.ts`), not the identifiers,
+    /// so a pure rename is a non-event there too, closing the trap at its root instead of papering
+    /// over one demonstrated case of it.
+    pub const ALL: [Channel; 2] = [Channel::Sidecar, Channel::Plain];
+
+    /// Exists ONLY to make the compiler enforce exhaustiveness. This match has NO `_` wildcard arm —
+    /// adding a variant to `Channel` without adding it here fails to COMPILE (E0004: non-exhaustive
+    /// match) until it is. Never called at runtime (hence `#[allow(dead_code)]`); its only job is to
+    /// force whoever adds a variant to also touch `ALL` above in the same change, so `ALL` can't
+    /// silently drift out of sync with the enum the way a hand-maintained list could.
+    #[allow(dead_code)]
+    fn exhaustiveness_guard(c: Channel) {
+        match c {
+            Channel::Sidecar => {}
+            Channel::Plain => {}
+        }
+    }
+}
+
 impl std::fmt::Display for Channel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -935,5 +968,25 @@ mod tests {
         assert!("plaintext".parse::<Channel>().is_err());
         assert!("".parse::<Channel>().is_err());
         assert!("plain-sidecar".parse::<Channel>().is_err());
+    }
+
+    /// CPE-1908 round 2 (Reviewer) — proves, for EVERY `Channel::ALL` entry, that `Display`'s output
+    /// parses back via `FromStr` to the same variant. This is what makes a pure Rust-identifier
+    /// rename (e.g. `Sidecar` → `SidecarBuild`) provably safe for the CLI vocabulary: as long as this
+    /// keeps passing, `Display`/`FromStr` stay each other's inverse regardless of what the variant is
+    /// spelled, so nothing downstream that reads the string tokens (this test, the TS ratchet, the
+    /// real `--expect-channel` flag) can be broken by a rename alone. `Channel::ALL` is fed by
+    /// `exhaustiveness_guard`'s compile-enforced match, so this loop can never silently skip a variant
+    /// added later without someone extending `ALL` first (a non-exhaustive match is a hard compile
+    /// error, not a lint).
+    #[test]
+    fn channel_display_fromstr_round_trip_covers_every_variant() {
+        for c in Channel::ALL {
+            let token = c.to_string();
+            let parsed: Channel = token.parse().unwrap_or_else(|e| {
+                panic!("Channel::{c:?}'s Display output {token:?} did not parse back via FromStr: {e}")
+            });
+            assert_eq!(parsed, c, "Display->FromStr round trip must return the SAME variant");
+        }
     }
 }

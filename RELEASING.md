@@ -101,6 +101,17 @@ draft — every platform's minisign signature against the configured pubkey, tha
 points at this repo's own release rather than a foreign host/wrong tag, **and** (CPE-1908) that every
 platform's asset is actually from the **sidecar** channel, not a plain-channel asset that slipped in.
 
+**If you publish via `/run` (saying "Run"), this check now runs automatically** (CPE-1908 round 2):
+`/run`'s step 1a always installs the *latest* release regardless of channel, and — because this
+project's shipping strategy is sidecar-only — that is very often a `-sidecar` tag. `run.md`'s step
+1b-ii branches on the tag suffix and checks `verify-published-manifest-sidecar` on the sidecar path,
+the same way it already checked `verify-published-manifest` on the plain path. An earlier draft of
+this doc claimed there was no automated flow to wire this into; that was wrong (`/run` *is* the
+publish path for this channel in practice) and has been corrected here and in `run.md` itself.
+
+The check below is for publishing **by hand**, outside `/run` — e.g. from this doc's own
+dispatch-and-review flow, or the Cowork desktop app:
+
 ```powershell
 $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=release-sidecar.yml `
   --limit 1 --json databaseId --jq '.[0].databaseId'
@@ -112,20 +123,20 @@ if (-not $job -or $job.conclusion -ne "success") {
 ```
 
 `--limit 1` assumes you check this immediately after dispatching — if another sidecar dispatch races
-yours, resolve the run by its `displayTitle`/`createdAt` instead of trusting "most recent". A missing or
+yours, resolve the run by its `displayTitle`/`createdAt` instead of trusting "most recent" (`run.md`'s
+copy of this check matches on `displayTitle` for exactly this reason — `release-sidecar.yml` now sets
+`run-name: "Release (sidecar) ${{ inputs.tag }}"` so the tag is actually visible there). A missing or
 non-`success` job means STOP: do not `gh release edit --draft=false` this tag.
 
-**What this does *not* close (the ticket's own explicit call):** unlike `run.md`'s plain-channel gate,
-nothing in CI or in `/run` currently *forces* this check before a human types `gh release edit <TAG>
---draft=false` by hand — there is no server-side hook on GitHub Releases that can require a workflow
-conclusion before a publish. This is the SAME residual gap the plain channel already accepts (documented
-in `release.yml`'s own comments): a CI job can make the check impossible to *silently* miss (it's a red
-run in the Actions tab, not a silent skip), but it cannot force a human to *look* before running a
-manual command. Judged acceptable for the same reason the plain channel's equivalent gap is: the actual
-publish step in both channels is already a deliberate, manual, low-frequency action (never automated,
-never in a hot path), and the realistic failure mode this ticket closes — a channel-mixing bug shipping
-undetected — is now caught the moment anyone *does* check the run (which `/run`'s equivalent flow and
-this doc's own instructions both do by default).
+**What this does *not* close:** nothing on GitHub can force a human to run either check above before
+typing `gh release edit <TAG> --draft=false` directly, bypassing both `/run` and this doc's own
+instructions — there is no server-side hook on GitHub Releases that can require a workflow conclusion
+before a publish. This is the SAME residual gap the plain channel's `run.md` gate has always had: a CI
+job can make the failure impossible to *silently* miss (a red run in the Actions tab, not a silent
+skip), but it cannot physically stop a manual command that skips checking it. Judged acceptable for the
+same reason the plain channel's gap is — the publish step is a deliberate, manual, low-frequency
+action — and now that `/run` covers the common case automatically, the realistic remaining exposure is
+narrower than it was when this section was first written.
 
 **Gotchas:**
 - A sidecar release left as a **prerelease** (or draft) is invisible to `/releases/latest/` — the

@@ -25,6 +25,14 @@ on:
         required: true
         type: string
 
+# CPE-1908 round 2 (Reviewer, §4): without a custom run-name, a workflow_dispatch run's default
+# display title carries no reliable trace of WHICH tag it was dispatched for -- unlike release.yml
+# (tag-push-triggered, so `headBranch` IS the tag), this workflow's `headBranch` is always the
+# dispatched REF (e.g. `main`), never the tag. `run.md`'s publish gate needs to find "the run that
+# built THIS tag" without a tag-bearing `headBranch` to match on, so it matches on `displayTitle`
+# instead -- which only works because this line puts the tag IN the display title.
+run-name: "Release (sidecar) ${{ inputs.tag }}"
+
 # Needed so the workflow can create the GitHub Release.
 permissions:
   contents: write
@@ -687,8 +695,17 @@ jobs:
       # dispatch-only and checks out whatever ref it was run against, which is not the release tag.
       # Same "download each referenced name individually" reasoning as release.yml's step: a missing
       # asset must be a loud `gh` failure here, never a quietly-smaller verified set downstream.
+      #
+      # CPE-1908 round 2 (Reviewer R2): `timeout-minutes` -- this workflow carries CPE-1824 hang
+      # hardening everywhere else (see the apt-get install at `:191` and the native-deps fetch at
+      # `:303`), and a `gh release download` loop has no hardening of its own against a stalled
+      # connection; without a bound it rides to the job's 360-minute default instead of failing fast.
+      # `release.yml`'s sibling step (`verify-published-manifest`) has this same pre-existing gap and
+      # is intentionally left untouched here -- fixing it is a separate, pre-existing-debt change
+      # outside this ticket's diff surface, not something this PR introduced.
       - name: Download the published manifest + every asset it references
         if: steps.sig.outputs.has == 'true'
+        timeout-minutes: 10
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -712,8 +729,15 @@ jobs:
       # Same crypto + url-binding checks release.yml's verify step runs, PLUS `--expect-channel
       # sidecar` (CPE-1908) so `platforms_with_mismatched_channel` actually has something to check
       # against on this channel -- the whole point of this job.
+      #
+      # CPE-1908 round 2 (Reviewer R2): `timeout-minutes` -- same CPE-1824 reasoning as the download
+      # step above. `cargo run --release` compiles this small crate from scratch on a cache miss
+      # (observed locally: well under a minute) then runs the verifier itself (fast, no network I/O
+      # beyond what already happened in the download step) -- 8 minutes is generous headroom, not a
+      # tight bound.
       - name: Verify the published manifest + signatures + channel purity (CPE-1058, CPE-1894, CPE-1908)
         if: steps.sig.outputs.has == 'true'
+        timeout-minutes: 8
         shell: bash
         env:
           TAG: ${{ inputs.tag }}
