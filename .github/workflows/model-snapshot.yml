@@ -79,6 +79,15 @@ jobs:
         env:
           CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
         run: |
+          # CPE-1941 deliberately does NOT apply here, and the difference is worth stating so a
+          # future reader does not "align" the two. The agent catalog's content comes out of the
+          # CHECKOUT, so its version must describe the checkout (the tagged commit's timestamp) —
+          # otherwise re-running an old tag republishes old manifests under a new number. This
+          # snapshot's content is fetched LIVE from the reseller endpoints in the step above, so it
+          # is genuinely new on every run regardless of which ref the run was started from; the
+          # commit timestamp would describe the wrong thing entirely (unchanged reseller manifests,
+          # not the scraped model lists), and would stop advancing across scheduled runs — freezing
+          # the snapshot at the first published version. Publish time IS the content time here.
           VERSION=$(date -u +%s)
           export SNAPSHOT_GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cargo run --locked --release --quiet \

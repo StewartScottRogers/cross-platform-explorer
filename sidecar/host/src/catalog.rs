@@ -31,6 +31,15 @@ pub struct CatalogEntry {
     pub sha256: String,
     /// Monotonic catalog version for this entry — a fetched entry must be strictly newer than the
     /// installed one to be accepted (anti-rollback).
+    ///
+    /// This number is the engine's **only** freshness signal, so it is only as sound as its source.
+    /// It is produced by the release pipeline from the **tagged commit's committer timestamp**
+    /// (`.github/workflows/scripts/catalog-version.sh`), never from publish-time wall clock: with a
+    /// clock as the source, re-running the release workflow on an old tag stamped that tag's stale
+    /// manifests with a number newer than anything installed, and every check here passed while the
+    /// content went backwards (CPE-1941, reproduced in
+    /// `tests/catalog_republish_downgrade.rs`). The `sha256` above binds *which* content an entry
+    /// names; it cannot order two contents, which is why freshness rests on this field.
     pub version: u64,
 }
 

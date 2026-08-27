@@ -428,13 +428,64 @@ jobs:
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libdbus-1-dev pkg-config
 
+      # CPE-1941 — this used to be `VERSION=$(date +%s)` inline in the signing step below: a
+      # wall-clock timestamp read AT PUBLISH TIME, so the number recorded when the workflow ran, not
+      # what it published. Re-running this workflow on an OLD TAG therefore republished that tag's
+      # old manifests under a version newer than anything installed, and the trust engine's
+      # anti-rollback rule (sidecar/host/src/catalog.rs, `VersionStanding::refusal`) accepted them:
+      # a content downgrade with every signature and content hash intact, reachable with no
+      # signing-key compromise by anyone who can press "Re-run jobs" on an old tag.
+      #
+      # The version now comes from the TAGGED COMMIT's committer timestamp, read out of the checkout
+      # this job already has — no network and no new trust dependency (the correction PR #1051's
+      # Security Auditor made to CPE-1924's "we'd have to fetch and trust the published index"
+      # framing). Re-running an old tag now reproduces that tag's own, older number, which
+      # anti-rollback refuses. The whole rule, including the installed-base floor that keeps the
+      # scheme change from emitting numbers below what clients already hold, lives in one place:
+      # .github/workflows/scripts/catalog-version.sh (structurally pinned by
+      # src/lib/catalogPublishVersion.test.ts, demonstrated end to end by
+      # sidecar/host/tests/catalog_republish_downgrade.rs).
+      #
+      # A separate, FATAL step on purpose: if the version cannot be derived or fails the floor /
+      # future-date checks, this job fails instead of falling back to a number that would either be
+      # rejected by every installed client or poison anti-rollback for every later release.
+      - name: Derive the catalog version from the tagged commit (CPE-1941)
+        if: steps.k.outputs.has == 'true'
+        id: cv
+        shell: bash
+        env:
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # "the checkout's HEAD *is* the tagged commit" was the one link in this chain that was
+          # inferred rather than executed (CPE-1941 SEC review). Inferred no longer: this workflow
+          # triggers on `push: tags:` ONLY, so `github.sha` is by definition the commit the tag
+          # points at, and `actions/checkout@v4` with no `ref:` checks out `github.ref`. Assert the
+          # two agree rather than trusting they do -- if a future checkout change (an added `ref:`,
+          # or a trigger that produces a merge commit) ever made HEAD something other than the
+          # tagged commit, this job would otherwise version the WRONG commit in silence, which is
+          # the exact class of bug this ticket exists to close.
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "::error::checkout HEAD ${HEAD_SHA} is not the tagged commit ${TAG_SHA} -- refusing to version a commit other than the one being released"
+            exit 1
+          fi
+          VERSION=$(bash .github/workflows/scripts/catalog-version.sh "$TAG_SHA" .)
+          STAMPED=$(date -u -d "@${VERSION}" +%Y-%m-%dT%H:%M:%SZ)
+          echo "catalog version ${VERSION} (${STAMPED}) — committer timestamp of ${TAG_SHA}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Build + sign the catalog bundle
         if: steps.k.outputs.has == 'true'
         env:
           # A 32-byte ed25519 seed (hex). Generate once; its public key goes in CATALOG_TRUSTED_KEYS.
           CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
+          # Monotonic across releases → anti-rollback (CPE-372), and derived from the tag's own
+          # commit rather than from publish time (CPE-1941) so re-running an old tag cannot advance it.
+          VERSION: ${{ steps.cv.outputs.version }}
         run: |
-          VERSION=$(date +%s)   # monotonic across releases → anti-rollback (CPE-372)
+          set -euo pipefail
+          test -n "$VERSION" # the derive step above is the only source; never sign an empty version
           cargo run --locked --release --quiet --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
             sidecar/ai-console/agents catalog-out "$VERSION"
 

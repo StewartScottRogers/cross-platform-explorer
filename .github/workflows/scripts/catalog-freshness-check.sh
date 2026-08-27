@@ -2,10 +2,21 @@
 # CPE-1893: the ONE copy of "how old is the published agent catalog, and is that too old".
 #
 # catalog-sign (sidecar/host/src/bin/catalog_sign.rs, invoked by release.yml's `catalog` job) stamps
-# every catalog-index.json entry's `version` field with `date +%s` at sign time (CPE-372's
-# anti-rollback counter doubles as a wall-clock publish timestamp for free — no second field to add
-# or let drift). That means "how old is the live catalog" is just `now - version`, no extra
-# provenance needed. This file is sourced by catalog-freshness.yml so the arithmetic exists in one
+# every catalog-index.json entry's `version` field with a Unix epoch at sign time (CPE-372's
+# anti-rollback counter doubles as a wall-clock timestamp for free — no second field to add or let
+# drift). That means "how old is the live catalog" is just `now - version`, no extra provenance
+# needed.
+#
+# CPE-1941 changed WHICH epoch that is, and the arithmetic here is unaffected — deliberately, which
+# is why the version scheme kept an epoch rather than switching to a counter. It used to be
+# `date +%s` at publish time; it is now the committer timestamp of the tagged commit
+# (.github/workflows/scripts/catalog-version.sh), because a publish-time clock let a re-run of an
+# OLD TAG republish old manifests under a newer number and sail past anti-rollback. The practical
+# difference to this check is a few minutes — the gap between cutting a tag and its release job
+# finishing — against a 14-day threshold, and it reads the age of the catalog's CONTENT rather than
+# of its upload, which is the thing this check actually wanted to know.
+#
+# This file is sourced by catalog-freshness.yml so the arithmetic exists in one
 # place, is directly runnable for a local dry run, and needs no live GitHub Actions run to verify
 # (see catalog-freshness.yml's header comment for the chosen threshold + cadence and why).
 #
@@ -32,8 +43,12 @@ catalog_age_days() {
 #     third verdict precisely so a caller can never collapse it into "fresh": a future-dated version
 #     means either the signing runner's clock was wrong at sign time, or catalog-sign itself
 #     mis-stamped the version — either way, a real problem worth surfacing, not something to
-#     reassure anyone about. Low severity in practice (the timestamp is CI-stamped `date +%s`, not
-#     attacker-influenced), but the arithmetic must still say what happened rather than paper over it.
+#     reassure anyone about. Since CPE-1941 the stamped value is a COMMIT timestamp, which — unlike
+#     the old CI-stamped `date +%s` — a committer can set outright (`GIT_COMMITTER_DATE`), so a
+#     future-dated version is no longer purely a runner-clock accident. That is why the publish side
+#     now refuses one up front: catalog-version.sh fails the release when the derived version is more
+#     than a day ahead of the runner's clock, so a poisoned version never gets signed in the first
+#     place. This remains the detection half for anything already live.
 is_catalog_stale() {
   local published="$1" threshold_days="$2" now="${3:-$(date +%s)}"
   local age_days
