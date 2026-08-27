@@ -3,7 +3,7 @@ id: CPE-1894
 title: release.yml fires on `-sidecar` tags too, so one live manifest mixes plain and sidecar installers
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-26
