@@ -33,6 +33,24 @@ export function rawInvoke<T = unknown>(cmd: string, args?: unknown): Promise<T> 
   return Promise.resolve(handler(args)) as Promise<T>;
 }
 
+/** The busy-tracking wrapper the real `src/lib/invoke.ts` exports, and the one this repo's own
+ *  convention says production code must use (`docs/design/BUSY-CURSOR.md`: import `invoke`, never
+ *  `rawInvoke`). In the harness there is no OS wait cursor to raise, so it is `rawInvoke` — but it
+ *  MUST exist as a named export, because a component that transitively imports `src/lib/settings.ts`
+ *  (which does `import { invoke, unwrap } from "./invoke"`) otherwise dies at ES-module link time
+ *  with `does not provide an export named 'invoke'`.
+ *
+ *  That failure is worse than a missing measurement: the crash happens before any script runs, so the
+ *  engine sees only `"readySelector" never appeared within 40s` — no case name, no selector, no
+ *  console. Both an independent reviewer and an independent UAT hit it separately on the first
+ *  service-module component either tried (`TagEditor.svelte` → `settings.ts`), and `settings.ts` backs
+ *  pins, recents, theme and feature flags, so it is on the path of most real components.
+ *
+ *  If a future case needs `Channel`, `localTransport`, `setTransport` or `isRemoteTransport`, add them
+ *  here rather than in a per-case mock — the point of this file is that a case author touches
+ *  `cases.mjs` and their own harness page, nothing else. */
+export const invoke = rawInvoke;
+
 export function unwrap<T>(r: { status: "ok"; data: T } | { status: "error"; error: unknown }): T {
   if (r.status === "ok") return r.data;
   throw r.error instanceof Error ? r.error : new Error(String(r.error));
