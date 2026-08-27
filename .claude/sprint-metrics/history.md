@@ -1743,3 +1743,25 @@ is 30 on that machine, and its 23/33 mutation kill is a *lower bound*), and #106
 had the same shape until its author was asked to make them throw. **Prefer failing on a missing tool
 over skipping** — CI always has it, so the only machine that skips is the one where a human would
 have wanted to know.
+
+## 2026-08-27 — "assert the diagnostic" means YOUR diagnostic, not the shell's
+
+PR #1064 took the false-green lesson (assert the guard's message, not just a nonzero exit) and applied
+it one notch too literally: its tests asserted on **bash's** error text.
+
+    Git Bash (Windows):  bash: line 1: [: 0\n1: integer expected
+    GNU bash (Linux):    bash: line 1: [: 0\n1: integer expression expected
+
+Green locally, red on CI, on a wording difference between shell builds.
+
+**The rule needs its second half stated:** assert on **your own** guard's diagnostic — the message the
+code under test emits — and on the **behavioural** fact (branch not taken, exit code, no output
+written). An external tool's human-readable text is not the thing under test, and it is not stable
+across builds, versions or platforms.
+
+The same review round had already flagged the general form on a different tool: `/npm error/i` matches
+npm 7+ but **not** npm 6's `npm ERR!` prefix, so a future wording change would silently revert that
+guard to fail-open. Same defect, caught before it shipped there and after it shipped here.
+
+**Practical test:** if the string you are asserting on was written by someone else's program, it is
+evidence, not the assertion. Match it loosely if at all, and say at the site why it is loose.
