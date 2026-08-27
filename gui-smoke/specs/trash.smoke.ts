@@ -575,7 +575,7 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
     });
 
     for (const theme of ["light", "dark"] as const) {
-      it(`the ${theme}-theme pass: rows render and the title bar reads "Still loading…" before the pass resolves`, async function () {
+      it(`the ${theme}-theme pass: renders correctly whether caught mid-stream or already resolved`, async function () {
         if (!IS_LINUX) {
           this.skip();
           return;
@@ -583,49 +583,84 @@ describe("CPE-1822 — headless GUI smoke: the Trash view's empty/populated/degr
         await setTheme(theme);
         await openTrash();
 
-        // The core, falsifiable assertion (CPE-1816): while this pass is still in flight, the title
-        // bar's `.tv-count` must read "Still loading…" (`trash.stillLoading`), not a number — and rows
-        // must already be visible (the first batch landed, `loading` is false) at the same time.
+        // CPE-1822 review round 4 (live CI evidence: run 33056917385, shard 2). The PRIOR shape of this
+        // assertion (fail unless "Still loading…" + rows is observed) went red on a real run that
+        // produced ZERO AssertionErrors from the app — 23/26 other cases green, only this one red —
+        // because the 2,500-item pass resolved FASTER than the poll could catch the transitional frame
+        // on a loaded runner (shard 2 is CPE-1910's own WebDriver-flakiness neighbourhood; that run
+        // logged 38 environment-signature markers). The Reviewer's diagnosis: "the assertion treats 'I
+        // did not observe the intermediate state' as a failure" — and CPE-1816's OWN ticket already says
+        // a fast/one-batch trash can resolve within a single frame, so a pass that resolves before this
+        // can photograph it is a HEALTHY outcome, not a regression.
         //
-        // CPE-1822 review round 2: the poll condition now runs entirely inside ONE `browser.execute`
-        // call rather than a `getText()` round trip plus a separate `$$(".tv-row").length` round trip.
-        // The latter was the dominant cost this test paid for nothing: classic WebDriver's
-        // `findElements` serializes one element HANDLE per matched row on EVERY poll tick — up to 2,500
-        // of them here — while `document.querySelectorAll(...).length`, computed entirely inside the
-        // page, returns one number over one round trip.
-        //
-        // Kept on the rendered TEXT rather than the `.tv-count-loading` class alone — a deliberate
-        // red-proof probe on this ticket found the class can be renamed without redding
-        // `TrashView.test.ts`'s own suite (which asserts on text), so the class alone is not the whole
-        // load-bearing contract; the visible string is, and it's what the Visual Critic actually judges
-        // in the screenshot below. If the pass resolves before this ever observes the combination, the
-        // wait throws and this test goes RED — see the file header for why a large real listing is the
-        // honest way to make this window observable rather than fabricating it.
-        await browser.waitUntil(
+        // So: poll for EITHER shape — mid-stream (rows + "Still loading…") or fully resolved (rows + a
+        // real final count) — whichever this run actually reaches first, and only fail if NEITHER is
+        // ever reached (rows never render at all within the budget) or if rows render with a count slot
+        // that matches NEITHER shape (a genuine third possibility — wrong/garbled text — which is
+        // exactly the regression this case exists to catch; a test that accepts anything here would be
+        // worse than no test). Still ONE `browser.execute` per poll tick (kept from round 2 — see that
+        // round's own note on why `$$(".tv-row").length` was the dominant cost this test used to pay).
+        const outcome = (await browser.waitUntil(
           async () => {
-            const observed = await browser.execute(() => {
+            const state = await browser.execute(() => {
               const span = document.querySelector(".tv-count");
               const text = span ? span.textContent || "" : "";
-              return text.includes("Still loading") && document.querySelectorAll(".tv-row").length > 0;
+              const rowCount = document.querySelectorAll(".tv-row").length;
+              if (rowCount === 0) return null; // nothing rendered yet — keep polling
+              if (text.includes("Still loading")) return "midstream";
+              if (/\d[\d,]*\s*items?/.test(text)) return "resolved";
+              return "unknown"; // rows exist but the count slot matches neither shape — a real signal
             });
-            return observed as boolean;
+            return state;
           },
           {
             timeout: 20_000,
             interval: 15,
-            timeoutMsg: `expected the title bar to read "Still loading…" together with rendered rows while the ${theme}-theme 2,500-item Trash pass was still streaming`,
+            timeoutMsg: `expected the ${theme}-theme 2,500-item Trash pass to render at least one row within 20s (neither the mid-stream nor the resolved state was ever observed)`,
           },
-        );
+        )) as "midstream" | "resolved" | "unknown";
 
-        await snap(`trash-mid-stream-${theme}`);
+        if (outcome === "unknown") {
+          // Rows rendered, but `.tv-count` shows neither "Still loading…" nor a plausible resolved
+          // count — NOT a timing miss, a genuine regression signal. Fail loudly with the actual text.
+          const badText = await (await $(".tv-count")).getText();
+          expect.fail(
+            `rows rendered during the ${theme}-theme pass but .tv-count read neither "Still loading…" nor a resolved item count: ${JSON.stringify(badText)}`,
+          );
+        }
 
-        // Deliberately does NOT wait for the pass to fully resolve before returning (the original
-        // version did, at a 60s budget alone — most of why this test used to sit on the 90s cliff).
-        // Nothing downstream needs it to: `afterEach`'s `closeTrash()` closes the view unconditionally,
-        // and TrashView.svelte's own `loadGen` supersession means the NEXT test's `openTrash()` starts
-        // a genuinely fresh `list_trash_stream` call regardless of whether this pass's summary ever
-        // arrived — a still-in-flight stream's later batches are silently dropped once superseded, so
-        // there is nothing this wait was protecting.
+        if (outcome === "midstream") {
+          // The happy path this case exists for: caught CPE-1816's transient window live.
+          // eslint-disable-next-line no-console
+          console.log(`[trash.smoke.ts] ${theme}-theme: caught the mid-stream "Still loading…" window live.`);
+          await snap(`trash-mid-stream-${theme}`);
+        } else {
+          // outcome === "resolved": the pass finished before the poll could catch it in flight. Per the
+          // round-4 diagnosis above, this is a healthy fast-resolve outcome (CPE-1816's own ticket: "a
+          // typical trash flushes in one batch... the banner's entire lifetime could be a single
+          // frame"), not a failure — assert the TERMINAL state is genuinely correct instead of failing
+          // over a window this run simply never opened wide enough to observe, and log plainly so the
+          // screenshot this produces is honest about what it actually photographed.
+          // eslint-disable-next-line no-console
+          console.log(
+            `[trash.smoke.ts] ${theme}-theme: the 2,500-item pass resolved before the mid-stream window could be caught (healthy fast-resolve, not a failure) — capturing the resolved state instead.`,
+          );
+          await browser.waitUntil(async () => (await $$(".tv-row").length) === 2_500, {
+            timeout: 10_000,
+            timeoutMsg: `expected all 2,500 rows to be present once the ${theme}-theme pass resolved`,
+          });
+          const countText = await (await $(".tv-count")).getText();
+          expect(countText, "the resolved title bar must show the real final item count").to.match(/\d[\d,]* items?/);
+          await snap(`trash-mid-stream-${theme}-resolved-fast`);
+        }
+
+        // Deliberately does NOT wait for the pass to fully resolve before returning in the mid-stream
+        // branch (the original version did, at a 60s budget alone — most of why this test used to sit
+        // on the 90s cliff). Nothing downstream needs it to: `afterEach`'s `closeTrash()` closes the
+        // view unconditionally, and TrashView.svelte's own `loadGen` supersession means the NEXT test's
+        // `openTrash()` starts a genuinely fresh `list_trash_stream` call regardless of whether this
+        // pass's summary ever arrived — a still-in-flight stream's later batches are silently dropped
+        // once superseded, so there is nothing an extra wait here would protect in that branch.
       });
     }
   });

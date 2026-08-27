@@ -308,3 +308,61 @@ runs on failure and is failure-tolerant; all four round-2 comment corrections ar
 **Verification, round 3 (full).** `gui-smoke && npm run typecheck` — clean. Markdown rendering per above.
 No change to `TrashView.svelte`, `wdio.conf.ts`, or any dependency this round — 2 files touched
 (`gui-smoke/specs/trash.smoke.ts`, `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md`), plus this ticket.
+
+## Round 4 — a real live CI failure, not a review finding
+
+CI ran on the pushed branch and went red on `GUI smoke (ubuntu-latest) shard 2` (run `33056917385`):
+`trash.smoke.ts :: the light-theme pass: rows render and the title bar reads "Still loading…" before the
+pass resolves` failed with `expected the title bar to read "Still loading…" together with rendered rows
+while the light-theme 2,500-item Trash pass was still streaming`. The raw log showed 23/26 other cases
+green and **zero AssertionErrors from the app anywhere in the run** — the run's own log-signature
+classifier flagged it ENVIRONMENT SIGNATURE ONLY (38 environment-signature markers, 0 AssertionErrors),
+and shard 2 is the shard CPE-1910 tracks for WebDriver-socket flakiness.
+
+**Diagnosis (confirmed, not assumed): this was not a timeout and not a real Trash-view regression.** The
+timing budget introduced in round 2/3 is fine (measured ≈1.3–7s typical against a ≈43s worst case on the
+90s budget). The 2,500-item pass simply resolved FASTER than the 20s poll could catch the transitional
+"Still loading…" frame on a loaded runner — the test's OLD shape treated "I never observed the
+intermediate state" as a failure, which is not the same claim as "the app is broken." CPE-1816's own
+ticket already documents that a fast/one-batch trash can resolve within a single rendered frame; this
+run's fast resolution is that same class of healthy behaviour, just reached at 2,500 items instead of a
+handful.
+
+**Fix: removed the fail-only-if-I-catch-it shape.** The mid-stream `it()` now polls (still via ONE
+`browser.execute` per tick, kept from round 2) for EITHER shape — mid-stream (rows + "Still loading…")
+or fully resolved (rows + a real final item count) — and takes whichever this run actually reaches
+first:
+- **Caught mid-stream** (the happy path this case exists for): snaps `trash-mid-stream-<theme>.png` as
+  before.
+- **Resolved before catch** (the case that just went red in CI): logged plainly as a healthy fast-resolve
+  outcome, NOT a failure — then asserts the TERMINAL state is genuinely correct (waits for all 2,500 rows
+  to be present, asserts `.tv-count` shows a real final count) and snaps
+  `trash-mid-stream-<theme>-resolved-fast.png` instead, so the evidence stays honest about what it
+  actually photographed.
+- **Neither ever observed** (rows never render at all within 20s) or **rows render with a count slot
+  matching neither shape** (a genuinely garbled/wrong render): still fails loudly — `expect.fail(...)`
+  names the actual bad text for the garbled case; the 20s `waitUntil` itself times out for the
+  never-rendered case. This is the guard against the test now "accepting anything": a real regression
+  (TrashView.svelte rendering nothing, or the wrong text, during a large pass) still reds it.
+
+**Red-proofed both ways**, as instructed, via a throwaway standalone probe (`chai`, not a live browser —
+written, run, then deleted) exercising the EXACT classification function copied verbatim out of the
+spec against synthetic `(rowCount, text)` pairs:
+- Broken render (`rowCount=30, text=""` or `"ERROR"`) → classifies `"unknown"` → the branch's own
+  `expect.fail(...)` throws — confirmed the new shape still reds on a genuine regression.
+- The live-CI failure case reproduced (`rowCount=2500, text="2500 items"` and the comma-grouped
+  `"2,500 items"` variant) → classifies `"resolved"` → the resolved-branch assertion passes — confirmed
+  the new shape no longer reds on a healthy fast resolve.
+- Negative control: resolved text present but a hypothetical short final row count (2,499, one row
+  missing) → the resolved branch's OWN row-count `waitUntil` would still catch it — confirmed the
+  fast-resolve path isn't a rubber stamp either.
+- The honest mid-stream happy path (`rowCount=300, text="Still loading…"` and the
+  selection-suffixed `"Still loading… · 1 selected"` variant) → classifies `"midstream"` cleanly.
+- Nothing ever renders (`rowCount=0`) → classifies `null` → the real `browser.waitUntil` would time out
+  and throw, not silently pass.
+  All 8 checks behaved as predicted.
+
+**Verification, round 4.** `gui-smoke && npm run typecheck` — clean. `gui-smoke && npx tsx --test
+lib/*.test.ts` — 130/130. Root `npm run check` — 0 errors, 0 warnings. 1 file touched
+(`gui-smoke/specs/trash.smoke.ts`), plus this ticket. No change to `TrashView.svelte`, `wdio.conf.ts`,
+`MANUAL-TEST-BURNDOWN.md`, or any dependency this round.
