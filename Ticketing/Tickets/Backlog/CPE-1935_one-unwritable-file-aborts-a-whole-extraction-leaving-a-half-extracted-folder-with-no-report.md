@@ -64,6 +64,29 @@ of the silent-success shape CPE-1896 and CPE-1913 exist to eliminate.
       recurring defect is guards that prove nothing; an assertion on the `Err` string alone would be
       one of them — assert on **the filesystem**.
 
+
+## Claim narrowed 2026-08-27 — "pre-existing" is true for a read-only or directory occupant, NOT for a link
+
+This ticket was filed asserting the whole-run abort is pre-existing. PR #1050's Security Auditor
+measured both versions and found that is **only partly true**:
+
+    main   [zip junction->outside]  Ok((done 1, skipped 1, [...is a link...]))   second entry delivered = true
+    branch [zip junction->outside]  Err("refusing to write ... could not be opened for writing")  delivered = FALSE
+
+A **link** at an entry's name went from `Ok` + per-entry skip to `Err` + half-extracted folder — a
+genuine regression from CPE-1913, not pre-existing. A **read-only file** or a **plain directory** at
+the leaf aborts on both, which is the case this ticket was filed for and which remains pre-existing.
+
+**The link half has already been fixed in PR #1050** (round 2), by classification rather than errno:
+on a leaf-open failure the walk makes one more `NtCreateFile` as a directory and asks
+`name_surrogate_at`. Its author also noted this restored **parity with the Unix arm**, which has
+always classified through `link_at` — so it was a per-platform divergence, not only a regression.
+
+The plain-directory case was **deliberately left aborting**, because `main` aborts for that too and
+widening it would have exceeded the regression being fixed. So this ticket's scope is now precisely:
+**a read-only or otherwise unwritable occupant, and a plain directory occupant** — the cases where
+one entry aborts the run and leaves a half-extracted folder with no per-entry report.
+
 ## Notes
 
 Filed 2026-08-27 by the sprint Foreman from PR #1050's UAT, which added this check beyond its brief
