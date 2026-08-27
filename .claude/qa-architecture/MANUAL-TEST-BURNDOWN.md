@@ -4,7 +4,12 @@ The authoritative list of every app aspect that still needs a **human** to verif
 that will retire each one. The QA Architect drives the **still-manual count (MVD) toward zero** and never
 lets an automated row silently regress. Charter + rules: [README.md](README.md).
 
-**MVD (still-manual surfaces): 6 primary + 10 supplementary = 16 total** · _baseline seeded 2026-07-25; row #8 flipped ✅ (CPE-1049); row #6's download/verify sub-surface automated (CPE-1058) — row stays in MVD for the still-attended in-place binary swap; row #9 added 2026-07-29 (CPE-1129 UAT deferred the standalone-board switcher's live-browser click-through) then flipped ✅ 2026-07-31 (CPE-1168 headless click-through); **row #5 flipped ✅ 2026-08-04 (CPE-1307 — macOS `xattr` OS-interop test, confirmed on the macos-latest CI leg), 7→6**._
+**MVD (still-manual surfaces): 6 primary + 7 supplementary = 13 total** · _**derived, not asserted** —
+this sentence is recounted from the tables below by `src/lib/mvdLedger.ts`, and `src/lib/mvdLedger.test.ts`
+fails CI when it disagrees with them (CPE-1922). Do not patch it forward: change a row, then re-run
+`npx vitest run src/lib/mvdLedger.test.ts`, which prints the true number. Every dated note below is kept
+as history — where one's arithmetic disagrees with this sentence, this sentence is the one that was
+counted._ · _baseline seeded 2026-07-25; row #8 flipped ✅ (CPE-1049); row #6's download/verify sub-surface automated (CPE-1058) — row stays in MVD for the still-attended in-place binary swap; row #9 added 2026-07-29 (CPE-1129 UAT deferred the standalone-board switcher's live-browser click-through) then flipped ✅ 2026-07-31 (CPE-1168 headless click-through); **row #5 flipped ✅ 2026-08-04 (CPE-1307 — macOS `xattr` OS-interop test, confirmed on the macos-latest CI leg), 7→6**._
 _**2026-08-10 QA-Architect pass:** primary ledger **unchanged at 6** (nothing flipped, nothing added). **+5 supplementary rows** logged this shift (see "Sprint 2026-08-10" section at the foot) → supplementary still-manual 5→10, **total 11→16, delta +5**. MVD ROSE this shift and no automation retired anything, because the only CI substrate that could have retired it — `gui-smoke` — has produced **zero terminal verdicts in 800 consecutive runs** (see the diagnosis section below). Retiring ticket for the substrate: **CPE-1594**._
 _**2026-08-10 (same shift, CPE-1594 landed):** **rows #1, #2, #4 flipped ✅, primary 6→3, total 16→13.** The `gui-smoke-linux` job is now the BLOCKING gate (ratchet against `gui-smoke/known-failing.json`, `continue-on-error` removed) instead of a non-blocking diagnostic that never concluded — a regression outside the known-failing list now actually reds CI instead of needing a human to notice, which is the bar this ledger uses for ✅. Residuals kept honest, not hidden: **Windows leg** (row 1/2's other half) stays non-blocking/off-hot-path (CPE-1048, unfixed) — a canary only; **macOS** (row 4) stays fully attended, no `tauri-driver` support exists; **7 of 40 Linux specs** are pinned known-failing pending triage (CPE-1595; `network.smoke.ts`'s selector was fixed — the old `=text` link-text locator could never match a `<span>` — but a live PR #801 CI run confirmed it STILL fails on WebKitGTK/Xvfb, the same class of `.fav-title getText()` issue `saved-search.smoke.ts` is already listed for, so it stays in the list; `samples`/`saved-search` remain CPE-1507's). Row #3 stays 🔧: screenshots now reach CI as a build artifact (unblocking the CPE-1148 Visual Critic there for the first time), but real per-surface baselines still aren't blessed — that's still open work, not this ticket's scope. **Correction, same shift:** PR #801's first live run also surfaced two workflow bugs — the screenshot upload silently matched zero files (`actions/upload-artifact@v4` excludes dot-prefixed folders like `.screenshots/` by default; needs `include-hidden-files: true`) and, worse, its `if-no-files-found: error` aborted the job BEFORE the ratchet step ran at all. Both fixed: `include-hidden-files: true` added, the upload downgraded to `warn` and moved to run AFTER the ratchet step so the gate always executes regardless of the artifact's own outcome._
 _**2026-08-11 (CPE-1629):** supplementary row **CPE-1586 flipped ✅, supplementary 10→9, total 13→12.** `gui-smoke` had **zero preview-pane coverage at all** (the CPE-1615/PR#820 review had to hand-build a throwaway Vite+Chrome harness to look at the new Binary Inspector tab, then threw it away) and **zero dark-theme coverage anywhere** (every visual surface was verified light-only, per CPE-1586's own note). `gui-smoke/specs/preview-pane.smoke.ts` fixes both at once: it opens the preview pane against committed `samples/` files and `snap()`s the Binary Inspector's tabs (data-driven off `.bp-tabs .tab`, walked against both a native PE — `other/mini.dll` — and a new managed .NET PE fixture — `other/mini-dotnet.dll`), the sqlite data-grid, the font glyph-grid (retiring CPE-1586), and the cert/JWT EXPIRED-badge pills — **every surface in both light AND dark theme, and at both a narrow (220px) AND a comfortable (400px) pane width**. Two new reusable helpers land in the harness for future specs: `lib/theme.ts#setTheme()` and `lib/paneWidth.ts#setPreviewPaneWidth()`. Confirmed on a real `tauri build --no-bundle`: 6/6 tests passing, all screenshots opened and visually verified (narrow width visibly reflows the Binary Inspector's tab strip + wraps its field list; dark theme renders correctly throughout; the managed-PE fixture correctly triggers the app's existing "possible managed .NET" heuristic banner where the native fixture doesn't — proof the fixture is a genuine managed PE, not a placeholder). **CPE-1615 (PR #820, the ".NET metadata" tab) merged into `main` mid-ticket** — merging it into this branch and re-running the suite confirmed the managed-PE walk test picks up the REAL ".NET metadata" tab automatically at full flagship (2x2 combo) depth with ZERO spec changes: `binary-managed-net-metadata-*.png` shows the real Assembly-identity + Referenced-assemblies tables, matching this exact fixture's contents. **The ".NET metadata tab" acceptance criterion is literally satisfied, not just designed for.** `gui-smoke/known-failing.json`'s baseline is UNCHANGED (still 7) — no new spec was added to it. CPE-1577/1570/1576/1578/1573/1560 (the other Sprint 2026-08-10 supplementary rows) are untouched — different surfaces._
@@ -116,32 +121,47 @@ exiting naturally — fixed by killing the whole process group + a hard `process
 a log read. Row #3's layout half is genuinely done now, not just locally-verified-and-hoped._
 
 ## Legend
-`⛰ manual` = still needs human eyes · `🔧 in progress` = automation ticket open · `✅ automated` = retired,
-pinned by a CI/guard job (must never regress).
+`⛰ manual` = still needs human eyes · `🔧 in progress` = automation ticket open · `🟡 partial` = one
+sub-surface pinned, the rest still human · `✅ automated` = retired, pinned by a CI/guard job (must never
+regress).
+
+### How the total is counted (CPE-1922)
+
+The header sentence is **derived from these tables, not maintained alongside them.** The rule, so it can
+never be argued about again:
+
+- **MVD = `⛰` + `🔧` + `🟡`.** A row is debt whenever a human still has to look at something for the
+  row's claim to hold — whether nobody has started (`⛰`), a ticket is open but has not landed (`🔧`), or
+  only one sub-surface is pinned (`🟡`). **Only `✅` leaves MVD.** This is the ambiguity that produced
+  half the old drift: "6 primary" counted `🔧`/`🟡`, "4 primary manual" did not, and both numbers were
+  written down as if they meant the same thing.
+- **`primary`** = the numbered Ledger below. **`supplementary`** = the dated per-shift debt tables at the
+  foot. Both halves count identically; the split is only about where a row was logged.
+- Every table is annotated with `<!-- mvd-table: primary|supplementary|excluded ... -->`. The parser
+  refuses to count an unannotated table, so a new debt table cannot arrive uncounted, and an `excluded`
+  one must say why it is excluded.
+- Each counted row carries **exactly one** marker, in **exactly one** cell. A row with none, or with
+  markers in two cells, is a hard failure rather than a row that quietly counts as zero.
+- **A malformed table reds; it never shrinks the number.** A blank line between two rows, a row wrapped
+  onto a second line, a missing pipe, or a stray unescaped `|` all fail the test naming the line. This is
+  not hypothetical: a blank line inside the Ledger had detached rows #10–#14 from it — they had stopped
+  rendering as a table at all — and that was found by *rendering* the page, not by reading it.
 
 ## Ledger
+
+<!-- mvd-table: primary — the numbered Ledger; the "N primary" half of the header total -->
 
 | # | App aspect | Automated coverage today | Status | Automation to build (retires the manual step) | Ticket |
 |---|-----------|--------------------------|--------|-----------------------------------------------|--------|
 | 1 | **GUI end-to-end** (real Tauri/WebView2 app: navigate, click, dialogs, menus behave) | `tauri-driver` + WebDriver drives the real built app through 40 specs (`gui-smoke/specs/*.smoke.ts` — navigation, dialogs, menus, context-menu, macros, vault, archives, and more). **`gui-smoke-linux` (ubuntu-latest, WebKitWebDriver) is the BLOCKING gate (CPE-1594)**: `gui-smoke/lib/ratchet.ts` reds the job on any spec failing outside the committed `gui-smoke/known-failing.json` (7 of 40, pending CPE-1595 triage) or on the run not completing at all — a real regression on the other 33 specs now reds CI without a human needing to notice | ✅ automated | Pinned by `GUI smoke (ubuntu-latest)` + its ratchet step (CI-blocking). **Residual:** the `gui-smoke` (windows-latest) leg stays non-blocking + off the push/PR path (CPE-1048 — WebView2 `DevToolsActivePort` crash, unfixed; manual/nightly canary only) | CPE-1045 / CPE-1594 |
 | 2 | **Build → deploy → run smoke** (installer installs, app launches + responds) | Folded into the same CPE-1045 harness: `open-dir.smoke.ts` asserts the launched window + `<body>` render non-empty content before any other assertion runs. Now covered by the same **blocking** `gui-smoke-linux` ratchet gate as row 1 | ✅ automated | Pinned by `GUI smoke (ubuntu-latest)` + its ratchet step. **Residual:** the Windows leg (real installer/WebView2 launch on the actual target OS) stays non-blocking + manual/nightly-only (CPE-1048) | CPE-1045 / CPE-1594 |
-| 3 | **Visual / theme regression** (menus per MENUS.md, tabs per TABS.md, pill reflow, light+dark per CPE-1492/1493) | **LAYOUT half (CPE-1882): a real-browser CI job — `layout-guard` (`.github/workflows/gui-smoke.yml`, blocking, every push/PR) drives `chrome.exe --headless=new` over raw CDP (no WebDriver) against `scripts/dev-harness/layout-guard/`'s generic engine and asserts, for each case in `cases.mjs`, that no two elements in a row overlap, no text paints past its own background, and no interactive control becomes unreachable — the pill/chip-reflow rule, mechanically checked on every run — **confirmed on a real CI run**
-(job `98387478392`: `pass`, 38s, verdict printed and the job exited cleanly with no hang), after
-five rounds of UAT/reviewer findings that were each CI-only and invisible locally: a Node-version gap
-(the job crashed unconditionally before ever measuring a pixel, fixed by pinning that one job to
-Node 22), a per-width Chrome-launch cost that hit the job's own 10-minute cap on a shared runner
-(fixed by reusing one Chrome instance for the whole sweep), and a process-tree leak that hung the job
-for its full external timeout AFTER the verdict had already printed (fixed by killing the whole
-process group + a hard `process.exit` backstop) — see CPE-1882's own Work Log for the full trail.
-Live on `StatusBar.svelte` + `TrashView.svelte` today; red-proofed against CPE-1836 + CPE-1827.**
-PIXEL half unchanged: pixel-diff comparator (`gui-smoke/lib/compare.ts`) exists, unit-tested headlessly (`npm run test:unit`, 15 cases incl. identical/one-pixel-changed/size-mismatch/tolerance/bless-flow), wired as a worked example into `specs/open-dir.smoke.ts` (advisory, `GUI_SMOKE_VISUAL_STRICT=1` to gate). **CPE-1594: both `gui-smoke` legs now upload `gui-smoke/.screenshots/**` as a CI artifact (`if: always()`, so failing-run `-fail.png` shots upload too) — the ~75 `snap()`'d surfaces per run reach CI for the first time**, unblocking the CPE-1148 Visual Critic there instead of requiring a Foreman to run a local `tauri build` by hand. Real per-surface baselines still aren't blessed against those screenshots — that blessing work itself is not yet done, only for 2 synthetic demo baselines | 🔧 in progress | **Layout geometry: done, confirmed on real CI (CPE-1882)** — `layout-guard` job `98387478392` passed in 38s; extend `cases.mjs` to more components as they're touched. **Pixel: still open** — bless real baselines for the screenshot-table surfaces now that the artifact exists, and optionally gate on `GUI_SMOKE_VISUAL_STRICT=1` | CPE-1170 / CPE-1594 / CPE-1882 |
+| 3 | **Visual / theme regression** (menus per MENUS.md, tabs per TABS.md, pill reflow, light+dark per CPE-1492/1493) | **LAYOUT half (CPE-1882): a real-browser CI job — `layout-guard` (`.github/workflows/gui-smoke.yml`, blocking, every push/PR) drives `chrome.exe --headless=new` over raw CDP (no WebDriver) against `scripts/dev-harness/layout-guard/`'s generic engine and asserts, for each case in `cases.mjs`, that no two elements in a row overlap, no text paints past its own background, and no interactive control becomes unreachable — the pill/chip-reflow rule, mechanically checked on every run — **confirmed on a real CI run** (job `98387478392`: `pass`, 38s, verdict printed and the job exited cleanly with no hang), after five rounds of UAT/reviewer findings that were each CI-only and invisible locally: a Node-version gap (the job crashed unconditionally before ever measuring a pixel, fixed by pinning that one job to Node 22), a per-width Chrome-launch cost that hit the job's own 10-minute cap on a shared runner (fixed by reusing one Chrome instance for the whole sweep), and a process-tree leak that hung the job for its full external timeout AFTER the verdict had already printed (fixed by killing the whole process group + a hard `process.exit` backstop) — see CPE-1882's own Work Log for the full trail. Live on `StatusBar.svelte` + `TrashView.svelte` today; red-proofed against CPE-1836 + CPE-1827.** PIXEL half unchanged: pixel-diff comparator (`gui-smoke/lib/compare.ts`) exists, unit-tested headlessly (`npm run test:unit`, 15 cases incl. identical/one-pixel-changed/size-mismatch/tolerance/bless-flow), wired as a worked example into `specs/open-dir.smoke.ts` (advisory, `GUI_SMOKE_VISUAL_STRICT=1` to gate). **CPE-1594: both `gui-smoke` legs now upload `gui-smoke/.screenshots/**` as a CI artifact (`if: always()`, so failing-run `-fail.png` shots upload too) — the ~75 `snap()`'d surfaces per run reach CI for the first time**, unblocking the CPE-1148 Visual Critic there instead of requiring a Foreman to run a local `tauri build` by hand. Real per-surface baselines still aren't blessed against those screenshots — that blessing work itself is not yet done, only for 2 synthetic demo baselines | 🔧 in progress | **Layout geometry: done, confirmed on real CI (CPE-1882)** — `layout-guard` job `98387478392` passed in 38s; extend `cases.mjs` to more components as they're touched. **Pixel: still open** — bless real baselines for the screenshot-table surfaces now that the artifact exists, and optionally gate on `GUI_SMOKE_VISUAL_STRICT=1` | CPE-1170 / CPE-1594 / CPE-1882 |
 | 4 | **Cross-OS GUI** (macOS + Linux app behaviour, not just backend) | backend only (3-OS matrix) previously; **Linux GUI now driven headlessly AND blocking (CPE-1594)** by `gui-smoke-linux` (`.github/workflows/gui-smoke.yml`): `ubuntu-latest` + `tauri-driver` + `WebKitWebDriver` under `xvfb-run`, running the full WebdriverIO suite (open-dir navigation, code-preview, organize, batch-media, cost-History, replay, context-menu, archives, vault, macros, and more) against a real `tauri build --no-bundle` binary, gated by the `gui-smoke/lib/ratchet.ts` known-failing ratchet instead of `continue-on-error`. **Confirmed running the whole suite to completion on a LIVE PR #801 CI run** (33/40 passing, 7 known-failing pending CPE-1595 triage) — the earlier "not yet proven green" caveat is resolved; "flaky" was a misdiagnosis, the leg completes reliably in ~28 min. macOS still has no `tauri-driver` support (no WKWebView WebDriver) and stays attended | ✅ automated (Linux) | **Done for Linux** — pinned by `GUI smoke (ubuntu-latest)` + its ratchet step. **macOS residual: attended, no automation path exists yet** (no WKWebView WebDriver support in `tauri-driver`) | CPE-1171 / CPE-1594 |
 | 5 | **macOS Finder tag byte-interop** (Finder actually reads CPE's tag bytes) | **self-asserting `cargo test`** (`crates/server/tests/finder_tags_os_interop.rs`): `native_bridge::push` writes tags, then the OS's own `xattr -px com.apple.metadata:_kMDItemUserTags` reads the raw bytes back and the test decodes the binary plist and asserts the tag names (the exact bytes Finder reads); `native_bridge::pull` round-trip also asserted | ✅ automated | Done — pinned by the `Server crates` **macos-latest** `cargo test` leg (3-OS matrix), confirmed green on PR #603 (2026-08-04). Retires the hand-run `native_tags_demo.rs` eyeball. (Was mis-numbered CPE-828 → renumbered CPE-1307.) | CPE-1307 |
 | 6 | **Auto-update flow** (updater downloads, verifies signature, swaps in place) | manifest shape + minisign signature + version match automated by `crates/updater-verify` (CPE-1058, **merged** PR #376) | 🟡 partial — download/verify automated & pinned; binary-swap still attended | **Done for the download/verify/version sub-surface** — hermetic `crates/updater-verify` unit tests (manifest shape + minisign signature verify against the configured pubkey + version match) pinned on the 3-OS `Server crates` CI job, plus a `release.yml` guard (`verify-release-artifacts`, skips cleanly without signing secrets) re-checking the real built artifacts. **Residual still-manual: the in-place binary swap on each OS only** (needs a running app/GUI runner — kept in MVD) | CPE-1058 |
 | 7 | **Real remote network run** (non-loopback client↔server over the wire) | **self-asserting `cargo test`** (`crates/net/tests/real_server_e2e.rs`, `#[ignore]`d, run with `--ignored` in the new CI job): the real `cpe-server-ref` binary runs in its own container on the job's Docker bridge network, driven from the test process at the container's own IP (172.28.0.14) — a genuinely different network namespace, never `127.0.0.1`. Asserts a real listing crosses the socket AND the missing-path error comes back as a structured `NotFound` (this assertion caught a real dispatcher bug on its first-ever run: `list_dir`'s error mapping flattened every domain error to `Internal`, fixed in `crates/server/src/dispatch.rs`, with an in-process regression test added too) | ✅ automated | Pinned by `Network E2E (ubuntu-latest, real servers)` (CI-blocking, push + pull_request). Confirmed green on a live run: https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/31584936382 | CPE-819/820 → CPE-1659 |
 | 8 | **Native OS metadata interop** (ADS on Win, xattr on Linux) verified with OS tools | **self-asserting `cargo test`** (`native_meta_os_interop.rs`) reads back via the OS's own path (`file:stream` on Win / `getfattr` on Linux / `xattr` on macOS) and compares bytes | ✅ automated | Done — pinned by the `Backend` + `Server crates` 3-OS `cargo test` jobs (ubuntu leg now installs `attr` so `getfattr` always runs) | CPE-1049 |
 | 9 | **Standalone agent-board sidecar UI** (Board/Epics/Sprints view-switcher click-to-swap in a live browser) | **live-browser click-through automated** (`sidecar/agent-board/clickthrough.mjs`): launches the built sidecar, does the ADR-0001 stdio handshake to reach `Ready`, drives the announced loopback URL with headless Edge (raw WebDriver via `msedgedriver`, zero-dep), clicks Board/Epics/Sprints and asserts each view's list renders + the others actually **hide** (computed `display`, not just the `hidden` prop) + snaps a screenshot per view; tears the sidecar + browser down. Caught & fixed a real swap bug (CPE-1168: `[hidden]` was overridden by `.cols`/`.list{display:flex}` so panes never hid) — pinned by the new `ui.rs` `board_html_is_valid` assertion. Plus the pre-existing agent-board `ui.rs` HTTP/HTML tests | ✅ automated | **Done** — local harness `node sidecar/agent-board/clickthrough.mjs` (msedgedriver + a `cargo build --release` of the sidecar). Not yet wired as a CI job (needs Edge+msedgedriver on the runner, like `gui-smoke`); a follow-up can add it to `gui-smoke.yml` | CPE-1168 |
-
 | 10 | **System tray icon + tray menu** (icon appears, menu items open/act, close-to-tray and restore behave) | none at any level — no `gui-smoke` spec reaches the tray (it is an OS shell surface outside the webview), no unit test covers the menu wiring end-to-end | ⛰ manual | Needs a substrate that does not exist yet: OS-shell automation for the Windows notification area (UI Automation / `pywinauto`-class driving) or an injectable tray seam so the *menu model* + its actions can at least be asserted headlessly, leaving only "the icon is visibly there" to a human. Log the cheap half first: assert the tray menu model + action dispatch in a unit test | — (owed to user; unfiled) |
 | 11 | **Archive drag-out to the OS shell** (dragging an entry out of an opened archive to Explorer/Finder materialises the real file) | none — the in-app drag logic has unit coverage, but the hand-off to the OS shell (OLE drag-drop / `DROPFILES`) is unexercised | ⛰ manual | No substrate reaches this: CDP mouse injection (`gui-smoke/lib/mouse.ts`) drives the *webview*, and the drop target is the OS shell, outside it. Cheapest honest slice: assert the shell payload the app hands the OS (the temp-materialised path + the drag descriptor) in a Rust test, leaving only the physical drag to a human | — (owed to user; unfiled) |
 | 12 | **AI search dialog end-to-end** (shipped v0.57.45; query → results → navigate on a real build) | logic covered by jsdom component tests; **no `gui-smoke` spec** — the dialog opens via the command palette rather than a free key combo, the same obstacle recorded for `ContentIndexSearchDialog` (CPE-1263) | ⛰ manual | A `gui-smoke` spec that drives the palette (`Ctrl+Shift+P` → type → Enter) to open it and `snap()`s it in both themes; solving it also retires the CPE-1263 residual. **2026-08-20 correction: the "palette-driven opening is the obstacle" premise above is OBSOLETE** — `near-duplicates`, `similar-images` and `declutter` already do exactly that, green, on the blocking Linux leg. The work left is to extract `gui-smoke/lib/palette.ts` from those three and write the spec. Headless residual that survives: the *ranked-results* leg needs a live embedding endpoint, so the deterministic assertion is the needs-build affordance (same off-means-off shape as `instant-search.smoke.ts`), with the full query→results→navigate loop pinned on the sibling literal content search instead | **CPE-1819** (filed 2026-08-20) |
@@ -173,8 +193,20 @@ These are **not** MVD; listed so the QA Architect pins them and audits for regre
   covered them.
 - Row 12's real obstacle is **palette-driven opening**, which also blocks CPE-1263. Build the palette
   helper into `gui-smoke/lib/` once and both retire — prefer it over one-off specs.
-- When a row flips to ✅, decrement the MVD count in the header and name the pinning CI job in the row.
+- When a row flips to ✅, name the pinning CI job in the row. **Do not touch the header number** — since
+  CPE-1922 it is derived from these tables, so flipping the marker moves it for you, and hand-editing it
+  is how the old drift started. `npx vitest run src/lib/mvdLedger.test.ts` prints the new total.
 
+<!-- mvd-table: excluded — the 2026-07-26 "new manual debt from merged PRs" table. Its Status cells are
+     prose written before the marker Legend existed, and every row now reads "render automated — feel
+     residual": feel/taste is reserved for the user by the CPE-1148 split and is something we never intend
+     to burn down, so logging it as MVD would inflate the number with work that has no retiring ticket.
+     Kept verbatim as history. (One row, CPE-1263, claims a *render* residual rather than a feel one — it
+     is flagged in the 2026-08-27 section at the foot as a promote-or-close candidate for the next pass,
+     rather than being silently swallowed here.) -->
+
+| Ticket | Surface | Automated coverage today | Status | Logged |
+|--------|---------|--------------------------|--------|--------|
 | CPE-1090 | Code-preview outline strip / pills reflow / breadcrumb-on-scroll / jump feel | render pinned by `gui-smoke` (CPE-1096): opens a seeded code fixture and asserts `.outline-bar` + `.outline-pill` render on a real `tauri build` binary; job is a non-blocking CI smoke signal (`continue-on-error`, CPE-1048, WebView2-flakiness caveat), not a hard gate; fold animation/jump *feel* still worth an occasional human glance | automated — pinned by `gui-smoke` (CPE-1096; non-blocking per CPE-1048) | 2026-07-26 |
 | CPE-1091 | Per-line gutter/fold/minimap/indent-guides visual render | render pinned by `gui-smoke` (CPE-1096): asserts `.cl-row[data-line]` + `.minimap` render for the same fixture, plus the highlighted `<pre class="preview-text code-rows"><code class="cl-code">` (regression guard); job is a non-blocking CI smoke signal (`continue-on-error`, CPE-1048), not a hard gate; fold-*animation*/minimap-*drag* feel still worth an occasional human glance | automated — pinned by `gui-smoke` (CPE-1096; non-blocking per CPE-1048) | 2026-07-26 |
 | CPE-1093 | Batch-media dialog: layout/pills/entry | **interaction logic** (op-building/removal/ordering + incomplete-op gating; debounced + generation-tokened `batchMediaPlan` preview incl. stale-response drop; validation-blocks-Apply; streamed-apply `done`/`failed` progress + completion `apply` dispatch; channel teardown on completion/unmount; non-destructive toggle → `BatchJob`) pinned by `BatchMediaDialog.test.ts` (jsdom, backend mocked, CPE-1105); pixel layout/pills/theme "looks good" was human-verified on installed 0.57.35 (2026-07-26). **Render now pinned by `gui-smoke` (CPE-1144, non-blocking per CPE-1048):** `specs/batch-media.smoke.ts` seeds valid PNGs, opens the dialog via the real right-click opener, adds a Resize op, and asserts the op-pill + plan-preview rows (with the backend's computed output names) render on a real `tauri build` binary; exact pixel/theme fidelity + real image-transform *output* still worth an occasional human glance | **render automated** — pixel/feel residual | 2026-07-30 |
@@ -205,6 +237,12 @@ numbered Ledger, that's a separate reorganisation, not part of this ticket's sco
   only pure pixel/theme *feel* on the installed build remains human debt.
 
 ### Sprint 2026-07-26 (resume) — new manual debt from merged PRs
+
+<!-- mvd-table: excluded — same vintage and same reason as the 2026-07-26 table above: a pre-Legend
+     Status cell, and the row is fully `automated — pinned by gui-smoke (CPE-1130)`. Kept as history. -->
+
+| Ticket | Surface | Automated coverage today | Status | Logged |
+|--------|---------|--------------------------|--------|--------|
 | CPE-1114 | Cost History tab: SVG over-time bar-chart geometry + hover tooltips; light/dark theme of `.hd-stat`/`.hd-bar`; drawer at 340px/90vw reflow; long agent/model name ellipsis+title; a real multi-week `history.jsonl` round-tripping into believable numbers | **logic fully automated** (`agentMetricsRollup.test.ts` 14 cases assert real values; AgentTimeline History-tab component behaviour, pull-only, empty/error states covered) **+ render pinned by `gui-smoke` (CPE-1130):** `wdio.conf.ts#seedHistoryFixture` seeds a synthetic 3-row `history.jsonl` straight into the real app-data dir the built binary reads from; `specs/cost-history.smoke.ts` seeds a synthetic watched-session announcement (test-mode-only hook) to reach the drawer, opens the History tab, and asserts `.hd-bar` (over-time chart), `.hd-totals`/`.hd-stat` (totals strip), and a `.hd-table` row (by-model/by-agent) all render non-empty on a real `tauri build` binary — non-blocking CI smoke signal (`continue-on-error`, CPE-1048), not a hard gate; exact pixel/theme colour fidelity still worth an occasional human glance (same framing as the CPE-1090/1091 rows above) | **automated — pinned by `gui-smoke` (CPE-1130; non-blocking per CPE-1048)** | 2026-07-29 |
 
 - 2026-07-30 16:31 USMST — **CPE-1126 revert-safety GUI verify** (owner: user). The Agent-Watch restore panel + checkpoint markers are code-complete + reviewer-APPROVED (PR #466), but "confirm-to-revert is safe/clear" + "markers land right" need a user-present build→run. Blocker to full headless coverage: gui-smoke cannot render a checkpoint marker without a `checkpoint_create` test-mode seam (see CPE-1126 P2). Automating that seam would retire this row.
@@ -325,6 +363,10 @@ spec, none is reached by any `snap()`, and — critically — **no CI run has pr
 weeks** (see the diagnosis below), so the CPE-1148 Visual Critic cannot judge any of them without a Foreman
 running a local `tauri build` by hand. Retiring the substrate: **CPE-1594**; the per-surface specs follow it.
 
+<!-- mvd-table: supplementary — the 2026-08-10 batch-1 dispatch wave -->
+
+| Ticket(s) | Surface | Status | Automation to build | Logged |
+|-----------|---------|--------|---------------------|--------|
 | CPE-1586 | **Font preview: specimen rendering fidelity + glyph-grid spacing/contrast, in BOTH light and dark themes** (`FontPreview.svelte`, PR #798). The parse/metadata/copy-action layer is jsdom-covered (`preview/font.test.ts`, `PreviewPane.fontActions.test.ts`), but "does the specimen actually render the face, and is the glyph grid legible" is a pure rendering judgement the UAT tester explicitly refused to claim. **Doubly manual since CPE-1492/1493 shipped a real dark theme: `gui-smoke` has ZERO dark-theme coverage — no spec anywhere flips `data-theme`, so every visual surface in the app is verified light-only.** | ✅ automated — pinned by `gui-smoke` (CPE-1629) | ~~needs `font-preview.smoke.ts` + a `snap()` pair (light+dark) + artifact upload~~ Done | 2026-08-10 |
 | CPE-1577 | **User-command Toolbar surface: crowding / overflow when several long-named commands are bound to the Toolbar** (`CommandBar.svelte`, PR #797). Binding logic + surface routing are jsdom-covered (`App.userCommandSurfaces.test.ts`, `CommandBar.test.ts`, `ContextMenu.test.ts`), but layout behaviour under many long labels is a reflow judgement — and per the CLAUDE.md pill/chip rule ("tick-tacks reflow") a wrapping-vs-overflow bug here is exactly the class that only shows up on screen. UAT flagged it human-eyes-only. | ⛰ manual — logic automated, layout-under-load human-only | needs a `gui-smoke` spec that seeds N long-named toolbar-bound commands and `snap()`s the bar at 2 window widths | 2026-08-10 |
 | CPE-1570/1576/1578 | **Preview action bars (JSON / image / archive / JWT), incl. the 2 new image-rotate icons** — carried over from the prior session's "Owed to the USER" queue (CHECKPOINT.md), never logged here. Declarative per-provider action wiring is unit-tested; the rendered bar (icon column alignment per the CPE-748 menu-icon rule, button crowding, disabled states) has had no eyes and no screenshot. | ⛰ manual | needs a `preview-actions.smoke.ts` snapping the bar for each provider kind | 2026-08-10 |
@@ -471,6 +513,8 @@ a real build. This run was overwhelmingly backend hardening (S3 keys, archive ex
 parsing, temp-dir leaks, the ffmpeg pin), all of it pinned by `cargo test` on the 3-OS matrix; these two are
 the whole of its front-end debt.
 
+<!-- mvd-table: supplementary — the 2026-08-17→20 trash/listing wave -->
+
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
 | CPE-1803 / CPE-1804 / CPE-1805 | **Trash view's three new degraded-listing states**: degraded-with-no-entries (the "couldn't be read" panel that replaced a false `trash.empty`), degraded-with-entries (a partial list plus an in-place notice), and the skipped-count wording (`trash.skippedOne`/`trash.skippedMany`). The count chip is also deliberately SUPPRESSED on a degraded pass, which is itself a visible layout change | logic pinned by `cargo test` (the walker/command seam) and jsdom component tests **+ render pinned by `gui-smoke` (CPE-1822):** `gui-smoke/specs/trash.smoke.ts` opens the real Trash overlay and `snap()`s the healthy/degraded-empty/degraded-with-entries/mid-stream states, in both themes, on the blocking `GUI smoke (ubuntu-latest)` shards | ✅ automated — pinned by `gui-smoke` (CPE-1822) | ~~`trash.smoke.ts`: seed the XDG trash (`~/.local/share/Trash/{files,info}`) on the Linux leg, open the Trash section, and `snap()` all four states — healthy, degraded-empty, degraded-with-entries, skipped-count — in both themes. Compounds the older **CPE-1560** row (the overlay's look + the sidebar section's weight), which asked for the same spec; build one spec covering both. Watch for the `.fav-title` `getText()` WebKitGTK quirk that has `network`/`saved-search` in `known-failing.json` — the Trash sidebar header is the same `<span class="label fav-title">` shape, so open the view by a route that does not read that header's text~~ Done | 2026-08-20 |
@@ -506,6 +550,8 @@ loosen in the spec.
 One new row, and it is a **tooling** gap rather than a missing spec: the debt is that a Worker on this
 machine cannot run `gui-smoke` at all, so every visual change ships judged only by CI's Linux shards.
 
+<!-- mvd-table: supplementary — the 2026-08-23 batched run `batched-2026-08-23-1124` -->
+
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
 | CPE-1821 | **Five colour tokens' rendered appearance in all four themes.** `--text-muted` (20 sites: `AgentTimeline`, `ConsultedFiles`, `FileList`), `--accent-2` (`BackupDashboard`), `--bg-dim` (`SidecarManager`) were undefined, so one hard-coded hex applied in light, dark AND both high-contrast themes. Now defined per theme. **`--bg-dim` was additionally retokenised to `var(--surface)`, which deliberately gives up the log console's distinct near-black backdrop** — a visible design change nobody has looked at | contrast ratios asserted numerically per theme in `app.css.{light,dark,hc}-contrast.test.ts`, plus a token-list-driven existence/fallback guard in `app.css.warn-token.test.ts` (red-proofed 3 ways). **Zero browser-level coverage**: no `snap()` of any of these five components exists | ⛰ manual | **CORRECTED 2026-08-23, same day.** The original entry said the drivers were absent. They are not: `tauri-driver.exe`, `msedgedriver.exe` and `msedgedriver-tool.exe` are all present in `~/.cargo/bin`, and PR #1009's independent UAT built the app and captured **20 real screenshots** across 5 surfaces × 4 themes with them. The CPE-1821 worker's claim that they were unavailable was wrong and I propagated it without checking — a claim about the tooling, stated more strongly than the evidence, which is the same defect class this whole burndown tracks. The **real** blocker is narrower and far more tractable: `msedgedriver` is version **150** against installed Edge **151**, and the mismatch hangs the session partway ("Timed out receiving message from renderer") on longer specs. The UAT reproduced the identical hang on the repo's own stock `open-dir.smoke.ts`, so it is environmental, not spec-specific. Needed: **pin msedgedriver to the installed Edge major version** (the `msedgedriver-tool` already sitting in `~/.cargo/bin` exists to do exactly this) and add a preflight that fails loudly on a mismatch instead of hanging. Then a `theme-tokens.smoke.ts` covering the two surfaces the UAT could not reach — `BackupDashboard` (`--accent-2`) and `SidecarManager` (`--bg-dim`) | 2026-08-23 |
@@ -527,6 +573,8 @@ That is the missing capability, not the pictures. The reason the Visual Critic h
 nothing local could answer a **layout** question; `npm run check` and jsdom can only assert that a CSS
 property is present in the source, never that the resulting pixels do not overlap.
 
+<!-- mvd-table: supplementary — the 2026-08-23 later-same-day local-screenshot-path run -->
+
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
 | CPE-1833 / CPE-1836 (mechanism, not one surface) | **Any layout/overflow/reflow claim, app-wide.** The status bar was the occasion; the gap is general — the pill/tick-tack reflow rule, the Trash titlebar at 600px (CPE-1827), every future "does it clip at this width" ticket | jsdom can pin that a CSS property exists in the source and nothing more. The `chrome --headless=new` harness in `scripts/dev-harness/statusbar-notice/` now answers real rect/overlap/paint questions at chosen widths — but it is **one bespoke harness for one component**, invoked by hand | ⛰ manual (but the hard part is built) | Generalise that harness into something any ticket can point at a component and a width list and get back rects + overlap pairs + paint probes, then run it in CI. This is a **much cheaper path to the same goal** than fixing the driver mismatch, because it needs no WebDriver at all. Fixing `msedgedriver` (see the correction above) is still worth doing for full-app flows, but it is no longer on the critical path for layout claims | 2026-08-23 |
@@ -539,8 +587,9 @@ file is the 2026-08-20 entry near the top (`total 15→16, delta +1`: primary 6,
 2026-08-23 (later the same day)" (CPE-1833/1836, one new supplementary row) — but neither carried a
 tallied `supplementary N→N+1` delta line the way every other addition in this file does. Rather than
 silently pretend the running total never drifted, stating it plainly: **supplementary was 10+2=12,
-total was 16+2=18, immediately before this shift's flip.** (The header line at the top of this file,
-`**MVD (still-manual surfaces): 6 primary + 10 supplementary = 16 total**`, was NOT stale relative to the
+total was 16+2=18, immediately before this shift's flip.** (The header line at the top of this file, then
+reading "6 primary + 10 supplementary = 16 total" — quoted without its `**MVD …**` wrapper on purpose,
+so that only ONE line in this file ever states the total — was NOT stale relative to the
 2026-08-20 entry — it matched exactly (6 primary, 10 supplementary, 16 total). It only drifted out of sync
 on 2026-08-23, when the two additions above landed without a tallied delta line updating it. This shift's
 flip brings the running total back down to 16, which — by coincidence, not intent — makes the header line
@@ -564,3 +613,78 @@ table (`specWeightMs`) is hand-maintained and "NOTHING CATCHES" a table entry go
 landing uncosted — a heavy new spec is priced as ordinary until someone re-measures and edits the table
 by hand. `trash.smoke.ts` is un-costed today; a follow-up should add its measured runtime to
 `specWeightMs` once a live CI run reports it, rather than assuming the packer already knows.
+
+---
+## Added/recounted 2026-08-27 (CPE-1922) — the total stops being a running number
+
+**The header total is now derived from these tables, not maintained beside them.** It had been patched
+forward every shift (add what you logged, subtract what you automated) since the 2026-07-25 baseline, and
+it had drifted **+4, overstating the debt**: the header said 16; a fresh count of the tables says **12**.
+That is not one shift's arithmetic slipping. PR #1042's independent UAT recount found the same gap on
+both sides of that PR (18 claimed vs 14 real before it, 16 vs 12 after), so the drift predates any single
+entry, and every dated delta line in this file after 2026-07-25 was reconciling forward from an
+already-wrong baseline. The substantive claims in those entries were all correct; only the running total
+was not.
+
+**How 12 breaks down** — `src/lib/mvdLedger.ts` parses the tables, and `src/lib/mvdLedger.test.ts` reds
+CI whenever this header disagrees with them, naming both numbers:
+
+- **primary 6** = rows #10 (tray), #11 (archive drag-out), #12 (AI search), #14 (AI Console UI) at
+  `⛰ manual`; row #3 (visual/theme — the pixel half) at `🔧 in progress`; row #6 (auto-update's
+  still-attended in-place binary swap) at `🟡 partial`.
+- **supplementary 6** = CPE-1577, CPE-1570/1576/1578, CPE-1573 (the 2026-08-10 wave), CPE-1708/CPE-1775
+  (StatusBar advisories), CPE-1821 (colour tokens), CPE-1833/CPE-1836 (the layout/overflow mechanism).
+- Plus the one row this section adds below, which takes the total to **13**.
+
+**Two things had to be repaired before anything could be counted — and both are the reason a grep could
+never have done this job:**
+
+1. **A blank line inside the Ledger had detached rows #10–#14 from it.** With no header and no delimiter
+   row above them they were not a table at all: GitHub rendered them as a paragraph of pipe characters.
+   Same class of break as the blank line that silently deleted a burndown row earlier this week. Removed.
+2. **Row #3 had been wrapped across ten physical lines.** In GFM every wrapped line renders as its own
+   single-cell row, so the Ledger showed nine spurious rows and row #3's real cells landed nowhere.
+   Joined back onto one line; not one character of its text changed.
+
+Also repaired while counting: the two 2026-07 tables and the 2026-08-10 table had no header/delimiter
+rows at all and rendered as paragraphs; `🟡 partial` was in use on row #6 but had never been added to the
+Legend; and one CPE-1708 cell contains an escaped pipe (a `grep` alternation) that a naive line-splitter
+reads as an extra column — the parser splits on unescaped pipes only, exactly as GFM does.
+
+**How `🔧` and `🟡` count is now written down** (Legend → "How the total is counted"): both are MVD,
+because in both cases a human is still the test until the automation lands. The old ambiguity between
+"6 primary" (which counted them) and "4 primary manual" (which did not) is how half the drift hid.
+
+**Deliberately NOT folded in.** The two 2026-07 tables are annotated `excluded`, with the reason in the
+annotation itself: their Status cells predate the marker Legend, and every row now reads "render
+automated — feel residual". Feel/taste is reserved for the user by the CPE-1148 split — debt we never
+intend to burn down — so counting it would inflate the number with work that has no retiring ticket. One
+row in there, **CPE-1263**, claims a *render/gui-smoke* residual rather than a feel one; it is flagged
+here rather than silently swallowed, and the next QA-Architect pass should either promote it to a
+supplementary row or close it. Promoting it inside this ticket would have meant the recount landing on a
+number nobody had independently checked — the habit this ticket exists to break.
+
+**`trash-degraded-scrolled` — checked, and already honest.** The concern that it is captured dark-only
+while its test title claims "in both themes" was **already resolved inside CPE-1822**: the snapshot is
+named `trash-degraded-scrolled-dark`, the `it()` title now says "scrolled screenshot: dark theme only —
+see the `snap()` call below", and the `snap()` call carries a comment explaining that it is one extra
+capture on top of the mandatory light+dark pair taken at the top of the list, not a second full pass
+(`gui-smoke/specs/trash.smoke.ts`, the CPE-1805 `it()` and its closing `snap()`). Nothing to fix — recorded
+so the question is closed with evidence instead of left open.
+
+**New debt: the half of the Trash view CPE-1822 did not photograph.** `trash.smoke.ts` covers empty,
+populated, the three degraded states and the mid-stream pass, in both themes — genuinely strong coverage,
+which is exactly why the uncovered half has to be visible rather than assumed-covered. None of the
+surfaces below is reached by any `snap()` or assertion in that spec (grepped 2026-08-27: it contains no
+`selected`, `ConfirmDialog`, `restoreErrors`, overflow-menu, narrow-width or truncation case at all), and
+every one of them exists in `src/lib/components/TrashView.svelte` today.
+
+<!-- mvd-table: supplementary — the 2026-08-27 CPE-1922 recount shift -->
+
+| Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
+|-----------|---------|--------------------------|--------|---------------------|--------|
+| CPE-1822 residual (unfiled) | **The Trash-view surfaces CPE-1822 did not photograph.** Row **selection** state (the per-row checkboxes, the select-all checkbox, and the "N selected" label built by `selectedCountLabel`); the Empty/Restore **`ConfirmDialog`** — the highest-stakes screen in the view, since Empty is irreversible and both routes to it are funnelled through that dialog per MENUS.md; the **`restoreErrors`** banner (the per-entry failure list after a partial restore); the **overflow menu** (Select all / Restore / Empty selected / Empty Trash / Refresh / Docs — `TrashView.svelte`'s own comment warns this can outgrow the viewport floor); **narrow width**; and **long-filename truncation** in the name column. | `TrashView.test.ts` + `TrashView.bidiSpoof.test.ts` (jsdom) cover the selection set, the confirm scope and the restore-error list as *logic*; `gui-smoke/specs/trash.smoke.ts` drives none of them — every one of its passes lands on a freshly-opened, nothing-selected overlay at one width | ⛰ manual | Extend `trash.smoke.ts`: check two rows and `snap()` the selected state plus its "N selected" label; open the Empty confirm by both routes and `snap()` it; seed a restore that fails one entry and `snap()` the banner; open the overflow menu, `snap()` it and assert it stays inside the viewport; add a narrow-width pass and a long-filename fixture. Reuses `lib/theme.ts#setTheme()` and the spec's existing fixture helpers — no new substrate needed | 2026-08-27 |
+
+**Primary ledger unchanged at 6** this shift: nothing flipped into it and nothing was added to it. The
+recount moved the *stated* number, not the debt — six primary rows and six of the seven supplementary
+rows were already there and already true. They were simply being reported as sixteen.
