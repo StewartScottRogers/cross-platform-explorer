@@ -793,8 +793,12 @@ describe("Agent Deck launcher — catalog controls", () => {
       await w.refreshCatalog();
       const msg = w.document.getElementById("msg");
       expect(msg.textContent).toMatch(/gone backwards/i);
-      expect(msg.textContent).toMatch(/older than the ones you already have/i);
+      // UAT: the claim must be SCOPED by the counts, not left as an unqualified "the catalog".
+      // Here every entry the index carried (2) regressed, so it says 2 of 2 — plural form.
+      expect(msg.textContent).toMatch(/2 of the 2 published agent entries are older than the versions you already have/i);
       expect(msg.textContent).toMatch(/agents are unchanged/i);
+      expect(msg.textContent).toMatch(/nothing to do on your end/i);
+      expect(msg.textContent).toMatch(/clears itself once a newer catalog is published/i);
       expect(msg.textContent).not.toMatch(/you already have the latest published agents/i);
       expect(msg.textContent).not.toBe("Agents are already up to date.");
       expect(msg.style.color).toBe(AMBER);
@@ -803,8 +807,10 @@ describe("Agent Deck launcher — catalog controls", () => {
     });
 
     // A mixed publish (some entries current, one regressed) must surface the regression, not the
-    // reassuring half — the alarming state wins when both are present.
-    it("a mixed publish — some current, some regressed — reports the regression, not 'you're current'", async () => {
+    // reassuring half — the alarming state wins when both are present. But it must not OVER-claim
+    // either: with 3 of 4 entries fine, an unqualified "the catalog has gone backwards" reads as a
+    // wholesale regression, so the sentence carries the counts (UAT on PR #1051).
+    it("a mixed publish — some current, some regressed — reports the regression, scoped to how many", async () => {
       const { w } = await mountLauncher((path) =>
         path === "/api/catalog/refresh"
           ? {
@@ -820,6 +826,11 @@ describe("Agent Deck launcher — catalog controls", () => {
       await w.refreshCatalog();
       const msg = w.document.getElementById("msg");
       expect(msg.textContent).toMatch(/gone backwards/i);
+      // Singular form, and the denominator counts every entry the index carried (3 current + 1
+      // regressed), so the user can see the regression is one entry out of four — not all of them.
+      expect(msg.textContent).toMatch(/1 of the 4 published agent entries is older than the version you already have/i);
+      expect(msg.textContent).not.toMatch(/1 of the 1 /);
+      expect(msg.textContent).toMatch(/nothing to do on your end/i);
       expect(msg.style.color).toBe(AMBER);
     });
 

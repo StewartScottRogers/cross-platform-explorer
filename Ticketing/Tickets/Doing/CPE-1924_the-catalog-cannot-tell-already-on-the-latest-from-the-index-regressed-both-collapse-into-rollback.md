@@ -124,3 +124,32 @@ fixes. The alternative (carry a per-entry version forward when the manifest sha2
 requires the release signer to fetch and trust the previously published index at publish time — new
 network and new trust surface in the release pipeline, for a cosmetic win. Not worth bundling into a
 trust-engine change that is trying to stay small and reviewable.
+
+**2026-08-27 — post-review polish (PR #1051 gated: Reviewer APPROVE, Security Auditor SEC PASS, UAT
+PASS).** Rebased on `main` (#1039, #1048, #1049 had landed). Three changes:
+
+1. **Provenance claim corrected (Security Auditor, CPE-1933 shape).** Its sabotage C — permitting
+   `Same` in `is_upgrade()` while leaving `refusal()` correct — left every behavioural probe green,
+   which empirically proves `is_upgrade()` / `is_upgrade_over()` are **off** the enforcement path.
+   The doc comment calling `is_upgrade` "the anti-rollback rule itself" was therefore a false
+   provenance claim; both predicates now say plainly that they are derived and that
+   `VersionStanding::refusal` is the enforced rule, and `refusal`'s own comment says so from its
+   side. The invariant test is what keeps the derived pair honest — noted in the comment.
+2. **The regression sentence is now scoped by count (UAT).** With `alreadyCurrent: 3,
+   regressedRejected: 1` the old wording claimed a wholesale regression. It now reads "1 of the 4
+   published agent entries is older than the version you already have…" (singular/plural handled),
+   with the denominator summing the rejection buckets. Priority is unchanged — the regression still
+   wins over already-current. `integrityRejected` is included in the sum although it is always 0 on
+   this path (its branch is checked first), so the count survives a future re-ordering.
+3. **Docs finished.** `src/docs/04-ai-console.md` now covers the success and mixed-publish cases as
+   well as the four "nothing changed" ones, and closes the loop for someone looking at the amber
+   bar: nothing to fix on their machine, it clears when the next good catalog is published.
+
+Not touched, deliberately: the `applied > 0` masking (filed as **CPE-1939** together with the
+`integrityRejected` case) and the release-versioning scheme (filed as **CPE-1941**, whose framing —
+derive `VERSION` from the tag's commit timestamp or a committed counter, needing no new network or
+trust surface — is a better option than the one this ticket weighed and rejected).
+
+Red-proof for the new wording: replaced the count-bearing sentence with an unqualified one; the two
+jsdom regression tests went red on `/2 of the 2 published agent entries are…/` and `/1 of the 4
+published agent entries is…/`, then restored to green.

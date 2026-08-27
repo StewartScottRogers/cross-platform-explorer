@@ -75,13 +75,19 @@ pub enum VersionStanding {
 }
 
 impl VersionStanding {
-    /// The anti-rollback rule itself: **only** [`Self::Newer`] may be applied.
+    /// Whether this standing is the applyable one ([`Self::Newer`]). **Not the enforcement point:**
+    /// nothing on the gating path calls this, and permitting `Same` here while leaving
+    /// [`Self::refusal`] correct changes no behaviour at all (CPE-1924's security audit proved that
+    /// empirically — its sabotage C left every behavioural probe green). [`Self::refusal`] is the
+    /// rule that is actually enforced; this is a derived predicate, kept in step with it by
+    /// `refusal_and_is_upgrade_agree_on_what_is_applyable`.
     pub fn is_upgrade(self) -> bool {
         matches!(self, VersionStanding::Newer)
     }
     /// Why an entry with this standing was refused — `None` exactly when [`Self::is_upgrade`] is
-    /// true. Splitting `==` from `<` is a *reporting* refinement only: both arms still return a
-    /// refusal, so no standing that isn't `Newer` can reach `Accept`.
+    /// true. **This is the enforced anti-rollback rule**: `gate_manifest_opt` returns whatever this
+    /// names, so its single `None` arm is the only route to `Accept`. Splitting `==` from `<` is a
+    /// *reporting* refinement only — both non-`Newer` arms still return a refusal.
     /// (Invariant pinned by `refusal_and_is_upgrade_agree_on_what_is_applyable`.)
     pub fn refusal(self) -> Option<EntryVerdict> {
         match self {
@@ -109,8 +115,10 @@ impl CatalogEntry {
             },
         }
     }
-    /// Anti-rollback: accept only a strictly newer version than what's installed (or a first install).
-    /// Derived from [`Self::version_standing`] — never a second, independent comparison.
+    /// Whether this entry is strictly newer than what's installed (or a first install). Like
+    /// [`VersionStanding::is_upgrade`] it is a **derived predicate, not the enforcement point** —
+    /// the gating path goes through [`VersionStanding::refusal`]. Derived from
+    /// [`Self::version_standing`] — never a second, independent comparison.
     pub fn is_upgrade_over(&self, installed: Option<u64>) -> bool {
         self.version_standing(installed).is_upgrade()
     }

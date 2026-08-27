@@ -1838,7 +1838,19 @@ async function refreshCatalog() {
       // untouched), and unlike the "==" branch below this really does mean something upstream
       // regressed, so it's the one version-rejection worth a heads-up. Checked BEFORE the
       // already-current branch: if a mixed publish produces both, the regression is what matters.
-      setMsg("Heads up: the published agent catalog has gone backwards — it's offering versions older than the ones you already have, so nothing was installed. Your agents are unchanged and safe to use; the publishing pipeline is the thing that needs a look, not anything on your end.", "warn");
+      //
+      // UAT: leading with the regression is right, but it must be SCOPED — with 1 regressed entry
+      // out of 4, an unqualified "the catalog has gone backwards" over-claims a wholesale
+      // regression. The counts are already in the payload, so say how many. `applied` is 0 in this
+      // branch (a nonzero one returns above), so the entries we know the index carried are the
+      // rejection buckets. `integrityRejected` is 0 whenever we reach here (its branch is checked
+      // first) — it's in the sum so the count stays right if that ordering ever changes.
+      const bad = r.regressedRejected;
+      const seen = (r.alreadyCurrent || 0) + bad + (r.integrityRejected || 0);
+      const scope = bad === 1
+        ? "1 of the " + seen + " published agent entries is older than the version you already have, so it wasn't installed"
+        : bad + " of the " + seen + " published agent entries are older than the versions you already have, so they weren't installed";
+      setMsg("Heads up: the published agent catalog has gone backwards — " + scope + ". Your agents are unchanged and safe to use, and there's nothing to do on your end; the publishing side is what needs a look, and this clears itself once a newer catalog is published.", "warn");
     } else if (r.indexOk && r.alreadyCurrent > 0) {
       // CPE-1924: every listed entry names EXACTLY the version already installed. This is the
       // routine, healthy outcome of checking again between releases — under the release pipeline's
