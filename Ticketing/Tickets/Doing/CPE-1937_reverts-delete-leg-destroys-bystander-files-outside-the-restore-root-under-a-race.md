@@ -359,3 +359,53 @@ CPE-1937 in the first place, and a stale residual note is read as a live one.
   assertions; sabotage 3's two reds are a directory-debris assertion and a *wording* assertion, and
   sabotage 4's `open_beneath` red fires at an `expect_err` — a verdict assertion — before reaching its
   harm check. The round-2 leaf sabotage reddens on harm on both platforms.
+
+## Work Log — round 3, 2026-08-27 (Reviewer APPROVE, Auditor one Low)
+
+### F-R2-1 — the test seam could outlive the call that armed it. Closed with an RAII guard.
+
+`between_descent_and_leaf` **takes** the hook, so it fires once *if it is reached*. A call that ends
+before the seam never reaches it — a refused descent is the easy one — and the hook then sat armed
+until some later, unrelated delete ran it:
+
+```text
+still_armed_after_refused_descent = true
+fired_on_next_unrelated_delete    = 1
+```
+
+Latent rather than live (the one shipped test that arms it always reaches the seam and clears
+defensively in its skip path), but the cell is `pub(crate)`, any module's tests may arm it, and
+`--test-threads=1` puts them all on one thread — so a leak crosses tests, and a stray directory swap
+inside somebody else's containment fixture is exactly what makes a later green mean nothing.
+
+**A `SeamGuard` bound at the top of `remove_file_beneath`, not a clear-on-entry** — the other option
+offered. Clearing at entry would discard the hook the caller had just armed *for that call*; a guard
+disarms on every exit path instead, including the early refusals that never reach the seam.
+
+Red-proofed: `cpe_1937_the_test_seam_is_disarmed_even_when_the_call_never_reaches_it` fails with
+*"the seam survived the call that armed it"* when the guard binding is removed. It asserts both halves
+— the cell is empty afterwards, **and** a following ordinary delete does not fire the hook — so it
+still reddens if the cell were only cleared somewhere else by accident. Suite re-run under
+`--test-threads=1`, which is the leak's own scenario: 2423 / 0 on Windows.
+
+### Two one-line notes, both requested rather than discovered
+
+- **`between_descent_and_leaf`'s doc now tells the next author to add a call site.** Nothing structural
+  stops a future descent-then-leaf primitive from omitting the seam, and the seam's own doc names
+  `renameat` / `copilot::apply_op` as this module's next consumer — so that ticket is the one at risk.
+  There is no existing pattern to copy: `WALK_SYSCALLS`'s only consumer prints an unasserted number.
+- **The pre-1709 read-only fallback is marked as having no CI coverage**, with the audit's forced-branch
+  numbers recorded as the only evidence it has, and its restore is marked **best-effort** — `let _ =
+  set_attributes(...)`, so a failing restore leaves the bit cleared and nothing says so. The comment
+  above it read as unconditional and no longer does.
+
+### Re-verified after the change
+
+- Windows `cargo test -p cpe-server --lib`: **2423 / 0 / 11 ignored**, and **2423 / 0** again under
+  `--test-threads=1`.
+- Real Linux: **2410 / 0 / 11 ignored**; the CPE-1937 set also run `--test-threads=1` (7 / 0).
+- `cargo clippy --all-targets -- -D warnings` clean in plain / `index` / `specta` on both platforms.
+- The audit's artifact check re-run because this round **added** a `#[cfg(test)]` item: the linked,
+  non-test `ticket-mcp` binary has `SeamGuard` **0 strings / 0 symbols**, `BETWEEN_DESCENT_AND_LEAF`
+  0 / 0, `WALK_SYSCALLS` 0 / 0 — against a test-binary control showing 10 for each thread-local, so the
+  probe is not vacuous.

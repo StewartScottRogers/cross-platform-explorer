@@ -156,13 +156,58 @@ fn tick() {}
 // test do the swap the racer was trying to hit by luck. `cpe_1937_the_leaf_and_not_only_the_descent…`
 // then passes only if the leaf resolves against the handle rather than the path.
 //
+// **NOTE FOR THE NEXT AUTHOR: a new descent-then-leaf primitive in this module must call
+// `between_descent_and_leaf` too.** Nothing structural enforces that — `renameat`, which
+// `copilot::apply_op` is waiting on and which is this module's next consumer, would otherwise ship with
+// exactly the CI gap this seam was added to close. There is no existing pattern to copy: `WALK_SYSCALLS`'s
+// only consumer prints an unasserted number, so it has no such guard either.
+//
 // Compiled out entirely in a shipped binary — `#[cfg(test)]`, the same discipline as `WALK_SYSCALLS`
-// above, so the seam cannot become a production hook. The hook is **taken** rather than borrowed across
-// the call, so it fires exactly once and a hook that re-enters this module cannot deadlock the `RefCell`.
+// above, so the seam cannot become a production hook. **Proven on the artifact rather than on the
+// attribute** (PR #1059 round 2 audit): the linked, non-test `ticket-mcp` binary that depends on this
+// crate contains **0 strings and 0 symbols** for the seam — `WALK_SYSCALLS` likewise 0 — against a
+// test-binary control of 3/3, and zero occurrences across every codegen `.o` unit. The single surviving
+// occurrence in the rlib is inside `lib.rmeta`, which the linker discards.
+//
+// The hook is **taken** rather than borrowed across the call, so it fires exactly once and a hook that
+// re-enters this module cannot deadlock the `RefCell` (also verified by that audit).
 #[cfg(test)]
 thread_local! {
     pub(crate) static BETWEEN_DESCENT_AND_LEAF: std::cell::RefCell<Option<Box<dyn Fn()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Disarms the seam when [`remove_file_beneath`] returns, **however it returns** (CPE-1937 round 2,
+/// finding F-R2-1).
+///
+/// Taking the hook *at* the seam is not enough on its own, because a call can end **before** the seam:
+/// arm the hook, run a delete whose **descent** refuses, and nothing consumes it — then the next,
+/// unrelated delete fires someone else's hook. Measured identically on both platforms:
+///
+/// ```text
+/// still_armed_after_refused_descent = true
+/// fired_on_next_unrelated_delete    = 1
+/// ```
+///
+/// Latent rather than live in the shipped tests (the one that arms it always reaches the seam, and
+/// clears defensively in its skip path), but the cell is `pub(crate)`, any module's tests may arm it,
+/// and `--test-threads=1` puts every test on one thread — so a leak crosses tests, and a cross-test
+/// leak in a *containment* fixture is what makes a later green mean nothing.
+///
+/// **A guard rather than a clear-on-entry**, which was the other option offered: clearing at entry
+/// would discard the hook the caller had just armed for that very call. This is a zero-sized value
+/// bound at the top of [`remove_file_beneath`], so every early `Err` — a non-plain relative path, the
+/// root-itself refusal, a refused descent — disarms it on the way out.
+#[cfg(test)]
+struct SeamGuard;
+
+#[cfg(test)]
+impl Drop for SeamGuard {
+    fn drop(&mut self) {
+        BETWEEN_DESCENT_AND_LEAF.with(|h| {
+            let _ = h.borrow_mut().take();
+        });
+    }
 }
 
 #[cfg(test)]
@@ -338,6 +383,10 @@ pub(crate) fn create_dir_beneath(root: &RootDir, rel: &Path) -> Result<(), Refus
 /// correct, and it is what a future `DeleteRefusalGroup` would read. See `apply_delete`'s doc for what
 /// wiring it would actually cost.
 pub(crate) fn remove_file_beneath(root: &RootDir, rel: &Path) -> Result<(), Refusal> {
+    // Disarm the seam on EVERY exit path, including the early refusals below that never reach
+    // it. See `SeamGuard` for the cross-test leak this closes.
+    #[cfg(test)]
+    let _seam = SeamGuard;
     let parts = plain_components(root, rel)?;
     let Some((last, dirs)) = parts.split_last() else {
         return Err(Refusal {
@@ -1012,8 +1061,24 @@ mod sys {
         // ourselves (on the handle, never by path) and use the delete-on-close form. If that still
         // fails, put the attribute back — a refused deletion must not leave the file's attributes
         // changed, which would be a silent edit performed by an operation that did nothing else.
+        //
+        // **NOT COVERED BY CI, and that is a known gap** (CPE-1937 round 2). Every supported Windows
+        // answers `FileDispositionInfoEx`, so nothing in the suite reaches these four lines; the only
+        // exercise they have had is PR #1059's Security Auditor forcing the branch open with an
+        // environment gate and then forcing `dispose_on_close` to fail as well. That run is the
+        // evidence for the restore below — `survived=true, readonly_before=true, READONLY_AFTER=true`,
+        // and a plain file refused the same way came back `readonly_after=false`, so no attribute is
+        // invented for a file that never had one. Treat a change here as untested until re-run that
+        // way; a reachable regression test would need a pre-1709 host or a filesystem that declines
+        // the Ex form.
         let restore = if may_write_attrs { clear_read_only(&file) } else { None };
         dispose_on_close(&file).map_err(|e| {
+            // **Best-effort, and the sentence above is therefore conditional.** If putting the
+            // attribute back fails — the handle lost its rights, the volume went away — the file is
+            // left writable and nothing says so, because there is no second channel to say it in and
+            // failing the refusal harder would not restore the bit either. The narrow case it can
+            // happen in is the only reason it is acceptable: this is already the fallback of a
+            // fallback, on a host that has just refused two deletion calls in a row.
             if let Some(was) = restore {
                 let _ = set_attributes(&file, was);
             }
@@ -1697,6 +1762,72 @@ mod tests {
     /// `FileDispositionInfoEx` with `IGNORE_READONLY_ATTRIBUTE` is what `std` itself uses and is what
     /// this now does. Unix has no equivalent bit — `unlinkat` never consults one — so the test runs on
     /// every platform with the permission staged the platform's own way, and both must delete.
+    /// **CPE-1937 round 2, finding F-R2-1 — the seam must not survive the call that armed it.**
+    ///
+    /// [`between_descent_and_leaf`] takes the hook, so it fires once *if it is reached*. A call that
+    /// ends **before** the seam never reaches it — a refused descent is the easy one — and the hook
+    /// then sat armed until some later, unrelated delete ran it:
+    ///
+    /// ```text
+    /// still_armed_after_refused_descent = true
+    /// fired_on_next_unrelated_delete    = 1
+    /// ```
+    ///
+    /// Latent in the shipped tests, but the cell is `pub(crate)`, any module's tests can arm it, and
+    /// `--test-threads=1` puts them all on one thread — so it crosses tests, and a stray swap inside
+    /// someone else's containment fixture is exactly the kind of thing that makes a green meaningless.
+    ///
+    /// Both halves are asserted: the cell is empty after the refused call (the direct property), and a
+    /// following ordinary delete does **not** fire it (the consequence that actually bites). The second
+    /// is what makes this test fail without the guard even if the cell were cleared somewhere else by
+    /// accident.
+    #[test]
+    fn cpe_1937_the_test_seam_is_disarmed_even_when_the_call_never_reaches_it() {
+        let d = scratch("seam-leak");
+        let root = open_root(&d, "folder being restored").unwrap();
+        std::fs::write(d.join("ordinary.txt"), b"unrelated").unwrap();
+
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let fired = fired.clone();
+            BETWEEN_DESCENT_AND_LEAF.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    fired.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }));
+            });
+        }
+
+        // A descent that refuses: `missing/` is not there, and a delete never creates its parents. The
+        // call returns before the seam, so nothing consumes the hook.
+        let refused = remove_file_beneath(&root, Path::new("missing/x.txt"));
+        assert!(refused.is_err(), "fixture is inert: this call was supposed to refuse at the descent");
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "fixture is inert: the refused call reached the seam, so it cannot leak one"
+        );
+
+        let still_armed = BETWEEN_DESCENT_AND_LEAF.with(|h| h.borrow().is_some());
+        assert!(
+            !still_armed,
+            "the seam survived the call that armed it — the next unrelated delete would fire another \
+             test's hook"
+        );
+
+        // The consequence, which is the half that actually bites: an ordinary later delete must run
+        // untouched.
+        remove_file_beneath(&root, Path::new("ordinary.txt")).unwrap();
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a leaked seam fired inside an unrelated delete"
+        );
+        assert!(!d.join("ordinary.txt").exists(), "and that delete must still have happened");
+
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn cpe_1937_a_read_only_file_is_still_deleted_as_std_would() {
         let d = scratch("unlink-readonly");
