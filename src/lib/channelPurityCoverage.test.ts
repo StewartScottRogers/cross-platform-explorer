@@ -84,6 +84,15 @@
 //     regex at all: it reads each variant's `(identifier, token)` pair directly from
 //     `define_channel!`'s invocation, which is simpler AND strictly more robust than round 2's
 //     separate enum-body parser + Display-arm regex kept in sync by nothing but review discipline.
+//   N6 (Reviewer finding, coordinator override on round 3's approval -- fixed in the SAME round rather
+//     than filed as a follow-up) -- `isRealInvocationLine()` proved the binary is INVOKED, not that a
+//     failure actually FAILS the step. Every real site runs under `shell: bash` (`set -eo pipefail`),
+//     so a bad manifest fails the job today -- but appending `|| true` (or `| true`, or `; true`)
+//     silently defeats that while the line still starts with `cargo run`, still names the binary, and
+//     still carries the flag, so it read as full coverage: the same intent as R2-1's commented-out
+//     flag, just laundered through the exit code instead of the text. Fixed: `isRealInvocationLine()`
+//     now rejects any line containing `|` (covers `|| true` too) or `;` -- a real invocation in this
+//     repo never needs either.
 //
 // Structural assertions go through `parseYaml` (src/lib/preview/yaml.ts, CPE-1617), the same approach
 // `catalogPublishFreshnessGuard.test.ts` and `releaseHangHardening.test.ts` use.
@@ -255,9 +264,20 @@ const BUILD_JOB_FOR_WORKFLOW: Record<string, string> = {
  *  `^cargo\s+run\b` is what rejects the Reviewer's decoy job: a step whose `run:` is just
  *  `echo cargo run --bin verify-release-artifacts -- --expect-channel sidecar` contains every
  *  substring a naive scan would look for, but the line actually starts with `echo`, so it never runs
- *  the binary at all. */
+ *  the binary at all.
+ *
+ *  N6 (Reviewer, coordinator override on round 3's approval): the checks above prove the binary is
+ *  INVOKED, not that its failure actually FAILS the step. `shell: bash` runs every real site under
+ *  `set -eo pipefail`, so today a bad manifest fails the job — but appending `|| true` (or `| true`,
+ *  or `; true`) silently defeats that while the line still starts with `cargo run`, still names the
+ *  binary, and still carries the flag, so it read as full coverage: the same intent as commenting the
+ *  flag out (R2-1), just laundered through the exit code instead of the text. A real invocation in
+ *  this repo never needs a pipe or a semicolon, so any `|` (covers `|| true` too) or `;` anywhere on
+ *  the line is rejected outright, rather than trying to enumerate every fallback spelling. */
 function isRealInvocationLine(line: string): boolean {
-  return /^cargo\s+run\b.*--bin\s+verify-release-artifacts\b.*--(?:\s|$)/.test(line);
+  if (!/^cargo\s+run\b.*--bin\s+verify-release-artifacts\b.*--(?:\s|$)/.test(line)) return false;
+  if (/[|;]/.test(line)) return false; // N6: pipe/semicolon chaining can swallow the exit code silently
+  return true;
 }
 
 /** Every `--expect-channel` value a single step's `run:` text genuinely declares — one entry per
@@ -498,6 +518,59 @@ describe("CPE-1908 round 3, R2-1: guardInvocations() only credits a channel to t
     expect(decoyRun.includes("--expect-channel sidecar")).toBe(true);
     expect(isRealInvocationLine(decoyRun)).toBe(false);
     expect(channelsDeclaredByStepRun(decoyRun)).toEqual([]);
+  });
+});
+
+/** Reproduces `isRealInvocationLine()` exactly as it stood immediately after R2-1/R2-2 (this same
+ *  round), before N6's pipe/semicolon rejection -- i.e. it proves the binary is invoked and the flag
+ *  is present, but says nothing about whether the invocation's OWN exit code can reach the step. Kept
+ *  local to this test file, not production code, purely so the tests below can show N6's three decoy
+ *  shapes really did read as coverage under the pre-N6 predicate before asserting the fix rejects
+ *  them. */
+function preN6IsRealInvocationLine(line: string): boolean {
+  return /^cargo\s+run\b.*--bin\s+verify-release-artifacts\b.*--(?:\s|$)/.test(line);
+}
+function preN6ChannelsDeclaredByStepRun(run: string | undefined): string[] {
+  const channels: string[] = [];
+  for (const line of logicalLines(run)) {
+    if (!preN6IsRealInvocationLine(line)) continue;
+    const m = line.match(/--expect-channel\s+(\S+)/);
+    if (m) channels.push(m[1].toLowerCase());
+  }
+  return channels;
+}
+
+describe("CPE-1908 round 3, N6 (Reviewer finding, coordinator override): a piped/chained invocation whose OWN exit code never reaches the step is not coverage", () => {
+  // shell: bash runs every real site under `set -eo pipefail` (see release.yml/release-sidecar.yml),
+  // so today a bad manifest fails the job. Each shape below defeats that silently while still
+  // starting with `cargo run`, still naming the binary, and still carrying the flag.
+  // Plain concatenation, not a template-literal source continuation: REAL_INVOCATION_LINE's
+  // value already ends on its own final physical line (no trailing backslash), so appending
+  // text directly lands it on that SAME logical line once logicalLines() joins the
+  // continuations -- exactly the shape of a real invocation with a pipe/semicolon tacked onto
+  // its own line.
+  const orTrue = `${REAL_INVOCATION_LINE} --expect-channel sidecar || true`;
+  const semicolonTrue = `${REAL_INVOCATION_LINE} --expect-channel sidecar ; true`;
+  const pipeTrue = `${REAL_INVOCATION_LINE} --expect-channel sidecar | true`;
+
+  it("RED (pre-N6) / GREEN (N6 fix): `|| true` no longer counts as coverage", () => {
+    expect(preN6ChannelsDeclaredByStepRun(orTrue), "RED: the pre-N6 predicate wrongly finds coverage").toEqual(["sidecar"]);
+    expect(channelsDeclaredByStepRun(orTrue), "GREEN: N6's pipe/semicolon rejection correctly finds none").toEqual([]);
+  });
+
+  it("RED (pre-N6) / GREEN (N6 fix): `; true` no longer counts as coverage", () => {
+    expect(preN6ChannelsDeclaredByStepRun(semicolonTrue), "RED: the pre-N6 predicate wrongly finds coverage").toEqual(["sidecar"]);
+    expect(channelsDeclaredByStepRun(semicolonTrue), "GREEN: N6's pipe/semicolon rejection correctly finds none").toEqual([]);
+  });
+
+  it("RED (pre-N6) / GREEN (N6 fix): `| true` no longer counts as coverage", () => {
+    expect(preN6ChannelsDeclaredByStepRun(pipeTrue), "RED: the pre-N6 predicate wrongly finds coverage").toEqual(["sidecar"]);
+    expect(channelsDeclaredByStepRun(pipeTrue), "GREEN: N6's pipe/semicolon rejection correctly finds none").toEqual([]);
+  });
+
+  it("sanity: the genuine invocation (no pipe, no semicolon) is unaffected by N6's rejection", () => {
+    const run = `${REAL_INVOCATION_LINE} --expect-channel sidecar`;
+    expect(channelsDeclaredByStepRun(run)).toEqual(["sidecar"]);
   });
 });
 
