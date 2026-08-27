@@ -104,3 +104,126 @@ Related: **CPE-1873** (the pin), **CPE-1900** (`CONFIG_CHAIN` is a hand-copied l
 cause, a copy instead of a derivation), **CPE-1901** (`--skip-pin-check` and the secret-gated step),
 **CPE-1894** (the live manifest mixing plain and sidecar assets, which is why the plain channel's tag
 path matters here).
+
+
+## Work Log
+
+- **2026-08-26 (Worker)** — Picked up; `git mv` Backlog -> Doing as the first commit. Round 4 of the
+  CPE-1873 arc, and the brief was explicit that the answer is a **derivation, not a longer list**.
+
+  **What shipped.**
+  - `crates/updater-verify/src/platform_config_guard.rs` (**new**) — the derivation, as a library
+    module so the binary and the tests share one implementation.
+    - `scan_for_platform_config_updater_overrides(dir)` calls `read_dir` and classifies what is
+      actually there. **No name lookup anywhere**, which is what makes it behave identically on a
+      case-insensitive NTFS build runner and on the byte-exact `ubuntu-latest` host where
+      `verify-updater-pin` runs. Round 3's `read_to_string(dir.join("tauri.windows.conf.json"))` was a
+      lookup, and therefore silently blind on exactly that host.
+    - `is_auto_merged_platform_config_name(name)` ASCII-lowercases and matches the *shape* Tauri
+      derives its names from — `tauri` `.` `<platform token>` `.` `<tail>`. That is all 15 of today's
+      filenames (3 formats x 5 `Target` variants, verified against tauri-utils 2.9.3's
+      `ConfigFormat::into_platform_file_name` in this machine's cargo registry), every casing, and any
+      format Tauri adds later. `tauri.conf.json` / `Tauri.toml` and every `tauri.sidecar.*` overlay are
+      deliberately NOT matched — their second segment is not a platform token, which is exactly the
+      property Tauri itself keys on.
+    - `platform_config_updater_refusal(text)` keeps the semantics CPE-1873 round 3 got right:
+      refusal on the **presence of a `plugins.updater` key**, never on the file's existence and never
+      by value comparison. `plugins.cli`-only stays allowed; `{"plugins":{"updater":null}}` (an RFC
+      7396 delete) is still refused. Strict JSON is inspected structurally; formats this crate carries
+      no parser for (JSON5, TOML — **no new dependencies** were added) get a conservative textual scan
+      that fails closed on an `updater` token or on backslash escapes that could spell one.
+    - 13 unit tests, including one that plants all 15 real filenames plus one innocent file in a temp
+      dir and asserts 14 refusals, and one that plants `Tauri.Windows.Conf.JSON`. On `ubuntu-latest`
+      those execute against a genuinely case-sensitive filesystem with real files on disk.
+  - `crates/updater-verify/src/bin/verify-release-artifacts.rs` — runs the same library function on the
+    directory holding its `--conf`. This is the binary `release.yml`'s tag-triggered
+    `verify-published-manifest` job invokes, so **the tag path now gets the check** — CPE-1873 round
+    1's lesson, which round 3 never carried over to this particular guard. Deliberately placed
+    **outside** the `--skip-pin-check` block: that flag exists because this crate's fixtures scaffold
+    throwaway keypairs unrelated to the pinned *values*, and this check compares no values and reads no
+    constants, so the rationale does not reach it (this narrows CPE-1901's kill switch without
+    stepping on that ticket). A `--conf` directory that cannot be listed is a hard failure, not "clean".
+  - `crates/updater-verify/tests/platform_config_guard.rs` (**new**) — the fast PR-time signal against
+    the real `src-tauri/`. Split out of `pinned_pubkey_guard.rs`, whose old three-filename
+    `no_automatic_per_platform_config_overrides_the_updater_pin` is deleted; that file's module doc now
+    points here.
+  - `src/lib/sidecarBundleResources.test.ts` — the TypeScript mirror: `readdirSync` + the same
+    ASCII-fold shape match (`asciiLower` is hand-rolled so it matches Rust's `to_ascii_lowercase`
+    exactly rather than JS's Unicode `toLowerCase`), the same refusal semantics, plus four tests that
+    exercise the derivation directly. `existsSync` is no longer imported — the lookup is gone.
+  - `.github/workflows/release-sidecar.yml` — `verify-updater-pin` ran `cargo test --test
+    pinned_pubkey_guard`. Naming one test target is the same enumeration mistake in another costume: it
+    skipped the crate's `--lib` unit tests (where this round's derivation tests live) and would skip any
+    guard added in a new `tests/*.rs`. Now `cargo test --locked` for the whole crate, so a guard added
+    tomorrow gates the sidecar channel without anyone remembering to edit that line.
+  - `crates/updater-verify/src/pinned_pubkey.rs` + `README.md` — the "third path" narrative rewritten
+    from "three `.json` filenames" to the derivation, with the honest note that attempt 3's fix was
+    itself an enumeration that got bypassed. README's rotation section now states that a rotation must
+    not arrive as a per-platform config file.
+
+  **Red-proof — all 9 filenames, both cases, three legs each, every file planted and deleted
+  individually.** Legs: (1) `cargo test --test platform_config_guard`, (2) the real
+  `verify-release-artifacts` binary invoked the way `release.yml` invokes it, (3) `npx vitest run
+  src/lib/sidecarBundleResources.test.ts`.
+
+  | planted file | leg 1 | leg 2 | leg 3 |
+  |---|---|---|---|
+  | `tauri.windows.conf.json` | EXIT=101 | EXIT=1 | 1 failed |
+  | `tauri.macos.conf.json` | EXIT=101 | EXIT=1 | 1 failed |
+  | `tauri.linux.conf.json` | EXIT=101 | EXIT=1 | 1 failed |
+  | `tauri.windows.conf.json5` | EXIT=101 | EXIT=1 | 1 failed |
+  | `tauri.macos.conf.json5` | EXIT=101 | EXIT=1 | 1 failed |
+  | `tauri.linux.conf.json5` | EXIT=101 | EXIT=1 | 1 failed |
+  | `Tauri.windows.toml` | EXIT=101 | EXIT=1 | 1 failed |
+  | `Tauri.macos.toml` | EXIT=101 | EXIT=1 | 1 failed |
+  | `Tauri.linux.toml` | EXIT=101 | EXIT=1 | 1 failed |
+  | `Tauri.Windows.Conf.JSON` (mixed case) | EXIT=101 | EXIT=1 | 1 failed |
+  | `tauri.windows.conf.json` = `{"plugins":{"updater":null}}` | EXIT=101 | EXIT=1 | 1 failed |
+
+  Every message named the offending file by its on-disk spelling. Two GREEN controls confirm the
+  semantics were preserved rather than replaced by a blanket ban: `tauri.windows.conf.json` carrying
+  only `plugins.cli` + `bundle.targets`, and `Tauri.windows.toml` carrying only `[plugins.cli]`, both
+  left leg 1 and leg 3 fully green (leg 2 then failed further downstream on `no latest.json found`,
+  which is the expected result of running the binary without a manifest and proves the CPE-1903 check
+  passed and let it proceed).
+
+  **The case leg, precisely.** The ticket asked for it on a case-sensitive filesystem. Two local
+  routes were tried and both need machine-global changes this run is barred from making: `fsutil file
+  setCaseSensitiveInfo … enable` returns `error: 0x00000005 Access is denied.` without elevation, and
+  WSL's `/mnt/z` is DrvFs `case=off` (demonstrated — writing `Alpha.txt` then `alpha.txt` produced one
+  file). So it is covered by construction plus CI instead, which is stronger than a one-off local run:
+  the guard performs **no name lookup at all**, so filesystem case behaviour cannot reach it; the
+  matcher's mixed-case cases are pure-function tests; and
+  `scan_catches_a_mixed_case_spelling_on_any_filesystem` writes a real `Tauri.Windows.Conf.JSON` to a
+  real temp directory and scans it — which on `ubuntu-latest`, the host that runs `verify-updater-pin`,
+  executes on a byte-exact filesystem. The NTFS run above is the third leg of the same proof.
+
+  **CPE-1873's other closures re-run afterwards; all still red, no regression.**
+  - `--config` overlay chain, attacker pubkey injected into `tauri.sidecar.conf.json` alone: vitest
+    `3 failed | 12 passed`, one failure per shipped OS (windows/linux/macos).
+  - Same overlay, attacker endpoints: vitest `3 failed | 12 passed`, again all three OSes.
+  - Base config pubkey rotated: `cargo test --test pinned_pubkey_guard` EXIT=101 with `SECURITY
+    (CPE-1873): the updater's root-of-trust public key changed.`; the binary EXIT=1 with the matching
+    message.
+  - Base config endpoints repointed: same shape, EXIT=101 / EXIT=1, `the updater's manifest
+    endpoint(s) changed.`
+  - Restored via `git checkout --` after each; `git status --short` clean and vitest back to 15/15.
+
+  No private key material was generated, printed or committed at any point — the attacker "pubkey" is
+  a plain placeholder string, since none of these checks parses it as a key.
+
+  **Verification.** `crates/updater-verify`: `cargo clippy --locked --all-targets -- -D warnings`
+  clean; `cargo test --locked` **52/52** (34 lib + 2 pinned-pubkey + 1 platform-config + 15
+  release_guard). Frontend: `npm run check` 0 errors / 0 warnings; `npx vitest run` (full suite) 4504
+  passed, **2 pre-existing failures in `src/lib/msrvSync.test.ts`** — that is CPE-1902 (the MSRV guard
+  is not CRLF-safe and fails spuriously on Windows), open in Backlog, untouched by this work and
+  unrelated to it. No feature-gated build modes exist in this crate, and nothing outside
+  `crates/updater-verify` + `src/lib/sidecarBundleResources.test.ts` + docs was touched.
+
+  **The ceiling, stated plainly.** Unchanged from CPE-1873: every check here compares files read from
+  the **same commit** and consults nothing outside it. A key rotated in the same commit as the pin
+  passes all of them. What this round adds is that the rotation can no longer arrive through a filename
+  the guard was not told about.
+
+  **Not in scope, untouched:** CPE-1900 (`CONFIG_CHAIN` is a hand-copied literal with no drift guard)
+  and CPE-1901 (`--skip-pin-check`, and the secret-gated step).
