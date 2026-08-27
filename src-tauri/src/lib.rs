@@ -10333,8 +10333,18 @@ fn do_fetch_catalog(
     let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
     let _ = std::fs::remove_dir_all(&staging);
     // CPE-1911: an index that verifies fine but whose entries are all no-newer-than-installed
-    // (anti-rollback correctly refusing them) is a *stale published catalog*, not "up to date" —
-    // count that separately so the UI can tell the two apart instead of reporting both identically.
+    // (anti-rollback correctly refusing them) is not simply "up to date" — count those separately so
+    // the UI can tell them apart instead of reporting everything identically.
+    //
+    // CPE-1924 splits that count in two, because "no newer than installed" is two different
+    // situations the user experiences completely differently:
+    //   * `alreadyCurrent`   — the entry names EXACTLY the installed version. Routine and healthy:
+    //     you already have the latest published catalog. Under release.yml's `VERSION=$(date +%s)`
+    //     stamping this is the normal outcome of every check between releases, so it must read calm.
+    //   * `regressedRejected` — the entry names an OLDER version than what's installed. The
+    //     published catalog has gone backwards; that is the one case where "the publishing pipeline
+    //     is broken" is a true statement.
+    // Both are still `report.rejected` — nothing here relaxes anti-rollback.
     //
     // That's not the only way "up to date" lies, though (CPE-1911 review round 2): the index can
     // verify fine while every *entry* fails its own integrity check — `ContentMismatch`,
@@ -10343,7 +10353,12 @@ fn do_fetch_catalog(
     // must not fall through to "up to date" either. `Pinned` is excluded deliberately: that's the
     // user's own choice, not a lie.
     use sidecar_host::catalog::ApplyOutcome;
-    let stale_rejected =
+    let already_current = report
+        .rejected
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, ApplyOutcome::AlreadyCurrent))
+        .count();
+    let regressed_rejected =
         report.rejected.iter().filter(|(_, outcome)| matches!(outcome, ApplyOutcome::Rollback)).count();
     let integrity_rejected = report
         .rejected
@@ -10362,7 +10377,8 @@ fn do_fetch_catalog(
         "indexOk": report.index_ok,
         "applied": report.applied,
         "rejected": report.rejected.len(),
-        "staleRejected": stale_rejected,
+        "alreadyCurrent": already_current,
+        "regressedRejected": regressed_rejected,
         "integrityRejected": integrity_rejected,
     }))
 }

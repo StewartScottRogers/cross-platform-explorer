@@ -67,6 +67,30 @@ it anywhere.
 - **Reset to the shipped agents** — undoes any updates, back to what shipped with the app.
 - **Roll back a version…** — steps an agent back to a previous signed version.
 
+**What the result message means.** "Check for updates now" spells out which situation you're
+actually in, rather than reporting every outcome as the same reassuring line:
+
+- *Updated N agents* — new definitions were published, verified, and installed. The agent list
+  re-renders with them straight away.
+- *You already have the latest published agents* — the published catalog offers exactly the
+  versions you're running. Routine and healthy; nothing to do. This is what an ordinary check
+  returns most of the time, between one release and the next.
+- *Agents are already up to date* — same good news, from a check that found nothing listed to
+  reconsider at all.
+- *The published agent catalog has gone backwards* — the catalog is offering **older** versions
+  than the ones you already have, so they weren't installed. The message says how many entries are
+  affected ("1 of the 4 published agent entries…"), so a single bad entry doesn't read as a
+  wholesale failure. Updates are only ever accepted going forwards, which is exactly why nothing
+  was installed here.
+- *The published catalog looks corrupted or mis-signed* — signatures didn't check out, so nothing
+  was installed. Again, your existing agents are untouched and safe to use.
+- *Couldn't check / you're offline* — the check never completed. Nothing changed; try again later.
+
+**If you see the amber bar, there is nothing to fix on your machine.** Every one of those states
+leaves your installed agents exactly as they were, and they keep working. The problem is on the
+publishing side, and the message clears itself the next time a good, newer catalog is published —
+so the useful response is to carry on and check again later, not to reset or roll anything back.
+
 ## Recent…
 
 Click **Recent…** for a list of past sessions, kept across restarts. **Relaunch** reopens one with the

@@ -55,14 +55,72 @@ impl CatalogIndex {
     }
 }
 
+/// How a fetched entry's `version` stands against the installed one.
+///
+/// This is the **one** place the "is this an upgrade?" question is answered (CPE-1924). Both the
+/// trust decision ([`Self::is_upgrade`]) and the two *reporting* reasons ([`Self::refusal`]) are
+/// derived from this single comparison, so they can never disagree about what is applyable: there
+/// is exactly one variant that isn't refused, and it is the same variant in both methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionStanding {
+    /// Strictly newer than what's installed — or nothing is installed yet (first install).
+    /// **The only standing that may be applied.**
+    Newer,
+    /// Exactly the version already installed. Routine and healthy: you already have the latest
+    /// published catalog. Still refused (there is nothing to apply), but it is not a regression.
+    Same,
+    /// Older than what's installed — the published index has gone *backwards*. Refused, and unlike
+    /// [`Self::Same`] this genuinely means something is wrong upstream.
+    Older,
+}
+
+impl VersionStanding {
+    /// Whether this standing is the applyable one ([`Self::Newer`]). **Not the enforcement point:**
+    /// nothing on the gating path calls this, and permitting `Same` here while leaving
+    /// [`Self::refusal`] correct changes no behaviour at all (CPE-1924's security audit proved that
+    /// empirically — its sabotage C left every behavioural probe green). [`Self::refusal`] is the
+    /// rule that is actually enforced; this is a derived predicate, kept in step with it by
+    /// `refusal_and_is_upgrade_agree_on_what_is_applyable`.
+    pub fn is_upgrade(self) -> bool {
+        matches!(self, VersionStanding::Newer)
+    }
+    /// Why an entry with this standing was refused — `None` exactly when [`Self::is_upgrade`] is
+    /// true. **This is the enforced anti-rollback rule**: `gate_manifest_opt` returns whatever this
+    /// names, so its single `None` arm is the only route to `Accept`. Splitting `==` from `<` is a
+    /// *reporting* refinement only — both non-`Newer` arms still return a refusal.
+    /// (Invariant pinned by `refusal_and_is_upgrade_agree_on_what_is_applyable`.)
+    pub fn refusal(self) -> Option<EntryVerdict> {
+        match self {
+            VersionStanding::Newer => None,
+            VersionStanding::Same => Some(EntryVerdict::AlreadyCurrent),
+            VersionStanding::Older => Some(EntryVerdict::Rollback),
+        }
+    }
+}
+
 impl CatalogEntry {
     /// Whether `manifest_bytes` is exactly the content this entry names (content binding).
     pub fn matches(&self, manifest_bytes: &[u8]) -> bool {
         trust::content_hash(manifest_bytes).eq_ignore_ascii_case(self.sha256.trim())
     }
-    /// Anti-rollback: accept only a strictly newer version than what's installed (or a first install).
+    /// Where this entry's version sits relative to `installed` — the single version comparison in
+    /// the trust engine. A first install (`None`) counts as [`VersionStanding::Newer`].
+    pub fn version_standing(&self, installed: Option<u64>) -> VersionStanding {
+        match installed {
+            None => VersionStanding::Newer,
+            Some(v) => match self.version.cmp(&v) {
+                std::cmp::Ordering::Greater => VersionStanding::Newer,
+                std::cmp::Ordering::Equal => VersionStanding::Same,
+                std::cmp::Ordering::Less => VersionStanding::Older,
+            },
+        }
+    }
+    /// Whether this entry is strictly newer than what's installed (or a first install). Like
+    /// [`VersionStanding::is_upgrade`] it is a **derived predicate, not the enforcement point** —
+    /// the gating path goes through [`VersionStanding::refusal`]. Derived from
+    /// [`Self::version_standing`] — never a second, independent comparison.
     pub fn is_upgrade_over(&self, installed: Option<u64>) -> bool {
-        installed.is_none_or(|v| self.version > v)
+        self.version_standing(installed).is_upgrade()
     }
 }
 
@@ -81,7 +139,12 @@ pub enum EntryVerdict {
     Unlisted,
     /// Listed, but the content hash does not match (tamper).
     ContentMismatch,
-    /// Listed, but not newer than what is installed (rollback attempt).
+    /// Listed at **exactly** the installed version — you already have the latest published entry.
+    /// Refused like any non-upgrade (nothing is applied), but routine and healthy rather than a
+    /// regression (CPE-1924).
+    AlreadyCurrent,
+    /// Listed at an **older** version than what is installed — the published catalog has gone
+    /// backwards (rollback attempt / regressed publish).
     Rollback,
 }
 
@@ -116,8 +179,14 @@ pub fn gate_manifest_opt(
     if !entry.matches(manifest_bytes) {
         return EntryVerdict::ContentMismatch;
     }
-    if !allow_downgrade && !entry.is_upgrade_over(installed_version) {
-        return EntryVerdict::Rollback;
+    // Anti-rollback — ONE decision, taken from ONE comparison. `VersionStanding::refusal()` returns
+    // `Some(..)` for every standing except `Newer`, so the only route past this point is a strict
+    // upgrade (or the audited per-agent downgrade override below). The `==` / `<` split changes the
+    // *reason* reported, never whether the entry is applied (CPE-1924).
+    if !allow_downgrade {
+        if let Some(refused) = entry.version_standing(installed_version).refusal() {
+            return refused;
+        }
     }
     EntryVerdict::Accept
 }
@@ -145,6 +214,11 @@ pub fn save_versions(path: &Path, versions: &VersionMap) -> Result<(), String> {
 pub enum ApplyOutcome {
     Applied,
     ContentMismatch,
+    /// Refused because the entry names exactly the installed version — the routine "you already
+    /// have the latest published catalog" outcome. A **rejection**, never an apply (CPE-1924).
+    AlreadyCurrent,
+    /// Refused because the entry names an **older** version than the installed one — the published
+    /// catalog has regressed.
     Rollback,
     MissingManifest,
     MissingSignature,
@@ -245,6 +319,10 @@ pub fn apply_bundle_with(
             }
             EntryVerdict::ContentMismatch => {
                 report.rejected.push((entry.id.clone(), ApplyOutcome::ContentMismatch))
+            }
+            // Both non-upgrade verdicts land in `rejected` — the split only names the reason.
+            EntryVerdict::AlreadyCurrent => {
+                report.rejected.push((entry.id.clone(), ApplyOutcome::AlreadyCurrent))
             }
             EntryVerdict::Rollback => report.rejected.push((entry.id.clone(), ApplyOutcome::Rollback)),
             EntryVerdict::Unlisted => {} // impossible: we iterate the index's own entries
@@ -351,9 +429,69 @@ mod tests {
             gate_manifest(&index, "claude", b"different bytes", None),
             EntryVerdict::ContentMismatch
         );
-        // Same version as installed → not an upgrade → rollback attempt.
-        assert_eq!(gate_manifest(&index, "claude", manifest, Some(5)), EntryVerdict::Rollback);
+        // Neither "same as installed" nor "older than installed" is an upgrade — neither is
+        // accepted. CPE-1924: they are reported as *different* refusals (see the split tests below).
+        assert_eq!(gate_manifest(&index, "claude", manifest, Some(5)), EntryVerdict::AlreadyCurrent);
         assert_eq!(gate_manifest(&index, "claude", manifest, Some(6)), EntryVerdict::Rollback);
+    }
+
+    // --- "already current" vs. "the index regressed" (CPE-1924) --------------------------
+
+    /// The two non-upgrade cases must be **distinguishable**, and neither may be accepted. Before
+    /// CPE-1924 both collapsed into `Rollback`, so the console could not tell the routine, healthy
+    /// "you already have the latest published catalog" (`==` — the normal outcome of every check
+    /// between releases, given `release.yml`'s `VERSION=$(date +%s)` stamping) from the genuinely
+    /// broken "the published index has gone backwards" (`<`).
+    #[test]
+    fn gate_tells_already_current_apart_from_a_regressed_index_and_accepts_neither() {
+        let manifest = br#"{"schema_version":1,"id":"claude"}"#;
+        let sha = trust::content_hash(manifest);
+        let index = CatalogIndex::from_json(&index_json("claude", &sha, 5)).unwrap();
+
+        let same = gate_manifest(&index, "claude", manifest, Some(5)); // published == installed
+        let older = gate_manifest(&index, "claude", manifest, Some(9)); // published <  installed
+        assert_eq!(same, EntryVerdict::AlreadyCurrent);
+        assert_eq!(older, EntryVerdict::Rollback);
+        assert_ne!(same, older, "== and < must not collapse into one verdict again");
+        // Neither is an accept — the split is reporting only.
+        assert_ne!(same, EntryVerdict::Accept);
+        assert_ne!(older, EntryVerdict::Accept);
+        // …and a genuine upgrade / first install still is.
+        assert_eq!(gate_manifest(&index, "claude", manifest, Some(4)), EntryVerdict::Accept);
+        assert_eq!(gate_manifest(&index, "claude", manifest, None), EntryVerdict::Accept);
+    }
+
+    /// The security-critical invariant of the split: the *reason* map and the *trust* rule are two
+    /// views of one comparison and can never disagree. `refusal()` returns `None` exactly for the
+    /// standings `is_upgrade()` calls applyable — i.e. only `Newer`.
+    #[test]
+    fn refusal_and_is_upgrade_agree_on_what_is_applyable() {
+        for standing in [VersionStanding::Newer, VersionStanding::Same, VersionStanding::Older] {
+            assert_eq!(
+                standing.refusal().is_none(),
+                standing.is_upgrade(),
+                "{standing:?}: a refusal-free standing must be exactly an upgrade"
+            );
+        }
+        // Only `Newer` is applyable; the other two both refuse (with different reasons).
+        assert_eq!(VersionStanding::Newer.refusal(), None);
+        assert_eq!(VersionStanding::Same.refusal(), Some(EntryVerdict::AlreadyCurrent));
+        assert_eq!(VersionStanding::Older.refusal(), Some(EntryVerdict::Rollback));
+
+        // And the standings themselves, straight off a real entry.
+        let e = CatalogEntry {
+            id: "claude".into(),
+            schema_version: 1,
+            sha256: "deadbeef".into(),
+            version: 5,
+        };
+        assert_eq!(e.version_standing(None), VersionStanding::Newer);
+        assert_eq!(e.version_standing(Some(4)), VersionStanding::Newer);
+        assert_eq!(e.version_standing(Some(5)), VersionStanding::Same);
+        assert_eq!(e.version_standing(Some(6)), VersionStanding::Older);
+        // `is_upgrade_over` is derived from the same comparison — anti-rollback is unchanged.
+        assert!(e.is_upgrade_over(None) && e.is_upgrade_over(Some(4)));
+        assert!(!e.is_upgrade_over(Some(5)) && !e.is_upgrade_over(Some(6)));
     }
 
     #[test]
@@ -415,9 +553,10 @@ mod tests {
         std::fs::write(out.path().join("claude.json"), b"GOOD").unwrap();
         let mut installed = VersionMap::from([("claude".to_string(), 5u64)]);
 
-        // Rollback: same version 5.
+        // Rollback: an OLDER version (4) than the installed 5. (The same-version case is its own
+        // outcome now — see `apply_reports_already_current_and_a_regressed_publish_separately`.)
         let s1 = tempfile::tempdir().unwrap();
-        stage_bundle(s1.path(), &[("claude", br#"{"id":"claude"}"#, 5)], &k);
+        stage_bundle(s1.path(), &[("claude", br#"{"id":"claude"}"#, 4)], &k);
         let r1 = apply_bundle(s1.path(), out.path(), std::slice::from_ref(&pk), &mut installed, &[]);
         assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
@@ -431,6 +570,44 @@ mod tests {
         let r2 = apply_bundle(s2.path(), out.path(), &[pk], &mut installed, &[]);
         assert_eq!(r2.rejected, vec![("claude".to_string(), ApplyOutcome::ContentMismatch)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // still untouched
+    }
+
+    /// End-to-end through `apply_bundle`: a same-version publish and an older-version publish must
+    /// produce **different, asserted** outcomes — and *both* must land in `rejected`, never in
+    /// `applied`, with the installed copy and the version map untouched. This is the test that goes
+    /// red if the reporting split is ever allowed to become a trust change (CPE-1924).
+    #[test]
+    fn apply_reports_already_current_and_a_regressed_publish_separately_and_applies_neither() {
+        let (k, pk) = keypair(1);
+
+        // Leg 1: the published entry is EXACTLY what's installed (v5) — routine "you're current".
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("claude.json"), b"GOOD").unwrap();
+        let mut installed = VersionMap::from([("claude".to_string(), 5u64)]);
+        let s1 = tempfile::tempdir().unwrap();
+        stage_bundle(s1.path(), &[("claude", br#"{"id":"claude","v":"NEW"}"#, 5)], &k);
+        let r1 = apply_bundle(s1.path(), out.path(), std::slice::from_ref(&pk), &mut installed, &[]);
+        assert!(r1.index_ok);
+        // Asserted FIRST and on its own: if the reporting split ever becomes a trust change, this
+        // is the line that names the violation.
+        assert!(r1.applied.is_empty(), "an already-current entry must NEVER be applied");
+        assert!(!r1.applied.contains(&"claude".to_string()));
+        assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::AlreadyCurrent)]);
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
+        assert_eq!(installed.get("claude"), Some(&5)); // version map untouched
+
+        // Leg 2: the published entry is OLDER (v3) than installed — the index has gone backwards.
+        let s2 = tempfile::tempdir().unwrap();
+        stage_bundle(s2.path(), &[("claude", br#"{"id":"claude","v":"OLD"}"#, 3)], &k);
+        let r2 = apply_bundle(s2.path(), out.path(), &[pk], &mut installed, &[]);
+        assert!(r2.index_ok);
+        assert!(r2.applied.is_empty(), "a regressed entry must NEVER be applied");
+        assert_eq!(r2.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
+        assert_eq!(installed.get("claude"), Some(&5));
+
+        // The whole point: the two situations are reported differently.
+        assert_ne!(r1.rejected, r2.rejected);
     }
 
     #[test]

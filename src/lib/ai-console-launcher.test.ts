@@ -718,7 +718,7 @@ describe("Agent Deck launcher — catalog controls", () => {
   // failed/offline fetch were all reported as the identical reassuring "Agents are already up to
   // date." (or one generic fallback). Pin the three real states to three distinguishable messages,
   // driving the real refreshCatalog() through this harness the way CPE-1893's UAT measured the bug.
-  describe("refreshCatalog honesty (CPE-1911)", () => {
+  describe("refreshCatalog honesty (CPE-1911, split by CPE-1924)", () => {
     // Round-2 review: the genuine-success colour (green) vs. an actionable-error colour (red) vs.
     // the "nothing changed, nothing you need to do" colour (amber) must all be distinguishable —
     // pin the actual rendered colours, not just the text, so a colour regression goes red too.
@@ -729,7 +729,14 @@ describe("Agent Deck launcher — catalog controls", () => {
     it("genuinely current — nothing new, nothing rejected — says so plainly, in green", async () => {
       const { w } = await mountLauncher((path) =>
         path === "/api/catalog/refresh"
-          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 0, integrityRejected: 0 }
+          ? {
+              indexOk: true,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 0,
+              regressedRejected: 0,
+              integrityRejected: 0,
+            }
           : {},
       );
       await w.refreshCatalog();
@@ -738,38 +745,111 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.style.color).toBe(GREEN);
     });
 
-    // CPE-1911 review round 3: anti-rollback (sidecar/host/src/catalog.rs) can't tell "you already
-    // have the latest" (==) from "the index regressed to something older" (<) — both produce
-    // staleRejected>0, and under the release pipeline's timestamp versioning, "==" (routine,
-    // healthy — you already checked since the last release) vastly outnumbers "<" (genuinely
-    // broken). So this branch must say only what's true in both cases, diagnose neither, and render
-    // calm (green), not amber — an amber "may be stuck" banner on every routine check is exactly
-    // the kind of alarm the user can't act on that this ticket exists to prevent.
-    it("index verifies but every entry is no newer than installed — states the fact without diagnosing a cause, calm not amber", async () => {
+    // CPE-1924: anti-rollback used to collapse "you already have the latest" (==) and "the index
+    // regressed to something older" (<) into one `staleRejected` count, so the console could only
+    // say something true of both and diagnose neither. The host now reports them separately
+    // (alreadyCurrent / regressedRejected), so these two tests pin the two halves to DIFFERENT text
+    // AND different colours. If the split ever collapses back, one of them goes red.
+    it("every entry is exactly the installed version — calm, routine 'you already have the latest', in green", async () => {
       const { w } = await mountLauncher((path) =>
         path === "/api/catalog/refresh"
-          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 2, integrityRejected: 0 }
+          ? {
+              indexOk: true,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 2,
+              regressedRejected: 0,
+              integrityRejected: 0,
+            }
           : {},
       );
       await w.refreshCatalog();
       const msg = w.document.getElementById("msg");
-      expect(msg.textContent).toMatch(/nothing newer than what you have/i);
-      expect(msg.textContent).not.toMatch(/may be stuck/i);
-      expect(msg.textContent).not.toMatch(/isn't newer than what's installed/i); // the old, retracted wording
+      expect(msg.textContent).toMatch(/you already have the latest published agents/i);
+      expect(msg.textContent).not.toMatch(/gone backwards/i); // must NOT read as a regression
+      expect(msg.textContent).not.toMatch(/may be stuck/i); // the retracted round-2 wording
+      expect(msg.textContent).not.toMatch(/heads up/i);
       expect(msg.style.color).toBe(GREEN);
       expect(msg.style.color).not.toBe(AMBER);
       expect(msg.style.color).not.toBe(RED);
     });
 
+    // The other half: the published index actually went BACKWARDS. This is the one version
+    // rejection where "the publishing pipeline is broken" is a true statement, so it must say so
+    // plainly and render as a heads-up (amber), not as the calm routine message above.
+    it("the published catalog regressed to older versions — says it has gone backwards, in amber", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: true,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 0,
+              regressedRejected: 2,
+              integrityRejected: 0,
+            }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/gone backwards/i);
+      // UAT: the claim must be SCOPED by the counts, not left as an unqualified "the catalog".
+      // Here every entry the index carried (2) regressed, so it says 2 of 2 — plural form.
+      expect(msg.textContent).toMatch(/2 of the 2 published agent entries are older than the versions you already have/i);
+      expect(msg.textContent).toMatch(/agents are unchanged/i);
+      expect(msg.textContent).toMatch(/nothing to do on your end/i);
+      expect(msg.textContent).toMatch(/clears itself once a newer catalog is published/i);
+      expect(msg.textContent).not.toMatch(/you already have the latest published agents/i);
+      expect(msg.textContent).not.toBe("Agents are already up to date.");
+      expect(msg.style.color).toBe(AMBER);
+      expect(msg.style.color).not.toBe(GREEN);
+      expect(msg.style.color).not.toBe(RED);
+    });
+
+    // A mixed publish (some entries current, one regressed) must surface the regression, not the
+    // reassuring half — the alarming state wins when both are present. But it must not OVER-claim
+    // either: with 3 of 4 entries fine, an unqualified "the catalog has gone backwards" reads as a
+    // wholesale regression, so the sentence carries the counts (UAT on PR #1051).
+    it("a mixed publish — some current, some regressed — reports the regression, scoped to how many", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: true,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 3,
+              regressedRejected: 1,
+              integrityRejected: 0,
+            }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/gone backwards/i);
+      // Singular form, and the denominator counts every entry the index carried (3 current + 1
+      // regressed), so the user can see the regression is one entry out of four — not all of them.
+      expect(msg.textContent).toMatch(/1 of the 4 published agent entries is older than the version you already have/i);
+      expect(msg.textContent).not.toMatch(/1 of the 1 /);
+      expect(msg.textContent).toMatch(/nothing to do on your end/i);
+      expect(msg.style.color).toBe(AMBER);
+    });
+
     // CPE-1911 review round 2 (F1): the index can verify fine while every LISTED entry fails its
     // own integrity check (bad/missing signature, content mismatch) — a corrupt/mis-signed publish,
     // not an anti-rollback rejection. Pre-fix this fell through every branch straight to "up to
-    // date" (indexOk:true, applied:0, staleRejected:0 — the exact shape a signature-botching
+    // date" (indexOk:true, applied:0, no version rejections — the exact shape a signature-botching
     // pipeline produces).
     it("index verifies but every entry fails its own integrity check — reports a corrupt/mis-signed publish, not 'up to date'", async () => {
       const { w } = await mountLauncher((path) =>
         path === "/api/catalog/refresh"
-          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 0, integrityRejected: 3 }
+          ? {
+              indexOk: true,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 0,
+              regressedRejected: 0,
+              integrityRejected: 3,
+            }
           : {},
       );
       await w.refreshCatalog();
