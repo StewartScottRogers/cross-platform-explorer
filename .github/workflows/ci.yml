@@ -208,10 +208,17 @@ jobs:
       # site (CPE-1772) — a GitHub-hosted-runner IPv6-connectivity stall can hang `apt-get update` with
       # zero output before it ever falls back to IPv4. `timeout-minutes` turns that into a fast, named
       # failure instead of riding to the job's (unset, so 360-minute default) cap.
+      # CPE-1916: `ubuntu-latest` preinstalls the `azure-cli` and Microsoft-prod (`packages.microsoft.com`)
+      # apt sources — see the `msrv` job's copy of this comment for the real failure this guards against
+      # and why removing the lists (not tolerating the error) is the fix. This project installs nothing
+      # from either, on any job, so `rm -f` them before `update` — `-f` makes it a no-op if a future
+      # runner image ever drops one or both. `install` below is untouched: a genuinely missing package
+      # from a source we DO use still fails the step exactly as before.
       - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 8
         run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
@@ -549,10 +556,14 @@ jobs:
       # instead of genuinely asserting OS interop — install it so the assertion always runs on Linux.
       # CPE-1787: ForceIPv4/retry/timeout hardening — see the `backend` job's copy of this comment
       # (CPE-1772) for the IPv6-stall diagnosis this guards against.
+      # CPE-1916: remove the preinstalled azure-cli/Microsoft-prod apt sources before updating — see the
+      # `msrv` job's copy of this comment for why. This step has no `continue-on-error`, so a real
+      # `attr` install failure still fails the job exactly as before.
       - name: Install attr (getfattr) for xattr interop test
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 5
         run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y attr
 
@@ -573,11 +584,17 @@ jobs:
       # and with no timeout a genuine hang here never reached one: this exact step hung with zero
       # output for 1.5+ hours on PR #935's own `Server crates (ubuntu-latest)` job (see CPE-1772) and
       # had to be cancelled and rerun manually. The cap below lets `continue-on-error` do its job.
+      # CPE-1916: remove the preinstalled azure-cli/Microsoft-prod apt sources before updating — see the
+      # `msrv` job's copy of this comment for why. This step already tolerates a real ffmpeg-install
+      # failure via `continue-on-error` (degrading to a skipped real-render assertion, CPE-1268); this
+      # fix just stops an UNRELATED third-party repo's outage from being the thing that trips that
+      # degradation instead of a genuine ffmpeg problem.
       - name: Install ffmpeg (video-thumb real-render test, Linux)
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
         timeout-minutes: 8
         run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y ffmpeg
 
@@ -1401,10 +1418,14 @@ jobs:
       # CPE-1787: ForceIPv4/retry/timeout hardening — see the `backend` job's copy of this comment
       # (CPE-1772) for the IPv6-stall diagnosis this guards against. This `apt-get update`'s cached
       # lists are reused by the "host — real keychain round-trip" step's `gnome-keyring` install below.
+      # CPE-1916: remove the preinstalled azure-cli/Microsoft-prod apt sources before updating — see the
+      # `msrv` job's copy of this comment for why. This step has no `continue-on-error`, so a real
+      # `libdbus-1-dev`/`pkg-config` install failure still fails the job exactly as before.
       - name: Install Linux system dependencies (libdbus for the keyring)
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 8
         run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libdbus-1-dev pkg-config
 
@@ -1671,9 +1692,31 @@ jobs:
       # false MSRV red for an unrelated environment gap. Union of both jobs' package lists, same
       # ForceIPv4/retry/timeout hardening (CPE-1772/1787) for the same GitHub-hosted-runner IPv6-stall
       # risk on `apt-get update`.
+      # CPE-1916: this job's SECOND false red, same root shape as the first (above) -- an unrelated
+      # environment gap read as a real failure. PR #1035's `apt-get update` here failed after 20s with
+      # `403 Forbidden` on `packages.microsoft.com/repos/azure-cli/...` and
+      # `packages.microsoft.com/ubuntu/24.04/prod/...` -- the azure-cli and .NET/Microsoft-prod apt
+      # sources `ubuntu-latest` preinstalls. This project installs NOTHING from either (confirmed: no
+      # `az`/`azure-cli`/`dotnet`/`microsoft` package anywhere in this workflow or any other), so a
+      # transient outage on a feed we never touch failed a job whose purpose is "does Rust compile" --
+      # not a regression of CPE-1787's hardening, that hardening is *why* this failed loudly and fast
+      # (20s) instead of hanging, exactly as intended; the remaining gap this ticket closes is that it
+      # should not have failed AT ALL for a source we don't need.
+      #   `apt-get update` treats every configured source as required and hard-fails if ANY one 403s/
+      #   times out/etc, even though `install` below only ever asks for packages from Ubuntu's own
+      #   archives (already covered by the ForceIPv4/retry/timeout hardening above -- unaffected by
+      #   this). Removing the two unused lists before `update` (a common, well-understood one-liner on
+      #   GitHub-hosted runners) is preferred here over either alternative AC listed: scoping `update`
+      #   to specific sources has no stable `apt-get` flag for it, and "tolerate any per-source
+      #   failure" would also swallow a REAL failure on a source we do care about, which is the thing
+      #   CPE-1787 explicitly traded silence away from. `rm -f` is a no-op if a future runner image
+      #   ever renames/drops one or both files, rather than a new failure mode of its own.
+      # Sources this runner ships preinstalled that matter here: Ubuntu's own `archive.ubuntu.com`/
+      # `security.ubuntu.com` (needed, left alone) and the two removed below (not needed, ever).
       - name: Install Linux system dependencies (src-tauri's WebKitGTK + sidecar/host's D-Bus keyring)
         timeout-minutes: 8
         run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \

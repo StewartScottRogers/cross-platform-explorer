@@ -141,8 +141,12 @@
     <!-- svelte-ignore a11y-no-noninteractive-tabindex -- deliberate: a plain focusable static-text span
          is the WCAG "reveal truncated content on focus" technique (mirrors LogPreview.svelte's
          `.log-body` SCR29 precedent for the same lint rule). Without this the text is permanently
-         truncated for any keyboard user with no mouse to hover the `title` with. -->
-    <span class="filtered-hidden" title={filteredHiddenTitle} tabindex="0">
+         truncated for any keyboard user with no mouse to hover the `title` with.
+         CPE-1883: `data-reveal` duplicates this span's own text for the `:focus-visible::after` overlay
+         (see that rule's own comment for why the reveal is a SEPARATE generated-content box rather than
+         resizing this span itself) — `content: attr(...)` can only read a plain attribute, not this
+         span's text-node children, so the same string has to exist both places. -->
+    <span class="filtered-hidden" title={filteredHiddenTitle} tabindex="0" data-reveal={filteredHiddenText}>
       {filteredHiddenText}
     </span>
   {/if}
@@ -153,7 +157,7 @@
          one IS a real read failure, not just an intentional/successful name filter. CPE-1833:
          `tabindex="0"` — see the comment on `.filtered-hidden` above; same reasoning applies here. -->
     <!-- svelte-ignore a11y-no-noninteractive-tabindex -- see the comment on `.filtered-hidden` above. -->
-    <span class="unreadable" title={unreadableTitle} tabindex="0">
+    <span class="unreadable" title={unreadableTitle} tabindex="0" data-reveal={unreadableText}>
       {unreadableText}
     </span>
   {/if}
@@ -266,8 +270,12 @@
      above) plus the "loaded successfully" reassurance always readable via the `title` tooltip
      (`filteredHiddenTitle`) — so a narrow window that ellipsis-truncates the visible text never loses
      either the count or the reassurance, and the status bar's fixed height never grows for a long count.
-     `--priority-shrink` (see the ordering comment above `.dim`) — this is a SHRINKS-FIRST element. */
+     `--priority-shrink` (see the ordering comment above `.dim`) — this is a SHRINKS-FIRST element.
+     `position: relative` unconditionally (not just on focus): CPE-1883's `:focus-visible::after` reveal
+     needs a STABLE containing block that is never itself resized by focus — see that rule's own comment
+     for why. */
   .filtered-hidden {
+    position: relative;
     color: var(--accent);
     max-width: 45%;
     min-width: 0;
@@ -279,8 +287,10 @@
 
   /* CPE-1780: same overflow/truncation strategy as `.filtered-hidden` above (same reasoning — a narrow
      window must still show the count via `title`), but `--warn` instead of `--accent`: an unreadable row
-     is a genuine read FAILURE for that one row, distinct from a successful, intentional name filter. */
+     is a genuine read FAILURE for that one row, distinct from a successful, intentional name filter.
+     `position: relative` — see the identical note on `.filtered-hidden` above. */
   .unreadable {
+    position: relative;
     color: var(--warn);
     max-width: 45%;
     min-width: 0;
@@ -295,20 +305,166 @@
      / `.unreadable` makes each Tab-reachable, and this rule reveals the whole sentence on focus for a
      sighted keyboard user who has no mouse to hover with — the visual truncation these pills otherwise
      apply is a rendering choice, not a loss of the underlying text, so focus simply turns that clipping
-     back off. `position: relative` + `z-index` so the revealed box draws OVER whatever neighbour it would
-     otherwise be clipped against, rather than reflowing the row (reflow-on-focus would itself be a
-     usability trap — the bar's fixed height is load-bearing, see the ordering comment above `.dim`). */
+     back off. `position: relative` (kept on the base rule below, unconditionally — not just on focus) so
+     the reveal has a stable anchor: see the `::after` rule's own comment for why the reveal is generated
+     content on a pseudo-element rather than a resize of this span itself.
+     CPE-1883 diagnosis: `max-width` above was never the whole story. The FIRST fix tried was resizing
+     THIS span directly on `:focus-visible` (`overflow: visible; white-space: normal; max-width: ...`) —
+     it never worked, for two DIFFERENT reasons tried in sequence:
+       1. As shipped (no flex override): the base rule's `flex: 0 var(--priority-shrink) auto` (a
+          SHRINKS-FIRST item, see the ordering comment above `.dim`) still applied, so the flex algorithm
+          kept squeezing the item toward its shrink-allocated share of the row regardless of `max-width`
+          sitting unreached above it — and once `white-space: normal` legalised wrapping, that squeeze
+          bottomed out at the single longest WORD's min-content width, producing the ticket's tall
+          one-word-per-line column instead of a wide box.
+       2. Tried `flex: 0 0 auto` (stop shrinking) to fix #1 — it DOES stop the column, but by giving the
+          box real layout width inside the flex row at the moment it's needed most (a crowded busy row),
+          which squeezes `.git`/`.disk` (both SHRINKS-FIRST too, later in priority) toward ZERO width
+          while a note is focused — measured, not assumed: at 600px busy `.git`/`.disk` both collapsed to
+          `width: 0`. Fixing this ticket's bug by breaking a neighbour is exactly what this component's
+          rules forbid. Also tried `position: absolute` directly on the span (removing it from flex
+          layout entirely, so it can't squeeze siblings) — that solves the squeeze but trades it for a
+          WORSE regression: Chromium's static-position computation for an absolutely-positioned FLEX
+          CHILD does not reliably reproduce its in-flow location (a documented cross-browser rough edge,
+          not a mistaken assumption on this codebase's part) — measured jumping to `left: 0` (the row's
+          own padding edge) regardless of how many earlier siblings (`.item-count`, `.selected-count`,
+          `.dim`) it should have sat after, covering them instead of the neighbours to its right the
+          original design intended to overlay.
+     Both attempts share the same root problem: THIS element's own box is a flex item whose size/position
+     depends on its siblings, so restyling it directly can never cleanly detach it from the row without
+     one of the above trade-offs. The actual fix moves the reveal to a `::after` PSEUDO-element instead
+     (below) — its containing block is this span (via `position: relative`, kept always-on so the
+     anchor never changes across DOM updates), and that span's own box is NEVER resized by focus, so it
+     never re-enters the flex-shrink negotiation and `.git`/`.disk` never lose anything; the pseudo is
+     `position: absolute; left: 0; top: 0;` relative to that STABLE anchor (a plain relative-parent
+     absolute-child, not a flex-child static position — no ambiguity), so it starts exactly where the
+     narrow pill visually sits and grows to the right, over whatever neighbour it would otherwise be
+     clipped against — the original design's own intent, now actually achieved. */
+  /* CPE-1883: the reveal itself. `content: attr(data-reveal)` reads the SAME sentence the markup already
+     puts in this span's own title/text (see the markup comment on `data-reveal` for why a duplicate
+     attribute is needed — generated content can only read a plain attribute, never text-node children).
+     `overflow: visible` on the BASE rule's sibling above would defeat its own `text-overflow: ellipsis`
+     (which requires `overflow: hidden` to do anything), so it is set HERE, scoped to focus, and only
+     matters for letting this pseudo-element's box paint past its (unmoved) parent's clip region — the
+     parent's own text stays correctly ellipsis-clipped underneath, invisible only because this opaque
+     box paints after it (`::after` = last-painted) and fully covers it (same anchor corner, one string,
+     so their extents coincide).
+     `width: max-content` turned out to be load-bearing, not decorative — its absence was a THIRD way to
+     reproduce this exact ticket, discovered measuring this very attempt: `position: absolute; left: 0;`
+     with `width` left at its default `auto` still computes a "shrink-to-fit" width CONSTRAINED BY THE
+     CONTAINING BLOCK's own remaining space (CSS2.1 §10.3.7) — and the containing block here is this
+     narrow, still flex-shrunk SPAN (58px at 600px busy), so the pseudo dutifully wrapped to fit inside
+     ITS PARENT's 58px, reproducing the identical one-word-per-line column one level down. `width:
+     max-content` bypasses that: it is not `auto`, so the shrink-to-fit-within-containing-block algorithm
+     never runs, and the box sizes to its own max-content width instead — `max-width` then still clamps
+     that, exactly as intended, independent of the narrow parent.
+     Measured before/after via `scripts/dev-harness/layout-guard` (statusbar-focus-reveal case, which
+     measures this `::after` box via `getComputedStyle` — pseudo-elements have no
+     `getBoundingClientRect()`) and the ticket's own work log: 600px compound-busy went 63.9x148px (the
+     span itself, pre-fix) -> 367.3x16px (this `::after` box, a single readable line); 900px went
+     157x52px -> the same 367.3x16px — both with `.git`/`.disk`/`.item-count`/`.selected-count` measured
+     BYTE-FOR-BYTE identical to their unfocused rects (the span's own box, and therefore the row's flex
+     layout, is never touched by any of this).
+     ROUND 2 (Visual Critic UAT, real Chrome re-render of the shipped CSS at 600x26/900x26, both
+     themes) caught four more defects `npm run check`/jsdom structurally cannot see, all fixed here:
+       1. `left: 0` anchored the box's LEFT edge to the pill, so it grew RIGHTWARD — at the app's own
+          600px width floor WITH the full compound-busy row, that ran the box ~100px past the viewport
+          edge, and `body { overflow: hidden }` (app.css) silently clipped the SENTENCE'S TAIL — no
+          ellipsis, no scroll, just gone. Measured: "…their names could" visible, "not be shown safely"
+          not. That is WORSE than the original bug: the one-word-per-line column was ugly but showed
+          every word. Fixed by anchoring the opposite edge instead — `right: 0; left: auto` — so the box
+          grows LEFTWARD from the pill's right edge. Unconditional (not just a 600px media query): the
+          pill always sits in the right half of a busy row (after item-count/selected-count/hidden-shown,
+          before .git/.disk), so growing leftward runs over those ALREADY-TRUNCATED counts rather than
+          off the right edge of the window — see the ticket's work log for the re-measured on-screen
+          rects at both widths.
+       2. Vertical alignment: `top: 0` anchors to the pill's 16px text box, then this rule's own 2px
+          padding + the 1px ring pushed the visible box 5px down inside the 26px bar — measured
+          bottom-flush with the bar's own edge (0.5px clear below, 4.5px above), shadow dying into the
+          window boundary. `top: 50%; transform: translateY(-50%);` centres it in the bar instead,
+          matching how a deliberate popover reads rather than a mis-anchored one.
+       3. Dark-theme contrast: no `color` here means this inherits the PILL's `var(--accent)` — dark
+          `--accent` on `--surface` measures 3.21:1 for a full sentence of 12px body text, under
+          the 4.5:1 AA floor (light is 5.5:1, fine). `--accent` is correctly a NON-text accent by design
+          (focus rings, icons — see `app.css.dark-contrast.test.ts:270`, which only asserts >=3:1 on
+          purpose), so that guard has no reason to catch a full sentence of body text using it — its
+          blind spot, same family as CPE-1919/CPE-1921 (also guard-blind color-as-text uses), not a bug
+          in the guard itself. The pill underneath KEEPS `--accent`/`--warn` (unaffected, still correct
+          for a short truncated label); only the reveal — precisely the low-vision affordance this whole
+          ticket is about — gets `color: var(--text)` instead.
+       4. `::after` is part of its originating element for hit-testing, so while focused this box (up to
+          367px wide) can paint over `.git`'s Pull/Push/Sync buttons and swallow their first click (it
+          blurs the note instead of pressing the button). `pointer-events: none` removes that entirely —
+          a hover/focus reveal has no interactive content of its own, so nothing is lost by letting
+          clicks fall through to whatever it's covering.
+     NOT changed, confirmed correct by the same UAT: `width: max-content` (still load-bearing, see
+     above), the 1px `--border-strong` ring — do NOT "simplify" that away, it is carrying ALL of the
+     visual separation in dark theme, where the box's `--surface` fill is only two steps off
+     `.statusbar`'s own `--surface` background and would otherwise read as barely-there. */
+  /* CPE-1883 round 2 fix, found capturing evidence for THIS round: `overflow: visible` here lets the
+     span's OWN raw text (still `white-space: nowrap`, unaffected by anything else in this rule) paint
+     unclipped past its own narrow box — with the original `left: 0` anchor that coincided with where the
+     `::after` box also grew (both rightward from the same point), so the opaque overlay happened to
+     cover it. `right: 0` (the round-2 fix above) grows the OVERLAY leftward while the raw underlying
+     text still flows rightward as always — the two no longer occupy the same horizontal range, so the
+     span's own unclipped text bleeds out to the right of the overlay, visible as a second, ellipsis-less
+     copy of the sentence in the pill's own colour. `color: transparent` removes it from view entirely
+     (safe for a11y the same way the rest of this component already treats colour-only hiding: the DOM
+     text node, the accessible name computed from it, and the separate always-mounted `.sr-only` live
+     region are all untouched by `color`) rather than trying to keep the overlay's geometry chasing the
+     raw text's, which — given the raw text has no width constraint of its own — cannot be made to work
+     in general. */
   .filtered-hidden:focus-visible,
   .unreadable:focus-visible {
-    position: relative;
-    z-index: 1;
     overflow: visible;
+    color: transparent;
+    /* CPE-1883 round 3 (Reviewer, real dispatched-click test — see the comment above `overflow:
+       visible` for why `color: transparent` alone leaves this span's raw text still painting, invisibly,
+       across its full unclipped ~367px natural width): with no `pointer-events` override here, that
+       invisible text is STILL A LIVE CLICK TARGET over `.git`'s Pull/Push/Sync buttons — confirmed via
+       actual CDP `Input.dispatchMouseEvent` (mouseMoved -> mousePressed -> mouseReleased) at the Pull
+       button's exact centre, not `elementFromPoint`/`elementsFromPoint`: both of those APIs returned the
+       git button as reachable, but the real click landed on `.filtered-hidden` instead — see the
+       `clickReaches` check kind and cases.mjs's own comment for why hit-test APIs are not trustworthy for
+       this class of bug and had to be replaced with a real dispatched click, both for this manual finding
+       and for the permanent CI guard. `pointer-events: none` removes the invisible text from hit-testing
+       entirely, same as it already did for the `::after` overlay itself. Verified: real click on Pull
+       flips from swallowed-by-the-span to landing on the button. */
+    pointer-events: none;
+  }
+  .filtered-hidden:focus-visible::after,
+  .unreadable:focus-visible::after {
+    content: attr(data-reveal);
+    position: absolute;
+    right: 0;
+    left: auto;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    display: inline-block;
     white-space: normal;
+    width: max-content;
     max-width: min(90vw, 420px);
     background: var(--surface);
+    color: var(--text);
     border-radius: 4px;
+    /* Do not drop this ring — see the comment above: in dark theme it is the ONLY thing separating this
+       box from the bar behind it. */
     box-shadow: 0 0 0 1px var(--border-strong), 0 2px 6px rgba(0, 0, 0, 0.35);
     padding: 2px 4px;
+    /* CPE-1883 round 2: a hover/focus reveal has no interactive content of its own — without this, the
+       box (up to 367px wide) can sit over `.git`'s Pull/Push/Sync buttons while focused and swallow
+       their first click (it blurs the note instead of pressing the button underneath). Verified via a
+       real-Chrome hit-test sweep (`document.elementsFromPoint` over all three `.git-btn` centres at
+       900px busy): every button is topmost/reachable with this in place, none are shadowed by the
+       reveal.
+       Open question, not a regression, left unexamined rather than silently assumed either way: `::after`
+       generated content is not a text node, so it cannot be drag-selected, and the real `<span>`'s own
+       text sits UNDER this opaque overlay — whether a sighted mouse user can still select the sentence
+       by dragging across it is browser-dependent and untested here. Not a regression from this fix's own
+       baseline: pre-fix there was no readable box to select from in the first place (a one-word-per-line
+       column), so this doesn't take away a capability that existed before CPE-1883. */
+    pointer-events: none;
   }
 
   /* CPE-1833: the persistent announcer for both advisory notes. ALWAYS mounted (see the markup comment

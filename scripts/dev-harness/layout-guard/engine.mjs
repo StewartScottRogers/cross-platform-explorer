@@ -18,7 +18,7 @@
 // to "the harness crashed" rather than "a real layout bug" — if you see it, check `node --version`
 // first.
 //
-// Four independent, composable check kinds (a case's `checks` array picks whichever apply — see
+// Five independent, composable check kinds (a case's `checks` array picks whichever apply — see
 // cases.mjs's own decision table for which kind catches which class of bug, and its header for real
 // examples):
 //
@@ -49,10 +49,70 @@
 //    actually clickable" check generalised: a control that still LAYS OUT somewhere doesn't mean it's
 //    still reachable once an ancestor clips it or another element paints on top.
 //
+//  - `rectBounds` — does a single element's OWN rendered box stay within simple width/height limits
+//    (`maxHeight`, `minWidth`, either or both)? This is CPE-1883 ("the status bar's focus-reveal box
+//    ignores its own max-width and stacks one word per line"): a `max-width` CSS declaration existing
+//    in the source (which is all jsdom can ever confirm) proves nothing about whether the FLEX
+//    ALGORITHM ever lets the box reach it — a flex item can keep shrinking toward its content's
+//    min-content width regardless of `max-width` sitting unreached above it, and when that min-content
+//    width is a single word (because `white-space: normal` allows wrapping), the box collapses to a
+//    tall one-word-per-line column instead of the wide, readable box `max-width` implies. `maxHeight`
+//    catches exactly that shape (a column is tall for its width); `minWidth` catches the companion
+//    failure of a box that never grows outward at all. Needs the element already in the state under
+//    test (e.g. focused) BEFORE this engine measures it — that is the harness PAGE's job (see
+//    `scripts/dev-harness/statusbar-notice/inner-main.ts`'s `?focus=` param), not this engine's; unlike
+//    the other four kinds, `rectBounds` cannot discover the interaction that produces the state itself.
+//    Optional `pseudo` (e.g. `"::after"`) measures a GENERATED-CONTENT box instead of `selector` itself
+//    — CPE-1883's actual fix renders its reveal on `::after` (not the real element, to avoid disturbing
+//    flex siblings), and a pseudo-element has no `getBoundingClientRect()` (querySelector can't even
+//    select one), so this path reads `getComputedStyle(el, pseudo)` instead — width/height only, no
+//    position.
+//
+//  - `pseudoOnScreen` — CPE-1883 round 2 (Visual Critic UAT): `rectBounds` proves the reveal box is the
+//    right SHAPE (wide, not a column) but says nothing about WHERE it lands — the shipped-then-reverted
+//    `left: 0` anchor grew the box off the RIGHT edge of a 600px window with the compound-busy row, and
+//    `body { overflow: hidden }` (app.css) silently clipped the sentence's tail with no ellipsis, no
+//    scroll, no visual cue at all. Anchoring the OPPOSITE edge (`right: 0; left: auto`) fixes it by
+//    construction (the anchor element itself is always on-screen, so growing toward the anchor's own
+//    side can only run off the FAR edge, never the near one) — this check proves that by construction is
+//    actually true, not assumed: given `anchorSelector` (the real, still-narrow flex item) + `pseudo`, it
+//    reads the pseudo's ACTUAL resolved `left`/`right` offset from `getComputedStyle` (which DOES
+//    resolve these to used pixel values for an absolutely positioned pseudo-element, even though it has
+//    no `getBoundingClientRect()`) to determine which edge it is really anchored to, combines that with
+//    the anchor's real `getBoundingClientRect()` and the pseudo's computed width, and fails if the FAR
+//    edge falls outside `[0, window.innerWidth]`. Went through TWO corrections, both found red-proofing
+//    it against the reverted `left: 0`, not assumed correct on the first pass: (1) a first version
+//    computed the position from the OPTIONAL `edge` config field instead of measuring it, so reverting
+//    the CSS anchor didn't change what got measured — fixed to measure the true anchor and only
+//    cross-check `edge` as a declared expectation now (a mismatch is itself flagged). (2) the "measure
+//    it" fix above then assumed only ONE of computed `left`/`right` would resolve to a definite number —
+//    false: BOTH resolve to definite numbers for a fully-determined box (width + one authored offset),
+//    the un-authored side is algebraically DERIVED and can drift several px from the authored anchor
+//    (sub-pixel rounding) — so this check now trusts whichever side computes to (near) zero, since this
+//    CSS pattern always authors its anchor as an exact `0` offset.
+//
+//  - `clickReaches` — CPE-1883 round 3 (Reviewer finding, the most important lesson this whole check
+//    kind exists to record): does a REAL, CDP-dispatched mouse click on a `selectors` entry actually
+//    land on that element (or a descendant), or does something else swallow it? `selfPaint` (above) asks
+//    a similar-sounding question but answers it with `document.elementFromPoint` — proven, twice, NOT
+//    trustworthy for this exact failure shape: an invisible (`color: transparent`), unclipped
+//    (`overflow: visible`), `pointer-events: auto` element that overlaps a control. Both
+//    `elementFromPoint` AND `elementsFromPoint` reported CPE-1883's `.git` Pull button as reachable while
+//    a real dispatched click on it landed on the invisible span instead — repro'd twice, not a fluke (see
+//    StatusBar.svelte's own CPE-1883 round-3 comment). `clickReaches` runs OUTSIDE the in-page probe
+//    string this file builds for every other check kind, because it needs CDP's own Input domain (a
+//    click synthesized through the renderer's real event pipeline), not anything reachable from browser
+//    JS — see `runClickReachesChecks` below for the implementation and exactly why the hit-test APIs
+//    diverge from a real click for this shape.
+//
 // `siblingOverlap`/`clipProbe`/`textOverflow` catch a decorative element BLEEDING onto something else;
-// `selfPaint` catches an interactive element BECOMING UNREACHABLE. Both are real, distinct failure
-// shapes on record in this repo (CPE-1836 is the first kind, CPE-1827/CPE-1884 are the second) — a
-// generic harness needs both, not just one.
+// `selfPaint` catches an interactive element APPEARING unreachable by hit-test APIs (which is usually
+// sufficient, but see `clickReaches`'s own note for the one shape it can miss); `rectBounds` catches an
+// element's OWN box growing the wrong SHAPE; `pseudoOnScreen` catches the right shape landing in the
+// wrong PLACE; `clickReaches` catches a control that LOOKS reachable but isn't, when only tested via
+// hit-test APIs rather than a real click. All are real, distinct failure shapes on record in this repo
+// (CPE-1836 is the first kind, CPE-1827/CPE-1884 are the second, CPE-1883 is the third, fourth, and
+// fifth) — a generic harness needs all five, not fewer.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -100,23 +160,44 @@ let nextId = 1;
  *  a stalled internal navigation, a brief unresponsive period; real on a shared/throttled CI runner,
  *  never reproduced locally), the `await` on that one call blocked forever, hanging the WHOLE run
  *  silently until the job's own external `timeout-minutes` killed it with no information about where it
- *  was stuck. `CDP_CALL_TIMEOUT_MS` below makes every call fail LOUD, by method name, instead. */
+ *  was stuck. `CDP_CALL_TIMEOUT_MS` below makes every call fail LOUD, by method name, instead. Keep this
+ *  one TIGHT: `Runtime.evaluate` (etc.) taking anywhere near this long means something is genuinely
+ *  wrong (CPE-1882's reviewer relied on exactly that to turn a forced port collision into a loud named
+ *  failure rather than a silent wrong measurement) — do not widen it globally to cover navigation. */
 const CDP_CALL_TIMEOUT_MS = 15000;
 
-/** CI-round finding (CPE-1891): `waitForHttp` below used to wait a flat 15s for Chrome to expose its
- *  CDP endpoint at all -- BEFORE any navigation, before the dev server is even touched -- and gave no
- *  budget in its own error message, so a timeout here read as a bare port number with no way to tell
- *  whether 15s was tight or generous. Measured on a GitHub-hosted runner already busy with this
- *  workflow's OTHER jobs: Chrome launched (the orphan-reaper log line proves the process existed) but
- *  the wait gave up at ~19s, before `--remote-debugging-port` ever came up -- the same "cold start on a
- *  loaded machine" cost class CPE-1914 (PR #1041, main) hit for the first `Page.navigate` call and gave
- *  its own `CDP_NAVIGATE_TIMEOUT_MS`, rather than widening the shared `CDP_CALL_TIMEOUT_MS` used for
- *  every OTHER call (an ordinary hung `Runtime.evaluate` etc. should still fail loud and fast at 15s).
- *  `CDP_NAVIGATE_TIMEOUT_MS` does not exist on this branch yet (it landed on `main` after this branch's
- *  last sync and will reconcile normally on the next merge) -- so rather than invent an unrelated
- *  number, this reuses the SAME 40000ms this file already commits to a few dozen lines below, for the
- *  identical "cold dev server compiling the module graph on first hit" reason
- *  (`checkOneCaseOnClient`'s `readySelector` poll deadline) -- one anchor, not two uncoordinated ones. */
+/** CPE-1914: `Page.navigate`'s own ACK (not the page load — `checkOneCaseOnClient`'s separate 40s
+ *  `readySelector` poll below already covers that) is the single slowest CDP call this engine makes,
+ *  because the FIRST one lands on a freshly-launched Chrome talking to a cold vite dev server still
+ *  compiling the module graph. `CDP_CALL_TIMEOUT_MS` (15s) was tuned for "is an ordinary call stuck",
+ *  not for that — CPE-1882's independent UAT got 7/7 local failures at 15s, root-caused with a raw-CDP
+ *  probe against the real first-case URL on a cold server: the ack itself arrived at ~18.65s on a
+ *  loaded Windows dev machine (policy-managed Chrome force-installing extensions into every fresh
+ *  profile, plus normal multi-agent load — the NORMAL condition on this project, not an edge case).
+ *  Reverting to 15s locally reproduced the failure; raising it to 60s locally gave an immediate clean
+ *  12/12, confirming the cost is real and bounded, not a hang. Re-measured here on 2026-08-26 (same
+ *  machine, lighter concurrent load at the time): the cold ack took 1556ms vs ~9ms once warm — same
+ *  shape, smaller magnitude, because load varies run to run. Reuse the 40s the engine's own
+ *  `readySelector` poll already budgets for "cold dev server compiling on first hit" (see
+ *  `checkOneCaseOnClient` below) instead of inventing a second, uncoordinated number for the same cause
+ *  — 40s clears the one hard data point (~18.65s) with ~2.1x headroom while staying well under CI's
+ *  own 30-40s total-job budget (this is a LOCAL-machine allowance; the job passes in 33-38s on
+ *  GitHub's runners, where this call never gets close to either timeout). */
+const CDP_NAVIGATE_TIMEOUT_MS = 40000;
+
+/** CPE-1891: `waitForHttp` below used to wait a flat, unnamed 15s for Chrome to expose its CDP
+ *  endpoint at all — BEFORE `Page.navigate` above is ever called, before the dev server is even
+ *  touched — and its error message named the port but not the budget. CI failed twice in a row on a
+ *  GitHub-hosted runner already busy with this workflow's OTHER jobs: Chrome launched (the
+ *  orphan-reaper log line proved the process existed) but the wait gave up at ~19s, before
+ *  `--remote-debugging-port` ever came up — the identical "cold start on a loaded machine" cost class
+ *  `CDP_NAVIGATE_TIMEOUT_MS` above exists for, just one step earlier in the sequence (the endpoint has
+ *  to come up before anything can navigate through it at all). Sits deliberately next to
+ *  `CDP_NAVIGATE_TIMEOUT_MS` rather than folding into it — they gate two SEPARATE waits (endpoint-up
+ *  vs. first-navigate-ack) that can each independently be the slow one, so collapsing them into one
+ *  constant would hide which wait actually expired. Reuses that same 40000ms rather than inventing a
+ *  third number: both waits exist for the identical "Chrome + a cold vite dev server, together, on a
+ *  loaded machine" cause, so one shared, already-justified budget beats two uncoordinated guesses. */
 const CDP_ENDPOINT_TIMEOUT_MS = 40000;
 
 function makeCdpClient(ws) {
@@ -131,13 +212,14 @@ function makeCdpClient(ws) {
     }
   });
   return {
-    send(method, params = {}) {
+    send(method, params = {}, { timeoutMs = CDP_CALL_TIMEOUT_MS, context } = {}) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`CDP call "${method}" got no response within ${CDP_CALL_TIMEOUT_MS}ms (id=${id})`));
-        }, CDP_CALL_TIMEOUT_MS);
+          const where = context ? ` (${context})` : "";
+          reject(new Error(`CDP call "${method}"${where} got no response within ${timeoutMs}ms (id=${id})`));
+        }, timeoutMs);
         pending.set(id, {
           resolve: (v) => { clearTimeout(timer); resolve(v); },
           reject: (e) => { clearTimeout(timer); reject(e); },
@@ -172,6 +254,15 @@ function buildProbeExpression(checks) {
     var textOverflows = [];
     var unpainted = [];
     var missing = [];
+    var boundsViolations = [];
+    // CPE-1883: always recorded (pass OR fail), unlike the violation arrays above — this is the actual
+    // measured evidence a ticket's work log wants, not just a yes/no. One entry per rectBounds check.
+    // NOTE: no backtick characters allowed in this comment or anywhere else in this probe string — see
+    // the textOverflow check's own identical warning below; this file already broke that rule once.
+    var rectBoundsInfo = [];
+    var offScreen = [];
+    // CPE-1883 round 2: same always-recorded-not-just-on-failure convention as rectBoundsInfo above.
+    var pseudoOnScreenInfo = [];
 
     for (var i = 0; i < checks.length; i++) {
       var check = checks[i];
@@ -273,9 +364,110 @@ function buildProbeExpression(checks) {
             );
           }
         }
+      } else if (check.kind === 'rectBounds') {
+        var rbsel = check.selector;
+        var rbel = document.querySelector(rbsel);
+        if (!rbel) { missing.push('rectBounds: not found: ' + rbsel); continue; }
+        // CPE-1883 addition: check.pseudo (e.g. "::after") measures a GENERATED-CONTENT box instead of
+        // the real element -- pseudo-elements are not DOM nodes, so getBoundingClientRect() cannot
+        // target one directly (querySelector cannot even select one). getComputedStyle(el, pseudo) is
+        // the one API that DOES resolve a pseudo-element's actual rendered width/height in real Chrome;
+        // it has no left/top/right/bottom equivalent, which is why this path only ever reports
+        // width/height, never position -- exactly what this check's maxHeight/minWidth need and no more.
+        // NOTE: no backtick characters allowed anywhere in this probe string -- see the textOverflow
+        // check's identical warning above; this file has broken that rule twice already.
+        var rbr;
+        if (check.pseudo) {
+          var pcs = getComputedStyle(rbel, check.pseudo);
+          rbr = { width: parseFloat(pcs.width) || 0, height: parseFloat(pcs.height) || 0 };
+        } else {
+          rbr = rectOf(rbel);
+        }
+        var rbLabel = rbsel + (check.pseudo ? check.pseudo : '');
+        rectBoundsInfo.push({ selector: rbLabel, width: Number(rbr.width.toFixed(1)), height: Number(rbr.height.toFixed(1)) });
+        if (typeof check.maxHeight === 'number' && rbr.height > check.maxHeight) {
+          boundsViolations.push(
+            rbLabel + ' height=' + rbr.height.toFixed(1) + 'px exceeds maxHeight=' + check.maxHeight +
+            'px (width=' + rbr.width.toFixed(1) + 'px) — looks like a stacked column, not a wide box'
+          );
+        }
+        if (typeof check.minWidth === 'number' && rbr.width < check.minWidth) {
+          boundsViolations.push(
+            rbLabel + ' width=' + rbr.width.toFixed(1) + 'px is below minWidth=' + check.minWidth +
+            'px (height=' + rbr.height.toFixed(1) + 'px) — never grew outward'
+          );
+        }
+      } else if (check.kind === 'pseudoOnScreen') {
+        var posel = document.querySelector(check.anchorSelector);
+        if (!posel) { missing.push('pseudoOnScreen: anchor not found: ' + check.anchorSelector); continue; }
+        var anchorR = rectOf(posel);
+        var poscs = getComputedStyle(posel, check.pseudo);
+        var posW = parseFloat(poscs.width) || 0;
+        var posLabel = check.anchorSelector + check.pseudo;
+        // Reviewer finding (CPE-1883 round 2): the FIRST version of this check trusted check.edge
+        // alone and computed a position from it, so reverting the CSS anchor (e.g. right: 0 back to
+        // left: 0) did NOT change what got measured -- the check silently re-asserted its own
+        // configured expectation instead of the page's actual rendered state, so it could never have
+        // caught that exact regression. Fixed: read the REAL resolved left/right offset from computed
+        // style (getComputedStyle DOES resolve these to used pixel values for an absolutely positioned
+        // pseudo-element, even though it has no getBoundingClientRect()) and derive the anchor edge from
+        // THAT, not from check.edge. check.edge is now only a declared expectation, cross-checked
+        // against the measured edge below rather than substituted for it.
+        // NOTE: no backtick characters allowed anywhere in this probe string -- see textOverflow's own
+        // identical warning above; this file has broken that rule three times now.
+        var rightPx = parseFloat(poscs.right);
+        var leftPx = parseFloat(poscs.left);
+        // Reviewer-motivated correction #2, found red-proofing the fix above: getComputedStyle resolves
+        // BOTH left AND right to definite numbers for a fully-determined absolutely positioned box
+        // (width + exactly one of left/right authored), not just the authored side -- the un-authored
+        // side is algebraically DERIVED and measured up to ~8px off the authored side's exact anchor
+        // (sub-pixel layout rounding), so trusting whichever side happens to parse as a number is not
+        // reliable; both always do. This CSS pattern always anchors with an offset of exactly 0 on the
+        // authored side (right: 0, or the pre-fix left: 0) -- so the side whose computed value is at (or
+        // essentially at) 0 is the one actually authored, and that is what this check trusts.
+        var farLeft, farRight, actualEdge;
+        if (Math.abs(rightPx) < 0.5) {
+          farRight = anchorR.right - rightPx;
+          farLeft = farRight - posW;
+          actualEdge = 'right';
+        } else if (Math.abs(leftPx) < 0.5) {
+          farLeft = anchorR.left + leftPx;
+          farRight = farLeft + posW;
+          actualEdge = 'left';
+        } else {
+          missing.push('pseudoOnScreen: ' + posLabel + ' -- neither left (' + poscs.left + ') nor right (' + poscs.right + ') computed near 0; this check only supports a 0-offset anchor');
+          continue;
+        }
+        pseudoOnScreenInfo.push({
+          selector: posLabel, edge: actualEdge, left: Number(farLeft.toFixed(1)), right: Number(farRight.toFixed(1)),
+          innerWidth: window.innerWidth,
+        });
+        if (farLeft < -0.5 || farRight > window.innerWidth + 0.5) {
+          offScreen.push(
+            posLabel + ' (measured anchor: ' + actualEdge + ': 0) spans left=' + farLeft.toFixed(1) +
+            ' right=' + farRight.toFixed(1) + 'px, outside the viewport [0, ' + window.innerWidth +
+            '] — part of the revealed sentence would be clipped by body { overflow: hidden } with no cue'
+          );
+        }
+        if (check.edge && check.edge !== actualEdge) {
+          offScreen.push(
+            posLabel + ' expected to anchor via "' + check.edge + '" but computed style measured "' +
+            actualEdge + '" instead — the CSS anchor direction itself changed'
+          );
+        }
       }
     }
-    return { overlaps: overlaps, clipBreaches: clipBreaches, textOverflows: textOverflows, unpainted: unpainted, missing: missing };
+    return {
+      overlaps: overlaps,
+      clipBreaches: clipBreaches,
+      textOverflows: textOverflows,
+      unpainted: unpainted,
+      missing: missing,
+      boundsViolations: boundsViolations,
+      rectBoundsInfo: rectBoundsInfo,
+      offScreen: offScreen,
+      pseudoOnScreenInfo: pseudoOnScreenInfo,
+    };
   })()
   `;
 }
@@ -284,20 +476,32 @@ function buildProbeExpression(checks) {
  *  why this no longer launches its own Chrome per width — CPE-1882 CI-round-3 finding). Sets the
  *  viewport, navigates, waits for `readySelector` AND confirms `location.href`, runs the probe. */
 async function checkOneCaseOnClient(client, { devServerBase, kase, width, height }) {
+  // CPE-1914: names which case/width a timeout happened during, so the next person doesn't have to
+  // write a raw-CDP probe to find out (as CPE-1882's UAT had to).
+  const caseContext = (label) => `case="${kase.name}" width=${width} height=${height} ${label}`;
   // The load-bearing step: `--window-size` alone does not reliably set the CSS viewport under
   // `--headless=new` (see statusbar-notice/index.html's header comment — it clamps internally and
   // rescales), which is why the earlier `--dump-dom`-driven harnesses needed an outer-page/iframe trick
   // to get a trustworthy width. `Emulation.setDeviceMetricsOverride` sets the REAL CSS viewport directly
   // (already proven by sidebar-drop-stack-overlap/check.mjs), so this engine drives harness pages
   // directly — no iframe indirection needed here.
-  await client.send("Emulation.setDeviceMetricsOverride", {
-    width,
-    height,
-    deviceScaleFactor: 1,
-    mobile: false,
-  });
+  await client.send(
+    "Emulation.setDeviceMetricsOverride",
+    { width, height, deviceScaleFactor: 1, mobile: false },
+    { context: caseContext("(set viewport)") },
+  );
   const expectedUrl = `${devServerBase}${kase.path}`;
-  await client.send("Page.navigate", { url: expectedUrl });
+  // CPE-1914: `Page.navigate`'s own ACK — not the page load, which the readySelector poll below covers
+  // separately — is the single slowest CDP call this engine makes, because the FIRST one lands on a
+  // freshly-launched Chrome talking to a cold vite dev server still compiling the module graph. Give it
+  // the same 40s budget the poll below already uses for that exact reason, instead of sharing the
+  // tight 15s `CDP_CALL_TIMEOUT_MS` meant for calls where any delay signals something is actually wrong.
+  // See `CDP_NAVIGATE_TIMEOUT_MS`'s own comment above for the measurement behind the number.
+  await client.send(
+    "Page.navigate",
+    { url: expectedUrl },
+    { timeoutMs: CDP_NAVIGATE_TIMEOUT_MS, context: caseContext(`(initial navigate to ${expectedUrl})`) },
+  );
 
   let ready = false;
   let urlMatched = false;
@@ -314,10 +518,14 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
     // showing up as a real measurement, because the OLD readiness check only confirmed `readySelector`
     // was present, never that this tab is actually looking at THIS run's URL. `location.href` is the one
     // signal that can't lie about that: verify it before trusting anything the DOM says.
-    const r = await client.send("Runtime.evaluate", {
-      expression: `(function(){var v=!!document.querySelector(${JSON.stringify(kase.readySelector)});return { ready: v, href: location.href };})()`,
-      returnByValue: true,
-    });
+    const r = await client.send(
+      "Runtime.evaluate",
+      {
+        expression: `(function(){var v=!!document.querySelector(${JSON.stringify(kase.readySelector)});return { ready: v, href: location.href };})()`,
+        returnByValue: true,
+      },
+      { context: caseContext("(readySelector poll)") },
+    );
     if (r.result && r.result.value) {
       lastHref = r.result.value.href || "";
       urlMatched = lastHref === expectedUrl;
@@ -330,21 +538,192 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
   }
   if (!urlMatched) {
     throw new Error(
-      `navigation mismatch at width=${width} height=${height}: expected location.href="${expectedUrl}" ` +
-      `but the tab reports "${lastHref}" — this Chrome instance never reached the URL this run navigated ` +
-      `it to (possibly a stale/foreign page from a port collision with another concurrent harness run)`,
+      `navigation mismatch at case="${kase.name}" width=${width} height=${height}: expected ` +
+      `location.href="${expectedUrl}" but the tab reports "${lastHref}" — this Chrome instance never ` +
+      `reached the URL this run navigated it to (possibly a stale/foreign page from a port collision ` +
+      `with another concurrent harness run)`,
     );
   }
   if (!ready) {
-    throw new Error(`"${kase.readySelector}" never appeared within 40s at width=${width} height=${height} (url confirmed correct)`);
+    throw new Error(
+      `"${kase.readySelector}" never appeared within 40s at case="${kase.name}" width=${width} ` +
+      `height=${height} (url confirmed correct)`,
+    );
   }
   await sleep(300); // settle layout/fonts
 
-  const r = await client.send("Runtime.evaluate", {
-    expression: buildProbeExpression(kase.checks),
-    returnByValue: true,
-  });
-  return r.result.value;
+  const r = await client.send(
+    "Runtime.evaluate",
+    { expression: buildProbeExpression(kase.checks), returnByValue: true },
+    { context: caseContext("(probe evaluate)") },
+  );
+  const result = r.result.value;
+
+  // CPE-1883 round 3 (Reviewer finding): a real dispatched click on ".git"'s Pull button was silently
+  // swallowed by an INVISIBLE, unclipped span sitting over it (round 2's `color: transparent` fix left
+  // the span's own raw text still painting at zero alpha across its full ~367px natural width, with
+  // default `pointer-events: auto`) -- and BOTH `document.elementFromPoint` and
+  // `document.elementsFromPoint`, used for every other check kind in this file, reported the button as
+  // reachable anyway. Repro'd twice, not a fluke: those APIs are Chromium's own hit-test result, which
+  // in this specific case (an invisible, unclipped, overflowing inline text run) diverged from what a
+  // REAL dispatched mouse event actually hits. `clickReaches` checks below run OUTSIDE the in-page probe
+  // string above for exactly that reason -- they need CDP's own Input domain (a genuine synthesized
+  // click through the renderer's real event pipeline), not anything reachable from browser JS.
+  const clickChecks = kase.checks.filter((c) => c.kind === "clickReaches");
+  if (clickChecks.length > 0) {
+    const { failures, info } = await runClickReachesChecks(client, clickChecks, caseContext);
+    result.clickFailures = failures;
+    result.clickReachesInfo = info;
+  } else {
+    result.clickFailures = [];
+    result.clickReachesInfo = [];
+  }
+
+  return result;
+}
+
+/** CPE-1883 round 3: dispatches a REAL mouse click (mouseMoved -> mousePressed -> mouseReleased via
+ *  CDP's Input domain) at each `selector`'s own measured centre, and reports whether the click's actual
+ *  DOM target (a capture-phase `click` listener installed fresh per selector) was that element or one of
+ *  its descendants -- the one signal proven (see the comment above) to disagree with
+ *  `elementFromPoint`/`elementsFromPoint` for an invisible-but-still-pointer-events:auto overlapping
+ *  element. Deliberately its own small helper, not folded into `buildProbeExpression`'s in-page probe:
+ *  everything else in that function runs as pure browser JS in one `Runtime.evaluate` round trip, but a
+ *  real click needs the Input domain, which only exists at the CDP client level in this Node process.
+ *  `caseContext` (CPE-1914's naming helper, threaded in from the caller) keeps timeout/error messages
+ *  from this helper just as identifiable by case/width/height as every other call in this file. */
+async function runClickReachesChecks(client, clickChecks, caseContext) {
+  const failures = [];
+  const info = [];
+  for (const check of clickChecks) {
+    for (const sel of check.selectors) {
+      // CPE-1930 (Reviewer, filed against round 3's first version): `document.querySelector` only ever
+      // grabs the FIRST match -- Pull, for `.git .git-btn` -- so a synthetic regression isolated to
+      // Push/Sync alone slipped past as a false-negative 14/14 PASS. `querySelectorAll` here instead,
+      // stashed on `window.__cprEls` so later per-target Runtime.evaluate calls can reference the SAME
+      // element by index rather than re-querying (DOM order is stable across these calls; nothing here
+      // reflows the row). Each target is measured for whether it is actually PAINTABLE before any click
+      // is dispatched -- both outside the window viewport AND clipped by an ancestor's own
+      // `overflow: hidden` count (a purely geometric ancestor-chain walk, not a hit-test API -- see the
+      // in-page probe's own `clippedByAncestor` comment for why): at 600px busy, `.git`'s own
+      // `overflow: hidden` (CPE-1836) clips Push/Sync for a pre-existing, unrelated row-overflow reason
+      // (not this ticket's bug), so a click dispatched there would land on nothing meaningful. Those are
+      // reported honestly as `hitTag: "not paintable here (skipped)"` with `clicked: null` (neither pass
+      // nor fail) rather than silently counted as a miss or silently dropped.
+      const setup = await client.send(
+        "Runtime.evaluate",
+        {
+          expression: `
+            (function () {
+              // Geometric only, no hit-test API (see this function's own header for why): a target's
+              // centre can sit inside the WINDOW viewport while still being invisible because an
+              // ANCESTOR clips it (e.g. ".git { overflow: hidden; }" clipping an overflowing pinned
+              // child on a crowded row -- CPE-1836 territory, pre-existing and out of this ticket's
+              // scope). Walk up the ancestor chain checking computed overflow; if any clipping ancestor's
+              // own rect does not contain the centre point, the target is not actually paintable there.
+              function clippedByAncestor(el, x, y) {
+                var node = el.parentElement;
+                while (node) {
+                  var cs = getComputedStyle(node);
+                  if (cs.overflow === 'hidden' || cs.overflowX === 'hidden' || cs.overflowY === 'hidden') {
+                    var r = node.getBoundingClientRect();
+                    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return true;
+                  }
+                  node = node.parentElement;
+                }
+                return false;
+              }
+              var els = Array.prototype.slice.call(document.querySelectorAll(${JSON.stringify(sel)}));
+              if (els.length === 0) return { error: 'not found' };
+              window.__cprEls = els;
+              return els.map(function (el, i) {
+                var r = el.getBoundingClientRect();
+                var x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
+                // Deliberately NOT gated on r.width/r.height > 0: a genuinely zero-sized target (e.g. a
+                // future CSS regression that collapses a button) still gets a REAL click dispatched at
+                // its degenerate centre point and an honest CLICK-MISS if it fails, rather than being
+                // silently skipped -- that is exactly the case the Reviewer stress-tested against the
+                // single-target version of this check and got a real, non-crashing failure out of; this
+                // multi-target version must not quietly downgrade that to a skip. Only genuine
+                // window-bounds / ancestor-clip exclusion (the pre-existing, expected 600px case) skips.
+                var inWindow = x >= 0 && x <= window.innerWidth && y >= 0 && y <= window.innerHeight;
+                var onScreen = inWindow && !clippedByAncestor(el, x, y);
+                return { i: i, x: x, y: y, onScreen: onScreen };
+              });
+            })()
+          `,
+          returnByValue: true,
+        },
+        { context: caseContext(`(clickReaches setup: ${sel})`) },
+      );
+      const targets = setup.result.value;
+      if (!targets || targets.error) {
+        failures.push(`clickReaches: not found: ${sel}`);
+        continue;
+      }
+      for (const t of targets) {
+        const label = `${sel}[${t.i}]`;
+        if (!t.onScreen) {
+          info.push({ selector: label, x: Number(t.x.toFixed(1)), y: Number(t.y.toFixed(1)), clicked: null, hitTag: "not paintable here (skipped)" });
+          continue;
+        }
+        await client.send(
+          "Runtime.evaluate",
+          {
+            expression: `
+              (function () {
+                var el = window.__cprEls[${t.i}];
+                if (window.__cprHandler) document.removeEventListener('click', window.__cprHandler, true);
+                window.__cprClicked = false;
+                window.__cprHitTag = null;
+                window.__cprHandler = function (e) {
+                  window.__cprClicked = !!(e.target === el || (el.contains && el.contains(e.target)));
+                  var cls = (e.target.className && typeof e.target.className === 'string')
+                    ? e.target.className.trim().split(/\s+/)[0] : '';
+                  window.__cprHitTag = e.target.tagName + (cls ? '.' + cls : '');
+                };
+                document.addEventListener('click', window.__cprHandler, true);
+              })()
+            `,
+            returnByValue: true,
+          },
+          { context: caseContext(`(clickReaches arm: ${label})`) },
+        );
+        await client.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseMoved", x: t.x, y: t.y },
+          { context: caseContext(`(clickReaches mouseMoved: ${label})`) },
+        );
+        await client.send(
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x: t.x, y: t.y, button: "left", clickCount: 1 },
+          { context: caseContext(`(clickReaches mousePressed: ${label})`) },
+        );
+        await client.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x: t.x, y: t.y, button: "left", clickCount: 1 },
+          { context: caseContext(`(clickReaches mouseReleased: ${label})`) },
+        );
+        const readback = await client.send(
+          "Runtime.evaluate",
+          { expression: "({ clicked: !!window.__cprClicked, hitTag: window.__cprHitTag || null })", returnByValue: true },
+          { context: caseContext(`(clickReaches readback: ${label})`) },
+        );
+        const clicked = readback.result.value.clicked;
+        const hitTag = readback.result.value.hitTag;
+        info.push({ selector: label, x: Number(t.x.toFixed(1)), y: Number(t.y.toFixed(1)), clicked, hitTag });
+        if (!clicked) {
+          failures.push(
+            `clickReaches: a real dispatched click at (${t.x.toFixed(1)}, ${t.y.toFixed(1)}) ` +
+            `(the centre of ${label}) landed on ${hitTag || 'nothing'} instead -- this control is not ` +
+            `actually clickable here, even though it may still test as "reachable" via ` +
+            `elementFromPoint/elementsFromPoint`
+          );
+        }
+      }
+    }
+  }
+  return { failures, info };
 }
 
 /** Runs every (case × width) combination against ONE launched Chrome instance, reused for the whole
@@ -409,6 +788,24 @@ export async function runAllCases({ cases, devServerBase, chromePath, cdpPort = 
     });
     const client = makeCdpClient(ws);
     await client.send("Page.enable");
+    // CPE-1883 finding: a headless tab navigated via `Page.navigate` never becomes the OS-level
+    // "active" window, so `document.hasFocus()` is false and — because `:focus`/`:focus-visible` both
+    // require DOCUMENT focus, not merely `document.activeElement`, per spec — a harness page's own
+    // `el.focus()` call sets `activeElement` but neither pseudo-class ever matches, silently. That
+    // surfaced as a real case ("statusbar-focus-reveal") hanging on its own `readySelector` for the
+    // full 40s below rather than measuring anything. `Emulation.setFocusEmulationEnabled` is CDP's own
+    // purpose-built fix: it makes the page report itself as focused/active regardless of real window
+    // activation state. Enabled once for the whole session (harmless for cases that never call
+    // `.focus()` — it only changes what `document.hasFocus()`/`:focus-visible` report, nothing about
+    // layout) rather than per-case, so any future focus-dependent case gets it for free.
+    // Reviewer note (CPE-1883 round 2): confirmed global rather than per-case is SAFE today — grepped
+    // every scripts/dev-harness/*/{inner-,}main.ts and cases.mjs, nothing else calls `.focus()` or
+    // depends on autofocus/`:hover`/`:focus-visible`, and the full 14-case suite re-ran clean with this
+    // enabled. It is a standing caveat for whoever adds the next case, though: a FUTURE case whose page
+    // autofocuses an element on load (no explicit `?focus=` param needed) will now engage
+    // `:focus-visible` styling where it previously would not have, simply because this flag makes
+    // `document.hasFocus()` true for every case's page, not just ones that ask for it.
+    await client.send("Emulation.setFocusEmulationEnabled", { enabled: true });
 
     const results = [];
     for (const kase of cases) {

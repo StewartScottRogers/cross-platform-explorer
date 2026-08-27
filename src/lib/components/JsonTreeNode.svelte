@@ -125,7 +125,7 @@
 <style>
   /* Theme-only colours throughout (MENUS.md) — every value below is an existing app.css token, no new
      ones introduced (CPE-1492/1493 WCAG guard doesn't need updating). */
-  .jt-node { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+  .jt-node { font-family: var(--mono); font-size: 12px; }
   .jt-row {
     display: flex;
     align-items: center;

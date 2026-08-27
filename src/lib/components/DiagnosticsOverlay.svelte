@@ -79,7 +79,7 @@
     color: #d8d8d8;
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 7px;
-    font-family: var(--mono, ui-monospace, Consolas, monospace);
+    font-family: var(--mono);
     font-size: 11px;
     pointer-events: none; /* informational only — never eats clicks */
     overflow: hidden;

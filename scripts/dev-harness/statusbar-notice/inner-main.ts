@@ -16,6 +16,18 @@
 // the ticket's own lesson: "This row has moved its failure between elements three times; measuring only
 // the element you changed is how that happened." `?compact=1` additionally requests the case where
 // `.git`'s pinned children alone (no branch) already threaten to overflow, isolating the exact defect.
+//
+// CPE-1883 extends it again with `?focus=filtered-hidden|unreadable` — programmatically focuses that
+// pill after mount so its `:focus-visible` reveal rule is actually engaged before anything is measured
+// or screenshotted (a `tabindex="0"` element matches `:focus-visible` in real Chrome on ANY focus, not
+// only a keyboard-driven one, since it has no native "only show the ring after keyboard use" heuristic —
+// verified via `.matches(':focus-visible')` in `diag.focusVisibleMatched` below, so a false pass can't
+// slip through if that assumption ever stops holding). `?fh=<n>` / `?un=<n>` override
+// `filteredHidden`/`unreadableCount` independently of `?busy=1`, so the "uncrowded" 900px case from the
+// ticket (one pill focused, nothing else competing for row space) is reachable without the compound
+// busy-row scenario. `?theme=dark` sets `document.documentElement.dataset.theme` the same way
+// `src/lib/theme.ts` does in the real app (see `scripts/dev-harness/trash-titlebar/main.ts` for the
+// same convention), for before/after screenshots in both themes.
 import StatusBar from "../../../src/lib/components/StatusBar.svelte";
 
 const params = new URLSearchParams(location.search);
@@ -24,6 +36,13 @@ const kind = noticeParam === "long" ? "long" : noticeParam === "none" ? "none" :
 const showGit = params.get("git") !== "off";
 const showDisk = params.get("disk") !== "off";
 const busy = params.get("busy") === "1";
+const theme = params.get("theme") === "dark" ? "dark" : "light";
+document.documentElement.dataset.theme = theme;
+const focusTarget = params.get("focus"); // "filtered-hidden" | "unreadable" | null
+const fhParam = params.get("fh");
+const unParam = params.get("un");
+const filteredHiddenCount = fhParam !== null ? Number(fhParam) : busy ? 4 : 0;
+const unreadableCount = unParam !== null ? Number(unParam) : busy ? 2 : 0;
 
 // Mirrors the ticket's own evidence table: a long, real-world-shaped notice string (German-length
 // class) vs. a short one that comfortably fits on one line at the tested widths.
@@ -44,8 +63,8 @@ const app = new StatusBar({
     selectedCount: busy ? 7 : 0,
     selectedSize: busy ? 987_654_321 : 0,
     hiddenShown: busy,
-    filteredHidden: busy ? 4 : 0,
-    unreadableCount: busy ? 2 : 0,
+    filteredHidden: filteredHiddenCount,
+    unreadableCount,
     notice: kind === "none" ? "" : kind === "long" ? LONG_NOTICE : SHORT_NOTICE,
     // CPE-1859: `{#if git && git.is_repo}` gates the whole chip, so `git: null` is the ordinary
     // NON-REPO folder — the state in which `.disk` has no preceding `margin-left: auto` sibling.
@@ -60,12 +79,12 @@ const app = new StatusBar({
 });
 (window as unknown as { __statusBar?: unknown }).__statusBar = app;
 
-type Rect = { left: number; right: number; top: number; bottom: number; width: number } | null;
+type Rect = { left: number; right: number; top: number; bottom: number; width: number; height: number } | null;
 
 function rectOf(el: Element | null): Rect {
   if (!el) return null;
   const b = el.getBoundingClientRect();
-  return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width };
+  return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height };
 }
 
 /** CPE-1836: every DIRECT child of `.statusbar` — not a curated subset — plus `.git`'s own children,
@@ -94,9 +113,31 @@ function overlaps(a: NonNullable<Rect>, b: NonNullable<Rect>): boolean {
   return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 }
 
+/** CPE-1883: programmatically focuses the requested pill so its `:focus-visible` reveal rule is
+ *  engaged before anything is measured. Idempotent (re-focusing an already-focused element is a no-op),
+ *  which matters because `computeDiag` — this function's only caller — itself runs 3× (rAF/load/
+ *  timeout backstops, see the bottom of this file). Returns the focused element (or null) so callers
+ *  can confirm `:focus-visible` actually matched, rather than assuming `.focus()` alone proves it. */
+function applyFocus(): HTMLElement | null {
+  if (focusTarget !== "filtered-hidden" && focusTarget !== "unreadable") return null;
+  const el = document.querySelector(`.${focusTarget}`) as HTMLElement | null;
+  el?.focus({ preventScroll: true });
+  return el;
+}
+
 function computeDiag() {
+  const focusedEl = applyFocus();
   const statusbar = document.querySelector(".statusbar") as HTMLElement | null;
-  const diag: Record<string, unknown> = { innerWidth: window.innerWidth, noticeLineCount: 0 };
+  const diag: Record<string, unknown> = {
+    innerWidth: window.innerWidth,
+    noticeLineCount: 0,
+    focusTarget: focusTarget ?? null,
+    // CPE-1883: `:focus-visible` matching real Chrome behaviour, not merely "the element has focus" —
+    // a tabindex-only element has no native click-suppresses-the-ring heuristic, so any `.focus()`
+    // should match it, but asserting that here (rather than assuming it) is what makes this harness
+    // trustworthy for the actual regression rather than a weaker "was .focus() called" proxy.
+    focusVisibleMatched: focusedEl ? focusedEl.matches(":focus-visible") : null,
+  };
   if (statusbar) {
     const r = statusbar.getBoundingClientRect();
     diag.statusbarRect = { height: r.height, width: r.width, left: r.left, right: r.right };
@@ -208,12 +249,13 @@ function renderInnerReadout(diag: Record<string, unknown>) {
   const el = document.getElementById("inner-readout");
   if (!el) return;
   const fmt = (r: Rect) =>
-    r ? `left=${r.left.toFixed(1)} right=${r.right.toFixed(1)} w=${r.width.toFixed(1)}` : "ABSENT";
+    r ? `left=${r.left.toFixed(1)} right=${r.right.toFixed(1)} w=${r.width.toFixed(1)} h=${r.height.toFixed(1)}` : "ABSENT";
   const contentRight = diag.contentRight as number | undefined;
   const disk = diag.disk as Rect;
   const itemCount = diag.itemCount as Rect;
   const lines = [
-    `innerWidth=${diag.innerWidth} notice=${kind} git=${showGit ? "on" : "off"} disk=${showDisk ? "on" : "off"} busy=${busy ? "1" : "0"}`,
+    `innerWidth=${diag.innerWidth} notice=${kind} git=${showGit ? "on" : "off"} disk=${showDisk ? "on" : "off"} busy=${busy ? "1" : "0"} theme=${theme}`,
+    `focusTarget=${diag.focusTarget ?? "none"} focusVisibleMatched=${diag.focusVisibleMatched ?? "n/a"}`,
     `.item-count ${fmt(itemCount)}`,
     `.git        ${fmt(diag.git as Rect)}`,
     `.disk       ${fmt(disk)}`,

@@ -202,7 +202,7 @@
   .rowbtns { display: flex; gap: 6px; flex: 0 0 auto; }
   .mini { height: 24px; padding: 0 8px; font-size: 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); }
   .mini.danger:hover { border-color: var(--danger); color: var(--danger); }
-  .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono, monospace); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
+  .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
   .status { min-height: 18px; margin: 6px 2px; font-size: 12px; }
   .note { color: var(--accent); }
   .err { color: var(--danger); }

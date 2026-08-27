@@ -363,7 +363,7 @@
     flex: 1; min-height: 0; overflow-y: auto;
     border: 1px solid var(--border); border-radius: var(--radius);
     background: var(--surface);
-    font-family: var(--mono, ui-monospace, monospace); font-size: 12px;
+    font-family: var(--mono); font-size: 12px;
   }
   /* Keyboard-reachable scroll region (Visual Critic finding on PR 829): `tabindex="0"` on the div above
      makes it a single tab stop (not every row) that arrow keys/Page Down/Page Up natively scroll once

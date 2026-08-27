@@ -329,7 +329,13 @@ running a local `tauri build` by hand. Retiring the substrate: **CPE-1594**; the
 | CPE-1577 | **User-command Toolbar surface: crowding / overflow when several long-named commands are bound to the Toolbar** (`CommandBar.svelte`, PR #797). Binding logic + surface routing are jsdom-covered (`App.userCommandSurfaces.test.ts`, `CommandBar.test.ts`, `ContextMenu.test.ts`), but layout behaviour under many long labels is a reflow judgement — and per the CLAUDE.md pill/chip rule ("tick-tacks reflow") a wrapping-vs-overflow bug here is exactly the class that only shows up on screen. UAT flagged it human-eyes-only. | ⛰ manual — logic automated, layout-under-load human-only | needs a `gui-smoke` spec that seeds N long-named toolbar-bound commands and `snap()`s the bar at 2 window widths | 2026-08-10 |
 | CPE-1570/1576/1578 | **Preview action bars (JSON / image / archive / JWT), incl. the 2 new image-rotate icons** — carried over from the prior session's "Owed to the USER" queue (CHECKPOINT.md), never logged here. Declarative per-provider action wiring is unit-tested; the rendered bar (icon column alignment per the CPE-748 menu-icon rule, button crowding, disabled states) has had no eyes and no screenshot. | ⛰ manual | needs a `preview-actions.smoke.ts` snapping the bar for each provider kind | 2026-08-10 |
 | CPE-1573 | **JSON tree viewer render** (expand/collapse chevrons, indent guides, value colouring in both themes) — carried over from the prior session's visual/taste queue. Tree-building logic is unit-tested; the rendered tree is unseen. | ⛰ manual | fold a `snap("json-tree")` into the preview-actions spec above | 2026-08-10 |
-| CPE-1560 | **Trash view overlay + sidebar Trash section** (PR #795) — carried over from the prior session's visual/taste queue. Restore/Empty logic + the CPE-1559 bindings are covered; the overlay's look and the sidebar section's weight-as-a-peer-of-Drives are unseen. Known cosmetic defect already noted (folders show a file icon — `TrashEntry` has no `is_dir`) that a screenshot pass would have caught automatically. | ⛰ manual | needs a `trash.smoke.ts` (seed a trashed file, open the view, `snap()`) | 2026-08-10 |
+| CPE-1560 | **Trash view overlay + sidebar Trash section** (PR #795) — carried over from the prior session's visual/taste queue. Restore/Empty logic + the CPE-1559 bindings are covered; the overlay's look and the sidebar section's weight-as-a-peer-of-Drives are unseen. Known cosmetic defect already noted (folders show a file icon — `TrashEntry` has no `is_dir`) that a screenshot pass would have caught automatically. | ✅ automated — pinned by `gui-smoke` (CPE-1822) | ~~needs a `trash.smoke.ts` (seed a trashed file, open the view, `snap()`)~~ Done | 2026-08-10 |
+
+→ ✅ **CPE-1560 RETIRED 2026-08-27 (CPE-1822).** `gui-smoke/specs/trash.smoke.ts` opens the Trash overlay from
+the real Sidebar entry point and `snap()`s it populated, in both themes — the overlay's own look is no
+longer unseen. See the CPE-1803/1804/1805 retirement note further down (same ticket, same spec) for the
+degraded-state coverage this row's "needs a `trash.smoke.ts`" note also asked for; the two rows shared one
+missing spec and are retired together.
 
 → ✅ **CPE-1586 RETIRED 2026-08-11 (CPE-1629).** `gui-smoke/specs/preview-pane.smoke.ts` opens `samples/fonts/mini.ttf`
 and `snap()`s the glyph-grid specimen at `dark-wide` + `light-narrow` — both the dark-theme gap AND the
@@ -467,8 +473,32 @@ the whole of its front-end debt.
 
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
-| CPE-1803 / CPE-1804 / CPE-1805 | **Trash view's three new degraded-listing states**: degraded-with-no-entries (the "couldn't be read" panel that replaced a false `trash.empty`), degraded-with-entries (a partial list plus an in-place notice), and the skipped-count wording (`trash.skippedOne`/`trash.skippedMany`). The count chip is also deliberately SUPPRESSED on a degraded pass, which is itself a visible layout change | logic pinned by `cargo test` (the walker/command seam) and jsdom component tests; **zero browser-level coverage** — there is still no `trash.smoke.ts`, so no `snap()` has ever captured the Trash overlay at all | ⛰ manual | `trash.smoke.ts`: seed the XDG trash (`~/.local/share/Trash/{files,info}`) on the Linux leg, open the Trash section, and `snap()` all four states — healthy, degraded-empty, degraded-with-entries, skipped-count — in both themes. Compounds the older **CPE-1560** row (the overlay's look + the sidebar section's weight), which asked for the same spec; build one spec covering both. Watch for the `.fav-title` `getText()` WebKitGTK quirk that has `network`/`saved-search` in `known-failing.json` — the Trash sidebar header is the same `<span class="label fav-title">` shape, so open the view by a route that does not read that header's text | 2026-08-20 |
+| CPE-1803 / CPE-1804 / CPE-1805 | **Trash view's three new degraded-listing states**: degraded-with-no-entries (the "couldn't be read" panel that replaced a false `trash.empty`), degraded-with-entries (a partial list plus an in-place notice), and the skipped-count wording (`trash.skippedOne`/`trash.skippedMany`). The count chip is also deliberately SUPPRESSED on a degraded pass, which is itself a visible layout change | logic pinned by `cargo test` (the walker/command seam) and jsdom component tests **+ render pinned by `gui-smoke` (CPE-1822):** `gui-smoke/specs/trash.smoke.ts` opens the real Trash overlay and `snap()`s the healthy/degraded-empty/degraded-with-entries/mid-stream states, in both themes, on the blocking `GUI smoke (ubuntu-latest)` shards | ✅ automated — pinned by `gui-smoke` (CPE-1822) | ~~`trash.smoke.ts`: seed the XDG trash (`~/.local/share/Trash/{files,info}`) on the Linux leg, open the Trash section, and `snap()` all four states — healthy, degraded-empty, degraded-with-entries, skipped-count — in both themes. Compounds the older **CPE-1560** row (the overlay's look + the sidebar section's weight), which asked for the same spec; build one spec covering both. Watch for the `.fav-title` `getText()` WebKitGTK quirk that has `network`/`saved-search` in `known-failing.json` — the Trash sidebar header is the same `<span class="label fav-title">` shape, so open the view by a route that does not read that header's text~~ Done | 2026-08-20 |
 | CPE-1708 / CPE-1775 (+ CPE-1660, CPE-1798) | **StatusBar's advisory lines**: CPE-1708's `.filtered-hidden` ("N entries were hidden because their names could not be shown safely"), and CPE-1775's `notice.archiveSkippedOne`/`archiveSkippedMany` ("N entries were skipped — they couldn't be written safely"). Both are ellipsis-truncated with the full sentence kept only in a `title` tooltip, so **how they behave at a narrow window is a reflow judgement**, exactly the class the CLAUDE.md tick-tacks rule exists for | jsdom component tests on `StatusBar.svelte`; **zero browser-level coverage** — `grep -rl 'status-bar\|\.sb-' gui-smoke/specs/` returns nothing, so no spec asserts or snaps the status bar in any state | ⛰ manual | a `status-bar.smoke.ts` that drives the bar into each advisory state and `snap()`s it at two window widths in both themes. `filteredHidden` and the archive skip notice are both prop/notice-driven, so a test-mode ingest hook in the `__CPE_TEST_INGEST_*` family (App.svelte, CPE-1130/1173) is the cheap seam — no remote S3 listing or real refused-entry archive needed. Note CPE-1780 (Backlog) already records three further status-bar/listing gaps found while building CPE-1708, so this spec has an existing bug list to red-proof against | 2026-08-20 |
+
+→ ✅ **CPE-1803 / CPE-1804 / CPE-1805 RETIRED 2026-08-27 (CPE-1822).** `gui-smoke/specs/trash.smoke.ts` (5
+`it()`s, Linux-scoped — see the spec's own header for why) opens the real Trash overlay from the Sidebar
+and `snap()`s: a genuinely empty Trash (never the degraded note); a populated Trash with real rows; the
+CPE-1803 degraded-with-no-entries note (own distinct wording, not `trash.empty`); CPE-1805's ordinary
+degraded-WITH-entries shape (`.tv-degraded-banner` above a partial list, including the `trash.skippedOne`
+wording this row also named) plus a real-layout sticky-header hit-test after scrolling
+(`.tv-sticky-stack`, the thing jsdom's own structural pin in `TrashView.test.ts` cannot verify); and
+CPE-1816's mid-stream "Still loading…" state on a genuinely large (2,500-item) real streaming pass — every
+state in both light and dark. Seeding is direct freedesktop `.trashinfo`/`files` construction (the same
+technique `src-tauri/src/lib.rs`'s own CPE-1791/CPE-1804 backend tests use), not the app's delete UI or a
+foreign OS tool. Runs on the BLOCKING `GUI smoke (ubuntu-latest)` shards (not `known-failing.json`), and is
+auto-discovered by `lib/specFiles.ts` with no workflow edit. Also retires the older **CPE-1560** row
+(above) — both asked for the same missing spec. **Two residual, disclosed gaps, not silently papered
+over:** (1) this ticket's own CI environment had no Linux runner to rehearse against, so the mid-stream
+capture's reliability rests on reasoned wall-clock-cost argument (see the spec's "WHY A LARGE TRASH"
+comment), verified locally only via a deliberate red-proof against the jsdom `TrashView.test.ts` suite
+(four classes of breakage: `.tv-degraded-banner`, `.tv-sticky-stack`, the mid-stream render condition, and
+the degraded-empty branch condition — all reproduced red then restored green), not a live `gui-smoke` run — the CI verdict is the first live
+Linux confirmation; (2) the `windows-latest` leg stays uncovered by this spec (deliberately — see the
+spec's own "SCOPE" note: that leg is `continue-on-error`/non-blocking and its Recycle Bin cannot be
+hand-constructed the way freedesktop Trash can). If CI ever shows the mid-stream case flaking, that is a
+follow-up (an `"intermittent": true` `known-failing.json` entry citing runs), not something to quietly
+loosen in the spec.
 
 
 ## Added 2026-08-23 — batched run `batched-2026-08-23-1124`
@@ -500,3 +530,37 @@ property is present in the source, never that the resulting pixels do not overla
 | Ticket(s) | Surface | Automated coverage today | Status | Automation to build | Logged |
 |-----------|---------|--------------------------|--------|---------------------|--------|
 | CPE-1833 / CPE-1836 (mechanism, not one surface) | **Any layout/overflow/reflow claim, app-wide.** The status bar was the occasion; the gap is general — the pill/tick-tack reflow rule, the Trash titlebar at 600px (CPE-1827), every future "does it clip at this width" ticket | jsdom can pin that a CSS property exists in the source and nothing more. The `chrome --headless=new` harness in `scripts/dev-harness/statusbar-notice/` now answers real rect/overlap/paint questions at chosen widths — but it is **one bespoke harness for one component**, invoked by hand | ⛰ manual (but the hard part is built) | Generalise that harness into something any ticket can point at a component and a width list and get back rects + overlap pairs + paint probes, then run it in CI. This is a **much cheaper path to the same goal** than fixing the driver mismatch, because it needs no WebDriver at all. Fixing `msedgedriver` (see the correction above) is still worth doing for full-app flows, but it is no longer on the critical path for layout claims | 2026-08-23 |
+
+## Added/flipped 2026-08-27 (CPE-1822) — the Trash view row(s) flip ✅, plus a reconciliation
+
+**Reconciliation first, so the delta below is honest.** The last explicitly-tallied running total in this
+file is the 2026-08-20 entry near the top (`total 15→16, delta +1`: primary 6, supplementary 10, total
+16). Two rows were added after that — "Added 2026-08-23" (CPE-1821, one new supplementary row) and "Added
+2026-08-23 (later the same day)" (CPE-1833/1836, one new supplementary row) — but neither carried a
+tallied `supplementary N→N+1` delta line the way every other addition in this file does. Rather than
+silently pretend the running total never drifted, stating it plainly: **supplementary was 10+2=12,
+total was 16+2=18, immediately before this shift's flip.** (The header line at the top of this file,
+`**MVD (still-manual surfaces): 6 primary + 10 supplementary = 16 total**`, was NOT stale relative to the
+2026-08-20 entry — it matched exactly (6 primary, 10 supplementary, 16 total). It only drifted out of sync
+on 2026-08-23, when the two additions above landed without a tallied delta line updating it. This shift's
+flip brings the running total back down to 16, which — by coincidence, not intent — makes the header line
+correct again too. Not rewritten here beyond that coincidence: a future QA-Architect pass may still want
+to fold the whole header into the dated-paragraph convention so this kind of silent drift can't recur.)
+
+**This shift:** supplementary rows **CPE-1560** and **CPE-1803 / CPE-1804 / CPE-1805 flipped ✅ (CPE-1822),
+supplementary 12→10, total 18→16.** `gui-smoke/specs/trash.smoke.ts` is the Trash view's first-ever
+`gui-smoke` coverage (verified 2026-08-20 in CPE-1822's own ticket: nothing under `specs/` referenced
+`TrashView`, `.tv-`, or the Trash toolbar entry before this). It closes both rows at once — they always
+asked for the same missing spec (CPE-1560 from the 2026-08-10 sprint, CPE-1803/1804/1805 from the
+2026-08-17→20 sprint) — retirement notes for each are inline at their own table rows above. Primary
+ledger unchanged at 6.
+
+**Pinning job:** `GUI smoke (ubuntu-latest) shard N` (whichever shard `lib/shard.ts`'s cost-based
+partition assigns `trash.smoke.ts` to) — the BLOCKING gate per CPE-1594, not the non-blocking
+`windows-latest` canary. Ratcheted by `gui-smoke-linux-verdict` against `gui-smoke/known-failing.json`;
+`trash.smoke.ts` is **not** listed there. Correction from an earlier draft of this note: the partition
+does NOT re-balance itself as costs are measured. `lib/shard.ts`'s own header is explicit that its cost
+table (`specWeightMs`) is hand-maintained and "NOTHING CATCHES" a table entry going stale or a new spec
+landing uncosted — a heavy new spec is priced as ordinary until someone re-measures and edits the table
+by hand. `trash.smoke.ts` is un-costed today; a follow-up should add its measured runtime to
+`specWeightMs` once a live CI run reports it, rather than assuming the packer already knows.

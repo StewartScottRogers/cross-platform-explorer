@@ -10332,7 +10332,39 @@ fn do_fetch_catalog(
     );
     let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
     let _ = std::fs::remove_dir_all(&staging);
-    Ok(json!({ "indexOk": report.index_ok, "applied": report.applied, "rejected": report.rejected.len() }))
+    // CPE-1911: an index that verifies fine but whose entries are all no-newer-than-installed
+    // (anti-rollback correctly refusing them) is a *stale published catalog*, not "up to date" —
+    // count that separately so the UI can tell the two apart instead of reporting both identically.
+    //
+    // That's not the only way "up to date" lies, though (CPE-1911 review round 2): the index can
+    // verify fine while every *entry* fails its own integrity check — `ContentMismatch`,
+    // `MissingManifest`, `MissingSignature`, `BadSignature` — e.g. the pipeline signs the index but
+    // botches signing an entry. That is a corrupt/mis-signed publish, not "nothing to apply", and
+    // must not fall through to "up to date" either. `Pinned` is excluded deliberately: that's the
+    // user's own choice, not a lie.
+    use sidecar_host::catalog::ApplyOutcome;
+    let stale_rejected =
+        report.rejected.iter().filter(|(_, outcome)| matches!(outcome, ApplyOutcome::Rollback)).count();
+    let integrity_rejected = report
+        .rejected
+        .iter()
+        .filter(|(_, outcome)| {
+            matches!(
+                outcome,
+                ApplyOutcome::ContentMismatch
+                    | ApplyOutcome::MissingManifest
+                    | ApplyOutcome::MissingSignature
+                    | ApplyOutcome::BadSignature
+            )
+        })
+        .count();
+    Ok(json!({
+        "indexOk": report.index_ok,
+        "applied": report.applied,
+        "rejected": report.rejected.len(),
+        "staleRejected": stale_rejected,
+        "integrityRejected": integrity_rejected,
+    }))
 }
 
 /// One allow-listed HTTPS GET for a catalog asset (CPE-376), proxy/offline-aware (reuses CPE-369).

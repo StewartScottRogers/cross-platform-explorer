@@ -210,6 +210,19 @@
      reintroducing the exact regression CPE-1810 round 3 caught and reverted. */
   --bg-dim: var(--surface);
 
+  /* CPE-1876: --mono was referenced at ~24 call sites across ~20 preview/dialog components as
+     `var(--mono, ui-monospace, monospace)` (and similar chains) but never defined anywhere in this
+     file — same defect shape as CPE-1810/CPE-1821, just for the monospace font stack instead of a
+     colour. Since no theme ever supplied a value, the literal fallback (several slightly different
+     ones across call sites) was the only stack that ever rendered. Deliberately theme-invariant: a
+     monospace typeface choice has no light/dark/contrast dimension, so — like --accent-2 above —
+     this is duplicated with the SAME literal value in every theme block below rather than routed
+     through a --pal-* primitive (there is no per-theme colour to source it from). Value is the
+     richest of the pre-existing per-call-site fallbacks (DiffPeek/DiffSideBySide's), so call sites
+     that already used it are visually unchanged and the shorter chains gain the platform-specific
+     names (SFMono-Regular/Menlo on macOS, Consolas on Windows) they were previously missing. */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
   /* Syntax highlighting (CPE-1631) — backs the `.hljs-*` rules near the end of this file. See
      --pal-hljs-* above for the WCAG AA contrast measurements. */
   --hljs-keyword: var(--pal-hljs-keyword);
@@ -295,6 +308,9 @@
   --text-muted: var(--pal-gray-600);  /* CPE-1821 — see the bare :root block's comment above */
   --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
   --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;  /* CPE-1876 — theme-invariant,
+                                                                          see the bare :root block's
+                                                                          comment above */
 
   --hljs-keyword: var(--pal-hljs-keyword);
   --hljs-title: var(--pal-hljs-title);
@@ -475,6 +491,9 @@
   --text-muted: var(--pal-dark-gray-300);  /* CPE-1821 — see the bare :root block's comment above */
   --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
   --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;  /* CPE-1876 — theme-invariant,
+                                                                          see the bare :root block's
+                                                                          comment above */
 
   --hljs-keyword: var(--pal-dark-hljs-keyword);
   --hljs-title: var(--pal-dark-hljs-title);
@@ -704,6 +723,9 @@
                                                     even the AAA-inspired 7:1 bar */
   --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
   --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;  /* CPE-1876 — theme-invariant,
+                                                                          see the bare :root block's
+                                                                          comment above */
 
   --hljs-keyword: var(--pal-hc-light-hljs-keyword);
   --hljs-title: var(--pal-hc-light-hljs-title);
@@ -774,6 +796,9 @@
                                                    even the AAA-inspired 7:1 bar */
   --accent-2: var(--pal-accent2-fill);  /* CPE-1821 — theme-invariant, see --pal-accent2-fill above */
   --bg-dim: var(--surface);  /* CPE-1821 — see the bare :root block's comment above */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;  /* CPE-1876 — theme-invariant,
+                                                                          see the bare :root block's
+                                                                          comment above */
 
   --hljs-keyword: var(--pal-hc-dark-hljs-keyword);
   --hljs-title: var(--pal-hc-dark-hljs-title);
