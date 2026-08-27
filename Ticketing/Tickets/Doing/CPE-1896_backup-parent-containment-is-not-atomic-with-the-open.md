@@ -3,7 +3,7 @@ id: CPE-1896
 title: backup's parent containment is not atomic with the open — a three-syscall parent swap writes outside the root and reports ok:true (measured 73/1200)
 type: bug
 priority: High
-status: Backlog
+status: In Progress
 tags: ready
 estimate: L
 created: 2026-08-26
@@ -76,3 +76,16 @@ documented; this ticket is the follow-through, not a regression report against i
 
 Related: **CPE-1889** (the static case, closed), **CPE-1897** (the second check's race probe),
 **CPE-1898** (the source leg's missing containment), **CPE-1895** (the syscall-cost measurement).
+
+## Work Log
+
+- **2026-08-26 (Worker) — SCOPE: this branch implements the MITIGATION HALF ONLY. The race itself is
+  still open and this ticket STAYS OPEN.** Read this before anything below it. The branch
+  `cpe-1896-verify-leg-catches-escaped-write` builds acceptance criterion 3 — the ticket's own stated
+  *cheaper partial mitigation* — and deliberately nothing else. It does **not** build criterion 1: the
+  containment is still not atomic with the open, the three-syscall window after the parent check is
+  unchanged, and a racing thread can still get the bytes written outside the backup root. What changes
+  is only that the engine no longer calls that a **success**. `openat2(RESOLVE_BENEATH)` on Linux and
+  an `O_NOFOLLOW` / `NtCreateFile(FILE_OPEN_REPARSE_POINT)` per-component walk on Windows remain
+  unwritten; criteria 1 and 5 (the syscall-cost measurement, CPE-1895) remain unticked, and criterion 4
+  is *recorded* below rather than fixed. **Do not read this branch as closing CPE-1896.**
