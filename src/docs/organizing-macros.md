@@ -148,6 +148,14 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   can't write outside it. This is checked before anything runs. A separator that stays *inside* the root
   is allowed and **relocates** the file: a Rename template of `sub/{stem}.{ext}` lands the file in
   `sub/`, exactly where the plan preview says it will.
+- **A confirmed overwrite REPLACES the file, it doesn't edit it in place.** The new bytes are written to
+  a temporary file alongside the destination and then swapped in, so a confirmed Convert can never write
+  into a file that merely *shares* its content with the one you ticked — a second name for the same
+  file, living somewhere outside the macro's folder, is not reachable this way. The cost is that the
+  file at that name is a new file afterwards: on Windows it takes the folder's permissions rather than
+  keeping the old file's own, and anything holding it open keeps seeing the old contents. A destination
+  that is genuinely shared under two names is still refused outright before any of this, with the count
+  in the message.
 - **No pickers.** The Move destination and any `{ask:label}` answer are plain text fields — there's no
   Browse dialog for either.
 - **The run-flow Undo is separate from Ctrl+Z.** It only exists in the confirm dialog right after a run;

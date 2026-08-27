@@ -2722,9 +2722,71 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 /// [`copy_file_onto_no_follow_with_wording`] does for its callers. `None` only on a platform whose
 /// identity model `batch_media` does not know, where the path check above is the whole defence, same as
 /// every other caller of `handle_facts`.
+///
+/// # CPE-1958: those refusals are POLICY. The containment is the write mechanism underneath them
+///
+/// **The `links > 1` refusal above was measured writing into a file outside the macro's scope root.**
+/// It is a check-then-use: `nNumberOfLinks` is a property of the object *at the instant it is read*, and
+/// an attacker with write access to the destination's folder can change it after the open and before the
+/// read. Loop `hard_link(outside_victim, slot)` / `remove_file(slot)` against a confirmed Convert and the
+/// open lands on the victim's object, the second name is unlinked before `handle_facts` runs, the count
+/// reads 1, the guard passes, and `set_len(0) + write_all` lands in a file the user never named.
+///
+/// **Measured on this machine** (Windows 11 / NTFS, one run, five arms racing the same attacker thread —
+/// `cpe_1958_race_report`, and every figure is the OUTSIDE file's bytes read back off disk, never a
+/// verdict): unguarded control **846 / 2,000**; this function's pre-fix body, replicated and raced in
+/// the same run, **354 / 2,000**; this function after the change **0 / 2,000** — at 784 trials that
+/// began with the destination genuinely hard-linked against the pre-fix body's 857, so the comparison
+/// is not the fixed arm getting an easier attacker. Re-take them rather than trust them.
+///
+/// **Re-checking harder cannot fix it** (PR #1066's Security Auditor, and it is the load-bearing part):
+/// any number of reads of the same racy fact can each be true and stale. So the fix is not another
+/// check — the refusals above are kept **exactly** as they were, wording included, as a policy verdict
+/// the user wants to see, and the *write* is moved onto a mechanism that has no window in it:
+/// [`stage_and_replace_at`] writes into a file it created itself with `create_new` and then commits it
+/// over the name with a rename. Bytes can no longer reach a pre-existing object at all, so defeating the
+/// `links > 1` check now buys an attacker a *successful overwrite of the name the user confirmed*
+/// instead of a destroyed file somewhere else.
+///
+/// ## Why claim-then-rename and not post-write re-verify
+///
+/// The auditor named two shapes that work. Post-write re-verify — write, then confirm by handle identity
+/// that the object written is the object claimed, and undo — was rejected: it repairs damage instead of
+/// preventing it, the undo needs the victim's original bytes read and held first (unbounded, and racy in
+/// its own right), and an undo that fails leaves exactly the outcome it exists to prevent. Claim-then-
+/// rename prevents it, and in the staging form the argument is structural rather than an interleaving
+/// one: *the only object this function writes into is one it created a moment ago that has never had
+/// another name.*
+///
+/// ## What it costs, stated rather than implied
+///
+/// - **The destination is replaced, not truncated in place.** Its inode/file-id changes. Anything
+///   holding an open handle to the old object keeps seeing the old bytes.
+/// - **Windows loses the destination's ACL, attribute word and alternate data streams**, because the
+///   commit is a rename rather than `ReplaceFileW` — see [`Commit::ReplacingTheName`] for why that arm
+///   is the safe one here. The Unix side still carries mode and xattrs, off the handle's own metadata.
+/// - **Write access to the destination's *folder* is now required**, not just to the file. The
+///   unconfirmed sibling path already needed it (`create_exclusive` creates the name there), so this
+///   only narrows the confirmed path to match.
+/// - One `fsync` and one rename per confirmed overwrite, and a `.cpe-tmp` sibling left behind if the
+///   process is killed mid-write — the same residue, and the same collector, as every editor save.
+///
+/// ## The reparse-point doctrine split is NOT settled here, and one input to it moved
+///
+/// This site refuses a reparse point on the **bare bit**; [`claim_destination_handle`] refuses one only
+/// when it is a **name surrogate**, so a dehydrated cloud placeholder is written there and refused here.
+/// PR #1066 recorded that disagreement as deliberately unresolved and pointed at this ticket. **It is
+/// still unresolved and this change does not resolve it** — nothing here was quietly unified.
+///
+/// What did move is one of the facts the answer depends on. The argument for refusing a non-surrogate
+/// reparse point was always about what a write *through* the handle does to it — CPE-1896 measured a
+/// synthetic tag surviving `set_len(0)` and the object coming back unopenable by ordinary path. This
+/// function no longer writes through the destination handle at all: the placeholder would be **replaced
+/// by name**, which is a different question with a different answer (the user gets a real file and
+/// loses the placeholder, rather than a possibly-corrupt object). That is a reason the split may be
+/// resolvable at this site later; it is not a reason to resolve it in a ticket about hard links.
 pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let (mut file, created) = crate::batch_media::open_no_follow(target)
+    let (file, created) = crate::batch_media::open_no_follow(target)
         .map_err(|e| format!("{}: could not open for writing: {e}", target.display()))?;
     // **CPE-1929: handle first, path second — the same reorder CPE-1896 made at
     // `claim_destination_handle` and CPE-1929 made at `batch_media::open_output_verified`.** These
@@ -2809,9 +2871,25 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
             target.display()
         ));
     }
-    file.set_len(0).map_err(|e| format!("{}: could not truncate: {e}", target.display()))?;
-    file.write_all(bytes).map_err(|e| format!("{}: could not write: {e}", target.display()))?;
-    Ok(())
+    // What the destination carries today, read off the HANDLE every check above just interrogated — not
+    // a second `fs::metadata(target)`, which would be one more path question in the window this function
+    // spent CPE-1958 removing. `None` when this call created the name, because then there was nothing
+    // there to carry anything from.
+    let existing = if created { None } else { file.metadata().ok() };
+    // The handle is dropped WITHOUT being written through, and that is the change (CPE-1958). Everything
+    // above was a verdict about what is sitting at the name; nothing above is what keeps the bytes out
+    // of a file outside the root. That job belongs to `stage_and_replace_at`, whose only write target is
+    // a file it exclusively creates itself — so whatever an attacker does at `target` from here on, the
+    // worst outcome is that the rename below replaces a name they planted, never that a pre-existing
+    // file's contents change.
+    drop(file);
+    let staged = stage_and_replace_at(target, bytes, existing.as_ref(), Commit::ReplacingTheName);
+    if staged.is_err() && created {
+        // Same rule as every refusal above: a call that created the name and then did not write it must
+        // not leave an empty file behind for the user to puzzle over.
+        let _ = std::fs::remove_file(target);
+    }
+    staged
 }
 
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -2824,6 +2902,64 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // [`classify_carryover`].
     let source = std::fs::metadata(&target);
     let existing = if classify_carryover(source.as_ref().err(), &target)? { source.as_ref().ok() } else { None };
+    stage_and_replace_at(&target, bytes, existing, Commit::CarryingTheDestination)?;
+    // CPE-1738: the save just succeeded, so THIS save's own temp is already gone — it became `target` via
+    // the rename above. Sweep for a STALE sibling a DIFFERENT, earlier save of this same file left behind
+    // by being killed between its own `create_new` and `rename`. Runs only here, after success, so a
+    // failed save (which already removed its own temp above) never pays for it and the sweep is never on
+    // the path a slow save is already blocking on.
+    sweep_stale_temp_siblings(&target);
+    Ok(())
+}
+
+/// How [`stage_and_replace_at`] commits the staged file over the destination — the one thing its two
+/// callers genuinely disagree about, and the disagreement is a security question rather than a style one.
+///
+/// Named rather than passed as a bare `bool` because the bool at [`commit_replacement`] reads as "is
+/// there something to carry across", while the decision here is "may this commit RESOLVE the destination
+/// path, or must it only replace the NAME".
+enum Commit {
+    /// Windows: `ReplaceFileW`, which carries the destination's ACL, attribute word, creation time and
+    /// named streams onto the replacement — see [`commit_replacement`]. It is a **path** operation on the
+    /// destination, so it is only safe where the destination path has already been resolved to a real
+    /// file that is not a link: [`stage_and_replace`]'s [`resolve_write_target`] does exactly that, which
+    /// is why the editor's save uses this arm.
+    CarryingTheDestination,
+    /// A rename on every platform, always. The commit replaces the **name**: `MoveFileEx`/`rename` swap
+    /// the directory entry and do not follow a link sitting at it, so nothing planted at the destination
+    /// after the caller's checks ran can redirect the commit into another file.
+    ///
+    /// **CPE-1958's arm**, and the trade is stated rather than implied: on Windows this gives up
+    /// `ReplaceFileW`'s carry-over — the replaced file's ACL, attributes and alternate data streams are
+    /// not preserved, and the new file inherits the destination folder's ACL instead. That is a real
+    /// cost, taken deliberately, because the alternative is a commit that asks the destination *path* a
+    /// question inside the exact window this ticket exists to close.
+    ReplacingTheName,
+}
+
+/// Write `bytes` into a fresh, exclusively-created sibling and then commit it over `target` — the
+/// staging half of [`stage_and_replace`], extracted by CPE-1958 so the confirmed-overwrite path can
+/// reuse it instead of growing a second copy.
+///
+/// `existing` is the destination's metadata when there is one to carry protections from, and `None` when
+/// there is nothing at the name (or nothing worth carrying). It is a parameter rather than a stat taken
+/// here on purpose: [`overwrite_confirmed_no_follow`] reads it off the **open handle** it has already
+/// checked, so that caller never asks the destination path a second question.
+///
+/// # The invariant, and it is the whole reason this function exists
+///
+/// **The only object this function ever writes into is one it created itself with `create_new`.** Not a
+/// file it opened and then vetted — one that did not exist a moment ago and has never had any other
+/// name. That is a structural property a reader can check in one glance, and it does not depend on any
+/// interleaving argument: nothing an attacker does at `target` can make the bytes land in a file that
+/// already existed, because the bytes are already written before `target` is touched at all. The commit
+/// that follows moves a *name*, and moving a name cannot change any other file's contents.
+fn stage_and_replace_at(
+    target: &Path,
+    bytes: &[u8],
+    existing: Option<&std::fs::Metadata>,
+    commit: Commit,
+) -> Result<(), String> {
     // A per-write pid+nanosecond stamp so two concurrent saves — or a stale temp left by an earlier crash
     // — cannot collide on the same sibling path.
     let stamp = std::time::SystemTime::now()
@@ -2854,7 +2990,7 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         // could — but it does mean the Windows staging file carries the *directory's* inherited ACL for
         // the whole write, which `carry_protections`' Windows arm records.
         if let Some(src) = existing {
-            if let Err(e) = carry_protections(&target, src, &f, &tmp) {
+            if let Err(e) = carry_protections(target, src, &f, &tmp) {
                 drop(f);
                 let _ = std::fs::remove_file(&tmp);
                 return Err(e);
@@ -2897,16 +3033,13 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // would additionally refuse a dangling symlinked path, which `resolve_write_target` has already
     // judged. So this is a genuinely different primitive, not a duplicate: the guard that matters here is
     // that resolution — `target` is a real file, never a link — and it has already run.
-    commit_replacement(&tmp, &target, existing.is_some()).inspect_err(|_| {
+    //
+    // **CPE-1958 added the `commit` arm.** `ReplaceFileW` resolves the destination path; a rename
+    // replaces the name. See [`Commit`] for which caller needs which, and what the rename arm gives up.
+    let carrying = matches!(commit, Commit::CarryingTheDestination) && existing.is_some();
+    commit_replacement(&tmp, target, carrying).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed commit
-    })?;
-    // CPE-1738: the save just succeeded, so THIS save's own temp is already gone — it became `target` via
-    // the rename above. Sweep for a STALE sibling a DIFFERENT, earlier save of this same file left behind
-    // by being killed between its own `create_new` and `rename`. Runs only here, after success, so a
-    // failed save (which already removed its own temp above) never pays for it and the sweep is never on
-    // the path a slow save is already blocking on.
-    sweep_stale_temp_siblings(&target);
-    Ok(())
+    })
 }
 
 /// **CPE-1739, the pure decision**: the target's own metadata could not be read — does the save go ahead
@@ -6714,6 +6847,345 @@ mod tests {
              test is that a Result alone does not prove that (result was: {e})"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1958's guard, and the one CI runs.** The racer below measures the hole; this pins the
+    /// property that closed it, with no race in it at all.
+    ///
+    /// The destination really is a second name for a file outside its folder — a genuine hard link, not
+    /// a mock — and [`crate::batch_media::ProbeInjection::HandleUnderReportsLinks`] makes
+    /// `handle_facts` report the link count an attacker's `remove_file` produces: **1**. So the
+    /// `links > 1` refusal is defeated exactly as the racer defeats it, and every other guard in the
+    /// function is left switched on and honest.
+    ///
+    /// **Asserts on the filesystem, never on the `Result`** — this family's entire history is reports
+    /// that read healthy while files were destroyed, so the outside file's bytes are read back and
+    /// compared, and the confirmed destination's are too.
+    ///
+    /// **Red-proof (re-take it by reverting the write half, not the checks):** against the pre-CPE-1958
+    /// body — `set_len(0)` + `write_all` through the checked handle — this test fails with the victim
+    /// holding `ATTACKER PAYLOAD`. Against a version that keeps the staging write but deletes the
+    /// `links > 1` refusal it still PASSES, which is the point: the refusal is a policy verdict now, and
+    /// the containment does not depend on it.
+    #[test]
+    fn cpe_1958_a_lying_link_count_cannot_destroy_a_file_outside_the_folder() {
+        let d = scratch("cpe1958-lying-links");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, CPE_1958_UNTOUCHED).unwrap();
+
+        let slot = d.join("slot.jpg");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &slot.to_string_lossy()).is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1958] SKIPPED: this machine could not create a hard link at {}. NOTHING in this \
+                 test covered the containment property on this run.",
+                slot.display()
+            );
+            return;
+        }
+
+        let result = {
+            let _reset = crate::batch_media::ProbeReset::arm(
+                crate::batch_media::ProbeInjection::HandleUnderReportsLinks,
+            );
+            overwrite_confirmed_no_follow(&slot, CPE_1958_PAYLOAD)
+        };
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            CPE_1958_UNTOUCHED,
+            "a file OUTSIDE the destination's folder was written through the destination's name — the \
+             link count said 1 and the write believed it (result was: {result:?})"
+        );
+        assert_eq!(
+            std::fs::read(&slot).unwrap(),
+            CPE_1958_PAYLOAD,
+            "with every guard's answer being 'ordinary file', the confirmed overwrite must still land \
+             at the name the user confirmed (result was: {result:?})"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1958 — the TOCTOU racer, and the deterministic guard that replaced trusting it.
+    //
+    // The test above plants a hard link and watches the guard refuse. It proves the guard FIRES; it
+    // cannot prove the guard is LOAD-BEARING, because `facts.links` is read after the open and an
+    // attacker can change it in between. Everything below exists to measure that gap and then to pin
+    // the property that closed it.
+    // ---------------------------------------------------------------------------------------------
+
+    /// What the file OUTSIDE the destination's folder holds before a trial, and must still hold after.
+    const CPE_1958_UNTOUCHED: &[u8] = b"UNTOUCHED";
+    /// What ends up in it instead when the race is won.
+    const CPE_1958_PAYLOAD: &[u8] = b"ATTACKER PAYLOAD";
+
+    /// Truncate-and-write with **no guard at all** — the racer's sensitivity control (CPE-1937's
+    /// lesson). A harness whose control does not destroy the victim is a harness that measures nothing,
+    /// and this family has produced two false-green harnesses in one week.
+    fn cpe_1958_unguarded_write(_source: &Path, slot: &Path) -> Result<(), String> {
+        use std::io::Write as _;
+        let (mut f, _created) = crate::batch_media::open_no_follow(slot).map_err(|e| e.to_string())?;
+        f.set_len(0).map_err(|e| e.to_string())?;
+        f.write_all(CPE_1958_PAYLOAD).map_err(|e| e.to_string())
+    }
+
+    /// The **pre-CPE-1958 body** of [`overwrite_confirmed_no_follow`], replicated so the old shape and
+    /// the new one can be raced in the same run, on the same machine, against the same attacker thread
+    /// — which is the only way two rates are comparable. Refusal *wording* is deliberately not
+    /// replicated (the racer asserts on the filesystem, never on a message); the guard ORDER and the
+    /// in-place `set_len(0)` + `write_all` through the checked handle are, because that ordering is the
+    /// whole of what is being measured.
+    fn cpe_1958_pre_fix_body(_source: &Path, slot: &Path) -> Result<(), String> {
+        use std::io::Write as _;
+        let (mut file, created) = crate::batch_media::open_no_follow(slot).map_err(|e| e.to_string())?;
+        if std::fs::symlink_metadata(slot).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            drop(file);
+            if created {
+                let _ = std::fs::remove_file(slot);
+            }
+            return Err("is a link".to_string());
+        }
+        if let Some(facts) = crate::batch_media::handle_facts(&file) {
+            if facts.is_reparse_point || facts.is_dir || facts.links > 1 {
+                drop(file);
+                if created {
+                    let _ = std::fs::remove_file(slot);
+                }
+                return Err("refused by a handle fact".to_string());
+            }
+        }
+        file.set_len(0).map_err(|e| e.to_string())?;
+        file.write_all(CPE_1958_PAYLOAD).map_err(|e| e.to_string())
+    }
+
+    /// The sibling engine's write path, raced through its real entry point rather than a replica —
+    /// PR #1066's Security Auditor measured it at **0 / 2,000** and this arm is how that claim gets
+    /// re-taken rather than inherited.
+    fn cpe_1958_batch_media_write(source: &Path, slot: &Path) -> Result<(), String> {
+        let (input, output) = (source.to_string_lossy().into_owned(), slot.to_string_lossy().into_owned());
+        crate::batch_media::open_output_verified(&input, &output)?.write_all(CPE_1958_PAYLOAD, &output)
+    }
+
+    /// The backup/restore copier, which reaches the identical `facts.links > 1` refusal through
+    /// [`claim_destination_handle`]. Raced for the enumeration acceptance item: the other sites are
+    /// MEASURED here, not recalled (CPE-1932).
+    fn cpe_1958_claim_destination_write(source: &Path, slot: &Path) -> Result<(), String> {
+        copy_file_onto_no_follow(source, slot).map(|_| ())
+    }
+
+    /// Drive `write(source, slot)` `trials` times against a thread that does nothing but unlink `slot`
+    /// — PR #1066's racer, rebuilt in-tree so its numbers can be re-taken instead of quoted.
+    ///
+    /// `victim` lives OUTSIDE `slot`'s folder, so any byte of it that changes is a byte written outside
+    /// the destination the caller named.
+    ///
+    /// # Why the harness plants the link and the attacker only removes it
+    ///
+    /// The first version had the attacker do both halves — `hard_link` then `remove_file`, in a tight
+    /// loop — which is the attack as described, and it reproduced the hole. But it made the **arms
+    /// incomparable**, and only the numbers showed it: after the fix the same loop landed 2,825 hard
+    /// links instead of ~250, because a staged write leaves a fresh single-linked file at the slot where
+    /// an in-place write left the attacker's own link sitting there. More attacker activity and less
+    /// destruction is the right *direction*, but "the attacker got a different number of chances" is
+    /// exactly the confound that lets a narrowed window read as a closed one.
+    ///
+    /// So the trial start is now fixed rather than raced: the harness itself plants the hard link before
+    /// every trial, and the attacker thread only unlinks. Every arm therefore faces the same starting
+    /// condition — a destination that genuinely *is* a second name for a file outside the folder — and
+    /// `planted` (how many trials actually began that way) is the count that makes two rates comparable.
+    ///
+    /// Returns `(destroyed, planted, oks)`: trials that left the victim holding something other than its
+    /// own bytes — **read back off the filesystem, never off the `Result`** — trials that began with the
+    /// link genuinely in place, and trials the writer returned `Ok` for. That last one is what tells
+    /// "the racy window is closed" apart from "fewer trials reached the racy window", which is exactly
+    /// the distinction PR #1066's `batch_media` figure turned on. `None` when the machine cannot create
+    /// a hard link at all, so a filesystem without them reads as a loud skip rather than a clean sheet.
+    ///
+    /// Both shapes are kept and both are run, because they measure different things and the weaker one
+    /// is the one that produced PR #1066's `batch_media` figure. `harness_plants == false` is the
+    /// original: the attacker owns both halves and the destination is whatever that loop left behind.
+    /// `true` is the comparable one described above.
+    fn cpe_1958_race(
+        trials: u64,
+        harness_plants: bool,
+        write: &dyn Fn(&Path, &Path) -> Result<(), String>,
+    ) -> Option<(u64, u64, u64)> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        let d = scratch("cpe1958-race");
+        let root = d.join("root");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, CPE_1958_UNTOUCHED).unwrap();
+        // The copy arms need a real source; it sits in `root` because `open_output_verified` requires
+        // the output to stay inside the input's own folder.
+        let source = root.join("source.bin");
+        std::fs::write(&source, CPE_1958_PAYLOAD).unwrap();
+        let slot = root.join("slot.bin");
+        let (v, s) = (victim.to_string_lossy().into_owned(), slot.to_string_lossy().into_owned());
+        if crate::links::create_hard_link(&v, &s).is_err() {
+            return None;
+        }
+        std::fs::remove_file(&slot).ok()?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swaps = Arc::new(AtomicU64::new(0));
+        let attacker = {
+            let (v, s, stop, swaps) = (v.clone(), s.clone(), Arc::clone(&stop), Arc::clone(&swaps));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // Re-attaching as well as detaching is load-bearing, measured: an attacker that ONLY
+                    // unlinks is *too fast* — it drops the second name before the writer's open instead
+                    // of inside the window after it, every trial takes the create-a-fresh-file path, and
+                    // even the unguarded control falls to 2 destroyed in 2,000. Cycling gives the open
+                    // something to land on.
+                    if crate::links::create_hard_link(&v, &s).is_ok() {
+                        swaps.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let _ = std::fs::remove_file(&s);
+                }
+            })
+        };
+
+        let (mut destroyed, mut oks, mut planted) = (0u64, 0u64, 0u64);
+        let mut refusals: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for _ in 0..trials {
+            if harness_plants {
+                let _ = std::fs::remove_file(&slot);
+                if crate::links::create_hard_link(&v, &s).is_ok() {
+                    planted += 1;
+                }
+            }
+            match write(&source, &slot) {
+                Ok(()) => oks += 1,
+                Err(e) => {
+                    let key: String = e.chars().rev().take(70).collect::<Vec<_>>().into_iter().rev().collect();
+                    *refusals.entry(key).or_default() += 1;
+                }
+            }
+            if std::fs::read(&victim).ok().as_deref() != Some(CPE_1958_UNTOUCHED) {
+                destroyed += 1;
+                let _ = std::fs::write(&victim, CPE_1958_UNTOUCHED);
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = attacker.join();
+        let _ = std::fs::remove_file(&slot);
+        // WHICH refusal fired, not just how many — "expect nonzero" is nearly worthless here, and both
+        // the path check and the handle check in this family say "is a link" (PR #1066's finding).
+        for (why, n) in &refusals {
+            let _ = writeln!(std::io::stderr(), "[CPE-1958]        {n:>5} refused: ...{why}");
+        }
+        let _ = writeln!(
+            std::io::stderr(),
+            "[CPE-1958]        {} attacker swaps", swaps.load(Ordering::Relaxed)
+        );
+        Some((destroyed, planted, oks))
+    }
+
+    /// **CPE-1958's measurement harness.** `#[ignore]`d because it is a measurement, not a guard: it
+    /// spends seconds, its rates move with the machine, and a race that happens not to be won proves
+    /// nothing on its own. The guard CI actually runs is
+    /// `cpe_1958_a_lying_link_count_cannot_destroy_a_file_outside_the_folder` below, which pins the
+    /// same property with no race in it at all.
+    ///
+    /// ```text
+    /// cargo test -p cpe-server cpe_1958_race_report -- --ignored --nocapture
+    /// CPE_1958_TRIALS=2000 cargo test -p cpe-server cpe_1958_race_report -- --ignored --nocapture
+    /// ```
+    ///
+    /// **Measured on Windows 11 / NTFS, 2,000 trials per arm, both shapes in one run.** `planted` is
+    /// how many of those trials began with the destination genuinely hard-linked to the outside file,
+    /// which is what makes two arms comparable; every "destroyed" is the outside file's bytes read back
+    /// off disk. Arm B is the pre-fix body raced beside the fixed one, so before/after is a within-run
+    /// comparison rather than two runs on two machines.
+    ///
+    /// | arm | attacker owns both halves | harness plants each trial |
+    /// |---|---|---|
+    /// | A unguarded (control) | 200 / 2,000 | **846 / 2,000** (1,032 planted) |
+    /// | B pre-CPE-1958 body, replicated | **76 / 2,000** | **354 / 2,000** (857 planted) |
+    /// | C `overwrite_confirmed_no_follow`, fixed | **0 / 2,000** | **0 / 2,000** (784 planted) |
+    /// | D `batch_media::open_output_verified` | **3 / 2,000** | **2 / 2,000** (668 planted) |
+    /// | E `fsutil::copy_file_onto_no_follow` | 45 / 2,000 | **167 / 2,000** (686 planted) |
+    ///
+    /// **And the same run on Linux** (WSL, ext4 `/tmp`, 1,000 trials per arm), which is where D stops
+    /// being ambiguous:
+    ///
+    /// | arm | attacker owns both halves | harness plants each trial |
+    /// |---|---|---|
+    /// | A unguarded (control) | 131 / 1,000 | 140 / 1,000 (548 planted) |
+    /// | B pre-CPE-1958 body, replicated | 29 / 1,000 | 8 / 1,000 (322 planted) |
+    /// | C `overwrite_confirmed_no_follow`, fixed | **0 / 1,000** | **0 / 1,000** (621 planted) |
+    /// | D `batch_media::open_output_verified` | **29 / 1,000** | **32 / 1,000** (501 planted) |
+    /// | E `fsutil::copy_file_onto_no_follow` | 90 / 1,000 | 54 / 1,000 (537 planted) |
+    ///
+    /// **D and E are untouched by this ticket and both are live** — see the ticket's Work Log. D's
+    /// `0 / 2,000` in PR #1066 was luck, not a property, and this is the measurement that settles it
+    /// rather than arguing it: the same code destroys the victim 2–4 times per 2,000 on Windows and
+    /// **~30 times per 1,000 on Linux**. On Windows it is *shielded*, not safe — its
+    /// `classify_output_containment` gauntlet runs **before** the open and refuses a flickering
+    /// destination outright, so far fewer trials reach the identical check-then-use (681 writes reported
+    /// `Ok` against C's 1,249 in the same run) and a ~1-per-1,000 rate sits inside a 2,000-trial
+    /// sample's noise. Nothing about that shielding is a containment property, and it is absent on
+    /// Linux.
+    #[test]
+    #[ignore = "CPE-1958 measurement harness: two racer shapes x five arms x 1,000 racing trials. Run by hand with --ignored --nocapture."]
+    fn cpe_1958_race_report() {
+        let trials: u64 =
+            std::env::var("CPE_1958_TRIALS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+        #[allow(clippy::type_complexity)]
+        let arms: Vec<(&str, Box<dyn Fn(&Path, &Path) -> Result<(), String>>)> = vec![
+            ("A unguarded (SENSITIVITY CONTROL)", Box::new(cpe_1958_unguarded_write)),
+            ("B pre-CPE-1958 body, replicated", Box::new(cpe_1958_pre_fix_body)),
+            (
+                "C overwrite_confirmed_no_follow (live)",
+                Box::new(|_s: &Path, slot: &Path| overwrite_confirmed_no_follow(slot, CPE_1958_PAYLOAD)),
+            ),
+            ("D batch_media::open_output_verified (live)", Box::new(cpe_1958_batch_media_write)),
+            ("E fsutil::copy_file_onto_no_follow (live)", Box::new(cpe_1958_claim_destination_write)),
+        ];
+        let mut measured: Vec<(&str, u64, u64)> = Vec::new();
+        for harness_plants in [false, true] {
+            let shape = if harness_plants { "harness plants each trial" } else { "attacker owns both halves" };
+            let _ = writeln!(std::io::stderr(), "[CPE-1958] ==== racer shape: {shape} ====");
+            for (name, w) in &arms {
+                match cpe_1958_race(trials, harness_plants, w.as_ref()) {
+                    None => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[CPE-1958] {name}: SKIPPED — this machine cannot create a hard link, so \
+                             NOTHING was measured on this run."
+                        );
+                        return;
+                    }
+                    Some((destroyed, planted, oks)) => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[CPE-1958] {name}: {destroyed} destroyed / {trials} trials ({planted} \
+                             trials started hard-linked, {oks} writes reported Ok)"
+                        );
+                        if harness_plants {
+                            measured.push((name, destroyed, planted));
+                        }
+                    }
+                }
+            }
+        }
+        let control = measured[0].1;
+        assert!(
+            control > 0,
+            "SENSITIVITY CONTROL FAILED: the unguarded writer destroyed nothing in {trials} trials, so \
+             every other arm's zero is worthless. Raise CPE_1958_TRIALS or fix the racer — do not read \
+             this run as evidence of safety."
+        );
+        assert_eq!(
+            measured[2].1, 0,
+            "overwrite_confirmed_no_follow wrote into a file outside the destination's folder"
+        );
     }
 
     /// **The leg where CPE-1716's loss was measured**: a *live* symlink to a real file. Pre-fix the rename

@@ -1414,9 +1414,11 @@ fn real_facts(facts: FileFacts) -> Probe {
             return Probe::Real(FileFacts { id: FileIdentity { volume: 0, index: 0 }, ..facts })
         }
         Some(ProbeInjection::Unreadable) => return Probe::Unreadable(WHY_PROBE_FAILED),
-        // Matched explicitly rather than folded into `None`: this variant is `handle_facts`'s, and a
-        // wildcard here would silently start swallowing any fourth variant someone adds later.
-        Some(ProbeInjection::HandleUndescribable) => {}
+        // Matched explicitly rather than folded into `None`: these variants are `handle_facts`'s, and a
+        // wildcard here would silently start swallowing any later addition — which is exactly how this
+        // arm earned its comment, since CPE-1958's `HandleUnderReportsLinks` landed on it as a compile
+        // error rather than as a silent behaviour change to the by-PATH probe.
+        Some(ProbeInjection::HandleUndescribable | ProbeInjection::HandleUnderReportsLinks) => {}
         None => {}
     }
     Probe::Real(facts)
@@ -1446,6 +1448,18 @@ pub(crate) enum ProbeInjection {
     /// the OS just returned succeeds on every filesystem a test can reach, and `File::metadata` on a
     /// live fd is close to unfailable. A fail-open no test can reach is one that comes back.
     HandleUndescribable,
+    /// Make [`handle_facts`] report `links: 1` no matter what the OS said — the **lying predicate** for
+    /// the one fact in this module that an attacker can genuinely change between the open and the read
+    /// (CPE-1958).
+    ///
+    /// Unlike its two siblings this is not staging an unreachable failure: `nNumberOfLinks` reading 1 on
+    /// a multiply-linked object is exactly what a `hard_link` / `remove_file` racer produces, measured at
+    /// 35 in 2,000 trials against the pre-CPE-1958 `fsutil::overwrite_confirmed_no_follow`. What cannot
+    /// be staged is the *timing*, so this injects the outcome instead and lets the assertion be about
+    /// the filesystem: with the count lying, does a write still stay out of the file outside the folder?
+    /// A racing proof of the same property is a coin toss per run; this one is deterministic, which is
+    /// why it is the version CI gets.
+    HandleUnderReportsLinks,
 }
 
 #[cfg(test)]
@@ -2127,6 +2141,20 @@ fn handle_facts_injected_none() -> bool {
     false
 }
 
+/// The [`ProbeInjection::HandleUnderReportsLinks`] seam (CPE-1958), asked by both real arms of
+/// [`handle_facts`] for the same reason [`handle_facts_injected_none`] is: an injection honoured on one
+/// platform and not the other is a test that passes for a different reason on each runner.
+#[cfg(test)]
+fn handle_facts_injected_links() -> Option<u64> {
+    matches!(PROBE_INJECTION.with(|c| c.get()), Some(ProbeInjection::HandleUnderReportsLinks)).then_some(1)
+}
+
+#[cfg(not(test))]
+#[inline]
+fn handle_facts_injected_links() -> Option<u64> {
+    None
+}
+
 #[cfg(unix)]
 pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
     use std::os::unix::fs::MetadataExt;
@@ -2136,7 +2164,7 @@ pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
     let meta = file.metadata().ok()?;
     Some(HandleFacts {
         id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
-        links: meta.nlink(),
+        links: handle_facts_injected_links().unwrap_or_else(|| meta.nlink()),
         is_dir: meta.is_dir(),
         // Unix has no reparse points; `O_NOFOLLOW` already refused a symlink at the final component.
         is_reparse_point: false,
@@ -2168,7 +2196,7 @@ pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
                 volume: u64::from(info.dwVolumeSerialNumber),
                 index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
             },
-            links: u64::from(info.nNumberOfLinks),
+            links: handle_facts_injected_links().unwrap_or_else(|| u64::from(info.nNumberOfLinks)),
             is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
             is_reparse_point: info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
         })
