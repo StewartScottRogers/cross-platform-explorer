@@ -174,3 +174,52 @@ Re-verification after round 2: `cargo clippy` clean in both feature modes for
 `cloned_ref_to_slice_refs` lint from the new test); `cargo test --lib` in `sidecar/ai-console` —
 384/384 (was 382, +2 new); `npx vitest run src/lib/ai-console-launcher.test.ts` — 79/79 (was 78, +1
 new); `npm run check` clean; `sidecar/host/` confirmed zero-diff against `origin/main`.
+
+### Round 3 (PR #1040 review — one finding, wording/tone only)
+
+Reviewer confirmed round 2 was correct and properly tested (re-broke both middle legs, watched the
+new Rust tests go red with the exact numbers logged above; reproduced two of the four probes
+verbatim; confirmed amber is genuinely distinct and reachable). Then it asked a question neither
+round 1 nor round 2 had asked: **when is `staleRejected` actually nonzero in real operation?**
+
+The answer is a genuine design gap latent since round 1, not a new bug: `EntryVerdict::Rollback`
+(`sidecar/host/src/catalog.rs`, `is_upgrade_over`) fires whenever an entry's version is **not
+strictly greater than** installed — it cannot distinguish `==` (you already have the latest; the
+routine, healthy result of checking again before the next release exists) from `<` (the index
+regressed to something older; genuinely broken). `.github/workflows/release.yml` stamps
+`VERSION=$(date +%s)` uniformly across every entry per release run, so under real operation `==` is
+the overwhelmingly common case — nearly everyone who checks for updates twice between releases hits
+this exact branch. Round 2's "the publishing pipeline may be stuck" amber warning was therefore
+firing on the single most common **healthy** outcome of the whole feature: this ticket's own bug,
+inverted (false alarm instead of false reassurance), and its own violation of the "don't raise an
+alarm the user can't act on" acceptance criterion.
+
+**Fix, deliberately the small half** (coordinator's call, and the right one — `sidecar/host/` stays
+zero-diff across all three rounds; a real "regressed vs current" distinction needs a trust-engine
+change and its own security review, filed by the coordinator as a separate follow-up ticket, not
+bolted onto this PR):
+
+- Reworded the `staleRejected` branch to state only what's true in **both** `==` and `<` and
+  diagnose neither: *"Nothing newer than what you have is currently published, so nothing was
+  installed — your agents are unchanged."* Dropped "the publishing pipeline may be stuck" entirely —
+  unsupported in the common case, and the genuinely-broken cases stay covered honestly by the
+  `error`/`offline`/`integrityRejected` branches, which are unchanged.
+- Moved this branch off `"warn"` (amber) onto the calm/success treatment (green, `true` — the same
+  colour as "Agents are already up to date.") since it's now understood to be the routine outcome,
+  not a warning. `error`, `offline`, `integrityRejected`, and the unverified-signature catch-all
+  stay amber — those remain real "heads up" states.
+- Added a comment at the branch in `sidecar/ai-console/src/launcher.html` spelling out why `==` and
+  `<` can't be told apart here, citing the exact anti-rollback code path and the release workflow's
+  versioning scheme, and pointing at the follow-up ticket — so nobody has to re-derive this.
+- No `sidecar/host/` diff, no `src-tauri/` diff, no `broker_client.rs`/`console.rs` diff this round —
+  purely a `launcher.html` wording/colour change plus its test.
+
+Red-then-green: reverted the branch to the round-2 wording/colour (`"The published catalog isn't
+newer than what's installed, ... the publishing pipeline may be stuck", "warn"`) → the updated test
+failed (expected `/nothing newer than what you have/i`, got the old "may be stuck" text) → restored;
+`git diff --stat` came back empty (byte-identical to the committed state).
+
+Final re-verification: `npx vitest run src/lib/ai-console-launcher.test.ts` — 79/79 green; full
+`npm run check` clean; `cargo test --lib` in `sidecar/ai-console` — 384/384 (unchanged from round 2,
+since no Rust file changed this round); `sidecar/host/` confirmed zero-diff against `origin/main`
+across all three rounds.
