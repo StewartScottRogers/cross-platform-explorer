@@ -3,10 +3,11 @@ id: CPE-1931
 title: the hard-coded-hex ratchet counts `#1044`-style PR references in comments as colours
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
+closed: 2026-08-27
 ---
 
 ## Summary
@@ -58,3 +59,32 @@ rather than a code defect. Credit to that worker for checking rather than comply
 
 Related: **CPE-1534** (the ratchet), **CPE-1922** (a running total patched forward instead of
 recounted), **CPE-1929** (guards that do not measure what they appear to).
+
+## Work Log
+
+- **2026-08-27 USMST** — Worked end to end on branch `cpe-1931-hex-ratchet-comments`. Replaced the
+  whole-file `HEX_LITERAL` scan with `hexColourSites()`, which only matches inside `<style>` block
+  bodies and inline `style="..."` attribute values, stripping CSS `/* */` comments from each first
+  (reusing this file's own `stripComments` helper — no new dependency, matches the existing
+  "strip before matching" shape). SVG icon `fill=`/`stroke=` attributes fall out of scope too, which
+  is not a new exemption — this file already documented icon hex as intentional and out of scope,
+  now enforced structurally.
+  Re-baselined from scratch (walked every `.svelte` file fresh with the new matcher, not by
+  subtracting the two known false positives) per the ticket's own instruction and CPE-1922's
+  cautionary shape: new baseline is **85 files / 276 occurrences** (down from 86/399). Only
+  `Icon.svelte` dropped out of the "has hex" set entirely — its hex was always SVG `fill=`/`stroke=`,
+  never a `style=` value.
+  Added a direct `describe("hexColourSites() matches only CSS value positions (CPE-1931)")` block on
+  synthetic input, red-proofing both directions: a `<style>`-block hex literal and an inline
+  `style=` hex literal still count; a `//` comment, an `<!-- -->` comment, a `/* */` comment inside
+  `<style>`, and an SVG `fill=`/`stroke=` attribute do not. Manually verified both directions against
+  the real ratchet too (scratch `.svelte` files, deleted after): a genuine new `<style>` hex reds the
+  suite (`86 > 85`); a `// PR #1044 review round 2` comment stays green.
+  Searched the tree for the `PR 1044`/`PR 1045`-without-`#` mangled comments the ticket describes —
+  found none on `main`. `StatusBar.svelte`'s contrast comment (left alone per the ticket) already
+  names tokens instead of citing a bare PR number. The one known live instance is in
+  `MacroRunConfirm.svelte` on PR #1044's still-open branch (CPE-1891) — not present on `main`, not
+  touched here; flagging for the Foreman to sequence once that PR is rebased onto this fix.
+  Swept for the same whole-file-content-scan shape in other guards — see the PR description /
+  Foreman report for the findings; no other guard was changed by this ticket.
+  `npm run check` clean. Full `npx vitest run`: 336 files / 4631 tests passed.
