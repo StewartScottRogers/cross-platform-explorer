@@ -129,11 +129,19 @@ if (-not $job -or $job.conclusion -ne "success") {
 }
 ```
 
-> **`$jobs` is assigned first on purpose.** In Windows PowerShell 5.1 `ConvertFrom-Json` emits a JSON
-> array as a **single** pipeline object, so `… | ConvertFrom-Json | Where-Object { $_.name -ceq '…' }`
-> evaluates `$_.name` against the whole 4-element array; the array comparison returns a non-empty
-> result, `Where-Object` reads that as true, and **every** job passes the filter. Assigning to `$jobs`
-> and then piping the variable enumerates it, so exactly one job matches. (Verified, CPE-1918.)
+> **`$jobs` is assigned first on purpose — this is a correctness fix, not a style one.** In Windows
+> PowerShell 5.1 `ConvertFrom-Json` emits a JSON array as a **single** pipeline object, so
+> `… | ConvertFrom-Json | Where-Object { $_.name -ceq '…' }` evaluates `$_.name` against the whole
+> array. When the name exists the array comparison is non-empty, `Where-Object` reads that as true, and
+> **all** jobs pass the filter — `$job` becomes the entire array, `-not $job` is false, and
+> `$job.conclusion -ne "success"` is false as long as *any* job succeeded. **The check then passes.**
+> It has silently degraded from "the verify job succeeded" to "some job on this run succeeded", which
+> is precisely wrong on a cancelled or partial-matrix run — the case the gate exists to catch.
+>
+> Measured on real run `32645968281`: `matched job count = 4`, both `if` arms false, result *would
+> publish*. Note it fires correctly when the name is **absent** (count 0), which is how this hides
+> during casual testing. Assigning to `$jobs` and piping the variable enumerates it, so exactly one job
+> matches. (Verified, CPE-1918.)
 
 `--limit 1` assumes you check this immediately after dispatching — if another sidecar dispatch races
 yours, resolve the run by its `displayTitle`/`createdAt` instead of trusting "most recent" (`run.md`'s
@@ -164,7 +172,10 @@ Measured on PS 5.1 (26100.9168) with `node -e "console.log(JSON.stringify(proces
 | `--jq ".jobs[] \| select(.name==\"x\")"` | `.jobs[] \| select(.name==" x\)` | ✗ `invalid escape sequence "\)"` |
 | ``--jq ".jobs[] \| select(.name==`"x`")"`` | `.jobs[] \| select(.name==x)` | ✗ same as the first |
 | `$q = '…"x"…'; --jq $q` | quotes still stripped | ✗ a variable does not help |
+| `--jq='.jobs[] \| select(.name=="x")'` | `.jobs[] \| select(.name==x)` | ✗ the `=` form fails the same way |
 | `--jq '.jobs'` | `.jobs` | ✓ no `"` in the argument |
+| `--jq '.jobs[] \| select(.name==\"x\")'` | `.jobs[] \| select(.name=="x")` | ✓ but **banned anyway** — see below |
+| `--jq '.jobs[] \| select(.name==""x"")'` | `.jobs[] \| select(.name=="x")` | ✓ but **banned anyway** — see below |
 
 Note the second row: the escaped-double-quote form was long assumed correct here and in `run.md`, and
 it is **not** — it is broken in a *different* way, which is how the bug survived being "fixed" once.
@@ -176,9 +187,22 @@ not `-eq`: PowerShell's `-eq` is case-insensitive where jq's `==` is not, and th
 publish. `src/lib/runbookJqQuoting.test.ts` fails CI if a `"` reappears inside a `--jq` argument in a
 PowerShell block.
 
-The `--jq '…"…"…'` form is *correct* in the `.github/workflows/**` steps that use it — those run under
-`bash` on Linux runners, where single quotes are honoured. The shell the snippet targets is the whole
-difference, which is why every fenced block here carries a language tag.
+**That rule is deliberately stricter than strictly necessary, and this clause is here so nobody
+"corrects" it back.** The last two rows above are measured, not hypothetical: single quotes with a
+*backslash*-escaped or *doubled* inner quote really do reach `jq` intact. They are still banned,
+because what separates them from the four broken rows is a single character in a position no reader
+can verify by eye — and this exact class already regressed once, when the row-2 form was believed
+correct, cited as the fix, and then copied forward by CPE-1908. A reader who discovers the backslash
+form working has found a true fact, not a bug in the rule.
+
+The `--jq '…"…"…'` form is *correct* in the one `.github/workflows/**` step that uses it
+(`ffmpeg-pin-freshness.yml`, the FFmpeg tag walk) — that step runs under `bash` on `ubuntu-latest`,
+where single quotes are honoured. Every other workflow `--jq`/`-q` filter is quote-free anyway, and the
+two `shell: pwsh` steps in the repo (`release.yml` and `release-sidecar.yml`, both the Windows
+cert-signing step) have no `--jq` at all. The shell the snippet targets is the whole difference, which
+is why the guard also fails any fenced block that runs a `gh` command without naming a specific shell —
+an info string like ```` ```console ```` is not a shell name, and a PowerShell snippet wearing one
+would be skipped by the quote check *and* pass a naive "has a tag" check.
 
 **Gotchas:**
 - A sidecar release left as a **prerelease** (or draft) is invisible to `/releases/latest/` — the

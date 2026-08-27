@@ -100,9 +100,15 @@ if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish
 # tag (so its `displayTitle` carries the tag), or verify the job by hand per RELEASING.md instead.
 
 # CPE-1918 again: `--jq` only plucks the sub-tree (no `"` in the filter); the name match is
-# PowerShell's. `$jobs` is assigned BEFORE being piped on purpose -- in PS 5.1 `ConvertFrom-Json`
-# emits a JSON array as ONE pipeline object, so `… | ConvertFrom-Json | Where-Object { $_.name -ceq …}`
-# compares the whole array, finds the comparison truthy, and lets EVERY job through the filter.
+# PowerShell's. `$jobs` is assigned BEFORE being piped on purpose -- that is a CORRECTNESS fix, not a
+# style one. In PS 5.1 `ConvertFrom-Json` emits a JSON array as ONE pipeline object, so
+# `… | ConvertFrom-Json | Where-Object { $_.name -ceq … }` compares the WHOLE array; when the name
+# exists the comparison is truthy and EVERY job passes the filter. $verifyJob then holds all of them,
+# `-not $verifyJob` is false, and the `conclusion -ne "success"` test below is false as long as ANY
+# job succeeded -- so the gate PASSES, having quietly degraded from "the verify job succeeded" to
+# "some job on this run succeeded". That is exactly wrong on the cancelled/partial-matrix run the gate
+# exists to catch. Measured on real run 32645968281: matched job count = 4, both arms false, would
+# publish. It fires correctly when the name is ABSENT, which is how it hides in casual testing.
 $jobs = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
   --jq '.jobs' | ConvertFrom-Json
 $verifyJob = $jobs | Where-Object { $_.name -ceq $jobName }
