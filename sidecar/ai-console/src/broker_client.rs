@@ -210,6 +210,17 @@ pub struct KeyVerdict {
 pub struct CatalogFetch {
     pub index_ok: bool,
     pub applied: usize,
+    /// Entries the host fetched and verified but rejected because they weren't newer than what's
+    /// installed (anti-rollback) — a **stale published catalog**, distinct from "nothing to apply
+    /// because you're current" (CPE-1911).
+    pub stale_rejected: usize,
+    /// The host never attempted the fetch because it's offline (CPE-1911: distinct from a fetch
+    /// that was attempted and failed).
+    pub offline: bool,
+    /// The real reason the fetch/apply didn't produce a usable catalog (e.g. a 404 from a dead
+    /// publishing pipeline) — `None` when nothing went wrong. Surfaced to the user instead of being
+    /// silently thrown away (CPE-1911).
+    pub error: Option<String>,
 }
 
 /// One prior published catalog version offered by the rollback picker (CPE-383).
@@ -302,6 +313,9 @@ impl HostDialogs for BrokerDialogs {
         Ok(CatalogFetch {
             index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+            stale_rejected: v.get("staleRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            error: v.get("error").and_then(Value::as_str).map(str::to_string),
         })
     }
 
@@ -355,6 +369,9 @@ impl HostDialogs for BrokerDialogs {
         Ok(CatalogFetch {
             index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+            stale_rejected: v.get("staleRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            error: v.get("error").and_then(Value::as_str).map(str::to_string),
         })
     }
 

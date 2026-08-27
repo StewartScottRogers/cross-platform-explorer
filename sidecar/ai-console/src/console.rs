@@ -1338,7 +1338,10 @@ impl ConsoleState {
     }
 
     /// `POST /api/catalog/refresh` → ask the host to fetch + apply the signed catalog bundle
-    /// (CPE-376), then hot-reload if anything changed. Returns `{ indexOk, applied, agents }`.
+    /// (CPE-376), then hot-reload if anything changed. Returns
+    /// `{ indexOk, applied, agents, staleRejected, offline, error }` — the last three exist purely
+    /// so the launcher can tell "genuinely up to date" apart from "the pipeline is stale/dead"
+    /// instead of reporting both as the same reassuring message (CPE-1911).
     fn handle_catalog_refresh(&self) -> Response {
         let pinned = self.presets.load().pinned_agents;
         match self.dialogs.fetch_catalog(&pinned) {
@@ -1349,8 +1352,15 @@ impl ConsoleState {
                     self.registry.read().unwrap().len()
                 };
                 Response::json(
-                    json!({ "indexOk": res.index_ok, "applied": res.applied, "agents": agents })
-                        .to_string(),
+                    json!({
+                        "indexOk": res.index_ok,
+                        "applied": res.applied,
+                        "agents": agents,
+                        "staleRejected": res.stale_rejected,
+                        "offline": res.offline,
+                        "error": res.error,
+                    })
+                    .to_string(),
                 )
             }
             Err(e) => bad(e),
@@ -2120,7 +2130,7 @@ mod tests {
             _tag: &str,
             _agents: &[String],
         ) -> Result<crate::broker_client::CatalogFetch, String> {
-            Ok(crate::broker_client::CatalogFetch { index_ok: true, applied: 1 })
+            Ok(crate::broker_client::CatalogFetch { index_ok: true, applied: 1, ..Default::default() })
         }
         fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
             // No snapshot from this stub → /api/models falls back to the live `list_models` above.

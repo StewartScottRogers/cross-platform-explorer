@@ -713,6 +713,58 @@ describe("Agent Deck launcher — catalog controls", () => {
     expect(w.document.getElementById("rollback-overlay").hidden).toBe(true);
     expect(w.document.getElementById("msg").textContent).toMatch(/no prior versions/i);
   });
+
+  // CPE-1911: a genuinely-current catalog, a stale/broken publishing pipeline, and an outright
+  // failed/offline fetch were all reported as the identical reassuring "Agents are already up to
+  // date." (or one generic fallback). Pin the three real states to three distinguishable messages,
+  // driving the real refreshCatalog() through this harness the way CPE-1893's UAT measured the bug.
+  describe("refreshCatalog honesty (CPE-1911)", () => {
+    it("genuinely current — nothing new, nothing rejected — says so plainly", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 0 }
+          : {},
+      );
+      await w.refreshCatalog();
+      expect(w.document.getElementById("msg").textContent).toBe("Agents are already up to date.");
+    });
+
+    it("index verifies but every entry is no newer than installed — reports a stale published catalog, not 'up to date'", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 2 }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg").textContent;
+      expect(msg).toMatch(/isn't newer than what's installed/i);
+      expect(msg).not.toBe("Agents are already up to date.");
+    });
+
+    it("the fetch itself failed (e.g. a 404 from a dead pipeline) — surfaces the real reason, not a generic 'no update' line", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: false, applied: 0, agents: 1, error: "fetch failed: status code 404" }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg").textContent;
+      expect(msg).toMatch(/couldn't check for agent updates/i);
+      expect(msg).toMatch(/404/);
+      expect(msg).not.toBe("Agents are already up to date.");
+      expect(msg).not.toMatch(/^No agent update available/);
+    });
+
+    it("offline is reported distinctly from a failed fetch", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: false, applied: 0, agents: 1, offline: true }
+          : {},
+      );
+      await w.refreshCatalog();
+      expect(w.document.getElementById("msg").textContent).toMatch(/you're offline/i);
+    });
+  });
 });
 
 describe("Agent Deck launcher — Help panel + Manage menu (CPE-390)", () => {

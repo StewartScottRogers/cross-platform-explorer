@@ -1800,6 +1800,9 @@ async function relaunch(s) {
   if (ok) $("history-overlay").hidden = true;
 }
 // --- Catalog refresh (CPE-374/376): fetch + apply the signed agent catalog, then re-render. ---
+// CPE-1911: "nothing changed" is NOT one situation — it's genuinely-current, a stale/broken
+// publishing pipeline, or an outright failed/offline fetch, and the user must be able to tell
+// those apart instead of always reading the same reassuring "up to date" line.
 async function refreshCatalog() {
   closeManageMenu();
   setMsg("Checking for agent updates…", true);
@@ -1808,10 +1811,22 @@ async function refreshCatalog() {
     if (r.applied > 0) {
       await load(); // re-render the agent list with the newly-applied manifests
       setMsg("Updated " + r.applied + " agent" + (r.applied === 1 ? "" : "s") + ".", true);
+    } else if (r.error) {
+      // The fetch itself failed (e.g. a 404 — the publishing pipeline is down), not just "nothing
+      // new". Say so plainly and give the honest, non-alarming next step.
+      setMsg("Couldn't check for agent updates (" + r.error + "). Nothing changed — no action needed from you; try again later.", false);
+    } else if (r.offline) {
+      setMsg("You're offline, so agent updates weren't checked. Nothing changed.", false);
+    } else if (r.indexOk && r.staleRejected > 0) {
+      // The index verified fine, but every entry is no newer than what's installed — the
+      // *published* catalog is stale, which is different from "you're current".
+      setMsg("The published catalog isn't newer than what's installed, so nothing changed. If this doesn't clear up on its own, the publishing pipeline may be stuck — no action needed on your end.", false);
     } else if (r.indexOk) {
       setMsg("Agents are already up to date.", true);
     } else {
-      setMsg("No agent update available (offline, or none published yet).", true);
+      // Fetched, but the catalog itself didn't verify (bad/missing signature) — the trust engine
+      // correctly refused it and left the previous catalog in place.
+      setMsg("The catalog couldn't be verified, so nothing was changed.", false);
     }
   } catch (e) { setMsg("Update failed: " + e.message); }
 }

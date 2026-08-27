@@ -10068,7 +10068,20 @@ fn do_fetch_catalog(
     );
     let _ = sidecar_host::catalog::save_versions(&vpath, &versions);
     let _ = std::fs::remove_dir_all(&staging);
-    Ok(json!({ "indexOk": report.index_ok, "applied": report.applied, "rejected": report.rejected.len() }))
+    // CPE-1911: an index that verifies fine but whose entries are all no-newer-than-installed
+    // (anti-rollback correctly refusing them) is a *stale published catalog*, not "up to date" —
+    // count that separately so the UI can tell the two apart instead of reporting both identically.
+    let stale_rejected = report
+        .rejected
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, sidecar_host::catalog::ApplyOutcome::Rollback))
+        .count();
+    Ok(json!({
+        "indexOk": report.index_ok,
+        "applied": report.applied,
+        "rejected": report.rejected.len(),
+        "staleRejected": stale_rejected,
+    }))
 }
 
 /// One allow-listed HTTPS GET for a catalog asset (CPE-376), proxy/offline-aware (reuses CPE-369).
