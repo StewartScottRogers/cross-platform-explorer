@@ -2776,7 +2776,8 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 /// This site refuses a reparse point on the **bare bit**; [`claim_destination_handle`] refuses one only
 /// when it is a **name surrogate**, so a dehydrated cloud placeholder is written there and refused here.
 /// PR #1066 recorded that disagreement as deliberately unresolved and pointed at this ticket. **It is
-/// still unresolved and this change does not resolve it** — nothing here was quietly unified.
+/// still unresolved and this change does not resolve it** — nothing here was quietly unified. It now has
+/// a ticket of its own, **CPE-1959**, rather than riding on a hard-link one.
 ///
 /// What did move is one of the facts the answer depends on. The argument for refusing a non-surrogate
 /// reparse point was always about what a write *through* the handle does to it — CPE-1896 measured a

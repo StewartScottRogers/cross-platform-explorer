@@ -232,7 +232,8 @@ sample's noise. That shielding is a path gauntlet, not a containment property, a
 ### The reparse-point doctrine split: left, not unified
 
 PR #1066 recorded that `fsutil` (post-#1066) writes a non-surrogate reparse point while `batch_media`
-refuses it on the bare bit, deliberately unresolved. **Still unresolved; nothing was quietly unified.**
+refuses it on the bare bit, deliberately unresolved. **Still unresolved; nothing was quietly unified** — and it now has its own ticket, **CPE-1959**,
+filed while this was in flight, so it is no longer riding on a hard-link ticket.
 One input to it did move, and that is recorded at the site: this function no longer writes *through* the
 destination handle, so the question that drove the refusal ("what does `set_len(0)` do to a dehydrated
 placeholder") no longer arises here — the placeholder would be replaced by name. That is a reason the
