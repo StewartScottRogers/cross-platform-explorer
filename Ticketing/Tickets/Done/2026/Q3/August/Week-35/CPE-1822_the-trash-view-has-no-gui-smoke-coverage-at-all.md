@@ -133,3 +133,106 @@ that helper rather than duplicating the block a fourth time.
   folded into a `supplementary N→N+1` delta line) — stated that gap plainly, computed the corrected
   pre-flip total (supplementary 12, total 18), then applied this shift's decrement (supplementary
   12→10, total 18→16). Primary ledger unchanged at 6.
+
+## Round 2 (independent Reviewer: CHANGES REQUESTED; UAT: PASS)
+
+Two blockers, two silent-pass holes, one failure-cascade fix, several factually-wrong comments, and five
+should-fixes. All addressed in `gui-smoke/specs/trash.smoke.ts` and
+`.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md`; no change to `TrashView.svelte` this round.
+
+**BLOCKER 1 (`this.timeout()` inside an `it()` body is not honoured)** — the mid-stream test's
+`this.timeout(180_000)` call was the exact violation `wdio.conf.ts`'s CPE-1702 comment forbids (cited CI
+evidence: CPE-1679's stress harness died at ~90s on all 3 real runs despite calling
+`this.timeout(2_060_000)`). Fixed both parts: split the single mid-stream `it()` into one `it()` per
+theme (light, dark) inside a nested `describe`, per `wdio.conf.ts:1367`'s own instruction for exactly
+this case; moved the shared, expensive fixture setup (2,500 real files) into that describe's `before()`
+hook and teardown into `after()`, where `this.timeout()` reliably widens THAT hook's own budget (unlike
+inside an `it()` body — matches `preview-pane.smoke.ts:179`'s own documented distinction). Also replaced
+the hot poll's `getText()` + `$$(".tv-row").length` (which serializes up to 2,500 WebDriver element
+handles per tick under classic WebDriver's `findElements`) with one `browser.execute()` call computing
+`document.querySelectorAll(...).length` entirely in-page — one round trip instead of thousands of
+handles. Also dropped the "wait for the pass to fully resolve" step (60s alone) — unneeded, since
+`TrashView.svelte`'s own `loadGen` supersession already drops a still-in-flight stream's later batches
+once the next test's `openTrash()` starts a fresh load.
+
+**BLOCKER 2 (burndown table broken)** — the CPE-1803/1804/1805 retirement note had been inserted
+*between* two table rows, turning the following `| CPE-1708 / CPE-1775 ... |` row into a lazy Markdown
+paragraph continuation (literal pipe text, not a table row) — silently deleting the still-open StatusBar
+row from the rendered ledger. Moved the note below the whole table (matching the existing `→ ✅ CPE-1586
+RETIRED` precedent), confirmed the CPE-1708/1775 row now immediately follows the CPE-1803/1804/1805 row
+with nothing between them.
+
+**Silent-pass holes, both fixed and red-proofed** (see "Verification, round 2" below):
+- The sticky-header test's scroll step (`if (body) body.scrollTop = body.scrollHeight`) was a silent
+  no-op if `.tv-body` were renamed or the list wasn't actually taller than its container — the sticky
+  assertion would then pass on an unscrolled list. Added `expect(scrollTop).to.be.greaterThan(0)`
+  immediately after the scroll.
+- The degraded-empty test's `noteText.to.not.include("Trash is empty")` also silently passes on the
+  transient mid-stream render of the SAME element (`.tv-degraded-note` shows `trash.stillLoading` before
+  `degraded` resolves — `noticeMessage` in TrashView.svelte). Changed to positively wait for and assert
+  the actual CPE-1803 wording ("...couldn't be fully read...") before reading the text at all.
+
+**Failure cascade** — `closeTrash()` was inside each `try`, never a `finally` or `afterEach`. A mid-test
+failure left `.tv-overlay` (z-index 60) over the Sidebar, so the NEXT `it()`'s `openTrash()` click would
+be intercepted — the exact `WebDriverError: element not interactable` signature from a live PR #1038
+shard-4 run (a different spec, same failure shape). Moved `closeTrash()` (already defensive) into a
+shared `afterEach`, which now also resets theme to light (`preview-pane.smoke.ts`'s own `afterEach` is
+named in `resetAppState.ts` as "the model to copy, not a coincidence" for exactly this — this harness's
+state reset runs once per spec FILE, not per test).
+
+**Comment corrections (code kept, prose fixed)**:
+- The undecodable-entry fixture's header/comments claimed it matches `item_with_undecodable(Some("name"))`.
+  It doesn't: the `trash` crate's freedesktop backend derives `TrashItem.name` from the decoded `Path=`
+  value's basename, not from the `.trashinfo` filename — the skip actually fires on `id`. More
+  importantly, `item_with_undecodable` fabricates a struct in memory and never writes a non-UTF-8
+  `.trashinfo` file or runs `list()` over one; this spec is the first thing in this repo that does, over
+  the real dependency — reworded to say that instead of claiming equivalence with an existing test.
+- A comment claimed sort order keeps `trash-titlebar.smoke.ts` and `trash.smoke.ts` from ever colliding
+  "regardless of shard packing" — wrong; they land on different SHARDS (different runners, different
+  Trash directories), which is why they can't collide, not sort order. Reworded; the cleanup discipline
+  itself doesn't depend on this either way.
+- Burndown: "the header line ... is itself stale relative to even the 2026-08-20 entry" was wrong — it
+  matched 2026-08-20 exactly and only drifted on 2026-08-23. Fixed the claim.
+- Burndown: "re-balanced automatically as the ratchet measures this spec's real cost" was the opposite of
+  what `lib/shard.ts` says — the cost table (`specWeightMs`) is hand-maintained and the file's own header
+  says "NOTHING CATCHES" a stale entry or an uncosted new spec. Fixed the claim; noted `trash.smoke.ts`
+  is uncosted today and a follow-up should add its measured runtime once a live CI run reports it.
+- "3 classes of breakage" → "four" (degraded-banner, sticky-stack, mid-stream condition, degraded-empty
+  condition), matching the Work Log above.
+- Independently confirmed correct and left alone: the burndown arithmetic itself (16 + 2 = 18 pre-flip,
+  16 post-flip; 6 primary + 10 supplementary).
+
+**Should-fixes**:
+- `wipeTrashDir`'s only call sites now also gate on `process.env.CI` (not just `IS_LINUX`) — wiping a
+  Linux contributor's own real Trash during a local run would be destructive; the rust equivalent
+  (`lock_real_trash`) redirects `XDG_DATA_HOME` for the same reason, which this spec can't do to an
+  already-launched app process.
+- `fs.rmSync` in `wipeTrashDir` now passes `recursive: true` — without it, a trashed DIRECTORY throws
+  `ERR_FS_EISDIR`, silently swallowed by the `catch`, leaving the entry behind and failing test 1.
+- `before()`'s `IS_LINUX` guard now runs BEFORE reading/parsing `STATE_FILE`.
+- `trash-degraded-scrolled` (dark-only capture, despite the old it() title implying both themes) renamed
+  to `trash-degraded-scrolled-dark` and the it() title now says so explicitly, rather than adding a
+  second full scroll+hit-test pass in light for one extra screenshot.
+
+**Verification, round 2.** Same constraint as round 1 — this environment could not run the real
+`gui-smoke`/WebDriver harness. What was checked:
+- `gui-smoke && npm run typecheck` — clean.
+- `gui-smoke && npx tsx --test lib/*.test.ts` — 130/130, unaffected.
+- Root `npm run check` — 0 errors, 0 warnings.
+- **Red-proofed the two silent-pass fixes specifically**, as instructed, via a throwaway vitest probe
+  (`src/lib/components/CPE1822RedProof.probe.test.ts`, written, run, then deleted — not part of the
+  permanent suite) reusing TrashView's real render + the SAME mid-stream-drain-to-zero setup an existing
+  permanent test (`TrashView.test.ts`, "does not claim 'Trash is empty' when Restore drains...") already
+  exercises:
+  - Confirmed the real rendered text in that exact state is `"Still loading…"` — proving the OLD
+    assertion shape (`.to.not.include("Trash is empty")`) would have silently PASSED there (a true
+    silent-pass hole), while the NEW assertion (`.to.include("couldn't be fully read")`) correctly
+    REJECTS it, and correctly ACCEPTS the real resolved degraded wording once `finishStream(0, true, 0)`
+    lands.
+  - Confirmed jsdom's real `.tv-body` (rendered from 30 real entries) reports `scrollHeight: 0` and
+    `scrollTop` stays `0` after the exact assignment the gui-smoke spec runs — demonstrating the fixed
+    `expect(scrollTop).to.be.greaterThan(0)` is NOT vacuous even here (jsdom cannot lay out, which is
+    exactly why this check has to live in gui-smoke rather than the jsdom suite) — and confirmed a
+    renamed selector genuinely returns `null`.
+  All three probe assertions passed as predicted; full console output captured before the probe file was
+  deleted.

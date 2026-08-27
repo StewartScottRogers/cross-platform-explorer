@@ -475,6 +475,8 @@ the whole of its front-end debt.
 |-----------|---------|--------------------------|--------|---------------------|--------|
 | CPE-1803 / CPE-1804 / CPE-1805 | **Trash view's three new degraded-listing states**: degraded-with-no-entries (the "couldn't be read" panel that replaced a false `trash.empty`), degraded-with-entries (a partial list plus an in-place notice), and the skipped-count wording (`trash.skippedOne`/`trash.skippedMany`). The count chip is also deliberately SUPPRESSED on a degraded pass, which is itself a visible layout change | logic pinned by `cargo test` (the walker/command seam) and jsdom component tests **+ render pinned by `gui-smoke` (CPE-1822):** `gui-smoke/specs/trash.smoke.ts` opens the real Trash overlay and `snap()`s the healthy/degraded-empty/degraded-with-entries/mid-stream states, in both themes, on the blocking `GUI smoke (ubuntu-latest)` shards | ✅ automated — pinned by `gui-smoke` (CPE-1822) | ~~`trash.smoke.ts`: seed the XDG trash (`~/.local/share/Trash/{files,info}`) on the Linux leg, open the Trash section, and `snap()` all four states — healthy, degraded-empty, degraded-with-entries, skipped-count — in both themes. Compounds the older **CPE-1560** row (the overlay's look + the sidebar section's weight), which asked for the same spec; build one spec covering both. Watch for the `.fav-title` `getText()` WebKitGTK quirk that has `network`/`saved-search` in `known-failing.json` — the Trash sidebar header is the same `<span class="label fav-title">` shape, so open the view by a route that does not read that header's text~~ Done | 2026-08-20 |
 
+| CPE-1708 / CPE-1775 (+ CPE-1660, CPE-1798) | **StatusBar's advisory lines**: CPE-1708's `.filtered-hidden` ("N entries were hidden because their names could not be shown safely"), and CPE-1775's `notice.archiveSkippedOne`/`archiveSkippedMany` ("N entries were skipped — they couldn't be written safely"). Both are ellipsis-truncated with the full sentence kept only in a `title` tooltip, so **how they behave at a narrow window is a reflow judgement**, exactly the class the CLAUDE.md tick-tacks rule exists for | jsdom component tests on `StatusBar.svelte`; **zero browser-level coverage** — `grep -rl 'status-bar\|\.sb-' gui-smoke/specs/` returns nothing, so no spec asserts or snaps the status bar in any state | ⛰ manual | a `status-bar.smoke.ts` that drives the bar into each advisory state and `snap()`s it at two window widths in both themes. `filteredHidden` and the archive skip notice are both prop/notice-driven, so a test-mode ingest hook in the `__CPE_TEST_INGEST_*` family (App.svelte, CPE-1130/1173) is the cheap seam — no remote S3 listing or real refused-entry archive needed. Note CPE-1780 (Backlog) already records three further status-bar/listing gaps found while building CPE-1708, so this spec has an existing bug list to red-proof against | 2026-08-20 |
+
 → ✅ **CPE-1803 / CPE-1804 / CPE-1805 RETIRED 2026-08-27 (CPE-1822).** `gui-smoke/specs/trash.smoke.ts` (5
 `it()`s, Linux-scoped — see the spec's own header for why) opens the real Trash overlay from the Sidebar
 and `snap()`s: a genuinely empty Trash (never the degraded note); a populated Trash with real rows; the
@@ -491,14 +493,13 @@ auto-discovered by `lib/specFiles.ts` with no workflow edit. Also retires the ol
 over:** (1) this ticket's own CI environment had no Linux runner to rehearse against, so the mid-stream
 capture's reliability rests on reasoned wall-clock-cost argument (see the spec's "WHY A LARGE TRASH"
 comment), verified locally only via a deliberate red-proof against the jsdom `TrashView.test.ts` suite
-(3 classes of breakage: `.tv-degraded-banner`, `.tv-sticky-stack`, and the mid-stream render condition —
-all reproduced red then restored green), not a live `gui-smoke` run — the CI verdict is the first live
+(four classes of breakage: `.tv-degraded-banner`, `.tv-sticky-stack`, the mid-stream render condition, and
+the degraded-empty branch condition — all reproduced red then restored green), not a live `gui-smoke` run — the CI verdict is the first live
 Linux confirmation; (2) the `windows-latest` leg stays uncovered by this spec (deliberately — see the
 spec's own "SCOPE" note: that leg is `continue-on-error`/non-blocking and its Recycle Bin cannot be
 hand-constructed the way freedesktop Trash can). If CI ever shows the mid-stream case flaking, that is a
 follow-up (an `"intermittent": true` `known-failing.json` entry citing runs), not something to quietly
 loosen in the spec.
-| CPE-1708 / CPE-1775 (+ CPE-1660, CPE-1798) | **StatusBar's advisory lines**: CPE-1708's `.filtered-hidden` ("N entries were hidden because their names could not be shown safely"), and CPE-1775's `notice.archiveSkippedOne`/`archiveSkippedMany` ("N entries were skipped — they couldn't be written safely"). Both are ellipsis-truncated with the full sentence kept only in a `title` tooltip, so **how they behave at a narrow window is a reflow judgement**, exactly the class the CLAUDE.md tick-tacks rule exists for | jsdom component tests on `StatusBar.svelte`; **zero browser-level coverage** — `grep -rl 'status-bar\|\.sb-' gui-smoke/specs/` returns nothing, so no spec asserts or snaps the status bar in any state | ⛰ manual | a `status-bar.smoke.ts` that drives the bar into each advisory state and `snap()`s it at two window widths in both themes. `filteredHidden` and the archive skip notice are both prop/notice-driven, so a test-mode ingest hook in the `__CPE_TEST_INGEST_*` family (App.svelte, CPE-1130/1173) is the cheap seam — no remote S3 listing or real refused-entry archive needed. Note CPE-1780 (Backlog) already records three further status-bar/listing gaps found while building CPE-1708, so this spec has an existing bug list to red-proof against | 2026-08-20 |
 
 
 ## Added 2026-08-23 — batched run `batched-2026-08-23-1124`
@@ -540,10 +541,12 @@ file is the 2026-08-20 entry near the top (`total 15→16, delta +1`: primary 6,
 tallied `supplementary N→N+1` delta line the way every other addition in this file does. Rather than
 silently pretend the running total never drifted, stating it plainly: **supplementary was 10+2=12,
 total was 16+2=18, immediately before this shift's flip.** (The header line at the top of this file,
-`**MVD (still-manual surfaces): 6 primary + 10 supplementary = 16 total**`, is itself stale relative to
-even the 2026-08-20 entry — it stopped being updated in place several shifts ago in favour of the dated
-paragraphs carrying the running total instead. Not touched here to avoid a large, unrelated rewrite; a
-future QA-Architect pass may want to fold the whole header into the dated-paragraph convention.)
+`**MVD (still-manual surfaces): 6 primary + 10 supplementary = 16 total**`, was NOT stale relative to the
+2026-08-20 entry — it matched exactly (6 primary, 10 supplementary, 16 total). It only drifted out of sync
+on 2026-08-23, when the two additions above landed without a tallied delta line updating it. This shift's
+flip brings the running total back down to 16, which — by coincidence, not intent — makes the header line
+correct again too. Not rewritten here beyond that coincidence: a future QA-Architect pass may still want
+to fold the whole header into the dated-paragraph convention so this kind of silent drift can't recur.)
 
 **This shift:** supplementary rows **CPE-1560** and **CPE-1803 / CPE-1804 / CPE-1805 flipped ✅ (CPE-1822),
 supplementary 12→10, total 18→16.** `gui-smoke/specs/trash.smoke.ts` is the Trash view's first-ever
@@ -554,7 +557,11 @@ asked for the same missing spec (CPE-1560 from the 2026-08-10 sprint, CPE-1803/1
 ledger unchanged at 6.
 
 **Pinning job:** `GUI smoke (ubuntu-latest) shard N` (whichever shard `lib/shard.ts`'s cost-based
-partition assigns `trash.smoke.ts` to, re-balanced automatically as the ratchet measures this spec's
-real cost) — the BLOCKING gate per CPE-1594, not the non-blocking `windows-latest` canary. Ratcheted by
-`gui-smoke-linux-verdict` against `gui-smoke/known-failing.json`; `trash.smoke.ts` is **not** listed
-there.
+partition assigns `trash.smoke.ts` to) — the BLOCKING gate per CPE-1594, not the non-blocking
+`windows-latest` canary. Ratcheted by `gui-smoke-linux-verdict` against `gui-smoke/known-failing.json`;
+`trash.smoke.ts` is **not** listed there. Correction from an earlier draft of this note: the partition
+does NOT re-balance itself as costs are measured. `lib/shard.ts`'s own header is explicit that its cost
+table (`specWeightMs`) is hand-maintained and "NOTHING CATCHES" a table entry going stale or a new spec
+landing uncosted — a heavy new spec is priced as ordinary until someone re-measures and edits the table
+by hand. `trash.smoke.ts` is un-costed today; a follow-up should add its measured runtime to
+`specWeightMs` once a live CI run reports it, rather than assuming the packer already knows.
