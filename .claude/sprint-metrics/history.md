@@ -1522,3 +1522,5 @@ and correctly measured. It cannot prove anything about a real OneDrive placehold
 `FILE_FLAG_OPEN_REPARSE_POINT` exists to **bypass the handler that owns the tag**, and the synthetic
 tag has no handler. The one structural difference between fixture and reality is exactly the variable
 being inferred. Honest at the code comment; the user-facing doc had promoted it to fact.
+
+**Pattern worth carrying — the shadowed guard, with a diagnostic tell.** A guard cannot be given test coverage while an earlier guard answers on the same underlying fact; it is then simultaneously *safe* and *unverifiable*, and those are easy to mistake for each other. **The tell: a sabotage that leaves the suite green AND a fault-injection that changes no behaviour, on the same guard.** Separately each reads as evidence of safety; together they mean the guard is unreachable. Found on CPE-1896, where three symptoms presented and only the third looked like a problem at the time. Filed as CPE-1929 with a named lead (`batch_media::open_output_verified`, same shape, unexamined).
