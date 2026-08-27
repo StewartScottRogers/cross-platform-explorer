@@ -414,7 +414,7 @@
   .step-actions { display: flex; gap: 4px; flex: 0 0 auto; }
   .add-step { display: flex; gap: 8px; align-items: center; }
   .editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono, monospace); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
+  .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
   .status { min-height: 18px; margin: 6px 2px; font-size: 12px; }
   .note { color: var(--accent); }
   .err { color: var(--danger); }

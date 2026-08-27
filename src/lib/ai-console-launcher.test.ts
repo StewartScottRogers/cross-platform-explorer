@@ -713,6 +713,103 @@ describe("Agent Deck launcher — catalog controls", () => {
     expect(w.document.getElementById("rollback-overlay").hidden).toBe(true);
     expect(w.document.getElementById("msg").textContent).toMatch(/no prior versions/i);
   });
+
+  // CPE-1911: a genuinely-current catalog, a stale/broken publishing pipeline, and an outright
+  // failed/offline fetch were all reported as the identical reassuring "Agents are already up to
+  // date." (or one generic fallback). Pin the three real states to three distinguishable messages,
+  // driving the real refreshCatalog() through this harness the way CPE-1893's UAT measured the bug.
+  describe("refreshCatalog honesty (CPE-1911)", () => {
+    // Round-2 review: the genuine-success colour (green) vs. an actionable-error colour (red) vs.
+    // the "nothing changed, nothing you need to do" colour (amber) must all be distinguishable —
+    // pin the actual rendered colours, not just the text, so a colour regression goes red too.
+    const GREEN = "rgb(58, 157, 74)"; // #3a9d4a
+    const RED = "rgb(208, 86, 86)"; // #d05656
+    const AMBER = "rgb(208, 138, 26)"; // #d08a1a
+
+    it("genuinely current — nothing new, nothing rejected — says so plainly, in green", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 0, integrityRejected: 0 }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toBe("Agents are already up to date.");
+      expect(msg.style.color).toBe(GREEN);
+    });
+
+    // CPE-1911 review round 3: anti-rollback (sidecar/host/src/catalog.rs) can't tell "you already
+    // have the latest" (==) from "the index regressed to something older" (<) — both produce
+    // staleRejected>0, and under the release pipeline's timestamp versioning, "==" (routine,
+    // healthy — you already checked since the last release) vastly outnumbers "<" (genuinely
+    // broken). So this branch must say only what's true in both cases, diagnose neither, and render
+    // calm (green), not amber — an amber "may be stuck" banner on every routine check is exactly
+    // the kind of alarm the user can't act on that this ticket exists to prevent.
+    it("index verifies but every entry is no newer than installed — states the fact without diagnosing a cause, calm not amber", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 2, integrityRejected: 0 }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/nothing newer than what you have/i);
+      expect(msg.textContent).not.toMatch(/may be stuck/i);
+      expect(msg.textContent).not.toMatch(/isn't newer than what's installed/i); // the old, retracted wording
+      expect(msg.style.color).toBe(GREEN);
+      expect(msg.style.color).not.toBe(AMBER);
+      expect(msg.style.color).not.toBe(RED);
+    });
+
+    // CPE-1911 review round 2 (F1): the index can verify fine while every LISTED entry fails its
+    // own integrity check (bad/missing signature, content mismatch) — a corrupt/mis-signed publish,
+    // not an anti-rollback rejection. Pre-fix this fell through every branch straight to "up to
+    // date" (indexOk:true, applied:0, staleRejected:0 — the exact shape a signature-botching
+    // pipeline produces).
+    it("index verifies but every entry fails its own integrity check — reports a corrupt/mis-signed publish, not 'up to date'", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: true, applied: 0, agents: 1, staleRejected: 0, integrityRejected: 3 }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/corrupted or mis-signed/i);
+      expect(msg.textContent).toMatch(/existing agents are untouched/i);
+      expect(msg.textContent).not.toBe("Agents are already up to date.");
+      expect(msg.style.color).toBe(AMBER);
+      expect(msg.style.color).not.toBe(RED);
+    });
+
+    it("the fetch itself failed (e.g. a 404 from a dead pipeline) — surfaces the real reason in amber, not a generic 'no update' line in red", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: false, applied: 0, agents: 1, error: "fetch failed: status code 404" }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/couldn't check for agent updates/i);
+      expect(msg.textContent).toMatch(/404/);
+      expect(msg.textContent).not.toBe("Agents are already up to date.");
+      expect(msg.textContent).not.toMatch(/^No agent update available/);
+      expect(msg.style.color).toBe(AMBER);
+      expect(msg.style.color).not.toBe(RED);
+    });
+
+    it("offline is reported distinctly from a failed fetch, in amber not red", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? { indexOk: false, applied: 0, agents: 1, offline: true }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/you're offline/i);
+      expect(msg.style.color).toBe(AMBER);
+      expect(msg.style.color).not.toBe(RED);
+    });
+  });
 });
 
 describe("Agent Deck launcher — Help panel + Manage menu (CPE-390)", () => {

@@ -539,6 +539,30 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
     std::fs::rename(src, target).map_err(|e| e.to_string())
 }
 
+/// `fs::rename` onto a slot the caller has decided, **with the user's explicit confirmation**, to
+/// overwrite (CPE-1891) — the CONFIRMED counterpart to [`rename_into_slot`], scoped to the macro
+/// engine's confirm-and-retry escape hatch: a saved macro's Rename/Move step refuses an occupied
+/// destination the same way every other name-claiming site does, and this is what lets a re-run with
+/// `confirmed_overwrite: true` proceed anyway.
+///
+/// Still refuses outright if `target` is a link (live or dangling): matching CPE-1734's absolute rule
+/// (a confirm authorises overwriting the user's OWN file, never destroying a link to a path the user
+/// never named), this keeps [`rename_slot_refusal`]'s link half — [`symlink_slot_refusal`] — and drops
+/// only its occupancy half ([`clobber_refusal`]). `symlink_slot_refusal` alone is sufficient to answer
+/// "is anything at this name a link at all": live and dangling links both read `Ok(true)` from
+/// `symlink_metadata`'s `is_symlink()`, since that call never follows the final component either way —
+/// there is no live/dangling split to reproduce here the way the unconfirmed combinator has one.
+pub fn rename_into_confirmed_slot(src: &Path, target: &Path) -> Result<(), String> {
+    if let Some(e) = symlink_slot_refusal(target) {
+        return Err(e);
+    }
+    // Same sanctioned `fs::rename` as `rename_into_slot`, guarded the same way — only the guard's
+    // occupancy half is missing, deliberately, because overwriting the user's own confirmed target is
+    // the entire point of this entry point.
+    #[allow(clippy::disallowed_methods)]
+    std::fs::rename(src, target).map_err(|e| e.to_string())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // CPE-1765 — the name-pick → write GAP, closed by CLAIMING the name instead of re-checking it
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1384,6 +1408,21 @@ impl LinkGuardWording {
                  on purpose -- leave the entry as it is. Otherwise, break the link (copy the file over \
                  itself) and run the backup again.",
     };
+
+    /// The explanation behind a hard-link write refusal using this wording, with the destination and its
+    /// link count left out — the shared half [`copy_file_onto_no_follow_with_wording`]'s per-path message
+    /// is built from below, and the same half `revert_engine::execute_restore` states ONCE for a whole
+    /// group of hard-link refusals instead of copying it onto every path (CPE-1881: measured at ~420
+    /// bytes/entry, ~8.2 MiB extrapolated for 20,000 refused entries in one revert). Both callers build
+    /// from these same `scope`/`remedy` fields, so the single-entry and grouped forms of the sentence can
+    /// never drift apart.
+    pub fn hard_link_reason(&self) -> String {
+        format!(
+            "writing here would change the content at every one of them — including any that live \
+             outside {}, which no path check can see because a hard link resolves to itself. {}",
+            self.scope, self.remedy
+        )
+    }
 }
 
 /// What [`copy_file_onto_no_follow_with_wording`] establishes about the copy it just performed
@@ -1424,6 +1463,51 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
     dst: &Path,
     wording: LinkGuardWording,
 ) -> Result<CopiedOnto, String> {
+    copy_file_onto_destination_handle(src, dst, wording, || {
+        crate::batch_media::open_no_follow(dst)
+            .map(|(file, created)| crate::open_beneath::Opened { file, created })
+            .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))
+    })
+}
+
+/// The same copy, onto a destination handle **the caller opens** (CPE-1896).
+///
+/// # Why this split exists, and why it is the whole of the atomic fix on this side
+///
+/// [`copy_file_onto_no_follow_with_wording`] opens `dst` **by path**, which means the kernel resolves
+/// every one of its directory components at that moment — after whatever containment check the caller
+/// ran, and therefore inside the window a racing rename can use to redirect the write. Every guard on
+/// the caller's side is a path question; this open was the matching path *answer*, and no amount of
+/// re-checking closes the gap between them.
+///
+/// [`crate::open_beneath::create_beneath`] resolves the destination one component at a time, each
+/// relative to the handle of the component before it, so the object it returns is beneath the root **by
+/// construction** rather than by a check that could be stale. Handing that handle in here is what lets
+/// the backup engine use it: the copy keeps every guard it already had — the reparse-point refusal, the
+/// directory refusal, the hard-link refusal, all read off the very handle the bytes go through — and
+/// simply stops being the one step that re-asks the path.
+///
+/// `created` must mean what [`crate::batch_media::open_no_follow`]'s second return value means: *this*
+/// call brought the name into existence, established by an exclusive create rather than by a preceding
+/// `exists()`. It is what decides whether a refusal removes the destination it just made.
+///
+/// **The destination opener is a closure, not an already-open handle, and the ordering is the reason.**
+/// This function opens and describes the **source** first, and only then the destination. Taking a
+/// ready-made handle would invert that: an unreadable source would leave behind an empty file this call
+/// had already created at `dst` — a new, silent way for a failed entry to change the user's tree, and
+/// exactly the class of regression this ticket's family exists to stop. The closure preserves the old
+/// order exactly, so nothing is created until the source is known to be copyable.
+///
+/// The belt-and-braces `symlink_metadata(dst)` check below is deliberately kept even for a handle that
+/// came from the atomic walk. It costs one path stat and it is the only thing standing if a hard-coded
+/// no-follow constant is ever wrong on a platform this crate does not test — the same reasoning
+/// `batch_media` records for its own copy of that check.
+pub(crate) fn copy_file_onto_destination_handle(
+    src: &Path,
+    dst: &Path,
+    wording: LinkGuardWording,
+    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, String>,
+) -> Result<CopiedOnto, String> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
     // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
@@ -1451,29 +1535,13 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
         );
     }
 
-    let (mut w, created) = crate::batch_media::open_no_follow(dst)
-        .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))?;
+    let crate::open_beneath::Opened { file: mut w, created } = open_dst()?;
 
-    // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
-    // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.
-    // Copied in shape from `batch_media::open_output_verified`, and for its reason.
-    if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        drop(w);
-        if created {
-            let _ = std::fs::remove_file(dst);
-        }
-        return Err(format!(
-            "{}: this name is a link, and {} never writes through one — a link's target can be \
-             re-pointed after any check. Nothing was written for this entry",
-            dst.display(),
-            wording.verb
-        ));
-    }
-
-    // THE authority on Windows, where a junction is a reparse point that `is_symlink` above may or may
-    // not report depending on its tag: `GetFileInformationByHandle` on the handle we are about to write
-    // through. `handle_facts` returns `None` only on a platform whose identity model `batch_media` does
-    // not know, where the path check above is the whole defence.
+    // THE authority on Windows, where a junction is a reparse point that `is_symlink` (the path check,
+    // now BELOW this block since CPE-1896 round 4) may or may not report depending on its tag:
+    // `GetFileInformationByHandle` on the handle we are about to write through. `handle_facts` returns
+    // `None` only on a platform whose identity model `batch_media` does not know, where the path check
+    // below is the whole defence.
     //
     // **Both arms below appear UNREACHABLE on Windows, measured, and are kept anyway** (CPE-1846
     // review). A directory and a junction both fail the `open` itself there, so the refusal a user
@@ -1495,10 +1563,64 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
     let mut written: Option<crate::batch_media::FileIdentity> = None;
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         written = Some(facts.id);
-        let why = if facts.is_reparse_point {
+        // CPE-1896 round 3 (F5): refuse a reparse point only when it is a **name surrogate** — a tag
+        // whose whole purpose is to make this name mean another name. The bare
+        // `FILE_ATTRIBUTE_REPARSE_POINT` bit that used to sit here is set by a great deal that is not a
+        // link, and the case that matters is not hypothetical: a **dehydrated OneDrive
+        // Files-On-Demand file** carries it, OneDrive dehydrates exactly the files it has already
+        // synced, and those are exactly what an incremental backup's `update` list lands on. This guard
+        // was therefore turning "back up a folder inside OneDrive" into a per-file refusal reading
+        // "this name is a reparse point … never writes through one".
+        //
+        // `reparse_name_surrogate` is asked **only** when the reparse bit is already set, so the
+        // ordinary case pays nothing, and it **fails closed** — an unreadable tag counts as a surrogate.
+        // The security property is unchanged: a non-surrogate tag does not redirect the name, so the
+        // bytes still land in the object this handle names, which is the only thing this guard ever
+        // claimed. The symlink/junction/mount-point cases it exists for all carry the bit.
+        //
+        // Measured (CPE-1896 PR #1043) with a synthetic non-Microsoft GUID reparse point planted by
+        // `FSCTL_SET_REPARSE_POINT` — refused before this change, accepted after. The fixture and a
+        // real placeholder differ in one structural way (no filter driver owns the synthetic tag), so
+        // the two halves of the claim are split rather than averaged:
+        //
+        // **MEASURED, and the absent driver cannot affect it: the classification.**
+        // `GetFileInformationByHandleEx(FileAttributeTagInfo)` is serviced by the **filesystem**, not by
+        // the tag's owner — the tag and its surrogate bit live in the NTFS reparse data and come back
+        // identically whether or not `cldflt` is loaded. Cloud tags are N=0 by construction. So "this
+        // guard classifies a real placeholder as non-surrogate" is established, not inferred.
+        //
+        // **NOT ESTABLISHED by this fixture: that the resulting file is correct.** Whether a write
+        // through a `FILE_OPEN_REPARSE_POINT` handle onto a *live dehydrated* placeholder produces a
+        // properly hydrated file is untested, and the fixture gives three reasons not to assume it:
+        //   1. the copy reports `Ok(16)` and the object is then **unopenable by ordinary path**
+        //      (`ERROR_CANT_ACCESS_FILE`), so the fixture cannot tell "wrote a correct file" from
+        //      "wrote into an unreadable object" — and on the fixture it is demonstrably the latter;
+        //   2. attributes afterwards are `0x420` — **the reparse bit survives** `set_len(0)` and the
+        //      whole copy — and `FILE_OPEN_REPARSE_POINT` exists precisely to tell the owning filter
+        //      *not* to hydrate, so on a real placeholder this could leave an object OneDrive still
+        //      believes is a placeholder sitting over replaced data;
+        //   3. `backup::landed_inside` re-opens by ordinary path, which **fails on the fixture and
+        //      would succeed on a real placeholder** — so even the final verdict diverges, in opposite
+        //      directions.
+        // None of that touches containment: the bytes cannot leave the destination either way, and the
+        // prior behaviour refused *every* dehydrated file, so this is better in expectation. But it is
+        // not a demonstration that backups into OneDrive work, and `src/docs/safety-undo.md` says so to
+        // the user rather than claiming the win. An attended check on a real Files-On-Demand file is
+        // tracked separately.
+        let why = if facts.is_reparse_point && crate::batch_media::reparse_name_surrogate(&w).unwrap_or(true) {
             Some(format!(
-                "this name is a reparse point (a link, junction or stand-in for another name), and {} \
-                 never writes through one",
+                // Wording deliberately re-led for the COMMONEST case (CPE-1896 round 4). The
+                // reorder made this refusal, not the path check below, the one a plain symlink at
+                // the leaf reaches — and the sentence it inherited opened on "reparse point",
+                // which is the precise term but the wrong first word for the shape a user actually
+                // hits. It now opens on "a link", keeps the "stands in for another name" clause the
+                // tag check is named for (and which the leaf test asserts on to prove WHICH guard
+                // fired), and restores the re-pointing explanation the old path-check sentence
+                // carried. Safe to change: the Foreman grepped src/, src-tauri/, crates/ and
+                // gui-smoke/ for downstream matchers on the old text and found none on this path.
+                "this name is a link that stands in for another name — a symlink, junction or \
+                 mount point — and {} never writes through one: a link's target can be \
+                 re-pointed after any check",
                 wording.verb
             ))
         } else if facts.is_dir {
@@ -1522,16 +1644,74 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
         // question, which is the property the rest of this function is built on.
         if facts.links > 1 {
             drop(w);
+            // CPE-1881: the shared half of this sentence now lives in `wording.hard_link_reason()` — see
+            // its doc — so this per-entry message and the summary a caller states once for a whole GROUP
+            // of these refusals (`revert_engine::execute_restore`'s `WriteRefusalGroup`) are built from
+            // the same two words and cannot say different things.
             return Err(format!(
-                "{}: this file has {} names (it is hard-linked), and writing here would change the \
-                 content at every one of them — including any that live outside {}, which no path check \
-                 can see because a hard link resolves to itself. {} Nothing was written for this entry",
+                "{}: this file has {} names (it is hard-linked), and {} Nothing was written for this \
+                 entry",
                 dst.display(),
                 facts.links,
-                wording.scope,
-                wording.remedy
+                wording.hard_link_reason()
             ));
         }
+    }
+
+    // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
+    // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.
+    // Copied in shape from `batch_media::open_output_verified`, and for its reason.
+    //
+    // **It now runs AFTER the handle checks, and the reorder is the point of CPE-1896 round 4.** It
+    // used to run first, and that made the handle-based surrogate check below **unreachable for every
+    // refusal**: `is_symlink` tracks the same name-surrogate bit (measured, below), so every surrogate
+    // was refused *here*, by a path question, and the tag check only ever got to say "allow". That is
+    // why the Security Auditor could disable the tag refusal outright and watch all 2404 tests stay
+    // green, and why a fixture "refused by the tag check and nothing else" cannot be built while this
+    // check goes first — the two guards answer on the same bit.
+    //
+    // Putting the handle question first matches what this whole function is for: `w` is the object the
+    // bytes will enter, and nothing can substitute it after the open, whereas `dst` is a name that can.
+    // The path check keeps its job as the **second** net — see the paragraph below for what it still
+    // independently catches — and on Unix it remains the *only* net, because `is_reparse_point` is
+    // always false there, so the reorder changes nothing at all on Linux or macOS. What changes on
+    // Windows is only which guard reports a surrogate, and therefore which one a test can pin.
+    //
+    // **On Windows this appears to be more than belt-and-braces, measured in CPE-1896 round 4** (PR
+    // #1043 Security Auditor). `std`'s `FileType::is_symlink` **tracked the name-surrogate bit** across
+    // three synthetic tags on one Windows build: `true` for `0x2000_1896`, `false` for `0x0000_1896`
+    // and `0x1000_1896`. That is consistent with it keying on the bit rather than on the two
+    // well-known tags, and it explains why forcing `reparse_name_surrogate` to a lying `Some(false)`
+    // still let nothing through — a real symlink and a synthetic surrogate were both refused *here*.
+    //
+    // **The mechanism is inferred from that pattern, not read out of the OS**, and std promises
+    // nothing: a future release could narrow `is_symlink` to the two documented tags without breaking
+    // its contract, and this second net would silently disappear. Since the leaf guard's fail-closed
+    // argument leans on it, it is pinned by a test rather than left as a comment —
+    // `cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit`, which turns the inference into a
+    // tripwire. Do not delete this line as redundant with the tag check below: the two are
+    // independent, and only one of them is a path question.
+    //
+    // **The two `remove_file(dst)` cleanups below are the only PATH writes left in this function, and
+    // that is worth naming** (CPE-1896 PR #1043, N3), since the whole thesis of the CPE-1896 caller is
+    // that the destination is addressed by handle and never by path. They are bounded and deliberate:
+    // they run only on `created`, i.e. a name **this call** claimed with an exclusive create moments
+    // ago and is now abandoning, so the worst a racing swap achieves is that the cleanup unlinks
+    // something else — it cannot make this function *write* anywhere, and the entry is refused either
+    // way. Doing it properly needs a handle-relative unlink (`FileDispositionInfo` on Windows,
+    // `unlinkat` on the parent fd on Unix), which means threading the parent handle out of
+    // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
+    if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        drop(w);
+        if created {
+            let _ = std::fs::remove_file(dst);
+        }
+        return Err(format!(
+            "{}: this name is a link, and {} never writes through one — a link's target can be \
+             re-pointed after any check. Nothing was written for this entry",
+            dst.display(),
+            wording.verb
+        ));
     }
 
     // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
@@ -2364,6 +2544,94 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
         opts.mode(mode);
     }
     opts.open(path)
+}
+
+/// Overwrite the file at `target` with `bytes`, refusing to follow a link at the final component
+/// (CPE-1891) — the CONFIRMED counterpart to [`create_exclusive`]: where that function only ever
+/// claims a FREE name, this is for a caller (currently only the macro engine's Convert step) that has
+/// already established — via its own preflight, [`create_slot_link_refusal`] — that `target` is a
+/// plain, already-occupied name, and the user has explicitly confirmed overwriting it.
+///
+/// Still refuses outright if `target` turns out at open time to be a link: the confirm authorises
+/// overwriting the user's OWN file, never writing through a link to a path the user never named
+/// (CPE-1734's absolute rule, which this ticket generalises to the whole macro engine's confirm gate,
+/// not just Convert).
+///
+/// Reuses [`crate::batch_media::open_no_follow`]'s exact `O_NOFOLLOW`/`FILE_FLAG_OPEN_REPARSE_POINT`
+/// flags rather than a second hand-rolled `OpenOptions` — that function's own doc explains why a
+/// second copy of those constants is exactly the thing to avoid — so there remains exactly one
+/// definition of "never follow a link at the final component" in this crate. The post-open
+/// `symlink_metadata` re-check mirrors [`copy_file_onto_no_follow`]'s belt-and-braces: a wrong or
+/// ignored no-follow flag on some platform must not be the only thing standing between a link and a
+/// write.
+///
+/// **The hard-link hole (CPE-1891 PR #1044 review round 2), closed the same way
+/// [`copy_file_onto_no_follow_with_wording`] closes it.** The `symlink_metadata` re-check above answers
+/// a PATH question and this function is the "claiming/writing" sibling of that one — CPE-1896's whole
+/// point was that a path re-check is never the last word once a handle is open, because a hard link is
+/// not a reparse point at all: `symlink_metadata` reports it as an utterly ordinary file, so the
+/// no-follow open above succeeds, the path check above passes, and without this the write would land at
+/// EVERY name the object has — including one outside the macro's scope root, which `within_root` cannot
+/// see because a hard link resolves to itself. Demonstrated on this ticket: a hard link from inside the
+/// macro root to a name outside it made a confirmed Convert write the new bytes at the outside name too,
+/// with `overwrite_confirmed_no_follow` reporting `Ok`. [`crate::batch_media::handle_facts`] reads the
+/// open handle's own identity (`GetFileInformationByHandle` on Windows / `fstat` on Unix) — a question a
+/// path swap cannot defeat — and refuses `is_reparse_point` (a junction that `is_symlink` may not tag as
+/// a link, per that function's own doc) and `links > 1` (a hard link), exactly as
+/// [`copy_file_onto_no_follow_with_wording`] does for its callers. `None` only on a platform whose
+/// identity model `batch_media` does not know, where the path check above is the whole defence, same as
+/// every other caller of `handle_facts`.
+pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let (mut file, created) = crate::batch_media::open_no_follow(target)
+        .map_err(|e| format!("{}: could not open for writing: {e}", target.display()))?;
+    if std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        drop(file);
+        if created {
+            let _ = std::fs::remove_file(target);
+        }
+        return Err(format!(
+            "{}: is a link, and writing to a link's name writes THROUGH it — refusing even though \
+             overwrite was confirmed, because a confirm authorises overwriting a plain file, never \
+             writing through a link",
+            target.display()
+        ));
+    }
+    if let Some(facts) = crate::batch_media::handle_facts(&file) {
+        let why = if facts.is_reparse_point {
+            Some(
+                "is a reparse point (a link, junction or stand-in for another name), and writing to it \
+                 writes THROUGH it"
+                    .to_string(),
+            )
+        } else if facts.is_dir {
+            Some("is a directory, so there is nothing here a file's bytes could replace".to_string())
+        } else if facts.links > 1 {
+            Some(format!(
+                "has {} names (it is hard-linked), and writing here would change the content at every \
+                 one of them — including any that live outside the macro's scope root, which no path \
+                 check can see because a hard link resolves to itself",
+                facts.links
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            drop(file);
+            if created {
+                let _ = std::fs::remove_file(target);
+            }
+            return Err(format!(
+                "{}: {why} — refusing even though overwrite was confirmed, because a confirm authorises \
+                 overwriting a plain file, never writing through a link or a name that resolves to more \
+                 than one entry",
+                target.display()
+            ));
+        }
+    }
+    file.set_len(0).map_err(|e| format!("{}: could not truncate: {e}", target.display()))?;
+    file.write_all(bytes).map_err(|e| format!("{}: could not write: {e}", target.display()))?;
+    Ok(())
 }
 
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -4522,6 +4790,97 @@ pub fn make_dir_link(target: &Path, link: &Path) -> bool {
     require_staged("make_dir_link", true, make_dir_link_inner(target, link))
 }
 
+/// Attach a **non-Microsoft GUID reparse point** to an existing file or directory — a reparse point
+/// that is deliberately **not** a name surrogate (CPE-1896 round 3).
+///
+/// This exists to disprove a comment. `open_beneath::sys::name_surrogate_at` used to say a
+/// non-surrogate reparse point "needs OneDrive, dedup or ProjFS to create, none of which a unit test
+/// can stage on a CI runner", so the OneDrive-placeholder motivation for the surrogate-bit check rested
+/// on the documented meaning of a bit rather than on a measurement. PR #1043's Security Auditor showed
+/// otherwise: `FSCTL_SET_REPARSE_POINT` with a `REPARSE_GUID_DATA_BUFFER` and a tag whose top bit is
+/// clear (non-Microsoft) needs **no privilege, no filter driver and no OneDrive**.
+///
+/// `tag`'s bits are load-bearing and the caller picks them deliberately:
+/// - bit 31 (`0x8000_0000`) **clear** = non-Microsoft, which is what makes the GUID form legal;
+/// - bit 29 (`0x2000_0000`) = `IO_REPARSE_TAG_NAME_SURROGATE`, the bit under test;
+/// - bit 28 (`0x1000_0000`) = "may be set on a directory" — **required** for a directory, and NT
+///   refuses the descent without it regardless of what any guard decides.
+///
+/// **One combination was observed not to stage, cause undetermined:** surrogate + directory bits
+/// together (`0x3000_1896`) returned `false`, while the other three combinations of those two bits
+/// staged fine. Recorded as what was seen, not as a rule — nobody established *why* Windows refused
+/// it — so a future test should not be written expecting that combination to work, nor expecting the
+/// refusal to be guaranteed.
+///
+/// Windows-only: reparse points do not exist elsewhere, and every caller is `#[cfg(windows)]`.
+/// Returns whether the attribute really landed, so a `false` is a skip a test must announce rather
+/// than an assertion it can quietly drop. `supported_here = false`: an over-strict antivirus filter or
+/// a non-NTFS scratch volume can legitimately refuse this, unlike a junction.
+#[cfg(windows)]
+#[track_caller]
+pub fn make_guid_reparse_point(path: &Path, tag: u32, is_dir: bool) -> bool {
+    require_staged("make_guid_reparse_point", false, guid_reparse_inner(path, tag, is_dir))
+}
+
+#[cfg(windows)]
+fn guid_reparse_inner(path: &Path, tag: u32, is_dir: bool) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    /// `FSCTL_SET_REPARSE_POINT`.
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // `REPARSE_GUID_DATA_BUFFER`: tag (4) + data length (2) + reserved (2) + GUID (16) = 24-byte
+    // header, then the payload. Built by hand rather than through a binding, because the `windows`
+    // crate models it as a variable-length struct that is awkward to construct and this is 24 bytes.
+    let payload: [u8; 8] = *b"CPE-1896";
+    let mut buf = Vec::with_capacity(24 + payload.len());
+    buf.extend_from_slice(&tag.to_le_bytes());
+    buf.extend_from_slice(&u16::try_from(payload.len()).unwrap_or(0).to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    // A stable, arbitrary GUID identifying "this test planted it". Any non-null GUID is legal for a
+    // non-Microsoft tag; a null one is rejected.
+    buf.extend_from_slice(&[
+        0x2f, 0x1e, 0x96, 0x18, 0x44, 0x3c, 0x4b, 0x7a, 0x9d, 0x11, 0x0c, 0x5e, 0x7a, 0x63, 0x18, 0x96,
+    ]);
+    buf.extend_from_slice(&payload);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    if is_dir {
+        // A directory handle needs backup semantics, and `write(true)` alone cannot open one.
+        opts.read(true).write(false).custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        opts.access_mode(0x0002 | 0x0100 | 0x0080 | 0x0010_0000); // WRITE_DATA|WRITE_ATTRS|READ_ATTRS|SYNCHRONIZE
+    }
+    let Ok(f) = opts.open(path) else { return false };
+
+    let Ok(len) = u32::try_from(buf.len()) else { return false };
+    // SAFETY: `f` is a live `File` whose handle is only borrowed; `buf` outlives the call and `len` is
+    // its real length. `FSCTL_SET_REPARSE_POINT` takes no output buffer.
+    let ok = unsafe {
+        DeviceIoControl(
+            HANDLE(f.as_raw_handle() as isize),
+            FSCTL_SET_REPARSE_POINT,
+            Some(buf.as_ptr().cast()),
+            len,
+            None,
+            0,
+            None,
+            None,
+        )
+    }
+    .is_ok();
+    drop(f);
+    // Confirm the attribute really landed rather than trusting the ioctl's verdict.
+    ok && std::fs::symlink_metadata(path)
+        .map(|m| std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0)
+        .unwrap_or(false)
+}
+
 /// Put a **live FILE link** at `link` pointing at the existing file `target` (CPE-1765) — the exact slot
 /// the PR #924 Security Auditor planted to send a copy's bytes out of the destination folder.
 ///
@@ -5919,6 +6278,159 @@ mod tests {
             );
             assert!(e.contains("is a link"), "the refusal must say what is in the way: {e}");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1891: the macro engine's confirmed-overwrite escape hatch --------------------------
+    // `rename_into_confirmed_slot` / `overwrite_confirmed_no_follow` are the two primitives behind a
+    // saved macro's Rename/Move/Convert step proceeding onto an occupied name once the user has
+    // explicitly confirmed it — and CPE-1734's absolute rule (a confirm may overwrite a plain file,
+    // never write through a link) must survive the new bypass unchanged. Every test below asserts on
+    // the FILESYSTEM, not just the `Result`, for the same reason the CPE-1734 tests do.
+
+    #[test]
+    fn rename_into_confirmed_slot_overwrites_a_plain_occupied_target() {
+        let d = scratch("confirmed-rename-plain");
+        let src = d.join("a.txt");
+        std::fs::write(&src, b"new bytes").unwrap();
+        let target = d.join("b.txt");
+        std::fs::write(&target, b"old bytes, about to be replaced").unwrap();
+
+        rename_into_confirmed_slot(&src, &target).expect("a confirmed overwrite of a plain file must succeed");
+
+        assert!(!src.exists(), "the source name is consumed by the rename");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new bytes");
+    }
+
+    #[test]
+    fn rename_into_confirmed_slot_still_refuses_a_dangling_link() {
+        // CPE-1734's rule, generalised: a confirm authorises overwriting the user's OWN file, never a
+        // link. Runs on every runner — `make_dangling_link` falls back to a privilege-free junction.
+        let d = scratch("confirmed-rename-link");
+        let src = d.join("a.txt");
+        std::fs::write(&src, b"new bytes").unwrap();
+        let link = d.join("dangling.txt");
+        if !make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the dangling-link leg of rename_into_confirmed_slot: this machine \
+                 could not create a link at {}. NOTHING in this test covered the link route on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = rename_into_confirmed_slot(&src, &link)
+            .expect_err("a link must be refused even with a confirmed overwrite");
+
+        assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        assert!(src.exists(), "the source must survive the refusal — nothing was renamed");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link must survive the refusal, never destroyed by a confirmed overwrite"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn overwrite_confirmed_no_follow_overwrites_a_plain_occupied_target() {
+        let d = scratch("confirmed-write-plain");
+        let target = d.join("photo.jpg");
+        std::fs::write(&target, b"old bytes, about to be replaced").unwrap();
+
+        overwrite_confirmed_no_follow(&target, b"NEW CONVERTED BYTES")
+            .expect("a confirmed overwrite of a plain file must succeed");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW CONVERTED BYTES");
+    }
+
+    /// **Round 5 correction:** this test originally asserted `e.contains("is a link")`
+    /// unconditionally, which reddened `macos-latest` while `ubuntu-latest`/`windows-latest` stayed
+    /// green — the exact class of bug [`overwrite_confirmed_no_follow`]'s own doc comment already
+    /// names and already has a measured fix pattern for ("The `ELOOP` half of that is measured, not
+    /// reasoned"): on Windows the no-follow open succeeds on the reparse point and the post-open
+    /// `symlink_metadata` check is what refuses, wording it "is a link"; on Unix `O_NOFOLLOW` makes
+    /// the open ITSELF fail (`ELOOP`) before either post-open check is ever reached, so the wording
+    /// there is `open_no_follow`'s own `"could not open for writing: ..."` wrapper instead. The
+    /// refusal is real on every platform — nothing is ever written through the link, proven below on
+    /// the filesystem, not just the `Result` — only the SENTENCE is platform-specific, so only the
+    /// Windows leg pins it, per that doc comment's own prescription: "assert the class ... freely;
+    /// gate any assertion on the sentence itself behind `cfg!(windows)`."
+    #[test]
+    fn overwrite_confirmed_no_follow_never_writes_through_a_dangling_link() {
+        let d = scratch("confirmed-write-link");
+        let link = d.join("dangling.jpg");
+        if !make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the dangling-link leg of overwrite_confirmed_no_follow: this \
+                 machine could not create a link at {}. NOTHING in this test covered the link route on \
+                 this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let target = dangling_link_target(&link);
+
+        let e = overwrite_confirmed_no_follow(&link, b"NEW CONVERTED BYTES")
+            .expect_err("a link must be refused even with a confirmed overwrite");
+
+        if cfg!(windows) {
+            assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        }
+        assert!(
+            !target.exists(),
+            "the link's target must not have been conjured by a write-through (result was refused: {e})"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link must survive the refusal"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **PR #1044 review round 2, Blocker 1.** `symlink_metadata` alone cannot see this: a hard link is
+    /// not a reparse point, so it reads as an utterly ordinary file, and the pre-fix code confirmed
+    /// this writes through it — corrupting the OTHER name's content, including a name outside the
+    /// macro's scope root, which `within_root` cannot see either (a hard link resolves to itself).
+    /// Mirrors `batch_execute::tests::link_as_final_component_hard_link_alias_is_refused_even_with_confirmed_overwrite`,
+    /// the sibling engine's version of the identical proof.
+    #[test]
+    fn overwrite_confirmed_no_follow_refuses_a_hard_linked_destination() {
+        let d = scratch("confirmed-write-hardlink");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must not be touched".to_vec();
+        std::fs::write(&victim, &victim_original).unwrap();
+
+        // `link.jpg`'s NAME is the one the macro is about to write to; its DATA is the same file as
+        // `victim`, which lives OUTSIDE the scope this test is standing in for.
+        let link = d.join("link.jpg");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the hard-link leg of overwrite_confirmed_no_follow: this machine \
+                 could not create a hard link at {}. NOTHING in this test covered the hard-link route \
+                 on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = overwrite_confirmed_no_follow(&link, b"CONVERTED BYTES")
+            .expect_err("a hard-linked destination must be refused even with a confirmed overwrite");
+
+        assert!(e.contains("hard-linked") || e.contains("names"), "got: {e}");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            victim_original,
+            "the hard-linked victim's ACTUAL bytes on disk must be untouched — the whole point of this \
+             test is that a Result alone does not prove that (result was: {e})"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -8425,6 +8937,172 @@ mod tests {
     /// **The fixture's liveness is proved before anything is asserted about the code under test**, and
     /// proved the only way a hard link can be: content is written through ONE name and read back
     /// through the OTHER. A test whose fixture is two unrelated files certifies nothing at all.
+    /// CPE-1896 round 3 (F5): the **final component**'s reparse guard must refuse a name surrogate and
+    /// allow everything else — the same split the directory walk got, at the place the bytes land.
+    ///
+    /// The user-visible case is not hypothetical. A **dehydrated OneDrive Files-On-Demand file** carries
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`, OneDrive dehydrates exactly the files it has already synced, and
+    /// those are exactly what an incremental backup's `update` list writes onto. While this guard tested
+    /// the bare attribute bit, backing up into a OneDrive folder refused every one of them with "this
+    /// name is a reparse point … never writes through one" — so the OneDrive motivation written on
+    /// `open_beneath` was only half-delivered by fixing the directory walk.
+    ///
+    /// Both directions in one test, on the same volume in the same run, because the claim is that they
+    /// **diverge**: a non-surrogate tag is written through, a symlink is not.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1896_a_non_surrogate_reparse_point_at_the_leaf_is_written_not_refused() {
+        /// Non-Microsoft (bit 31 clear), NOT a surrogate (bit 29 clear) — a file-shaped placeholder.
+        const NON_SURROGATE_FILE_TAG: u32 = 0x0000_1234;
+
+        let d = scratch("cpe1896-leaf-surrogate");
+        let src = d.path().join("src.txt");
+        let dst = d.path().join("placeholder.txt");
+        std::fs::write(&src, b"BACKUP SOURCE").unwrap();
+        std::fs::write(&dst, b"stale").unwrap();
+
+        if !make_guid_reparse_point(&dst, NON_SURROGATE_FILE_TAG, false) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1896_a_non_surrogate_reparse_point_at_the_leaf_is_written_not_refused: \
+                 could not plant a GUID reparse point on this volume. NOTHING on this run covered the \
+                 dehydrated-OneDrive-file case at the final component."
+            );
+            return;
+        }
+        // Liveness: without the attribute this is just a test that an ordinary file can be overwritten.
+        assert!(
+            std::os::windows::fs::MetadataExt::file_attributes(
+                &std::fs::symlink_metadata(&dst).unwrap()
+            ) & 0x400
+                != 0,
+            "fixture is inert: no FILE_ATTRIBUTE_REPARSE_POINT on the destination"
+        );
+
+        let outcome = copy_file_onto_no_follow(&src, &dst);
+        assert!(
+            outcome.is_ok(),
+            "a reparse point that does not stand in for another name must be written through — \
+             refusing it is what turned every dehydrated OneDrive file into a failed backup entry: \
+             {outcome:?}"
+        );
+        // Read back through a **no-follow handle**, which is how the bytes went in — not by ordinary
+        // path. A plain `fs::read` here fails with `ERROR_CANT_ACCESS_FILE (1920)`, and that is a
+        // property of the *fixture*, not of the code under test: a reparse tag with no filter driver
+        // registered has nothing to service an ordinary open, whereas a real OneDrive placeholder has
+        // the cloud filter in the path and reads normally. Measured, and recorded rather than worked
+        // around, because it is the honest limit of what a synthetic tag can prove: this asserts the
+        // bytes reached the object, not that a driverless placeholder is generally usable.
+        let mut back = String::new();
+        std::io::Read::read_to_string(
+            &mut crate::batch_media::open_existing_no_follow_read(&dst).unwrap(),
+            &mut back,
+        )
+        .unwrap();
+        assert_eq!(
+            back, "BACKUP SOURCE",
+            "the bytes must actually land in the object, not merely be reported as written"
+        );
+
+        // The surrogate half, same run, differing from the fixture above in **exactly one bit**:
+        // `0x2000_1234` is the same non-Microsoft, file-shaped tag as `0x0000_1234` with
+        // `IO_REPARSE_TAG_NAME_SURROGATE` set. Nothing else about the two destinations differs, which
+        // is the only arrangement that lets this test claim the *tag* is what decides.
+        //
+        // **It used to be a symlink, and that version proved nothing** (PR #1043 round 4, found by
+        // sabotage rather than by reading). At the time, a symlink at the final component was refused
+        // by the unrelated `symlink_metadata(dst).is_symlink()` path check, which then ran *ahead* of
+        // the handle checks — it is now the second net, below them — so the two halves
+        // went on "diverging" even with `reparse_name_surrogate` hard-wired to `false` — precisely the
+        // condition this test's own doc says it exists to exclude. Measured: with the surrogate refusal
+        // disabled outright (`if false && facts.is_reparse_point`) the old test passed and the whole
+        // 2404-test lib suite stayed green, so the leaf refusal had **zero** coverage anywhere in the
+        // crate. The old leg was also wrapped in `if make_file_link(...)`, which is
+        // `require_staged(..., supported_here = false)` on Windows and therefore skipped **silently**
+        // on a runner without `SeCreateSymbolicLinkPrivilege` — no `skip_notice!`, unlike the
+        // non-surrogate half above it. The GUID fixture needs no privilege, so this half cannot vanish.
+        // (The symlink-at-the-leaf case itself is covered by
+        // `backup::cpe_1879_a_symlinked_backup_destination_is_never_written_through`.)
+        const SURROGATE_FILE_TAG: u32 = 0x2000_1234;
+        let surrogate = d.path().join("surrogate.txt");
+        std::fs::write(&surrogate, b"UNTOUCHED").unwrap();
+        assert!(
+            make_guid_reparse_point(&surrogate, SURROGATE_FILE_TAG, false),
+            "the surrogate fixture must plant: the non-surrogate one above already planted on this \
+             same volume moments ago, so a failure here is a real defect, not an unsupported filesystem"
+        );
+        let refused = copy_file_onto_no_follow(&src, &surrogate);
+        assert!(
+            refused.is_err(),
+            "a reparse point with the NAME SURROGATE bit set must be refused. It differs from the \
+             destination written through above by exactly that one bit, so if this passes, the tag \
+             check is doing nothing: {refused:?}"
+        );
+        let why = refused.unwrap_err();
+        assert!(
+            why.contains("stands in for another name"),
+            "and the SURROGATE refusal must be the one that fired — not the symlink path check and \
+             not the directory check, either of which would make this assertion pass for free: {why}"
+        );
+        let mut untouched = String::new();
+        std::io::Read::read_to_string(
+            &mut crate::batch_media::open_existing_no_follow_read(&surrogate).unwrap(),
+            &mut untouched,
+        )
+        .unwrap();
+        assert_eq!(untouched, "UNTOUCHED", "HARM: the refused copy wrote its bytes anyway");
+    }
+
+    /// Pin an **inferred** property of `std` that this module's leaf guard quietly leans on: that
+    /// `FileType::is_symlink` on Windows tracks the reparse tag's **name-surrogate bit** rather than
+    /// the two well-known tags.
+    ///
+    /// Why it earns a test rather than a comment. The `symlink_metadata(dst).is_symlink()` refusal in
+    /// [`copy_file_onto_destination_handle`] is what still caught a surrogate when CPE-1896's Security
+    /// Auditor forced `reparse_name_surrogate` to a lying `Some(false)` — i.e. it is a genuine
+    /// independent second net, not decoration. But that behaviour was established from **three data
+    /// points on one Windows build**, and std promises nothing about it: narrowing `is_symlink` to
+    /// `IO_REPARSE_TAG_SYMLINK`/`MOUNT_POINT` would break no contract and would silently remove the
+    /// net. A toolchain bump could do it between one CI run and the next, with no other test noticing.
+    ///
+    /// So this asserts the property directly, on synthetic tags that differ **only** in the surrogate
+    /// bit. If a future `std` changes, this reds and names what was lost — which is the whole point of
+    /// pinning an inference instead of writing it down.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit() {
+        let d = scratch("cpe1896-is-symlink-pin");
+        // Non-Microsoft tags differing only in the two bits that matter here. `0x1000_1896` is the
+        // one that carries the OneDrive argument: bit 28 set (directory-capable), bit 29 clear
+        // (not a surrogate) is the exact shape of `IO_REPARSE_TAG_CLOUD` (`0x9000001A`), so it is the
+        // tag whose classification the whole Files-On-Demand motivation rests on. It was the unpinned
+        // one while this loop covered only the surrogate/non-surrogate pair.
+        for (tag, expected) in
+            [(0x2000_1896_u32, true), (0x0000_1896_u32, false), (0x1000_1896_u32, false)]
+        {
+            let f = d.path().join(format!("t{tag:08x}.bin"));
+            std::fs::write(&f, b"x").unwrap();
+            if !make_guid_reparse_point(&f, tag, false) {
+                crate::skip_notice!(
+                    "SKIPPING cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit: could not plant \
+                     tag {tag:#010x} on this volume. NOTHING on this run pinned std's is_symlink \
+                     behaviour, which the leaf guard's second net depends on."
+                );
+                return;
+            }
+            let got = std::fs::symlink_metadata(&f).unwrap().file_type().is_symlink();
+            assert_eq!(
+                got, expected,
+                "std's FileType::is_symlink no longer tracks the name-surrogate bit for tag \
+                 {tag:#010x} (expected {expected}, got {got}). That bit is what makes \
+                 `copy_file_onto_destination_handle`'s `symlink_metadata` refusal an INDEPENDENT \
+                 second net behind `reparse_name_surrogate` — the thing that still refused a surrogate \
+                 when that helper was forced to lie. If std has narrowed this to the two well-known \
+                 tags, the leaf now has one net where it had two: re-read that guard before changing \
+                 this expectation."
+            );
+        }
+    }
+
     #[test]
     fn cpe_1857_a_hard_linked_destination_is_never_written_through() {
         let d = scratch("cpe1857-hardlink-dest");

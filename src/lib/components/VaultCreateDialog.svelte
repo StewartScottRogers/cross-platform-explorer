@@ -333,7 +333,7 @@
   }
   .hd-icon { color: var(--text); display: grid; place-items: center; }
   .intro { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; margin-bottom: 14px; }
-  .intro code { font-family: var(--mono, monospace); font-size: 12px; }
+  .intro code { font-family: var(--mono); font-size: 12px; }
   .field-label {
     display: block;
     font-size: 12px;

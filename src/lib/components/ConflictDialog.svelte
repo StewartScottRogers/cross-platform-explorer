@@ -215,13 +215,13 @@
     background: var(--surface-alt); border-bottom: 1px solid var(--border); color: var(--text-dim); }
   .col-h.ours { color: #3b83c0; }
   .col-h.theirs { color: #7a5cc0; }
-  .col pre { flex: 1; overflow: auto; margin: 0; padding: 6px 8px; font-family: var(--mono, monospace);
+  .col pre { flex: 1; overflow: auto; margin: 0; padding: 6px 8px; font-family: var(--mono);
     font-size: 11px; white-space: pre; }
 
   .res-head { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
   .res-head em { font-style: normal; text-transform: none; letter-spacing: 0; opacity: .8; }
   .res-head code { font-size: 10px; }
-  .res { flex: 1; min-height: 120px; resize: none; font-family: var(--mono, monospace); font-size: 12px;
+  .res { flex: 1; min-height: 120px; resize: none; font-family: var(--mono); font-size: 12px;
     padding: 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-alt); color: inherit; }
   .res-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
   .warn { color: var(--warn); font-size: 11px; margin: 0 0 8px; }

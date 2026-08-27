@@ -247,7 +247,7 @@
   .log {
     margin-bottom: 14px; max-height: 140px; overflow: auto;
     background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px; font-size: 11px; font-family: var(--mono, monospace);
+    padding: 8px; font-size: 11px; font-family: var(--mono);
   }
   .log.failed { border-color: var(--warn); }
   .log-line { white-space: pre-wrap; word-break: break-word; }

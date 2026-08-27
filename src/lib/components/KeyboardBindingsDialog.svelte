@@ -540,7 +540,7 @@
     width: 100%;
     height: 100px;
     resize: vertical;
-    font: 11px/1.4 var(--mono, monospace);
+    font: 11px/1.4 var(--mono);
     color: var(--text);
     background: var(--surface-alt);
     border: 1px solid var(--border);

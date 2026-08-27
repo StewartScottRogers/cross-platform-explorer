@@ -158,7 +158,7 @@
   .cp-recur { display: flex; align-items: center; gap: 6px; margin: 10px 0 0; color: var(--text-dim); font-size: 11.5px; }
   .cp-body {
     margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--surface); font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+    background: var(--surface); font-family: var(--mono); font-size: 11.5px;
     white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto;
   }
 </style>

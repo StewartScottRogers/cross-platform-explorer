@@ -75,6 +75,33 @@ pub struct ResolvedRun {
     pub inverses: Vec<InverseOp>,
 }
 
+/// One resolved rename/move/convert destination that is currently occupied on the real filesystem —
+/// found by a preflight scan run **before** any op in a [`ResolvedRun`] is applied (CPE-1891). This
+/// module stays pure and touches no filesystem itself; the scan that produces these lives in the apply
+/// layer (`src-tauri`'s `macro_preflight_collisions`, alongside `macro_apply_run`) for the same reason
+/// that layer already owns every other real-filesystem decision this module's own doc comment
+/// describes.
+///
+/// `confirmable` is the whole point of this ticket: **true** for an ordinary occupied name (a plain
+/// pre-existing file) — a `macro_run` call with `confirmed_overwrite: true` may overwrite it. **false**
+/// for a link (live or dangling) or a slot that could not be read at all — CPE-1734's write-through
+/// refusal stays absolute no matter what the user confirms; a link collision is still reported here so
+/// the user can SEE it (the same visibility CPE-1869 established for the revert hold-back list), it
+/// just has no confirm that unblocks it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct MacroCollision {
+    /// Index into `ResolvedRun::ops`/`inverses`, so the caller can correlate a collision back to the
+    /// exact op it belongs to.
+    pub op_index: usize,
+    pub from: String,
+    pub to: String,
+    /// `"rename"` / `"move"` / `"convert"` — the only kinds a collision can occur at.
+    pub kind: String,
+    pub confirmable: bool,
+    pub reason: String,
+}
+
 /// Resolve `m` over `inputs` into a collision-safe [`ResolvedRun`], rejecting (with **every**
 /// violation reported, not just the first) any resolved rename/move/convert destination that would
 /// land outside `root` — see [`within_root`]. Also rejects a malformed macro (see

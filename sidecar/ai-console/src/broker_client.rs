@@ -210,6 +210,22 @@ pub struct KeyVerdict {
 pub struct CatalogFetch {
     pub index_ok: bool,
     pub applied: usize,
+    /// Entries the host fetched and verified but rejected because they weren't newer than what's
+    /// installed (anti-rollback) — a **stale published catalog**, distinct from "nothing to apply
+    /// because you're current" (CPE-1911).
+    pub stale_rejected: usize,
+    /// Entries the index listed but that failed their OWN integrity check — bad/missing manifest
+    /// signature or a content-hash mismatch — even though the index itself verified fine. A
+    /// corrupt/mis-signed publish, distinct from both "up to date" and "stale" (CPE-1911 review
+    /// round 2: this state fell through to "up to date" pre-fix, same lie via a different cause).
+    pub integrity_rejected: usize,
+    /// The host never attempted the fetch because it's offline (CPE-1911: distinct from a fetch
+    /// that was attempted and failed).
+    pub offline: bool,
+    /// The real reason the fetch/apply didn't produce a usable catalog (e.g. a 404 from a dead
+    /// publishing pipeline) — `None` when nothing went wrong. Surfaced to the user instead of being
+    /// silently thrown away (CPE-1911).
+    pub error: Option<String>,
 }
 
 /// One prior published catalog version offered by the rollback picker (CPE-383).
@@ -302,6 +318,10 @@ impl HostDialogs for BrokerDialogs {
         Ok(CatalogFetch {
             index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+            stale_rejected: v.get("staleRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            integrity_rejected: v.get("integrityRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            error: v.get("error").and_then(Value::as_str).map(str::to_string),
         })
     }
 
@@ -355,6 +375,10 @@ impl HostDialogs for BrokerDialogs {
         Ok(CatalogFetch {
             index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+            stale_rejected: v.get("staleRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            integrity_rejected: v.get("integrityRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            error: v.get("error").and_then(Value::as_str).map(str::to_string),
         })
     }
 
@@ -537,5 +561,65 @@ mod tests {
         assert_eq!(m.get("k").unwrap().as_deref(), Some("v"));
         m.delete("k").unwrap();
         assert_eq!(m.get("k").unwrap(), None);
+    }
+
+    /// Pins the `host.fetch_catalog` JSON → [`CatalogFetch`] parse (CPE-1911 review round 2): every
+    /// field the host can send — `staleRejected`, `integrityRejected`, `offline`, `error` — must
+    /// actually land in the struct, not just `indexOk`/`applied`. This is the leg of the pipe the
+    /// jsdom launcher tests can never reach (they mock `fetch` directly and never touch this parser).
+    #[test]
+    fn fetch_catalog_parses_the_full_rejection_and_error_breakdown() {
+        let (writer, sink) = buffer();
+        let client = Arc::new(BrokerClient::new(writer));
+        let dialogs = BrokerDialogs::new(client.clone());
+        let c = client.clone();
+        let h = std::thread::spawn(move || BrokerDialogs::new(c).fetch_catalog(&[]));
+
+        let id = wait_for_request(&client, &sink);
+        client.deliver(
+            id,
+            Response {
+                result: Ok(json!({
+                    "indexOk": true,
+                    "applied": ["claude", "aider"],
+                    "rejected": 5,
+                    "staleRejected": 2,
+                    "integrityRejected": 3,
+                    "offline": false,
+                    "error": null,
+                })),
+            },
+        );
+        let res = h.join().unwrap().unwrap();
+        assert!(res.index_ok);
+        assert_eq!(res.applied, 2);
+        assert_eq!(res.stale_rejected, 2);
+        assert_eq!(res.integrity_rejected, 3);
+        assert!(!res.offline);
+        assert_eq!(res.error, None);
+        let _ = dialogs; // constructed to prove the type wires up, actual call runs on the thread
+
+        // A second shape: never fetched (offline), with the host's real error text carried too.
+        let (writer2, sink2) = buffer();
+        let client2 = Arc::new(BrokerClient::new(writer2));
+        let c2 = client2.clone();
+        let h2 = std::thread::spawn(move || BrokerDialogs::new(c2).fetch_catalog(&[]));
+        let id2 = wait_for_request(&client2, &sink2);
+        client2.deliver(
+            id2,
+            Response {
+                result: Ok(json!({
+                    "indexOk": false,
+                    "applied": [],
+                    "rejected": 0,
+                    "offline": true,
+                    "error": "fetch failed: status code 404",
+                })),
+            },
+        );
+        let res2 = h2.join().unwrap().unwrap();
+        assert!(!res2.index_ok);
+        assert!(res2.offline);
+        assert_eq!(res2.error.as_deref(), Some("fetch failed: status code 404"));
     }
 }

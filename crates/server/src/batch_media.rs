@@ -1300,6 +1300,16 @@ fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
 /// Excluding directories costs nothing this exists for: a directory is not something a file's bytes can
 /// be written into, and every caller refuses one on its own terms already. This function's job is only
 /// the *hard link* question, which is a question about files.
+///
+/// **CPE-1881: no longer called from production code**, kept anyway rather than deleted. Its one
+/// production caller, `revert_engine::apply_write`'s refusal classifier, switched to calling
+/// [`name_links`] directly so it can also read the link COUNT (to report a grouped hard-link refusal
+/// without a second filesystem probe) — the same answer this function computes, just not thrown away.
+/// Retiring this function outright would also orphan the table immediately above, which several other
+/// modules' doc comments cross-reference by name; kept `#[allow(dead_code)]` with its own test still
+/// pinning the three-way answer (`One`/`Many`/`NoFileHere` via `name_links`, exercised through this
+/// wrapper) rather than moving or duplicating that documentation.
+#[allow(dead_code)]
 pub(crate) fn name_is_multiply_linked(path: &std::path::Path) -> bool {
     matches!(name_links(path), NameLinks::Many(_))
 }
@@ -2074,6 +2084,89 @@ pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
 #[cfg(not(any(windows, unix)))]
 pub(crate) fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
     None // fail closed on a platform whose identity model this module does not know
+}
+
+/// `IO_REPARSE_TAG_NAME_SURROGATE` — the tag bit Microsoft sets on exactly those reparse points whose
+/// name **stands in for another name**: `IO_REPARSE_TAG_SYMLINK` (`0xA000000C`) and
+/// `IO_REPARSE_TAG_MOUNT_POINT` (`0xA0000003`, junctions) among them. It is *not* set on tags that
+/// merely decorate an object which is still itself — OneDrive Files-On-Demand (`0x9000001A`, measured
+/// by CPE-1896's Security Auditor: surrogate bit **clear**, directory bit set), NTFS dedup, WOF/WIM
+/// compression, ProjFS, app-exec links.
+///
+/// One owner for the constant and the rule, because two guards now depend on it and must not drift:
+/// `open_beneath`'s per-component directory walk, and
+/// `fsutil::copy_file_onto_destination_handle`'s final-component guard.
+///
+/// `#[cfg(windows)]` because reparse points only exist there and the only reader is the Windows arm of
+/// [`reparse_name_surrogate`] below. Ungated, it is `dead_code` on Linux and macOS, and CI runs
+/// `-D warnings` — so it reddened **every** job that compiles this crate on those two, while three
+/// rounds of local `cargo clippy` on Windows stayed clean. The lesson is the gate, not the constant:
+/// anything here that only the Windows arm touches needs one.
+#[cfg(windows)]
+pub(crate) const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
+
+/// Does this handle's reparse point make the name **stand in for another name**?
+///
+/// [`HandleFacts::is_reparse_point`] answers the far broader question "does this object carry *any*
+/// reparse tag", which is true of a great deal that is not a link — cloud placeholders, dedup, WOF,
+/// ProjFS. This asks the narrow one, off `FILE_ATTRIBUTE_TAG_INFO`, in a single handle query that
+/// covers both the attribute bit and the tag.
+///
+/// **Returns `Option`, and the `None` is the point.** `None` means *the description could not be read*,
+/// which is a different answer from "not a surrogate" — and the two callers need **opposite** defaults,
+/// so neither default can live in here:
+///
+/// - `fsutil::copy_file_onto_destination_handle` (the final component, where the bytes go) uses
+///   `unwrap_or(true)` — **fails closed**. "I could not tell whether this name stands for another
+///   name" is not a licence to write through it, and there is no later check to catch it.
+/// - `open_beneath::sys::name_surrogate_at` (a directory component of the walk) uses
+///   `unwrap_or(false)` — **fails open**. Containment there does not rest on this check: a genuine
+///   surrogate is caught one component later by NT itself (`ERROR_CANT_RESOLVE_FILENAME`, measured by
+///   neutering the check and re-running the CPE-1889 junction harm test, which still refused). All the
+///   check buys is naming the link one component earlier.
+///
+/// Putting a default in here would silently give one of those two the wrong one.
+///
+/// **Both defaults rest on reading, not on measurement, and in a module this heavily measured that is
+/// worth saying out loud.** The `None` arm is untestable by construction: no fixture can make
+/// `GetFileInformationByHandleEx` fail on a handle that has just been opened successfully, which is the
+/// only state either caller reaches it from. Everything either caller does with a `Some` is pinned by
+/// sabotage-verified tests; the `None` arm has no test and cannot have one, so it is argued rather than
+/// demonstrated. If it ever becomes reachable in the field — a network redirector that opens a handle
+/// and then refuses to describe it — the leaf's refusal is the safe direction and the walk's allow is
+/// backstopped by NT, which is the whole reason the split is where it is.
+#[cfg(windows)]
+pub(crate) fn reparse_name_surrogate(file: &std::fs::File) -> Option<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO,
+    };
+    let size = u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>()).ok()?;
+    // SAFETY: the handle is borrowed from a live `File` that outlives this call; `info` is a
+    // correctly-sized out-parameter matching the information class. Read-only query, nothing closed.
+    unsafe {
+        let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle() as isize),
+            FileAttributeTagInfo,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+        .ok()?;
+        Some(
+            info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                && info.ReparseTag & IO_REPARSE_TAG_NAME_SURROGATE != 0,
+        )
+    }
+}
+
+/// Unix has no reparse points, so [`HandleFacts::is_reparse_point`] is always `false` there and no
+/// caller reaches a decision that depends on this. Defined rather than `cfg`-ed away at every site.
+#[cfg(not(windows))]
+pub(crate) fn reparse_name_surrogate(_file: &std::fs::File) -> Option<bool> {
+    Some(false)
 }
 
 /// Open for writing without following a link at the final component, reporting whether *we* created it.

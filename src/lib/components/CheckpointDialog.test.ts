@@ -470,7 +470,10 @@ describe("CheckpointDialog (CPE-1125)", () => {
       expect(panel.textContent?.trim()).toBe("Reverted — applied 2 changes.");
       expect(screen.queryByTestId("outcome-held-back")).toBeNull();
       expect(screen.queryByTestId("outcome-held-paths")).toBeNull();
-      expect(screen.queryByTestId("outcome-failures")).toBeNull();
+      // CPE-1881 round 4: the single "outcome-failures" box split into two — "outcome-failed" (genuine
+      // failures) and "outcome-refused" (grouped write refusals) — neither should render either.
+      expect(screen.queryByTestId("outcome-failed")).toBeNull();
+      expect(screen.queryByTestId("outcome-refused")).toBeNull();
     });
 
     it("shows a genuine failure separately from a hold-back, in the same result", async () => {

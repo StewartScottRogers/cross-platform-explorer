@@ -1484,3 +1484,55 @@ CPE-1700 (S3 refusal precision + Trojan Source) · CPE-1695 (SigV4 SP/HTAB-only 
 **Capacity note:** two consecutive `API Error 529 Overloaded` kills on an opus worker mid-task. Backed off
 rather than retrying a third time, and preserved its 1,284 uncommitted lines as a WIP commit so nothing
 was lost. Handed to the next run.
+
+---
+
+## 2026-08-26 → 08-27 (CLI, `/sprint`) — IN PROGRESS, notes so far
+
+**Foreman override recorded (per CPE-1835):** CPE-1881 / PR #1046 was allowed a **4th** build→check
+attempt, past the skill's 3-attempt circuit-breaker cap. Reason: the ticket was converging — each
+round's findings were strictly finer than the last and nothing was re-found — and round 4's list
+contained two genuine defects (a count/row mismatch that undercounts its own list on any mixed
+outcome, and a failure/refusal distinction carried by **hue alone at matched lightness** in light
+theme, invisible to protan/deutan vision and to greyscale) rather than polish. The cap exists to stop
+burning agents on a ticket that needs a rethink; that is not this shape.
+
+**Pattern worth carrying: a plausible verification API can return a false clean.** On PR #1045 both
+the author and the reviewer's first pass used `document.elementsFromPoint` to check that an overlay
+was not swallowing clicks, and both got a clean answer. Dispatching an **actual CDP mouse click**
+showed the click landing on the wrong element. Twice on the same question. When the property is "can
+a user actually do this", drive the real input — do not ask the DOM what it thinks is under a point.
+
+**Pattern worth carrying: an assertion that reds when it fails to *observe* a transient state.** The
+CPE-1822 mid-stream gui-smoke case failed on CI not because anything broke — 23 of 26 passed and the
+run produced zero AssertionErrors from the app — but because the app finished streaming 2,500 items
+faster than the poll caught the loading state. A test whose only failure mode is "I was too slow"
+reds forever on fast runners and trains the crew to re-run rather than read.
+
+**Second override recorded (per CPE-1835):** CPE-1896 / PR #1043 was also allowed a **4th**
+build→check attempt. Same reasoning as CPE-1881 — converging, nothing re-found — and round 4's single
+finding was a test half that proves nothing: the Reviewer disabled the leaf surrogate guard entirely
+and the **full 2404-test suite stayed green**, because a symlink at the leaf is refused ~50 lines
+earlier by an unrelated path check. That is the repo's signature defect and the cap must not be the
+reason it ships.
+
+**Pattern worth carrying: a fixture can be structurally unable to test the thing it is cited for.**
+CPE-1896's synthetic reparse point proves the code reads the *tag* rather than the attribute — real,
+and correctly measured. It cannot prove anything about a real OneDrive placeholder, because
+`FILE_FLAG_OPEN_REPARSE_POINT` exists to **bypass the handler that owns the tag**, and the synthetic
+tag has no handler. The one structural difference between fixture and reality is exactly the variable
+being inferred. Honest at the code comment; the user-facing doc had promoted it to fact.
+
+**Pattern worth carrying — the shadowed guard, with a diagnostic tell.** A guard cannot be given test coverage while an earlier guard answers on the same underlying fact; it is then simultaneously *safe* and *unverifiable*, and those are easy to mistake for each other. **The tell: a sabotage that leaves the suite green AND a fault-injection that changes no behaviour, on the same guard.** Separately each reads as evidence of safety; together they mean the guard is unreachable. Found on CPE-1896, where three symptoms presented and only the third looked like a problem at the time. Filed as CPE-1929 with a named lead (`batch_media::open_output_verified`, same shape, unexamined).
+
+**Process lesson (bit twice): while a PR is open, its visual evidence lives on the branch only.** The Foreman landing screenshots on `main` at paths an open PR also carries produces a modify/modify conflict the moment the worker re-captures — and a CONFLICTING PR schedules **zero** CI checks, so it reads as "no runs yet" rather than "blocked". Cost two diagnosis detours on CPE-1883 alone. Do not land a PRs evidence on main until it merges.
+
+**Pattern worth carrying — prove the harness can go red before you trust its green.** CPE-1896's worker built a dependency-free extraction harness to check the Unix/macOS arms from this Windows box. Its first version rewrote `pub(crate)` to `pub` while extracting — and a `pub` item is never `dead_code`, so the harness reported the **known-bad** code clean. It only trusted the harness after sabotaging the source and watching it reproduce the real CI error verbatim. This is the shadowed-guard disease (CPE-1929) one level out, in the verification tooling rather than the code: a check that cannot fail is indistinguishable from a check that passes.
+
+**Pattern worth carrying — enumerate, do not recall.** CPE-1896's round-1 dependency change updated the two `Cargo.lock` files everyone knew about; both reviewers independently verified those two and both were **correct**. Seven others were stale, and CI discovers them **serially**, one per hour-long run. The worker's framing: *"round 1 didn't break the rule, it got the **enumeration** wrong — it updated the two it knew about and never asked how many existed."* A rule followed from memory is followed incompletely. The mechanical form — `git ls-files '*Cargo.lock'` -> grep for the changed package -> `cargo metadata --locked` in each — is complete by construction and takes seconds. Filed as CPE-1932.
+
+**Foreman error worth recording — a red run list is history, not a diagnosis.** I filed CPE-1917 ("plain Release broken 27 days") from a checkpoint note plus `gh run list --workflow=release.yml`, which showed three failures, latest 2026-08-23 14:35. All true. What I never asked was whether a fix had landed **since the last run** — and it had, at 20:27 the same day (CPE-1872, `f97aef8a`). For a **tag-triggered** workflow, "what happened" and "what is true now" diverge the moment a fix merges without a tag, and stay diverged for as long as nobody tags — a month, at that channel's cadence. The worker's suggested pre-flight, two seconds: `git log --oneline -- <the file the failure names>` against the last run's timestamp. I also wrote a *proposed* flag from a PR review round into that ticket as landed fact; it was falsifiable with one `grep`. Both are the same disease this crew spent the night finding in code — a claim stated with more confidence than its evidence — committed by the Foreman, in a ticket.
+
+**Pattern worth carrying — provenance claims in comments are untested by construction.** A comment saying "exactly the way `release.yml` invokes it" / "same as X" / "mirrors Y" cannot be checked, and decays silently **because the surrounding green test reads as vouching for it**. CPE-1872 carried three such claims that were true for exactly one commit before its own round 2 moved the check. Either derive the claim from its source at runtime, or do not make it. Filed as CPE-1933 with a seed grep.
+
+**Foreman miss worth recording — a PR fell out of the rotation for four and a half hours.** PR #1039 (CPE-1908) sat at its round-2 head, CLEAN and MERGEABLE, from ~01:50 to ~06:35 while I chased five other PRs. Its worker had been sent a round-3 list and an addendum; it never pushed and never reported. `ListAgents` showed it "running 4h" — the only signal, and one I only looked at when I had a spare turn. When stopped, its last line was *"The macro compiles cleanly. Now let's run the full test suite"* — so it was genuinely working, just never reporting, which is exactly what the dispatch contract forbids and what the stall-check exists to catch **on a returned report**. There is no equivalent check for an agent that simply never returns. The lesson is a Foreman one: **track PRs, not agents.** A per-tick sweep of `gh pr list` against a known set would have surfaced this in minutes; watching for agent notifications did not, because the absence of a notification is not an event.

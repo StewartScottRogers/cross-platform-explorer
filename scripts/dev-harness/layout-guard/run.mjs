@@ -103,6 +103,29 @@ function formatProblems(r) {
   for (const m of r.textOverflows) lines.push(`    TEXT-OVERFLOW  ${m}`);
   for (const m of r.unpainted) lines.push(`    UNREACHABLE    ${m}`);
   for (const m of r.missing) lines.push(`    MISSING        ${m}`);
+  for (const m of r.boundsViolations ?? []) lines.push(`    BOUNDS         ${m}`);
+  for (const m of r.offScreen ?? []) lines.push(`    OFF-SCREEN     ${m}`);
+  for (const m of r.clickFailures ?? []) lines.push(`    CLICK-MISS     ${m}`);
+  return lines;
+}
+
+// CPE-1883: `rectBoundsInfo`/`pseudoOnScreenInfo`/`clickReachesInfo` are recorded whether their check
+// passed or failed — printed unconditionally (not gated on `problems.length > 0`) so a ticket's measured
+// before/after numbers come straight out of this console output instead of a bespoke one-off script.
+function formatRectInfo(r) {
+  const lines = (r.rectBoundsInfo ?? []).map(
+    (m) => `    rect  ${m.selector} width=${m.width}px height=${m.height}px`,
+  );
+  for (const m of r.pseudoOnScreenInfo ?? []) {
+    lines.push(
+      `    pos   ${m.selector} (${m.edge}:0) left=${m.left}px right=${m.right}px viewport=[0, ${m.innerWidth}]`,
+    );
+  }
+  for (const m of r.clickReachesInfo ?? []) {
+    lines.push(
+      `    click ${m.selector} at (${m.x}, ${m.y}) -> clicked=${m.clicked} hit=${m.hitTag ?? "n/a"}`,
+    );
+  }
   return lines;
 }
 
@@ -149,6 +172,7 @@ async function main() {
     let failures = 0;
     for (const r of results) {
       const problems = formatProblems(r);
+      const rectInfo = formatRectInfo(r);
       if (problems.length > 0) {
         failures++;
         console.error(`[layout-guard] ${r.case} @ ${r.width}px: FAIL`);
@@ -156,6 +180,7 @@ async function main() {
       } else {
         console.log(`[layout-guard] ${r.case} @ ${r.width}px: OK`);
       }
+      for (const line of rectInfo) console.log(line);
     }
 
     if (failures > 0) {

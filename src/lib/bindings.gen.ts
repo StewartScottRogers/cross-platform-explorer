@@ -999,15 +999,60 @@ async macroPlan(macro: ActionMacro, inputs: string[]) : Promise<Result<PlannedOp
 }
 },
 /**
+ * Preflight-scan a macro run for destination collisions **before anything is applied** (CPE-1891):
+ * resolves `macro_` over `inputs` exactly like `macro_run` will (same `root` scope guard), then checks
+ * every rename/move/convert destination against the real filesystem — read-only stats, never a write.
+ * 
+ * `MacroRunConfirm` calls this before offering Run, so a 200-file batch shows its whole collision set
+ * up front ("N of 200 need confirmation to overwrite") instead of discovering them one at a time via
+ * repeated all-or-nothing run/rollback cycles — the actual defect CPE-1891 was filed against: a single
+ * collision at file #150 used to burn through 149 real writes only to undo every one of them, with no
+ * way to say "yes, overwrite" and no visibility into which other names would collide too. A
+ * `confirmable` collision (a plain pre-existing name) may be overwritten by re-calling `macro_run`
+ * with `confirmed_overwrite: true`; a non-confirmable one (a link, live or dangling) is still reported
+ * here so the user can see it, but stays refused no matter what — CPE-1734's rule, unconditionally.
+ */
+async macroPreflight(macro: ActionMacro, inputs: string[], root: string) : Promise<Result<MacroCollision[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_preflight", { macro, inputs, root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Run `macro_` over `inputs`, scoped to `root`: resolves + scope-checks via CPE-1187
  * (`macro_run::resolve`), then physically applies each op. All-or-nothing — if any step fails
  * partway, everything already applied is rolled back automatically via the recorded inverses
  * before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
  * frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
+ * 
+ * **`confirmed_overwrite` (CPE-1891, re-scoped in PR #1044 review round 2, Blocker 2).** A list of
+ * destination paths (`MacroCollision::to`) the user has explicitly confirmed overwriting — normally
+ * exactly the `to` values `macro_preflight` reported as `confirmable`, since `MacroRunConfirm`'s
+ * checkbox confirms the whole displayed set at once. **Not a blanket bool.** The first cut of this
+ * ticket took `confirmed_overwrite: bool` and handed the same `true` to every rename/move/convert op
+ * in the run — so ticking the box for the ONE collision a 200-file batch actually had also switched
+ * off the occupancy guard on the other 199 non-colliding ops, and a confirm made five minutes before
+ * Run authorised overwriting whatever happened to occupy those names BY THEN, not what the user was
+ * shown. Scoping to a set of names closes both: `macro_refuse_unconfirmed_collisions` re-derives
+ * collisions fresh at call time and only lets a `confirmable` one through when its OWN `to` is in this
+ * set, and `macro_apply_run` looks up each op's own `to` in the set individually rather than trusting
+ * one flag for the whole run — an op whose destination is not in `confirmed_overwrite` still goes
+ * through its ordinary (unconfirmed) primitive, which only ever succeeds there if the destination is
+ * actually free.
+ * 
+ * The engine itself refuses an unconfirmed (or now, un-matched) collision, not just the UI — the same
+ * posture `batch_execute::execute_plan_walk` already takes for the Batch-Media engine (CPE-1599): a
+ * devtools call, a future automation surface, or a stale `MacroRunConfirm` must not get a free
+ * overwrite just by naming a path that happens to match, and conversely must never be able to talk
+ * this engine into writing through a link no matter what it passes (`MacroCollision::confirmable` is
+ * never influenced by this list). Nothing has been applied yet when this check runs, so a refusal here
+ * costs nothing to roll back.
  */
-async macroRun(macro: ActionMacro, inputs: string[], root: string) : Promise<Result<ResolvedRun, string>> {
+async macroRun(macro: ActionMacro, inputs: string[], root: string, confirmedOverwrite: string[]) : Promise<Result<ResolvedRun, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("macro_run", { macro, inputs, root }) };
+    return { status: "ok", data: await TAURI_INVOKE("macro_run", { macro, inputs, root, confirmedOverwrite }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1016,6 +1061,18 @@ async macroRun(macro: ActionMacro, inputs: string[], root: string) : Promise<Res
 /**
  * Undo a previously-applied `ResolvedRun` (as returned by `macro_run`) by replaying its inverses
  * in reverse order.
+ * 
+ * **Does not restore a confirmed overwrite's victim (CPE-1891, PR #1044 review round 2, Blocker 3).**
+ * `run.inverses` only ever encodes "move this NAME back" — for a `rename`/`move` step that overwrote an
+ * occupied destination, the file that occupied it was replaced by `fs::rename`'s own atomic
+ * replace-on-rename with nothing preserved anywhere; undo restores the NAME `from` pointed to but
+ * cannot conjure back content that was never kept. A confirmed Convert is the same shape: the plain
+ * pre-existing file at `to` is truncated and overwritten in place (`overwrite_confirmed_no_follow`),
+ * not trashed the way the pre-convert original is, so undoing a confirmed convert restores the
+ * pre-convert original but does not restore whatever the confirmed write replaced. This is the
+ * documented, deliberate minimum for this ticket (see the ticket's Work Log for the reasoning against
+ * building a pre-overwrite checkpoint instead) — `MacroRunConfirm.svelte`'s confirm panel warns about
+ * it before the run, and `src/docs/organizing-macros.md`'s Undo section says so explicitly.
  */
 async macroUndo(run: ResolvedRun) : Promise<Result<null, string>> {
     try {
@@ -5282,6 +5339,31 @@ at_end: boolean;
  */
 line_aligned: boolean }
 /**
+ * One resolved rename/move/convert destination that is currently occupied on the real filesystem —
+ * found by a preflight scan run **before** any op in a [`ResolvedRun`] is applied (CPE-1891). This
+ * module stays pure and touches no filesystem itself; the scan that produces these lives in the apply
+ * layer (`src-tauri`'s `macro_preflight_collisions`, alongside `macro_apply_run`) for the same reason
+ * that layer already owns every other real-filesystem decision this module's own doc comment
+ * describes.
+ * 
+ * `confirmable` is the whole point of this ticket: **true** for an ordinary occupied name (a plain
+ * pre-existing file) — a `macro_run` call with `confirmed_overwrite: true` may overwrite it. **false**
+ * for a link (live or dangling) or a slot that could not be read at all — CPE-1734's write-through
+ * refusal stays absolute no matter what the user confirms; a link collision is still reported here so
+ * the user can SEE it (the same visibility CPE-1869 established for the revert hold-back list), it
+ * just has no confirm that unblocks it.
+ */
+export type MacroCollision = { 
+/**
+ * Index into `ResolvedRun::ops`/`inverses`, so the caller can correlate a collision back to the
+ * exact op it belongs to.
+ */
+op_index: number; from: string; to: string; 
+/**
+ * `"rename"` / `"move"` / `"convert"` — the only kinds a collision can occur at.
+ */
+kind: string; confirmable: boolean; reason: string }
+/**
  * One step in a macro. Each variant maps to an existing op primitive.
  */
 export type MacroStep = 
@@ -5903,7 +5985,15 @@ skipped: OpResult[];
  * Present when the revert deliberately held its deletions back: the single explanation, the count,
  * and a next step honest about whether re-running can help. `None` when nothing was held back.
  */
-held_back: HeldBackSummary | null }
+held_back: HeldBackSummary | null; 
+/**
+ * Present when one or more writes were refused for the SAME reason (CPE-1881) — currently only the
+ * CPE-1857 hard-link rule. The single explanation and the count; the refused paths themselves are
+ * already in [`skipped`](RevertOutcome::skipped) (each with `outcome: "failed"` and a short
+ * per-path reason), so nothing is duplicated here beyond the one paragraph. `None` when nothing was
+ * grouped — an ungrouped write refusal is unaffected and still just a `skipped` entry.
+ */
+write_refusal: WriteRefusalSummary | null }
 /**
  * A preview of what reverting to a checkpoint would do: the restore-plan summary plus a **drift** report.
  * 
@@ -6458,6 +6548,29 @@ export type WatchAction = { kind: string; resolved: string }
  * The workbench's view of a folder (CPE-526/535): whether it's a git repo, the branch, and the diff.
  */
 export type WorkbenchDiff = { is_repo: boolean; branch: string | null; diff: string }
+/**
+ * The one statement behind a whole group of grouped write refusals (CPE-1881), the write-side
+ * counterpart to [`HeldBackSummary`]. Measured on a 200-file all-hard-linked revert: the un-grouped
+ * `skipped` reasons alone totalled 84,180 bytes (~420 bytes/entry), extrapolating to ~8.2 MiB for 20,000
+ * entries. This states the shared explanation once.
+ */
+export type WriteRefusalSummary = { 
+/**
+ * The shared explanation, stated once.
+ */
+reason: string; 
+/**
+ * How many writes this covers.
+ */
+count: number; 
+/**
+ * **CPE-1881 round 3.** The refused paths, in plan order — the structural way a consumer tells a
+ * grouped write refusal apart from a genuine per-file failure in `skipped` (both carry
+ * `outcome: "failed"`; only path membership here distinguishes them, never `error`'s wording). Backs
+ * the frontend's "paint the grouped rows `--text-dim`, keep `--warn` for real failures" fix and its
+ * "Copy all N refused paths" affordance, mirroring `HeldBackSummary`'s equivalent via `skipped`.
+ */
+paths: string[] }
 
 /** tauri-specta globals **/
 
