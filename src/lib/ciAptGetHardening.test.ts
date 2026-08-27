@@ -74,11 +74,17 @@ const HARDENING_FLAGS =
  *  functionally identical aliases a future site could plausibly be written with either way (a
  *  Reviewer round on this ticket proved it: injecting a brand-new unhardened `apt update` /
  *  `apt install` step sailed straight through an earlier version of this filter that only checked
- *  for the substring `"apt-get"`). The lookbehind/lookahead require a non-word/non-hyphen
+ *  for the substring `"apt-get"`). The lookbehind/lookahead require a non-word/non-hyphen/non-slash
  *  character (or line start/end) on both sides, so this does NOT match `apt` appearing inside a
  *  longer identifier -- `apt-transport-https`, `adapter`, `apt-get-wrapper` -- only the bare
- *  command token itself. */
-const APT_COMMAND_WORD = /(?<![\w-])apt(?:-get)?(?![\w-])/;
+ *  command token itself.
+ *
+ *  CPE-1916 added `/` to the excluded lookbehind: `sudo rm -f /etc/apt/sources.list.d/…` (the
+ *  unused-Microsoft-repo cleanup that ticket introduced) contains `apt` as a bare path SEGMENT, not
+ *  a command word, and an `rm` line is not an apt invocation to harden in the first place -- without
+ *  excluding `/`, this filter mistook that path for a sixth unhardened apt-get site and false-failed
+ *  the regression guard below. */
+const APT_COMMAND_WORD = /(?<![\w\-/])apt(?:-get)?(?![\w-])/;
 
 /** Every `apt`/`apt-get` invocation line inside a step's `run:` script, so each can be checked
  *  individually rather than treating the whole multi-line script as one blob (a hardened `update`
