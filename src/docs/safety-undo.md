@@ -88,12 +88,22 @@ Three details are worth knowing, because they are deliberate:
     about to write into and refuses the entry if that folder does not actually sit inside the backup
     destination you chose. The write side and the mirror-delete side of a backup job are guarded the
     same way at last; before, only deletes were.
-  - **What the folder check does and does not promise.** It refuses a redirect that is *already there*
-    when the job runs, which is the case that was measured. It cannot promise anything about someone
-    with write access to your backup destination who swaps a folder for a link at the exact instant the
-    file is being written — closing that needs an operating-system facility the app does not have on
-    all three platforms. If your backup destination is a shared network folder that other people can
-    write to, that residual risk is real and this guard does not remove it.
+  - **The instant-of-the-write swap is now closed too** (CPE-1896). This bullet used to say the app
+    could refuse a redirect that was *already there*, but could promise nothing about someone with
+    write access to your backup destination who swapped a folder for a link at the exact instant a file
+    was being written — and that it needed an operating-system facility the app did not yet use. It
+    uses it now. The app no longer hands the operating system a whole path and hope; it opens your
+    backup folder once, then opens each folder along the way *inside the one before it*, refusing any
+    link it meets. There is no longer a moment between "check the folder" and "write the file" for
+    anyone to swap anything, because the file is opened inside the folder the app is already holding
+    open. Measured: a test that races the backup 400 times, renaming folders underneath it as fast as
+    it can, no longer gets a single byte written outside the destination.
+  - **The one thing it still cannot promise.** If someone with write access *renames one of your backup
+    folders out of the backup destination* while the job is copying into it, the copy follows that
+    folder — the app is writing into the folder itself, not into its name. That is much weaker than
+    what it replaces: the files can only end up inside a folder the backup itself owns, never aimed at
+    a folder of your own that someone chose. And it is still caught after the fact, so the job reports
+    those entries as failures rather than successes (next bullet).
   - **If it happens anyway, the job now tells you** (CPE-1896). That instant-of-the-write swap was
     measured, and it used to end in the worst possible way: the file landed outside your backup folder,
     overwriting whatever was already there, and the run reported it as a **success** with no error —
@@ -103,11 +113,12 @@ Three details are worth knowing, because they are deliberate:
     say whatever they like, but by confirming that the file now sitting there is *the very file it just
     wrote*. If it is not, or if it sits outside the backup destination you chose, the entry is reported
     as a **failure** naming the file, the outside path it reached, and which of your files' contents is
-    now sitting there — so you know exactly what to go and look at. **This does not prevent the
-    redirect** — by then the bytes are already written — it stops the job from calling it a success.
-    Closing the gap itself is still open work. One exception, worth knowing if you back up to a network
-    share: a few network filesystems cannot tell one file from another at all, and on those the app
-    falls back to the weaker path check, which a fast enough attacker can still fool.
+    now sitting there — so you know exactly what to go and look at. **This check does not prevent a
+    redirect** — by the time it runs the bytes are already written — it stops the job from calling one
+    a success. It is kept now as the backstop for the renamed-folder case in the bullet above, and as a
+    second opinion on the new folder-by-folder opening. One exception, worth knowing if you back up to
+    a network share: a few network filesystems cannot tell one file from another at all, and on those
+    the app falls back to the weaker path check.
   - **Backup copies do not currently carry Windows' "downloaded from the internet" mark
     (`Zone.Identifier`).** A file copied by File Explorer keeps that mark, so Windows still warns before
     opening it after a restore; a file copied by a backup job in this app currently does not carry it

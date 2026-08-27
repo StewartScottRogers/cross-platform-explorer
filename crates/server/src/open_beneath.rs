@@ -95,14 +95,15 @@ pub(crate) struct Opened {
     pub(crate) created: bool,
 }
 
-/// Syscall counter for CPE-1896's cost measurement (acceptance criterion 5). Test builds only: the
-/// increment compiles to nothing in a shipped binary, so the instrument cannot itself become the cost.
-///
-/// **Thread-local, and that is not a detail.** A process-wide counter was tried first and gave 5.16
-/// syscalls per file for a shape that can only cost a whole number — libtest runs tests in parallel, so
-/// the sibling tests in this module were adding their own walks to the total. The walk always runs on
-/// the calling thread, so a thread-local count is both exact and immune to whatever else the test
-/// binary is doing.
+// Syscall counter for CPE-1896's cost measurement (acceptance criterion 5). Test builds only: the
+// increment compiles to nothing in a shipped binary, so the instrument cannot itself become the cost.
+//
+// **Thread-local, and that is not a detail.** A process-wide counter was tried first and gave 5.16
+// syscalls per file for a shape that can only cost a whole number — libtest runs tests in parallel, so
+// the sibling tests in this module were adding their own walks to the total. The walk always runs on
+// the calling thread, so a thread-local count is both exact and immune to whatever else the test
+// binary is doing. (A plain `//` comment: rustdoc does not document a macro invocation, and
+// `-D unused-doc-comments` is right to say so.)
 #[cfg(test)]
 thread_local! {
     pub(crate) static WALK_SYSCALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };

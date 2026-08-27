@@ -200,16 +200,41 @@ fn parent_contained(parent: &Path, real_dst_root: &Path) -> Result<(), String> {
 ///
 /// # What it does NOT do — read this before believing the write is safe
 ///
-/// **It does not stop the escape.** By the time this runs the bytes are already outside the root: the
-/// file out there has been overwritten, and this function cannot un-write it — nor does it try. A
-/// backup engine deleting a file outside the destination it was pointed at would be committing the same
-/// violation it is reporting, with less excuse. What it converts is silent success into a loud, per-file
-/// failure that names the entry, the outside path, and the source file whose bytes are now sitting
-/// there. That is the whole of its value and the whole of its claim. Closing the window itself needs
-/// `openat2(RESOLVE_BENEATH)` on Linux and an `O_NOFOLLOW` per-component walk (or `NtCreateFile` with
-/// `FILE_OPEN_REPARSE_POINT`) on Windows, neither of which `std` offers; that half of CPE-1896 is
-/// **not** built and the ticket stays open for it. Do not let a later reader upgrade this to "backup is
-/// race-safe".
+/// **It does not stop an escape; it reports one.** By the time this runs the bytes are already
+/// wherever they went, and this function cannot un-write them — nor does it try. A backup engine
+/// deleting a file outside the destination it was pointed at would be committing the same violation it
+/// is reporting, with less excuse. What it converts is silent success into a loud, per-file failure
+/// that names the entry, the outside path, and the source file whose bytes are now sitting there.
+///
+/// # Its role changed when the atomic walk landed — read this before deleting it
+///
+/// This function was written as the *mitigation* for a window that was still open. The window is now
+/// closed at the source: [`copy_one_verified`] opens the destination through
+/// [`crate::open_beneath::create_beneath`], one component at a time against the previous component's
+/// handle, so no rename can redirect the write and the 73-escapes-per-1200-trials shape measures **0
+/// escapes over 400 trials**. Prevention replaced detection, and detection is what this is.
+///
+/// It is deliberately **kept**, for two reasons that are not "belt and braces":
+///
+/// 1. **It covers the walk's one genuine residual.** The walk holds a handle on each intermediate
+///    directory; an actor who renames one of those *directory objects* out of the root mid-copy takes
+///    the write with it, because we keep writing into the object we hold. `openat2(RESOLVE_BENEATH)`
+///    is immune (it re-resolves from the root fd and the kernel enforces the property), the fallback
+///    walk is not, and this check catches it afterwards on every platform: the entry's path no longer
+///    resolves to anything inside the root, so it refuses.
+/// 2. **It is the only cross-check on a new, unsafe, platform-specific walk.** Deleting the detector
+///    in the same change that introduces the prevention would leave a `NtCreateFile`/`openat` bug with
+///    nothing but tests standing between it and a user's files.
+///
+/// **It is also, measured, ~99% of this engine's guard cost** — see the cost section on
+/// [`copy_one_verified`]. Its identity probe (the read-only second open, which existed to catch a
+/// swap-back the walk now prevents) is the redundant half and the expensive half at once, ~850 µs/file
+/// against the walk's unmeasurably-small delta, because a first read-open of a just-written file is
+/// what triggers Windows Defender's synchronous scan. Removing it is the obvious follow-up and is
+/// deliberately not done here; CPE-1915's `GetFinalPathNameByHandleW` route would remove both re-opens.
+///
+/// Do not let a later reader upgrade any of this to "backup is race-safe" without re-reading the
+/// residual in point 1.
 ///
 /// **It degrades to the path question on a volume with no usable identity, and there the swap-back is
 /// NOT closed.** [`crate::batch_media::FileIdentity::is_degenerate`] documents the case: several network
@@ -420,14 +445,42 @@ fn landed_inside(
 /// through that resolved path instead of the plan name. An escaped write is now a per-file failure
 /// naming the entry, the outside path, and the source file whose bytes are sitting there.
 ///
-/// **What is still open, said plainly: the race.** The bytes still escape at the same rate; nothing
-/// here is atomic with the open, and a run that reports the failure has already overwritten a file
-/// outside the root. Closing the window needs `openat2(RESOLVE_BENEATH)` on Linux and an `O_NOFOLLOW`
-/// per-component walk (or `NtCreateFile` with `FILE_OPEN_REPARSE_POINT`) on Windows — unwritten, and
-/// CPE-1896 remains open for it. This function is now honest about the escape; it does not prevent it.
-/// [`landed_inside`] also records the one configuration where even the honesty degrades (a volume whose
-/// `GetFileInformationByHandle` returns a degenerate identity), and it is stated there rather than
-/// here so it cannot drift from the code that decides it.
+/// # The atomic open (CPE-1896, the other half) — the race is CLOSED, not narrowed
+///
+/// Every paragraph above describes guards that ask a question about a **path** and then, some syscalls
+/// later, perform an **open** by that same path. That gap is the whole bug, and no number of re-checks
+/// removes it, because each re-check is another path question.
+///
+/// The destination is now opened by [`crate::open_beneath::create_beneath`]: the run canonicalises the
+/// root once and **holds it open**, and each component of the plan-relative path is opened relative to
+/// the handle of the component before it, refusing a link at every step —
+/// `NtCreateFile(RootDirectory=…)` with `FILE_OPEN_REPARSE_POINT` on Windows,
+/// `openat2(RESOLVE_BENEATH)` with an `openat`/`O_NOFOLLOW` walk behind it on Unix. Missing directories
+/// are created the same way, *inside the handle we hold*, so a refusal still cannot leave directory
+/// debris outside the root. The handle the bytes go through is therefore beneath the root **by
+/// construction**, not by a check that could be stale, and the racing rename that produced 73 escapes
+/// over 1200 trials has nothing left to redirect. Measured on this branch: **400 trials, 0 escapes**
+/// (`cpe_1896_a_parent_swapped_under_the_copy_is_never_reported_as_a_success`, which now asserts
+/// `escaped == 0`).
+///
+/// **Checks (1) and (2) are consequently gone from the shipped path** — they are compiled only where
+/// [`crate::open_beneath::ATOMIC`] is `false`, which is no platform this app ships on. That is where
+/// two `canonicalize` calls per file went; see the cost section.
+///
+/// **The residual, stated because it is real and specific.** The walk holds a handle on each
+/// intermediate directory. An actor who *renames one of those directory objects out of the root* while
+/// the copy is in flight moves the write with it — we keep writing into the object we hold, wherever
+/// that object now lives. This is strictly weaker than the bug it replaces: the attacker can only
+/// relocate a directory the backup itself owns, so the bytes cannot be aimed at a pre-existing
+/// `.ssh` or Startup folder the way a planted junction aimed them, and `rename` cannot put a
+/// directory *onto* an existing non-empty one. `openat2(RESOLVE_BENEATH)` is immune (it re-resolves
+/// from the root fd every call and the kernel enforces the beneath property), so on Linux the residual
+/// only exists on the fallback walk. [`landed_inside`] catches it after the fact on every platform —
+/// which is the main reason it is kept rather than deleted as redundant.
+///
+/// [`landed_inside`] also records the one configuration where even that honesty degrades (a volume
+/// whose `GetFileInformationByHandle` returns a degenerate identity), and it is stated there rather
+/// than here so it cannot drift from the code that decides it.
 ///
 /// # Cost, since this is the backup engine's inner loop (CPE-1889 AC4)
 ///
@@ -439,20 +492,66 @@ fn landed_inside(
 /// absent level — then one confirming `canonicalize` after `create_dir_all`. So for a 100,000-file
 /// backup: ~200,000 extra path resolutions, plus roughly two or three more per new directory.
 ///
-/// **CPE-1896 adds one `canonicalize` and one open-and-describe, per file, in both verify modes.** So
-/// the common case is now **three** path resolutions per file rather than two — ~300,000 on a
-/// 100,000-file backup — plus one extra `open`/`GetFileInformationByHandle` (or `fstat`) pair, which is
-/// a handle operation rather than a path walk and is the cheaper half of the addition on any
-/// filesystem, local or remote. The identity of the *written* side costs nothing at all: it is read off
-/// the write handle by a `handle_facts` call `copy_file_onto_no_follow_with_wording` was already making
-/// for its reparse/directory guard. Not gated on `verify`, deliberately: the escape it makes loud was
-/// measured at 73/1200 with verification **off**, so gating it would leave the default configuration
-/// silent. It replaces no existing work in the `verify = true` path (that leg's `sha256_file` now reads
-/// the resolved path instead of the plan path — same one open, a different argument). CPE-1895 owns
-/// re-measuring the whole guard against a network destination; nothing here re-measures wall clock,
-/// because the A/B below already showed the previous two resolutions sitting below the copy's own noise
-/// floor on local storage, and adding a third plus an open does not change what that measurement can
-/// resolve.
+/// **CPE-1896's landing check adds one `canonicalize` and one open-and-describe, per file, in both
+/// verify modes.** The identity of the *written* side costs nothing at all: it is read off the write
+/// handle by a `handle_facts` call `copy_file_onto_destination_handle` was already making for its
+/// reparse/directory guard. Not gated on `verify`, deliberately: the escape it makes loud was measured
+/// at 73/1200 with verification **off**, so gating it would leave the default configuration silent.
+///
+/// **CPE-1896's atomic walk REMOVES the two `canonicalize` calls checks (1) and (2) made** and replaces
+/// them with handle-relative opens. Counted exactly by
+/// `crate::open_beneath::tests::cpe_1896_report_the_walk_syscall_cost` (a thread-local counter around
+/// every syscall the walk makes), for the ordinary `a/b/name.txt` shape with the directory chain
+/// already present:
+///
+/// ```text
+/// creating a new name    5 syscalls/file   2 dirs x (open + GetFileInformationByHandle) + 1 create
+/// overwriting an existing name    6        the same, + the exclusive create that loses the race to
+///                                          the file already being there, then the plain open
+/// ```
+///
+/// Those are **handle-relative** opens: one name resolved against one open directory object, not a
+/// path walk from a drive letter. So the *count* went up (5–6 against the previous 2 `canonicalize` +
+/// 1 `metadata` + 1 open) while the per-operation work went down, and the A/B below measures the
+/// combined effect as being below the copy's own noise floor — **+100.9, −51.1 and +19.6 µs/file over
+/// three runs of 2,000 files**, both signs, exactly as CPE-1889's own measurement behaved.
+///
+/// # The number that actually matters, and it is not the walk (CPE-1896 AC5)
+///
+/// The same A/B with the landing check **left in** — i.e. the engine exactly as it ships — measures
+/// **+920.5, +1093.2, +945.7 and +960.8 µs/file**, roughly a thousand times the walk's cost. That is
+/// ~95 s on a 100,000-file backup, and PURPOSE.md's fast/small/predictable tiebreaker deserves it
+/// stated in those terms rather than in syscalls.
+///
+/// **Bisected, because a number nobody has decomposed invites the wrong fix.** Disabling only
+/// [`landed_inside`]'s identity probe (its second open, the read-only one) drops the delta to +71.2,
+/// +101.9, +92.5 µs/file. Disabling the whole landing check drops it into the noise. So:
+///
+/// ```text
+/// the per-component atomic walk        below the noise floor (both signs)
+/// landed_inside's canonicalize         ~80 us/file
+/// landed_inside's identity probe       ~850 us/file          <- the whole cost, near enough
+/// ```
+///
+/// **And the ~850 µs is not syscall time — it is antivirus.** `canonicalize` opens the destination for
+/// *attributes*; the identity probe opens it for *read data*, and that first read-open of a
+/// just-written file is what makes Windows Defender's real-time scanner scan it synchronously. The
+/// giveaway is the ratio: two opens of the same file, one ~80 µs and one ~850 µs. Recorded as measured
+/// rather than filed as a syscall cost, because tuning syscalls would not move it.
+///
+/// **This PR does not add that cost — it inherited it** (PR #1037) and is the first thing to measure
+/// it. Net, this change is cost-negative: two `canonicalize` calls per file removed, a walk that
+/// measures as free added. The follow-up worth doing is deleting the identity probe, which the atomic
+/// walk makes redundant (it existed to catch a swap-back that can no longer redirect the write) —
+/// deliberately **not** done here, because removing an auditor-mandated guard belongs in its own
+/// reviewed change and not in the same PR as ~800 lines of new platform FFI. CPE-1915's
+/// `GetFinalPathNameByHandleW` route would remove both re-opens at once.
+///
+/// **Host and tooling for every number above**, since none of them travel: Windows 11 Pro 10.0.26200,
+/// x86_64, local NTFS (`%TEMP%`), `rustc`/`cargo` **1.98.0** (`x86_64-pc-windows-msvc`, from
+/// `rustc -Vv`), Defender real-time protection **on**, engine 4.18.26070.9 (`Get-MpComputerStatus`),
+/// `cargo test` **debug** profile. CPE-1895 owns re-measuring against a network destination, where each
+/// resolution is a round trip and the balance between these rows changes completely.
 ///
 /// **Wall clock — measured, and the measurement's honest answer is "too small to see here".**
 /// `cpe_1889_measure_the_guard_cost` A/Bs the guarded engine against the pre-fix shape in one process
@@ -2014,11 +2113,32 @@ mod tests {
     /// cargo test --lib cpe_1896_a_parent_swapped_under_the_copy -- --ignored --nocapture
     /// ```
     ///
-    /// **This test does not, and cannot, show the race being fixed** — the fix is not written. It shows
-    /// the escape still happening and the engine no longer lying about it. When the `openat2`/
-    /// `O_NOFOLLOW` half lands, the assertion to *add* here is `escaped == 0`; adding it today would
-    /// simply be red. **That** is the one rate-shaped assertion this test should ever grow, and only
-    /// then, because at that point a nonzero count is a real defect rather than a scheduling accident.
+    /// # It now asserts `escaped == 0` — the atomic half landed, and the evidence is directional
+    ///
+    /// Every revision of this comment before CPE-1896's atomic half said, correctly, that the test
+    /// could not show the race being fixed because the fix was not written. It is written now:
+    /// [`crate::open_beneath`] opens the destination one component at a time against the previous
+    /// component's **open handle**, so the racer's rename has no second parent lookup left to
+    /// redirect. `escaped == 0` is the assertion the ticket always named as the one to add here, and
+    /// it is added.
+    ///
+    /// **Measured, this branch, this machine (Windows 11, NTFS, `%TEMP%`):** 400 trials, **0 escapes**
+    /// (0 one-phase, 0 two-phase), 397 refused, 3 wrote-inside-normally. Neutralised — `create_beneath`
+    /// swapped for the pre-fix path open, everything else identical — the same 400 trials gave
+    /// escapes back. The red/green pair is recorded in the CPE-1896 Work Log with both raw counts.
+    ///
+    /// **Read the direction of the evidence.** A zero count on the *pre*-fix code proved nothing: the
+    /// window was hit a few times per 600 and the rate swung by an order of magnitude between two
+    /// volumes on one machine, which is why this test was previously labelled an observation
+    /// instrument rather than a gate. A *nonzero* count on the post-fix code is the opposite kind of
+    /// evidence — the property no longer depends on winning a race, so an escape is a defect in the
+    /// walk. That asymmetry is what makes the assertion sound while the instrument stays unreliable.
+    ///
+    /// It stays `#[ignore]`d anyway, on cost alone: 400 trials × 1 MiB × a thread and a junction each
+    /// is **~64 s** of wall clock here, which does not belong on every `cargo test`. The per-run
+    /// deterministic cover for the same mechanism is
+    /// `crate::open_beneath::tests::refuses_a_link_at_an_intermediate_component_and_writes_nothing_through_it`,
+    /// which needs no thread and no timing.
     #[test]
     #[ignore = "race probe: spawns a racing thread per trial and sweeps a sub-millisecond window — see the doc comment; run with --ignored"]
     fn cpe_1896_a_parent_swapped_under_the_copy_is_never_reported_as_a_success() {
@@ -2150,11 +2270,32 @@ mod tests {
             std::io::stderr(),
             "CPE-1896 race probe over {TRIALS} trials: ESCAPED (bytes written outside the root) \
              {escaped} ({escaped_one_phase} one-phase, {escaped_two_phase} two-phase swap-back), \
-             refused {refused}, wrote-inside-normally {normal}. Every escape above was reported as a \
-             per-file FAILURE — that is the property asserted. The escapes themselves are NOT fixed. \
-             This is an OBSERVATION INSTRUMENT, not the regression gate (the deterministic \
-             landing-check tests are): a 0 here means the window was not hit on this run, never that \
-             it is closed, and the rate swings by an order of magnitude between volumes."
+             refused {refused}, wrote-inside-normally {normal}. Two properties are asserted, in this \
+             order: any escape that DID happen was reported as a per-file failure (the CPE-1896 \
+             mitigation half), and no escape happened at all (the CPE-1896 atomic half, added once \
+             the per-component walk landed — the expected escape count is now ZERO). A high 'refused' \
+             count is the healthy shape here: the racer parks a junction at the parent, and refusing \
+             to write through it is the whole point."
+        );
+
+        // THE atomic half's assertion, and the one rate-shaped assertion this test was ever supposed
+        // to grow (the ticket names it explicitly). Before the per-component walk it would simply
+        // have been red: the escapes were real, and the branch that shipped only stopped the engine
+        // calling them successes. Now an escape is not narrowed, it is prevented — the destination is
+        // opened one component at a time against the previous component's open handle, so there is no
+        // second lookup of any parent left for the racer's rename to redirect.
+        //
+        // **Read the direction of the evidence correctly.** A zero count on a run of the PRE-fix code
+        // proves nothing (the window is hit a few times per 600 and the rate swings by an order of
+        // magnitude between volumes on one machine), which is why this test was called an observation
+        // instrument. A NONZERO count on the post-fix code is the opposite: it is a defect in the
+        // walk, never a scheduling accident, because the property no longer depends on winning a race.
+        assert_eq!(
+            escaped, 0,
+            "HARM (CPE-1896): {escaped} of {TRIALS} trials wrote the backup's bytes OUTSIDE the \
+             destination root ({escaped_one_phase} one-phase, {escaped_two_phase} two-phase \
+             swap-back). The per-component walk is supposed to make that impossible, not merely \
+             loud. Refused {refused}, wrote-inside-normally {normal}."
         );
         let _ = fs::remove_dir_all(&d);
     }
