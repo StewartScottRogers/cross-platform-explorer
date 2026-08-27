@@ -104,6 +104,7 @@ three, and saying otherwise would be exactly the "reads as coverage" failure the
 
 Related: **CPE-1929** (the sweep), **CPE-1896** (where the pattern was found), **CPE-1937** (a guard with
 zero CI coverage that nobody noticed), **CPE-1958** (the TOCTOU race CPE-1929's security audit measured
-in `fsutil::overwrite_confirmed_no_follow`'s `links > 1` guard — same function, different defect; and
-the place the `fsutil`-writes / `batch_media`-refuses doctrine split recorded at
-`batch_media::open_output_verified` should be settled).
+in `fsutil::overwrite_confirmed_no_follow`'s `links > 1` guard — same function, different defect), and
+**CPE-1959** (the `fsutil`-writes / `batch_media`-refuses doctrine split recorded at
+`batch_media::open_output_verified`). Site 1's narrowing question is CPE-1959's question asked at a
+third site, so whichever is worked second should read the other's answer first.

@@ -2020,8 +2020,10 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
     // asymmetric between the two callers, in the direction that makes this site's stricter answer
     // cheap. **That has not been established as the right answer**, nobody has asked a user whose
     // batch output landed on a cloud placeholder, and the two sites now say opposite things about the
-    // same input class. Unresolved on purpose; revisit alongside CPE-1958, which reopens the
-    // neighbouring `fsutil` guard.
+    // same input class. Unresolved on purpose, and **owned by CPE-1959**, which carries this asymmetry
+    // argument and the evidence that would settle it. Deliberately not CPE-1958: that one is the
+    // `links > 1` TOCTOU race at a neighbouring guard — a different problem — and a worker arriving
+    // there would be working the race and might never read this.
     let facts = match handle_facts(&verified.file) {
         Some(f) if !f.id.is_degenerate() => f,
         _ => {

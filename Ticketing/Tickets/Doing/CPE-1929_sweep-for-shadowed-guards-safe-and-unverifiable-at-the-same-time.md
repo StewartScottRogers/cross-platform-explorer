@@ -258,7 +258,10 @@ removed), `fsutil::rename_slot_refusal` and `create_slot_refusal` (genuinely rea
    but only one half was documented as a choice. The site now states the split, gives the one real
    asymmetry (a refused batch item is *skipped* and the user keeps the input; a refused restore has
    failed at the only thing it was asked to do), and says plainly that this has **not** been
-   established as the right answer — unresolved on purpose, pointing at CPE-1958.
+   established as the right answer — unresolved on purpose, and **owned by CPE-1959**. Round 2 first
+   pointed it at CPE-1958; that ticket is the `links > 1` TOCTOU race at a *neighbouring* guard, so a
+   worker arriving there would be working the race and might never read the comment. Everything else
+   this ticket deferred got a ticket that owns it; this now does too.
 4. **CPE-1957 corrected**: `vault_manager` citations were `origin/main` numbers while `batch_media`'s
    was post-merge, so the set would have been stale on arrival. All now post-merge, with the reason
    stated in the ticket. Raised **Low → Medium**: site 1 carries the same bare-reparse-bit defect fixed
