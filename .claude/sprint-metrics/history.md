@@ -1538,3 +1538,37 @@ being inferred. Honest at the code comment; the user-facing doc had promoted it 
 **Foreman miss worth recording — a PR fell out of the rotation for four and a half hours.** PR #1039 (CPE-1908) sat at its round-2 head, CLEAN and MERGEABLE, from ~01:50 to ~06:35 while I chased five other PRs. Its worker had been sent a round-3 list and an addendum; it never pushed and never reported. `ListAgents` showed it "running 4h" — the only signal, and one I only looked at when I had a spare turn. When stopped, its last line was *"The macro compiles cleanly. Now let's run the full test suite"* — so it was genuinely working, just never reporting, which is exactly what the dispatch contract forbids and what the stall-check exists to catch **on a returned report**. There is no equivalent check for an agent that simply never returns. The lesson is a Foreman one: **track PRs, not agents.** A per-tick sweep of `gh pr list` against a known set would have surfaced this in minutes; watching for agent notifications did not, because the absence of a notification is not an event.
 
 **Pattern worth carrying — a red-proof that fails BACKWARDS means the reproduction is broken, not the fix.** CPE-1908's takeover worker was building a byte-for-byte reproduction of a pre-fix predicate to red-proof its own change. The RED assertion failed — but in the **wrong direction** (`expected [] to deeply equal ['sidecar']`), the opposite of what a working reproduction shows. Root cause: a Python heredoc hand-typed `\b` inside a **non-raw** string, and Python silently converts that to an ASCII backspace byte (0x08) rather than the two characters — unlike `\s`, which is not a recognised escape and merely warns. So the *reproduction's* regex was corrupt and it was proving nothing. Found with `xxd` on the raw bytes, then a defensive control-character scan caught the same mistake repeated in the ticket narration. **The tell is the direction of the failure**: a red-proof is only evidence if it fails the way the historical bug would have.
+
+## 2026-08-27 — real Linux execution is now a one-liner on this machine (from CPE-1913 / PR #1050)
+
+A worker sent to fix a Linux+macOS CI failure that Windows could not see **bootstrapped a working
+Linux Rust toolchain inside WSL** rather than reasoning about the failure from Windows:
+
+- WSL Ubuntu 2 had rustc 1.97.1 but **no C compiler**, and `rusqlite/bundled` needs one, so musl +
+  `rust-lld` was not a way around it. Docker Desktop's daemon was not running.
+- It bootstrapped gcc-15 rootlessly: user-scoped `apt-get update`, `--print-uris` on
+  `build-essential`, 41 debs unpacked with `dpkg-deb -x` into a sysroot, plus a `cc` wrapper that
+  fixes the `libc.so` linker script (which names dev-only members no root install had put there).
+- The environment then **reproduced CI exactly before any code changed**: 2402 passed / 1 failed /
+  10 ignored, the same single failure.
+
+**The toolchain is left in place at `~/lintools` inside the WSL VM** (outside the repo, so it does
+not dirty the tree). Real `cargo test --lib` and `cargo clippy` runs on Linux are now a one-liner
+for the rest of this sprint. **Dispatch prompts for anything touching `crates/server` should say so**
+— this repo's 3-OS matrix means Windows-only local green has been a repeated source of an hour-long
+CI round trip, and three separate PRs paid that cost this shift.
+
+Two related lessons from the same fix:
+
+1. **A cross-compile harness is not a test run.** PR #1050 reported "the Unix harness is clean on
+   both targets" and that was true and useless — it cross-*compiles*. It cannot execute Unix tests,
+   so it could not see a test that had stopped testing.
+2. **The test's own inertness guard is what caught it**, not an assertion failure: *"fixture is
+   inert: the refusal is not the link one this test is about"*. A guard that checks it is still
+   exercising its subject turned a silently-vacuous test into a red one. That is worth copying.
+3. **The fix made the assertion stronger, not weaker.** The old string
+   `could not open the destination for writing` was a generic open-failure prefix any open error
+   satisfied; the new one names the component and the link, and `open_beneath`'s own negative test
+   pins the surrounding boilerplate as lexically disjoint from `"is a link"`. When a guard trips,
+   check whether the replacement can be *tighter* than the original — relaxing it to green is the
+   move that creates a shadowed guard.
