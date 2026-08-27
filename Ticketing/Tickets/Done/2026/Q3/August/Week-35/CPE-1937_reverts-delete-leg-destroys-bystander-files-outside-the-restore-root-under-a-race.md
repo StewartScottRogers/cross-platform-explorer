@@ -3,7 +3,7 @@ id: CPE-1937
 title: revert's delete leg destroys bystander files **outside the restore root** under a race — 596 in 200 trials, every one counted as `applied`
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -409,3 +409,67 @@ still reddens if the cell were only cleared somewhere else by accident. Suite re
   non-test `ticket-mcp` binary has `SeamGuard` **0 strings / 0 symbols**, `BETWEEN_DESCENT_AND_LEAF`
   0 / 0, `WALK_SYSCALLS` 0 / 0 — against a test-binary control showing 10 for each thread-local, so the
   probe is not vacuous.
+
+## Closed 2026-08-27 — merged as PR #1059, after three rounds
+
+**Reviewer APPROVE + Security Auditor findings closed.**
+
+**What shipped.** A new primitive, `open_beneath::remove_file_beneath` — `unlinkat(parent_fd, name, 0)`
+on Unix; handle-relative `NtCreateFile` with `DELETE` + `FILE_OPEN_REPARSE_POINT` +
+`FILE_NON_DIRECTORY_FILE` then `SetFileInformationByHandle(FileDispositionInfoEx)` on Windows — and
+`apply_delete` routed through it. The descent is **parameterised, not copied**: one `Act` enum carries
+the two real differences (a delete *opens* the parent chain rather than creating it, so no directory
+debris behind a refused deletion; the refusal says "delete"), and every writing leg's wording is
+byte-for-byte unchanged.
+
+Positive control with `main`'s body restored: **122 bystanders destroyed / 200 trials on Windows, 59
+on Linux**, while the report said `RestoreReport { applied: 2, skipped: [], held_back: None }`. After:
+**0 escapes**, including a 2,000-trial / 75,758-swap Linux run.
+
+### The finding that mattered was in the record, not the code
+
+The worker reported that a fifth sabotage — a by-path `remove_file` placed *after* the Unix descent —
+did not redden, and reasoned that `O_NOFOLLOW` refuses at the component so the leaf is never reached.
+Clean, plausible, and written into the module's **design narrative** as a finding.
+
+**Both gates disproved it independently, by running the race harness this PR had just built and never
+pointed at that question**: 94/200 (Reviewer), **141/200 and 1393/2000** (Auditor), 89/200 (the worker,
+reproducing it before fixing). The descent refuses only a component that **is** a link at that
+instant, so on every delete that succeeds it hands back a handle and the leaf runs — and a by-path
+leaf **re-resolves the whole path from the root**, which a concurrent rename redirects. `O_NOFOLLOW`
+makes the leaf unreachable only for a hostile name in a **static** fixture.
+
+Then the Auditor found what made it a defect rather than a wording error: it ran the **entire
+2,406-test non-ignored suite** with that sabotage in place and got a clean pass. **The leaf primitive
+had zero CI coverage**; its only red-proof was a test marked `#[ignore]`.
+
+The worker closed the hole rather than noting it — a `#[cfg(test)]` seam (`BETWEEN_DESCENT_AND_LEAF`)
+that fires once between descent and leaf and does **deterministically** what the racer was hitting by
+luck. The by-path sabotage now reds the non-ignored suite on both platforms.
+
+### Three more the gauntlet produced
+
+- **A Windows regression nobody was looking for.** `FileDispositionInfo` fails on
+  `FILE_ATTRIBUTE_READONLY`, so a revert could no longer delete read-only files — and it was classified
+  **transient**, telling the user re-running would fix it. It never would. Fixed by matching `std`
+  (`IGNORE_READONLY_ATTRIBUTE`), with the pre-1709 fallback clearing the attribute **on the open
+  handle, never by path** — doing it `std`'s way (`set_permissions`) would have reintroduced *this
+  ticket's own defect inside its fix*. The Auditor forced the fallback reachable *and* forced its
+  disposition to fail: the attribute is restored after a refusal, and none is added to a file that
+  never had one.
+- **A guard that proved nothing.** `apply_delete` computed permanent-vs-transient and **discarded** it;
+  an unconditional `transient` left the suite at 2419/0 unchanged while the shipped user doc asserted
+  the distinction was real. Branch dropped, doc corrected.
+- **The seam could be left armed.** Arm the hook, run a delete whose *descent* refuses so nothing
+  consumes it, and the next unrelated delete fires it — measured on both platforms, and it crosses
+  tests under `--test-threads=1`. Fixed with an RAII `SeamGuard`, and the worker explained why the
+  obvious alternative fails: clearing at entry would discard the hook the caller had just armed for
+  that very call.
+
+The Auditor proved the seam absent from a **linked non-test binary** (strings 0, symbols 0, against a
+test-binary control of 10) and verified `POSIX_SEMANTICS` on the **Z: worktree volume itself**,
+proving the probe non-vacuous by forcing the flag off on the same volume.
+
+**Still deferred:** `copilot::apply_op` (needs `renameat`; `remove_file_beneath` is half of what it was
+waiting on), tar/7z extraction, and the delete leg's retryability channel — scoped in `apply_delete`'s
+doc rather than half-built.
