@@ -1,6 +1,6 @@
 ---
 id: CPE-1947
-title: a "could not check" refusal leaks the path into the sentence, and suppresses a real link explanation entirely — including, now, its remedy
+title: a "could not check" refusal leaks the path into the sentence, and suppresses a real link explanation entirely — remedy included
 type: bug
 priority: Medium
 status: Open
@@ -13,7 +13,7 @@ created: 2026-08-27
 
 Two pre-existing defects in the macro run-confirm dialog's collision explanations, found by PR
 #1056's independent Reviewer. Both predate CPE-1928 and are unchanged by it — the Reviewer measured
-that explicitly and did not block on them — but the second is **marginally sharper** after that PR.
+that explicitly and did not block on them.
 
 ## F-A: the "could not check" arms leak the path into the sentence
 
@@ -36,11 +36,23 @@ sentence) — but the "could not check" arms were never covered, on either side.
 before a real-link **rename** collision, the real one is suppressed entirely — the user is told the
 guard could not check, and never told that a destination is genuinely a link.
 
-**After CPE-1928 this loses the remedy as well as the sentence.** The shared remedy
-(*"remove the link first if that is what you meant"*) is hoisted out and rendered once, driven by
-`sawLinkHazard`; a suppressed link hazard no longer contributes it. Before that PR the whole
-explanation was already being dropped, so this is a sharpening rather than a new defect — but it is
-the actionable half that is now missing.
+**This is NOT sharpened by CPE-1928 — it is exactly as bad as it always was.** That PR's author and
+the Foreman both believed the hoisted remedy made the suppression worse; PR #1056's Reviewer measured
+every suppression ordering on both trees and disproved it:
+
+    rename-unknown before rename-link (same bucket)  remedy rendered 0x pre-PR, 0x post-PR
+    convert-unknown before convert-link              remedy rendered 0x pre-PR, 0x post-PR
+    rename-link before rename-unknown                remedy rendered 1x both
+    suppression + a live link in the other bucket    remedy rendered 1x both
+
+The *mechanism* did change — `sawLinkHazard` is now computed from the bucket's **representative**
+only, so a suppressed link hazard can no longer raise the shared remedy line. The *outcome* did not,
+because on `main` the suppressed link message carried its remedy **inside itself** and was dropped
+along with it. In these cases the representative is the `could not check` arm, which never had a
+remedy clause at all.
+
+**So do not go looking for a regression here.** The defect is that the suppression drops the entire
+link explanation, remedy included, and it did so before CPE-1928 too.
 
 ## Acceptance criteria
 
@@ -71,3 +83,25 @@ bucketed at all, which is past that ticket's XS).
 Related: **CPE-1891** (the no-path property and the collision dialog), **CPE-1928** (the prose split
 and the derivation guard, PR #1056), **CPE-1933** (a frontend parse of a backend string with nothing
 binding them — the shape the derivation guard exists to close).
+
+## One-line hardening for the derivation guard, from the same review
+
+PR #1056's Reviewer attacked CPE-1928's `format!`-literal walker with ten adversarial sources. Nine
+failed **loudly** — `{{ }}` escapes, a `//` between `format!(` and the literal, reordered match arms,
+a raw string, a second earlier `format!` in the same fn, and a renamed or missing fn (which throws at
+**collection**, so the suite cannot run at all, let alone pass with zero comparisons).
+
+**One constructible silent pass survives.** If a comment sits between `pub fn classify_symlink_slot`
+and the real `format!(`, contains the text `format!(`, and quotes the *old* message — as a block
+comment or a single `//` line — the walker anchors on the comment and pins **that** while the shipped
+literal has drifted. It needs a self-inflicted in-body "this used to read `format!(…)`" comment,
+which does not exist today. (Doc comments *above* the fn are safe: the scan starts at the signature.
+Multi-line `///`/`//` mostly self-defeat because the per-line prefix leaks into the derived string
+and reds — luck, not design.)
+
+**The fix is one line**, and the Reviewer measured it as strictly better on every probe including the
+arm reorder — anchor on the arm rather than on "the first `format!` after the fn":
+
+    const fmt = src.indexOf("Ok(true) => Some(format!(", fnStart);
+
+Take it when extending the guard to the `could not check` arms.
