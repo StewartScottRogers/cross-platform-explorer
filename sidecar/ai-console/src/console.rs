@@ -1338,7 +1338,11 @@ impl ConsoleState {
     }
 
     /// `POST /api/catalog/refresh` → ask the host to fetch + apply the signed catalog bundle
-    /// (CPE-376), then hot-reload if anything changed. Returns `{ indexOk, applied, agents }`.
+    /// (CPE-376), then hot-reload if anything changed. Returns
+    /// `{ indexOk, applied, agents, staleRejected, integrityRejected, offline, error }` — the last
+    /// four exist purely so the launcher can tell "genuinely up to date" apart from "the pipeline is
+    /// stale", "the pipeline published a corrupt/mis-signed catalog", and "the pipeline is
+    /// dead/unreachable", instead of reporting all of them as the same reassuring message (CPE-1911).
     fn handle_catalog_refresh(&self) -> Response {
         let pinned = self.presets.load().pinned_agents;
         match self.dialogs.fetch_catalog(&pinned) {
@@ -1349,8 +1353,16 @@ impl ConsoleState {
                     self.registry.read().unwrap().len()
                 };
                 Response::json(
-                    json!({ "indexOk": res.index_ok, "applied": res.applied, "agents": agents })
-                        .to_string(),
+                    json!({
+                        "indexOk": res.index_ok,
+                        "applied": res.applied,
+                        "agents": agents,
+                        "staleRejected": res.stale_rejected,
+                        "integrityRejected": res.integrity_rejected,
+                        "offline": res.offline,
+                        "error": res.error,
+                    })
+                    .to_string(),
                 )
             }
             Err(e) => bad(e),
@@ -2120,7 +2132,7 @@ mod tests {
             _tag: &str,
             _agents: &[String],
         ) -> Result<crate::broker_client::CatalogFetch, String> {
-            Ok(crate::broker_client::CatalogFetch { index_ok: true, applied: 1 })
+            Ok(crate::broker_client::CatalogFetch { index_ok: true, applied: 1, ..Default::default() })
         }
         fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
             // No snapshot from this stub → /api/models falls back to the live `list_models` above.
@@ -2421,6 +2433,90 @@ mod tests {
         assert_eq!(v["valid"], false);
         assert_eq!(v["detail"], "Provider rejected this key (unauthorized).");
         assert!(stub.called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A [`HostDialogs`] whose `fetch_catalog` returns a scripted [`crate::broker_client::CatalogFetch`]
+    /// with every field populated — used to pin the `/api/catalog/refresh` route's JSON serialization
+    /// end-to-end (CPE-1911 review round 2: the tests up to this point only exercised the launcher's
+    /// jsdom mock, never the actual Rust struct → JSON pipe; a field silently dropped anywhere in
+    /// `handle_catalog_refresh` or `CatalogFetch` went completely unnoticed).
+    struct CatalogRefreshDialogs {
+        result: crate::broker_client::CatalogFetch,
+    }
+    impl crate::broker_client::HostDialogs for CatalogRefreshDialogs {
+        fn pick_folder(&self, _start: Option<&str>) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn verify_key(&self, _p: &str, _k: &str) -> Result<crate::broker_client::KeyVerdict, String> {
+            Err("n/a".into())
+        }
+        fn fetch_catalog(&self, _pinned: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
+            Ok(self.result.clone())
+        }
+        fn list_models(&self, _reseller: &str, _token: Option<&str>) -> Result<Vec<crate::model_catalog::Model>, String> {
+            Err("n/a".into())
+        }
+        fn list_catalog_versions(&self) -> Result<Vec<crate::broker_client::CatalogVersion>, String> {
+            Err("n/a".into())
+        }
+        fn rollback_catalog(&self, _tag: &str, _agents: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
+            Err("n/a".into())
+        }
+        fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
+            Err("n/a".into())
+        }
+    }
+
+    /// Pins the pipe CPE-1911 round 2 found untested: `CatalogFetch`'s `stale_rejected` /
+    /// `integrity_rejected` / `offline` / `error` fields must reach the `/api/catalog/refresh`
+    /// response JSON verbatim, not just `indexOk`/`applied`. Two shapes, since a real host response
+    /// is never all of these truthy at once: a "rejections happened" shape and an "offline+error"
+    /// shape (mutually exclusive in practice, both wired through the same JSON, so both must parse).
+    #[test]
+    fn catalog_refresh_route_forwards_the_full_rejection_and_error_breakdown() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let post = |dialogs: crate::broker_client::CatalogFetch| {
+            let registry = AgentRegistry::load_from_dirs(std::slice::from_ref(&dir));
+            let st = ConsoleState::with_backends(
+                registry,
+                "/repo".into(),
+                Arc::new(crate::broker_client::MemSecrets::default()),
+                Arc::new(crate::presets::MemPresets::default()),
+                Arc::new(CatalogRefreshDialogs { result: dialogs }),
+                Arc::new(crate::history::MemHistory::default()),
+            );
+            let r = route(&st, &Request { method: "POST".into(), path: "/api/catalog/refresh".into(), ..Default::default() });
+            serde_json::from_slice::<Value>(&r.body).unwrap()
+        };
+
+        // Shape 1: index verified, but rejections of both kinds happened (0 applied).
+        let v = post(crate::broker_client::CatalogFetch {
+            index_ok: true,
+            applied: 0,
+            stale_rejected: 2,
+            integrity_rejected: 3,
+            offline: false,
+            error: None,
+        });
+        assert_eq!(v["indexOk"], true);
+        assert_eq!(v["applied"], 0);
+        assert_eq!(v["staleRejected"], 2);
+        assert_eq!(v["integrityRejected"], 3);
+        assert_eq!(v["offline"], false);
+        assert!(v["error"].is_null());
+
+        // Shape 2: never even fetched — offline, with the host's error text carried too.
+        let v = post(crate::broker_client::CatalogFetch {
+            index_ok: false,
+            applied: 0,
+            stale_rejected: 0,
+            integrity_rejected: 0,
+            offline: true,
+            error: Some("fetch failed: status code 404".into()),
+        });
+        assert_eq!(v["indexOk"], false);
+        assert_eq!(v["offline"], true);
+        assert_eq!(v["error"], "fetch failed: status code 404");
     }
 
     #[test]
