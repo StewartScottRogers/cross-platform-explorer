@@ -159,3 +159,83 @@ gap that can actually reach a user.
      plain channel already made, now applied symmetrically.
   6. `npm run check` clean. Did not touch `.github/workflows/ci.yml` (a sibling worker's file per the
      dispatch note) or any signing-key material.
+- **2026-08-27 USMST** — Round 2, independent Security Auditor + Reviewer passes on PR #1039. Both
+  confirmed the round-1 fix itself is correct and load-bearing (ran the real invocation against the
+  live contaminated `v0.57.69-sidecar` manifest, got exit 1 naming exactly the five known-bad platform
+  keys; confirmed the job can't pass vacuously in six traced failure modes), but found the round-1
+  coverage RATCHET (`channelPurityCoverage.test.ts`) was itself under-guarded in five distinct ways,
+  and that the AC #4 decision rested on a factual error. All fixed on the same branch:
+  1. **H2/H3 (job wiring can be silently disabled):** the round-1 detector matched only `step.run`
+     TEXT — hard-disabling the whole job (`if: ${{ false }}`), DELETING its `if:` line outright
+     (restoring the exact bare-`needs:` silent-skip shape CPE-1872/CPE-1893 exist to prevent), or
+     neutering the step's own `if:` all still passed 5/5. Fixed with `isActuallyWired()`: every
+     coverage assertion now checks the job's `if:` is EXACTLY `${{ !cancelled() }}`, `needs:` names
+     the real build job, and the step's own `if:` is the real secret gate.
+  2. **H1 (flag matched inside a shell comment):** commenting out `--expect-channel` (a realistic
+     "unblock a red release" edit) still counted as coverage, and the binary then falls back to a
+     productName-derived `plain` expectation — an all-plain manifest under a `-sidecar` tag would
+     pass. Fixed by extracting `stripShellComment`/`logicalLines` out of `releaseHangHardening.test.ts`
+     into `src/lib/preview/shellScriptLines.ts` (CPE-1849's already-reviewed comment/continuation
+     handling) and using it here instead of a second hand-rolled stripper.
+  3. **H4 + extension (undercounted variants):** the enum-variant parser only matched a bare
+     `Ident,`, so `Beta(String),` OR `Beta = 3,` both vanished from the canonical list silently.
+     Fixed with a depth-aware top-level-comma splitter (`splitTopLevelVariantSegments`) that extracts
+     every variant's identifier regardless of payload/discriminant, asserting the parsed segment
+     count equals the enum body's real non-comment/non-attribute line count.
+  4. **The "false RED" trap:** reading the Rust IDENTIFIER's spelling meant a pure, harmless rename
+     (`Channel::Sidecar` → `Channel::SidecarBuild`; `FromStr` still accepts `"sidecar"`, nothing
+     breaks) made the ratchet go red and recommend `--expect-channel sidecarbuild` — a value the
+     binary actually REJECTS, which would have broken a real release. Fixed at the root in BOTH
+     languages: `crates/updater-verify/src/lib.rs` gained `Channel::ALL` + an `exhaustiveness_guard`
+     match (no wildcard arm — a new variant fails to COMPILE until handled) +
+     `channel_display_fromstr_round_trip_covers_every_variant` (proves Display's output always parses
+     back via FromStr, for every variant, regardless of identifier spelling); the TS test now reads
+     `Display`'s string LITERALS via `readCanonicalChannelTokens()`, not the Rust identifiers, so a
+     pure rename is a non-event there too.
+  5. **R2:** added `timeout-minutes` (10 for the download step, 8 for the verify step) to
+     `verify-published-manifest-sidecar` — this new job had none of the CPE-1824 hang hardening the
+     rest of `release-sidecar.yml` carries. `release.yml`'s identical sibling gap on
+     `verify-published-manifest` is pre-existing and deliberately left untouched (outside this
+     ticket's diff surface, not something this PR introduced).
+  6. **§4, the AC #4 decision was factually wrong, now corrected:** round 1 claimed "no `/run`-style
+     automated sidecar publish flow to wire it into". Wrong — `run.md` step 1a always installs the
+     *latest* release regardless of channel, and this project ships sidecar-only, so `/run` *is* the
+     de facto sidecar publish path; it only failed safe by accident (a hard-coded `release.yml`
+     lookup that throws on a `-sidecar` tag instead of silently passing). Fixed by WIRING it rather
+     than filing a follow-up: `release-sidecar.yml` now sets
+     `run-name: "Release (sidecar) ${{ inputs.tag }}"` (a `workflow_dispatch` run has no tag-bearing
+     `headBranch` to match on otherwise — unlike `release.yml`'s tag-triggered runs), and `run.md`
+     step 1b-ii branches on the `-sidecar` tag suffix, resolving the run via `displayTitle` and
+     checking `verify-published-manifest-sidecar`. Corrected the false premise in `RELEASING.md` and
+     this ticket's own round-1 Work Log entry (left uncorrected in place above, superseded here) — a
+     manual `gh release edit --draft=false` that bypasses `/run` AND `RELEASING.md`'s own instructions
+     entirely is still unguarded, same residual limitation the plain channel's gate always had.
+  - **Red-then-green, every finding, each demonstrated interactively and reverted via `git checkout`
+    before landing the real fix (fix committed first, then probed, per instruction):**
+    - Job `if: ${{ false }}` → RED (`no ACTUALLY-WIRED ... guards: ["sidecar"]`) → reverted → GREEN.
+    - Job `if:` line deleted entirely → RED (same message) → reverted → GREEN.
+    - Step `if: steps.sig.outputs.has == 'true'` neutered to `if: false` → RED → reverted → GREEN.
+    - `--expect-channel sidecar` commented out (reviewer's exact scenario, a `# TODO: re-enable...`
+      line plus the trailing `\` removed) → RED → reverted → GREEN.
+    - `needs: [create-release, release-sidecar]` → `[create-release]` (build job dropped) → RED →
+      reverted → GREEN.
+    - `Beta(String),` added to `Channel` with no `Display` arm → RED (loud "no Display arm" failure,
+      whole suite errors rather than silently passing). With a matching `Display` arm added too → RED
+      at the union-coverage check instead, correctly naming `"beta"` as unguarded — this ALSO caught a
+      real bug in my own regex (it didn't tolerate a tuple-variant binding pattern between the
+      identifier and `=>`, so a legitimately-written arm still read as missing); fixed the regex,
+      re-ran, got the correct RED. Reverted → GREEN.
+    - `Beta = 3,` (discriminant variant) → same RED/RED/GREEN sequence as `Beta(String)`.
+    - `Channel::Sidecar` → `Channel::SidecarBuild` (pure rename, real Rust identifiers only, no string
+      literals touched) → Rust: `cargo test` 70/70 still green (round-trip test proves `Display`/
+      `FromStr` stay consistent) → TS: **stayed GREEN** (6/6) — the fix working as intended. Also ran
+      the actual round-1 (pre-fix) test file (extracted via `git show c75c99c9:...` into a throwaway
+      `src/lib/__round1_scratch_*.test.ts`, deleted after) against this same rename: it went RED
+      exactly as the Reviewer predicted (`expected [ 'sidecarbuild', 'plain' ] to include 'sidecar'`),
+      concretely proving the trap existed before this fix and is closed after it.
+  - Full validation after all fixes: `cargo test --locked` in `crates/updater-verify` 70/70 green
+    (46 lib + 21 release_guard + 2 pin-guard + 1 platform-config), `cargo clippy --all-targets -- -D
+    warnings` clean, `npm run check` clean, full `vitest run` 4609/4611 green (the 2 failures are a
+    pre-existing `ci.yml` `msrv:`-job gap on `main` itself — confirmed via
+    `git diff --stat origin/main -- .github/workflows/ci.yml` showing zero diff, untouched by this
+    branch, a sibling worker's file per the original dispatch note).
