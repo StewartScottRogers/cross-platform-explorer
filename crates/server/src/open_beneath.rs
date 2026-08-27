@@ -421,6 +421,17 @@ mod sys {
     /// (`0x9000001A`) has the surrogate bit **clear** and the directory bit **set** — the same shape as
     /// the `0x10001234` row — so OneDrive Files-On-Demand *directory* placeholders are genuinely
     /// unblocked rather than merely believed to be.
+    /// # Cost, stated accurately rather than by analogy with the leaf
+    ///
+    /// This runs on **every** directory component, unconditionally, and the shared helper performs the
+    /// `FILE_ATTRIBUTE_REPARSE_POINT` check *internally* — returning `Some(false)` for an ordinary
+    /// directory. So the ordinary-case cost here is **one extra `GetFileInformationByHandleEx` per
+    /// directory component**, not zero. The leaf guard's "only asked when the reparse bit is already
+    /// set" gating is real, but it is the leaf's, and does not apply to this call site.
+    ///
+    /// Nothing needs re-measuring on account of that: [`tick`] fires before the call, so the 5-and-6
+    /// syscalls-per-file figures in `cpe_1896_report_the_walk_syscall_cost` already count it, and
+    /// AC5's numbers stand as published.
     fn name_surrogate_at(dir: &File) -> bool {
         // `unwrap_or(false)` — fail OPEN. See the shared helper's doc for why this caller takes the
         // opposite default from the final-component guard in `fsutil`.

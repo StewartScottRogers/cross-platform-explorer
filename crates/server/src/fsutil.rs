@@ -1498,31 +1498,6 @@ pub(crate) fn copy_file_onto_destination_handle(
 
     let crate::open_beneath::Opened { file: mut w, created } = open_dst()?;
 
-    // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
-    // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.
-    // Copied in shape from `batch_media::open_output_verified`, and for its reason.
-    //
-    // **The two `remove_file(dst)` cleanups below are the only PATH writes left in this function, and
-    // that is worth naming** (CPE-1896 PR #1043, N3), since the whole thesis of the CPE-1896 caller is
-    // that the destination is addressed by handle and never by path. They are bounded and deliberate:
-    // they run only on `created`, i.e. a name **this call** claimed with an exclusive create moments
-    // ago and is now abandoning, so the worst a racing swap achieves is that the cleanup unlinks
-    // something else — it cannot make this function *write* anywhere, and the entry is refused either
-    // way. Doing it properly needs a handle-relative unlink (`FileDispositionInfo` on Windows,
-    // `unlinkat` on the parent fd on Unix), which means threading the parent handle out of
-    // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
-    if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        drop(w);
-        if created {
-            let _ = std::fs::remove_file(dst);
-        }
-        return Err(format!(
-            "{}: this name is a link, and {} never writes through one — a link's target can be \
-             re-pointed after any check. Nothing was written for this entry",
-            dst.display(),
-            wording.verb
-        ));
-    }
 
     // THE authority on Windows, where a junction is a reparse point that `is_symlink` above may or may
     // not report depending on its tag: `GetFileInformationByHandle` on the handle we are about to write
@@ -1558,18 +1533,41 @@ pub(crate) fn copy_file_onto_destination_handle(
         // was therefore turning "back up a folder inside OneDrive" into a per-file refusal reading
         // "this name is a reparse point … never writes through one".
         //
-        // `handle_is_name_surrogate` is asked **only** when the reparse bit is already set, so the
+        // `reparse_name_surrogate` is asked **only** when the reparse bit is already set, so the
         // ordinary case pays nothing, and it **fails closed** — an unreadable tag counts as a surrogate.
         // The security property is unchanged: a non-surrogate tag does not redirect the name, so the
         // bytes still land in the object this handle names, which is the only thing this guard ever
         // claimed. The symlink/junction/mount-point cases it exists for all carry the bit.
         //
         // Measured (CPE-1896 PR #1043) with a synthetic non-Microsoft GUID reparse point planted by
-        // `FSCTL_SET_REPARSE_POINT` — refused before this change, written and read back after. **Not**
-        // measured against a live OneDrive placeholder: that has a filter driver in the path and no CI
-        // runner has one. What is measured is that the tag discriminates; what is inferred from
-        // Microsoft's documented meaning of the bit is that the placeholder behaves like the synthetic
-        // one. Recorded rather than implied.
+        // `FSCTL_SET_REPARSE_POINT` — refused before this change, accepted after. The fixture and a
+        // real placeholder differ in one structural way (no filter driver owns the synthetic tag), so
+        // the two halves of the claim are split rather than averaged:
+        //
+        // **MEASURED, and the absent driver cannot affect it: the classification.**
+        // `GetFileInformationByHandleEx(FileAttributeTagInfo)` is serviced by the **filesystem**, not by
+        // the tag's owner — the tag and its surrogate bit live in the NTFS reparse data and come back
+        // identically whether or not `cldflt` is loaded. Cloud tags are N=0 by construction. So "this
+        // guard classifies a real placeholder as non-surrogate" is established, not inferred.
+        //
+        // **NOT ESTABLISHED by this fixture: that the resulting file is correct.** Whether a write
+        // through a `FILE_OPEN_REPARSE_POINT` handle onto a *live dehydrated* placeholder produces a
+        // properly hydrated file is untested, and the fixture gives three reasons not to assume it:
+        //   1. the copy reports `Ok(16)` and the object is then **unopenable by ordinary path**
+        //      (`ERROR_CANT_ACCESS_FILE`), so the fixture cannot tell "wrote a correct file" from
+        //      "wrote into an unreadable object" — and on the fixture it is demonstrably the latter;
+        //   2. attributes afterwards are `0x420` — **the reparse bit survives** `set_len(0)` and the
+        //      whole copy — and `FILE_OPEN_REPARSE_POINT` exists precisely to tell the owning filter
+        //      *not* to hydrate, so on a real placeholder this could leave an object OneDrive still
+        //      believes is a placeholder sitting over replaced data;
+        //   3. `backup::landed_inside` re-opens by ordinary path, which **fails on the fixture and
+        //      would succeed on a real placeholder** — so even the final verdict diverges, in opposite
+        //      directions.
+        // None of that touches containment: the bytes cannot leave the destination either way, and the
+        // prior behaviour refused *every* dehydrated file, so this is better in expectation. But it is
+        // not a demonstration that backups into OneDrive work, and `src/docs/safety-undo.md` says so to
+        // the user rather than claiming the win. An attended check on a real Files-On-Demand file is
+        // tracked separately.
         let why = if facts.is_reparse_point && crate::batch_media::reparse_name_surrogate(&w).unwrap_or(true) {
             Some(format!(
                 "this name is a reparse point that stands in for another name (a symlink, junction or \
@@ -1607,6 +1605,62 @@ pub(crate) fn copy_file_onto_destination_handle(
                 wording.remedy
             ));
         }
+    }
+
+    // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
+    // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.
+    // Copied in shape from `batch_media::open_output_verified`, and for its reason.
+    //
+    // **It now runs AFTER the handle checks, and the reorder is the point of CPE-1896 round 4.** It
+    // used to run first, and that made the handle-based surrogate check below **unreachable for every
+    // refusal**: `is_symlink` tracks the same name-surrogate bit (measured, below), so every surrogate
+    // was refused *here*, by a path question, and the tag check only ever got to say "allow". That is
+    // why the Security Auditor could disable the tag refusal outright and watch all 2404 tests stay
+    // green, and why a fixture "refused by the tag check and nothing else" cannot be built while this
+    // check goes first — the two guards answer on the same bit.
+    //
+    // Putting the handle question first matches what this whole function is for: `w` is the object the
+    // bytes will enter, and nothing can substitute it after the open, whereas `dst` is a name that can.
+    // The path check keeps its job as the **second** net — see the paragraph below for what it still
+    // independently catches — and on Unix it remains the *only* net, because `is_reparse_point` is
+    // always false there, so the reorder changes nothing at all on Linux or macOS. What changes on
+    // Windows is only which guard reports a surrogate, and therefore which one a test can pin.
+    //
+    // **On Windows this appears to be more than belt-and-braces, measured in CPE-1896 round 4** (PR
+    // #1043 Security Auditor). `std`'s `FileType::is_symlink` **tracked the name-surrogate bit** across
+    // three synthetic tags on one Windows build: `true` for `0x2000_1896`, `false` for `0x0000_1896`
+    // and `0x1000_1896`. That is consistent with it keying on the bit rather than on the two
+    // well-known tags, and it explains why forcing `reparse_name_surrogate` to a lying `Some(false)`
+    // still let nothing through — a real symlink and a synthetic surrogate were both refused *here*.
+    //
+    // **The mechanism is inferred from that pattern, not read out of the OS**, and std promises
+    // nothing: a future release could narrow `is_symlink` to the two documented tags without breaking
+    // its contract, and this second net would silently disappear. Since the leaf guard's fail-closed
+    // argument leans on it, it is pinned by a test rather than left as a comment —
+    // `cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit`, which turns the inference into a
+    // tripwire. Do not delete this line as redundant with the tag check below: the two are
+    // independent, and only one of them is a path question.
+    //
+    // **The two `remove_file(dst)` cleanups below are the only PATH writes left in this function, and
+    // that is worth naming** (CPE-1896 PR #1043, N3), since the whole thesis of the CPE-1896 caller is
+    // that the destination is addressed by handle and never by path. They are bounded and deliberate:
+    // they run only on `created`, i.e. a name **this call** claimed with an exclusive create moments
+    // ago and is now abandoning, so the worst a racing swap achieves is that the cleanup unlinks
+    // something else — it cannot make this function *write* anywhere, and the entry is refused either
+    // way. Doing it properly needs a handle-relative unlink (`FileDispositionInfo` on Windows,
+    // `unlinkat` on the parent fd on Unix), which means threading the parent handle out of
+    // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
+    if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        drop(w);
+        if created {
+            let _ = std::fs::remove_file(dst);
+        }
+        return Err(format!(
+            "{}: this name is a link, and {} never writes through one — a link's target can be \
+             re-pointed after any check. Nothing was written for this entry",
+            dst.display(),
+            wording.verb
+        ));
     }
 
     // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
@@ -4612,6 +4666,12 @@ pub fn make_dir_link(target: &Path, link: &Path) -> bool {
 /// - bit 29 (`0x2000_0000`) = `IO_REPARSE_TAG_NAME_SURROGATE`, the bit under test;
 /// - bit 28 (`0x1000_0000`) = "may be set on a directory" — **required** for a directory, and NT
 ///   refuses the descent without it regardless of what any guard decides.
+///
+/// **One combination was observed not to stage, cause undetermined:** surrogate + directory bits
+/// together (`0x3000_1896`) returned `false`, while the other three combinations of those two bits
+/// staged fine. Recorded as what was seen, not as a rule — nobody established *why* Windows refused
+/// it — so a future test should not be written expecting that combination to work, nor expecting the
+/// refusal to be guaranteed.
 ///
 /// Windows-only: reparse points do not exist elsewhere, and every caller is `#[cfg(windows)]`.
 /// Returns whether the attribute really landed, so a `false` is a skip a test must announce rather
@@ -8651,21 +8711,95 @@ mod tests {
             "the bytes must actually land in the object, not merely be reported as written"
         );
 
-        // The surrogate half, same run: a symlink at the final component is still refused.
-        let victim = d.path().join("victim.txt");
-        std::fs::write(&victim, b"USER DATA").unwrap();
-        let link = d.path().join("link.txt");
-        if make_file_link(&victim, &link) {
-            let refused = copy_file_onto_no_follow(&src, &link);
-            assert!(
-                refused.is_err(),
-                "a symlink IS a name surrogate and must still be refused — the two cases have to \
-                 diverge, or the tag check is doing nothing: {refused:?}"
-            );
+        // The surrogate half, same run, differing from the fixture above in **exactly one bit**:
+        // `0x2000_1234` is the same non-Microsoft, file-shaped tag as `0x0000_1234` with
+        // `IO_REPARSE_TAG_NAME_SURROGATE` set. Nothing else about the two destinations differs, which
+        // is the only arrangement that lets this test claim the *tag* is what decides.
+        //
+        // **It used to be a symlink, and that version proved nothing** (PR #1043 round 4, found by
+        // sabotage rather than by reading). A symlink at the final component is refused ~50 lines
+        // earlier by the unrelated `symlink_metadata(dst).is_symlink()` path check, so the two halves
+        // went on "diverging" even with `reparse_name_surrogate` hard-wired to `false` — precisely the
+        // condition this test's own doc says it exists to exclude. Measured: with the surrogate refusal
+        // disabled outright (`if false && facts.is_reparse_point`) the old test passed and the whole
+        // 2404-test lib suite stayed green, so the leaf refusal had **zero** coverage anywhere in the
+        // crate. The old leg was also wrapped in `if make_file_link(...)`, which is
+        // `require_staged(..., supported_here = false)` on Windows and therefore skipped **silently**
+        // on a runner without `SeCreateSymbolicLinkPrivilege` — no `skip_notice!`, unlike the
+        // non-surrogate half above it. The GUID fixture needs no privilege, so this half cannot vanish.
+        // (The symlink-at-the-leaf case itself is covered by
+        // `backup::cpe_1879_a_symlinked_backup_destination_is_never_written_through`.)
+        const SURROGATE_FILE_TAG: u32 = 0x2000_1234;
+        let surrogate = d.path().join("surrogate.txt");
+        std::fs::write(&surrogate, b"UNTOUCHED").unwrap();
+        assert!(
+            make_guid_reparse_point(&surrogate, SURROGATE_FILE_TAG, false),
+            "the surrogate fixture must plant: the non-surrogate one above already planted on this \
+             same volume moments ago, so a failure here is a real defect, not an unsupported filesystem"
+        );
+        let refused = copy_file_onto_no_follow(&src, &surrogate);
+        assert!(
+            refused.is_err(),
+            "a reparse point with the NAME SURROGATE bit set must be refused. It differs from the \
+             destination written through above by exactly that one bit, so if this passes, the tag \
+             check is doing nothing: {refused:?}"
+        );
+        let why = refused.unwrap_err();
+        assert!(
+            why.contains("stands in for another name"),
+            "and the SURROGATE refusal must be the one that fired — not the symlink path check and \
+             not the directory check, either of which would make this assertion pass for free: {why}"
+        );
+        let mut untouched = String::new();
+        std::io::Read::read_to_string(
+            &mut crate::batch_media::open_existing_no_follow_read(&surrogate).unwrap(),
+            &mut untouched,
+        )
+        .unwrap();
+        assert_eq!(untouched, "UNTOUCHED", "HARM: the refused copy wrote its bytes anyway");
+    }
+
+    /// Pin an **inferred** property of `std` that this module's leaf guard quietly leans on: that
+    /// `FileType::is_symlink` on Windows tracks the reparse tag's **name-surrogate bit** rather than
+    /// the two well-known tags.
+    ///
+    /// Why it earns a test rather than a comment. The `symlink_metadata(dst).is_symlink()` refusal in
+    /// [`copy_file_onto_destination_handle`] is what still caught a surrogate when CPE-1896's Security
+    /// Auditor forced `reparse_name_surrogate` to a lying `Some(false)` — i.e. it is a genuine
+    /// independent second net, not decoration. But that behaviour was established from **three data
+    /// points on one Windows build**, and std promises nothing about it: narrowing `is_symlink` to
+    /// `IO_REPARSE_TAG_SYMLINK`/`MOUNT_POINT` would break no contract and would silently remove the
+    /// net. A toolchain bump could do it between one CI run and the next, with no other test noticing.
+    ///
+    /// So this asserts the property directly, on synthetic tags that differ **only** in the surrogate
+    /// bit. If a future `std` changes, this reds and names what was lost — which is the whole point of
+    /// pinning an inference instead of writing it down.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit() {
+        let d = scratch("cpe1896-is-symlink-pin");
+        // Identical non-Microsoft tags apart from bit 29, `IO_REPARSE_TAG_NAME_SURROGATE`.
+        for (tag, expected) in [(0x2000_1896_u32, true), (0x0000_1896_u32, false)] {
+            let f = d.path().join(format!("t{tag:08x}.bin"));
+            std::fs::write(&f, b"x").unwrap();
+            if !make_guid_reparse_point(&f, tag, false) {
+                crate::skip_notice!(
+                    "SKIPPING cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit: could not plant \
+                     tag {tag:#010x} on this volume. NOTHING on this run pinned std's is_symlink \
+                     behaviour, which the leaf guard's second net depends on."
+                );
+                return;
+            }
+            let got = std::fs::symlink_metadata(&f).unwrap().file_type().is_symlink();
             assert_eq!(
-                std::fs::read(&victim).unwrap(),
-                b"USER DATA",
-                "HARM: the copy wrote through a symlink at the final component"
+                got, expected,
+                "std's FileType::is_symlink no longer tracks the name-surrogate bit for tag \
+                 {tag:#010x} (expected {expected}, got {got}). That bit is what makes \
+                 `copy_file_onto_destination_handle`'s `symlink_metadata` refusal an INDEPENDENT \
+                 second net behind `reparse_name_surrogate` — the thing that still refused a surrogate \
+                 when that helper was forced to lie. If std has narrowed this to the two well-known \
+                 tags, the leaf now has one net where it had two: re-read that guard before changing \
+                 this expectation."
             );
         }
     }

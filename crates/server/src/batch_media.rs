@@ -2109,6 +2109,15 @@ pub(crate) const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
 ///   check buys is naming the link one component earlier.
 ///
 /// Putting a default in here would silently give one of those two the wrong one.
+///
+/// **Both defaults rest on reading, not on measurement, and in a module this heavily measured that is
+/// worth saying out loud.** The `None` arm is untestable by construction: no fixture can make
+/// `GetFileInformationByHandleEx` fail on a handle that has just been opened successfully, which is the
+/// only state either caller reaches it from. Everything either caller does with a `Some` is pinned by
+/// sabotage-verified tests; the `None` arm has no test and cannot have one, so it is argued rather than
+/// demonstrated. If it ever becomes reachable in the field — a network redirector that opens a handle
+/// and then refuses to describe it — the leaf's refusal is the safe direction and the walk's allow is
+/// backstopped by NT, which is the whole reason the split is where it is.
 #[cfg(windows)]
 pub(crate) fn reparse_name_surrogate(file: &std::fs::File) -> Option<bool> {
     use std::os::windows::io::AsRawHandle;

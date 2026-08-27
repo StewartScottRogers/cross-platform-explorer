@@ -104,10 +104,16 @@ Three details are worth knowing, because they are deliberate:
     failures rather than copied through it. Previously they copied. This is deliberate: the app cannot
     tell your deliberate shortcut from one someone else planted, and following it is exactly how files
     ended up outside the destination. If you rely on one, back up the real folder it points at instead.
-    Cloud-placeholder folders are **not** affected — OneDrive Files-On-Demand, deduplication and
-    similar are a different kind of marker, and the app checks for the specific "this name stands for
-    another name" flag rather than for any marker at all, so a destination inside OneDrive keeps
-    working.
+    Cloud-placeholder **folders** are not affected: OneDrive Files-On-Demand, deduplication and similar
+    put a different kind of marker on a folder, and the app checks for the specific "this name stands
+    for another name" flag rather than for any marker at all. That much is tested directly.
+    **Backing up into a OneDrive folder is not yet confirmed end to end**, and the honest state is worth
+    knowing if that is your setup: individual *files* that OneDrive has offloaded to the cloud
+    ("dehydrated") used to be refused outright, and are now accepted — which is an improvement, because
+    previously every one of them failed — but whether the copy of such a file comes back correctly has
+    not been checked against real OneDrive, only against a stand-in. A check on a real
+    Files-On-Demand file is on the list. Nothing about this can put files **outside** the destination
+    you chose; the uncertainty is confined to whether a cloud-offloaded file inside it copies cleanly.
   - **The one thing it still cannot promise.** If someone with write access *renames one of your backup
     folders out of the backup destination* while the job is copying into it, the copy follows that
     folder — the app is writing into the folder itself, not into its name. On Windows this is not
