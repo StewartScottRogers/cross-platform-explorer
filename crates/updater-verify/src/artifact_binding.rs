@@ -42,15 +42,18 @@
 //!
 //! # The macOS naming exception (why "basename must contain the version" is not enough on its own)
 //!
-//! Tauri names the macOS updater artifact `<productName>.app.tar.gz` — **no version in the name**.
-//! Confirmed against this repo's own published releases (`v0.57.69-sidecar`):
-//!
+//! Tauri names the macOS updater artifact `<productName>.app.tar.gz` — **no version in the
+//! name**, and none in the SIGNED name either. Read off this repo's own published `.sig`
+//! assets (`v0.57.69-sidecar`), not assumed:
 //! ```text
-//! windows-x86_64        Cross-Platform.Explorer_0.57.69_x64_en-US.msi           <- versioned
-//! windows-x86_64-nsis Cross-Platform.Explorer_0.57.69_x64-setup.exe           <- versioned
-//! linux-x86_64          Cross-Platform.Explorer.Sidecar._0.57.69_amd64.AppImage <- versioned
-//! linux-x86_64-rpm Cross-Platform.Explorer.Sidecar.-0.57.69-1.x86_64.rpm   <- versioned
-//! darwin-aarch64        Cross-Platform.Explorer.Sidecar._aarch64.app.tar.gz     <- NOT versioned
+//! platform key         SIGNED name (the trusted comment's `file:` value)
+//! ------------------   ------------------------------------------------------------
+//! windows-x86_64       Cross-Platform Explorer_0.57.69_x64_en-US.msi        versioned
+//! windows-x86_64-nsis  Cross-Platform Explorer_0.57.69_x64-setup.exe        versioned
+//! linux-x86_64         Cross-Platform Explorer (Sidecar)_0.57.69_amd64.AppImage  versioned
+//! linux-x86_64-rpm     Cross-Platform Explorer (Sidecar)-0.57.69-1.x86_64.rpm    versioned
+//! darwin-aarch64       Cross-Platform Explorer (Sidecar).app.tar.gz     NOT versioned
+//! darwin-x86_64        Cross-Platform Explorer.app.tar.gz               NOT versioned
 //! ```
 //!
 //! So a blanket rule would break macOS on the first real release, and — checked against the real
@@ -238,6 +241,16 @@ pub fn platforms_with_wrong_extension_for_key(manifest_json: &str) -> Vec<(Strin
 /// The value can contain spaces (it is the *unsanitised* product name — note `Explorer (Sidecar)_`,
 /// which the uploaded asset name never carries), so the field is split on tabs, never whitespace.
 /// Returns `None` when there is no `file:` field at all.
+///
+/// **The literal tab is load-bearing, and that is a deliberate fragility.** If `tauri-bundler` ever
+/// emitted a space there instead, this returns `None`, every artifact fails
+/// [`SignedBindingFault::NoSignedFilename`], and the release goes red — loudly, on the first tag,
+/// rather than silently degrading to "no binding". That is the correct direction for a check whose
+/// whole job is refusing what it cannot verify, but it does mean a bundler change to the trusted
+/// comment's separator is a release-blocking event to be fixed here, not worked around. Splitting
+/// on whitespace instead would *look* more tolerant and would in fact be wrong: the real signed
+/// names contain spaces, so a whitespace split truncates `Cross-Platform Explorer (Sidecar)_…` at
+/// the first one.
 pub fn trusted_comment_file(trusted_comment: &str) -> Option<&str> {
     trusted_comment
         .split('\t')

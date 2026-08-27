@@ -24,19 +24,32 @@
 //! CPE-1923 added three more unconditional checks after an independent Security Auditor built
 //! hostile manifests that passed this binary at **EXIT 0 with genuine signatures**:
 //!
-//! 1. **artifact ↔ version binding** (the serious one) — every platform's asset must be an artifact
-//!    OF the version being shipped. A signature proves the bytes are ones we once signed; it says
-//!    nothing about which release they came from, so an actor with release-asset write and no
-//!    signing key could upload the old, vulnerable installer plus its genuine old signature to the
-//!    new tag and downgrade every auto-updating user. The decision lives in exactly one place,
-//!    [`cpe_updater_verify::platforms_not_bound_to_version`], along with the narrow macOS
-//!    `.app.tar.gz` naming exception it has to make.
-//! 2. **platform key → payload kind** — [`cpe_updater_verify::platforms_with_wrong_extension_for_key`].
-//! 3. the channel check above is now **anchored** to the real `productName` rather than testing for
-//!    the free substring "sidecar", which anyone who can name a release asset could add or omit.
+//! 1. **artifact ↔ release binding** (the serious one) — every platform's artifact must be one OF
+//!    the release being cut. A signature proves the bytes are ones we once signed; it says nothing
+//!    about which release they came from, so an actor with release-asset write and no signing key
+//!    could upload the old, vulnerable installer plus its genuine old signature to the new tag and
+//!    downgrade every auto-updating user.
+//! 2. **platform key → payload kind** — a `darwin-*` entry must not serve a Windows installer.
+//! 3. **release channel** — anchored to the real `productName` rather than testing for the free
+//!    substring "sidecar", which anyone who can name a release asset could add or omit.
 //!
-//! `productName` is consequently required in `--conf`; a config without one is refused rather than
-//! silently disarming check 3.
+//! **All three are decided from the artifact's SIGNED name, not the name it was uploaded under.**
+//! That distinction is the whole of the SEC-1/SEC-9 round: the uploaded name is attacker-chosen in
+//! this guard's own threat model, so the first versions of checks 1 and 2 were defeated by simply
+//! renaming the upload. `tauri-bundler` writes the original filename into the minisign trusted
+//! comment, and `minisign::verify` authenticates that comment against the global signature, so it
+//! is the one name here an asset-write attacker cannot pick.
+//!
+//! Check 1 therefore lives inside [`cpe_updater_verify::verify_update_manifest`] — a trusted comment
+//! is only trustworthy once its signature has verified — and is implemented by
+//! [`cpe_updater_verify::bind_signed_artifact`], which also carries the narrow macOS exception:
+//! Tauri signs the macOS artifact as `<productName>.app.tar.gz` with no version in the *signed*
+//! name either, so that one artifact kind has nothing to bind against (CPE-1942). Checks 2 and 3
+//! run twice: once over the uploaded basenames before download (cheap, and it gates what gets
+//! fetched) and again over the signed names afterwards, which is the pass that actually holds.
+//!
+//! `productName` is required in `--conf`; a config without one is refused rather than silently
+//! disarming check 3.
 //!
 //! Usage:
 //! ```text
@@ -505,6 +518,44 @@ fn main() -> ExitCode {
                      '{expected_channel}' channel: {}. The uploaded asset names claimed otherwise, \
                      so the upload was renamed -- do not publish this manifest.",
                     signed_channel_offenders.join("; ")
+                ));
+            }
+
+            // CPE-1923 finding 2, second pass -- SEC-9. The pre-download mapping check reads the
+            // uploaded basename, which is attacker-chosen, so the identical rename that defeated
+            // SEC-1 defeated this too: the current release's genuine, correctly-versioned,
+            // correctly-channelled Linux `.deb`, uploaded under `windows-x86_64` as
+            // `..._x64-setup.exe`, passed at EXIT 0. The version and channel passes above do not
+            // catch it -- both are satisfied, because the artifact really IS this release's build
+            // of this channel. It is simply the wrong OS's payload for the key serving it, and the
+            // users get denial-of-update: macOS clients downloading a Windows `.exe`, Windows
+            // clients downloading a Linux `.deb`.
+            //
+            // Same data and same shape as the channel pass above: ask the SIGNED name whether it is
+            // a payload this platform key's OS actually produces. An unrecognised key is skipped
+            // here rather than reported, because `bind_signed_artifact` has already failed the run
+            // for it (`UnknownPlatformKey`) -- reaching this line at all means every key resolved.
+            let signed_mapping_offenders: Vec<String> = verified
+                .signed_files
+                .iter()
+                .filter_map(|(platform, signed_file)| {
+                    let os = cpe_updater_verify::platform_os_of_key(platform)?;
+                    let lower = signed_file.to_ascii_lowercase();
+                    let allowed = os.allowed_extensions();
+                    if allowed.iter().any(|ext| lower.ends_with(ext)) {
+                        None
+                    } else {
+                        Some(format!(
+                            "{platform}: signed as `{signed_file}`, which is not a {os} updater payload (expected one of: {})",
+                            allowed.join(", ")
+                        ))
+                    }
+                })
+                .collect();
+            if !signed_mapping_offenders.is_empty() {
+                return fail(&format!(
+                    "PROPERTY FAILED -- platform/asset mapping, signed name (CPE-1923 finding 2): the signature's own trusted comment says these platform key(s) serve another OS's payload: {}. Every signature here can be genuine and current while every client downloads something it cannot run -- do not publish this manifest.",
+                    signed_mapping_offenders.join("; ")
                 ));
             }
             let n = served.get();

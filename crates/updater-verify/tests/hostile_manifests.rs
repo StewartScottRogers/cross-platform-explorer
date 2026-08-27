@@ -969,3 +969,145 @@ fn an_empty_version_in_the_config_is_refused_even_for_a_darwin_only_manifest() {
     );
     refuse(&run(dir.path(), &tag), &["EMPTY top-level `version`"]);
 }
+
+// ── SEC-9: the rename that defeated SEC-1 also defeated the platform/payload mapping ──────────
+//
+// The version binding was hardened onto the signed name and the channel check was given a
+// signed-name second pass — but the platform/payload mapping was left reading the uploaded
+// basename, which is attacker-chosen. So the identical rename walked through it.
+//
+// What makes these two probes nastier than the SEC-1 ones: every artifact is the CURRENT release's
+// genuine build, correctly versioned and correctly channelled. The version pass is satisfied. The
+// channel pass is satisfied. Only the platform key and the upload name are attacker-chosen, and the
+// result is denial-of-update — macOS clients downloading a Windows `.exe`, Windows clients
+// downloading a Linux `.deb`.
+//
+// The second probe's own log was the tell before the fix:
+//   verifying  : ...universal.app.tar.gz
+//   1 of 1 artifact(s) were SIGNED as version '0.57.70'
+//   OK: verified 1 of 1 platform signature(s)
+// The binary read the signed name `..._x64-setup.exe` for the version check and never asked whether
+// a Windows installer belongs under a macOS key.
+
+/// SEC-9 probe 1: this release's genuine Linux `.deb`, served to Windows clients.
+#[test]
+fn sec9_a_linux_deb_served_under_a_windows_key_is_refused() {
+    // Plain channel throughout, as the auditor ran it: the channel passes are SATISFIED, so the
+    // mapping check is the only thing that can refuse this.
+    let tag = format!("v{VERSION}");
+    let dir = scaffold(
+        PLAIN_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "windows-x86_64",
+            // Genuinely signed as the CURRENT version's Linux package...
+            format!("Cross-Platform Explorer_{VERSION}_amd64.deb"),
+            "this release's real linux .deb bytes",
+        )
+        // ...uploaded under a name whose extension a Windows key accepts.
+        .uploaded_as(format!("Cross-Platform.Explorer_{VERSION}_x64-setup.exe"))],
+    );
+    let stderr = refuse(
+        &run(dir.path(), &tag),
+        &["platform/asset mapping, signed name", "windows-x86_64"],
+    );
+    assert!(
+        stderr.contains(".deb"),
+        "the refusal must name what the artifact actually IS.\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("did NOT verify"),
+        "the signature is genuine and current here -- a signature-failure message would mean the \
+         fixture is not reproducing the probe.\n--- stderr ---\n{stderr}"
+    );
+}
+
+/// SEC-9 probe 2, the auditor's: this release's genuine Windows installer, served to macOS clients
+/// under the versionless macOS artifact name. Note this one ALSO tests the exemption's interaction
+/// — the upload name looks like the macOS artifact, but the signed name is a `.exe`, so the
+/// versionless exemption is correctly not granted and the mapping check is what refuses it.
+#[test]
+fn sec9_a_windows_installer_served_under_a_darwin_key_is_refused() {
+    let tag = format!("v{VERSION}");
+    let dir = scaffold(
+        PLAIN_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "darwin-aarch64",
+            format!("Cross-Platform Explorer_{VERSION}_x64-setup.exe"),
+            "this release's real windows installer bytes",
+        )
+        .uploaded_as("Cross-Platform.Explorer_universal.app.tar.gz")],
+    );
+    let stderr = refuse(&run(dir.path(), &tag), &["darwin-aarch64"]);
+    assert!(
+        stderr.contains("signed name"),
+        "the uploaded name is a valid darwin payload, so only the SIGNED-name pass can refuse \
+         this -- a refusal from the pre-download pass would mean the probe is not reproducing.\n\
+         --- stderr ---\n{stderr}"
+    );
+}
+
+/// The auditor's own control: the SAME fixture NOT renamed. The pre-download mapping check catches
+/// it, so this stays refused with or without the signed-name pass — which is exactly why it cannot
+/// stand in for the two probes above.
+#[test]
+fn sec9_control_the_same_mismatch_without_a_rename_is_still_refused() {
+    let tag = format!("v{VERSION}");
+    let dir = scaffold(
+        PLAIN_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[entry(
+            "darwin-aarch64",
+            format!("Cross-Platform.Explorer_{VERSION}_x64-setup.exe"),
+            "this release's real windows installer bytes",
+        )],
+    );
+    refuse(&run(dir.path(), &tag), &["platform/asset mapping", "darwin-aarch64"]);
+}
+
+/// And the control that keeps the new pass honest: a full, correctly-mapped release must still pass
+/// whole, including the versionless macOS artifact whose signed name carries no version.
+#[test]
+fn sec9_control_a_correctly_mapped_release_still_passes() {
+    let tag = format!("v{VERSION}-sidecar");
+    let dir = scaffold(
+        SIDECAR_PRODUCT,
+        VERSION,
+        VERSION,
+        &tag,
+        &[
+            entry(
+                "windows-x86_64",
+                format!("Cross-Platform.Explorer.Sidecar._{VERSION}_x64-setup.exe"),
+                "windows bytes",
+            )
+            .signed_as(format!("Cross-Platform Explorer (Sidecar)_{VERSION}_x64-setup.exe")),
+            entry(
+                "linux-x86_64-deb",
+                format!("Cross-Platform.Explorer.Sidecar._{VERSION}_amd64.deb"),
+                "linux bytes",
+            )
+            .signed_as(format!("Cross-Platform Explorer (Sidecar)_{VERSION}_amd64.deb")),
+            entry(
+                "linux-x86_64-rpm",
+                format!("Cross-Platform.Explorer.Sidecar.-{VERSION}-1.x86_64.rpm"),
+                "rpm bytes",
+            )
+            .signed_as(format!("Cross-Platform Explorer (Sidecar)-{VERSION}-1.x86_64.rpm")),
+            entry(
+                "darwin-aarch64",
+                "Cross-Platform.Explorer.Sidecar._aarch64.app.tar.gz",
+                "macos bytes",
+            )
+            .signed_as("Cross-Platform Explorer (Sidecar).app.tar.gz"),
+        ],
+    );
+    accept(&run(dir.path(), &tag), 4);
+}

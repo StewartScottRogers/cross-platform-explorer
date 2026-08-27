@@ -666,7 +666,7 @@ pub fn expected_channel_from_product_name(product_name: &str) -> Channel {
 ///
 /// `expected_product_name` is the `productName` from the same config `expected` was derived from.
 /// CPE-1923 finding 3 made it a parameter rather than leaving the check to a free `contains
-///("sidecar")` substring test: see [`channel_fault_of_asset_url`] for what that substring test
+///("sidecar")` substring test: see `channel_fault_of_asset_url` for what that substring test
 /// let through in both directions.
 pub fn platforms_with_mismatched_channel(
     manifest_json: &str,

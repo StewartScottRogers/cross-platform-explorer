@@ -253,11 +253,18 @@ platform key serving another OS's payload, and — the one an attacker with rele
 signing key would otherwise walk through — **an artifact belonging to a different release than the
 one being shipped**.
 
-That last check reads the artifact's **signed** name (the `file:` field of the minisign trusted
-comment, which the global signature covers), *not* the name it was uploaded under. The distinction is
-the whole point: an asset-write attacker chooses the upload name freely, so an earlier version of this
-guard that compared the upload name was defeated by uploading the old, genuinely-signed installer
-under a current-looking filename. Changing the signed name requires the signing key.
+**Three of those refusals — release channel, platform/payload mapping, and artifact/release binding
+— are decided from the artifact's *signed* name** (the `file:` field of the minisign trusted comment,
+which the global signature covers), not from the name it was uploaded under. The distinction is the
+whole point, and getting it wrong was this gate's most recent real defect twice over: an asset-write
+attacker chooses the upload name freely, so earlier versions of the binding and the mapping check
+were each defeated by simply renaming the upload — the old genuinely-signed installer uploaded under
+a current-looking filename (a downgrade), and this release's genuine Linux `.deb` uploaded under a
+Windows platform key as `..._x64-setup.exe` (denial-of-update). Changing the signed name requires the
+signing key, which is exactly the capability that threat model withholds.
+
+The channel and mapping checks also run once over the uploaded names *before* download — that pass is
+cheap and gates what gets fetched, but it proves nothing on its own and is not what the gate rests on.
 
 The three checks added for this (channel, platform/payload mapping, artifact/release binding) prefix
 their refusals with `PROPERTY FAILED -- <property>`. The older refusals — pubkey pin, manifest-vs-config

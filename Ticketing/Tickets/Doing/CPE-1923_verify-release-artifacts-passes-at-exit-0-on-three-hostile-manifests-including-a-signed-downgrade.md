@@ -384,3 +384,63 @@ plain and gets the other 6.
 **Merged-tree verification:** `cargo clippy --locked --all-targets -- -D warnings` clean;
 `cargo test --locked` 129 pass / 0 fail; `npm run check` 0/0; `npm test` 339 files / 4,700 tests /
 0 failures; lockfile pre-flight `0 stale of 17`.
+
+### 2026-08-27 (round 4) — SEC-9: I hardened one check onto the signed name and left its twin behind
+
+Blocking finding, and the third time in this ticket the same mistake: the version binding was moved
+onto the signed name (SEC-1) and the channel check was given a signed-name second pass in the same
+commit — but `platforms_with_wrong_extension_for_key` was left reading the uploaded basename alone.
+So the identical rename that defeated SEC-1 defeated the platform/payload mapping too.
+
+What makes these probes worse than SEC-1's: every artifact is the **current** release's genuine
+build, correctly versioned and correctly channelled. The version pass is satisfied. The channel pass
+is satisfied. Only the platform key and the upload name are attacker-chosen:
+
+| signed as | served under | before | after |
+|---|---|---|---|
+| `Cross-Platform Explorer_0.57.70_amd64.deb` | `windows-x86_64` → `..._x64-setup.exe` | **exit 0** | **exit 1** |
+| `Cross-Platform Explorer_0.57.70_x64-setup.exe` | `darwin-aarch64` → `..._universal.app.tar.gz` | **exit 0** | **exit 1** |
+| *(control: same mismatch, not renamed)* | `darwin-aarch64` → `..._x64-setup.exe` | exit 1 | exit 1 |
+
+Outcome for users was denial-of-update: macOS clients downloading a Windows `.exe`, Windows clients
+downloading a Linux `.deb` — the severity the ticket assigns finding 2.
+
+Fixed exactly as the auditor prescribed, and as the finding-3 pass already did: run
+`platform_os_of_key(platform).allowed_extensions()` against `signed_file` from
+`VerifiedManifest.signed_files`. No new data, no new dependency, same shape as the check beside it.
+
+**My first two probe fixtures did not isolate, and I caught it only because I sabotaged before
+trusting.** I wrote them against `SIDECAR_PRODUCT` with plain-named artifacts, so the *channel* pass
+refused them and they would have "reproduced" for the wrong reason — a fixture proving the wrong
+check, which is the same shadowing defect the Reviewer found in
+`h2_an_unrecognised_platform_key_is_refused` last round. Rewritten as plain-channel throughout,
+matching the auditor's own runs, so the mapping pass is the only thing that can refuse them. With
+the new pass disabled: exactly the two probes red, both on `EXPECTED A NON-ZERO EXIT, GOT Some(0)`,
+both controls green. With it enabled: all four green.
+
+**Doc corrections folded in (all of them mine, all overclaims or rot):**
+
+- `RELEASING.md` listed "a platform key serving another OS's payload" among what the gate refuses —
+  false for an asset-write attacker, and the *same shape of overclaim* my own round-3 commit message
+  called out as the reason SEC-1 was blocking rather than a residual. It now says plainly which
+  three checks read the signed name, names both real bypasses that made the distinction matter, and
+  states that the pre-download pass "proves nothing on its own and is not what the gate rests on".
+- `verify-release-artifacts.rs`'s module doc linked `[cpe_updater_verify::platforms_not_bound_to_version]`,
+  **deleted two rounds ago**, and still gave the pre-SEC-1 framing ("the narrow macOS `.app.tar.gz`
+  *naming* exception") with no mention of the trusted comment — the one thing that changed. CI runs
+  no `cargo doc`, so nothing caught it. Rewritten around the signed-name premise.
+- The ASCII table in `artifact_binding.rs` had lost column alignment on two rows (collateral from my
+  own whitespace-collapsing fix for the lost line continuations). Realigned, and switched to showing
+  the **signed** names, which is what the module now binds on.
+- `cargo doc` also surfaced a public item linking a private one; fixed. Not run by CI, so this was
+  found only by running it deliberately.
+
+**The load-bearing tab is now documented**, per both auditors' flag: `trusted_comment_file` splits on
+a literal tab, so if `tauri-bundler` ever emitted a space there every release would go red. That is
+the correct direction — loud, not silent — but it is now written down as a release-blocking event to
+fix here rather than work around, together with why splitting on whitespace instead would be *wrong*
+rather than merely lax (the real signed names contain spaces).
+
+**Merged-tree verification:** `cargo clippy --locked --all-targets -- -D warnings` clean;
+`cargo doc --no-deps` clean; `cargo test --locked` 133 pass / 0 fail; `npm run check` 0/0;
+`npm test` 339 files / 4,700 tests / 0 failures; lockfile pre-flight `0 stale of 17`.
