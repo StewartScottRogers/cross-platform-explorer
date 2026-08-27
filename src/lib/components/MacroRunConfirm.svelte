@@ -10,11 +10,26 @@
    * `macro` here is already fully resolved (any `{ask:label}` token substituted client-side by the
    * caller via `macroParams.resolveAskParams` — see App.svelte's `startMacro`), so this component
    * never has to know about prompt-parameters at all.
+   *
+   * **CPE-1891 — the confirm-and-retry escape hatch.** CPE-1734 made a Rename/Move/Convert step refuse
+   * an occupied destination rather than silently clobbering it, but the macro engine is strictly
+   * all-or-nothing: one collision used to abort and roll back the WHOLE run, with no way to say "yes,
+   * overwrite" and no visibility into which name collided. Alongside `commands.macroPlan`'s dry-run,
+   * this now also calls `commands.macroPreflight` — a read-only real-filesystem scan of every planned
+   * destination — so the WHOLE collision set is on screen before Run is ever clicked, not discovered
+   * one at a time via repeated run/rollback cycles. Each collision is either:
+   * - **confirmable** — a plain pre-existing file. The inline "Overwrite" checkbox below (never a
+   *   second modal — the repo's inline-instant-control convention) is the only thing standing between
+   *   here and Run; checking it re-issues `macroRun` with `confirmedOverwrite: true`.
+   * - **not confirmable** — a link (live or dangling). CPE-1734's refusal is absolute here: it is
+   *   listed the same way (CPE-1869's reused approach — show the user what they're being told to act
+   *   on) but there is no checkbox that unblocks it, and Run stays disabled while any are present.
    */
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
-  import type { ActionMacro, PlannedOp, ResolvedRun } from "../bindings.gen";
+  import type { ActionMacro, MacroCollision, PlannedOp, ResolvedRun } from "../bindings.gen";
+  import { formatPathsForClipboard } from "../format";
   import Icon from "./Icon.svelte";
 
   export let macro: ActionMacro;
@@ -24,8 +39,17 @@
 
   const dispatch = createEventDispatcher<{ close: void; ran: ResolvedRun }>();
 
+  /** Matches `revertHoldBack.ts`'s `MAX_LISTED` (CPE-1869) — the same on-screen preview cap. */
+  const MAX_LISTED = 8;
+
   let plan: PlannedOp[] | null = null;
   let planError = "";
+  let collisions: MacroCollision[] | null = null;
+  let preflightError = "";
+  /** The inline instant control (CPE-1891) — a checkbox, not a modal, toggled on a dime. */
+  let confirmOverwrite = false;
+  let copied = false;
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
   let runError = "";
   let run: ResolvedRun | null = null;
@@ -39,13 +63,41 @@
     } catch (e) {
       planError = e instanceof Error ? e.message : String(e);
     }
+    try {
+      collisions = unwrap(await commands.macroPreflight(macro, inputs, root));
+    } catch (e) {
+      preflightError = e instanceof Error ? e.message : String(e);
+    }
   });
+
+  $: confirmable = (collisions ?? []).filter((c) => c.confirmable);
+  $: blocked = (collisions ?? []).filter((c) => !c.confirmable);
+  $: canRun =
+    !!plan && plan.length > 0 && blocked.length === 0 && (confirmable.length === 0 || confirmOverwrite);
+  $: runLabel = running
+    ? "Running…"
+    : confirmable.length > 0 && confirmOverwrite
+      ? `Overwrite ${confirmable.length} and Run`
+      : "Run";
+
+  async function copyCollisionPaths(list: MacroCollision[]) {
+    try {
+      // Same "Copy as path" quoting Explorer uses (`formatPathsForClipboard`) — one quoted path per
+      // line, ready to paste into a search box, a terminal, or a script (CPE-1869's reused approach).
+      await navigator.clipboard.writeText(formatPathsForClipboard(list.map((c) => c.to)));
+      copied = true;
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copied = false), 1500);
+    } catch {
+      /* clipboard unavailable — the paths are still on screen (up to MAX_LISTED of them) to copy by hand */
+    }
+  }
 
   async function doRun() {
     running = true;
     runError = "";
     try {
-      const resolved = unwrap(await commands.macroRun(macro, inputs, root));
+      const resolved = unwrap(await commands.macroRun(macro, inputs, root, confirmOverwrite));
       run = resolved;
       dispatch("ran", resolved);
     } catch (e) {
@@ -101,16 +153,66 @@
           {#if plan.length === 0}<li class="dim">Nothing to run for the current selection.</li>{/if}
         </ul>
       {/if}
+
+      {#if preflightError}
+        <div class="err" data-testid="preflight-error">{preflightError}</div>
+      {/if}
+
+      {#if blocked.length}
+        <!-- CPE-1734's refusal, unconditional: a link is listed so the user can SEE it (CPE-1869's
+             reused list-affordance) but there is no checkbox — nothing here can unblock it. -->
+        <div class="collision blocked" data-testid="blocked-collisions">
+          <div class="collision-head">
+            <Icon name="link-broken" size={13} />
+            {blocked.length} destination{blocked.length === 1 ? "" : "s"} can’t be overwritten — a link,
+            never confirmable
+          </div>
+          <ul class="collision-list">
+            {#each blocked.slice(0, MAX_LISTED) as c (c.op_index)}
+              <li title={c.to}>{c.to}</li>
+            {/each}
+            {#if blocked.length > MAX_LISTED}
+              <li class="more">and {blocked.length - MAX_LISTED} more</li>
+            {/if}
+          </ul>
+        </div>
+      {/if}
+
+      {#if confirmable.length}
+        <div class="collision" data-testid="confirmable-collisions">
+          <div class="collision-head">
+            <Icon name="info" size={13} />
+            {confirmable.length} destination name{confirmable.length === 1 ? "" : "s"} already exist{confirmable.length === 1 ? "s" : ""}
+          </div>
+          <ul class="collision-list">
+            {#each confirmable.slice(0, MAX_LISTED) as c (c.op_index)}
+              <li title={c.to}>{c.to}</li>
+            {/each}
+            {#if confirmable.length > MAX_LISTED}
+              <li class="more">and {confirmable.length - MAX_LISTED} more</li>
+            {/if}
+          </ul>
+          <button
+            class="mini"
+            data-testid="copy-collisions"
+            on:click={() => copyCollisionPaths(confirmable)}
+            title="Copy every colliding name to the clipboard, one per line"
+          >
+            <Icon name={copied ? "check" : "copy"} size={13} />
+            {copied ? "Copied" : `Copy all ${confirmable.length} name${confirmable.length === 1 ? "" : "s"}`}
+          </button>
+          <label class="confirm-check" data-testid="confirm-overwrite-label">
+            <input type="checkbox" data-testid="confirm-overwrite" bind:checked={confirmOverwrite} />
+            Overwrite {confirmable.length === 1 ? "this file" : "these files"}
+          </label>
+        </div>
+      {/if}
+
       {#if runError}<div class="err" data-testid="run-error">{runError}</div>{/if}
       <div class="actions">
         <button class="btn" on:click={() => dispatch("close")} disabled={running}>Cancel</button>
-        <button
-          class="btn primary"
-          data-testid="run-btn"
-          on:click={doRun}
-          disabled={running || !plan || plan.length === 0}
-        >
-          {running ? "Running…" : "Run"}
+        <button class="btn primary" data-testid="run-btn" on:click={doRun} disabled={running || !canRun}>
+          {runLabel}
         </button>
       </div>
     {:else}
@@ -160,6 +262,28 @@
   .ok { font-size: 13px; color: var(--text); }
   .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
   .dim { color: var(--text-dim); font-size: 12.5px; }
+  /* CPE-1891 — the collision panel, matching RevertOutcomePanel's `.ro-held` box (CPE-1869) so the two
+     "here's the list you were told to act on" surfaces read the same way. */
+  .collision {
+    margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--border-strong);
+    border-radius: var(--radius); background: var(--surface-alt); font-size: 12.5px; color: var(--text);
+  }
+  .collision.blocked { border-color: var(--danger); }
+  .collision-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .collision.blocked .collision-head { color: var(--danger); }
+  .collision-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); max-height: 120px; overflow: auto; }
+  .collision-list li { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 11.5px; }
+  .collision-list li.more { list-style: none; margin-left: -18px; font-family: inherit; }
+  /* CPE-1869's "copy the whole list" affordance, same `.mini` treatment as RevertOutcomePanel. */
+  .mini {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+    height: 22px; padding: 0 9px; border-radius: var(--radius);
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font-size: 12px;
+    cursor: pointer;
+  }
+  .mini:hover { background: var(--surface-alt); }
+  /* CPE-1891 — the inline instant control: a checkbox the user flips on a dime, never a second modal. */
+  .confirm-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; cursor: pointer; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: auto; }
   .btn { height: 32px; padding: 0 16px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn:disabled { opacity: 0.5; }

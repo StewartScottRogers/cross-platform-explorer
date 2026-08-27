@@ -85,8 +85,9 @@ Starting a macro (from any of the three run surfaces above) always goes through 
    **Continue** resolves them (a field left blank resolves to an empty string, never a literal
    `{ask:...}` leaking through). A macro with no `{ask:...}` tokens skips this step entirely.
 2. **Dry-run confirm** — lists every planned operation (its kind, the input, and the resolved detail)
-   before anything touches disk. **Cancel** closes without effect; **Run** applies every op, over every
-   selected item, in step order.
+   before anything touches disk. Alongside that preview, a read-only scan checks whether any planned
+   Rename/Move/Convert destination is already occupied on disk (see *Collisions* below). **Cancel**
+   closes without effect; **Run** applies every op, over every selected item, in step order.
 3. **Result + Undo** — after a successful run, the dialog shows *"Applied N steps to `<count>`
    item(s)"* and an **Undo** button. Clicking it reverses the **entire run** in one action — this is a
    **separate** undo from the app-wide **Ctrl+Z** stack (see [Undo](safety-undo)): a macro run is applied
@@ -108,6 +109,25 @@ You want a one-click way to file screenshots into a per-project archive folder:
 7. The dry-run plan shows a rename then a move for each file; click **Run**.
 8. Each screenshot is renamed `Q3-<original-name>.png` and moved into `Screenshots\Archive`. Click
    **Undo** right away to put everything back, or **Close** to keep it.
+
+## Collisions — an occupied name doesn't have to abort the whole run
+
+A Rename/Move/Convert step refuses to write over a destination that's already occupied, rather than
+silently clobbering it — same as the rest of the app. Left alone, one collision partway through a large
+batch would abort and roll back *everything already applied*, with no way to proceed short of finding
+and renaming the colliding file by hand. The dry-run confirm avoids that:
+
+- Every colliding destination the macro would hit is listed **before Run is even clickable** — not
+  discovered one at a time by running, failing, and retrying.
+- A collision with a **plain, ordinary file** already at that name is **confirmable**: check the
+  **"Overwrite these files"** box (an inline checkbox, not a separate dialog) and the button becomes
+  **"Overwrite N and Run"**. Confirming re-runs with permission to replace those specific files' bytes.
+- A collision with a **link** (a shortcut, symlink, or similar) is listed the same way but is **never**
+  confirmable — no checkbox unblocks it, and Run stays disabled while one is present. Writing through a
+  link would put the bytes somewhere other than the name you picked, so this refusal doesn't have an
+  override; remove or rename the link first if that's really what you meant.
+- **Copy all N names** copies every colliding destination to the clipboard, one per line, for a batch
+  larger than the on-screen preview shows.
 
 ## Limits / notes
 
