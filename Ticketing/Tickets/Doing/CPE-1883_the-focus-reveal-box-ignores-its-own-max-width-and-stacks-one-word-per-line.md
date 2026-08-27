@@ -3,7 +3,7 @@ id: CPE-1883
 title: the status bar's focus-reveal box ignores its own max-width and stacks one word per line
 type: bug
 priority: Low
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-23
