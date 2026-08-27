@@ -60,11 +60,12 @@ name: agent catalog freshness check
 # Neither 7 nor 14 is free of false-alarm risk against a gap that size, and this comment does not
 # pretend otherwise: against the observed 28-day gap, a 7-day threshold goes red at day 8 (red for
 # ~20 of the 28 days -- "roughly three weeks", the shape that gets an alarm muted within a week and
-# defeats the point of having one); 14 goes red at day 15 (red for ~13 of the 28 days -- roughly
-# HALF as much false-alarm exposure, not zero). 14 is chosen as the better available compromise,
-# not a false-alarm-free number: it still catches a REAL outage at this ticket's own 31-day scale
-# with ~17 days of runway (31 - 14) before reaching that scale, while roughly halving how much of
-# an ordinary-paced gap it would flag red. Keeping 7 (or going lower) is only defensible alongside
+# defeats the point of having one); 14 goes red at day 15 (red for ~13 of the 28 days -- about a
+# THIRD fewer red days, i.e. roughly two-thirds the exposure, not half and not zero). 14 is chosen
+# as the better available compromise, not a false-alarm-free number: it still catches a REAL outage
+# at this ticket's own 31-day scale with ~17 days of runway (31 - 14) before reaching that scale,
+# while meaningfully cutting how much of an ordinary-paced gap it would flag red. Keeping 7 (or
+# going lower) is only defensible alongside
 # an explicit, written commitment that a plain release gets cut at least that often -- nothing
 # enforces that today, so 14 is the honest number for the cadence this channel actually has, not
 # the cadence it would need to have to justify something tighter. If the plain channel's cutting
