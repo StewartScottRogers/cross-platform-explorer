@@ -3,7 +3,7 @@ id: CPE-1926
 title: fourteen npm advisories (1 critical, 5 high) — all dev-only; four are non-major fixes worth taking now, two need the deferred toolchain migration
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -134,3 +134,44 @@ Windows-specific on a Windows dev box), and the `total:10` baseline.
 - `npm run build` (real `vite build`) — **✓ built in 13.87s**; only the pre-existing >500 kB chunk-size
   advisory, no new warnings. Run because `postcss` and `nanoid` sit under the bundler, so a regression
   had to surface here rather than at release time.
+
+## Closed 2026-08-27 — merged as PR #1057
+
+**Reviewer APPROVE.** Verified on `main` after the merge: `{"moderate":8,"high":1,"critical":1,"total":10}`,
+down from 14, high 5 → 1. `npm audit --omit=dev` reports **0 vulnerabilities before and after** —
+nothing shipped-facing moved in either direction.
+
+**Method worth keeping.** `npm audit fix` **without `--force`**, so accepting a semver-major was
+structurally impossible rather than merely avoided. `package.json` untouched; the entire change is
+`package-lock.json`, 13 lines: four version/resolved/integrity triples plus one dependency range. The
+Reviewer confirmed package count **248 → 248** — nothing added or removed — and that the four cleared
+**by name** from the `.vulnerabilities` map rather than inferring it from the count dropping. It then
+ran `npm ci` plus the full check/test/build cycle and confirmed the **lockfile was byte-identical to
+the committed one afterwards**, which given CPE-1932 is the check actually worth having.
+
+**The ticket undercounted the deferred work and the author corrected it.** The migration is **four**
+direct semver-majors, not the two this ticket named: `vite` ^5→8.2.2 and `vitest` ^2→4.1.11 as filed,
+**plus `svelte` ^4→5.56.10 and `@sveltejs/vite-plugin-svelte` ^3→7.3.0**. CPE-1443 updated with a
+four-row table derived from the real `effects` graph.
+
+**The dev-only framing was judged conservative, not talked down.** The advisory titles back it
+verbatim — two `vite` issues are genuinely Windows-specific on a Windows dev box, and the `vitest`
+critical is *"arbitrary file can be read and executed"*. `ci.yml` really does run `npm ci` / `check` /
+`test` / `build` on Actions runners, so "CI runners with repo credentials" is substantiated. The
+author **omitted** the mitigation that would have shrunk the risk (the vitest critical needs the UI
+server listening; `npm test` here is plain `vitest run`), which is the right direction for a Steward
+note and was deliberate.
+
+### The finding that matters more than the four packages
+
+**There are two npm projects in this repo, and every Steward pass has audited one.**
+`git ls-files '*package-lock.json'` returns the root and **`gui-smoke/`**, which carries **17**
+advisories — five non-major fixable, including **the same `brace-expansion` high this PR just fixed at
+the root**. `gui-smoke.yml` runs it on CI, i.e. the exact exposure this ticket's own risk framing
+argues from. Filed as **CPE-1945**.
+
+The author's own diagnosis, which is the durable part: *"The failure wasn't that I skipped
+`gui-smoke/`, it's that I never asked how many npm projects there were. I read 'run `npm audit`' and
+executed it where I happened to be standing."* That is **CPE-1932** in a different costume — the
+enumerate step costs one `git ls-files`. Both this ticket and CPE-1443 now say **root project only**
+so the `total:10` baseline cannot be misread as the repo's whole position.
