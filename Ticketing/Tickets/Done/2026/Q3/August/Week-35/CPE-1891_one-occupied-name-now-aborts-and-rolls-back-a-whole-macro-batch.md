@@ -189,3 +189,56 @@ be argued in the work log.
   3. Dark screenshots were stuck showing "booting…" in the diagnostic overlay (pixels were already
      correct — only the harness's own JS diagnostic readout hadn't settled). Replaced a fixed 100ms
      timeout with a DOM-readiness poll; all six evidence files re-captured.
+
+- **2026-08-27 — Round 4: PR #1044 fully APPROVED but red on CI; picked up from a prior session that
+  had gone stale. Three concrete failures fixed, nothing else touched.**
+
+  **1. Hard-coded hex ratchet (`src/app.css.test.ts`), 401 vs baseline 399.** Not a real colour — the
+  ratchet's `HEX_LITERAL` regex (`#[0-9a-fA-F]{3,8}\b`) also matches a hex-*looking* PR number in prose:
+  `MacroRunConfirm.svelte` gained two `"PR #1044 review round 2"` comment mentions across earlier rounds,
+  and `#1044` (digits 1/0/4/4, all valid hex) matched the same pattern a real `#rrggbb` would. Confirmed
+  by grepping the PR's full diff for `^\+.*#[0-9a-fA-F]{3,8}\b` in every `.svelte` file — the only two
+  hits were those comments, no CSS anywhere touched a literal colour. Fixed by dropping the `#` (→ "PR
+  1044"), restoring the count to exactly 399/86 without moving the baseline.
+
+  **2. Bidi/format-character escape guard (`src/lib/bidiEscape.guard.test.ts`).** The round-3 preflight
+  UI added real new render sites. Judged individually rather than blanket-wrapped:
+  - **Wrapped in `displaySafePath`:** `c.to` (`MacroCollision.to`, a real destination path) in both the
+    blocked and confirmable collision `<li>` lists — both the text content AND the `title=` attribute,
+    matching `RevertOutcomePanel.svelte`'s existing convention for the same CPE-1869 list shape.
+  - **REGISTRY updates (not wrapped) — none of these carry a filename/path:** `blocked.length` /
+    `confirmable.length` / `blockedPreview.more` / `confirmablePreview.more` (plain counts);
+    `=== 1 ? "" : "s"` and the "s"/"this file"/"these files" pluralisers (literal strings, not user
+    data); the two "Copy all N names" button template literals (count + literal strings only);
+    `preflightError` (an error string — kept raw, matching this same file's pre-existing `planError`/
+    `runError`/`undoError` entries, all already-accepted raw error text); and `reason` — verified safe by
+    reading the backend wording (`fsutil::classify_symlink_slot` / `classify_create_slot`): the ONLY
+    embedded path in either message is the leading `"<path>" ` clause, which `genericizeReason()` always
+    strips before render, so no path can reach the DOM through it. Also re-registered `runLabel` (the
+    ternary that used to render raw directly now lives in the `$: runLabel = …` reactive assignment, one
+    level removed from the render position) and dropped the now-stale
+    `text:running ? "Running…" : "Run"` entry.
+
+  **3. CPE-1817 staging-guard drift (`.github/workflows/ci.yml`, all 3 OSes).** `lib.rs` now has 10
+  `require_staged_reason("trash_roundtrip", ..)` call sites (grep-confirmed), but the CI step's two name
+  lists + doc-comment counts still said 9. Traced the 10th to
+  `cpe_1891_macro_convert_confirmed_overwrite_replaces_the_plain_target_and_still_trashes_the_original`
+  (this ticket's own end-to-end trash-undo test, added in round 2). Its
+  `#[cfg(any(target_os = "windows", target_os = "linux"))]` gate and `cfg!(target_os = "linux")`
+  `supported_here` argument are byte-for-byte the shared-shape pattern the other 7 round-trip tests use
+  (not the `true`-literal linux-only shape the 2 panic-boundary tests use), so it was added to the
+  `shared_sites` list, not `linux_only_sites` — verified against the two linux-only tests' actual `true`
+  argument and `#[cfg(target_os = "linux")]`-only gate to make sure the classification wasn't reversed.
+  Updated the doc-comment counts (9→10 sites, 7→8 shared, "ten tests" on macOS) alongside, leaving the
+  one deliberately-historical "2 of 9" sentence (describing CPE-1817's own original state) untouched.
+
+  **Verification before push:** full `npx vitest run` — 335 test files, 4615 tests, only
+  `src/lib/msrvSync.test.ts` failed (2 tests), and that failure is a pre-existing local-checkout-only
+  artifact matching the exact pattern `.gitattributes` already documents for CPE-1880 (`core.autocrlf=true`
+  on this Windows box checks `.github/workflows/ci.yml` out with CRLF; the test's literal `"\n  msrv:\n"`
+  substring search only matches LF; the Linux CI runner checks the same file out with LF and stays green)
+  — confirmed by reading raw bytes at offset 0 of the untouched file header, CRLF from the very first byte,
+  before any of this round's edits. Not one of the three assigned failures and not touched. `npm run check`
+  clean. `cargo clippy --all-targets -- -D warnings` clean in both feature modes for both `crates/server`
+  (default, and `--features pdf-thumb,video-thumb,waveform,dicom-thumb`) and `src-tauri` (default, and
+  `--features sidecar-platform`).

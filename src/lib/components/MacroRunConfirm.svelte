@@ -32,7 +32,7 @@
    *   the same paragraph once per path, so this hoists it out instead: one explanation, paths stay a
    *   plain list below it.
    *
-   * **Neither list is fully reversible once run (Blocker 3, PR #1044 review round 2).** A confirmed
+   * **Neither list is fully reversible once run (Blocker 3, PR 1044 review round 2).** A confirmed
    * overwrite replaces the occupant's bytes with nothing preserved anywhere — Undo (and a mid-run
    * rollback) can restore the NAME, never that content. The warning next to the checkbox says so before
    * the run, not after.
@@ -42,6 +42,7 @@
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import type { ActionMacro, MacroCollision, PlannedOp, ResolvedRun } from "../bindings.gen";
   import { formatPathsForClipboard } from "../format";
+  import { displaySafePath } from "../filename"; // bidi/format-character escape (CPE-1757) for a real destination path
   import { MAX_LISTED } from "../revertHoldBack"; // CPE-1869's cap — imported, not redeclared
   import Icon from "./Icon.svelte";
 
@@ -159,7 +160,7 @@
     running = true;
     runError = "";
     try {
-      // Only the destinations actually shown and confirmed — never a blanket flag (CPE-1891, PR #1044
+      // Only the destinations actually shown and confirmed — never a blanket flag (CPE-1891, PR 1044
       // review round 2, Blocker 2): the backend only bypasses the occupancy guard at a `to` in this
       // exact list, so a stray extra collision the user never saw still refuses.
       const confirmedDestinations = confirmOverwrite ? confirmable.map((c) => c.to) : [];
@@ -241,7 +242,7 @@
           {/each}
           <ul class="collision-list">
             {#each blockedPreview.listed as c (c.op_index)}
-              <li title={c.to}>{c.to}</li>
+              <li title={displaySafePath(c.to)}>{displaySafePath(c.to)}</li>
             {/each}
             {#if blockedPreview.more}
               <li class="more">and {blockedPreview.more} more</li>
@@ -270,7 +271,7 @@
           </div>
           <ul class="collision-list">
             {#each confirmablePreview.listed as c (c.op_index)}
-              <li title={c.to}>{c.to}</li>
+              <li title={displaySafePath(c.to)}>{displaySafePath(c.to)}</li>
             {/each}
             {#if confirmablePreview.more}
               <li class="more">and {confirmablePreview.more} more</li>

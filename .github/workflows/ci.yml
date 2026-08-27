@@ -253,17 +253,19 @@ jobs:
       # measurement that says why pinning it blinds the guard to the arm it needs to cover.
       #
       # CPE-1806 added the trash-roundtrip sub-blocks below, after PR #961's review found the routing
-      # this ticket added (9 `trash_roundtrip_available()` call sites in `lib.rs` — CPE-1770 added an
-      # 8th and 9th after this comment first said 7 (PR #986 review) — all through
-      # `cpe_server::fsutil::require_staged_reason` since CPE-1815) could be deleted from ANY of the 9
+      # this ticket added (10 `trash_roundtrip_available()` call sites in `lib.rs` — CPE-1770 added an
+      # 8th and 9th after this comment first said 7 (PR #986 review), CPE-1891 added a 10th (PR #1044,
+      # the confirm-and-retry escape hatch's own end-to-end trash-undo test) — all through
+      # `cpe_server::fsutil::require_staged_reason` since CPE-1815) could be deleted from ANY of the 10
       # sites with this step never noticing — the exact silent-vacuity shape CPE-1806 itself exists to
       # close, one level up.
       #
       # CPE-1817: this step originally only ever sabotage-tested 2 of those 9 sites (one of each shape)
       # while this comment read as if the whole mechanism was covered — the same silent-vacuity shape one
-      # level up again. It now sabotage-tests all 9 individually (below), and cross-checks that count
-      # against a live grep of `lib.rs` so a 10th site added later either gets a canary or fails this step
-      # for drifting, on purpose rather than by omission.
+      # level up again. It now sabotage-tests all 10 individually (below; CPE-1891's 10th call site is a
+      # shared-shape canary, added to the `shared_sites` list), and cross-checks that count against a live
+      # grep of `lib.rs` so an 11th site added later either gets a canary or fails this step for drifting,
+      # on purpose rather than by omission.
       - name: skip-visibility guard (CPE-1717 / CPE-1806)
         working-directory: src-tauri
         shell: bash
@@ -288,15 +290,15 @@ jobs:
           fi
 
           # ── CPE-1806 / CPE-1817: the trash-roundtrip mechanism (`trash_roundtrip_available()` /
-          # `cpe_server::fsutil::require_staged_reason("trash_roundtrip", ..)` since CPE-1815, 9 call
-          # sites in `lib.rs`), asymmetric across all THREE legs of this same job's matrix rather than
-          # just two.
+          # `cpe_server::fsutil::require_staged_reason("trash_roundtrip", ..)` since CPE-1815, 10 call
+          # sites in `lib.rs` — CPE-1891 (PR #1044) added the 10th), asymmetric across all THREE legs of
+          # this same job's matrix rather than just two.
           # `supported_here = true` for the two Linux-only malformed-`.trashinfo` panic-boundary tests
-          # (CPE-1791/CPE-1803); `supported_here = cfg!(target_os = "linux")` for the seven
+          # (CPE-1791/CPE-1803); `supported_here = cfg!(target_os = "linux")` for the eight
           # `cfg(any(target_os = "windows", target_os = "linux"))` round-trip tests — matching the
           # measured verdict now recorded on `trash_roundtrip_available`'s own doc comment (grepped whole
           # raw job logs of two real runs: zero `CPE-1268` notices on Linux, five on Windows, same runs).
-          # macOS has no `trash::os_limited` API at all, so none of the nine tests even compile there —
+          # macOS has no `trash::os_limited` API at all, so none of the ten tests even compile there —
           # a filter for any of their names would match ZERO tests on macOS, and `cargo test <filter>`
           # with zero matches exits 0, which would silently read as evidence of nothing rather than "not
           # applicable" (the same zero-match trap the fourth `link_status` block below guards against).
@@ -307,11 +309,12 @@ jobs:
           # other 7 sites (including the second Linux-only panic-boundary test,
           # `restore_and_empty_trash_fail_loudly_instead_of_reporting_false_success_when_the_dependency_panics`)
           # were deletable with this step never noticing, while the comment above read as if the whole
-          # mechanism was covered. Every one of the 9 sites now gets its own `cargo test <name>` below,
-          # via two small functions instead of nine copy-pasted blocks, and the Windows arm asserts the
-          # `CPE-1268` notice is actually present (previously `grep ... || true`, which could match
-          # nothing and still report OK — asserting nothing about whether the skip took the documented
-          # path).
+          # mechanism was covered. Every one of the 10 sites now gets its own `cargo test <name>` below
+          # (CPE-1891 round 4 added the shared-shape canary for its own new site, keeping this count
+          # exact rather than drifting the way it did before CPE-1817), via two small functions instead
+          # of ten copy-pasted blocks, and the Windows arm asserts the `CPE-1268` notice is actually
+          # present (previously `grep ... || true`, which could match nothing and still report OK —
+          # asserting nothing about whether the skip took the documented path).
 
           assert_linux_only_trash_canary() {
             local name="$1"
@@ -400,6 +403,7 @@ jobs:
             cpe_1770_restore_from_trash_refuses_when_a_dangling_link_occupies_the_original_path \
             empty_trash_purges_only_the_selected_probe_item \
             list_trash_stream_flushes_batches_over_the_channel_and_matches_the_collect_variant \
+            cpe_1891_macro_convert_confirmed_overwrite_replaces_the_plain_target_and_still_trashes_the_original \
           ; do
             shared_sites=$((shared_sites + 1))
             assert_shared_trash_canary "$name" || fail=1
