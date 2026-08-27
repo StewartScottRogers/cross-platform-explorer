@@ -59,9 +59,35 @@ const SURVIVING_COMMENT_LINE = /^[ \t]*\/\//m;
  * survives, and that is what makes the failure genuinely loud — it throws here rather than handing a
  * caller a plausible wrong answer. It catches all 173 leaked lines above.
  *
- * The invariant's own false-positive shape is a multi-line string literal with a line beginning `//`
- * inside it. No scanned file has one; if one ever appears this throws — loudly, on the side that added
- * it — rather than passing silently. That direction is the whole point.
+ * ### What the invariant costs, concretely
+ *
+ * **False positives are real and already in this repo — not hypothetical.** The invariant cannot tell
+ * a leaked comment from a string literal whose own content begins `//`, so a file containing one
+ * throws even though the strip was correct. A sweep of all 352 `.rs` files (11.1 MB) found **no**
+ * unhandled-literal desyncs and exactly **three** files of this kind, all of which throw today:
+ *
+ * - `crates/server/src/net_share.rs:552` — a `\`-continued string holding a `/proc/mounts` fixture
+ *   whose line begins `//fileserver/media …`
+ * - `sidecar/agent-board/src/ui.rs:209` — a raw string of embedded JS carrying `//` comments at line
+ *   start. **This is the one most likely to bite:** `agent-board` is one of the two board
+ *   implementations that must change in lockstep, so it is a prime future derivation target, and it
+ *   is one `readFileSync` away from throwing at whoever points a scanner at it.
+ * - `sidecar/host/src/scaffold.rs:56` — a raw string template of generated Rust with `//!` at column 0
+ *
+ * None of the files scanned today is one of them. If you need to scan one of the three, do not weaken
+ * the invariant: exclude the known literal, or narrow the input to the region you are reading.
+ *
+ * **False negatives, stated so the guarantee is not overread:** the invariant checks LINE STARTS, so
+ * it catches a leak of full-line comments only. A desync that leaks just a **trailing** comment, or
+ * only a **block-comment body**, slips through and can still yield a silent wrong value. Both were
+ * reproduced — but both probes required an **unterminated string literal**, which is not valid Rust,
+ * and the 352-file sweep found no such shape. So this is a backstop against the realistic desyncs,
+ * not a proof of correctness.
+ *
+ * One shape that is correct as written and needs no handling: string literals are not tracked *inside*
+ * block comments, so a block comment ends at the first close marker even when that marker sits inside
+ * what looks like a quoted string. That matches rustc, whose lexer nests on the open/close tokens
+ * regardless of quoting.
  *
  * Remaining known gap, stated rather than assumed away: a **lifetime immediately followed by a quote**
  * (`'a'` as two tokens) would be read as a char literal. That shape is not valid Rust in the positions

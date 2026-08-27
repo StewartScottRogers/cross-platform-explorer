@@ -242,8 +242,9 @@ fn authority(loc: &Location) -> String {
 /// CPE-1950: this is `pub` for ONE reason — `crates/vfs/tests/real_server_conformance.rs` calls it
 /// directly instead of reimplementing it.
 ///
-/// It used to carry its own copies (`remote`/`remote_dir`) plus a sentence here claiming that
-/// `remote()` "mirrors this function so the real-server-rig E2E job actually exercises the new shape".
+/// That test file used to carry its own copies of this join (`remote`/`remote_dir`), plus a sentence
+/// here claiming `remote()` "mirrors this function so the real-server-rig E2E job actually exercises
+/// the new shape".
 /// That sentence named the **wrong helper**: `remote()` is the `is_dir: false` join and never appends
 /// the slash; the slashed coverage came from `remote_dir()`, which
 /// `assert_slashed_directory_path_round_trips` drives through `mkdir`/`stat`/`list`/`delete` against
