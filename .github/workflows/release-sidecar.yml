@@ -124,7 +124,7 @@ jobs:
 
       - name: Updater pubkey/endpoints pin — base config (CPE-1873)
         working-directory: crates/updater-verify
-        run: cargo test --test pinned_pubkey_guard
+        run: cargo test --locked --test pinned_pubkey_guard
 
       - name: Setup Node
         uses: actions/setup-node@v4
