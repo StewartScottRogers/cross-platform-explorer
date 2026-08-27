@@ -3,7 +3,7 @@ id: CPE-1934
 title: every ratchet's baseline can be raised from inside the same diff that violates it — the gate has no gate
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -201,3 +201,54 @@ the edits, once from the reflog). When a temp commit is used to stage a red-proo
 `--soft` and restore only the sabotaged files.
 
 67 tests in `ratchetBaselines.test.ts`; 340 files / 4759 across the suite.
+
+## Closed 2026-08-27 — merged as PR #1052, after three rounds and four all-green bypasses
+
+**Reviewer APPROVE.** The final re-review ran every sabotage from all three rounds against the
+**pushed head as fetched** (`332ec6b1`, sha verified before and after each block) rather than a local
+copy — because the author had disclosed losing uncommitted work twice to `git reset --hard`.
+
+**What shipped:** `scripts/ratchet-baselines.mjs` plus a `ratchet-guard` CI job (**0.65 s**) that
+measures every baseline in the working tree *and* at the base revision and reds on an increase,
+unless the raise is declared in `docs/design/RATCHETS.md` with exact old/new values.
+**Twelve baselines across nine files**, found by four independent sweeps — the Reviewer re-derived the
+enumeration with a wider vocabulary and found **nothing missed**, and confirmed the Rust side has none.
+A recount from scratch showed **zero slack** (85 / 277, identical to stored).
+
+## The four all-green bypasses, and the pattern behind them
+
+Every one let the guard pass while a baseline was raised. Each is now a permanent fixture quoting the
+input that produced it.
+
+| round | bypass | before | after |
+|---|---|---|---|
+| 1 | `= 200 + 78;` (real 278) read as `277 -> 200 LOWERED` | exit 0, 52/52 pass | exit 1 |
+| 1 | a `...SPREAD` replacing four array entries counted as one | exit 0 | exit 1 |
+| 1 | a ledger row **committed at the base** acted as a permanent reusable licence | exit 0 | exit 1 |
+| 1 | base-side unmeasurable was green while head-side was red, so a `git mv` reset a ratchet | exit 0 | exit 1 |
+| 2 | a **block-comment or template-literal decoy** outranked the live constant, because the *search* ran on raw source and took the first match | exit 0, 72/72 pass | exit 1 |
+| 2 | the fix for the base-ledger bypass **over-corrected** — the same `from -> to` could never legitimately happen twice | exit 1 (wrongly) | exit 0 |
+
+The author named the pattern better than anyone: *"every hole in this guard has been a measurer that
+returned a **wrong number** rather than refusing. I strictened the initialiser twice while leaving the
+**search** naive — the same mistake at one remove."*
+
+The durable fixes are the structural ones: `maskNonCode()` blanks comment bodies and string/template
+interiors before any search, and `findSoleDeclaration()` makes **more than one match a red in itself**
+— which turns "which of these did I pick?" into a question that cannot arise. The Reviewer ran 24
+mask breakers: **20 correct, 4 red, 0 wrong numbers**, and showed structurally why a wrong number now
+needs *two* simultaneous faults (a live declaration hidden **and** a non-live one revealed).
+
+## Two things the guard's own guards taught
+
+- **Replacing an absolute check with a derived one can hand the check's inputs to whoever wants it to
+  pass.** Round 2 replaced a hardcoded `>= 8` floor with one derived from the registry; the Reviewer
+  then showed `SCAN_ROOTS = ["src/lib/preview"]` made it pass **vacuously**. Round 1's absolute would
+  have caught that head-on. Both halves are now asserted.
+- **The docs kept getting ahead of the code.** `RATCHETS.md` property 3 asserted "never a guessed
+  number" while the decoy bypass was live. Fixed *with* each fix, and a test now reads CLAUDE.md and
+  RATCHETS.md and asserts they state the base-ledger rule.
+
+Known and documented limitation: the guard measures **counts, not identities**, so removing one
+offender and adding a different one leaves the count flat. Recorded in `RATCHETS.md` under
+"What this guard does *not* catch".
