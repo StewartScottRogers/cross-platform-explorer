@@ -148,28 +148,69 @@ jobs:
         run: |
           set -euo pipefail
           source .github/workflows/scripts/catalog-freshness-check.sh
-          published=$(jq -r '[.entries[]?.version] | max // empty' catalog-index.json)
+
+          # CPE-1893 UAT round 1 (reviewer finding 2): under `set -e`, a BARE failing `jq` inside
+          # `published=$(jq ...)` aborts this step immediately -- before `unparseable=true` is ever
+          # written. The run still goes red (the always() "Pass/fail summary" step below still
+          # catches it), but "File an issue" below never sees `unparseable == 'true'`, so a genuinely
+          # corrupt body (HTTP 200, unparseable JSON) went red WITHOUT filing an issue --
+          # inconsistent with the sibling case right below it (valid JSON, empty entries[]), which
+          # DOES reach the issue-filing step. Fix: a command used as an `if` CONDITION is exempt from
+          # `set -e` (only a bare failing command aborts; one guarding an `if` never does), so
+          # wrapping the assignment in `if ! published=$(...); then` catches the failure here instead
+          # of aborting past it.
+          jq_err="$(mktemp)"
+          if ! published=$(jq -r '[.entries[]?.version] | max // empty' catalog-index.json 2>"$jq_err"); then
+            echo "::error::catalog-index.json fetched OK (HTTP 200) but could not be parsed as JSON at all -- corrupt or truncated body:"
+            cat "$jq_err" >&2
+            echo "unparseable=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           if [ -z "$published" ]; then
-            echo "::error::catalog-index.json fetched OK but has no parseable entries[].version -- cannot evaluate freshness (schema changed? empty index?)"
+            echo "::error::catalog-index.json fetched OK and parsed, but has no entries[].version -- cannot evaluate freshness (schema changed? empty index?)"
             echo "unparseable=true" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           age_days=$(catalog_age_days "$published")
           echo "published_epoch=${published}" >> "$GITHUB_OUTPUT"
           echo "age_days=${age_days}" >> "$GITHUB_OUTPUT"
-          if is_catalog_stale "$published" "$THRESHOLD_DAYS"; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::catalog is ${age_days} day(s) old, over the ${THRESHOLD_DAYS}-day threshold"
-          else
-            echo "stale=false" >> "$GITHUB_OUTPUT"
-            echo "catalog is ${age_days} day(s) old -- within the ${THRESHOLD_DAYS}-day threshold"
-          fi
 
-      # A confirmed 404 (no catalog live at all) is its own alarm -- see header comment. Anything
+          # CPE-1893 UAT round 1 (reviewer finding 1): is_catalog_stale is a 3-way verdict via exit
+          # code (0=stale, 1=fresh, 2=CLOCK SKEW -- a future-dated `version`), not a boolean. A bare
+          # `if is_catalog_stale ...; then stale=true; else stale=false; fi` collapses exit code 2
+          # into the `else` branch -- i.e. reports a nonsensical negative age as "fresh". Capturing
+          # the real exit code explicitly (condition-position calls are exempt from `set -e`
+          # regardless of which nonzero code they return, so this is safe under it) and switching on
+          # all three values is what keeps clock skew from ever reading as healthy.
+          set +e
+          is_catalog_stale "$published" "$THRESHOLD_DAYS"
+          verdict=$?
+          set -e
+          case "$verdict" in
+            2)
+              echo "clock_skew=true" >> "$GITHUB_OUTPUT"
+              echo "stale=false" >> "$GITHUB_OUTPUT"
+              echo "::error::catalog's published version (epoch ${published}) is in the FUTURE relative to this run (age ${age_days}d) -- a clock skew on the signing runner, or a mis-stamped catalog version. Never treated as fresh."
+              exit 1
+              ;;
+            0)
+              echo "clock_skew=false" >> "$GITHUB_OUTPUT"
+              echo "stale=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::catalog is ${age_days} day(s) old, over the ${THRESHOLD_DAYS}-day threshold"
+              ;;
+            *)
+              echo "clock_skew=false" >> "$GITHUB_OUTPUT"
+              echo "stale=false" >> "$GITHUB_OUTPUT"
+              echo "catalog is ${age_days} day(s) old -- within the ${THRESHOLD_DAYS}-day threshold"
+              ;;
+          esac
+
+      # A confirmed 404 (no catalog live at all) is its own alarm -- see header comment. A clock-skew
+      # verdict (reviewer finding 1) is likewise its own alarm, never folded into "stale". Anything
       # else non-200 (transport failure, 403, 429, 5xx) is inconclusive, handled below: never treated
       # as evidence of a problem, never silently swallowed as a pass either.
       - name: File an issue (deduped) on a confirmed problem
-        if: always() && (steps.fetch.outputs.http_code == '404' || steps.eval.outputs.stale == 'true' || steps.eval.outputs.unparseable == 'true')
+        if: always() && (steps.fetch.outputs.http_code == '404' || steps.eval.outputs.stale == 'true' || steps.eval.outputs.unparseable == 'true' || steps.eval.outputs.clock_skew == 'true')
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -178,6 +219,7 @@ jobs:
           AGE_DAYS: ${{ steps.eval.outputs.age_days }}
           THRESHOLD_DAYS: ${{ steps.threshold.outputs.days }}
           UNPARSEABLE: ${{ steps.eval.outputs.unparseable }}
+          CLOCK_SKEW: ${{ steps.eval.outputs.clock_skew }}
         run: |
           set -uo pipefail
           label="catalog-stale"
@@ -193,9 +235,11 @@ jobs:
             printf '%s\n\n' "\`${FETCH_URL}\`"
             if [ "$HTTP_CODE" = "404" ]; then
               printf '%s\n' "**HTTP 404 — no catalog is published there at all.** A real client's fetch (\`do_fetch_catalog\` in \`src-tauri/src/lib.rs\`) fails outright; the AI Console UI shows this identically to being offline (\"No agent update available (offline, or none published yet).\", see \`sidecar/ai-console/src/launcher.html\`'s \`refreshCatalog()\`)."
-              printf '%s\n' "Known live cause as of 2026-08-26 (CPE-1893's investigation): GitHub's \`/releases/latest/\` can resolve to a \`-sidecar\` release, and only \`release.yml\` (the plain channel) runs the \`catalog\` job — a sidecar-latest release has no catalog asset at all. That is CPE-1894/1908/1909 territory, not this check's job to fix; this issue is the freshness signal, not a diagnosis."
+              printf '%s\n' "Known live cause as of 2026-08-26 (CPE-1893's investigation): GitHub's \`/releases/latest/\` can resolve to a \`-sidecar\` release, and only \`release.yml\` (the plain channel) runs the \`catalog\` job — a sidecar-latest release has no catalog asset at all. Also confirmed 2026-08-26: every recent plain release is sitting as an unpublished Draft, so this check will most likely keep firing on its own until a plain release is actually published. That is CPE-1894/1908/1909 territory, not this check's job to fix; this issue is the freshness signal, not a diagnosis."
+            elif [ "$CLOCK_SKEW" = "true" ]; then
+              printf '%s\n' "**The catalog's published version is stamped in the FUTURE** (age ${AGE_DAYS} day(s), i.e. negative) relative to this run. That means either the signing runner's clock was wrong when \`catalog-sign\` ran, or the catalog was mis-stamped some other way -- either way, do not trust its freshness until this is understood."
             elif [ "$UNPARSEABLE" = "true" ]; then
-              printf '%s\n' "**Fetched HTTP 200, but the body has no parseable \`entries[].version\`** — the index schema may have changed, or the file is empty/corrupt. Cannot evaluate freshness."
+              printf '%s\n' "**Fetched HTTP 200, but the body has no parseable \`entries[].version\`** — the index schema may have changed, the file is empty, or the body is not valid JSON at all (corrupt/truncated). Cannot evaluate freshness."
             else
               printf '%s\n' "**Stale: ${AGE_DAYS} day(s) old, over the ${THRESHOLD_DAYS}-day threshold.** A fetch against this catalog will keep succeeding but applying nothing new (anti-rollback rejects a same-or-older \`version\`, see \`sidecar/host/src/catalog.rs::apply_bundle_with\`) — the AI Console UI shows this identically to genuinely being up to date (\"Agents are already up to date.\")."
             fi
@@ -230,15 +274,20 @@ jobs:
         env:
           HTTP_CODE: ${{ steps.fetch.outputs.http_code }}
           STALE: ${{ steps.eval.outputs.stale }}
+          CLOCK_SKEW: ${{ steps.eval.outputs.clock_skew }}
           AGE_DAYS: ${{ steps.eval.outputs.age_days }}
           THRESHOLD_DAYS: ${{ steps.threshold.outputs.days }}
         run: |
-          if [ "$HTTP_CODE" = "200" ] && [ "$STALE" = "false" ]; then
+          if [ "$HTTP_CODE" = "200" ] && [ "$STALE" = "false" ] && [ "$CLOCK_SKEW" != "true" ]; then
             echo "catalog is fresh (age ${AGE_DAYS}d, threshold ${THRESHOLD_DAYS}d) -- nothing to report"
             exit 0
           fi
           if [ "$HTTP_CODE" = "404" ]; then
             echo "::error::catalog is unreachable at its live URL (HTTP 404) -- see the filed/updated issue above. This run is intentionally red until it's fixed."
+            exit 1
+          fi
+          if [ "$CLOCK_SKEW" = "true" ]; then
+            echo "::error::catalog's published version is stamped in the future (age ${AGE_DAYS}d, negative) -- a clock skew or mis-stamped version, see the filed/updated issue above. This run is intentionally red until this is understood."
             exit 1
           fi
           if [ "$STALE" = "true" ]; then

@@ -196,4 +196,78 @@ describe("catalog-freshness-check.sh's age/staleness arithmetic (executed, not j
     expect(r.stdout).toContain("STALE");
     expect(r.stdout).toContain("40d");
   });
+
+
+  // CPE-1893 UAT round 1, reviewer finding 1: a naive `[ age -gt threshold ]` comparison lets a
+  // NEGATIVE age (a future-dated `version` -- a clock skew on the signing runner, or a mis-stamped
+  // catalog) slip through as "fresh", technically true since it is not GREATER than the threshold.
+  // is_catalog_stale now returns a distinct exit code (2) for this case so no caller can collapse it
+  // into "fresh". Both cases below are the reviewer's own red-proof inputs, reproduced exactly.
+  it("a future-dated version (age -1d, the reviewer's exact red-proof case) is CLOCK SKEW, not fresh (exit 2)", () => {
+    if (!hasBash) return;
+    const r = runScript(1_800_086_400, 7, 1_800_000_000);
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("CLOCK SKEW");
+    expect(r.stdout).toContain("-1d");
+    expect(r.stdout).not.toContain("fresh —"); // must never read as the healthy verdict
+  });
+
+  it("an extreme future-dated version (age far negative) is still CLOCK SKEW, not fresh (exit 2)", () => {
+    if (!hasBash) return;
+    const r = runScript(9_999_999_999, 7, 1_800_000_000);
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("CLOCK SKEW");
+    expect(r.stdout).toContain("-94907d");
+    expect(r.stdout).not.toContain("fresh —");
+  });
+});
+
+// --- Execution-level red-proof of the "don't let set -e swallow a parse failure" control flow ----
+// CPE-1893 UAT round 1, reviewer finding 2: catalog-freshness.yml's "Evaluate freshness" step runs
+// under `set -euo pipefail`. A BARE failing command inside `published=$(jq ...)` aborts the step
+// immediately -- before `unparseable=true` is ever written to $GITHUB_OUTPUT -- so a corrupt
+// catalog-index.json body (HTTP 200, invalid JSON) went red WITHOUT filing the alert issue, unlike
+// the sibling case (valid JSON, empty entries[]) which correctly does. The fix wraps the assignment
+// as an `if` CONDITION, which is exempt from `set -e` regardless of the guarded command's exit code.
+// `jq` is not installed in every dev/CI environment this test runs in (confirmed absent locally), so
+// this proves the underlying bash CONTROL-FLOW mechanism directly with a stand-in failing command
+// (`false`) rather than depending on jq being present -- the defect and the fix are both about
+// `set -e` interacting with a command-substitution assignment, not about jq specifically, and the
+// exact same shape (`if ! var=$(cmd); then ...`) is what catalog-freshness.yml now uses verbatim.
+describe('the "if ! var=$(cmd)" guard survives set -e where a bare "var=$(cmd)" does not (CPE-1893)', () => {
+  let hasBash = false;
+  beforeAll(() => {
+    hasBash = bashAvailable();
+  });
+
+  it("OLD shape: a bare failing assignment under set -e aborts BEFORE the failure can be handled", () => {
+    if (!hasBash) return;
+    const r = spawnSync(
+      "bash",
+      ["-c", 'set -euo pipefail; published=$(false); echo "unparseable=true"; echo "reached-marker"'],
+      { encoding: "utf8" },
+    );
+    // The script dies at the failing assignment -- neither the marker nor the "unparseable" line
+    // it was meant to guard ever runs. This is the exact silent-abort bug the reviewer found.
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain("reached-marker");
+    expect(r.stdout).not.toContain("unparseable=true");
+  });
+
+  it("NEW shape: guarding the assignment as an if-condition lets the failure be handled, then still exits non-zero", () => {
+    if (!hasBash) return;
+    const r = spawnSync(
+      "bash",
+      [
+        "-c",
+        'set -euo pipefail; if ! published=$(false); then echo "unparseable=true"; echo "reached-marker"; exit 1; fi',
+      ],
+      { encoding: "utf8" },
+    );
+    // The failure is caught -- both the "unparseable" line and the marker run before the step still
+    // exits non-zero (the run stays red, matching the sibling empty-entries[] case's own behavior).
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("reached-marker");
+    expect(r.stdout).toContain("unparseable=true");
+  });
 });

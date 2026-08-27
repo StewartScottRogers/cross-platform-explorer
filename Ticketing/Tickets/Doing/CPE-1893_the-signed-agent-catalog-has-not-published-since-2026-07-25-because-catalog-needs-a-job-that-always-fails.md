@@ -229,3 +229,64 @@ auto-update pipeline this job publishes for).
   `npx vitest run src/lib/catalogPublishFreshnessGuard.test.ts` — 15/15 (the test only asserts the
   threshold is a positive integer, so no test code needed to change for the new value).
   `npm run check` — 0 errors. Confirmed `main` had not moved (no rebase needed). Pushing the fix.
+
+
+- **2026-08-26 USMST — Independent reviewer: APPROVE, with two small non-blocking findings folded
+  into this same attempt 2 (not a new attempt).** Everything else the reviewer checked was confirmed
+  correct and untouched: the `if: ${{ !cancelled() }}` change was attacked directly (`gh release
+  upload` against a nonexistent tag on the real repo -> `release not found`, exit 1 -- confirms a
+  total-matrix failure now fails loudly instead of skipping silently); the consumer investigation
+  verified line-by-line including the exact `console.rs:1342` line that drops the `error` field;
+  empty `entries[]`, network failure, and the CPE-1794 `gh issue list` dedupe lesson all correctly
+  handled; the `.gitattributes` LF pin follows real precedent; 334 files / 4596 tests reproduced
+  exactly. Two fixes needed, both in the freshness script's edge handling:
+
+  1. **No sanity floor on a negative age.** Reviewer's red-proof:
+     `bash catalog-freshness-check.sh 1800086400 7 1800000000` printed `fresh — age -1d <= threshold
+     7d` (exit 0), and an extreme case (`9999999999`) printed `fresh — age -94907d`. A future-dated
+     `version` (a clock-skewed signing runner, or a mis-stamped catalog) silently read as healthy.
+     Fixed: `is_catalog_stale` in `catalog-freshness-check.sh` is now a 3-way verdict via exit code
+     (0=stale, 1=fresh, 2=CLOCK SKEW when age is negative), and both the script's own direct-run mode
+     and `catalog-freshness.yml`'s "Evaluate freshness" step now explicitly capture and switch on all
+     three values instead of a boolean `if/else` that silently collapsed exit code 2 into "fresh". A
+     clock-skew verdict is its own alarm (files/dedupes the same issue, distinct message, job fails
+     loud) — never folded into "stale". Re-verified locally with the reviewer's own two inputs
+     (age -1d and age -94907d) plus the original four fresh/boundary/stale cases at the corrected
+     14-day threshold (13d fresh, 14d fresh at the boundary, 15d stale) — all match.
+
+  2. **A truly corrupt body went red but filed no issue.** With `catalog-index.json` served at HTTP
+     200 but unparseable JSON, `jq` exits nonzero inside a bare `published=$(jq ...)` assignment,
+     and because the step runs under `set -euo pipefail`, that assignment itself aborted the step
+     BEFORE `unparseable=true` was ever written — the run went red (the `always()` summary step still
+     caught it) but "File an issue" never saw `unparseable == 'true'`, so no issue was filed.
+     Inconsistent with the sibling case right next to it (valid JSON, empty `entries[]`), which does
+     reach the issue-filing step. Fixed by wrapping the assignment as an `if` condition
+     (`if ! published=$(jq ...); then ...; fi`) — a command used as an `if` condition is exempt from
+     `set -e` regardless of its exit code, so the failure is now caught and `unparseable=true` is
+     written before the step exits. `jq` is not installed in this dev environment (confirmed:
+     `jq: command not found`), so the committed red-proof test isolates the underlying bash
+     control-flow mechanism directly with a stand-in failing command (`false`) rather than depending
+     on jq being present — the defect and the fix are both about `set -e` interacting with a
+     command-substitution assignment, not about jq specifically, and the test uses the exact same
+     `if ! var=$(cmd); then ...` shape the workflow now uses verbatim. Both the old (aborts silently)
+     and new (catches, still exits non-zero) shapes are asserted.
+
+  Both red-proofed and added to `src/lib/catalogPublishFreshnessGuard.test.ts` alongside the four
+  cases already there — file now has 19 tests, all passing (`npx vitest run
+  src/lib/catalogPublishFreshnessGuard.test.ts`). `npm run check` — 0 errors.
+
+- **2026-08-26 USMST — Note for whoever sees the first alert this check files, per the Foreman's
+  ask.** The reviewer traced *why* the catalog 404s further than my original investigation did: it
+  is not only that `/releases/latest/` can resolve to a sidecar release. **Every recent plain
+  release is currently sitting as an unpublished Draft** — `v0.57.69` is `Draft`, and no plain
+  release has been published in over a month. So once this PR merges, the live catalog at its
+  well-known URL will most likely **keep** 404ing until an actual plain release gets published (not
+  just built/drafted) — which means `catalog-freshness.yml`'s very first scheduled run is expected to
+  file a GitHub issue immediately. **That is the alarm working correctly, not misfiring** — record
+  this here so nobody mistakes the first issue for a bug in the check itself. The underlying fix
+  (getting a plain release actually published) is CPE-1894/1908/1909 territory, correctly out of
+  scope for this ticket.
+
+  Rebased onto the `main` commits that landed while this correction was in flight (`CPE-1903 merged
+  (#1034)`) — clean rebase, no conflicts. Re-validated YAML, re-ran the guard suite and `npm run
+  check` post-rebase before force-pushing.
