@@ -7,8 +7,20 @@
 // viewport, `Runtime.evaluate` to measure) — no WebDriver, no npm dependency, Node's built-in `fetch` +
 // `WebSocket` only.
 //
-// Three independent, composable check kinds (a case's `checks` array picks whichever apply — see
-// cases.mjs for real examples and the reasoning per case):
+// REQUIRES NODE >= 22. `checkOneWidthHeight` below calls the global `WebSocket` constructor directly —
+// it is only a STABLE Node built-in from v22 (unflagged); on Node 20 it is `undefined` and every call
+// throws `ReferenceError: WebSocket is not defined`, unconditionally, on every run. This is not
+// theoretical: it reached real CI once (job 98371907013, `.github/workflows/gui-smoke.yml`'s
+// `layout-guard` job was pinned to `node-version: 20` — every other job in that workflow's `Setup Node`
+// step, copy-pasted from) before being caught in UAT and fixed by pinning that ONE job to 22 — see that
+// job's own comment for why 22, not the `ws` package, was the fix. A red-proof run against a local Node
+// < 22 will fail with exactly that ReferenceError before it measures anything, which reads identically
+// to "the harness crashed" rather than "a real layout bug" — if you see it, check `node --version`
+// first.
+//
+// Four independent, composable check kinds (a case's `checks` array picks whichever apply — see
+// cases.mjs's own decision table for which kind catches which class of bug, and its header for real
+// examples):
 //
 //  - `siblingOverlap` — no two DIRECT CHILDREN of a given root may occupy overlapping screen space.
 //    This is the literal "no element in this row overlaps another" rule from the repo's pill/chip
@@ -146,8 +158,13 @@ function buildProbeExpression(checks) {
           for (var b = a + 1; b < kids.length; b++) {
             var ra = rectOf(kids[a]), rb = rectOf(kids[b]);
             if (overlapsRect(ra, rb)) {
+              // CPE-1882 UAT: match clipProbe's "overhangs by N px" -- the reader shouldn't have to
+              // subtract two raw rects by hand to tell a 1px rounding wobble from a real collision.
+              var overlapW = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);
+              var overlapH = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
               overlaps.push(
                 check.root + ' children: ' + labelOf(kids[a], 'child' + a) + ' × ' + labelOf(kids[b], 'child' + b) +
+                ' overlap by ' + overlapW.toFixed(1) + 'px × ' + overlapH.toFixed(1) + 'px' +
                 ' (rectA=' + JSON.stringify(ra) + ' rectB=' + JSON.stringify(rb) + ')'
               );
             }

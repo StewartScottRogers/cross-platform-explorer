@@ -19,8 +19,24 @@
 //                    the main window.
 //   readySelector  — CSS selector the engine polls for before measuring (proves the component actually
 //                    mounted and rendered, not just that the page loaded).
-//   checks         — see engine.mjs's header for the four check kinds and which class of bug each one
-//                    catches. A case can mix any number of any kind.
+//   checks         — see engine.mjs's header for the full reasoning behind each check kind. Which one
+//                    to reach for (found by an independent UAT pass building a case from scratch — its
+//                    first instinct, `siblingOverlap`, did NOT catch a missing `flex-wrap`, because
+//                    removing wrap doesn't make chips overlap, it pushes the row past the viewport or
+//                    shoves the next block down — a case built on that instinct alone would look
+//                    protective and not be):
+//
+//      Row of pills/chips that should wrap?                        -> siblingOverlap on the row (two
+//                                                                      chips must never share a pixel).
+//      A container has (or should have) overflow: hidden and a
+//      pinned child might poke through?                            -> clipProbe.
+//      Text might not fit its own box and could paint outside it?   -> textOverflow.
+//      A button/control might get squeezed or covered and become
+//      unclickable?                                                 -> selfPaint.
+//
+//    Note: removing flex-wrap alone does NOT reliably trigger siblingOverlap — a wrap regression
+//    usually needs a clipProbe (if the row's container clips) or a manual visual check. A case can mix
+//    any number of any kind.
 export const CASES = [
   {
     // CPE-1836 red-proof case: "the status bar's git block bleeds into the disk label at the 600px

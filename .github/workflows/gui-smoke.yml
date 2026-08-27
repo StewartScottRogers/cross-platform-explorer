@@ -1083,10 +1083,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # CPE-1882 UAT finding: pinned to 22, NOT this workflow's usual 20 (every other job here
+      # stays on 20 -- do not "fix" this to match them). scripts/dev-harness/layout-guard/engine.mjs
+      # calls the global `WebSocket` constructor directly (its own CDP client, no `ws` dependency --
+      # see that file's header) and global `WebSocket` is only stable in Node from v22; on v20 it is
+      # `ReferenceError: WebSocket is not defined`, unconditionally, on every run -- confirmed on a
+      # real CI run (job 98371907013) before this fix. The alternative (drop the global-WebSocket
+      # dependency, e.g. the `ws` package) was rejected: it's a new npm dependency, which the ticket's
+      # own bar was to avoid, and this job's Chrome-CDP approach otherwise has zero dependencies.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: "npm"
 
       - name: Install frontend dependencies
