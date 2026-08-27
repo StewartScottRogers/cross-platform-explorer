@@ -127,30 +127,91 @@ Spawning sub-agents is **pre-authorised** during a sprint (this overrides the de
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
 conventions + the delete-test rule) so it doesn't re-derive from cold.
 
-### Dispatch contract — every Worker/Reviewer/UAT prompt states this, verbatim (CPE-1848)
+### Dispatch contract — every Worker/Reviewer/UAT prompt states this, verbatim (CPE-1848, corrected by CPE-1880)
 
 A dispatched sub-agent — Worker, Reviewer, UAT Tester, or any other role — **never receives a background
 task notification**. That wake-up is a capability of the **Foreman's own harness loop** (the heartbeat
 above: "Background agents re-invoke you" describes what happens to the Foreman when ITS sub-agents
-finish, not something a sub-agent can itself rely on). A sub-agent that backgrounds a CI watch, "arms a
-monitor," or otherwise defers to a signal it cannot receive **stalls forever** and returns nothing usable
-— observed three times in one batch, on three different tickets, each recovered only by a full Foreman
-round-trip. So **every** Worker/Reviewer/UAT dispatch prompt includes, verbatim or in substance:
+finish, not something a sub-agent can itself rely on). A sub-agent left holding a background task has no
+way to be woken from it, so it does the only thing that follows: it waits, forever, and returns nothing
+usable.
 
-> You receive NO background task notifications. Run everything synchronously and in the foreground —
-> builds, tests, `gh` calls, all of it. To watch CI: `gh run watch <run-id> --interval 30` or
-> `gh pr checks <pr> --watch` (both block and return). `gh pr checks --watch` exits 0 when the branch
-> moves under it, not only when checks pass — after it returns, re-check explicitly, by **SHA** (not PR
-> number alone: a stale PR-number check can pass against a superseded head). If a wait is genuinely long,
-> poll in a bounded foreground loop and report the outcome — or return now with your findings plus an
-> explicit `CI still pending on <SHA>` so the Foreman can take it over. **Never** return a stub that
-> promises to report later, and never say a monitor is "armed" or "watching in the background" — that
-> phrasing is the exact defect this rule exists to prevent.
+**Why the rule alone was not enough, and what actually causes this (CPE-1880 — read this before editing
+the paragraph below).** CPE-1848 stated the rule and handed agents the blocking command to use instead:
+`gh run watch <run-id> --interval 30`. **Five more agents stalled the same day, three of them after being
+sent that exact command in a message that named the defect and named the ticket.** They were not being
+defiant and they had not forgotten — they *complied*, and complying is what stalled them:
+
+- The harness's Bash tool caps a single call at `timeout: 600000` ms. A command that outlives the cap is
+  **auto-backgrounded, not killed** — so the agent ends up holding precisely the background task the rule
+  told it to avoid, through no decision of its own.
+- `gh run watch` blocks until the run finishes. Measured over the 95 completed `ci.yml` runs from
+  2026-08-23 to 2026-08-26: **median 58.9 min, p90 77.3 min, max 97.0 min. Of the 71 runs that
+  succeeded, ZERO finished inside 600 s** — the fastest took 28.6 min, and the only sub-ten-minute runs
+  in the window were four cancellations. The prescribed command had a **0-of-71** chance of returning.
+- The obvious mitigation does **not** work: a shell-level `timeout 570 gh run watch …` wrapper was
+  observed backgrounded anyway, because the harness timer spans the whole compound command rather than
+  the wrapped process. Do not reach for it; it is the fix everyone tries and it did not hold.
+
+So the lever is not stronger wording — it is removing the unbounded call and moving the CI wait to the
+only participant that genuinely gets notified. **The Foreman owns CI.** Workers push and report; they are
+never asked to establish a CI outcome. This was validated live: the moment a stalled worker was told
+*"I own CI, do not watch it, hand me the report you already have,"* it returned a complete, high-quality
+report immediately. It never lacked the material; it lacked a way to stop waiting.
+
+**Every** Worker/Reviewer/UAT dispatch prompt includes, verbatim or in substance:
+
+> You receive NO background task notifications, and any command that runs past the harness's 600 s tool
+> cap is auto-backgrounded on your behalf — so a long-running call parks you whether or not you intended
+> it. Run everything synchronously and in the foreground, and keep every single call bounded well under
+> 600 s: builds, tests, `gh` calls, all of it.
+>
+> **The Foreman owns CI. Do not watch, poll, or monitor it.** Push your branch, open the PR, and report
+> — including `CI still pending on <SHA>` so the Foreman can take it over. Your report is complete
+> without a CI verdict; do not hold it back waiting for one.
+>
+> **Never run `gh run watch` or `gh pr checks --watch`.** Both block until CI finishes, and CI on this
+> repo has never once finished inside the 600 s cap (median ~59 min) — they are backgrounded 100% of the
+> time. If you genuinely must read CI for some other reason, the one sanctioned idiom is
+> `node scripts/ci-poll.mjs --run <run-id>` (or `--pr <number>`): it is clamped below the cap by
+> construction, prints one timestamped line per tick, and always ends with a single `CI VERDICT:` line
+> carrying `total_count`, `pending`, `mergeable`, and the SHA. Re-invoke it if it returns
+> `CI VERDICT: pending`. Never wrap `gh run watch` in `timeout`; that was measured and it still
+> backgrounds.
+>
+> **Never** return a stub that promises to report later, and never say a monitor is "armed" or "watching
+> in the background" — that phrasing is the exact defect this rule exists to prevent, and the Foreman
+> runs `node scripts/stall-check.mjs` over your report on arrival, so it is caught rather than believed.
+> If you need to QUOTE that phrasing (reporting on someone else's stall, or on this rule), put it in a
+> **code fence**. Fenced blocks are stripped before matching; `>` blockquotes are **not** — quoting by
+> blockquote used to hide every recorded stall, so that exemption was removed.
 
 This is a standing instruction, not a per-dispatch judgment call: include it in every Worker/Reviewer/UAT
 briefing regardless of how routine the ticket looks — the failure mode above hit ordinary tickets, not
 exotic ones. It applies unchanged inside a batched run (`/sprint-batched`): a stalled sub-agent there
 doesn't just cost a round-trip, it stalls the batch counter along with it.
+
+**The Foreman's own side of the bargain (CPE-1880).** Because the contract now forbids workers from
+establishing CI outcomes, the Foreman must actually pick them up:
+
+- After a worker reports, the Foreman polls that PR itself — **`node scripts/ci-poll.mjs --pr <n>
+  --budget 45`** — and routes failures back to the worker as a concrete fix request, not as "go check
+  CI." **Use a short budget and cycle**; do not take the 480 s default here. The default is sized for a
+  worker that has nothing else to do, whereas the Foreman polling seven branches at 480 s each would sit
+  blocked for ~56 minutes per sweep, unable to dispatch — which trades a stalled worker for a stalled
+  supervisor. Sweep the open PRs at 45 s apiece, dispatch in between, and come back round. Re-check the
+  current head by **SHA**, not PR number alone: a stale PR-number check can pass against a superseded
+  head, and `--watch` exits 0 when the branch moves under it rather than only when checks pass.
+- **Run the arrival check on every returned sub-agent report:** `node scripts/stall-check.mjs
+  report.txt --prior <n>`, where `<n>` is how many stall-shaped reports that same agent has already
+  returned. It exits `0` accept, `3` re-invoke, `4` take-over. This is mechanical on purpose — "a monitor
+  is armed" reads as progress, which is why a Foreman that trusts its own eye waits on a dead agent.
+- **The escalation is bounded at one retry, and that bound is the point.** First stall-shaped return →
+  re-invoke the same agent once (`SendMessage`) with "I own CI; report now, synchronously, with what you
+  have." Second one from the same agent → **kill it and take over its PR yourself.** Do not re-invoke a
+  third time: run `batched-2026-08-23-1124` recorded one agent producing four "still waiting" returns in
+  a row, each stale wake generating the next, and it could not exit on its own. An agent that has armed a
+  monitor cannot be talked out of it.
 
 ### Shared machine state — a tool install is a shared-resource change, not local setup (CPE-1856)
 
@@ -376,10 +437,12 @@ after it).
   read as "nearly done," and then rise again as more checks appear — CPE-1863 measured `total_count`
   14→18→19 while `pending` went 7→10, dipping before it rose. Require `total_count` to be **stable across
   at least two reads** (or match a known expected count) before trusting a `pending == 0` reading.
-- **`gh pr checks --watch` exits 0 when the branch moves under it, not only when checks pass** (the
-  recorded trap the dispatch contract above already accounts for). After it returns, re-check the
-  *current* head explicitly — `gh pr checks <pr>` or `gh pr view <pr> --json
-  headRefOid,statusCheckRollup` — keyed to the SHA you expect.
+- **`gh pr checks --watch` exits 0 when the branch moves under it, not only when checks pass.** After it
+  returns, re-check the *current* head explicitly — `gh pr checks <pr>` or `gh pr view <pr> --json
+  headRefOid,statusCheckRollup` — keyed to the SHA you expect. **A sub-agent must not run it at all**
+  (CPE-1880: it blocks past the 600 s tool cap and is auto-backgrounded 100% of the time on this repo);
+  the sanctioned bounded idiom for anyone who must read CI is `node scripts/ci-poll.mjs --pr <n>`, which
+  applies both of the rules above mechanically and always returns a single `CI VERDICT:` line.
 - **`gh api` pagination is the same shape from a third direction:** an unpaginated call silently returns
   only the first page (default 30 items), with no truncation marker of its own. Pass `--paginate` (or
   follow the `Link` header) whenever a listing could exceed one page, rather than trusting a short result
@@ -599,12 +662,22 @@ Workers implement the harnesses on their right-sized tier.
 ## Reporting — ASCII banners + timestamps + FOREMAN blocks
 
 - **A report naming a pending background task instead of results is incomplete, not a status update
-  (CPE-1848).** A sub-agent report is recognisable as a **stall**, not progress, when it contains
-  language like "a monitor is armed," "the background watch will report," "I'll wait for the
-  notification," or any variant that defers to a signal the agent cannot receive (per the dispatch
-  contract above). The Foreman must not treat that as "in flight and fine" — re-invoke the same agent
-  (`SendMessage` to its id/name) with the dispatch contract restated and an explicit "report now,
-  synchronously, with what you have" instruction, rather than waiting on it.
+  (CPE-1848, mechanised by CPE-1880).** A sub-agent report is recognisable as a **stall**, not progress,
+  when it contains language like "a monitor is armed," "the background watch will report," "I'll wait for
+  the notification," or any variant that defers to a signal the agent cannot receive (per the dispatch
+  contract above). The Foreman must not treat that as "in flight and fine." **Do not eyeball this — run
+  it:** `node scripts/stall-check.mjs <report-file> --prior <n>` classifies the report mechanically
+  (exit `0` accept · `3` re-invoke · `4` take-over), ignores the phrasing when it appears inside a
+  **code fence** (so quoting the rule is not committing the offence — `>` blockquotes are deliberately
+  NOT exempt, because that exemption hid all five recorded stalls behind one `> ` prefix), and treats a
+  backgrounded watcher, an armed monitor, a promised notification, a wait keyed to a signal the agent
+  cannot receive, or "continuing to wait" as **hard** findings that no amount of surrounding detail
+  excuses — including the `CI still pending on <SHA>` line this contract itself mandates. On `re-invoke`,
+  `SendMessage` the same agent with the dispatch contract restated and an explicit "I own CI; report
+  now, synchronously, with what you have." On `take-over` — the **second** stall-shaped report from that
+  same agent — kill it and read its PR yourself; a third re-invoke is the loop CPE-1880 bounds, and
+  run `batched-2026-08-23-1124` recorded an agent that produced four such returns and could not exit on
+  its own.
 - **Every message that directly addresses the user leads with an ASCII-art banner** (the user is often across
   the room and can't read prose) — see [[use-ascii-art-when-addressing-user]]. Keep the banner words short +
   high-contrast (`BUILDING…`, `RUNNING ✓`, `NEEDS YOU`, `DONE`).
