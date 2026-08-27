@@ -318,5 +318,37 @@ and "say nothing" — **the third option was not considered.**
     per the round-3 hazard where a bare headless-Chrome invocation once returned an unrelated already-open
     window). Captured via `claude-in-chrome`, not a raw headless-Chrome CLI call. Harness and vite config
     deleted after use; killed only the exact PID bound to port 48812, nothing else on the shared machine.
-  - Pushed to the existing branch `cpe-1881-refusal-reporting` / PR #1046. This closes the ticket's last
-    round; the PR is expected to merge from here.
+  - Pushed to the existing branch `cpe-1881-refusal-reporting` / PR #1046.
+  - **Post-push correction — CI red on ubuntu AND macOS, self-caught by the coordinator's own CI
+    ownership.** `cpe_1881_round5_unrestorable_reason_names_both_counts` (the item-3 pinning test above)
+    panicked on both non-Windows legs at its own `assert!(root.join("added-01.png").exists() && …)` —
+    confirmed by matching the panic's reported line/column against `git show`'s exact committed content:
+    it is that `assert!`'s own opening line, not `live_hold_back`'s. Root cause: the fixture's checkpoint
+    key `"notes: draft.txt"` is only unrestorable because of `safe_segments`'s colon/backslash check,
+    which is **deliberately `cfg!(windows)`-gated** (that function's own doc comment: "on Linux and macOS
+    neither character roots anything… apply the Windows rule where Windows is, and nowhere else"). On
+    ubuntu/macOS the key is fully restorable, `unrestorable` stays empty, `hold` is `None`, and the two
+    deletes actually apply — so the liveness assert (which exists to prove the fixture is NOT inert)
+    correctly caught its own fixture being platform-inert. Proved directly rather than argued: a minimal
+    single-file Rust probe mirroring the exact guard expression, cross-compiled from the Windows host to
+    `x86_64-unknown-linux-musl` with `rustc` + the toolchain's bundled self-contained `rust-lld` (no
+    system `cc`/`musl-gcc` needed for a dependency-free probe — the full crate's native C dependencies
+    made a full `cargo test --target x86_64-unknown-linux-musl` infeasible without root to install a
+    cross C toolchain, which this session did not have), then **executed under WSL2's real Linux
+    kernel**: `cfg!(windows) = false`, `colon-in-name rejected on this target = false`,
+    `wrote file with colon in name: ok = true`, confirming both the compile-time gate and the
+    filesystem-level premise on genuine Linux, not merely by reading the source. Fixed by adding
+    `#[cfg(windows)]` to the test — not `require_staged`/`require_staged_reason` (those exist for a
+    RUNTIME capability that might fail to stage even on a supporting platform, e.g. a symlink privilege;
+    this precondition is a compile-time platform fact with no staging step) — mirroring the two sibling
+    tests already in this exact file for the identical "Windows rejects this spelling" shape
+    (`cpe_1823_a_trailing_space_entry_never_destroys_the_file_it_aliases`,
+    `cpe_1823_a_device_name_entry_is_never_reported_applied_with_nothing_on_disk`, both already
+    `#[cfg(windows)]` and already CI-green today, proving the mechanism). The production fix in item 3
+    (the `format!` wording itself) needed no change and is NOT platform-dependent: `unrestorable` is also
+    reachable on every platform via the universal absolute-path/`.`/`..` rules, which is exactly what the
+    pre-existing `cpe_1845_…` tests already exercise cross-platform — only the NEW test's fixture had
+    picked a Windows-only trigger unnecessarily. Re-ran the full Windows suite (2398 passed, unchanged —
+    `#[cfg(windows)]` keeps the test compiled and passing on the platform it targets) and
+    `cargo clippy --all-targets -D warnings` clean. Pushed the fix to the same branch.
+  - This closes the ticket's last round; the PR is expected to merge from here.

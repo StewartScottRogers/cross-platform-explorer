@@ -1429,6 +1429,28 @@ mod tests {
     /// places with nothing connecting them. This pins that both counts now appear together, in the
     /// reason's own clause — the exact fixture shape (1 unrestorable name, 2 deletes) captured in
     /// `.claude/sprint-metrics/visual-evidence/cpe-1881-{light,dark}-held-back-and-refused.png`.
+    ///
+    /// **`#[cfg(windows)]`, deliberately — same reason as the sibling `cpe_1823_a_trailing_space_entry_…`
+    /// and `cpe_1823_a_device_name_entry_…` tests above.** The fixture's colon in `"notes: draft.txt"`
+    /// only lands this entry in `unrestorable` because of `safe_segments`'s
+    /// `cfg!(windows) && (seg.contains(':') || seg.contains('\\'))` check, and that gate is deliberately
+    /// Windows-only (see that function's own doc comment): on Linux and macOS `:` is an ordinary filename
+    /// byte, so this exact key is fully restorable there. Found the hard way — CI red on ubuntu AND
+    /// macOS at `assert!(root.join("added-01.png").exists() && …)` (this test's own liveness check),
+    /// because on those platforms `unrestorable` stays empty, `hold` is `None`, and the two deletes
+    /// actually apply. That is not a bug in the fix; this test's precondition simply does not hold
+    /// outside Windows, so the correct move is gating the test to where it does — a passing assertion on
+    /// a platform where the condition it describes cannot occur would prove nothing, which is exactly
+    /// the shape this ticket has been fighting throughout.
+    ///
+    /// Not a `require_staged`/`require_staged_reason` case: those exist for a RUNTIME capability that
+    /// might fail to stage even on a platform that is supposed to support it (a symlink privilege, an ACL
+    /// deny — see `cpe_1846_a_link_at_the_destination_…` above for that exact shape in this file). Here
+    /// there is no staging step and no privilege to lose: a colon being Windows-only is a compile-time
+    /// fact of `safe_segments`, never a runtime observation, so `#[cfg(windows)]` — the same tool the two
+    /// CPE-1823 siblings above already use for an identical "Windows rejects this spelling" precondition
+    /// — is the right-shaped gate, not a hand-rolled `cfg!` check inside the test body.
+    #[cfg(windows)]
     #[test]
     fn cpe_1881_round5_unrestorable_reason_names_both_counts() {
         let store = scratch("1881-r5-counts-store");
