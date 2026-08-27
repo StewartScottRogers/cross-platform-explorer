@@ -2364,7 +2364,7 @@ mod tests {
         // download the tree locally.
         let out = std::env::temp_dir().join(format!("cpe-webdav-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
-        let files = cpe_server::transfer::download_tree(&provider, "/", &out, &cancel).unwrap();
+        let files = cpe_server::transfer::download_tree(&provider, "/", &out, &cancel).unwrap().files;
         assert_eq!(files, 2);
         assert_eq!(std::fs::read(out.join("readme.txt")).unwrap(), FILE_BODY);
 

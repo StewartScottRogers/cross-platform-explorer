@@ -12,6 +12,34 @@ use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// What [`download_tree`] delivered, plus what a per-entry guard skipped on purpose and why (CPE-1881).
+///
+/// Before this existed, [`download_tree`] returned a bare `usize` — files written — and the CPE-1857
+/// hard-link leaf guard (and its pre-existing-symlink-leaf neighbour) reported a skip with `eprintln!`
+/// and nothing else: the caller saw the delivered count silently one lower, with no `undelivered` entry,
+/// no reason, no count. Measured by the independent Security Auditor on PR #1016: the line went to
+/// stderr and `n == 0` was the only signal reaching the caller at all.
+///
+/// **This is deliberately NOT [`RestoreReport`](crate::revert_engine::RestoreReport)'s shape.** A
+/// grouped write refusal earns a shared paragraph there because the *same* checkpoint tree can produce
+/// thousands of them from one `rsync --link-dest`-style hard-linked source. A transfer's hard-link skip
+/// is a per-entry **policy** decision by a *gate that never wrote anything* (see `download_tree`'s doc),
+/// so the plainer [`ArchiveReport`](crate::archive::ArchiveReport)-style "count implied by `skipped.len()`
+/// plus one reason string per entry" shape this ticket also asks for is the right fit — and it is never
+/// truncated: every skip is a real one, and dropping any of them silently would be the exact defect this
+/// ticket exists to close, worn as a different hat.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct DownloadReport {
+    /// Files actually written to `local_dir`.
+    pub files: usize,
+    /// Entries a per-entry guard refused to write — a pre-existing hard link or symlink at the local leaf
+    /// name — each as `"{remote path}: {reason}"`. Neither delivered nor a delivery failure: **not**
+    /// writing is the correct, safe outcome (see [`download_tree`]'s doc on why these do not go through
+    /// `undelivered`), but until CPE-1881 the only trace was a line on stderr. Never truncated.
+    pub skipped: Vec<String>,
+}
+
 /// One entry yielded by [`walk`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkEntry {
@@ -621,8 +649,8 @@ pub fn walk(
     Ok(visited)
 }
 
-/// Download the tree under `remote_root` into `local_dir`, recreating the directory structure. Returns the
-/// number of files written. Cancellable.
+/// Download the tree under `remote_root` into `local_dir`, recreating the directory structure. Returns a
+/// [`DownloadReport`] (files written, plus what a per-entry guard skipped and why — CPE-1881). Cancellable.
 ///
 /// Hardened against a hostile remote server (CPE-1461/CPE-1462):
 /// - Each entry is **streamed straight to disk as it is walked** rather than collecting the whole tree
@@ -648,12 +676,22 @@ pub fn walk(
 ///   `Err`, naming how many were lost and why. Everything deliverable is still delivered first. This
 ///   used to be a silent skip that returned `Ok`, which meant a batch could report success while
 ///   quietly dropping files.
+///
+/// **A third category, CPE-1881: a per-entry policy skip that IS worth telling the caller about, even
+/// though it must not fail the transfer.** The CPE-1857 hard-link leaf guard, and its pre-existing-symlink
+/// neighbour right next to it, used to report through `eprintln!` alone — invisible to any caller, with
+/// the delivered count silently one lower and no way to learn what was skipped or why. `undelivered` was
+/// considered and rejected for this (it fails the WHOLE transfer, which is wrong for a policy skip that
+/// legitimately recurs across a hard-linked source tree — see the guard's own comment below); the
+/// alternative actually taken is [`DownloadReport::skipped`], a counted list the transfer still ends `Ok`
+/// with, the same shape [`crate::archive::ArchiveReport::skipped`] already established for the archive
+/// extractor's per-entry refusals.
 pub fn download_tree(
     provider: &dyn FileSystemProvider,
     remote_root: &str,
     local_dir: &Path,
     cancel: &AtomicBool,
-) -> Result<usize, String> {
+) -> Result<DownloadReport, String> {
     let base = remote_root.trim_end_matches('/').to_string();
     std::fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
     // Canonicalize the download root ONCE; every written path is verified to stay under this.
@@ -667,6 +705,12 @@ pub fn download_tree(
     // below (traversal names, pre-existing symlinks), where not writing IS the correct outcome and `Ok`
     // is honest. These are files the user asked for and did not get, so the transfer must not end `Ok`.
     let mut undelivered: Vec<String> = Vec::new();
+    // CPE-1881: per-entry policy skips (hard link / symlink at the local leaf name) — reported, but never
+    // fail the transfer. See `DownloadReport::skipped`'s doc for why this is a distinct third bucket from
+    // both `undelivered` above and the plain `eprintln!`-only security refusals (traversal names,
+    // uninspectable ancestors) that stay exactly as they were: those are decided before any name is even
+    // resolved to a leaf, are not CPE-1857's shape, and are unchanged here — out of this ticket's scope.
+    let mut skipped: Vec<String> = Vec::new();
 
     walk(provider, remote_root, cancel, |entry| {
         if hard_err.is_some() {
@@ -762,11 +806,17 @@ pub fn download_tree(
                     // `undelivered`, so the transfer cannot report `Ok(n)` for a tree it did not deliver.
                     match crate::batch_media::name_links(&local) {
                         crate::batch_media::NameLinks::Many(names) => {
-                            eprintln!(
-                                "transfer: skipped entry whose local path already has {names} names (a \
-                                 hard link, whose other names may live outside the download folder): {}",
+                            // CPE-1881: was `eprintln!` only, with nothing reaching the caller — see
+                            // `DownloadReport::skipped`'s doc. Pushed here, still `eprintln!`'d too, so
+                            // stderr keeps carrying the same trace it always did.
+                            let why = format!(
+                                "{}: this local path already has {names} names (it is hard-linked); its \
+                                 other names may live outside the download folder, so nothing was written \
+                                 for this entry",
                                 entry.path
                             );
+                            eprintln!("transfer: skipped entry — {why}");
+                            skipped.push(why);
                             return;
                         }
                         crate::batch_media::NameLinks::Unknown(why) => {
@@ -787,7 +837,15 @@ pub fn download_tree(
                     }
                 }
                 LeafProbe::PreExistingSymlink => {
-                    eprintln!("transfer: skipped entry whose local path is a pre-existing symlink: {}", entry.path);
+                    // CPE-1881: same fix, same reason, as the hard-link arm just above — this was its
+                    // "adjacent symlink arm" the ticket named explicitly. See `DownloadReport::skipped`.
+                    let why = format!(
+                        "{}: the local path is a pre-existing symlink, and a download never writes \
+                         through one, so nothing was written for this entry",
+                        entry.path
+                    );
+                    eprintln!("transfer: skipped entry — {why}");
+                    skipped.push(why);
                     return;
                 }
                 LeafProbe::Uninspectable => {
@@ -847,7 +905,7 @@ pub fn download_tree(
             if more > 0 { format!(" (+{more} more)") } else { String::new() }
         ));
     }
-    Ok(files)
+    Ok(DownloadReport { files, skipped })
 }
 
 /// Ensure a directory exists at `path`, creating it (and any missing ancestors) if it does not — CPE-1741.
@@ -999,7 +1057,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("cpe-xfer-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         let cancel = AtomicBool::new(false);
-        let files = download_tree(&fs, "", &out, &cancel).unwrap();
+        let files = download_tree(&fs, "", &out, &cancel).unwrap().files;
         assert_eq!(files, 2);
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
         assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
@@ -1317,7 +1375,7 @@ mod tests {
 
         let provider = HostileNames { names };
         let cancel = AtomicBool::new(false);
-        let n = download_tree(&provider, "", &base, &cancel).expect("hostile transfer must not error, just skip");
+        let n = download_tree(&provider, "", &base, &cancel).expect("hostile transfer must not error, just skip").files;
 
         // The escaping sentinel must not exist anywhere outside the root.
         assert!(!sentinel_up.exists(), "path traversal escaped the download root: {sentinel_up:?}");
@@ -1350,7 +1408,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("cpe-xfer-legit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         let cancel = AtomicBool::new(false);
-        let files = download_tree(&fs, "", &out, &cancel).unwrap();
+        let files = download_tree(&fs, "", &out, &cancel).unwrap().files;
         assert_eq!(files, 2);
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
         assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
@@ -1459,14 +1517,18 @@ mod tests {
     /// the name really is inside the download root. `fs::write` then lands the remote bytes in the
     /// **inode**, and they come out at the other name too.
     ///
-    /// **Reported exactly like its symlink neighbour — an `eprintln` skip, not an `undelivered` entry —
-    /// and that was a decision, not a default.** `undelivered` makes `download_tree` return `Err` for
-    /// the WHOLE transfer, which is right for its own class ("this filesystem refused this name") and
+    /// **Reported exactly like its symlink neighbour — [`DownloadReport::skipped`], not an `undelivered`
+    /// entry — and that was a decision, not a default.** `undelivered` makes `download_tree` return `Err`
+    /// for the WHOLE transfer, which is right for its own class ("this filesystem refused this name") and
     /// wrong for this one: a hard-linked leaf is a per-entry *policy* skip, exactly like a symlinked
     /// leaf, and one collided name must not cost the user every other file in the tree. Sending a
     /// hard-linked leaf down the `undelivered` path while a symlinked leaf skips would also be an
     /// asymmetry with nothing behind it. Measured on the first cut of this test, which reddened with
     /// `must skip, not fail: "transfer: delivered 0 file(s), but 1 could not be written…"`.
+    ///
+    /// **CPE-1881 addition, pinned here rather than only in the wording change:** before this ticket, the
+    /// skip above reached nowhere but stderr — `report.skipped` did not exist, so a caller had `n == 0`
+    /// and nothing else. This test now also proves the reason reaches the return value.
     #[test]
     fn cpe_1857_download_tree_never_writes_through_a_preexisting_hard_linked_leaf() {
         let d = crate::fsutil::scratch_dir("cpe-transfer-1857");
@@ -1495,7 +1557,7 @@ mod tests {
         );
 
         let cancel = AtomicBool::new(false);
-        let n = download_tree(&OneFile, "", &root, &cancel).expect("must skip, not fail");
+        let report = download_tree(&OneFile, "", &root, &cancel).expect("must skip, not fail");
 
         // HARM FIRST, on the filesystem, before any claim about what was reported.
         assert_eq!(
@@ -1504,7 +1566,14 @@ mod tests {
             "HARM: the download wrote the remote server's bytes through a hard link, into a file \
              outside the download root that the user never named"
         );
-        assert_eq!(n, 0, "the hard-linked leaf must be skipped, not counted as delivered");
+        assert_eq!(report.files, 0, "the hard-linked leaf must be skipped, not counted as delivered");
+        // CPE-1881: before this ticket, this was the ONLY signal a caller had — an `eprintln!` on
+        // stderr, nothing on the return value. The skip must now be visible AND name the leaf and why.
+        assert_eq!(report.skipped.len(), 1, "the hard-linked skip must be reported, not silent: {report:?}");
+        assert!(
+            report.skipped[0].contains("target.txt") && report.skipped[0].contains("hard-linked"),
+            "the reported skip must name the entry and the reason: {report:?}"
+        );
     }
 
     /// **CPE-1857 Security-Auditor finding 1, at the transfer gate.** Both halves, from one fixture.
@@ -1546,7 +1615,9 @@ mod tests {
             let _reset = crate::batch_media::ProbeReset::arm(
                 crate::batch_media::ProbeInjection::DegenerateIdentity,
             );
-            download_tree(&OneFile, "", &root, &cancel).expect("a hard-linked leaf is a skip, not a failure")
+            download_tree(&OneFile, "", &root, &cancel)
+                .expect("a hard-linked leaf is a skip, not a failure")
+                .files
         };
         assert_eq!(
             std::fs::read(&victim).ok().as_deref(),
@@ -1593,12 +1664,19 @@ mod tests {
         symlink(&outside, root.join("target.txt")).unwrap();
 
         let cancel = AtomicBool::new(false);
-        let n = download_tree(&OneFile, "", &root, &cancel).expect("must skip, not fail");
-        assert_eq!(n, 0, "the symlinked leaf must be skipped, not written");
+        let report = download_tree(&OneFile, "", &root, &cancel).expect("must skip, not fail");
+        assert_eq!(report.files, 0, "the symlinked leaf must be skipped, not written");
         assert_eq!(
             std::fs::read(&outside).unwrap(),
             b"original",
             "the write followed a symlink and clobbered a file outside the root"
+        );
+        // CPE-1881 (item 3 — "the adjacent symlink arm has the same stderr-only shape"): the skip must
+        // now reach the caller, not just stderr.
+        assert_eq!(report.skipped.len(), 1, "the symlink skip must be reported, not silent: {report:?}");
+        assert!(
+            report.skipped[0].contains("target.txt") && report.skipped[0].contains("symlink"),
+            "the reported skip must name the entry and the reason: {report:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
@@ -1947,7 +2025,7 @@ mod tests {
         let provider =
             HostileNames { names: CPE_1709_MUST_NOT_REWRITE.iter().map(|s| s.to_string()).collect() };
         let cancel = AtomicBool::new(false);
-        let n = download_tree(&provider, "", &out, &cancel).expect("all of these are storable names");
+        let n = download_tree(&provider, "", &out, &cancel).expect("all of these are storable names").files;
         assert_eq!(n, CPE_1709_MUST_NOT_REWRITE.len());
         for name in CPE_1709_MUST_NOT_REWRITE {
             assert_eq!(
@@ -2051,7 +2129,7 @@ mod tests {
         let names = vec!["../escape.txt".into(), r"..\escape.txt".into(), "legit.txt".into()];
         let cancel = AtomicBool::new(false);
         let n = download_tree(&HostileNames { names }, "", &base, &cancel)
-            .expect("refusing a traversal name is correct behaviour, not a delivery failure");
+            .expect("refusing a traversal name is correct behaviour, not a delivery failure").files;
         assert_eq!(n, 1, "only the legitimate entry is delivered");
         assert_eq!(std::fs::read(base.join("legit.txt")).unwrap(), b"pwn");
         let _ = std::fs::remove_dir_all(&base);
@@ -2079,7 +2157,7 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let n = download_tree(&OneFile, "", &base, &cancel)
-            .expect("skipping a pre-existing symlinked leaf is correct behaviour, not a delivery failure");
+            .expect("skipping a pre-existing symlinked leaf is correct behaviour, not a delivery failure").files;
         assert_eq!(n, 0, "the symlinked leaf must be skipped, counted as neither delivered nor failed");
         assert_eq!(
             std::fs::read(&outside).unwrap(),
@@ -2165,7 +2243,7 @@ mod tests {
         let provider =
             HostileNames { names: CPE_1709_NAMES.iter().map(|r| r.0.to_string()).collect() };
         let cancel = AtomicBool::new(false);
-        let n = download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail");
+        let n = download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail").files;
         assert_eq!(n, CPE_1709_NAMES.len(), "every enumerated name must be written, none skipped");
 
         for row in CPE_1709_NAMES {
@@ -2209,7 +2287,7 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let n = download_tree(&HostileNames { names }, "", &base, &cancel)
-            .expect("a hostile transfer must skip, not fail");
+            .expect("a hostile transfer must skip, not fail").files;
         assert!(!sentinel.exists(), "path traversal escaped the download root: {sentinel:?}");
 
         let mut stack = vec![base.clone()];
@@ -2298,7 +2376,7 @@ mod tests {
         let leaf = "\u{202E}gnp.txt".to_string(); // the ticket's own repro
         let provider = HostileNames { names: vec![leaf.clone()] };
         let cancel = AtomicBool::new(false);
-        let n = download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail");
+        let n = download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail").files;
         assert_eq!(n, 1, "the file must be delivered, not skipped — this is a display bug, not security");
         assert_eq!(
             std::fs::read(out.join(&leaf)).unwrap_or_else(|e| panic!("{leaf:?}: {e}")),
@@ -2318,7 +2396,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("cpe-xfer-anc-dl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         let cancel = AtomicBool::new(false);
-        assert_eq!(download_tree(&fs, "", &out, &cancel).unwrap(), 2);
+        assert_eq!(download_tree(&fs, "", &out, &cancel).unwrap().files, 2);
         assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
         let _ = std::fs::remove_dir_all(&out);
     }
