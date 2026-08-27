@@ -590,11 +590,16 @@ fn landed_inside(
 /// - `archive::entry_sink_action` / `entry_dir_action` — resolve **every intermediate component** via
 ///   [`crate::fsutil::confined_to`], and deliberately *before* their `create_dir_all(parent)` for the
 ///   same no-debris reason as check (1) above (CPE-1744/CPE-1759).
-/// - `transfer::download_tree` — walks the ancestors with its own `classify_ancestor_probe` before
-///   `create_dir_all`, which is where its deliberately different `NotADirectory` stance comes from
-///   (CPE-1742).
-/// - `revert_engine::apply_write` — asks [`crate::fsutil::confined_to`] before `create_dir_all` and
-///   before touching the blob source (CPE-1750).
+/// - `transfer::download_tree` — **no longer in this list** (CPE-1913). It walked the ancestors with
+///   its own `classify_ancestor_probe` before `create_dir_all`, which is where its deliberately
+///   different `NotADirectory` stance came from (CPE-1742); it now opens the download folder once and
+///   resolves every component against that handle, exactly as this function does, so it has no
+///   ancestor walk and no `create_dir_all` left to run one before.
+/// - `revert_engine::apply_write` — **also no longer in this list** (CPE-1913), for the same reason and
+///   in the same way. It asked [`crate::fsutil::confined_to`] via `safe_target` before `create_dir_all`
+///   and before touching the blob source (CPE-1750); it now asks `open_beneath`. Its sibling
+///   `revert_engine::apply_delete` still does resolve by path and **is** still in this list — see
+///   CPE-1937, which measured that leg destroying bystander files outside the root.
 /// - `copilot::apply_op` — asks it on every path field of every op, final component included.
 /// - `batch_media` — resolves the computed `out_dir` against the input's directory rather than
 ///   comparing text, after PR #828 measured the text fast path being bypassed three ways (CPE-1623).
@@ -807,7 +812,7 @@ pub fn apply_backup_plan_walk(
     // A root that resolves but will not open is a whole-plan refusal, for the same reason an
     // unresolvable one is: with no anchor there is no containment question that can be answered, and
     // every write in the run would be back to trusting a path.
-    let root_handle = crate::open_beneath::open_root(&real_dst_root).map_err(|e| {
+    let root_handle = crate::open_beneath::open_root(&real_dst_root, "backup destination").map_err(|e| {
         format!(
             "refusing to run the backup plan: the destination folder {real_dst_root:?} could not be \
              opened ({e}), so the files cannot be written into it in a way that can be checked. \
@@ -901,7 +906,7 @@ mod tests {
         verify: bool,
     ) -> Result<(), String> {
         let real = fs::canonicalize(dst_root).unwrap();
-        let root = crate::open_beneath::open_root(&real).unwrap();
+        let root = crate::open_beneath::open_root(&real, "backup destination").unwrap();
         copy_one_verified(src, &dst_root.join(rel), std::path::Path::new(rel), &root, &real, verify)
     }
 
@@ -1512,6 +1517,85 @@ mod tests {
              only thing a path resolution could establish; CPE-1896 replaced that resolution with a \
              per-component walk that never resolves the whole path at all, so the refusal now names \
              the exact component — strictly more, not less, than the old assertion: {:?}",
+            results[0]
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1912's fixture, staged verbatim, as a deterministic test.** A directory junction
+    /// `dst/Photos -> dst/Trash` planted *inside* the destination root. No race, no thread, no timing
+    /// window — write access to the destination tree is the whole precondition.
+    ///
+    /// Before CPE-1896's per-component walk, both containment guards admitted it and were right to by
+    /// their own contracts: the pre-write check (`confined_to_resolved_root`) and the post-write
+    /// landing check (`landed_inside`) each compare the resolved destination against the **root**, and
+    /// `dst/Trash` is inside the root. Neither asked whether the bytes landed at the path the plan
+    /// actually *named*. CPE-1912 measured the result: `ok: true`, the photo in `dst/Trash`, and
+    /// `dst/Photos` keeping whatever stale content it had.
+    ///
+    /// CPE-1896 closed it as a side effect, and this test is what establishes that rather than
+    /// inferring it: the walk opens `Photos` relative to the root handle with
+    /// `FILE_OPEN_REPARSE_POINT` / `O_NOFOLLOW` and refuses **any** name surrogate at **any**
+    /// component, whether it points inside the root or outside it. "Inside the root" was never the
+    /// question the walk asks; "is this component a real directory" is.
+    ///
+    /// Kept as a standing regression rather than deleted as redundant with the outside-the-root
+    /// junction tests above, because it is the one fixture that distinguishes the two guards: a
+    /// containment-only guard passes it, and the per-component walk does not.
+    #[test]
+    fn cpe_1912_a_junction_inside_the_destination_never_silently_redirects_a_subtree() {
+        let d = scratch("cpe1912-inside");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(src.join("Photos")).unwrap();
+        fs::create_dir_all(dst.join("Trash")).unwrap();
+        fs::write(src.join("Photos/holiday.jpg"), b"THE PHOTO THE USER IS BACKING UP").unwrap();
+
+        if !crate::fsutil::make_dir_link(&dst.join("Trash"), &dst.join("Photos")) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1912_a_junction_inside_the_destination_never_silently_redirects_a_subtree: \
+                 could not stage a directory link. NOTHING on this run covered the inside-the-root \
+                 junction shape"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        // Liveness: the fixture must really redirect, or the test certifies nothing. A write through
+        // `dst/Photos` has to come out in `dst/Trash`.
+        fs::write(dst.join("Photos/liveness.txt"), b"through the junction").unwrap();
+        assert_eq!(
+            fs::read(dst.join("Trash/liveness.txt")).ok().as_deref(),
+            Some(&b"through the junction"[..]),
+            "fixture is inert: the planted junction does not redirect into dst/Trash"
+        );
+        fs::remove_file(dst.join("Trash/liveness.txt")).unwrap();
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &["Photos/holiday.jpg".into()],
+            &[],
+            &[],
+            false,
+            true, // confirmed
+        )
+        .expect("a confirmed plan runs");
+
+        // HARM FIRST, off the filesystem. The photo must not be sitting in Trash.
+        assert!(
+            !dst.join("Trash/holiday.jpg").exists(),
+            "HARM: the backup wrote the user's photo into dst/Trash because a junction at dst/Photos \
+             redirected the whole subtree — both paths are inside the root, so no containment check \
+             can see it (CPE-1912)"
+        );
+        assert_eq!(results.len(), 1, "one OpResult per plan entry: {results:?}");
+        assert!(
+            !results[0].ok,
+            "a redirected subtree must be REFUSED and reported, never reported as a success: {:?}",
+            results[0]
+        );
+        assert!(
+            results[0].error.contains("\"Photos\"") && results[0].error.contains("is a link"),
+            "the refusal must name the redirecting component and say a link stopped it: {:?}",
             results[0]
         );
         let _ = fs::remove_dir_all(&d);

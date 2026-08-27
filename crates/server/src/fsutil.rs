@@ -856,9 +856,11 @@ pub fn copy_file_into_claimed_slot(src: &Path, dst: &Path) -> Result<u64, String
     // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
     // the copy buffer, but taking it from the handle keeps this function free of a second path question.
     let copied =
-        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
+        stream_bytes(&mut r, &mut w, meta.len())
+            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
-    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    w.set_permissions(meta.permissions())
+        .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     // Everything past this point acts on `w`, the claimed HANDLE. Nothing re-opens `dst` by path — see
     // `claim_file_slot`'s contract, and R2-F1 for what happened the one round something did.
     carry_file_times(&meta, &w);
@@ -1409,6 +1411,26 @@ impl LinkGuardWording {
                  itself) and run the backup again.",
     };
 
+    /// CPE-1913: `transfer::download_tree`. The remedy is the one CPE-1881 wrote for this leg's own
+    /// hard-link skip, moved here verbatim rather than left behind when that guard became the shared
+    /// one — a download's other name really can be broken safely, unlike a backup destination that may
+    /// be a deliberate deduplicating store.
+    pub const DOWNLOAD: Self = Self {
+        verb: "a download",
+        scope: "the download folder",
+        remedy: "Break the link at that local name first (copy the file over itself, or delete it) \
+                 and download again.",
+    };
+
+    /// CPE-1913: the archive extractors. `scope` matches the noun `archive::escaped_dest_message` and
+    /// `multiply_linked_message` already use, so an extraction's refusals read as one voice whichever
+    /// guard produced them.
+    pub const EXTRACT: Self = Self {
+        verb: "an extraction",
+        scope: "the extraction folder",
+        remedy: "Remove or rename that name in the extraction folder and extract again.",
+    };
+
     /// The explanation behind a hard-link write refusal using this wording, with the destination and its
     /// link count left out — the shared half [`copy_file_onto_no_follow_with_wording`]'s per-path message
     /// is built from below, and the same half `revert_engine::execute_restore` states ONCE for a whole
@@ -1466,8 +1488,9 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
     copy_file_onto_destination_handle(src, dst, wording, || {
         crate::batch_media::open_no_follow(dst)
             .map(|(file, created)| crate::open_beneath::Opened { file, created })
-            .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))
+            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: could not open the destination for writing: {e}", dst.display())))
     })
+    .map_err(|r| r.why)
 }
 
 /// The same copy, onto a destination handle **the caller opens** (CPE-1896).
@@ -1506,8 +1529,8 @@ pub(crate) fn copy_file_onto_destination_handle(
     src: &Path,
     dst: &Path,
     wording: LinkGuardWording,
-    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, String>,
-) -> Result<CopiedOnto, String> {
+    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
+) -> Result<CopiedOnto, crate::open_beneath::Refusal> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
     // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
@@ -1518,24 +1541,81 @@ pub(crate) fn copy_file_onto_destination_handle(
     // needs highlighting either way, and a single rule beats one that quietly depends on `wording`. The
     // caller knows which source it passed, so nothing diagnostic is lost. `dst` IS named below: that is
     // the user's own tree, which is the half they need to see.
-    let mut r = std::fs::File::open(src).map_err(|e| format!("the source could not be opened: {e}"))?;
+    let mut r = std::fs::File::open(src).map_err(|e| crate::open_beneath::Refusal::failure(format!("the source could not be opened: {e}")))?;
     // Read from the OPEN HANDLE, not from a path stat that a swap could have invalidated — the same
     // authority `copy_file_into_claimed_slot` uses, and the reason a FIFO or directory substituted at
     // `src` after this open still cannot make this function write nonsense.
-    let meta = r.metadata().map_err(|e| format!("the source could not be described: {e}"))?;
+    let meta = r.metadata().map_err(|e| crate::open_beneath::Refusal::failure(format!("the source could not be described: {e}")))?;
     if !meta.is_file() {
         // Deliberately NOT `not_a_regular_file`, which names the source path — see the comment above.
         // That helper is shared with `copy_file_into_claimed_slot`, whose text does not reach a dialog,
         // so it is left exactly as it is rather than weakened for every caller to suit this one.
-        return Err(
-            "the source is not a regular file, so it was not copied — only ordinary files are copied \
-             by value (a device, socket, FIFO or directory would either block the copy or fill the \
-             destination volume)"
+        // `policy: true` — refusing to copy a device, socket, FIFO or directory *by value* is a
+        // verdict about what the source is, not an I/O failure, and it recurs identically next run.
+        return Err(crate::open_beneath::Refusal {
+            why: "the source is not a regular file, so it was not copied — only ordinary files are \
+                  copied by value (a device, socket, FIFO or directory would either block the copy or \
+                  fill the destination volume)"
                 .to_string(),
-        );
+            policy: true,
+        });
     }
 
-    let crate::open_beneath::Opened { file: mut w, created } = open_dst()?;
+    let ClaimedDestination { file: mut w, written } =
+        claim_destination_handle(dst, wording, open_dst)?;
+    // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
+    // the copy buffer, but taking it from the handle keeps this function free of a second path question.
+    let copied =
+        stream_bytes(&mut r, &mut w, meta.len())
+            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
+    // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
+    w.set_permissions(meta.permissions())
+        .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
+    carry_file_times(&meta, &w);
+    Ok(CopiedOnto { bytes: copied, written })
+}
+
+/// What [`claim_destination_handle`] hands back: the write handle every guard has already passed, and
+/// the identity of the object it names (see [`CopiedOnto::written`] for what `None` and a degenerate
+/// value mean — this is the same value, read off the same handle).
+pub(crate) struct ClaimedDestination {
+    /// Open for writing, truncated, and proven not to be a link, a directory or a hard link.
+    pub(crate) file: std::fs::File,
+    /// Identity of the object the bytes are about to enter, off the handle. `None` on a platform
+    /// whose identity model [`crate::batch_media::handle_facts`] does not know.
+    pub(crate) written: Option<crate::batch_media::FileIdentity>,
+}
+
+/// **Claim a destination to write into — the whole handle-side gate, in one place (CPE-1913).**
+///
+/// This is the block that used to live inside [`copy_file_onto_destination_handle`] and nowhere else.
+/// CPE-1896 built it for the backup engine; CPE-1913 is the ticket filed because *four other* write
+/// legs in this crate — archive extract, transfer download, revert apply, copilot apply — reached the
+/// same silent-success shape and none of them could reuse it, because it was welded to a
+/// source-file-to-destination-file copy. Splitting it out is that ticket's "one implementation and N
+/// call sites" acceptance criterion: a caller with bytes from a **stream** (an archive entry, a remote
+/// file body) now gets the identical guards and the identical wording rather than a fifth
+/// re-derivation.
+///
+/// `open_dst` is the caller's open — in production always
+/// [`crate::open_beneath::create_beneath`], which resolves the destination one component at a time
+/// against a held root handle, so the containment is atomic with the open. What this function adds is
+/// everything that can only be asked **of the handle that open returned**: is the object a name
+/// surrogate, a directory, or a second name for a file that may live anywhere.
+///
+/// On return the handle is at offset 0 and the file is truncated, so the caller writes its bytes and
+/// nothing of a previous, longer occupant survives.
+///
+/// # Errors
+///
+/// Every refusal ends "Nothing was written for this entry" and, when this call created the name, the
+/// name is removed again — so a refused entry leaves no empty file behind for the user to puzzle over.
+pub(crate) fn claim_destination_handle(
+    dst: &Path,
+    wording: LinkGuardWording,
+    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
+) -> Result<ClaimedDestination, crate::open_beneath::Refusal> {
+    let crate::open_beneath::Opened { file: w, created } = open_dst()?;
 
     // THE authority on Windows, where a junction is a reparse point that `is_symlink` (the path check,
     // now BELOW this block since CPE-1896 round 4) may or may not report depending on its tag:
@@ -1560,7 +1640,11 @@ pub(crate) fn copy_file_onto_destination_handle(
     // swapping a junction back defeats. `None` on a platform whose identity model `batch_media` does
     // not know; degenerate values are judged by the caller via `FileIdentity::is_degenerate`, never
     // here — this function has no policy about them.
-    let mut written: Option<crate::batch_media::FileIdentity> = None;
+    // Declared without an initialiser on purpose (CPE-1913 round 2): the `else` below now returns, so
+    // the compiler itself proves this is always assigned — which is the invariant the `else` arm's
+    // comment describes, checked rather than asserted. A `= None` default would compile and quietly
+    // re-open the fail-open the moment someone made that `else` fall through again.
+    let written: Option<crate::batch_media::FileIdentity>;
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
         written = Some(facts.id);
         // CPE-1896 round 3 (F5): refuse a reparse point only when it is a **name surrogate** — a tag
@@ -1633,7 +1717,12 @@ pub(crate) fn copy_file_onto_destination_handle(
             if created {
                 let _ = std::fs::remove_file(dst);
             }
-            return Err(format!("{}: {why}. Nothing was written for this entry", dst.display()));
+            // `policy: true` throughout this function's refusals — every one of them is a verdict
+            // about what is sitting at the name, not an I/O failure. See `open_beneath::Refusal`.
+            return Err(crate::open_beneath::Refusal {
+                why: format!("{}: {why}. Nothing was written for this entry", dst.display()),
+                policy: true,
+            });
         }
         // CPE-1857 — the hard-link hole, refused on the handle. See the "Multiply-linked destinations"
         // section above for the decision, its cost, and the two alternatives that were rejected.
@@ -1648,14 +1737,63 @@ pub(crate) fn copy_file_onto_destination_handle(
             // its doc — so this per-entry message and the summary a caller states once for a whole GROUP
             // of these refusals (`revert_engine::execute_restore`'s `WriteRefusalGroup`) are built from
             // the same two words and cannot say different things.
-            return Err(format!(
-                "{}: this file has {} names (it is hard-linked), and {} Nothing was written for this \
-                 entry",
-                dst.display(),
-                facts.links,
-                wording.hard_link_reason()
-            ));
+            return Err(crate::open_beneath::Refusal {
+                why: format!(
+                    "{}: this file has {} names (it is hard-linked), and {} Nothing was written for \
+                     this entry",
+                    dst.display(),
+                    facts.links,
+                    wording.hard_link_reason()
+                ),
+                policy: true,
+            });
         }
+    } else {
+        // **`handle_facts` said it cannot describe this handle, so REFUSE — CPE-1913 round 2, the
+        // Reviewer's finding A, and a fail-open this PR itself introduced.**
+        //
+        // Every question in the block above — is it a link, is it a directory, does it have a second
+        // name — is inside an `if let Some(facts)`. Round 1 let a `None` fall straight through to the
+        // write, which is the exact fail-open CPE-1857's Security Auditor found and closed at the two
+        // call sites this PR then deleted: `transfer`'s `NameLinks::Unknown` went to `undelivered`,
+        // and `archive`'s `entry_slot_action` `Unknown` arm aborted. Moving the question onto the
+        // handle was right; dropping its "cannot tell" answer with it was not. A gate that answers
+        // "no" when it cannot tell is a gate that is not there.
+        //
+        // **`policy: false`, and that is a deliberate departure from the shape the review suggested.**
+        // `policy: true` would make this a per-entry skip the run still reports `Ok` for. Both deleted
+        // arms did the opposite — they failed the call — and one of them still exists: the tar and 7z
+        // legs go on aborting through `entry_sink_action`'s `Unknown` arm
+        // (`cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`). A zip entry
+        // that skipped where a tar entry aborts would be a new disagreement inside one module about
+        // one condition, and it would weaken CPE-1709's rule that a file the user asked for and did
+        // not get must not leave the transfer `Ok`. So this restores the deleted behaviour exactly
+        // rather than approximately.
+        //
+        // On the platforms this crate builds for, `None` means the query genuinely failed —
+        // `GetFileInformationByHandle` on Windows, `File::metadata` on a live fd on Unix. It is NOT
+        // the degenerate-identity case (a zero volume/index from a network redirector), which arrives
+        // as `Some` with a usable `links` count and is `backup::landed_inside`'s business, not this
+        // one. The `#[cfg(not(any(windows, unix)))]` arm that returns `None` unconditionally cannot be
+        // reached: `open_beneath` does not compile there, so the crate does not build there.
+        //
+        // **One consequence, stated rather than left to be found:** `CopiedOnto::written` can no
+        // longer be `None` on any production path. `backup::landed_inside`'s `written == None` branch
+        // is therefore now a directly-unit-tested backstop rather than a reachable one
+        // (`cpe_1896_…_admits_an_ordinary_destination` drives it). It is kept, not deleted: it is data
+        // flow rather than a guard, and the alternative is changing a type to encode an invariant that
+        // this branch could relax again.
+        drop(w);
+        if created {
+            let _ = std::fs::remove_file(dst);
+        }
+        return Err(crate::open_beneath::Refusal::failure(format!(
+            "{}: could not check how many names this file has, or whether it is a link, so nothing \
+             was written for it — refusing to guess rather than risk writing through a second name \
+             into a file outside {}. Nothing was written for this entry",
+            dst.display(),
+            wording.scope
+        )));
     }
 
     // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
@@ -1706,25 +1844,28 @@ pub(crate) fn copy_file_onto_destination_handle(
         if created {
             let _ = std::fs::remove_file(dst);
         }
-        return Err(format!(
-            "{}: this name is a link, and {} never writes through one — a link's target can be \
-             re-pointed after any check. Nothing was written for this entry",
-            dst.display(),
-            wording.verb
-        ));
+        return Err(crate::open_beneath::Refusal {
+            why: format!(
+                "{}: this name is a link, and {} never writes through one — a link's target can be \
+                 re-pointed after any check. Nothing was written for this entry",
+                dst.display(),
+                wording.verb
+            ),
+            policy: true,
+        });
     }
 
     // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
     // A partial destination is left behind on a mid-copy error, exactly as `fs::copy` leaves one.
-    w.set_len(0).map_err(|e| format!("{}: could not truncate the destination: {e}", dst.display()))?;
-    // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
-    // the copy buffer, but taking it from the handle keeps this function free of a second path question.
-    let copied =
-        stream_bytes(&mut r, &mut w, meta.len()).map_err(|e| format!("{}: {e}", dst.display()))?;
-    // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
-    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
-    carry_file_times(&meta, &w);
-    Ok(CopiedOnto { bytes: copied, written })
+    // `policy: false` — unlike everything above it, a failed truncate is the filesystem saying no, and
+    // the entry the user asked for was not written.
+    w.set_len(0).map_err(|e| {
+        crate::open_beneath::Refusal::failure(format!(
+            "{}: could not truncate the destination: {e}",
+            dst.display()
+        ))
+    })?;
+    Ok(ClaimedDestination { file: w, written })
 }
 
 /// Recursively copy `src` into `dst`, claiming **every** directory and file name it creates
@@ -3648,8 +3789,18 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 /// `parent_confined` that inspected only the path's *parent* chain and treated a dangling link's
 /// `NotFound` as "this name does not exist yet", so it answered *confined* for `root/dangling`,
 /// `root/dangling/x.txt` and `root/live` while this function answers *not confined* for all three. If a
-/// fifth copy is ever proposed, that measurement is the reason not to write one: containment has one
-/// answer in this crate, and it is here. **Extend this; do not fork it.**
+/// fifth copy is ever proposed, that measurement is the reason not to write one: for a guard that has
+/// to answer about a **path**, containment has one answer in this crate and it is here.
+/// **Extend this; do not fork it.**
+///
+/// **What CPE-1913 changed, since "one answer in this crate" is no longer the whole picture.** Three
+/// write legs — `backup::copy_one_verified`, `transfer::download_tree`, `revert_engine::apply_write` —
+/// and the zip extraction loop stopped asking a path question at all: they open the destination one
+/// component at a time against a held root handle ([`crate::open_beneath`]) and ask the **handle** what
+/// it got. That is strictly better where it applies, because it is atomic with the open, and it is not
+/// a fifth copy of this walk — it is a different question. This function remains the right and only
+/// answer for every caller that must judge a path *before* it acts and has no handle to ask:
+/// `copilot::apply_op`, `revert_engine::apply_delete`, `archive`'s tar and 7z legs, and the rigs.
 ///
 /// # Containment is not equality, and the difference is the whole ticket
 ///
@@ -3694,9 +3845,11 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 ///    (`root/link/x` where `link` points outside), which needs neither `..` nor an absolute path and is
 ///    invisible to any purely textual check.
 /// 2. On `NotFound` — **or `NotADirectory`, CPE-1742 round 4: a component below a plain file cannot
-///    exist either, so the same reasoning applies** (see the guard's own inline comment for why this is
-///    a deliberately different stance from `transfer.rs`'s `classify_ancestor_probe`, which treats the
-///    same `ErrorKind` as "stop, do not step over") — drop the last component and try again. The
+///    exist either, so the same reasoning applies** — drop the last component and try again. The
+///    contrast this used to draw, against `transfer.rs`'s `classify_ancestor_probe` treating the same
+///    `ErrorKind` as "stop, do not step over", is **gone with that function** (CPE-1913):
+///    `download_tree` no longer walks ancestors by path at all, so there is no second stance left to
+///    differ from. The reasoning below stands on its own and always did. The
 ///    components dropped this way provably **do not exist**, so none of them can be a symlink, so
 ///    nothing about them can redirect the path elsewhere — which is why appending them back to a
 ///    contained ancestor is sound without further checks. The probe is normalised through
