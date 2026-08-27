@@ -1884,3 +1884,29 @@ Three things to carry:
 3. **Do not exempt the thing your tool just found in order to land the tool.** Adding
    `macro-param-prompt` to `known-failing.json` to get #1068 green would have destroyed the finding.
    It gets its own ticket; the harness fix stays a harness fix.
+
+## 2026-08-27 — an allowlist that fails closed beats a sweep that has to find everything
+
+CPE-1919's first sweep grepped `color: var(--accent)`. The Visual Critic independently enumerated the
+survivors and **reached the same set** — which read as a strong cross-check.
+
+Both were blind to the same thing: **five sites spell it `var(--accent, <fallback>)`**, plus one on
+`--accent-hover`. All six were running text, one at **3.43:1 on 10.5px**. Two independent
+enumerations agreeing is not evidence of completeness when both use the same query.
+
+The durable fix was not a better grep. The guard now **inverts the default**: every `color:` in `src/`
+resolving to `--accent`/`--accent-hover`, in *both* spellings, **fails unless** its selector is
+declared in an `ICON_ROLES` allowlist with a note naming the glyph it paints.
+
+Two properties worth copying:
+
+1. **An allowlist, not a heuristic — deliberately.** Nothing in CSS separates a checkmark from a word;
+   both are `color:` on an inline box. Any heuristic is guessing, and **a guard that guesses "icon" is
+   silently back to no guard.**
+2. **A third test reds on any allowlist row that stops matching anything**, so an exemption cannot
+   outlive what it excuses. That is what stops the allowlist becoming the next stale artifact.
+
+**Rule: when a sweep must find every instance of something, prefer a guard that fails on anything
+undeclared over one that searches.** Searching is bounded by the query you thought of; declaring is
+bounded by the thing itself. Same shape as *enumerate, don't recall* (CPE-1932) — but stronger,
+because it does not depend on the enumeration being right either.
