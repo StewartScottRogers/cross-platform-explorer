@@ -76,3 +76,13 @@ The three most recent `release.yml` runs (2026-08-20 and 2026-08-23 ×2) are all
 Filed 2026-08-26 by the sprint Foreman during pre-flight, from the previous run's checkpoint note
 ("open item 1") plus a fresh raw-log confirmation. The checkpoint explicitly flagged that this had
 never been ticketed.
+
+## Foreman note added 2026-08-27 00:00
+
+PR **#1039** (CPE-1908, sidecar channel-purity guard) touches the very binary that fails here —
+`crates/updater-verify/src/bin/verify-release-artifacts.rs` — adding an `--expect-channel` flag and a
+post-matrix gate job. It does **not** claim to fix the missing-`latest.json` failure. Whoever picks
+this ticket up should rebase onto that work rather than against it, and should specifically check
+whether the new post-matrix gate shape (which fetches the *published* manifest rather than searching
+`src-tauri/target`) is in fact the correct shape for the plain channel's in-matrix step too — that
+would make this a "use the gate we already have" fix rather than a search-root patch.
