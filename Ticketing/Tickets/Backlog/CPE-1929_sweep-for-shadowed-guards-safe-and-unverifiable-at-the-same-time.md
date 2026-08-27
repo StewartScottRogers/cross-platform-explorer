@@ -88,3 +88,27 @@ and others) have already migrated to `parseYaml`, and this one has not.
 
 A trailing `# cargo build --locked` in a comment would therefore count as a real invocation. Worth
 the two-sabotage check and, if confirmed, the same `parseYaml` migration its siblings already had.
+
+## Third named lead, added 2026-08-27 (from PR #1049's re-review)
+
+Two gaps in `hexColourSites()`'s new `scriptStyleAssignmentValues()` (CPE-1931). **Both are latent
+today** — the reviewer grepped the tree and neither shape exists — and both lean toward the *safer*
+failure direction. Neither is documented anywhere, which is why they belong on this sweep:
+
+1. **`el.style.setProperty("--x", "#abc123")` is not counted.** `STYLE_ASSIGNMENT_START` requires
+   `.style.<prop> =`; a method call has no `=`, so it never matches. Structurally the **same
+   false-negative class** as the `FileList.svelte` bug CPE-1931 round 2 fixed — a real CSS-affecting
+   value set from `<script>`. Unlike the `style:prop={"#literal"}` gap, which that round explicitly
+   documents as a known deliberate non-fix, this one is unmentioned.
+2. **A regex literal containing a quote character inside a `.style.` assignment desyncs quote
+   tracking.** e.g. `el.style.color = /['"]/.test(x) ? "#fff" : "#000"`. The apostrophe opens a quote
+   that never closes, so the char-scanner swallows to end-of-source. Net effect measured: the *next*
+   real assignment is **double-counted**, not dropped — because each `.style.` start is re-found by a
+   fresh pass over the untouched source and re-scanned from `quote = null`. So a desync in one
+   assignment cannot blind the matcher to another; it can only **inflate** the count of the
+   assignment containing the bad regex, surfacing as a false-positive CI failure on unrelated code.
+
+Worth a note or a fix when someone next touches that matcher. The second one is the more interesting
+of the two — a hand-rolled character scanner over JS is exactly the shape that produced
+`shellScriptLines.ts`'s escaped-quote bug, and it was found by feeding it adversarial input rather
+than by reading it.
