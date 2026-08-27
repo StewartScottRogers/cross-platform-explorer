@@ -210,9 +210,17 @@ fn manifest_at_repo_root_is_not_found_by_search_under_target_alone() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no latest.json found"));
 }
 
-/// CPE-1872 (GREEN, the fix): same repo-root layout, but invoked the way the fixed `release.yml` now
-/// invokes it — `--manifest latest.json` pointed straight at tauri-action's actual write location, run
-/// from the repo root. The signature must verify over the real artifact bytes under `src-tauri/target`.
+/// CPE-1872 (GREEN, round 1's fix): same repo-root layout, but with `--manifest latest.json` pointed
+/// straight at tauri-action's actual write location, run from the repo root. The signature must verify
+/// over the real artifact bytes under `src-tauri/target`.
+///
+/// CPE-1917 round 2 (Reviewer): this used to say "invoked the way the fixed `release.yml` now invokes
+/// it". It is not — today's invocation is `--manifest release-assets/latest.json --search
+/// release-assets` over assets downloaded from the draft release, and has been since CPE-1872 round 2
+/// moved the check into `verify-published-manifest`. Same species of stale provenance claim corrected
+/// elsewhere in this file; the workflow's real argv is read from the YAML and executed in
+/// `tests/release_workflow_wiring.rs`. What this test still proves on its own terms is that an
+/// explicit `--manifest` outside every `--search` dir is found and verified.
 #[test]
 fn manifest_at_repo_root_is_found_and_verified_via_explicit_manifest_flag() {
     let bytes = b"the real installer bytes";

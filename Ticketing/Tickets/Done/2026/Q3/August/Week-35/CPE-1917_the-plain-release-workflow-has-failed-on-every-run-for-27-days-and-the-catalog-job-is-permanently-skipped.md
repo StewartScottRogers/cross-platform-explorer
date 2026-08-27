@@ -97,7 +97,10 @@ The Foreman's note was right that the landscape moved, but it named the wrong PR
 (CPE-1908) is not what changed this area, and there is no `--expect-channel` flag anywhere in the
 repo** (`grep -rn "expect-channel"` → no hits; CPE-1908's actual commit is `c75c99c9`, "extend the
 channel-purity guard to the sidecar release channel"). What reworked this area is **PR #1008
-(CPE-1872), merged `f97aef8a` on 2026-08-23 20:27** — three hours after the last failing run.
+(CPE-1872), merged `f97aef8a` on 2026-08-23 20:27 PDT** — ~12h50m after the last failing run (14:35
+UTC = 07:35 PDT), same calendar day. (An earlier draft of this log said "three hours"; that compared a
+UTC timestamp against a PDT one. Corrected by the Reviewer — in a log arguing for evidence over
+confidence, an unchecked arithmetic claim is the same defect at smaller scale.)
 
 CPE-1872 is, in substance, **this same bug**: its ticket file is literally named
 `...-workflow-has-failed-on-every-platform-for-27-days.md`. CPE-1917 was filed 2026-08-26 from a stale
@@ -186,10 +189,29 @@ Two new pins, plus a correction:
 
    | mutation to `release.yml` | result |
    |---|---|
-   | `--search release-assets` → `--search src-tauri/target` (the original bug) | **2 tests RED** |
-   | download `--dir release-assets` → `--dir assets` | **2 tests RED** |
-   | drop `--expect-url-prefix` | **3 tests RED** |
-   | unmutated | 5 pass |
+   | `--search release-assets` → `--search src-tauri/target` (the original bug) | **3 RED** |
+   | both download `--dir release-assets` → `--dir assets` | **3 RED** |
+   | **only the second** download `--dir` → `downloaded` (Reviewer's break) | **4 RED** |
+   | a second `--search src-tauri/target` appended | **3 RED** |
+   | drop `--expect-url-prefix` (flag *and* value) | **1 RED** |
+   | unmutated | 7 pass |
+
+   **Correction (Reviewer, round 2).** The first version of this table claimed 3 RED for dropping
+   `--expect-url-prefix`. Not reproducible: a *clean* drop is **1 RED**. The 3 only appeared because
+   the mutation deleted the flag name and left the URL behind as a stray positional — the binary
+   rejects that as an unknown argument, so it was measuring a malformed workflow, not a dropped flag.
+   In a Work Log whose whole argument is that guards must not overclaim, an evidence table that
+   overclaims is the same defect. 1 RED is the honest number and is a perfectly good result.
+
+   **The Reviewer also broke this guard, and it deserves recording.** Round 1 read only the *first*
+   `gh release download` call. `release.yml` has **two** — one fetching `latest.json`, one looping
+   over the assets it references — so changing only the second (manifest into `release-assets/`, its
+   installers into `downloaded/`) left every assertion green while the real job would fail its next
+   tag with no artifact bytes to verify: this ticket's outage wearing a different hat, inside the file
+   written to prevent it. Now `download_calls()` reads every call and requires them to agree, with a
+   dedicated test saying so; `flag_value()` refuses a repeated flag instead of silently taking the
+   first (a second `--search` re-opened CPE-1872's own round-2 dirty-search-dir finding); and
+   `no_flag_is_passed_more_than_once` covers flags nothing else queries.
 
    Also asserts statically: exactly **one** `verify-release-artifacts` invocation in the file (so the
    deleted per-leg check cannot creep back), `--conf` is the plain channel's real config, and the
@@ -204,8 +226,12 @@ Two new pins, plus a correction:
    workspace — "no latest.json found", verbatim, again); `needs: release` + `if: ${{ !cancelled() }}`
    on both `verify-published-manifest` and `catalog`.
 
-3. `release_guard.rs`'s three stale "exactly as release.yml does" claims corrected to say what those
-   tests actually prove, with a pointer to the new file.
+3. `release_guard.rs`'s **four** stale "exactly as release.yml does" provenance claims corrected to
+   say what those tests actually prove, with a pointer to the new file. (Round 1 caught three; the
+   Reviewer swept the rest of the file and found a fourth on the `manifest_at_repo_root_is_found_…`
+   test. Two further comments in that file — the ones describing the *old* workflow historically —
+   were checked and are still true, and two more are now mechanically enforced by the new
+   assertions.)
 
 ### AC6 — the backstop, and the hole in the existing one
 
@@ -216,10 +242,12 @@ itself go dark, silently, in two ways — both of which reproduce this ticket on
 - **It selects its subjects by workflow *display name*** (`workflows: ["Release", "Release
   (sidecar-enabled)"]`). A `workflow_run` trigger naming a workflow that does not exist matches nothing
   and fails **silently**; rename `release.yml`'s `name:` and the only alarm on the release pipeline
-  stops firing with nothing anywhere saying so. Now guarded: the test resolves those strings against
-  the real `name:` fields **read from the workflow files**, in both directions (every release workflow
-  is covered; every watched name resolves to a real workflow). Red-proofed by renaming `name: Release`
-  → `name: Release Plain`: **2 tests RED**, with the reason spelled out in the failure message.
+  stops firing with nothing anywhere saying so. **The watchdog itself is unchanged — no workflow file
+  is modified by this ticket — and it still hard-codes those two names.** What is new is that the
+  *test* resolves them against the real `name:` fields **read from the workflow files**, in both
+  directions (every release workflow is covered; every watched name resolves to a real workflow), so a
+  rename now fails CI instead of going quiet in production. Red-proofed by renaming `name: Release` →
+  `name: Release Plain`: **2 tests RED**, with the reason spelled out in the failure message.
 - **It only fires on a run that happened.** If `release.yml`'s tag filter stops matching plain tags
   there is no run, no red X and no issue — quieter than the 27-day outage. CPE-1894's
   `tags: ["v*", "!v*-sidecar"]` was three characters of YAML with no test on it; now pinned, including
@@ -255,12 +283,18 @@ RELEASING.md section added here deliberately carries no `--jq` snippet).
 
 ### Verification
 
-- `cargo test -p cpe-updater-verify` — **69 tests, all pass** (43 lib + 18 release_guard + 5 new wiring
+- `cargo test -p cpe-updater-verify` — **71 tests, all pass** (43 lib + 18 release_guard + 7 new wiring
   + 2 pinned_pubkey + 1 platform_config).
 - `cargo clippy --all-targets -- -D warnings` on `crates/updater-verify` — clean.
 - `npm run check` — 0 errors, 0 warnings.
-- `npx vitest run` on the new guard plus neighbours (`catalogPublishFreshnessGuard`,
-  `releaseHangHardening`, `sectionDocs`, `epicsQueueLayout`) — 66 tests, all pass.
+- `npx vitest run src/lib/releaseVerifyWiringGuard.test.ts` — 16 pass.
+- **Correction on the neighbour sweep.** Round 1 reported "66 pass" across the new guard plus
+  `catalogPublishFreshnessGuard`, `releaseHangHardening`, `sectionDocs` and `epicsQueueLayout`. The
+  Reviewer could not reproduce that and got 58 pass / 8 fail, all inside
+  `catalogPublishFreshnessGuard.test.ts`'s bash-executing tests — and confirmed those **fail
+  identically on `main`**. Pre-existing and environment-dependent (that file shells out to `bash`,
+  which resolves differently between hosts), not caused by this ticket and not fixed by it. The
+  honest claim is: the guards this ticket adds pass, and the neighbours are unchanged by it.
 - No Rust dependency changed, so no `Cargo.lock` regeneration was needed across the nine lockfiles.
 - No signing key touched; `tauri.conf.json` unmodified; nothing published, no workflow dispatched, no
   release edited.

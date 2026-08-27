@@ -37,8 +37,12 @@
 //! Nothing here is hard-coded. The two halves of the invariant are read out of `release.yml` from
 //! **two different places**, and then actually executed against each other:
 //!
-//! 1. `download_dir()` reads where the *download* step puts `latest.json` (`gh release download …
-//!    --pattern 'latest.json' --dir <DIR>`).
+//! 1. `download_calls()` reads where the *download* step stages what it fetches. There are **two**
+//!    `gh release download` calls — one for `latest.json`, one looping over the assets that manifest
+//!    references — and they must agree on `--dir`, because `--search` names a single directory and a
+//!    manifest separated from its artifacts fails every platform as unavailable. Reading only the
+//!    first was this guard's own round-1 hole (CPE-1917 round 2, Reviewer): changing only the second
+//!    left everything green while the real job would break on its next tag.
 //! 2. `verify_argv()` reads the argv the *verify* step passes to this crate's binary.
 //! 3. The test scaffolds a repo-shaped temp tree with the manifest + artifact under (1), runs the
 //!    real binary with (2), and requires exit 0.
@@ -111,29 +115,68 @@ fn tokens(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Where the `verify-published-manifest` download step deposits the published `latest.json`.
-fn download_dir(text: &str) -> String {
+/// Every `gh release download` call in the workflow, as `(fetches_the_manifest, --dir value)`.
+///
+/// CPE-1917 round 2 (Reviewer, MEDIUM): there are **two** of these, not one. One fetches
+/// `latest.json`; the other loops over the names that manifest references and fetches each installer.
+/// They must land in the SAME directory, because `--search` names a single directory and the verifier
+/// needs the manifest and the artifacts it points at together. The first version of this guard read
+/// only the manifest call, so changing only the *second* — manifest into `release-assets/`, its
+/// installers into `downloaded/` — left every assertion green while the real job would fail on its
+/// next tag with no artifact bytes to verify: the identical class of outage this file exists to
+/// prevent, and a hole the Reviewer walked straight through.
+fn download_calls(text: &str) -> Vec<(bool, String)> {
     let lines: Vec<&str> = text.lines().collect();
-    let idx = lines
+    let calls: Vec<(bool, String)> = lines
         .iter()
-        .position(|l| l.contains("gh release download") && l.contains("latest.json"))
-        .expect(
-            "release.yml no longer has a `gh release download … latest.json` step in \
-             verify-published-manifest -- if the published manifest is fetched some other way now, \
-             update this guard to read the new shape rather than deleting it (CPE-1917)",
-        );
-    let toks = tokens(&logical_line(&lines, idx));
-    let dir = toks
-        .iter()
-        .position(|t| t == "--dir")
-        .and_then(|i| toks.get(i + 1))
-        .expect("the latest.json download step passes no --dir")
-        .clone();
+        .enumerate()
+        .filter(|(_, l)| l.contains("gh release download"))
+        .map(|(i, _)| {
+            let line = logical_line(&lines, i);
+            let toks = tokens(&line);
+            let dir = toks
+                .iter()
+                .position(|t| t == "--dir")
+                .and_then(|j| toks.get(j + 1))
+                .unwrap_or_else(|| panic!("a `gh release download` call passes no --dir: {line}"))
+                .clone();
+            assert!(
+                !dir.starts_with('-') && !dir.contains('$'),
+                "every download --dir must be a literal path this guard can scaffold, got {dir:?}"
+            );
+            (line.contains("latest.json"), dir)
+        })
+        .collect();
     assert!(
-        !dir.starts_with('-') && !dir.contains("$"),
-        "the download step's --dir must be a literal path this guard can scaffold, got {dir:?}"
+        calls.iter().any(|(is_manifest, _)| *is_manifest),
+        "release.yml no longer has a `gh release download … latest.json` call in \
+         verify-published-manifest -- if the published manifest is fetched some other way now, update \
+         this guard to read the new shape rather than deleting it (CPE-1917)"
     );
-    dir
+    assert!(
+        calls.iter().any(|(is_manifest, _)| !*is_manifest),
+        "release.yml no longer downloads the assets the manifest REFERENCES, only the manifest \
+         itself. `--search` would then hold a manifest with no artifact bytes behind it, and every \
+         platform would fail as unavailable (CPE-1917 round 2)."
+    );
+    calls
+}
+
+/// The one directory the whole `verify-published-manifest` job stages into. Panics if the download
+/// calls disagree — that disagreement *is* the bug, so it must never be quietly resolved to one of
+/// them.
+fn download_dir(text: &str) -> String {
+    let calls = download_calls(text);
+    let first = calls[0].1.clone();
+    assert!(
+        calls.iter().all(|(_, dir)| *dir == first),
+        "release.yml's `gh release download` calls stage into different directories ({:?}). The \
+         manifest and the artifacts it names must land together: `--search` is a single directory, \
+         and a manifest whose artifacts are somewhere else fails every platform as unavailable — \
+         which is this ticket's outage wearing a different hat.",
+        calls.iter().map(|(_, d)| d.as_str()).collect::<Vec<_>>(),
+    );
+    first
 }
 
 /// The argv `release.yml` hands to `verify-release-artifacts`, `${REPO}`/`${TAG}` resolved.
@@ -167,11 +210,27 @@ fn verify_argv(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The single value of `flag` in `argv`.
+///
+/// CPE-1917 round 2 (Reviewer, LOW-MED): this used to return the FIRST occurrence, so appending a
+/// second `--search src-tauri/target` to the verify step satisfied every assertion below while
+/// re-opening CPE-1872's own round-2 finding — a stale, same-basename artifact in a second, dirty
+/// search dir shadowing the freshly-downloaded one. A repeated flag is never intentional in this
+/// invocation, so it is a hard failure rather than a silently-ignored extra.
 fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
-    argv.iter()
-        .position(|a| a == flag)
-        .and_then(|i| argv.get(i + 1))
-        .map(String::as_str)
+    let hits: Vec<usize> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.as_str() == flag)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        hits.len() <= 1,
+        "release.yml passes {flag} {} times. Every flag in this invocation means exactly one thing; \
+         a second copy either silently overrides the first or widens what the verifier will trust.",
+        hits.len()
+    );
+    hits.first().and_then(|i| argv.get(i + 1)).map(String::as_str)
 }
 
 /// Build a temp tree shaped like the `verify-published-manifest` job's workspace: the manifest and
@@ -268,6 +327,46 @@ fn the_verify_step_reads_the_manifest_from_the_directory_the_download_step_write
          (the pre-CPE-1872 value) never contains them: tauri-action uploads its bundles to the release \
          and this job re-downloads them, so pointing the search at a build directory finds nothing."
     );
+}
+
+/// CPE-1917 round 2 (Reviewer, MEDIUM): the manifest and the artifacts it names are fetched by two
+/// separate `gh release download` calls, and only landing them in one directory makes `--search`
+/// meaningful. Asserted on its own, not just as a side effect of `download_dir`'s internals, so the
+/// failure names the real problem.
+#[test]
+fn both_download_calls_stage_into_the_same_directory() {
+    let text = workflow_text();
+    let calls = download_calls(&text);
+    assert!(
+        calls.len() >= 2,
+        "expected at least two `gh release download` calls (the manifest, and the assets it \
+         references); found {}",
+        calls.len()
+    );
+    let dirs: Vec<&str> = calls.iter().map(|(_, d)| d.as_str()).collect();
+    assert!(
+        dirs.windows(2).all(|w| w[0] == w[1]),
+        "the manifest download and the referenced-asset download disagree on --dir: {dirs:?}"
+    );
+    // And the directory they agree on is the one the verifier is actually pointed at.
+    assert_eq!(flag_value(&verify_argv(&text), "--search"), Some(dirs[0]));
+}
+
+/// CPE-1917 round 2 (Reviewer, LOW-MED). `flag_value` only refuses a repeat of a flag some test
+/// happens to ask for; this refuses a repeat of ANY of them, including one nothing else reads.
+#[test]
+fn no_flag_is_passed_more_than_once() {
+    let argv = verify_argv(&workflow_text());
+    let mut seen: Vec<&str> = Vec::new();
+    for flag in argv.iter().filter(|a| a.starts_with("--")) {
+        assert!(
+            !seen.contains(&flag.as_str()),
+            "release.yml passes {flag} more than once in argv {argv:?}. A second `--search` in \
+             particular re-opens CPE-1872's round-2 finding: a stale same-basename artifact in a \
+             dirty second directory can shadow the freshly-downloaded one and still verify clean."
+        );
+        seen.push(flag);
+    }
 }
 
 #[test]
