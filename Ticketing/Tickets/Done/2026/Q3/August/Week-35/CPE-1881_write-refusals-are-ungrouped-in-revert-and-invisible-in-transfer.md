@@ -113,3 +113,28 @@ and "say nothing" — **the third option was not considered.**
   - Opened PR #1046 against `main`, branch `cpe-1881-refusal-reporting`. CI still pending as of this
     entry. Moving to Done per the sprint's ticket-flow convention (folder location tracks work state,
     not merge state); the PR is the durable record if CI turns something up.
+- **2026-08-27 (round 2, post-UAT) USMST** — Independent UAT PASSed, re-measured the byte counts itself
+  (8,976 bytes on the 200-file fixture vs. the ticket's 84,180 pre-fix — 89% smaller, matching this
+  ticket's own test), confirmed nothing is capped three separate ways (source, `revertHoldBack.test.ts`,
+  a 200-row screenshot), and shot the six screenshots (both themes, `CheckpointDialog`-chrome mimic,
+  long-path wrap) this worker didn't take. Two follow-ups came back from that pass, both addressed:
+  1. **`src/docs/16-checkpoints.md` understated what ships.** It said the write-refusal list showed "the
+     first few, then a count" — true of the held-back list next to it, false of this one (`.ro-failures`
+     is `{#each summary.failures as f}`, no slice, genuinely uncapped). Corrected, and the paragraph now
+     explicitly contrasts the two: held-back is a capped preview (8, "and N more", with the copy-all
+     button for the rest); write-refusal is the full uncapped list, every entry always on screen.
+  2. **The transfer messages explained why and stopped.** Both the hard-link and pre-existing-symlink
+     skip messages in `download_tree` ended at "nothing was written for this entry" with no remedy —
+     unlike the revert paragraph's "Break the link first… and run this again." Added an actionable
+     sentence to each, in the same voice, composed fresh rather than forced through
+     `fsutil::LinkGuardWording` (that type's wording is written for the restore/backup domain
+     specifically; reusing it here would be the wrong kind of sharing for a third, unrelated caller).
+  Also did the UAT-flagged **optional** fix, since it turned out to be a genuine one-line change: the
+  held-back and write-refusal boxes now each carry a small "Held back" / "Refused" label
+  (`.ro-held-label`) so the two grey paragraphs next to each other in the panel don't read as
+  interchangeable. Re-ran the full `cpe-server` suite (2397 tests), `clippy --all-targets -D warnings`
+  (both feature modes), `npm run check`, and the `bidiEscape`/`revertHoldBack` vitest suites — all green.
+  Disclosure preserved for the next person: `download_tree` still has no live Tauri-command/UI caller
+  (only `cpe-sftp`/`cpe-webdav`'s thin wrappers and tests reach it) — wiring the existing remote
+  commands through it is CPE-685, a separate attended step; this ticket's transfer half is a
+  backend-correctness fix with no user-reachable surface yet.
