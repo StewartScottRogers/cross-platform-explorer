@@ -2086,6 +2086,13 @@ pub(crate) fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
 /// One owner for the constant and the rule, because two guards now depend on it and must not drift:
 /// `open_beneath`'s per-component directory walk, and
 /// `fsutil::copy_file_onto_destination_handle`'s final-component guard.
+///
+/// `#[cfg(windows)]` because reparse points only exist there and the only reader is the Windows arm of
+/// [`reparse_name_surrogate`] below. Ungated, it is `dead_code` on Linux and macOS, and CI runs
+/// `-D warnings` — so it reddened **every** job that compiles this crate on those two, while three
+/// rounds of local `cargo clippy` on Windows stayed clean. The lesson is the gate, not the constant:
+/// anything here that only the Windows arm touches needs one.
+#[cfg(windows)]
 pub(crate) const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
 
 /// Does this handle's reparse point make the name **stand in for another name**?

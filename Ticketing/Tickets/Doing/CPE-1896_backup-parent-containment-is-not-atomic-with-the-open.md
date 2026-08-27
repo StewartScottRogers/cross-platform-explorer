@@ -1039,6 +1039,79 @@ reorder by measuring it rather than reading it, and both went further than the q
   iteration; no control flow touched, no new dependency, no `specta::Type` touched, nothing
   machine-global added.
 
+## 2026-08-27 — ROUND 6: CI build break on Linux/macOS. A Windows-only const, ungated.
+
+**Not a defect in the work — a build break on a platform neither checker compiled.** The Reviewer's
+APPROVE and the Auditor's SEC PASS both stand.
+
+```text
+error: constant `IO_REPARSE_TAG_NAME_SURROGATE` is never used
+    --> src/batch_media.rs:2089:18
+     = note: `-D dead-code` implied by `-D warnings`
+```
+
+Red on **every job that compiles `cpe-server`** — Server crates on all three OSes, MSRV, and Network
+E2E — while three rounds of local `cargo clippy` on Windows stayed clean. The const is only read by the
+Windows arm of `reparse_name_surrogate`, so off Windows it is `dead_code`, and `-D warnings` turns one
+unused item on one platform into a whole-matrix failure. Gated `#[cfg(windows)]`, with the reason
+written at the constant so the next person adds the gate rather than rediscovering the lint.
+
+- **2026-08-27 (Worker) — verified on the platforms that failed, not on this one.** `crates/server`
+  **cannot** be cross-checked whole from here: `cargo check --target x86_64-unknown-linux-gnu` dies in
+  rusqlite's `bundled` build with `failed to find tool "x86_64-linux-gnu-gcc"`, and WSL2 has no C
+  toolchain either. So the round-2 extraction pattern was reused — pull the items out **verbatim, cfg
+  attributes included**, into a dependency-free crate that `cargo clippy --target <triple> -- -D warnings`
+  can analyse with no linker. Two harnesses, covering both files this branch added platform-specific
+  code to: the `batch_media` surrogate block, and `open_beneath`'s Unix arm.
+
+- **2026-08-27 (Worker) — the harness was wrong first, and it reported the known-bad code CLEAN.**
+  Worth recording, because it is the same disease as round 4 one level further out: the extractor
+  rewrote `pub(crate)` to `pub`, which makes every item part of the harness crate's public API — and a
+  `pub` item is **never** `dead_code`. Run against the ungated constant it happily passed. A green
+  harness that cannot go red is not evidence. Fixed by keeping `pub(crate)` verbatim and adding narrow
+  caller stubs that mirror the real cross-platform call sites (`fsutil`'s for the surrogate helper,
+  `backup`'s for `open_root`/`create_beneath`, destructuring **both** `Opened` fields as `fsutil` does).
+  **Only then** was it trusted, and only after it reproduced CI's error verbatim:
+
+  ```text
+  SABOTAGE: gate removed from the const
+  error: constant `IO_REPARSE_TAG_NAME_SURROGATE` is never used
+  ```
+
+  Red against the known-bad code, green against the fix, on `x86_64-unknown-linux-gnu` **and**
+  `x86_64-apple-darwin`.
+
+- **2026-08-27 (Worker) — the sweep, since one reported line is never the whole class.** Every item
+  rounds 3–5 added was checked for the same shape. Clean, and here is *why* each is clean rather than
+  just "checked": `make_guid_reparse_point` is `#[cfg(windows)]` **and** `pub`, so it cannot be
+  `dead_code` regardless; `guid_reparse_inner` is gated and referenced by it; its three constants
+  (`FSCTL_SET_REPARSE_POINT`, `FILE_FLAG_BACKUP_SEMANTICS`, `FILE_FLAG_OPEN_REPARSE_POINT`) are
+  **fn-local** inside that gated fn; every new test is `#[cfg(windows)]`; `open_beneath`'s
+  `name_surrogate_at`, `nt_child`, `io_err`, `STATUS_NAME_TOO_LONG`, `OBJ_CASE_INSENSITIVE` and
+  `SHARE_ALL` all live inside `#[cfg(windows)] mod sys`; `SUPPORTED` lives inside the
+  `#[cfg(target_os = "linux")]` fast path; and `reparse_name_surrogate`, `open_root`, `create_beneath`,
+  `copy_file_onto_destination_handle`, `refuse`, `WHY_LINK` and `tick` are all referenced from
+  cross-platform call sites. The gated const was the only one.
+
+- **2026-08-27 (Worker) — the standing lesson for this repo.** Local `cargo clippy` on Windows cannot
+  see this class at all, and it has now cost a CI round. The cheap guard is the two extraction
+  harnesses: they need no C toolchain, no WSL and no linker, and they run in about a second per target.
+  Anything added under a `#[cfg]` should be checked against `x86_64-unknown-linux-gnu` and
+  `x86_64-apple-darwin` with `-D warnings` **before** pushing — mirroring what CI denies rather than
+  what is convenient locally. The harnesses were deleted after use (they duplicate code by extraction
+  and would rot), but `extract.py`/`extract_beneath.py` are ~30 lines each and reproducible from this
+  entry.
+
+- **2026-08-27 (Worker) — not mine, noted for the Foreman:** GUI smoke shard 2 also failed on the same
+  run. That is CPE-1910's WebDriver socket flakiness and unrelated to a Rust compile error; the Foreman
+  is re-running it rather than having me chase it.
+
+- **2026-08-27 (Worker) — round 6 guardrails.** `cargo test` in `crates/server`: **2405 passed, 0
+  failed, 10 ignored**, all 11 targets green. `cargo clippy --all-targets -- -D warnings` clean on
+  Windows in plain, `--features index` and `--features specta`, **and** on `x86_64-unknown-linux-gnu`
+  and `x86_64-apple-darwin` via the extraction harnesses. One `#[cfg(windows)]` attribute and its
+  explanatory comment; no logic touched.
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a
