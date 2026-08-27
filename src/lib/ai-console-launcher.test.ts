@@ -959,6 +959,44 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.style.color).toBe(AMBER);
       expect(msg.style.color).not.toBe(RED);
     });
+
+    // CPE-1949: the FINAL else — `indexOk:false` with no error, no offline flag and no damaged
+    // local map. The index was refused as a whole, which now has four reachable causes: a bad or
+    // missing signature, an unsupported schema, bytes that are not UTF-8 or not parseable JSON,
+    // and (this ticket) a signed index naming an entry id that is not a usable filename. The copy
+    // deliberately names NONE of them, because naming the signature would be wrong for three of the
+    // four — so this test pins the absence as hard as the presence. It is the one branch in this
+    // chain that had no case of its own; every sibling above got one in CPE-1911/1924/1940.
+    it("an index refused as a whole is amber and blames no specific cause — in particular, not the signature", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: false,
+              applied: 0,
+              agents: 1,
+              alreadyCurrent: 0,
+              regressedRejected: 0,
+              integrityRejected: 0,
+            }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toMatch(/published catalog was refused/i);
+      expect(msg.textContent).toMatch(/nothing to do on your end/i);
+      // The point of the wording: it must not diagnose a cause it cannot know.
+      expect(msg.textContent).not.toMatch(/signature/i);
+      expect(msg.textContent).not.toMatch(/signed/i);
+      expect(msg.textContent).not.toMatch(/schema/i);
+      // …and it must not have fallen through to a sibling branch that would misdirect the user.
+      expect(msg.textContent).not.toMatch(/couldn't check for agent updates/i);
+      expect(msg.textContent).not.toMatch(/local record of installed agent versions/i);
+      expect(msg.textContent).not.toMatch(/you're offline/i);
+      expect(msg.textContent).not.toBe("Agents are already up to date.");
+      // Nothing on the user's machine broke — amber, not red.
+      expect(msg.style.color).toBe(AMBER);
+      expect(msg.style.color).not.toBe(RED);
+    });
   });
 });
 

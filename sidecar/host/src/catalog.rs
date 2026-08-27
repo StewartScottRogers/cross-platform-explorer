@@ -139,6 +139,29 @@ pub fn verify_index(index_bytes: &[u8], signature_hex: &str, trusted_keys: &[Str
     trusted_keys.iter().any(|pk| trust::verify_signature(index_bytes, signature_hex, pk))
 }
 
+/// The longest `entry.id` a catalog may name. Generous: the longest id this repo has ever published
+/// is 8 bytes (`opencode`), and the whole published set is 2–8. It exists so a signed index cannot
+/// hand `write_entry` a path the OS refuses halfway through a bundle.
+pub const MAX_ENTRY_ID_LEN: usize = 64;
+
+/// Whether `id` is a catalog entry id this build will interpolate into a path or a URL.
+///
+/// `[A-Za-z0-9._-]`, non-empty, at most [`MAX_ENTRY_ID_LEN`] bytes, and never `.` or `..` (CPE-1949).
+///
+/// The charset is what makes the id a **single path component**: no `/`, no `\`, no `:` (so no drive
+/// letter, no NTFS stream), no `%` or `?` or `#` for the two fetch URLs. With `.` and `..` refused
+/// outright, there is no spelling left that names anything but a file directly inside the directory
+/// the caller chose. That is the whole property — `entry.id` reaches five interpolations
+/// (`write_entry`'s two writes, and four `staging.join(format!("{id}…"))` reads and writes), and
+/// checking the id once is cheaper and harder to forget than guarding five call sites.
+pub fn is_valid_entry_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ENTRY_ID_LEN
+        && id != "."
+        && id != ".."
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
 /// An index whose detached signature **has already been checked against a trusted key**, and whose
 /// schema this build understands.
 ///
@@ -148,8 +171,9 @@ pub fn verify_index(index_bytes: &[u8], signature_hex: &str, trusted_keys: &[Str
 /// construct a `VerifiedIndex` is [`Self::open`], which verifies *first* and parses *second*, so a
 /// caller holding one cannot have used an entry field too early: there was no parsed entry to use.
 ///
-/// Fail-closed at every step: a bad/absent signature, non-UTF-8 or unparseable JSON, or an
-/// unsupported schema all yield `None` and therefore **no entries at all**.
+/// Fail-closed at every step: a bad/absent signature, non-UTF-8 or unparseable JSON, an
+/// unsupported schema, or an entry id outside [`is_valid_entry_id`] all yield `None` and therefore
+/// **no entries at all**.
 pub struct VerifiedIndex(CatalogIndex);
 
 impl VerifiedIndex {
@@ -163,7 +187,26 @@ impl VerifiedIndex {
         let text = std::str::from_utf8(index_bytes).ok()?;
         let index = CatalogIndex::from_json(text).ok()?;
         // Unknown-future schema is refused, as elsewhere in the subsystem.
-        index.is_supported().then_some(Self(index))
+        if !index.is_supported() {
+            return None;
+        }
+        // CPE-1949, defence-in-depth *after* the signature, never before it. A verified signature
+        // says "the holder of the catalog key published this"; it does not say the id is a filename.
+        // Without this, key compromise escalates from *install a malicious agent* to *arbitrary file
+        // write*: `id = "../../pwned"` steers `write_entry` and the four staging joins anywhere the
+        // app can reach. Rejecting here keeps that gap closed for every consumer at once — moving
+        // the check above the verify would undo CPE-1940's whole point, so it lives at the bottom.
+        //
+        // **Reject the index, do not drop the entry.** Two reasons. (1) A refusal is something the
+        // publisher sees and fixes; silently dropping an entry ships a catalog that is quietly
+        // missing an agent, and quietly missing is how a bad publish survives. (2) This newtype's
+        // invariant is "these are the bytes that verified" — filtering entries out of `self.0` would
+        // make `index()` return a document nobody signed, and `gate_manifest` reads that document to
+        // decide what is *listed*. A partial index is not a verified index.
+        if !index.entries.iter().all(|e| is_valid_entry_id(&e.id)) {
+            return None;
+        }
+        Some(Self(index))
     }
     /// The verified index.
     pub fn index(&self) -> &CatalogIndex {
@@ -454,6 +497,10 @@ fn write_entry(out: &Path, id: &str, bytes: &[u8], sig: &str) -> std::io::Result
 /// monotonic `version` stamped on every entry, returns the files to publish as release assets:
 /// `catalog-index.json` (+ `.sig`) and each `<id>.json` (+ `.sig`). The output verifies under
 /// [`verify_index`] / [`gate_manifest`] with the seed's public key.
+///
+/// Refuses any id outside [`is_valid_entry_id`], so the same rule that makes clients reject an index
+/// (CPE-1949) stops the publish instead of shipping one every client will refuse. Without this the
+/// only symptom of a mistyped manifest id would be a silent catalog outage on every machine.
 pub fn sign_bundle(
     manifests: &[(String, Vec<u8>)],
     signing_key_hex: &str,
@@ -461,6 +508,12 @@ pub fn sign_bundle(
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     use ed25519_dalek::{Signer, SigningKey};
 
+    if let Some((bad, _)) = manifests.iter().find(|(id, _)| !is_valid_entry_id(id)) {
+        return Err(format!(
+            "manifest id {bad:?} is not a valid catalog entry id \
+             (1-{MAX_ENTRY_ID_LEN} chars of [A-Za-z0-9._-], and not `.` or `..`)"
+        ));
+    }
     let seed = hex::decode(signing_key_hex.trim()).map_err(|e| format!("bad key hex: {e}"))?;
     let seed: [u8; 32] = seed.try_into().map_err(|_| "signing key must be a 32-byte seed".to_string())?;
     let key = SigningKey::from_bytes(&seed);
@@ -1017,12 +1070,305 @@ mod tests {
         // no entries; there is no `id` to interpolate anywhere.
         assert!(VerifiedIndex::open(evil.as_bytes(), "00", std::slice::from_ref(&pk)).is_none());
         assert!(VerifiedIndex::open(evil.as_bytes(), "not hex", std::slice::from_ref(&pk)).is_none());
-        // …and a *signed* index of the same shape does open — the gate is the signature, not the id.
+        // …and a *signed* index naming a well-formed id does open. (A signed index naming this same
+        // escaping id does **not** — that is CPE-1949's separate, post-verification gate, pinned by
+        // `a_signed_index_with_an_escaping_entry_id_writes_nothing_outside_the_catalog_dir`.)
         let signed = index_json("claude", "00", 1);
         let sig = sign(&keypair(1).0, signed.as_bytes());
         let ok = VerifiedIndex::open(signed.as_bytes(), &sig, &[pk]).expect("signed index opens");
         assert_eq!(ok.entries().len(), 1);
         assert_eq!(ok.index().entries[0].id, "claude");
+    }
+
+    // --- CPE-1949: a verified signature is not a promise that `entry.id` is a filename ----------
+
+    /// The whole of CPE-1949 in one test, with **a signing key this test controls** — i.e. the
+    /// key-compromise scenario, played out rather than argued.
+    ///
+    /// Leg 1 reproduces the primitive as it stood after PR #1058: signature verified, index parsed,
+    /// and then `entry.id` interpolated straight into the two paths `apply_bundle_with` uses. The id
+    /// is `../pwned`, so the manifest is read from *above* staging and the copy is written *above*
+    /// the catalog dir. Leg 2 runs the same signed bytes through the real `apply_bundle_at` and
+    /// asserts on **the filesystem** — the escaped location does not exist — before it looks at any
+    /// verdict, so the regression this guards reddens on the harm rather than on a missing flag.
+    ///
+    /// Two distinct directories on purpose: staging is `root/stage`, the catalog dir is
+    /// `root/nest/out`, so the escaping read (`root/pwned.json`, planted here, standing in for what
+    /// the fetch loop would have downloaded) and the escaping write (`root/nest/pwned.json`) land in
+    /// different places and the write target starts out clean.
+    #[test]
+    fn a_signed_index_with_an_escaping_entry_id_writes_nothing_outside_the_catalog_dir() {
+        let (k, pk) = keypair(3);
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("stage");
+        let out = root.path().join("nest").join("out");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+
+        let id = "../pwned";
+        let manifest = br#"{"schema_version":1,"id":"../pwned","exec":"calc.exe"}"#;
+        let sha = trust::content_hash(manifest);
+        let manifest_sig = sign(&k, manifest);
+        // Where `staging.join("../pwned.json")` resolves to — the attacker's staged payload.
+        let planted = root.path().join("pwned.json");
+        std::fs::write(&planted, manifest).unwrap();
+        std::fs::write(root.path().join("pwned.json.sig"), &manifest_sig).unwrap();
+        // Where `out.join("../pwned.json")` resolves to — outside the catalog dir, and clean.
+        let escaped = root.path().join("nest").join("pwned.json");
+        assert!(!escaped.starts_with(&out), "the write target must be outside the catalog dir");
+        assert!(!escaped.exists());
+
+        // A *properly signed* index — this is the key-compromise case, not a forgery.
+        let evil = index_json(id, &sha, 9);
+        let evil_sig = sign(&k, evil.as_bytes());
+        assert!(
+            verify_index(evil.as_bytes(), &evil_sig, std::slice::from_ref(&pk)),
+            "the index must genuinely verify, or leg 1 proves nothing"
+        );
+
+        // Leg 1 — the primitive, with the signature already satisfied. These are the two
+        // interpolations `apply_bundle_with` performs, verbatim.
+        let parsed = CatalogIndex::from_json(&evil).unwrap();
+        let pid = parsed.entries[0].id.clone();
+        let staged = std::fs::read(staging.join(format!("{pid}.json"))).expect("read escapes staging");
+        assert_eq!(staged, manifest);
+        write_entry(&out, &pid, &staged, manifest_sig.trim()).unwrap();
+        assert!(escaped.exists(), "pre-check: `write_entry` lands the bytes outside the catalog dir");
+        assert!(root.path().join("nest").join("pwned.json.sig").exists());
+
+        // Clean slate, then leg 2 — the same signed bytes through the real apply path.
+        std::fs::remove_file(&escaped).unwrap();
+        std::fs::remove_file(root.path().join("nest").join("pwned.json.sig")).unwrap();
+        std::fs::write(staging.join("index.json"), evil.as_bytes()).unwrap();
+        std::fs::write(staging.join("index.json.sig"), &evil_sig).unwrap();
+        let vpath = root.path().join("versions.json"); // absent ⇒ first run ⇒ every entry is "newer"
+        let report = apply_bundle_at(&staging, &out, &[pk], &vpath, &[], &[]).unwrap();
+
+        // The harm assertions come FIRST, so a regression fails on the escaped file, not on a flag.
+        assert!(
+            !escaped.exists(),
+            "a signed index escaped the catalog dir: {} was written",
+            escaped.display()
+        );
+        assert!(!root.path().join("nest").join("pwned.json.sig").exists());
+        assert_eq!(
+            std::fs::read(&planted).unwrap(),
+            manifest,
+            "the staged payload above staging must be left exactly as found"
+        );
+        assert_eq!(
+            std::fs::read_dir(&out).unwrap().count(),
+            0,
+            "nothing may be written inside the catalog dir either"
+        );
+        // …and only then the report: the index is refused whole, so there is nothing to apply.
+        assert!(!report.index_ok);
+        assert!(report.applied.is_empty());
+    }
+
+    /// Refusing the *index*, not the entry: one bad id takes the whole document down, so a publisher
+    /// sees a refusal instead of a catalog that is quietly missing an agent. (Also the newtype's
+    /// invariant — `index()` must return the bytes that verified, not a filtered subset.)
+    #[test]
+    fn one_escaping_id_refuses_the_whole_signed_index_rather_than_dropping_that_entry() {
+        let (k, pk) = keypair(4);
+        let mixed = r#"{"schema_version":1,"entries":[
+            {"id":"claude","schema_version":1,"sha256":"00","version":1},
+            {"id":"../../pwned","schema_version":1,"sha256":"00","version":1},
+            {"id":"aider","schema_version":1,"sha256":"00","version":1}]}"#;
+        let sig = sign(&k, mixed.as_bytes());
+        assert!(verify_index(mixed.as_bytes(), &sig, std::slice::from_ref(&pk)));
+        assert!(
+            VerifiedIndex::open(mixed.as_bytes(), &sig, &[pk]).is_none(),
+            "the good entries must not survive alongside the bad one"
+        );
+    }
+
+    /// The charset itself. Every spelling that could name something other than a plain file directly
+    /// inside the caller's directory, on either platform, plus the URL metacharacters — `entry.id`
+    /// is interpolated into two fetch URLs as well as five paths.
+    #[test]
+    fn entry_id_charset_admits_only_a_single_plain_path_component() {
+        for ok in ["claude", "a", "gpt-4.1", "some_agent", "A9", "x".repeat(64).as_str()] {
+            assert!(is_valid_entry_id(ok), "{ok:?} should be accepted");
+        }
+        for bad in [
+            "",                        // empty ⇒ ".json" in the caller's dir
+            ".",                       // ".json"
+            "..",                      // the traversal itself
+            "../pwned",                // POSIX + Windows traversal
+            "..\\pwned",               // Windows traversal
+            "a/b",                     // any subdirectory
+            "a\\b",
+            "/etc/passwd",             // absolute POSIX
+            "C:\\Windows\\evil",       // absolute Windows
+            "\\\\server\\share\\evil", // UNC
+            "claude:stream",           // NTFS alternate data stream
+            "a b",                     // space
+            "a%2e%2e",                 // percent-encoded traversal for the fetch URL
+            "a?x=1",                   // URL query
+            "a#frag",                  // URL fragment
+            "a\nb",                    // header/newline injection
+            "clau\u{0301}de",          // non-ASCII (normalisation games)
+            "\u{202e}drawkcab",        // RTL override
+        ] {
+            assert!(!is_valid_entry_id(bad), "{bad:?} should be rejected");
+        }
+        assert!(!is_valid_entry_id(&"x".repeat(MAX_ENTRY_ID_LEN + 1)), "over the length cap");
+    }
+
+    /// **Read off the live catalog, not off the schema** (CPE-1949; the lesson of PR #1053, where
+    /// this repo's assumptions about published artifact names were wrong twice). Every one of these
+    /// was extracted from the `entries[].id` of all 65 published `catalog-index.json` assets, and
+    /// they are exactly the 12 ids in `sidecar/ai-console/agents/` that `catalog-sign` publishes —
+    /// the publish side and the published side agree. A check that refuses these is a pipeline
+    /// outage, so it is pinned rather than assumed.
+    #[test]
+    fn every_id_this_repo_has_ever_published_passes_the_charset() {
+        const PUBLISHED: [&str; 12] = [
+            "aider", "claude", "codebuff", "codex", "gemini", "grok", "mistral", "opencode", "pi",
+            "qwen", "tau", "vtcode",
+        ];
+        for id in PUBLISHED {
+            assert!(is_valid_entry_id(id), "published id {id:?} would be refused");
+        }
+        // And through the real gate, not just the predicate: a signed index naming all twelve opens.
+        let (k, pk) = keypair(5);
+        let entries: Vec<String> = PUBLISHED
+            .iter()
+            .map(|id| format!(r#"{{"id":"{id}","schema_version":1,"sha256":"00","version":1}}"#))
+            .collect();
+        let index = format!(r#"{{"schema_version":1,"entries":[{}]}}"#, entries.join(","));
+        let sig = sign(&k, index.as_bytes());
+        let opened = VerifiedIndex::open(index.as_bytes(), &sig, &[pk]).expect("real catalog opens");
+        assert_eq!(opened.entries().len(), 12);
+    }
+
+    /// The publish side refuses the same shape, so a mistyped manifest id fails the release build
+    /// instead of shipping an index every client rejects (which would look like a dead catalog).
+    #[test]
+    fn sign_bundle_refuses_an_id_its_own_clients_would_reject() {
+        let (k, _pk) = keypair(6);
+        let seed = hex::encode(k.to_bytes());
+        let good = vec![("claude".to_string(), br#"{"id":"claude"}"#.to_vec())];
+        assert!(sign_bundle(&good, &seed, 1).is_ok());
+        let bad = vec![("../../pwned".to_string(), br#"{"id":"../../pwned"}"#.to_vec())];
+        let err = sign_bundle(&bad, &seed, 1).expect_err("publishing an escaping id must fail");
+        assert!(err.contains("../../pwned"), "the error must name the offending id: {err}");
+    }
+
+    /// CPE-1949 residual 1, **measured and pinned rather than argued away.** CPE-1940 made a
+    /// *damaged* `versions.json` fail closed; **deleting** it does not fail closed, and cannot, because
+    /// absent legitimately means first run. Leg 1 measures exactly what that costs. Leg 2 is why the
+    /// answer is still "leave it": the anti-rollback map is not the weakest link, so anchoring the
+    /// baseline in something harder to delete would move the lock to a door that is already open.
+    ///
+    /// The loader in `sidecar/ai-console/src/agents.rs` reads `<id>.json` + `<id>.json.sig` out of the
+    /// catalog dir and its **only** gate is `verify_manifest` — it never opens `versions.json`. So an
+    /// attacker with write access to the catalog dir skips this code entirely: they drop the ancient
+    /// *signed* manifest straight in and it loads. Deleting the map is a strictly longer route to a
+    /// result they already have, which is what keeps the severity low. Same trust format on both
+    /// sides (`sidecar_host::trust` ⇄ the sidecar-local re-implementation), so the check asserted
+    /// here is the check the loader runs.
+    #[test]
+    fn a_deleted_version_map_is_a_first_run_and_the_map_is_not_the_weakest_link() {
+        let (k, pk) = keypair(7);
+        let out = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let vdir = tempfile::tempdir().unwrap();
+        let vpath = vdir.path().join("versions.json");
+
+        const ANCIENT: &[u8] = br#"{"id":"claude","v":"ANCIENT"}"#;
+        std::fs::write(out.path().join("claude.json"), b"GOOD-v9").unwrap();
+        save_versions(&vpath, &VersionMap::from([("claude".to_string(), 9u64)])).unwrap();
+        stage_bundle(stage.path(), &[("claude", ANCIENT, 1)], &k);
+
+        // Leg 1 — the cost of the absent route, measured. Delete the map (not damage it) and the
+        // same ancient-but-signed bundle applies, because "no baseline" reads as "nothing installed".
+        std::fs::remove_file(&vpath).unwrap();
+        let r = apply_bundle_at(stage.path(), out.path(), std::slice::from_ref(&pk), &vpath, &[], &[])
+            .expect("absent is a first run, not a refusal");
+        assert_eq!(r.applied, vec!["claude".to_string()]);
+        assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), ANCIENT);
+        assert_eq!(load_versions(&vpath).unwrap(), VersionMap::from([("claude".to_string(), 1u64)]));
+
+        // Leg 2 — and the map was never the barrier. The bytes the attacker would plant in the
+        // catalog dir pass the loader's only gate on their own, with no `versions.json` in the story.
+        let ancient_sig = std::fs::read_to_string(stage.path().join("claude.json.sig")).unwrap();
+        assert!(
+            trust::verify_signature(ANCIENT, ancient_sig.trim(), &pk),
+            "an old first-party manifest stays validly signed forever — that is the real exposure, \
+             and no version map can revoke it"
+        );
+    }
+
+    /// CPE-1949 residual 2 — **the pin the auditor asked for.** CPE-1940 narrowed the two
+    /// `&mut VersionMap` entry points so nothing outside this file can hand in an empty baseline,
+    /// but a doc comment saying "on purpose" is not a guard: the next PR can widen `pub(crate)` back
+    /// to `pub` and the fail-open returns silently. The narrowing is a *decision*, so it gets a test.
+    ///
+    /// The `unwrap_or_default` sweep enumerates rather than recalls (CPE-1932) — it walks the crate's
+    /// sources at run time and refuses to pass on an implausibly small file list, because a sweep
+    /// that finds nothing looks identical to a sweep that found nothing wrong.
+    #[test]
+    fn the_mut_version_map_entry_points_stay_shut() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/catalog.rs"))
+            .expect("catalog.rs must be readable from its own crate");
+        // Column 0 only: a module-level `fn` declaration is unindented, while every mention of one
+        // inside this test (including these assertion messages) is indented. Matching anywhere in
+        // the file would make the guard trip over its own error strings.
+        let declared = |sig: &str| src.lines().any(|l| l.starts_with(sig));
+        assert!(
+            declared("pub(crate) fn apply_bundle_with("),
+            "apply_bundle_with must stay pub(crate): it takes a caller-supplied &mut VersionMap, \
+             which is the exact shape of the CPE-1940 fail-open"
+        );
+        assert!(!declared("pub fn apply_bundle_with("), "apply_bundle_with was widened to pub");
+        assert!(
+            !declared("pub fn apply_bundle("),
+            "apply_bundle was restored as a module-level pub fn; it belongs in the test module"
+        );
+
+        // `load_versions` and `save_versions` stay `pub` and that is fine — neither can manufacture
+        // the fail-open *read*. `load_versions(..).unwrap_or_default()` yields an empty map, but the
+        // only thing that applies a caller's map is `apply_bundle_with`, now out of reach;
+        // `apply_bundle_at` takes a *path* and reads it fail-closed itself. `save_versions` can write
+        // a wrong baseline, but so can `std::fs::write` — it adds no capability. What is worth
+        // guarding is the pairing, anywhere inside the crate that can still reach `pub(crate)`.
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).expect("crate src must be walkable").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    files.push(p);
+                }
+            }
+        }
+        assert!(files.len() >= 5, "the source walk found only {} files — it is not working", files.len());
+        // The needles are split so this guard does not match its own source, and comment lines are
+        // skipped so it does not match the prose that names the hazard (`apply_bundle_with`'s doc
+        // comment quotes the exact call it forbids). Both mistakes make the guard trip on itself,
+        // which reads as a finding and is not one.
+        let load = concat!("load_", "versions(");
+        let default = concat!(".unwrap_or_", "default()");
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                assert!(
+                    !(line.contains(load) && line.contains(default)),
+                    "{}:{} reintroduces the CPE-1940 fail-open baseline read",
+                    f.display(),
+                    n + 1
+                );
+            }
+        }
     }
 
     /// An index signed by a trusted key but declaring a schema this build doesn't understand still
