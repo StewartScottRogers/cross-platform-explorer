@@ -45,9 +45,17 @@ deleting the need for that procedure.
 3. **Design the automation, then file a `CPE-NNN` ticket** for a Worker to build it (the QA Architect
    architects; Workers implement — same split as PM/Foreman). Bias to the cheapest technique that fully
    retires the manual step.
-4. **Ratchet + verify.** When the automation lands and is green in CI, flip the burndown row to
-   *automated*, note the pinning job, and drop MVD by one.
+4. **Ratchet + verify.** When the automation lands and is green in CI, flip the burndown row's marker to
+   `✅ automated` and note the pinning job. **Do not touch the header total** — see below.
 5. **Report the number.** MVD and its delta this shift go in the wrap.
+
+**The number is derived, never patched forward (CPE-1922).** MVD used to be a running total maintained
+beside the ledger — add what you logged, subtract what you automated — and it drifted +4 before anyone
+recounted. `src/lib/mvdLedger.ts` now parses `MANUAL-TEST-BURNDOWN.md`'s tables and
+`src/lib/mvdLedger.test.ts` fails CI whenever the header sentence disagrees with them. So: **change the
+row, then read the number off the test** (`npx vitest run src/lib/mvdLedger.test.ts` prints both). The
+counting rule — `⛰` + `🔧` + `🟡` are all MVD, only `✅` leaves it — and the table annotations a new debt
+table must carry are documented in the ledger's own "How the total is counted" section.
 
 ## The automation toolbox (what to reach for, cheapest first)
 
