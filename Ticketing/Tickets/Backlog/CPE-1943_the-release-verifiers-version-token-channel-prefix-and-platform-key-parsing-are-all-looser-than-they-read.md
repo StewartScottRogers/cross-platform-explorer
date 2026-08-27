@@ -77,3 +77,25 @@ SEC-8). Its two blocking findings were fixed inside that PR.
 Related: **CPE-1923** (the verifier work, PR #1053), **CPE-1908** (the channel-purity guard),
 **CPE-1894** (a sidecar asset in a plain manifest), **CPE-1942** (the macOS asset with no version in
 its name), **CPE-1941** (stale content under a newer version).
+
+## F-D added 2026-08-27 — the mapping rule is OS-granular, so same-OS payload substitution is admitted
+
+From PR #1053's round-4 audit, after that PR closed the cross-OS case (SEC-9). The new signed-name
+mapping pass asks whether the payload's extension suits the key's **operating system**. It does not
+ask whether it suits the key's **bundle kind**, although the key carries it:
+
+    windows-x86_64-nsis  served the genuine .msi        -> exit 0
+    linux-x86_64-deb     served the genuine .rpm        -> exit 0
+    linux-x86_64-rpm     served the genuine .AppImage   -> exit 0
+
+Same denial-of-update class as SEC-9, one notch narrower: an NSIS client is handed an MSI it cannot
+apply. The `-nsis` / `-msi` / `-deb` / `-rpm` suffix is available and unused.
+
+**This is scope, not slippage** — CPE-1923's own proposed fix was OS-granular, so PR #1053 delivered
+what was asked. Recorded here so the narrower case is not mistaken for closed.
+
+Add to the acceptance criteria: **decide whether the mapping should be bundle-kind-granular**, and if
+so use the suffix already present on the key. Red-proof with the three rows above, and keep the
+18-case matrix that PR #1053's audit established (bare `.tar.gz`, bare `.gz`, `.app.tar`, extension
+mid-name, trailing dot, and the case variants `.EXE` / `.App.Tar.GZ` / `.AppImage` which must all be
+**accepted**).
