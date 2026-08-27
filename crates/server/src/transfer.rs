@@ -809,10 +809,20 @@ pub fn download_tree(
                             // CPE-1881: was `eprintln!` only, with nothing reaching the caller — see
                             // `DownloadReport::skipped`'s doc. Pushed here, still `eprintln!`'d too, so
                             // stderr keeps carrying the same trace it always did.
+                            // CPE-1881 round 2 (UAT): the message used to stop at "nothing was written
+                            // for this entry" — true, but not actionable. The remedy mirrors the revert
+                            // engine's own hard-link paragraph in shape (name the fix, then "and run/
+                            // download again"), though it is composed fresh here rather than shared
+                            // through `fsutil::LinkGuardWording` — that type's wording is written for the
+                            // restore/backup domain ("the folder being restored" / "the backup root"),
+                            // and forcing a third, unrelated caller through it would be the wrong kind of
+                            // reuse. A future fourth caller with the identical need is the point to widen
+                            // it, not this one.
                             let why = format!(
                                 "{}: this local path already has {names} names (it is hard-linked); its \
                                  other names may live outside the download folder, so nothing was written \
-                                 for this entry",
+                                 for this entry. Break the link at that local name first (copy the file \
+                                 over itself, or delete it) and download again.",
                                 entry.path
                             );
                             eprintln!("transfer: skipped entry — {why}");
@@ -839,9 +849,12 @@ pub fn download_tree(
                 LeafProbe::PreExistingSymlink => {
                     // CPE-1881: same fix, same reason, as the hard-link arm just above — this was its
                     // "adjacent symlink arm" the ticket named explicitly. See `DownloadReport::skipped`.
+                    // CPE-1881 round 2 (UAT): same "name the remedy, not just the cause" fix as the
+                    // hard-link arm above.
                     let why = format!(
                         "{}: the local path is a pre-existing symlink, and a download never writes \
-                         through one, so nothing was written for this entry",
+                         through one, so nothing was written for this entry. Remove or rename the \
+                         symlink and download again.",
                         entry.path
                     );
                     eprintln!("transfer: skipped entry — {why}");

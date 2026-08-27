@@ -95,6 +95,10 @@
 
   {#if summary.reason}
     <div class="ro-held" data-testid="{testid}-held-back">
+      <!-- CPE-1881 round 2 (UAT): this block sits right next to the write-refusal one below with the
+           same neutral surface, and neither used to say what it was — legible on a careful read but easy
+           to conflate. A one-line label each is enough to tell them apart at a glance. -->
+      <div class="ro-held-label">Held back</div>
       <div class="ro-held-reason">{summary.reason}</div>
       <div class="ro-next" data-testid="{testid}-next-step">{summary.nextStep}</div>
       {#if showCopyAffordance}
@@ -139,6 +143,7 @@
            unlike `f.error` above, this text never embeds a path today — `revert_engine.rs` builds it from
            a count and static wording only — but there is no structural guarantee that stays true, so this
            costs nothing and closes the gap before it can open. -->
+      <div class="ro-held-label">Refused</div>
       <div class="ro-held-reason">{displaySafeName(summary.writeRefusalReason)}</div>
     </div>
   {/if}
@@ -166,7 +171,9 @@
     border-radius: var(--radius);
     background: var(--surface-alt);
   }
-  .ro-held-reason { color: var(--text); }
+  /* CPE-1881 round 2 — distinguishes the held-back block from the write-refusal block beside it. */
+  .ro-held-label { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); }
+  .ro-held-reason { color: var(--text); margin-top: 2px; }
   .ro-next { margin-top: 6px; color: var(--text-dim); }
   /* CPE-1869 — matches the `.mini` button used for the same "copy X to clipboard" gesture elsewhere
      (e.g. `PropertiesDialog.svelte`'s checksum copy); scoped here since `.mini` isn't a global class. */

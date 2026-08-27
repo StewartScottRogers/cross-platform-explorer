@@ -111,9 +111,13 @@ The cases you may meet:
 
   A tree hard-linked wholesale — a backup made with `rsync --link-dest`, a Time Machine-style dedup, a
   package manager's store — can refuse hundreds or thousands of entries this way in one revert. Like the
-  held-back deletions above, the explanation is shown **once for the whole group**, not copied onto every
-  file: one paragraph, a count, then the file names (the first few, then a count) — never hundreds of
-  identical paragraphs stacking up on screen.
+  held-back deletions above, the shared explanation is stated **once for the whole group**, not copied
+  onto every file — never hundreds of identical paragraphs stacking up on screen. What comes after it is
+  different from the held-back list, though, and worth telling apart since the two sit right next to each
+  other on screen: the held-back list above shows only a **preview**, capped at eight names with "and N
+  more" (see the Copy-all button above it, for reaching the rest); the refused-writes list has no such
+  cap — **every** refused file is named individually, however many there are, because nothing here is
+  ever truncated.
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
   temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
   revert also hit one of the permanent cases above, running it again clears only the temporary half — the
