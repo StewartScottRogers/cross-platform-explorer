@@ -129,12 +129,22 @@
   /** One hazard sentence, differentiator first (CPE-1928): `"<path>" is a link, and renaming onto a
    *  link destroys it — …` becomes `Renaming onto a link destroys it — …`, with the shared remedy
    *  stripped for separate display. A `reason` that does not have that shape (the guards' "could not
-   *  check whether … is a link" arms) falls back to CPE-1891's `genericizeReason` unchanged. */
+   *  check whether … is a link" arms) falls back to CPE-1891's `genericizeReason` unchanged.
+   *
+   *  **Recognise the lead BEFORE stripping the tail, and test it against the RAW `reason`** (PR #1056
+   *  review, Finding 1 — this was the other way round and it was a live bug). The two halves drift
+   *  independently: `batch_media.rs` ALREADY prefixes this same refusal (`refusing at write time:
+   *  "<out>" is a link, and …`), so a `reason` whose TAIL still matches while its LEAD no longer does
+   *  is a string the backend can hand us today. Strip-then-recognise deleted the remedy from the
+   *  sentence and then fell through to `genericizeReason(body)` — and since `representativeReasons`
+   *  computes `sawLinkHazard` from the RAW `reason`, no separate remedy line rendered either, so
+   *  "remove the link first" vanished from the dialog entirely. Recognise-then-strip makes this
+   *  function agree with that flag: unrecognised in, untouched out, remedy still in the sentence. The
+   *  opposite drift (tail reworded, lead intact) degrades the safe way — the remedy shows twice. */
   function hazardSentence(reason: string): string {
-    const body = reason.replace(REMEDY_TAIL, "");
-    const lead = HAZARD_LEAD.exec(body);
-    if (!lead) return genericizeReason(body);
-    const rest = body.slice(lead[0].length).replace(/\.\s*$/, "");
+    const lead = HAZARD_LEAD.exec(reason);
+    if (!lead) return genericizeReason(reason);
+    const rest = reason.replace(REMEDY_TAIL, "").slice(lead[0].length).replace(/\.\s*$/, "");
     return `${rest.charAt(0).toUpperCase()}${rest.slice(1)}.`;
   }
 

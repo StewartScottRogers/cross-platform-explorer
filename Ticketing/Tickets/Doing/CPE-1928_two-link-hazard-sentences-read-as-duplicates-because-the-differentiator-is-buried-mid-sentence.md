@@ -138,3 +138,59 @@ Critic has the before/after pair side by side and no sibling PR touching that fi
 
 `npm run check` clean; `npm test` 4693/4693 green (incl. the `bidiEscape.guard` registry, which needed
 `text:blockedRemedy` recording — a frontend constant, no backend text in it).
+
+**2026-08-27 — PR #1056 review round: both findings addressed.**
+
+**Finding 1 (blocking), fixed — the split was ordered so one drift direction DELETED the remedy.**
+`hazardSentence` stripped the tail and *then* tested the lead, against the already-stripped body. The
+stated safety property ("an unrecognised `reason` passes through unchanged") therefore only held when
+*neither* half matched. When the tail matched and the lead did not, the remedy was gone from the
+sentence — and because `representativeReasons` computes `sawLinkHazard` from the **raw** `reason`, no
+separate remedy line rendered either, so "remove the link first" left the dialog entirely. Not
+hypothetical: `batch_media.rs` already prefixes this same refusal (`refusing at write time: "<out>"
+is a link, and …`). Now the lead is matched against the raw `reason` and the tail is stripped only
+once the shape is recognised, which also makes this function agree with the flag
+`representativeReasons` was already computing. The opposite drift (tail reworded, lead intact) still
+degrades the safe way — the remedy renders twice, never zero times.
+
+New test `keeps the remedy on screen when the reason's LEAD drifts but its tail still matches` uses
+the real `batch_media`-shaped prefix and asserts the box still contains `remove the link first`,
+that the sentence came through byte-identical, and that the remedy appears **exactly once** (so the
+fix cannot be "satisfied" by printing it twice). **Red-proofed:** restoring the old
+strip-then-recognise ordering fails it on exactly that assertion — `expected '… 1 destination can't
+be overwritten —…' to contain 'remove the link first'`.
+
+**Finding 2, built now (not deferred) — the derivation guard.** Nothing bound the TS wording to the
+Rust string: every frontend assertion compared hand-copied constants to hand-copied fixtures, and
+every *Rust* assertion on these two messages is a substring check that does not red on a lead reword.
+A backend copy edit could pass `cargo test`, pass `npm test`, and silently change the dialog — and,
+before Finding 1's fix, silently delete the remedy. A new `describe` block at the foot of
+`MacroRunConfirm.test.ts` now reads `crates/server/src/fsutil.rs`, walks the `Ok(true)` arm's
+`format!` literal in `classify_symlink_slot` / `classify_create_slot` (resolving `\"`, `\\` and Rust's
+`\`-at-end-of-line continuation, which also swallows the next line's indentation), substitutes the
+fixture's path for `{}`, and asserts byte-identity with all three fixtures. Two further assertions
+pin the halves the splitter depends on: each message still **opens** with `"{}" is a link, and ` and
+still **closes** on the shared remedy clause exactly once. Same shape as the repo's existing
+source-reading guards (`channelPurityCoverage`, `catalogPublishFreshnessGuard`, `lockfileLockedGuard`).
+
+**Red-proofed twice**, the second deliberately with a reword `cargo test` would *not* catch:
+
+- lead → `is a symlink, and renaming onto a symlink destroys it`: 2 guard tests red (byte-identity +
+  the lead-shape check).
+- lead → `renaming onto a link **wrecks** it`: the byte-identity guard reds. Confirmed no Rust
+  assertion pins that clause — the only `cargo` hits on "destroys it" are doc comments and one
+  assert's *failure message*, so this edit is green on the Rust side and red only here. That is the
+  guard doing the job it was asked for: failing on the side that caused the drift.
+
+Screenshots are unchanged and still valid — behaviour on every string the backend produces today is
+identical through both orderings; only the unrecognised-shape path moved.
+
+`npm run check` clean; `npm test` **4698/4698** green (+5: 1 lead-drift, 4 derivation guard).
+
+**Two pre-existing defects the reviewer found, agreed out of scope here** (Foreman filing them against
+CPE-1891): the `could not check whether "…" is a link` arms leak the path into the sentence, since
+`genericizeReason`'s `/^"[^"]*"\s*/` is anchored and cannot match a message opening with `could` —
+identical before and after this PR; and because dedup is by bucket, a "could not check" rename
+collision appearing before a real-link one suppresses the real-link sentence (and now its remedy)
+entirely. Both are properties of the bucketing/genericizing that predate this change, and fixing them
+means revisiting how a non-link-shaped refusal is bucketed — larger than this XS.

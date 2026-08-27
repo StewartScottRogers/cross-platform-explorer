@@ -12,6 +12,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // The two hazard sentences EXACTLY as the box must render them (CPE-1928): differentiator first,
 // path stripped (CPE-1891, Visual Critic round 3 — the hoisted sentence is shared across
@@ -309,6 +311,43 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     expect(reasons[0]).not.toContain(CONVERT_BLOCKED_COLLISION.to);
   });
 
+  it("keeps the remedy on screen when the reason's LEAD drifts but its tail still matches", async () => {
+    // PR #1056 review, Finding 1. The two halves of the split drift INDEPENDENTLY, and one of the two
+    // drift directions used to lose the remedy outright: strip-the-tail-then-test-the-lead deleted
+    // "remove the link first ..." from the sentence and THEN fell through to `genericizeReason`, while
+    // `representativeReasons` -- which tests the lead against the RAW reason -- reported no link hazard
+    // and so rendered no separate remedy line either. Net effect: the one thing the user has to DO
+    // disappeared from the dialog. Not hypothetical: `batch_media.rs` already prefixes this same
+    // refusal with "refusing at write time: ", so a lead-drifted reason is a string the backend can
+    // produce. The fix is to recognise the lead on the raw reason and strip the tail only after.
+    const LEAD_DRIFTED = {
+      ...BLOCKED_COLLISION,
+      reason: `refusing at write time: ${BLOCKED_COLLISION.reason}`,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "macro_plan") return PLAN;
+      if (cmd === "macro_preflight") return [LEAD_DRIFTED];
+      return null;
+    });
+
+    render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/a.txt"], root: "/work" });
+    await screen.findByTestId("blocked-collisions");
+
+    // THE assertion this test exists for: the remedy is still somewhere on screen.
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("remove the link first");
+    // ...and specifically because the sentence came through UNTOUCHED -- an unrecognised reason is
+    // passed on verbatim, remedy included, rather than half-processed.
+    expect(screen.getByTestId("blocked-reason").textContent).toEqual(LEAD_DRIFTED.reason);
+    // No separate remedy line here (the shape was not recognised, so nothing was hoisted) -- which is
+    // exactly why the sentence must keep its own tail. Asserting BOTH halves pins the invariant that
+    // matters: the remedy appears exactly once, wherever it appears.
+    expect(screen.queryByTestId("blocked-remedy")).toBeNull();
+    const remedyCount = (screen.getByTestId("blocked-collisions").textContent ?? "").split(
+      "remove the link first",
+    ).length - 1;
+    expect(remedyCount).toBe(1);
+  });
+
   it("shows a dim note stating why Run is blocked, next to the button, when a link collision is present", async () => {
     // CPE-1891, Visual Critic round 3: the red box's explanation lives two panels above the button --
     // this states the SAME fact right where the user is looking when they wonder why Run won't light.
@@ -412,5 +451,98 @@ describe("MacroRunConfirm run results + undo (CPE-1191)", () => {
     expect(invokeMock).toHaveBeenCalledWith("macro_undo", { run: RESOLVED_RUN });
     expect(await screen.findByTestId("undone-note")).toBeTruthy();
     expect(screen.queryByTestId("undo-btn")).toBeNull();
+  });
+});
+
+/**
+ * PR #1056 review, Finding 2 — the derivation guard.
+ *
+ * Everything above compares frontend constants to frontend fixtures, both hand-copied from Rust. The
+ * Rust side pins nothing either: every backend assertion on these two messages is a SUBSTRING check
+ * (`fsutil.rs`, `src-tauri/src/lib.rs`), none of which reds on a lead reword. So a backend copy edit
+ * could pass `cargo test`, pass `npm test`, and silently change what this dialog renders — the exact
+ * class of drift Finding 1 showed can DELETE the remedy rather than merely restyle it.
+ *
+ * This reads `crates/server/src/fsutil.rs` and re-derives both messages from the `format!` literals
+ * themselves, so the drift reds in CI on the side that caused it. Same shape as this repo's other
+ * source-reading guards (`channelPurityCoverage`, `catalogPublishFreshnessGuard`, `lockfileLockedGuard`).
+ */
+describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-copied (PR #1056, Finding 2)", () => {
+  /** Reads the Rust string literal starting at the first `"` at or after `fromIndex`, resolving the
+   *  escapes that appear in these two literals: `\"`, `\\`, and — the one that matters — Rust's
+   *  `\`-at-end-of-line continuation, which swallows the newline AND the next line's indentation. */
+  function rustStringLiteralAfter(src: string, fromIndex: number): string {
+    const start = src.indexOf('"', fromIndex);
+    if (start < 0) throw new Error("no string literal found");
+    let out = "";
+    for (let i = start + 1; i < src.length; ) {
+      const ch = src[i];
+      if (ch === "\\") {
+        const next = src[i + 1];
+        if (next === "\n" || next === "\r") {
+          i += 1;
+          while (i < src.length && /\s/.test(src[i])) i += 1;
+          continue;
+        }
+        out += next === "n" ? "\n" : next === "t" ? "\t" : next;
+        i += 2;
+        continue;
+      }
+      if (ch === '"') return out;
+      out += ch;
+      i += 1;
+    }
+    throw new Error("unterminated Rust string literal");
+  }
+
+  /** The `Ok(true)` (it IS a link) arm's `format!` template out of the named function. */
+  function linkRefusalTemplate(src: string, fnName: string): string {
+    const fnStart = src.indexOf(`pub fn ${fnName}`);
+    expect(fnStart, `${fnName} not found in fsutil.rs`).toBeGreaterThan(-1);
+    const fmt = src.indexOf("format!(", fnStart);
+    expect(fmt, `${fnName} has no format! call`).toBeGreaterThan(-1);
+    return rustStringLiteralAfter(src, fmt);
+  }
+
+  const FSUTIL = readFileSync(join(process.cwd(), "crates", "server", "src", "fsutil.rs"), "utf8");
+
+  it("the rename/move fixture is byte-identical to `classify_symlink_slot`'s own message", () => {
+    const derived = linkRefusalTemplate(FSUTIL, "classify_symlink_slot").replace("{}", BLOCKED_COLLISION.to);
+    expect(derived).toEqual(BLOCKED_COLLISION.reason);
+    // The move-kind fixture is the same message at a different path -- derive it too rather than
+    // assuming, since it is what proves the dedup buckets on wording and not on luck.
+    const derivedMove = linkRefusalTemplate(FSUTIL, "classify_symlink_slot").replace("{}", MOVE_BLOCKED_COLLISION.to);
+    expect(derivedMove).toEqual(MOVE_BLOCKED_COLLISION.reason);
+  });
+
+  it("the convert fixture is byte-identical to `classify_create_slot`'s own message", () => {
+    const derived = linkRefusalTemplate(FSUTIL, "classify_create_slot").replace("{}", CONVERT_BLOCKED_COLLISION.to);
+    expect(derived).toEqual(CONVERT_BLOCKED_COLLISION.reason);
+  });
+
+  it("both Rust messages still END with the clause SHARED_REMEDY claims to replace", () => {
+    // SHARED_REMEDY is the component's own wording, not a copy of either Rust tail -- it deliberately
+    // says "changed" for both. What has to hold is that each Rust message really does close on this
+    // clause (so there IS one shared remedy to hoist), and that the two differ only in that one word.
+    const rename = linkRefusalTemplate(FSUTIL, "classify_symlink_slot");
+    const convert = linkRefusalTemplate(FSUTIL, "classify_create_slot");
+    expect(rename).toContain("Nothing was changed; remove the link first if that is what you meant");
+    expect(convert).toContain("Nothing was written; remove the link first if that is what you meant");
+    expect(rename.endsWith("remove the link first if that is what you meant")).toBe(true);
+    expect(convert.endsWith("remove the link first if that is what you meant")).toBe(true);
+    // ...and the wording the UI prints once is one of those two, modulo the changed/written choice.
+    expect(`${rename.slice(rename.indexOf("Nothing was changed"))}.`).toEqual(SHARED_REMEDY);
+    // The clause appears exactly ONCE per message -- if it ever appeared twice, hoisting one copy out
+    // would leave the other stranded in the sentence and the remedy would render twice.
+    expect(rename.split("remove the link first").length - 1).toBe(1);
+    expect(convert.split("remove the link first").length - 1).toBe(1);
+  });
+
+  it("both Rust messages still OPEN with the lead the splitter strips", () => {
+    // The half Finding 1 turned on. If the Rust lead is reworded, this reds HERE -- on the Rust
+    // change -- instead of the dialog quietly rendering a differently-shaped sentence.
+    for (const fnName of ["classify_symlink_slot", "classify_create_slot"]) {
+      expect(linkRefusalTemplate(FSUTIL, fnName), fnName).toMatch(/^"\{\}" is a link, and /);
+    }
   });
 });
