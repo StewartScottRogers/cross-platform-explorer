@@ -3,7 +3,7 @@ id: CPE-1924
 title: the catalog cannot tell "you're already on the latest" from "the index regressed to something older" — both collapse into `Rollback`
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -153,3 +153,50 @@ trust surface — is a better option than the one this ticket weighed and reject
 Red-proof for the new wording: replaced the count-bearing sentence with an unqualified one; the two
 jsdom regression tests went red on `/2 of the 2 published agent entries are…/` and `/1 of the 4
 published agent entries is…/`, then restored to green.
+
+## Closed 2026-08-27 — merged as PR #1051
+
+Three independent gates: Reviewer **APPROVE**, Security Auditor **SEC PASS**, UAT **PASS**.
+
+**What shipped.** `CatalogEntry::version_standing() -> VersionStanding {Newer|Same|Older}` is now the
+**only** version comparison in `sidecar/host` — the Reviewer grepped the crate to confirm it, and the
+only other hits are `schema_version` bounds, a different field. `is_upgrade()` and `refusal()` are
+both derived from it, `refusal()` has exactly one `None` arm (`Newer`), and an invariant test asserts
+`refusal().is_none() == is_upgrade()` for every standing. `AlreadyCurrent` joins `Rollback`; both land
+in `report.rejected` and neither can reach `applied`.
+
+**Anti-rollback was not weakened, and this was proved rather than argued.** The Security Auditor
+enumerated the trust funnel by closed grep — `EntryVerdict::Accept` is constructed at **exactly one**
+non-test line, `write_entry` has **exactly one** caller, `report.applied.push` occurs at **exactly
+one** line — then attacked it with 12 hostile-catalog probes and 2 sabotages. Same-version-different-
+content: rejected, disk byte-identical, no `.sig` written. Malformed/absent/negative/overflow version:
+the whole index refused, fail-closed.
+
+**Two things came out of the review that neither the ticket nor the author knew.**
+
+1. **The UAT corrected the premise.** The Foreman's brief said `main` fired a false "pipeline may be
+   stuck" warning on `<`. It checked `origin/main` and found the shipped CPE-1911 compromise showed
+   *"Nothing newer than what you have is currently published…"* in **calm green** for both `==` and
+   `<`. So a genuinely backwards catalog was reported as fine, with no heads-up at all. The gain is
+   larger than the ticket claimed, and in the opposite direction.
+2. **`is_upgrade()` is off the enforcement path.** The Auditor's sabotage C permitted `Same` in
+   `is_upgrade()` while leaving `refusal()` correct — **every behavioural probe stayed green**. So the
+   enforced rule is `refusal()`, and `is_upgrade`/`is_upgrade_over` now have **zero production
+   callers**, kept alive only by the invariant test. **A dead-code sweep must not delete them** — that
+   would take the invariant test with them. The doc comment calling `is_upgrade` "the anti-rollback
+   rule itself" was corrected.
+
+**User-visible result**, measured through the real `launcher.html` in jsdom across 13 states:
+`==` → green *"You already have the latest published agents — nothing new to install."*; `<` → amber
+*"…has gone backwards — 1 of the 4 published agent entries is older than the version you already
+have…"*, with the count carried so it stops over-claiming a wholesale regression, and the regression
+winning over already-current on a mixed publish.
+
+**`VERSION=$(date +%s)` was deliberately left alone**, and the reasoning was corrected in review: the
+fix does **not** need `catalog-sign` to fetch and trust the previous index — deriving the version from
+the tag's commit timestamp or a repo-committed counter closes it with no new network or trust surface.
+Filed as **CPE-1941** (High) with that framing rather than the author's more expensive one.
+
+Residuals filed: **CPE-1939** (a regression still hidden behind "Updated 1 agent."; the model snapshot
+carries the same conflation), **CPE-1940** (High — `load_versions` fail-open, measured; an unverified
+`entry.id` reaching a URL and a path, inferred), **CPE-1941** (High).
