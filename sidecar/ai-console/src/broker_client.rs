@@ -227,6 +227,12 @@ pub struct CatalogFetch {
     /// The host never attempted the fetch because it's offline (CPE-1911: distinct from a fetch
     /// that was attempted and failed).
     pub offline: bool,
+    /// The host refused the apply because the **local** record of installed versions is damaged, so
+    /// anti-rollback had no baseline to compare against and failed *closed* (CPE-1940). Reported
+    /// separately from a plain [`Self::error`] because it is the one failure in this set that is on
+    /// the user's own machine: a dead publishing pipeline resolves itself and "try again later" is
+    /// true, whereas this repeats on every check until the catalog is reset.
+    pub version_map_unreadable: bool,
     /// The real reason the fetch/apply didn't produce a usable catalog (e.g. a 404 from a dead
     /// publishing pipeline) — `None` when nothing went wrong. Surfaced to the user instead of being
     /// silently thrown away (CPE-1911).
@@ -327,6 +333,7 @@ impl HostDialogs for BrokerDialogs {
             regressed_rejected: v.get("regressedRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             integrity_rejected: v.get("integrityRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            version_map_unreadable: v.get("versionMapUnreadable").and_then(Value::as_bool).unwrap_or(false),
             error: v.get("error").and_then(Value::as_str).map(str::to_string),
         })
     }
@@ -385,6 +392,7 @@ impl HostDialogs for BrokerDialogs {
             regressed_rejected: v.get("regressedRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             integrity_rejected: v.get("integrityRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            version_map_unreadable: v.get("versionMapUnreadable").and_then(Value::as_bool).unwrap_or(false),
             error: v.get("error").and_then(Value::as_str).map(str::to_string),
         })
     }
@@ -572,7 +580,8 @@ mod tests {
 
     /// Pins the `host.fetch_catalog` JSON → [`CatalogFetch`] parse (CPE-1911 review round 2): every
     /// field the host can send — `alreadyCurrent`, `regressedRejected`, `integrityRejected`,
-    /// `offline`, `error` — must actually land in the struct, not just `indexOk`/`applied`. This is
+    /// `offline`, `versionMapUnreadable`, `error` — must actually land in the struct, not just
+    /// `indexOk`/`applied`. This is
     /// the leg of the pipe the jsdom launcher tests can never reach (they mock `fetch` directly and
     /// never touch this parser). The two version-rejection counts are given **different** values so
     /// a swapped/collapsed pair goes red rather than passing by coincidence (CPE-1924).
@@ -596,6 +605,7 @@ mod tests {
                     "regressedRejected": 4,
                     "integrityRejected": 3,
                     "offline": false,
+                    "versionMapUnreadable": true,
                     "error": null,
                 })),
             },
@@ -607,6 +617,9 @@ mod tests {
         assert_eq!(res.regressed_rejected, 4);
         assert_eq!(res.integrity_rejected, 3);
         assert!(!res.offline);
+        // CPE-1940: the local-baseline refusal has to survive this hop too — the launcher branches
+        // on it to avoid giving "try again later" advice for a state that never resolves itself.
+        assert!(res.version_map_unreadable);
         assert_eq!(res.error, None);
         let _ = dialogs; // constructed to prove the type wires up, actual call runs on the thread
 
@@ -632,5 +645,42 @@ mod tests {
         assert!(!res2.index_ok);
         assert!(res2.offline);
         assert_eq!(res2.error.as_deref(), Some("fetch failed: status code 404"));
+        assert!(!res2.version_map_unreadable);
+    }
+
+    /// The **rollback** hop of the same pipe (CPE-1940). `rollback_catalog` builds its own
+    /// `CatalogFetch` from the same host reply, so the local-baseline refusal has to be parsed here
+    /// too — a rollback runs the identical fetch+apply and is refused the identical way. The first
+    /// round of CPE-1940 threaded this flag through the refresh route only, and the rollback route
+    /// dropped it silently, turning the refusal into a bare `applied: 0`.
+    #[test]
+    fn rollback_catalog_parses_the_local_baseline_refusal_too() {
+        let (writer, sink) = buffer();
+        let client = Arc::new(BrokerClient::new(writer));
+        let c = client.clone();
+        let h = std::thread::spawn(move || {
+            BrokerDialogs::new(c).rollback_catalog("v0.1.0", &["claude".to_string()])
+        });
+
+        let id = wait_for_request(&client, &sink);
+        client.deliver(
+            id,
+            Response {
+                result: Ok(json!({
+                    "indexOk": false,
+                    "applied": [],
+                    "rejected": 0,
+                    "versionMapUnreadable": true,
+                    "error": "installed-version map is corrupt: expected value",
+                })),
+            },
+        );
+        let res = h.join().unwrap().unwrap();
+        assert!(res.version_map_unreadable);
+        assert_eq!(res.error.as_deref(), Some("installed-version map is corrupt: expected value"));
+        // The shape that made the refusal indistinguishable from a benign "that version lacks
+        // this agent" once it reached the launcher.
+        assert_eq!(res.applied, 0);
+        assert!(!res.index_ok);
     }
 }
