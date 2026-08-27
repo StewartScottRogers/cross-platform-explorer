@@ -198,6 +198,12 @@ pub struct WriteRefusalSummary {
     pub reason: String,
     /// How many writes this covers.
     pub count: u32,
+    /// **CPE-1881 round 3.** The refused paths, in plan order — the structural way a consumer tells a
+    /// grouped write refusal apart from a genuine per-file failure in `skipped` (both carry
+    /// `outcome: "failed"`; only path membership here distinguishes them, never `error`'s wording). Backs
+    /// the frontend's "paint the grouped rows `--text-dim`, keep `--warn` for real failures" fix and its
+    /// "Copy all N refused paths" affordance, mirroring `HeldBackSummary`'s equivalent via `skipped`.
+    pub paths: Vec<String>,
 }
 
 /// The one statement behind a whole group of held-back deletes (CPE-1845), so 500 hold-backs cost one
@@ -250,9 +256,11 @@ impl RevertOutcome {
                 advises_manual_delete: group.advises_manual_delete,
             }
         });
-        let write_refusal = report
-            .write_refusal
-            .map(|group| WriteRefusalSummary { reason: group.reason, count: group.count });
+        let write_refusal = report.write_refusal.map(|group| WriteRefusalSummary {
+            reason: group.reason,
+            count: group.count,
+            paths: group.paths,
+        });
         Self { applied: report.applied as u32, skipped, held_back, write_refusal }
     }
 }

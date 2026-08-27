@@ -67,8 +67,20 @@ pub struct RestoreReport {
 pub struct WriteRefusalGroup {
     /// The shared explanation, stated once. Never copied per path.
     pub reason: String,
-    /// How many writes this covers.
+    /// How many writes this covers. Always `paths.len()`; kept as its own field (rather than derived at
+    /// every call site) because the count is quoted inside `reason` itself and callers that only need
+    /// the number (a UI heading, a copy-button label) shouldn't have to reconstruct it from a `Vec` len.
     pub count: u32,
+    /// **CPE-1881 round 3.** The refused paths, in plan order. Added so a consumer can tell a GROUPED
+    /// write refusal apart from a genuine per-file failure **structurally** — by path membership here —
+    /// rather than by matching `reason`'s wording, which is exactly the coupling this crate's own
+    /// standing rule forbids (`revertHoldBack.ts`: "reads `outcome` discriminants only, never the wording
+    /// of `error`"). The Visual Critic's finding was that all 200 grouped rows were painted with the same
+    /// `--warn` weight as a genuine locked-file failure, drowning the one paragraph worth reading in
+    /// amber; the frontend needs a non-textual way to repaint only the grouped rows `--text-dim`, and this
+    /// is it. Also backs the "Copy all N refused paths" affordance CPE-1869 already built for held-back
+    /// deletes — the same shape, the same reason to want it.
+    pub paths: Vec<String>,
 }
 
 /// One stand-down, covering every delete it held back (CPE-1845).
@@ -221,16 +233,18 @@ pub fn execute_restore(
     // than re-derived from the reason strings later — deriving it from prose is exactly the coupling
     // this ticket removes, and deriving it from "which branch fired" is what got it wrong first time.
     let mut any_permanent_refusal = false;
-    // CPE-1881: how many write refusals this run grouped (currently only the hard-link rule) — counted
-    // here, alongside every `Refused`, rather than re-derived from `report.skipped` afterwards.
-    let mut grouped_refusals: u32 = 0;
+    // CPE-1881: the write refusals this run grouped (currently only the hard-link rule) — collected
+    // here, alongside every `Refused`, rather than re-derived from `report.skipped` afterwards. The path
+    // list (round 3) is what lets a consumer tell a grouped refusal apart from a genuine failure by
+    // structure — see `WriteRefusalGroup::paths`'s doc.
+    let mut grouped_paths: Vec<String> = Vec::new();
     for action in &writes {
         match apply_write(action, dest_root_path, &blobs_dir, checkpoint) {
             Ok(()) => report.applied += 1,
             Err(refused) => {
                 any_permanent_refusal |= refused.permanent;
                 if refused.grouped {
-                    grouped_refusals += 1;
+                    grouped_paths.push(action.path.clone());
                 }
                 // Every refused write still gets its own `skipped` entry, grouped or not — see
                 // `RestoreReport::write_refusal`'s doc on why this must not change: the "did any write
@@ -240,7 +254,8 @@ pub fn execute_restore(
             }
         }
     }
-    if grouped_refusals > 0 {
+    if !grouped_paths.is_empty() {
+        let grouped_refusals = grouped_paths.len() as u32;
         let entries = if grouped_refusals == 1 { "entry" } else { "entries" };
         report.write_refusal = Some(WriteRefusalGroup {
             reason: format!(
@@ -249,6 +264,7 @@ pub fn execute_restore(
                 crate::fsutil::LinkGuardWording::RESTORE.hard_link_reason()
             ),
             count: grouped_refusals,
+            paths: grouped_paths,
         });
     }
 
@@ -1367,6 +1383,11 @@ mod tests {
         assert_eq!(group.count, N as u32, "{group:?}");
         assert!(group.reason.contains("hard-linked"), "{group:?}");
         assert!(group.reason.len() < 1000, "one paragraph, not several: {group:?}");
+        // CPE-1881 round 3: `paths` is the structural way a consumer tells this group's rows apart from
+        // a genuine failure — every refused path must be here, none lost, none invented.
+        assert_eq!(group.paths.len(), N, "{group:?}");
+        assert!(group.paths.contains(&"f0.txt".to_string()), "{group:?}");
+        assert!(group.paths.contains(&"f199.txt".to_string()), "{group:?}");
 
         // The measured acceptance criterion: total bytes across the whole report, before vs after. Each
         // per-path `skipped` reason is now the SHORT fact alone ("this file has N names…"), not the

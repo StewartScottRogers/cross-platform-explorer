@@ -98,8 +98,15 @@ export type RevertSummary = {
    * gated on this, not on {@link retryable} alone, so it never appears on the alias/collision hold-back.
    */
   advisesManualDelete: boolean;
-  /** The genuine failures, each with its own (distinct) reason. */
-  failures: { path: string; error: string }[];
+  /**
+   * Every entry with `outcome: "failed"` — genuine failures AND grouped write refusals together,
+   * unchanged in meaning from before CPE-1881 (this is what {@link failed} counts). Each entry carries
+   * {@link grouped} so a renderer can tell the two apart **structurally** without touching `error`'s
+   * wording: a grouped entry's path is a member of the backend's `write_refusal.paths` (CPE-1881 round
+   * 3) — the {@link writeRefusalReason} paragraph explains why every `grouped: true` row was refused,
+   * once, instead of a genuine per-file reason.
+   */
+  failures: { path: string; error: string; grouped: boolean }[];
   /**
    * **CPE-1881.** The shared explanation for a whole group of write refusals with the SAME cause
    * (currently only the hard-link rule) — stated once, the write-side counterpart to {@link reason}.
@@ -109,8 +116,23 @@ export type RevertSummary = {
    * this is purely the paragraph {@link failures}' short per-path text alone cannot state economically.
    */
   writeRefusalReason: string;
-  /** How many of {@link failures} the {@link writeRefusalReason} paragraph covers. `0` when `""`. */
+  /**
+   * How many of {@link failures} the {@link writeRefusalReason} paragraph covers. `0` when `""`.
+   *
+   * **CPE-1881 round 3 (Visual Critic finding).** This field existed before round 3 and nothing ever
+   * rendered it — the only reason a count reached the screen at all was that it happened to be quoted
+   * inside {@link writeRefusalReason}'s prose, so a future reword of that sentence could have silently
+   * deleted the only visible count. `RevertOutcomePanel.svelte` now renders this explicitly as its own
+   * heading, independent of the paragraph's wording.
+   */
   writeRefusalCount: number;
+  /**
+   * **CPE-1881 round 3.** Every refused path, untruncated, in plan order — the write-side counterpart to
+   * {@link allHeldBackPaths}, backing an identical "copy all N" affordance. `[]` when nothing was
+   * grouped. Read straight off the backend's `write_refusal.paths`, never re-derived from {@link
+   * failures} by wording, though the two always agree in practice (same source, filtered two ways).
+   */
+  allWriteRefusalPaths: string[];
 };
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
@@ -119,15 +141,29 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
  * Summarise a revert for display. Reads `outcome` discriminants only — never the wording of `error`.
  */
 export function summarizeRevert(outcome: RevertOutcome): RevertSummary {
+  // CPE-1881 round 3: which failed paths are members of the grouped write refusal, read straight off
+  // the backend's own `write_refusal.paths` — never by matching `error`'s wording (this module's
+  // standing rule). A `Set` so per-entry membership is O(1) rather than an O(N) `includes` per row.
+  const groupedPaths = new Set(outcome.write_refusal?.paths ?? []);
   const failures = outcome.skipped
     .filter((r) => r.outcome === "failed")
-    .map((r) => ({ path: r.path, error: r.error }));
+    .map((r) => ({ path: r.path, error: r.error, grouped: groupedPaths.has(r.path) }));
   const heldBackPaths = outcome.skipped
     .filter((r) => r.outcome === "skipped_by_plan" || r.outcome === "held_back_by_checkpoint")
     .map((r) => ({ path: r.path, detail: r.error }));
 
+  const writeRefusalCount = outcome.write_refusal?.count ?? 0;
+  // CPE-1881 round 3 (D2): a grouped refusal is a deliberate, correct stand-down — the same reason
+  // `heldBackPaths` gets its own headline clause instead of being folded into "failed". Before this,
+  // the headline's first line ("200 failed") flatly contradicted the very next line's paragraph
+  // explaining these were refused on purpose. Split exactly like held-back already is: genuine
+  // failures keep the word "failed"; the grouped count gets its own "refused" clause. `genuineFailed`
+  // can't go negative — `writeRefusalCount` is always `<= failures.length` by construction (every
+  // grouped path is one of the `outcome: "failed"` entries `write_refusal` was built from).
+  const genuineFailed = failures.length - writeRefusalCount;
   const parts = [`Applied ${outcome.applied} ${plural(outcome.applied, "change", "changes")}`];
-  if (failures.length) parts.push(`${failures.length} failed`);
+  if (genuineFailed > 0) parts.push(`${genuineFailed} failed`);
+  if (writeRefusalCount > 0) parts.push(`${writeRefusalCount} refused`);
   if (heldBackPaths.length) {
     parts.push(`${heldBackPaths.length} ${plural(heldBackPaths.length, "deletion", "deletions")} held back`);
   }
@@ -150,6 +186,7 @@ export function summarizeRevert(outcome: RevertOutcome): RevertSummary {
     advisesManualDelete: held?.advises_manual_delete ?? false,
     failures,
     writeRefusalReason: outcome.write_refusal?.reason ?? "",
-    writeRefusalCount: outcome.write_refusal?.count ?? 0,
+    writeRefusalCount,
+    allWriteRefusalPaths: outcome.write_refusal?.paths ?? [],
   };
 }

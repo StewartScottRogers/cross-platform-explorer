@@ -138,23 +138,56 @@ describe("summarizeRevert (CPE-1845)", () => {
     // with its own (now short) per-path fact, and the paragraph reaches the screen exactly once.
     const reason =
       "200 checkpoint entries could not be written because the destination is hard-linked " + "x".repeat(300);
-    const skipped = Array.from({ length: 200 }, (_, i) =>
-      op(`f${i}.txt`, "failed", `this file has 2 names (it is hard-linked)`),
-    );
+    const paths = Array.from({ length: 200 }, (_, i) => `f${i}.txt`);
+    const skipped = paths.map((p) => op(p, "failed", `this file has 2 names (it is hard-linked)`));
     const s = summarizeRevert({
       applied: 0,
       skipped,
       held_back: null,
-      write_refusal: { reason, count: 200 },
+      write_refusal: { reason, count: 200, paths },
     });
     expect(s.failed).toBe(200);
     expect(s.failures).toHaveLength(200);
     expect(s.failures.every((f) => f.error === "this file has 2 names (it is hard-linked)")).toBe(true);
+    // CPE-1881 round 3 (D3): every one of these is grouped — none is a genuine per-file failure — so a
+    // renderer keying colour off `grouped` must paint all 200 the same (dim) way, structurally, never by
+    // matching `error`'s text.
+    expect(s.failures.every((f) => f.grouped)).toBe(true);
     // ONE copy of the shared paragraph reaches the screen, not 200.
     expect(s.writeRefusalReason).toBe(reason);
     expect(s.writeRefusalCount).toBe(200);
+    // CPE-1881 round 3 (D1): the full set survives, untruncated, for the copy-all affordance — and the
+    // headline (D2) says "refused", never "failed", when every failure is a deliberate stand-down.
+    expect(s.allWriteRefusalPaths).toHaveLength(200);
+    expect(s.allWriteRefusalPaths[0]).toBe("f0.txt");
+    expect(s.allWriteRefusalPaths[199]).toBe("f199.txt");
+    expect(s.headline).toBe("Applied 0 changes, 200 refused.");
     const rendered = s.writeRefusalReason.length + s.failures.map((f) => f.error.length).reduce((a, b) => a + b, 0);
     expect(rendered).toBeLessThan(20_000);
+  });
+
+  it("CPE-1881 round 3 (D2/D3): a genuine failure mixed with grouped refusals keeps its own word and colour", () => {
+    // A locked file (genuine attempt-and-fail) alongside 2 hard-linked refusals in the SAME run — proves
+    // `grouped` and the headline split are computed per-entry by path membership, not by "any grouping
+    // happened at all in this run".
+    const paths = ["linked-a.txt", "linked-b.txt"];
+    const s = summarizeRevert({
+      applied: 0,
+      skipped: [
+        op("locked.txt", "failed", "permission denied"),
+        ...paths.map((p) => op(p, "failed", "this file has 2 names (it is hard-linked)")),
+      ],
+      held_back: null,
+      write_refusal: { reason: "2 checkpoint entries could not be written…", count: 2, paths },
+    });
+    expect(s.failed).toBe(3); // unchanged meaning: every `outcome: "failed"` entry, grouped or not
+    expect(s.writeRefusalCount).toBe(2);
+    const locked = s.failures.find((f) => f.path === "locked.txt");
+    const linkedA = s.failures.find((f) => f.path === "linked-a.txt");
+    expect(locked?.grouped).toBe(false);
+    expect(linkedA?.grouped).toBe(true);
+    // Both clauses appear — a genuine failure must not vanish behind the grouped count, and vice versa.
+    expect(s.headline).toBe("Applied 0 changes, 1 failed, 2 refused.");
   });
 
   it("carries the per-path detail the backend produces, and only when there is one", () => {

@@ -47,9 +47,11 @@ Two ways to revert, both from the checkpoint's row in the list:
 Both are destructive — files are overwritten or deleted on disk directly, not moved to the Recycle Bin —
 so both arm a confirmation panel first, restating what will happen. Nothing reverts on a single click.
 After a revert, the dialog reports how many changes were applied, how many failed (e.g. a locked or
-missing file), and how many deletions were held back — up to three separate counts, since a count of zero
-is left out. Held back is kept apart from failed because a hold-back is the safety net working rather than
-a problem. Neither a failure nor a hold-back stops the rest of the revert.
+missing file), how many writes were refused on purpose (see "a file that has more than one name" below),
+and how many deletions were held back — up to four separate counts, since a count of zero is left out.
+Refused and held back are both kept apart from failed because both are the safety net working, not a
+problem: a refused write says "you already have this content, safely, right here" every bit as much as a
+held-back delete says "nothing was destroyed on a doubt". Nothing here stops the rest of the revert.
 
 ### When a revert holds its deletions back
 
@@ -112,12 +114,15 @@ The cases you may meet:
   A tree hard-linked wholesale — a backup made with `rsync --link-dest`, a Time Machine-style dedup, a
   package manager's store — can refuse hundreds or thousands of entries this way in one revert. Like the
   held-back deletions above, the shared explanation is stated **once for the whole group**, not copied
-  onto every file — never hundreds of identical paragraphs stacking up on screen. What comes after it is
-  different from the held-back list, though, and worth telling apart since the two sit right next to each
-  other on screen: the held-back list above shows only a **preview**, capped at eight names with "and N
-  more" (see the Copy-all button above it, for reaching the rest); the refused-writes list has no such
-  cap — **every** refused file is named individually, however many there are, because nothing here is
-  ever truncated.
+  onto every file — never hundreds of identical paragraphs stacking up on screen, and it is now titled
+  with the count in its own right ("Refused (200)"), so the scale is stated rather than left for you to
+  count. What comes after it is different from the held-back list, though, and worth telling apart since
+  the two sit right next to each other on screen: the held-back list above shows only a **preview**,
+  capped at eight names with "and N more"; the refused-writes list has no such cap — **every** refused
+  file is named individually, however many there are, nothing here is ever truncated. At more than a
+  handful of names it scrolls inside its own bounded box rather than growing the dialog without end, but
+  scrolling only changes what is currently visible, never what exists — and both lists carry the same
+  **Copy all** button, so the full set can leave as a pasteable list either way, scrolled through or not.
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
   temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
   revert also hit one of the permanent cases above, running it again clears only the temporary half — the

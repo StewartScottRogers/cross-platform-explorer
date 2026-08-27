@@ -6480,7 +6480,15 @@ reason: string;
 /**
  * How many writes this covers.
  */
-count: number }
+count: number; 
+/**
+ * **CPE-1881 round 3.** The refused paths, in plan order — the structural way a consumer tells a
+ * grouped write refusal apart from a genuine per-file failure in `skipped` (both carry
+ * `outcome: "failed"`; only path membership here distinguishes them, never `error`'s wording). Backs
+ * the frontend's "paint the grouped rows `--text-dim`, keep `--warn` for real failures" fix and its
+ * "Copy all N refused paths" affordance, mirroring `HeldBackSummary`'s equivalent via `skipped`.
+ */
+paths: string[] }
 
 /** tauri-specta globals **/
 
