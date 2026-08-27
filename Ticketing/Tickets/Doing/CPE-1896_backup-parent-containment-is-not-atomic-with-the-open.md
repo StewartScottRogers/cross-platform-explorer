@@ -966,6 +966,79 @@ Reviewer and the Security Auditor for a narrow look: is the new ordering sound, 
 the old ordering refused, and does the S3 sabotage now red for the right reason. Nothing further is
 pending from the Worker unless one of them raises something.
 
+## 2026-08-27 — ROUND 5: APPROVED + SEC PASS. The reorder cleared by measurement, and the drift it caused
+
+**PR #1043 is approved by the Reviewer and passed by the Security Auditor.** Both cleared the round-4
+reorder by measuring it rather than reading it, and both went further than the question asked.
+
+- **Reviewer, on the window between the two guards.** Audited the whole `open_dst()` → `set_len(0)`
+  sequence and confirmed **no write, no truncate, no create, no rename and no path resolution** occurs
+  between the handle checks and the path check on any arm — every refusal is a terminal `return Err`.
+  It also checked two things neither the Foreman nor I raised: `written` is assigned before the path
+  check, but every arm that reaches it returns `Err`, so no caller ever sees a changed value; and
+  `remove_file(dst)` gained no exposure, still gated on `created`.
+- **Reviewer, on whether the tag check is now load-bearing.** Forced the shared predicate to lie on the
+  **reordered** code: **2401 passed / 4 failed**, with the leaf test failing on the *wording* assertion
+  and **not** on `is_err` — i.e. the surrogate was still refused, by the second net, exactly as the
+  design says. Compare round 3, where the identical experiment left all 2,404 green. The tag check is
+  load-bearing at both call sites and pinned at both.
+- **Security Auditor, on the cost of the window.** The path question now runs **4.4 µs** later, and it
+  is itself ~4× more expensive (**16.2 µs**) than the block now placed ahead of it. Not exploitable in
+  either direction: making it fire spuriously unlinks the attacker's own symlink, and making it not
+  fire is pointless because the handle check has already refused. It then raced it — flipping `dst`
+  between an ordinary file and a symlink continuously — for **1,200 trials, ~25,500 leaf flips, 0
+  clobbers, 0 silent successes.**
+- **Its judgement, recorded because it is the durable form of the argument:** *putting the unspoofable
+  question first and the spoofable one second is the correct ordering on the merits, independently of
+  the coverage argument.*
+
+**Running total across four rounds: 2,700 race-probe trials, 0 escapes.**
+
+- **2026-08-27 (Worker) — the reorder caused exactly the drift this review has spent four rounds
+  chasing, and all four instances are fixed.** Every one is a comment the reorder itself invalidated:
+  two direction words (`is_symlink` "above", "the path check above is the whole defence" — both now
+  below), a doubled blank line where the moved block was cut out, and a historical note in the leaf test
+  saying a symlink "is refused ~50 lines earlier", which is now ~60 lines *later*. The last one is
+  re-tensed rather than re-numbered: it describes the state at the time of the finding, and a line count
+  would go stale again on the next edit.
+
+- **2026-08-27 (Worker) — the tripwire now pins three tags, and the third is the one that carried the
+  argument.** `cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit` looped `0x2000_1896` / `0x0000_1896`,
+  which isolates the surrogate bit and is sufficient for that claim — but the comment cited three tags
+  and **`0x1000_1896` was the unpinned one**. It is bit 28 set / bit 29 clear: the exact shape of
+  `IO_REPARSE_TAG_CLOUD` (`0x9000001A`), and therefore the tag the whole OneDrive Files-On-Demand
+  motivation rests on. Added; it stages and classifies as non-surrogate as expected. (Note it stages
+  fine on a *file* despite carrying the directory-capable bit, unlike `0x3000_1896`, whose refusal to
+  stage remains an observed limit with cause undetermined.)
+
+- **2026-08-27 (Worker) — the user-visible sentence for the commonest case: CHANGED, deliberately.**
+  The Auditor flagged that the reorder moves a plain symlink at the leaf — the shape a user is most
+  likely to hit — from the path check's sentence to the tag check's, and the inherited one opened on
+  "reparse point": precise, but the wrong first word for a symlink. The Foreman grepped `src/`,
+  `src-tauri/`, `crates/` and `gui-smoke/` for downstream matchers on the old text and found none on
+  this path (the other hits are `archive.rs`, `batch_media.rs` and `split_join.rs` with their own
+  distinct strings), so it was safe to change and it is changed rather than left:
+
+  > this name is a link that stands in for another name — a symlink, junction or mount point — and a
+  > backup never writes through one: a link's target can be re-pointed after any check
+
+  It opens on "a link", keeps the **"stands in for another name"** clause the tag check is named for
+  (and which the leaf test asserts on to prove *which* guard fired), and restores the re-pointing
+  explanation the old path-check sentence carried and the new one had dropped. Deliberate, not
+  incidental — recorded here because the Foreman asked for the decision either way.
+
+- **2026-08-27 (Worker) — the shadowed-guard finding is filed as CPE-1929**, with the
+  `batch_media::open_output_verified` lead recorded as a **lead, not a finding** — it has the same
+  shape (a path check and a handle check answering about links at one name) and has not been run
+  through the two-sabotage check. The diagnostic tell (a green sabotage **and** a no-op fault injection
+  on the same guard) is in the sprint history.
+
+- **2026-08-27 (Worker) — round 5 guardrails.** `cargo test` in `crates/server`: **2405 passed, 0
+  failed, 10 ignored**, all 11 targets green. `cargo clippy --all-targets -- -D warnings` clean in
+  plain, `--features index` and `--features specta`. Comment-and-wording changes plus one extra loop
+  iteration; no control flow touched, no new dependency, no `specta::Type` touched, nothing
+  machine-global added.
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a

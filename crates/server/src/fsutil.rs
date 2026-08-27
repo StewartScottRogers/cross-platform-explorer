@@ -1498,11 +1498,11 @@ pub(crate) fn copy_file_onto_destination_handle(
 
     let crate::open_beneath::Opened { file: mut w, created } = open_dst()?;
 
-
-    // THE authority on Windows, where a junction is a reparse point that `is_symlink` above may or may
-    // not report depending on its tag: `GetFileInformationByHandle` on the handle we are about to write
-    // through. `handle_facts` returns `None` only on a platform whose identity model `batch_media` does
-    // not know, where the path check above is the whole defence.
+    // THE authority on Windows, where a junction is a reparse point that `is_symlink` (the path check,
+    // now BELOW this block since CPE-1896 round 4) may or may not report depending on its tag:
+    // `GetFileInformationByHandle` on the handle we are about to write through. `handle_facts` returns
+    // `None` only on a platform whose identity model `batch_media` does not know, where the path check
+    // below is the whole defence.
     //
     // **Both arms below appear UNREACHABLE on Windows, measured, and are kept anyway** (CPE-1846
     // review). A directory and a junction both fail the `open` itself there, so the refusal a user
@@ -1570,8 +1570,18 @@ pub(crate) fn copy_file_onto_destination_handle(
         // tracked separately.
         let why = if facts.is_reparse_point && crate::batch_media::reparse_name_surrogate(&w).unwrap_or(true) {
             Some(format!(
-                "this name is a reparse point that stands in for another name (a symlink, junction or \
-                 mount point), and {} never writes through one",
+                // Wording deliberately re-led for the COMMONEST case (CPE-1896 round 4). The
+                // reorder made this refusal, not the path check below, the one a plain symlink at
+                // the leaf reaches — and the sentence it inherited opened on "reparse point",
+                // which is the precise term but the wrong first word for the shape a user actually
+                // hits. It now opens on "a link", keeps the "stands in for another name" clause the
+                // tag check is named for (and which the leaf test asserts on to prove WHICH guard
+                // fired), and restores the re-pointing explanation the old path-check sentence
+                // carried. Safe to change: the Foreman grepped src/, src-tauri/, crates/ and
+                // gui-smoke/ for downstream matchers on the old text and found none on this path.
+                "this name is a link that stands in for another name — a symlink, junction or \
+                 mount point — and {} never writes through one: a link's target can be \
+                 re-pointed after any check",
                 wording.verb
             ))
         } else if facts.is_dir {
@@ -8717,8 +8727,9 @@ mod tests {
         // is the only arrangement that lets this test claim the *tag* is what decides.
         //
         // **It used to be a symlink, and that version proved nothing** (PR #1043 round 4, found by
-        // sabotage rather than by reading). A symlink at the final component is refused ~50 lines
-        // earlier by the unrelated `symlink_metadata(dst).is_symlink()` path check, so the two halves
+        // sabotage rather than by reading). At the time, a symlink at the final component was refused
+        // by the unrelated `symlink_metadata(dst).is_symlink()` path check, which then ran *ahead* of
+        // the handle checks — it is now the second net, below them — so the two halves
         // went on "diverging" even with `reparse_name_surrogate` hard-wired to `false` — precisely the
         // condition this test's own doc says it exists to exclude. Measured: with the surrogate refusal
         // disabled outright (`if false && facts.is_reparse_point`) the old test passed and the whole
@@ -8778,8 +8789,14 @@ mod tests {
     #[test]
     fn cpe_1896_std_is_symlink_tracks_the_name_surrogate_bit() {
         let d = scratch("cpe1896-is-symlink-pin");
-        // Identical non-Microsoft tags apart from bit 29, `IO_REPARSE_TAG_NAME_SURROGATE`.
-        for (tag, expected) in [(0x2000_1896_u32, true), (0x0000_1896_u32, false)] {
+        // Non-Microsoft tags differing only in the two bits that matter here. `0x1000_1896` is the
+        // one that carries the OneDrive argument: bit 28 set (directory-capable), bit 29 clear
+        // (not a surrogate) is the exact shape of `IO_REPARSE_TAG_CLOUD` (`0x9000001A`), so it is the
+        // tag whose classification the whole Files-On-Demand motivation rests on. It was the unpinned
+        // one while this loop covered only the surrogate/non-surrogate pair.
+        for (tag, expected) in
+            [(0x2000_1896_u32, true), (0x0000_1896_u32, false), (0x1000_1896_u32, false)]
+        {
             let f = d.path().join(format!("t{tag:08x}.bin"));
             std::fs::write(&f, b"x").unwrap();
             if !make_guid_reparse_point(&f, tag, false) {
