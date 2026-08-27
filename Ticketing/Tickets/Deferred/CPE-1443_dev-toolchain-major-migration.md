@@ -64,4 +64,29 @@ advisories, and its own CI job (`gui-smoke.yml`). A Steward pass must
 **enumerate** the lockfiles rather than assume "the npm audit" means the root one; CPE-1932 is the standing
 lesson here. This ticket's scope is unchanged either way: CPE-1443 owns the **root** dev-toolchain majors only.
 
-Related: **CPE-1926** (the non-major half, done), **CPE-1904** (package-lock drift backstop).
+**CPE-1945 answered the open question above: `gui-smoke/`'s residue is NOT in this ticket's scope, and is
+not a migration at all.** After its non-major pass, `gui-smoke/` sits at 15 advisories (1 moderate / 14 high)
+— and every one is **upstream-gated, with no forward fix in existence**. The project is already on the
+**latest** `@wdio/*` (9.31.4) and the latest `expect-webdriverio` (6.0.9); the advisories are cascades from
+pins that WebdriverIO's own current release still carries:
+
+- `@wdio/config` / `@wdio/utils` / `@wdio/runner` / `webdriver` @ 9.31.x require `deepmerge-ts@^7.0.3`; the
+  advisory needs `>=8.0.0`. Waiting on WebdriverIO, not on us.
+- `@wdio/mocha-framework@9.31.2` requires `mocha@^10.3.0`, and `mocha@10` requires
+  `serialize-javascript@^6.0.2`; the advisory needs `>7.0.4`. Same shape.
+- `@puppeteer/browsers@2.13.2` (latest) requires `extract-zip@^2.0.1`, and that advisory's range is `*` —
+  **no published version of `extract-zip` is unaffected.** There is nothing to upgrade to.
+
+So there is no `@wdio/*` major migration to schedule. What npm *offers* as a fix for these is a **downgrade**
+— `@wdio/local-runner@7.40.0`, `@wdio/cli@8.14.6` against an installed 9.31.4 — i.e. walking backwards to a
+tree that predates the advisory. `npm audit fix --force` would have taken it, silently regressing the harness
+that guards the whole GUI verification leg by two major versions. That is the concrete reason the no-`--force`
+rule is structural here rather than stylistic.
+
+This ticket's scope therefore stands unchanged and genuinely separate: **CPE-1443 owns the four root
+dev-toolchain majors, which DO have forward fixes available.** `gui-smoke/`'s residue needs no decision from
+us, only an upstream release; `npm-audit-sweep` in ci.yml will notice the day one lands, because it fails on
+an unapplied non-major fix.
+
+Related: **CPE-1926** (the non-major half, done), **CPE-1904** (package-lock drift backstop),
+**CPE-1945** (`gui-smoke/` audited for the first time; the repo-wide npm sweep).

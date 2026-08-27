@@ -37,6 +37,11 @@ updater.pw
 # Sub-agent worktrees (transient; never commit)
 .claude/worktrees/
 
+# CPE-1945: scratch for `scripts/audit-npm-projects.mjs`'s `npm audit fix --package-lock-only` probe.
+# The script removes it itself; this entry is the belt-and-braces for an interrupted run, so a killed
+# sweep can never leave a copied package-lock.json sitting in the tree looking committable.
+.claude/tmp/
+
 # CPE-1884: headless-chrome user-data-dirs scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs
 # (and future real-browser layout harnesses in the same spirit) spin up per-run — transient, never commit.
 .claude/dev-harness-chrome-profiles/

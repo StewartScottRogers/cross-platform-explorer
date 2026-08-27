@@ -155,6 +155,23 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   workflows' argv and **executes** the real binary with it), `src/lib/keymap.test.ts` (joins two data
   modules), `src/lib/components/MacroRunConfirm.test.ts` (walks a `format!` literal out of
   `fsutil.rs`, comments stripped first), `src/lib/channelPurityCoverage.test.ts`.
+  Two jobs enforce this for the two lockfile families, and a third gets a third job, not a note:
+  `lockfile-preflight` (`cargo metadata --locked` over every `Cargo.lock`) and **`npm-audit-sweep`**
+  (`scripts/audit-npm-projects.mjs`, `npm audit` over every `package-lock.json`).
+- **There are TWO npm projects (CPE-1945).** The root, and **`gui-smoke/`** — which has its own
+  `package.json`, its own `package-lock.json`, its own advisories, and its own CI job. Any
+  dependency/advisory statement must say which project it covers, or cover both: `gui-smoke/` went
+  unaudited through every Dependency Steward pass because "run `npm audit`" was executed wherever the
+  reader happened to be standing, and its root-only number was then quoted as the repo's. Never quote
+  a single project's audit total as the repo's position — run `node scripts/audit-npm-projects.mjs`,
+  which enumerates, sweeps all of them, and prints the per-project *and* summed totals.
+- **`npm audit fix` is run WITHOUT `--force`, always.** `--force` accepts semver-majors, and npm's
+  idea of a "fix" is frequently a **downgrade**: in `gui-smoke/` it proposes `@wdio/local-runner@7.40.0`
+  and `@wdio/cli@8.14.6` against an installed 9.31.4 — walking *backwards* to a tree that predates the
+  advisory. That is a regression wearing a fix's clothing. A major bump is a migration decision and
+  belongs in its own reviewed ticket. Related: npm's `fixAvailable: true` is optimistic and cannot be
+  trusted as "there is something to do" — see the sweep script's header for why the guard measures a
+  real `npm audit fix --package-lock-only` instead of believing that flag.
 
 ## Docs
 
