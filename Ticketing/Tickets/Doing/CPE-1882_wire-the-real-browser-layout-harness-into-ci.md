@@ -125,3 +125,29 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   into `.github/workflows/gui-smoke.yml` as a new job, unconditional on every push/PR (measured cost:
   under a minute end to end — cheap enough that path-filtering isn't worth the CPE-1893-shaped risk of a
   silently-skipped check).
+
+  First local run against the real (fixed) code caught the engine's own bugs, not real regressions —
+  worth recording since they shaped the final design: (1) `scrollWidth > clientWidth` alone is NOT "text
+  overflows its own background" — `.git-branch`/`.disk`/etc. correctly ellipsis-truncate
+  (`overflow: hidden; text-overflow: ellipsis`), which legitimately makes scrollWidth exceed
+  clientWidth while painting nothing outside the box; the `textOverflow` check now also requires
+  `getComputedStyle(el).overflowX === "visible"` before flagging. (2) `.resize-grip`
+  (`position: absolute; right: 0; bottom: 0`) is BY DESIGN allowed to sit over the tail of trailing flow
+  content in the corner — added as `siblingOverlap`'s `exclude` option, matching the original CPE-1836
+  prototype's own judgment call. Both false positives are recorded in engine.mjs's own comments so a
+  future case doesn't rediscover them.
+
+  **Red-proofed both AC-mandated bugs, locally, against the real components:**
+  - CPE-1836: removed `.git { overflow: hidden }` in `StatusBar.svelte` → `layout-guard` went red at
+    600px: `CLIP-BREACH .git: .git .git-btn:not(.resolve) overhangs by 16.1px AND paints there (probe
+    (547.2,13.5) hit .git-btn) — not clipped`. Restored the line → clean at all 12 case/width
+    combinations again (confirmed `git diff` shows zero change to `StatusBar.svelte`).
+  - CPE-1827: reintroduced the pre-fix shape in `TrashView.svelte` (dropped `.tv-title`'s
+    `flex-wrap: wrap` back to the old pinned width, and added 5 dummy buttons to `.tv-tools` to restore
+    the old toolbar density) → `layout-guard` went red at the app's own 600px/640px floor: `TEXT-OVERFLOW
+    .tv-title scrollWidth=91 clientWidth=0 overflow-x=visible — text paints past its own background`.
+    Reverted both → clean again (confirmed `git diff` shows zero change to `TrashView.svelte`).
+
+  Both real components ship unchanged — only the harness itself (engine.mjs/cases.mjs) is a permanent
+  diff. Next: wire the `layout-guard` job into `.github/workflows/gui-smoke.yml`, run `npm run
+  check`/`npx vitest run`, update `MANUAL-TEST-BURNDOWN.md`, open the PR.

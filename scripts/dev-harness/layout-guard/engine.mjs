@@ -133,9 +133,14 @@ function buildProbeExpression(checks) {
       if (check.kind === 'siblingOverlap') {
         var root = document.querySelector(check.root);
         if (!root) { missing.push('siblingOverlap: root not found: ' + check.root); continue; }
+        var exclude = check.exclude || [];
         var kids = Array.prototype.filter.call(root.children, function (el) {
           var r = el.getBoundingClientRect();
-          return r.width > 0 && r.height > 0;
+          if (r.width <= 0 || r.height <= 0) return false;
+          for (var e = 0; e < exclude.length; e++) {
+            if (el.matches(exclude[e])) return false;
+          }
+          return true;
         });
         for (var a = 0; a < kids.length; a++) {
           for (var b = a + 1; b < kids.length; b++) {
@@ -180,8 +185,24 @@ function buildProbeExpression(checks) {
           var tsel = check.selectors[t];
           var tel = document.querySelector(tsel);
           if (!tel) { missing.push('textOverflow: not found: ' + tsel); continue; }
-          if (tel.scrollWidth > tel.clientWidth + 2) {
-            textOverflows.push(tsel + ' scrollWidth=' + tel.scrollWidth + ' clientWidth=' + tel.clientWidth);
+          // scrollWidth > clientWidth alone is NOT the bug: CSS overflow: hidden (with or without
+          // text-overflow: ellipsis) is the CORRECT, intended way to handle text too long for a pill —
+          // it clips the excess, nothing paints outside the box, and scrollWidth legitimately exceeds
+          // clientWidth for that whole (correct) state. The actual convention violation ("text never
+          // wraps inside a pill and overflows its background") is text escaping VISIBLY, which only
+          // overflow-x: visible (no clip at all) allows — so gate on that computed property, not on
+          // scrollWidth/clientWidth alone. Caught a false positive this way on .git-branch/.disk/etc.
+          // in StatusBar.svelte, which correctly ellipsis-truncate — flagged as "overflow" by
+          // scrollWidth alone but painting nothing outside their own box.
+          // NOTE: no backtick characters allowed anywhere in this probe string — it is itself the body
+          // of an outer template literal in buildProbeExpression() below; a literal backtick here would
+          // terminate THAT string early and break every check kind, not just this one.
+          var overflowX = getComputedStyle(tel).overflowX;
+          if (overflowX === 'visible' && tel.scrollWidth > tel.clientWidth + 2) {
+            textOverflows.push(
+              tsel + ' scrollWidth=' + tel.scrollWidth + ' clientWidth=' + tel.clientWidth +
+              ' overflow-x=visible — text paints past its own background'
+            );
           }
         }
       } else if (check.kind === 'selfPaint') {

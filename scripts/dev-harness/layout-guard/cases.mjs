@@ -30,12 +30,15 @@ export const CASES = [
     name: "statusbar-notice",
     path: "/scripts/dev-harness/statusbar-notice/inner.html?notice=short&git=on&disk=on&busy=1",
     height: 200,
-    widths: [420, 480, 520, 600, 680, 760, 900, 1200],
+    widths: [600, 680, 760, 900, 1200],
     readySelector: ".statusbar",
     checks: [
-      // No two of .statusbar's own direct children (item-count/git/disk/notice/resize-grip/...) may
-      // occupy overlapping screen space.
-      { kind: "siblingOverlap", root: ".statusbar" },
+      // No two of .statusbar's own direct children (item-count/git/disk/notice/...) may occupy
+      // overlapping screen space. `.resize-grip` is excluded deliberately, not overlooked: it's
+      // `position: absolute; right: 0; bottom: 0` — a corner-pinned resize handle that by design can
+      // sit over the tail of trailing flow content (the original CPE-1836 prototype's own
+      // `inner-main.ts` made the same call — see its `spillOutside` comment).
+      { kind: "siblingOverlap", root: ".statusbar", exclude: [".resize-grip"] },
       // CPE-1836 itself: does .git's `overflow: hidden` actually clip an overhanging pinned child
       // (branch/ahead/behind/dirty/pull-button), or does it paint through onto .disk's territory?
       {
