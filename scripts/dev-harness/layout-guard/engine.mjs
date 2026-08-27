@@ -160,8 +160,30 @@ let nextId = 1;
  *  a stalled internal navigation, a brief unresponsive period; real on a shared/throttled CI runner,
  *  never reproduced locally), the `await` on that one call blocked forever, hanging the WHOLE run
  *  silently until the job's own external `timeout-minutes` killed it with no information about where it
- *  was stuck. `CDP_CALL_TIMEOUT_MS` below makes every call fail LOUD, by method name, instead. */
+ *  was stuck. `CDP_CALL_TIMEOUT_MS` below makes every call fail LOUD, by method name, instead. Keep this
+ *  one TIGHT: `Runtime.evaluate` (etc.) taking anywhere near this long means something is genuinely
+ *  wrong (CPE-1882's reviewer relied on exactly that to turn a forced port collision into a loud named
+ *  failure rather than a silent wrong measurement) — do not widen it globally to cover navigation. */
 const CDP_CALL_TIMEOUT_MS = 15000;
+
+/** CPE-1914: `Page.navigate`'s own ACK (not the page load — `checkOneCaseOnClient`'s separate 40s
+ *  `readySelector` poll below already covers that) is the single slowest CDP call this engine makes,
+ *  because the FIRST one lands on a freshly-launched Chrome talking to a cold vite dev server still
+ *  compiling the module graph. `CDP_CALL_TIMEOUT_MS` (15s) was tuned for "is an ordinary call stuck",
+ *  not for that — CPE-1882's independent UAT got 7/7 local failures at 15s, root-caused with a raw-CDP
+ *  probe against the real first-case URL on a cold server: the ack itself arrived at ~18.65s on a
+ *  loaded Windows dev machine (policy-managed Chrome force-installing extensions into every fresh
+ *  profile, plus normal multi-agent load — the NORMAL condition on this project, not an edge case).
+ *  Reverting to 15s locally reproduced the failure; raising it to 60s locally gave an immediate clean
+ *  12/12, confirming the cost is real and bounded, not a hang. Re-measured here on 2026-08-26 (same
+ *  machine, lighter concurrent load at the time): the cold ack took 1556ms vs ~9ms once warm — same
+ *  shape, smaller magnitude, because load varies run to run. Reuse the 40s the engine's own
+ *  `readySelector` poll already budgets for "cold dev server compiling on first hit" (see
+ *  `checkOneCaseOnClient` below) instead of inventing a second, uncoordinated number for the same cause
+ *  — 40s clears the one hard data point (~18.65s) with ~2.1x headroom while staying well under CI's
+ *  own 30-40s total-job budget (this is a LOCAL-machine allowance; the job passes in 33-38s on
+ *  GitHub's runners, where this call never gets close to either timeout). */
+const CDP_NAVIGATE_TIMEOUT_MS = 40000;
 
 function makeCdpClient(ws) {
   const pending = new Map();
@@ -175,13 +197,14 @@ function makeCdpClient(ws) {
     }
   });
   return {
-    send(method, params = {}) {
+    send(method, params = {}, { timeoutMs = CDP_CALL_TIMEOUT_MS, context } = {}) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`CDP call "${method}" got no response within ${CDP_CALL_TIMEOUT_MS}ms (id=${id})`));
-        }, CDP_CALL_TIMEOUT_MS);
+          const where = context ? ` (${context})` : "";
+          reject(new Error(`CDP call "${method}"${where} got no response within ${timeoutMs}ms (id=${id})`));
+        }, timeoutMs);
         pending.set(id, {
           resolve: (v) => { clearTimeout(timer); resolve(v); },
           reject: (e) => { clearTimeout(timer); reject(e); },
@@ -438,20 +461,32 @@ function buildProbeExpression(checks) {
  *  why this no longer launches its own Chrome per width — CPE-1882 CI-round-3 finding). Sets the
  *  viewport, navigates, waits for `readySelector` AND confirms `location.href`, runs the probe. */
 async function checkOneCaseOnClient(client, { devServerBase, kase, width, height }) {
+  // CPE-1914: names which case/width a timeout happened during, so the next person doesn't have to
+  // write a raw-CDP probe to find out (as CPE-1882's UAT had to).
+  const caseContext = (label) => `case="${kase.name}" width=${width} height=${height} ${label}`;
   // The load-bearing step: `--window-size` alone does not reliably set the CSS viewport under
   // `--headless=new` (see statusbar-notice/index.html's header comment — it clamps internally and
   // rescales), which is why the earlier `--dump-dom`-driven harnesses needed an outer-page/iframe trick
   // to get a trustworthy width. `Emulation.setDeviceMetricsOverride` sets the REAL CSS viewport directly
   // (already proven by sidebar-drop-stack-overlap/check.mjs), so this engine drives harness pages
   // directly — no iframe indirection needed here.
-  await client.send("Emulation.setDeviceMetricsOverride", {
-    width,
-    height,
-    deviceScaleFactor: 1,
-    mobile: false,
-  });
+  await client.send(
+    "Emulation.setDeviceMetricsOverride",
+    { width, height, deviceScaleFactor: 1, mobile: false },
+    { context: caseContext("(set viewport)") },
+  );
   const expectedUrl = `${devServerBase}${kase.path}`;
-  await client.send("Page.navigate", { url: expectedUrl });
+  // CPE-1914: `Page.navigate`'s own ACK — not the page load, which the readySelector poll below covers
+  // separately — is the single slowest CDP call this engine makes, because the FIRST one lands on a
+  // freshly-launched Chrome talking to a cold vite dev server still compiling the module graph. Give it
+  // the same 40s budget the poll below already uses for that exact reason, instead of sharing the
+  // tight 15s `CDP_CALL_TIMEOUT_MS` meant for calls where any delay signals something is actually wrong.
+  // See `CDP_NAVIGATE_TIMEOUT_MS`'s own comment above for the measurement behind the number.
+  await client.send(
+    "Page.navigate",
+    { url: expectedUrl },
+    { timeoutMs: CDP_NAVIGATE_TIMEOUT_MS, context: caseContext(`(initial navigate to ${expectedUrl})`) },
+  );
 
   let ready = false;
   let urlMatched = false;
@@ -468,10 +503,14 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
     // showing up as a real measurement, because the OLD readiness check only confirmed `readySelector`
     // was present, never that this tab is actually looking at THIS run's URL. `location.href` is the one
     // signal that can't lie about that: verify it before trusting anything the DOM says.
-    const r = await client.send("Runtime.evaluate", {
-      expression: `(function(){var v=!!document.querySelector(${JSON.stringify(kase.readySelector)});return { ready: v, href: location.href };})()`,
-      returnByValue: true,
-    });
+    const r = await client.send(
+      "Runtime.evaluate",
+      {
+        expression: `(function(){var v=!!document.querySelector(${JSON.stringify(kase.readySelector)});return { ready: v, href: location.href };})()`,
+        returnByValue: true,
+      },
+      { context: caseContext("(readySelector poll)") },
+    );
     if (r.result && r.result.value) {
       lastHref = r.result.value.href || "";
       urlMatched = lastHref === expectedUrl;
@@ -484,20 +523,25 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
   }
   if (!urlMatched) {
     throw new Error(
-      `navigation mismatch at width=${width} height=${height}: expected location.href="${expectedUrl}" ` +
-      `but the tab reports "${lastHref}" — this Chrome instance never reached the URL this run navigated ` +
-      `it to (possibly a stale/foreign page from a port collision with another concurrent harness run)`,
+      `navigation mismatch at case="${kase.name}" width=${width} height=${height}: expected ` +
+      `location.href="${expectedUrl}" but the tab reports "${lastHref}" — this Chrome instance never ` +
+      `reached the URL this run navigated it to (possibly a stale/foreign page from a port collision ` +
+      `with another concurrent harness run)`,
     );
   }
   if (!ready) {
-    throw new Error(`"${kase.readySelector}" never appeared within 40s at width=${width} height=${height} (url confirmed correct)`);
+    throw new Error(
+      `"${kase.readySelector}" never appeared within 40s at case="${kase.name}" width=${width} ` +
+      `height=${height} (url confirmed correct)`,
+    );
   }
   await sleep(300); // settle layout/fonts
 
-  const r = await client.send("Runtime.evaluate", {
-    expression: buildProbeExpression(kase.checks),
-    returnByValue: true,
-  });
+  const r = await client.send(
+    "Runtime.evaluate",
+    { expression: buildProbeExpression(kase.checks), returnByValue: true },
+    { context: caseContext("(probe evaluate)") },
+  );
   const result = r.result.value;
 
   // CPE-1883 round 3 (Reviewer finding): a real dispatched click on ".git"'s Pull button was silently
@@ -512,7 +556,7 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
   // click through the renderer's real event pipeline), not anything reachable from browser JS.
   const clickChecks = kase.checks.filter((c) => c.kind === "clickReaches");
   if (clickChecks.length > 0) {
-    const { failures, info } = await runClickReachesChecks(client, clickChecks);
+    const { failures, info } = await runClickReachesChecks(client, clickChecks, caseContext);
     result.clickFailures = failures;
     result.clickReachesInfo = info;
   } else {
@@ -530,45 +574,64 @@ async function checkOneCaseOnClient(client, { devServerBase, kase, width, height
  *  `elementFromPoint`/`elementsFromPoint` for an invisible-but-still-pointer-events:auto overlapping
  *  element. Deliberately its own small helper, not folded into `buildProbeExpression`'s in-page probe:
  *  everything else in that function runs as pure browser JS in one `Runtime.evaluate` round trip, but a
- *  real click needs the Input domain, which only exists at the CDP client level in this Node process. */
-async function runClickReachesChecks(client, clickChecks) {
+ *  real click needs the Input domain, which only exists at the CDP client level in this Node process.
+ *  `caseContext` (CPE-1914's naming helper, threaded in from the caller) keeps timeout/error messages
+ *  from this helper just as identifiable by case/width/height as every other call in this file. */
+async function runClickReachesChecks(client, clickChecks, caseContext) {
   const failures = [];
   const info = [];
   for (const check of clickChecks) {
     for (const sel of check.selectors) {
-      const setup = await client.send("Runtime.evaluate", {
-        expression: `
-          (function () {
-            var el = document.querySelector(${JSON.stringify(sel)});
-            if (!el) return { error: 'not found' };
-            if (window.__cprHandler) document.removeEventListener('click', window.__cprHandler, true);
-            window.__cprClicked = false;
-            window.__cprHitTag = null;
-            window.__cprHandler = function (e) {
-              window.__cprClicked = !!(e.target === el || (el.contains && el.contains(e.target)));
-              var cls = (e.target.className && typeof e.target.className === 'string')
-                ? e.target.className.trim().split(/\s+/)[0] : '';
-              window.__cprHitTag = e.target.tagName + (cls ? '.' + cls : '');
-            };
-            document.addEventListener('click', window.__cprHandler, true);
-            var r = el.getBoundingClientRect();
-            return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
-          })()
-        `,
-        returnByValue: true,
-      });
+      const setup = await client.send(
+        "Runtime.evaluate",
+        {
+          expression: `
+            (function () {
+              var el = document.querySelector(${JSON.stringify(sel)});
+              if (!el) return { error: 'not found' };
+              if (window.__cprHandler) document.removeEventListener('click', window.__cprHandler, true);
+              window.__cprClicked = false;
+              window.__cprHitTag = null;
+              window.__cprHandler = function (e) {
+                window.__cprClicked = !!(e.target === el || (el.contains && el.contains(e.target)));
+                var cls = (e.target.className && typeof e.target.className === 'string')
+                  ? e.target.className.trim().split(/\s+/)[0] : '';
+                window.__cprHitTag = e.target.tagName + (cls ? '.' + cls : '');
+              };
+              document.addEventListener('click', window.__cprHandler, true);
+              var r = el.getBoundingClientRect();
+              return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+            })()
+          `,
+          returnByValue: true,
+        },
+        { context: caseContext(`(clickReaches setup: ${sel})`) },
+      );
       const pt = setup.result.value;
       if (!pt || pt.error) {
         failures.push(`clickReaches: not found: ${sel}`);
         continue;
       }
-      await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y });
-      await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-      await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: pt.x, y: pt.y, button: "left", clickCount: 1 });
-      const readback = await client.send("Runtime.evaluate", {
-        expression: "({ clicked: !!window.__cprClicked, hitTag: window.__cprHitTag || null })",
-        returnByValue: true,
-      });
+      await client.send(
+        "Input.dispatchMouseEvent",
+        { type: "mouseMoved", x: pt.x, y: pt.y },
+        { context: caseContext(`(clickReaches mouseMoved: ${sel})`) },
+      );
+      await client.send(
+        "Input.dispatchMouseEvent",
+        { type: "mousePressed", x: pt.x, y: pt.y, button: "left", clickCount: 1 },
+        { context: caseContext(`(clickReaches mousePressed: ${sel})`) },
+      );
+      await client.send(
+        "Input.dispatchMouseEvent",
+        { type: "mouseReleased", x: pt.x, y: pt.y, button: "left", clickCount: 1 },
+        { context: caseContext(`(clickReaches mouseReleased: ${sel})`) },
+      );
+      const readback = await client.send(
+        "Runtime.evaluate",
+        { expression: "({ clicked: !!window.__cprClicked, hitTag: window.__cprHitTag || null })", returnByValue: true },
+        { context: caseContext(`(clickReaches readback: ${sel})`) },
+      );
       const clicked = readback.result.value.clicked;
       const hitTag = readback.result.value.hitTag;
       info.push({ selector: sel, x: Number(pt.x.toFixed(1)), y: Number(pt.y.toFixed(1)), clicked, hitTag });

@@ -37,7 +37,7 @@
     border: 1px solid var(--border, #3a3a3a);
     border-radius: 5px;
     background: var(--surface-2, var(--surface, #181818));
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-family: var(--mono);
     font-size: 11.5px;
     line-height: 1.45;
   }

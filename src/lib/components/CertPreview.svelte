@@ -218,7 +218,7 @@
   .cp-rows > div { display: flex; gap: 10px; align-items: baseline; }
   .cp-rows dt { color: var(--text-dim); width: 110px; flex: none; }
   .cp-rows dd { flex: 1; overflow-wrap: anywhere; }
-  .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; }
+  .mono { font-family: var(--mono); font-size: 11.5px; }
   .wrap { overflow-wrap: anywhere; }
   .cp-badge {
     display: inline-flex; align-items: center; margin-left: 8px; padding: 1px 8px;
@@ -236,7 +236,7 @@
   .cp-fp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
   .cp-fp-row:last-child { margin-bottom: 0; }
   .cp-fp-label { color: var(--text-dim); width: 60px; flex: none; }
-  .cp-hash { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; overflow-wrap: anywhere; flex: 1; min-width: 160px; }
+  .cp-hash { font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; flex: 1; min-width: 160px; }
   .cp-copy {
     display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px;
     border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt);

@@ -1484,3 +1484,45 @@ CPE-1700 (S3 refusal precision + Trojan Source) · CPE-1695 (SigV4 SP/HTAB-only 
 **Capacity note:** two consecutive `API Error 529 Overloaded` kills on an opus worker mid-task. Backed off
 rather than retrying a third time, and preserved its 1,284 uncommitted lines as a WIP commit so nothing
 was lost. Handed to the next run.
+
+---
+
+## 2026-08-26 → 08-27 (CLI, `/sprint`) — IN PROGRESS, notes so far
+
+**Foreman override recorded (per CPE-1835):** CPE-1881 / PR #1046 was allowed a **4th** build→check
+attempt, past the skill's 3-attempt circuit-breaker cap. Reason: the ticket was converging — each
+round's findings were strictly finer than the last and nothing was re-found — and round 4's list
+contained two genuine defects (a count/row mismatch that undercounts its own list on any mixed
+outcome, and a failure/refusal distinction carried by **hue alone at matched lightness** in light
+theme, invisible to protan/deutan vision and to greyscale) rather than polish. The cap exists to stop
+burning agents on a ticket that needs a rethink; that is not this shape.
+
+**Pattern worth carrying: a plausible verification API can return a false clean.** On PR #1045 both
+the author and the reviewer's first pass used `document.elementsFromPoint` to check that an overlay
+was not swallowing clicks, and both got a clean answer. Dispatching an **actual CDP mouse click**
+showed the click landing on the wrong element. Twice on the same question. When the property is "can
+a user actually do this", drive the real input — do not ask the DOM what it thinks is under a point.
+
+**Pattern worth carrying: an assertion that reds when it fails to *observe* a transient state.** The
+CPE-1822 mid-stream gui-smoke case failed on CI not because anything broke — 23 of 26 passed and the
+run produced zero AssertionErrors from the app — but because the app finished streaming 2,500 items
+faster than the poll caught the loading state. A test whose only failure mode is "I was too slow"
+reds forever on fast runners and trains the crew to re-run rather than read.
+
+**Second override recorded (per CPE-1835):** CPE-1896 / PR #1043 was also allowed a **4th**
+build→check attempt. Same reasoning as CPE-1881 — converging, nothing re-found — and round 4's single
+finding was a test half that proves nothing: the Reviewer disabled the leaf surrogate guard entirely
+and the **full 2404-test suite stayed green**, because a symlink at the leaf is refused ~50 lines
+earlier by an unrelated path check. That is the repo's signature defect and the cap must not be the
+reason it ships.
+
+**Pattern worth carrying: a fixture can be structurally unable to test the thing it is cited for.**
+CPE-1896's synthetic reparse point proves the code reads the *tag* rather than the attribute — real,
+and correctly measured. It cannot prove anything about a real OneDrive placeholder, because
+`FILE_FLAG_OPEN_REPARSE_POINT` exists to **bypass the handler that owns the tag**, and the synthetic
+tag has no handler. The one structural difference between fixture and reality is exactly the variable
+being inferred. Honest at the code comment; the user-facing doc had promoted it to fact.
+
+**Pattern worth carrying — the shadowed guard, with a diagnostic tell.** A guard cannot be given test coverage while an earlier guard answers on the same underlying fact; it is then simultaneously *safe* and *unverifiable*, and those are easy to mistake for each other. **The tell: a sabotage that leaves the suite green AND a fault-injection that changes no behaviour, on the same guard.** Separately each reads as evidence of safety; together they mean the guard is unreachable. Found on CPE-1896, where three symptoms presented and only the third looked like a problem at the time. Filed as CPE-1929 with a named lead (`batch_media::open_output_verified`, same shape, unexamined).
+
+**Process lesson (bit twice): while a PR is open, its visual evidence lives on the branch only.** The Foreman landing screenshots on `main` at paths an open PR also carries produces a modify/modify conflict the moment the worker re-captures — and a CONFLICTING PR schedules **zero** CI checks, so it reads as "no runs yet" rather than "blocked". Cost two diagnosis detours on CPE-1883 alone. Do not land a PRs evidence on main until it merges.

@@ -108,7 +108,7 @@
   }
   .sbs-body {
     overflow: auto;
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-family: var(--mono);
     font-size: 12px;
     line-height: 1.5;
   }

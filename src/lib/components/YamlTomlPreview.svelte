@@ -199,6 +199,6 @@
   .yt-raw-fallback {
     background: var(--surface-alt); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
-    font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;
+    font-family: var(--mono); font-size: 11.5px;
   }
 </style>

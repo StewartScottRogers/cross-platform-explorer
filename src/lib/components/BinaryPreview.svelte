@@ -486,7 +486,7 @@
   .bp-note { color: var(--text-faint); }
   .bp-error { color: var(--danger); }
   .bp-error-detail {
-    margin-top: 4px; color: var(--text-faint); font-size: 11px; font-family: var(--mono, ui-monospace, monospace);
+    margin-top: 4px; color: var(--text-faint); font-size: 11px; font-family: var(--mono);
     overflow-wrap: anywhere;
   }
   .bp-empty { color: var(--text-faint); padding: 8px 0; }
@@ -515,7 +515,7 @@
   .bp-rows > div { display: flex; gap: 10px; align-items: baseline; }
   .bp-rows dt { color: var(--text-dim); width: 110px; flex: none; }
   .bp-rows dd { flex: 1; overflow-wrap: anywhere; }
-  .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; }
+  .mono { font-family: var(--mono); font-size: 11.5px; }
   .bp-table-wrap { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: var(--radius); }
   .bp-table-wrap table { width: 100%; border-collapse: collapse; }
   .bp-table-wrap th {
