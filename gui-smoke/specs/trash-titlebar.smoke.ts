@@ -36,8 +36,10 @@ import { snap, snapFailure } from "../lib/snap.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 // Duplicated literal rather than importing across the runner/worker boundary — matches this suite's
-// established convention (see vault-create.smoke.ts's identical note). Must stay in sync with
-// wdio.conf.ts#seedTrashTitlebarFixture.
+// established convention (see vault-create.smoke.ts's identical note). "Must stay in sync with
+// wdio.conf.ts#seedTrashTitlebarFixture" is checked rather than asked for since CPE-1950:
+// `src/lib/guiSmokeFixtureLiterals.test.ts` compares this declaration with wdio.conf.ts's exported
+// one on every PR.
 const TRASH_TITLEBAR_FILE_NAME = "CPE-1827-fixture.txt";
 
 /** Same getHTML-scan locator every other spec in this suite uses (script-injected text locators

@@ -1,7 +1,15 @@
 <script context="module" lang="ts">
-  // Hosts each hosted provider's own repo URLs use — mirrors clone_host() in src-tauri/src/lib.rs.
-  // "generic" and self-hosted-style providers have no fixed host, so they're absent here.
-  const PROVIDER_HOSTS: Record<string, string> = {
+  /** Hosts each hosted provider's own repo URLs use. "generic" and self-hosted-style providers
+   *  (`github-enterprise`, `gitea`, `forgejo`) have no fixed host, so they are absent here.
+   *
+   *  These same strings build the lookalike-host anchoring regexes in `stripRepoUrl` below, so a
+   *  provider the backend learns to clone but this map does not know about silently stops having its
+   *  host stripped — the user pastes a full URL and gets it handed to `forge_browse` as a repo id.
+   *
+   *  CPE-1950: this used to carry the comment "mirrors clone_host() in src-tauri/src/lib.rs", which
+   *  was a provenance claim and nothing more. `RepoBrowser.test.ts` now READS `clone_host`'s own
+   *  branches out of `src-tauri/src/lib.rs` and compares both directions — exported for that. */
+  export const PROVIDER_HOSTS: Record<string, string> = {
     github: "github.com",
     gitlab: "gitlab.com",
     bitbucket: "bitbucket.org",

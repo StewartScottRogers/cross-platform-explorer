@@ -24,7 +24,11 @@ import { rightClick, doubleClick, type Point } from "../lib/mouse.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 // Duplicated literals rather than importing across the runner/worker boundary — matches this suite's
-// established convention. Keep in sync with wdio.conf.ts#seedVaultCreateFixture.
+// established convention. "Keep in sync with wdio.conf.ts#seedVaultCreateFixture" is no longer left to
+// the reader: `src/lib/guiSmokeFixtureLiterals.test.ts` (root vitest, every PR) reads these four
+// declarations and wdio.conf.ts's exported ones and compares them, so a drift reds there instead of
+// showing up here as a spec timing out looking for a folder the seeder never wrote (CPE-1950). The
+// duplication stays deliberate; only the unchecked claim about it is gone.
 const SHRED_DIR_NAME = "CPE-1241-shred-folder"; // the (same-epic) host folder the source is nested in
 const VAULT_CREATE_PARENT_DIR = "CPE-1250-vault-create";
 const VAULT_CREATE_SRC_DIR = "payload";

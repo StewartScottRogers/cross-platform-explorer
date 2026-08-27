@@ -239,10 +239,14 @@ fn authority(loc: &Location) -> String {
 /// 3xx response and silently reported `Ok(())` having deleted nothing (fixed alongside this comment —
 /// see [`FileSystemProvider::delete`]'s WebDAV impl and
 /// `delete_of_an_already_slashed_directory_that_redirects_is_reported_as_an_error_not_ok`).
-/// `crates/vfs/tests/real_server_conformance.rs`'s `remote()` helper mirrors this function so the
-/// real-server-rig E2E job (OpenSSH/vsftpd/mod_dav) actually exercises the new shape end-to-end, rather
-/// than leaving it unverified beyond the in-process fakes.
-fn join_remote(dir: &str, name: &str, is_dir: bool) -> String {
+/// CPE-1950: this is `pub` for ONE reason — `crates/vfs/tests/real_server_conformance.rs` calls it
+/// directly instead of reimplementing it. It used to carry its own copy plus a comment claiming the
+/// copy "mirrors this function", and that claim was **false when it was written**: the copy
+/// (`remote()`) never appended the trailing slash, i.e. it mirrored the PRE-CPE-1737 shape, so the
+/// real-server-rig E2E job against OpenSSH/vsftpd/mod_dav was exercising a path shape production had
+/// already stopped building. There is now nothing to mirror and nothing to claim: the rig and
+/// production run this exact function, and the compiler is what enforces it.
+pub fn join_remote(dir: &str, name: &str, is_dir: bool) -> String {
     let base = dir.trim_end_matches('/');
     let suffix = if is_dir { "/" } else { "" };
     if base.is_empty() {

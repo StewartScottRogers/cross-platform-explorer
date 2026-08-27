@@ -17,6 +17,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { stripRustComments, rustStrSliceAfter } from "./rustSource";
+import guardCases from "./platformConfigGuard.cases.json";
 
 const SRC_TAURI = join(process.cwd(), "src-tauri");
 
@@ -265,11 +267,23 @@ describe("shipped sidecar bundle — updater root of trust survives the FULL ove
 // name))` was a LOOKUP, and therefore silently blind on exactly that host while Windows merged the
 // file anyway.
 //
-// Mirrors `crates/updater-verify/src/platform_config_guard.rs` (the Rust side, which additionally runs
-// inside `verify-release-artifacts` so it reaches `release.yml`'s tag path — no `#[test]` and no
-// vitest can). Keep the two derivations in lockstep; the Rust module doc carries the full rationale.
+// This guard exists TWICE — here and in `crates/updater-verify/src/platform_config_guard.rs`, which
+// additionally runs inside `verify-release-artifacts` so it reaches `release.yml`'s tag path (no
+// `#[test]` and no vitest can). The Rust module doc carries the full rationale.
+//
+// CPE-1950: the second copy used to be held together by the sentence "Keep the two derivations in
+// lockstep" — a provenance claim, untested by construction, on the app's updater root of trust. It is
+// now derived instead: the token list below is read out of the Rust const at run time, and both
+// implementations execute the shared case file `platformConfigGuard.cases.json`. See the "DERIVED"
+// describe block at the end of this file for what those two legs do and do not cover.
 
-/** The second dot-segment of every name `ConfigFormat::into_platform_file_name` can produce. */
+/**
+ * The second dot-segment of every name `ConfigFormat::into_platform_file_name` can produce.
+ *
+ * Declared here so this file stays readable on its own, and pinned to the Rust const it duplicates by
+ * the derivation at the end of this file — a token added on one side reds on the other, which is the
+ * failure the old "keep in lockstep" comment could not produce.
+ */
 const TAURI_PLATFORM_TOKENS: readonly string[] = ["macos", "windows", "linux", "android", "ios"];
 
 /** ASCII-only case fold, so this matches the Rust side's `to_ascii_lowercase` exactly. */
@@ -470,5 +484,84 @@ describe("shipped bundle — no auto-merged per-platform Tauri config overrides 
     expect(platformConfigUpdaterRefusal(`{"plugins":{"cli":{"args":[]}}}`)).toBeNull();
     expect(platformConfigUpdaterRefusal(`{"bundle":{"targets":["msi"]}}`)).toBeNull();
     expect(platformConfigUpdaterRefusal(`[plugins.cli]\ndescription = "hi"\n`)).toBeNull();
+  });
+});
+
+/**
+ * CPE-1950 — "keep the two derivations in lockstep", derived instead of asked for.
+ *
+ * This guard is duplicated across the Rust/TS boundary on purpose (each side reaches a CI path the
+ * other cannot), and the duplication was held together by a comment. That is the highest-blast-radius
+ * provenance claim in this repo: it guards the **updater root of trust**, so a platform token added on
+ * one side leaves a config-injection path green on the other, and nothing reds.
+ *
+ * Two legs, which fail in different ways on purpose:
+ *
+ *  1. **The token list is READ out of the Rust const** (`TAURI_PLATFORM_TOKENS` in
+ *     `platform_config_guard.rs`), comments stripped first via `rustSource.ts` so a commented-out old
+ *     list cannot be mistaken for the live one. Nobody has to remember to write a case: adding a token
+ *     to Tauri's `Target` enum on the Rust side alone reds here immediately.
+ *  2. **Both implementations execute the same case file**, `platformConfigGuard.cases.json` — this
+ *     file below, and `platform_config_guard.rs`'s `both_implementations_agree_on_every_shared_case`.
+ *     That covers the behaviour the const cannot express: the `>= 3` segment rule, the ASCII-only case
+ *     fold, and the RFC-7396 refusal set (null-deletion at `plugins.updater`, at `plugins`, and at the
+ *     root).
+ *
+ * **What leg 2 cannot catch: shared blindness.** A shared oracle proves the two sides agree; it cannot
+ * prove either is right. A shape neither implementation considered is simply absent from the case
+ * file, both answer it the same wrong way, and this passes green. That is measured, not theoretical —
+ * on PR #1060 a `<<` inside a quoted string opened a phantom heredoc in *both* the TS and the Rust
+ * shell scanners and their shared case file agreed with itself. Leg 1 is the part that does not depend
+ * on anyone having thought of the case; the two sides' own independent tests are the rest of the
+ * cover. If you touch either implementation, add the case to the SHARED file, never to one side.
+ *
+ * **Red-proofed, not assumed.** Leg 1: appending `"visionos"` to the Rust const fails the first test
+ * here with the SECURITY message (`expected [ 'macos', 'windows', 'linux', …(2) ] to deeply equal
+ * […(3)]`). Leg 2: making the Rust matcher demand one extra segment (so it stops matching
+ * `Tauri.<t>.toml`) fails `both_implementations_agree_on_every_shared_case` on the Rust side, on
+ * shared case "TOML tail, ConfigFormat::Toml's exact spelling". Both reverted.
+ */
+describe("the platform-config guard is DERIVED from its Rust twin, not claimed to match it (CPE-1950)", () => {
+  const RUST_GUARD = stripRustComments(
+    readFileSync(
+      join(process.cwd(), "crates", "updater-verify", "src", "platform_config_guard.rs"),
+      "utf8",
+    ),
+  );
+
+  it("the platform token list is read out of platform_config_guard.rs, not copied", () => {
+    const fromRust = rustStrSliceAfter(RUST_GUARD, "pub const TAURI_PLATFORM_TOKENS");
+    expect(
+      [...TAURI_PLATFORM_TOKENS],
+      "SECURITY (CPE-1903/CPE-1950): this file's platform token list no longer matches " +
+        "crates/updater-verify/src/platform_config_guard.rs's TAURI_PLATFORM_TOKENS. A token present " +
+        "on one side only means a `tauri.<token>.conf.json` that Tauri merges into the build — and " +
+        "which can rewrite plugins.updater.pubkey/endpoints — is refused by one guard and invisible " +
+        "to the other. Update BOTH, in the same commit.",
+    ).toEqual(fromRust);
+  });
+
+  it("the case file is not empty or truncated (an empty oracle agrees with everything)", () => {
+    // CPE-1932: enumerate, don't recall. A vacuous fixture is how a shared oracle passes while
+    // proving nothing, so both sides assert a floor on its size.
+    expect(guardCases.names.length).toBeGreaterThanOrEqual(20);
+    expect(guardCases.refusals.length).toBeGreaterThanOrEqual(18);
+  });
+
+  it("isAutoMergedPlatformConfigName answers every shared name case the way the oracle says", () => {
+    for (const c of guardCases.names) {
+      expect(isAutoMergedPlatformConfigName(c.fileName), `${c.name} (${c.fileName})`).toBe(
+        c.autoMerged,
+      );
+    }
+  });
+
+  it("platformConfigUpdaterRefusal answers every shared refusal case the way the oracle says", () => {
+    for (const c of guardCases.refusals) {
+      // The oracle pins the DECISION, never the message text: the two sides word their refusals
+      // differently on purpose (each names its own remediation path), and pinning prose would make
+      // this fixture red on a copy edit while staying silent on a semantic divergence.
+      expect(platformConfigUpdaterRefusal(c.text) !== null, c.name).toBe(c.refused);
+    }
   });
 });

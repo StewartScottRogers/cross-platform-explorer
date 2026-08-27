@@ -17,6 +17,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
+import { HARDENING_FLAGS, APT_COMMAND_WORD } from "./aptGetHardening";
 
 const WORKFLOWS = join(process.cwd(), ".github", "workflows");
 
@@ -64,27 +65,10 @@ function findStep(job: WorkflowJob, name: string): WorkflowStep {
   return step;
 }
 
-/** The full option string every hardened apt-get invocation in this repo carries, verbatim --
- *  matches gui-smoke.yml's two already-hardened sites. */
-const HARDENING_FLAGS =
-  "-o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20";
-
-/** Matches `apt` or `apt-get` as an isolated COMMAND WORD -- e.g. `sudo apt-get update` or
- *  `sudo apt install -y foo` -- not as a substring of something else. `apt` and `apt-get` are
- *  functionally identical aliases a future site could plausibly be written with either way (a
- *  Reviewer round on this ticket proved it: injecting a brand-new unhardened `apt update` /
- *  `apt install` step sailed straight through an earlier version of this filter that only checked
- *  for the substring `"apt-get"`). The lookbehind/lookahead require a non-word/non-hyphen/non-slash
- *  character (or line start/end) on both sides, so this does NOT match `apt` appearing inside a
- *  longer identifier -- `apt-transport-https`, `adapter`, `apt-get-wrapper` -- only the bare
- *  command token itself.
- *
- *  CPE-1916 added `/` to the excluded lookbehind: `sudo rm -f /etc/apt/sources.list.d/…` (the
- *  unused-Microsoft-repo cleanup that ticket introduced) contains `apt` as a bare path SEGMENT, not
- *  a command word, and an `rm` line is not an apt invocation to harden in the first place -- without
- *  excluding `/`, this filter mistook that path for a sixth unhardened apt-get site and false-failed
- *  the regression guard below. */
-const APT_COMMAND_WORD = /(?<![\w\-/])apt(?:-get)?(?![\w-])/;
+// CPE-1950: HARDENING_FLAGS and APT_COMMAND_WORD now live in `src/lib/aptGetHardening.ts` (imported
+// at the top of this file). releaseHangHardening.test.ts held its own copies under a "verbatim from
+// this file" comment, and they had already drifted -- CPE-1916 widened the lookbehind here only. One
+// declaration, imported by both, is the fix that cannot decay.
 
 /** Every `apt`/`apt-get` invocation line inside a step's `run:` script, so each can be checked
  *  individually rather than treating the whole multi-line script as one blob (a hardened `update`

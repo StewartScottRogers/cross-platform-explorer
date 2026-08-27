@@ -112,27 +112,28 @@ mod fixture {
     ];
 }
 
-/// Join a leaf/relative `name` onto the provider-relative `root` (forward-slash, provider convention;
-/// mirrors `cpe_vfs::connect::join_remote(..., is_dir: false)`, private to that module).
+/// Join a leaf/relative `name` onto the provider-relative `root` as a FILE path.
+///
+/// CPE-1950: this **calls** `cpe_vfs::connect::join_remote` rather than reimplementing it. It used to
+/// be a hand-written copy carrying the comment "mirrors `join_remote(..., is_dir: false)`" — a claim
+/// that was false the day it was written, because the copy trimmed and rejoined but never handled the
+/// `is_dir` slash at all, i.e. it mirrored the PRE-CPE-1737 `join_remote`. The rig therefore sent
+/// OpenSSH/vsftpd/mod_dav a path shape production had stopped building, and nothing reddened. Calling
+/// the real function deletes the claim instead of restating it: the compiler now enforces what the
+/// comment used to assert.
 fn remote(root: &str, name: &str) -> String {
-    let base = root.trim_end_matches('/');
-    if base.is_empty() {
-        format!("/{name}")
-    } else {
-        format!("{base}/{name}")
-    }
+    cpe_vfs::connect::join_remote(root, name, false)
 }
 
-/// The same join as [`remote`], but as a DIRECTORY path — trailing `/` included (mirrors
-/// `cpe_vfs::connect::join_remote(..., is_dir: true)`). CPE-1737 round 2: before this helper existed,
-/// `remote()` was the ONLY path-builder in this suite, and it mirrors the OLD `join_remote` that never
-/// appended a trailing slash regardless of `is_dir` — so this real-server rig never sent a slashed
-/// directory path to OpenSSH/vsftpd/mod_dav, and the one real bug that shape exposed (WebDAV's `delete`
+/// The same join as [`remote`], but as a DIRECTORY path — trailing `/` included. CPE-1737 round 2:
+/// before this helper existed, `remote()` was the ONLY path-builder in this suite and it never
+/// appended a trailing slash, so this real-server rig never sent a slashed directory path to
+/// OpenSSH/vsftpd/mod_dav, and the one real bug that shape exposed (WebDAV's `delete`
 /// retry-then-escalate guard skipping entirely on an already-slashed path — see `WebdavProvider::delete`)
 /// was caught only by an in-process fake-server test, not by this E2E job.
 /// `assert_slashed_directory_path_round_trips` below is what actually exercises the new shape here.
 fn remote_dir(root: &str, name: &str) -> String {
-    format!("{}/", remote(root, name))
+    cpe_vfs::connect::join_remote(root, name, true)
 }
 
 /// A short, collision-resistant tag for scratch paths this run creates — so re-running the suite (or

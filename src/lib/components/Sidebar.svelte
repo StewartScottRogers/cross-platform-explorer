@@ -14,6 +14,7 @@
   import type { SmartFolder } from "../smartFolders";
   import type { SavedSearch } from "../savedSearch";
   import { isValidDrop, hoverEffect } from "../dnd";
+  import { treePrefixPath } from "../paths";
   import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
   import { sidebarOrder, orderStyleMap, reorderSection, resetSidebarOrder, moveSection } from "../sidebarOrder";
   import {
@@ -257,8 +258,12 @@
   let hoverVolumeDest = "";
   let hoverSameVolume: boolean | null = null;
 
-  /** Normalise separators so parent/child checks work on both platforms. */
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  /** Normalise separators so parent/child checks work on both platforms. CPE-1950: the one
+   *  definition now lives in `$lib/paths` as `treePrefixPath`, alongside `canonicalPath` — a comment
+   *  there used to claim the two agreed, which was never true (this one collapses "/" to ""; that is
+   *  exactly what `isAncestorOrSelf`'s `startsWith(a + "/")` needs). Aliased so the call sites below
+   *  read unchanged. */
+  const norm = treePrefixPath;
 
   /**
    * A drop is valid only onto a folder that is not one of the dragged items and

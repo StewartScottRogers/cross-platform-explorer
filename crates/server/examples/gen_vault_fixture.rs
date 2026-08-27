@@ -22,7 +22,12 @@ use age::secrecy::SecretString;
 use base64::Engine;
 use cpe_server::vault_crypto::{pack_entries, EntryKind, TreeEntry, MAGIC, SCHEMA_VERSION};
 
-/// Must match `VAULT_FIXTURE_PASSPHRASE` in gui-smoke/wdio.conf.ts.
+/// Must match `VAULT_FIXTURE_PASSPHRASE` in gui-smoke/wdio.conf.ts — and, since CPE-1950, that is a
+/// *checked* fact rather than a note: `src/lib/guiSmokeFixtureLiterals.test.ts` reads this constant
+/// out of this file (comments stripped) and `VAULT_FIXTURE_PASSPHRASE` out of `wdio.conf.ts`, and
+/// compares them on every PR. Same for the first sealed entry's name below vs
+/// `VAULT_FIXTURE_INNER_NAME`. A Rust example cannot import a TypeScript module, so a text derivation
+/// is the honest form here; the alternative was leaving a "must match" claim nothing could falsify.
 const PASSPHRASE: &str = "open-sesame-1249";
 /// A deliberately-low scrypt log2(N): trivially cheap to decrypt (this is a throwaway fixture), well
 /// under the backend's accepted `MAX_WORK_FACTOR` of 22.
