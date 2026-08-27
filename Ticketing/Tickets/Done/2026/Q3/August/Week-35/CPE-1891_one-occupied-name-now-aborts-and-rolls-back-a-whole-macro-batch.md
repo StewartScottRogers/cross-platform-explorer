@@ -173,3 +173,19 @@ be argued in the work log.
   check` clean. New `scripts/dev-harness/macro-collision` dev harness (mirrors CPE-1869's
   revert-heldback-copy shape) used to re-capture the blocked-collision screenshots plus new
   mixed-collision ones proving the should-fix.
+
+- **2026-08-27 — PR #1044 review round 3 (Visual Critic): VISUAL PASS, three small items.** The
+  hoisted-reason redesign, mixed-state clarity, copy-button placement, and the (unrequested) undo
+  warning line all confirmed working as designed. Three follow-ups, all folded in:
+  1. **Real defect invisible with only one blocked item:** the hoisted reason sentence embedded the
+     FIRST matching collision's own path verbatim — with several blocked items it would name only one
+     path while the list below showed several, looking mismatched. Fixed with `genericizeReason()`
+     (strips the leading quoted-path clause; the sentence now reads "This destination is a link, and
+     …"). New harness case (`?case=many`, three blocked items across two hazard kinds) + a new
+     evidence pair prove it.
+  2. Added a dim "Run is blocked by N links above" status line next to the Run button — the friction
+     moment named (tick the confirm box, Run still won't light, nothing says why right there) is now
+     answered at the point of the click.
+  3. Dark screenshots were stuck showing "booting…" in the diagnostic overlay (pixels were already
+     correct — only the harness's own JS diagnostic readout hadn't settled). Replaced a fixed 100ms
+     timeout with a DOM-readiness poll; all six evidence files re-captured.
