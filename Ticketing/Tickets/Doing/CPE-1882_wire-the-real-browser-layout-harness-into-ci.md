@@ -78,12 +78,23 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
 
 ## Acceptance criteria
 
-- [ ] A CI job that measures real layout for at least two components at multiple widths.
-- [ ] Reintroducing CPE-1836's bug makes it red, naming the overlap — demonstrated.
-- [ ] Reintroducing CPE-1827's bug makes it red — demonstrated.
-- [ ] A ticket author can add a component and a width list without touching harness internals.
-- [ ] `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` updated: this closes the layout half of the
-      GUI-verification debt, and the row says so.
+- [x] A CI job that measures real layout for at least two components at multiple widths. —
+      `layout-guard` in `.github/workflows/gui-smoke.yml`, `statusbar-notice` (5 widths) +
+      `trash-titlebar` (7 widths, new harness page).
+- [x] Reintroducing CPE-1836's bug makes it red, naming the overlap — demonstrated locally (see Work
+      Log): `CLIP-BREACH .git: .git .git-btn:not(.resolve) overhangs by 16.1px AND paints there ... —
+      not clipped`. CI's own run of the same job is pending — I cannot watch CI (CPE-1880); the
+      Foreman owns that verdict.
+- [x] Reintroducing CPE-1827's bug makes it red — demonstrated locally (see Work Log):
+      `TEXT-OVERFLOW .tv-title scrollWidth=91 clientWidth=0 overflow-x=visible — text paints past its
+      own background`, at the app's own 600px floor.
+- [x] A ticket author can add a component and a width list without touching harness internals. —
+      `cases.mjs` is the one file touched; harness page (index.html+main.ts) is the same per-component
+      work every existing harness already requires. Backend-talking components use the shared,
+      pluggable mock (`shared-mocks/invoke.ts`'s `registerRawInvoke`) — no bespoke mock file needed.
+- [x] `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` updated: this closes the layout half of the
+      GUI-verification debt, and the row says so (row #3, half-closed — pixel-baseline blessing is
+      still open, separate mechanism).
 
 ## Work Log
 
@@ -151,3 +162,23 @@ navigation, real Tauri commands, real trash operations. But it is no longer on t
   Both real components ship unchanged — only the harness itself (engine.mjs/cases.mjs) is a permanent
   diff. Next: wire the `layout-guard` job into `.github/workflows/gui-smoke.yml`, run `npm run
   check`/`npx vitest run`, update `MANUAL-TEST-BURNDOWN.md`, open the PR.
+
+- **2026-08-26 (Worker, wrap-up)** — CI job added (`layout-guard`, unconditional + blocking, every
+  push/PR; `.github/workflows/gui-smoke.yml`). Cost measured locally: ~35s dev-server cold start + ~1-2s
+  per width thereafter, ~1 minute end to end for the 12 case/width combinations shipped today — cheap
+  enough that it is NOT path-filtered (deliberate: at this cost, a silently-skipped run reads
+  indistinguishably from a passed one in the checks list, exactly CPE-1893's shape, and isn't worth the
+  risk for a minute of runner time). `MANUAL-TEST-BURNDOWN.md` row #3 updated (half-closed: layout
+  geometry automated, pixel-baseline blessing still open, row stays 🔧 not ✅).
+
+  Guardrails: `npm run check` → 0 errors, 0 warnings. `npx vitest run` → 3 pre-existing failures
+  (`lockfileLockedGuard.test.ts`'s `release-sidecar.yml` `--locked` check, `msrvSync.test.ts` x2 — no
+  `msrv:` job in `ci.yml`), confirmed via `git stash` to already fail identically on this branch's base
+  commit before any of this ticket's changes — unrelated to this ticket, not touched (`ci.yml` and
+  `release-sidecar.yml` are both outside this ticket's scope and the sibling-agent conflict note).
+  Rebased cleanly onto `origin/main` (`40bb6193`, no conflicts), all three checks re-run clean
+  post-rebase.
+
+  **Status:** PR ready to open. Real components (`StatusBar.svelte`, `TrashView.svelte`) ship with
+  ZERO diff — every red-proof edit was reverted, confirmed via `git status`/`git diff`. Staying in
+  `Doing/` until the PR merges (CI verdict owned by the Foreman per CPE-1880 — I cannot watch it).
