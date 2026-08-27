@@ -87,3 +87,45 @@ reports full coverage — was NOT deferred**; it is a false green in a coverage 
 
 Related: **CPE-1908** (the guard), **CPE-1929** (guards that cannot go red), **CPE-1933** (provenance
 claims bound to nothing).
+
+## Two shapes measured 2026-08-27 by PR #1060 — one CLOSED, one still open
+
+PR #1060 (CPE-1933) built a Rust port of `shellScriptLines.ts` and made both languages run against a
+**shared** `src/lib/shellScriptLines.cases.json`. The oracle immediately caught a divergence, and the
+port turned out to be the safer half.
+
+**CLOSED in PR #1060 — the here-string phantom heredoc.** `HEREDOC_START`'s `(?!<)` only refuses a
+match beginning at the **first** `<` of `<<<`; the engine retries from the second, the lookahead sees
+a space, and `` closes on the word:
+
+    done <<< "names"
+    echo after
+
+    TS   -> ["done <<< \"names\""]                    <- swallows the rest of the script
+    Rust -> ["done <<< \"names\"", "echo after"]       <- correct
+
+A false negative in exactly the direction this module's own header calls unsafe for a coverage
+ratchet — an unhardened command silently drops out of the scan. Fixed by requiring **both** guards,
+`(?<!<)<<(?!<)`, pinned with a shared-line case (`echo a <<<"lit" && cat <<EOF` must still open `EOF`)
+so the fix cannot later be "corrected" into over-refusing. The Reviewer attacked it with eight
+over-refusal probes — all clean — and found the fix closes a **wider** class than the case that
+exposed it: the old regex also mis-fired on an **unquoted** here-string word (`done <<< names`),
+where `` matches empty.
+
+**STILL OPEN and belongs here — `<<` inside a quoted string opens a phantom heredoc.** Measured:
+
+    echo "a << EOF"
+    cargo run --bin x -- --expect-channel sidecar     <- swallowed
+
+Same unsafe false-negative direction. It fails **identically under the old and new regex**, so it is
+pre-existing, and **both languages share it**, so the shared oracle agrees rather than flagging it —
+which is worth knowing about oracles generally: a shared case file catches divergence, not shared
+blindness.
+
+Note this is closely related to **N8** already in this ticket (a heredoc token inside a quoted string
+swallowing the rest of the step). Treat them together: the fix for both is to match `HEREDOC_START`
+against the **out-of-quote skeleton**, which the scanner already tracks.
+
+**When fixing, add the case to `src/lib/shellScriptLines.cases.json`, not only to the TS test** — the
+Rust port reads it at run time, and a fix landed on one side only would put the two implementations
+back into the disagreement PR #1060 just resolved.
