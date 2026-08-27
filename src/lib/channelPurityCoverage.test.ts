@@ -170,7 +170,13 @@ function readCanonicalChannelTokens(): string[] {
   const displayBody = displayMatch![0];
 
   const arms = new Map<string, string>();
-  const armRe = /Channel::(\w+)\s*=>\s*write!\(f,\s*"([^"]*)"\)/g;
+  // Tolerates a tuple/struct-variant binding pattern between the identifier and `=>` (e.g.
+  // `Channel::Beta(_) => write!(f, "beta")`), not just a bare unit-variant arm — found by this
+  // file's own red-proofing (CPE-1908 round 2 self-check): an earlier version of this regex
+  // required `Channel::Ident =>` with nothing in between, so a CORRECTLY-written Display arm for a
+  // hypothetical payload-carrying variant still read as "no arm found", which would have blocked a
+  // legitimate PR with a misleading message even though it failed safe (loudly, not silently).
+  const armRe = /Channel::(\w+)(?:\([^)]*\)|\{[^}]*\})?\s*=>\s*write!\(f,\s*"([^"]*)"\)/g;
   let m: RegExpExecArray | null;
   while ((m = armRe.exec(displayBody)) !== null) {
     arms.set(m[1], m[2].toLowerCase());
