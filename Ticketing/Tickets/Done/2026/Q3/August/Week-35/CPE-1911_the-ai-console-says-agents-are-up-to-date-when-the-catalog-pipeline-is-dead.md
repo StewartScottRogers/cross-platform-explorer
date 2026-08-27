@@ -3,7 +3,7 @@ id: CPE-1911
 title: the AI Console says "Agents are already up to date" whether the catalog is current or the pipeline is dead
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-26
@@ -196,8 +196,9 @@ alarm the user can't act on" acceptance criterion.
 
 **Fix, deliberately the small half** (coordinator's call, and the right one — `sidecar/host/` stays
 zero-diff across all three rounds; a real "regressed vs current" distinction needs a trust-engine
-change and its own security review, filed by the coordinator as a separate follow-up ticket, not
-bolted onto this PR):
+change and its own security review — filed by the coordinator as **CPE-1924** ("the catalog
+cannot tell 'already on the latest' from 'the index regressed' — both collapse into `Rollback`"),
+not bolted onto this PR):
 
 - Reworded the `staleRejected` branch to state only what's true in **both** `==` and `<` and
   diagnose neither: *"Nothing newer than what you have is currently published, so nothing was
@@ -210,7 +211,7 @@ bolted onto this PR):
   stay amber — those remain real "heads up" states.
 - Added a comment at the branch in `sidecar/ai-console/src/launcher.html` spelling out why `==` and
   `<` can't be told apart here, citing the exact anti-rollback code path and the release workflow's
-  versioning scheme, and pointing at the follow-up ticket — so nobody has to re-derive this.
+  versioning scheme, and pointing at **CPE-1924** — so nobody has to re-derive this.
 - No `sidecar/host/` diff, no `src-tauri/` diff, no `broker_client.rs`/`console.rs` diff this round —
   purely a `launcher.html` wording/colour change plus its test.
 

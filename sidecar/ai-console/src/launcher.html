@@ -1844,7 +1844,8 @@ async function refreshCatalog() {
       // neither, and treat it as the routine "you're current" outcome it almost always is — not a
       // warning. A real fix needs sidecar/host/src/catalog.rs to report the regressed-vs-current
       // distinction itself; that's a trust-engine change and deliberately out of scope for this PR
-      // (tracked as a follow-up ticket, filed separately).
+      // (tracked as CPE-1924: "the catalog cannot tell 'already on the latest' from 'the index
+      // regressed' — both collapse into Rollback").
       setMsg("Nothing newer than what you have is currently published, so nothing was installed — your agents are unchanged.", true);
     } else if (r.indexOk) {
       setMsg("Agents are already up to date.", true);
