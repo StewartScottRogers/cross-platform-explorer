@@ -44,9 +44,17 @@ function declaredRustVersion(crateDir: string): string | undefined {
 }
 
 /** The text of the `msrv:` job in ci.yml, from its `  msrv:` header to the next line that starts a
- *  sibling top-level job (two-space indent, not a comment, not blank) or end of file. */
+ *  sibling top-level job (two-space indent, not a comment, not blank) or end of file.
+ *
+ *  Normalises CRLF -> LF once, up front (CPE-1902): on a Windows checkout with `core.autocrlf=true`
+ *  (the default here), ci.yml lands on disk with CRLF line endings, and the raw `"\n  msrv:\n"`
+ *  literal below requires an LF immediately after `msrv:` with nothing between -- a CRLF checkout has
+ *  `\r` there instead, so the search silently returns -1 and this test reports the false "no msrv job
+ *  at all" failure rather than anything about the MSRV itself. Normalising here fixes every match in
+ *  this function, not just the one that happened to break; see lockfileLockedGuard.test.ts for the
+ *  same idea applied per-line instead of via one upfront replace. */
 function msrvJobText(): string {
-  const ci = readFileSync(CI_YML_PATH, "utf8");
+  const ci = readFileSync(CI_YML_PATH, "utf8").replace(/\r\n/g, "\n");
   const start = ci.indexOf("\n  msrv:\n");
   expect(start, "ci.yml has no `  msrv:` job at all — CPE-1855's MSRV CI leg is missing").toBeGreaterThanOrEqual(0);
   const rest = ci.slice(start + 1);
