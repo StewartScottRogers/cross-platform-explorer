@@ -3,7 +3,7 @@ id: CPE-1918
 title: the runbooks' `gh --jq` snippets lose their embedded quotes in PowerShell, so a release check fails with a jq internals error instead of its crafted message
 type: bug
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-27
@@ -336,3 +336,61 @@ stray control characters anywhere in the test file.
   CPE-1901, as this ticket directs.
 - No attempt to make the snippets work identically in bash and PowerShell. They target PowerShell,
   they say so via their fence tag, and the new guard enforces that every `gh` block declares a shell.
+
+## Closed 2026-08-27 — merged as PR #1054, after three rounds
+
+**Reviewer APPROVE.** Guard verified on merged `main`: 17/17 green.
+
+### This ticket's own proposed fix was also broken
+
+The ticket cited `run.md`'s `--jq ".[] | select(...==\"<TAG>\")"` as *"the correct shape already exists
+two lines above"*. It fails in PowerShell 5.1 too, just differently — which is exactly why the bug
+survived being fixed once and was then copied forward by CPE-1908. Measured on **5.1.26100.9168**:
+
+    --jq '.jobs[] | select(.name=="x")'      -> jq receives  .jobs[] | select(.name==x)
+    --jq ".jobs[] | select(.name==\"x\")"    -> jq receives  .jobs[] | select(.name==" x\)
+    --jq ".jobs[] | select(.name==`"x`")"    -> jq receives  .jobs[] | select(.name==x)
+    $q = '…"x"…'; --jq $q                    -> quotes still stripped
+
+**The real rule is not single-vs-double quotes.** It is *whether the `--jq` argument contains a `"` at
+all*. The two already-working snippets worked for exactly one reason: no `"` in the argument.
+**AC #1 is annotated in this ticket as deliberately not followed, because it was disproved.**
+
+### A second trap, found only by running it
+
+In PS 5.1 `ConvertFrom-Json` emits a JSON array as **one** pipeline object, so
+`… | ConvertFrom-Json | Where-Object {…}` compares the whole array and every job passes the filter.
+Both the guard and the reviewer got the *direction* of this wrong before measuring it — the Foreman
+escalated the reviewer's round-1 wording into bold text in three files, and neither had executed the
+scenario it named. Round 3 retracted it against a five-row measured table:
+
+    S1 partial matrix (target SKIPPED, leg CANCELLED)  TRAP: THROWS | FIXED: THROWS
+    S2 target SUCCESS, sibling FAILED                  TRAP: THROWS | FIXED: PASSES
+    S3 all success => both PASS   S4 absent => both THROW   S5 failed => both THROW
+
+`-ne` on an array is a **filter**, so the test is false only when *every* conclusion is `success`. The
+trap can never allow a publish the correct form refuses; its real failure is **refusing** one the
+correct form allows, with a garbled `(conclusion: success success cancelled skipped)` message. **Wrong,
+and fail-safe.** The fix (assign `$jobs` first, pipe the variable) stands regardless.
+
+A rule stated in a runbook is as much a provenance claim as a command in one, and *"reasoned from how
+PowerShell works"* is the same evidence class as *"it looks right"* — **CPE-1933**'s shape one level up.
+
+### The guard, and its own blind spots
+
+`src/lib/runbookJqQuoting.test.ts` scans the runbooks and command files for a `"` inside a
+`--jq`/`-q` argument in a PowerShell-fenced block, and for `gh` blocks with no language tag. Six
+evasions were found by review and closed **in-PR** rather than filed: a filter on a backtick
+continuation line, the `--jq=FILTER` equals form, an info string not validated against a known set,
+indented and 4-backtick fences, an over-strict doc claim, and unticked ACs.
+
+**The fence gap was not latent — it was live.** The old parser was blind to seven blocks it had never
+seen, two of them `bash` blocks in `README.md`, so round 1's "no missed site" was established on
+incomplete input. Four known gaps remain, each documented in the test header with why: blockquoted
+fences, `--jq $q` (row 4 of the doc's own measured-broken table — the doc is the control for that
+one), a `Select-String -q` false-red class, and an info string on a closing fence.
+
+**One near-miss worth carrying:** patching the fence regex through a shell heredoc into Python wrote a
+literal `\x02` — the `\2` backreference eaten by an escaping layer and read as an octal escape. **It
+compiled**, and the regex quietly became "two or more markers, no backreference". Caught by dumping
+`repr()` instead of reading the line. A regex that compiles is not a regex that is correct.
