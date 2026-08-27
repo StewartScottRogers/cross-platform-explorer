@@ -3,7 +3,7 @@ id: CPE-1949
 title: a compromised catalog signing key becomes **arbitrary file write**, because `entry.id` is interpolated into five paths with no charset check
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -225,3 +225,63 @@ unpacked into `~/lintools/sysroot` by the same rootless `dpkg-deb -x` technique,
 
 No dependency changes, no `specta::Type` changes (no bindings regen), no new ratchet, no new docs
 section (so no `sectionDocs.ts` change), no `tauri.conf.json` changes.
+
+## Closed 2026-08-27 — merged as PR #1063, after three rounds
+
+**Reviewer APPROVE + Security Auditor SEC PASS.**
+
+**What shipped.** `is_valid_entry_id` — `[A-Za-z0-9._-]`, 1–64 bytes, never `.` or `..` — enforced at
+the **bottom** of `VerifiedIndex::open`, after verify → utf8 → parse → schema, so CPE-1940's ordering
+is untouched. The index is refused **whole**, not filtered, because dropping an entry would make
+`VerifiedIndex::index()` return a document nobody signed — and `gate_manifest_opt` reads exactly that
+to decide `Unlisted`. `sign_bundle` refuses the same shape, so a bad id fails the release build rather
+than shipping a catalog every client rejects.
+
+Measured, before and after, with a key the test owns and `verify_index` asserted true first:
+
+    before  write_entry(out, "../pwned", …)  ->  root/nest/pwned.json EXISTS (+ .sig)
+    after   root/nest/pwned.json does not exist; staged payload byte-identical; read_dir(out) == 0
+
+Red-proofed on **both** platforms — `..` resolves lexically on Windows and in the kernel on Linux, so
+a Windows-only green could have hidden a vacuous Linux arm.
+
+### The predicate held against everything, including the gap that was expected to be there
+
+The Auditor ran a **31-case gauntlet** and drove the accepted-but-odd ones end-to-end, verifying on
+disk that each stays inside the caller's directory. Every Unicode angle is closed **structurally**:
+the predicate iterates `id.bytes()`, so every byte ≥0x80 fails before normalisation could matter —
+checked with U+FF0F, U+2044, U+FF0E×2, RTL override and **U+212A KELVIN SIGN** (NFKC → `K`).
+
+**Windows reserved device names were the expected gap and are not one** — but the PR body's reasoning
+about them was wrong, and the worker re-measured rather than swapping one unchecked claim for another.
+`out/NUL.json` is a **real 30-byte file**, readable back: Rust's `std::fs` applies `\?\` verbatim
+prefixing and bypasses the Win32 reserved-name parser. It pinned the **mechanism** too — the same
+write through `cmd.exe` produces no file, so the parser is live and it is `std::fs` going around it.
+The conclusion is unaffected and stronger: a device-named id yields an ordinary in-directory file.
+
+**One rule, not two copies** — both sides call the same `is_valid_entry_id`, proved *behaviourally*
+across 10 probe ids: publish-side and consume-side verdicts agreed on all 10.
+
+### Real ids, enumerated rather than assumed
+
+**All 65 releases** carrying a `catalog-index.json` downloaded — 780 rows, **12 distinct** ids, all
+2–8 chars of `[a-z]`, identical to the 12 manifests `catalog-sign` publishes. The Reviewer reproduced
+this **from scratch**, fetching the draft `v0.57.32` via the asset API. No pipeline outage.
+
+### Three residual decisions, each recorded with evidence rather than argument
+
+- **The absent-map route stays open**, and the test proves *adversarially* why anchoring would not
+  help: `agents.rs:301` gates on `verify_manifest` alone and never opens `versions.json`, so a planted
+  old signed manifest passes on its own. The real exposure is that **a first-party signature never
+  expires** — a revocation design, not a sturdier baseline. Both gates agreed.
+- **Visibility pinned** by `the_mut_version_map_entry_points_stay_shut`. The Auditor sabotaged both
+  legs; the Reviewer got an accidental proof when its editor refused a replacement with "found 2
+  matches" — the declaration **and** the test's own string literal — and the guard still failed
+  correctly, showing the column-0 match discriminates between them.
+- **The staging dir is out of scope**, and the worker corrected two errors in the Foreman's brief:
+  `open_beneath` is `pub(crate)` **inside `cpe-server`** so `src-tauri` cannot reach it, and
+  `remove_file_beneath` did not exist yet. Filed as **CPE-1952**.
+
+**Also filed: CPE-1954** — `catalog_sign verify` is the last path-forming index read outside
+`VerifiedIndex`, and the worker corrected the framing again: the instance is **not** closed by
+`sign_bundle`, because that diagnostic reads third-party bundles which never pass through it.
