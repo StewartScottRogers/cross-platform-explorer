@@ -1339,10 +1339,12 @@ impl ConsoleState {
 
     /// `POST /api/catalog/refresh` → ask the host to fetch + apply the signed catalog bundle
     /// (CPE-376), then hot-reload if anything changed. Returns
-    /// `{ indexOk, applied, agents, staleRejected, integrityRejected, offline, error }` — the last
-    /// four exist purely so the launcher can tell "genuinely up to date" apart from "the pipeline is
-    /// stale", "the pipeline published a corrupt/mis-signed catalog", and "the pipeline is
-    /// dead/unreachable", instead of reporting all of them as the same reassuring message (CPE-1911).
+    /// `{ indexOk, applied, agents, alreadyCurrent, regressedRejected, integrityRejected, offline,
+    /// error }` — the last five exist purely so the launcher can tell "genuinely up to date" apart
+    /// from "you already have the latest published entries", "the published catalog has gone
+    /// backwards", "the pipeline published a corrupt/mis-signed catalog", and "the pipeline is
+    /// dead/unreachable", instead of reporting all of them as the same reassuring message
+    /// (CPE-1911; the already-current/regressed split is CPE-1924).
     fn handle_catalog_refresh(&self) -> Response {
         let pinned = self.presets.load().pinned_agents;
         match self.dialogs.fetch_catalog(&pinned) {
@@ -1357,7 +1359,8 @@ impl ConsoleState {
                         "indexOk": res.index_ok,
                         "applied": res.applied,
                         "agents": agents,
-                        "staleRejected": res.stale_rejected,
+                        "alreadyCurrent": res.already_current,
+                        "regressedRejected": res.regressed_rejected,
                         "integrityRejected": res.integrity_rejected,
                         "offline": res.offline,
                         "error": res.error,
@@ -2467,11 +2470,13 @@ mod tests {
         }
     }
 
-    /// Pins the pipe CPE-1911 round 2 found untested: `CatalogFetch`'s `stale_rejected` /
-    /// `integrity_rejected` / `offline` / `error` fields must reach the `/api/catalog/refresh`
-    /// response JSON verbatim, not just `indexOk`/`applied`. Two shapes, since a real host response
-    /// is never all of these truthy at once: a "rejections happened" shape and an "offline+error"
-    /// shape (mutually exclusive in practice, both wired through the same JSON, so both must parse).
+    /// Pins the pipe CPE-1911 round 2 found untested: `CatalogFetch`'s `already_current` /
+    /// `regressed_rejected` / `integrity_rejected` / `offline` / `error` fields must reach the
+    /// `/api/catalog/refresh` response JSON verbatim, not just `indexOk`/`applied`. Two shapes,
+    /// since a real host response is never all of these truthy at once: a "rejections happened"
+    /// shape and an "offline+error" shape (mutually exclusive in practice, both wired through the
+    /// same JSON, so both must parse). CPE-1924: the three rejection counts carry **distinct**
+    /// values, so collapsing or swapping two of them fails rather than passing by coincidence.
     #[test]
     fn catalog_refresh_route_forwards_the_full_rejection_and_error_breakdown() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
@@ -2493,14 +2498,16 @@ mod tests {
         let v = post(crate::broker_client::CatalogFetch {
             index_ok: true,
             applied: 0,
-            stale_rejected: 2,
+            already_current: 2,
+            regressed_rejected: 4,
             integrity_rejected: 3,
             offline: false,
             error: None,
         });
         assert_eq!(v["indexOk"], true);
         assert_eq!(v["applied"], 0);
-        assert_eq!(v["staleRejected"], 2);
+        assert_eq!(v["alreadyCurrent"], 2);
+        assert_eq!(v["regressedRejected"], 4);
         assert_eq!(v["integrityRejected"], 3);
         assert_eq!(v["offline"], false);
         assert!(v["error"].is_null());
@@ -2509,7 +2516,8 @@ mod tests {
         let v = post(crate::broker_client::CatalogFetch {
             index_ok: false,
             applied: 0,
-            stale_rejected: 0,
+            already_current: 0,
+            regressed_rejected: 0,
             integrity_rejected: 0,
             offline: true,
             error: Some("fetch failed: status code 404".into()),

@@ -3,7 +3,7 @@ id: CPE-1924
 title: the catalog cannot tell "you're already on the latest" from "the index regressed to something older" — both collapse into `Rollback`
 type: bug
 priority: Medium
-status: Open
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -73,3 +73,54 @@ trust-engine diff gets its own review rather than being bolted onto a third roun
 
 Related: **CPE-1911** (the honest-status work that surfaced this), **CPE-308** (the catalog
 auto-update pipeline), **CPE-1873** (updater pinning).
+
+## Work Log
+
+**2026-08-27 — picked up, moved Backlog → Doing.**
+
+**Design decision: one comparison, two reasons.** The security-critical constraint is that the
+`==`/`<` split must not create a second route by which a not-strictly-newer entry gets applied. So
+the "is this an upgrade?" question is answered in exactly **one** place —
+`CatalogEntry::version_standing(installed) -> VersionStanding {Newer|Same|Older}` — and *everything*
+else is derived from it:
+
+- `VersionStanding::is_upgrade()` — the trust rule (`Newer` only).
+- `VersionStanding::refusal() -> Option<EntryVerdict>` — the reporting map; `None` for `Newer`,
+  `Some(AlreadyCurrent)` for `Same`, `Some(Rollback)` for `Older`.
+- `CatalogEntry::is_upgrade_over()` — now `version_standing(..).is_upgrade()`, not its own `>`.
+- `gate_manifest_opt` — `if !allow_downgrade { if let Some(r) = standing.refusal() { return r } }`,
+  so there is a single `None` arm in the whole engine and it is the only route to `Accept`.
+
+A test (`refusal_and_is_upgrade_agree_on_what_is_applyable`) asserts
+`refusal().is_none() == is_upgrade()` for every standing, so the two views can never drift apart.
+
+**Assumption recorded:** `Same` still counts as a *rejection*, not a no-op. It is pushed to
+`report.rejected` with `ApplyOutcome::AlreadyCurrent`, never to `applied`, and
+`apply_reports_already_current_and_a_regressed_publish_separately_and_applies_neither` asserts
+`applied.is_empty()` on that leg, that the installed bytes are untouched, and that the version map
+is unchanged. Anti-rollback behaviour is byte-for-byte what it was; only the label changed.
+
+**Reporting pipe.** `do_fetch_catalog` (src-tauri) replaces the single ambiguous `staleRejected`
+count with `alreadyCurrent` + `regressedRejected`; `CatalogFetch` (broker_client.rs) and
+`handle_catalog_refresh` (console.rs) carry both; `refreshCatalog()` (launcher.html) branches on
+them. `staleRejected` was deliberately **removed** rather than kept as a sum — leaving a field whose
+meaning is "one of two very different things" is the defect this ticket exists to remove, and the
+host + sidecar ship in the same installer so there is no version-skew consumer.
+
+The regressed branch is checked **before** already-current, so a mixed publish surfaces the
+regression rather than the reassuring half (pinned by a jsdom test).
+
+**Console wording/colour (replacing CPE-1911's non-diagnostic compromise):**
+- `alreadyCurrent > 0` → "You already have the latest published agents — nothing new to install."
+  in the calm/green treatment.
+- `regressedRejected > 0` → "Heads up: the published agent catalog has gone backwards …" in amber.
+- The CPE-1911 comment pointing at this ticket is gone (it was the only in-code reference; grepped).
+
+**`VERSION=$(date +%s)` (last acceptance item): left as-is, deliberately.** Full reasoning in the PR
+body. Short version: the timestamp is uniform-per-run, which does mean every entry's version churns
+on every release even when its manifest bytes are identical — but the cost of that churn is a few KB
+of re-fetched JSON, while the *user-visible* damage was entirely the `==`/`<` conflation this ticket
+fixes. The alternative (carry a per-entry version forward when the manifest sha256 is unchanged)
+requires the release signer to fetch and trust the previously published index at publish time — new
+network and new trust surface in the release pipeline, for a cosmetic win. Not worth bundling into a
+trust-engine change that is trying to stay small and reviewable.

@@ -210,10 +210,15 @@ pub struct KeyVerdict {
 pub struct CatalogFetch {
     pub index_ok: bool,
     pub applied: usize,
-    /// Entries the host fetched and verified but rejected because they weren't newer than what's
-    /// installed (anti-rollback) — a **stale published catalog**, distinct from "nothing to apply
-    /// because you're current" (CPE-1911).
-    pub stale_rejected: usize,
+    /// Entries the host fetched and verified but rejected because they name **exactly** the
+    /// installed version — you already have the latest published catalog. Routine and healthy
+    /// (CPE-1924); it is the normal result of checking again between releases.
+    pub already_current: usize,
+    /// Entries the host fetched and verified but rejected because they name an **older** version
+    /// than what's installed — the published catalog has gone *backwards*. Distinct from
+    /// [`Self::already_current`] (CPE-1924: pre-fix both arrived as one indistinguishable count) and
+    /// the one rejection that really does mean the publishing pipeline regressed.
+    pub regressed_rejected: usize,
     /// Entries the index listed but that failed their OWN integrity check — bad/missing manifest
     /// signature or a content-hash mismatch — even though the index itself verified fine. A
     /// corrupt/mis-signed publish, distinct from both "up to date" and "stale" (CPE-1911 review
@@ -318,7 +323,8 @@ impl HostDialogs for BrokerDialogs {
         Ok(CatalogFetch {
             index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
-            stale_rejected: v.get("staleRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            already_current: v.get("alreadyCurrent").and_then(Value::as_u64).unwrap_or(0) as usize,
+            regressed_rejected: v.get("regressedRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             integrity_rejected: v.get("integrityRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
             error: v.get("error").and_then(Value::as_str).map(str::to_string),
@@ -375,7 +381,8 @@ impl HostDialogs for BrokerDialogs {
         Ok(CatalogFetch {
             index_ok: v.get("indexOk").and_then(Value::as_bool).unwrap_or(false),
             applied: v.get("applied").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
-            stale_rejected: v.get("staleRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
+            already_current: v.get("alreadyCurrent").and_then(Value::as_u64).unwrap_or(0) as usize,
+            regressed_rejected: v.get("regressedRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             integrity_rejected: v.get("integrityRejected").and_then(Value::as_u64).unwrap_or(0) as usize,
             offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
             error: v.get("error").and_then(Value::as_str).map(str::to_string),
@@ -564,9 +571,11 @@ mod tests {
     }
 
     /// Pins the `host.fetch_catalog` JSON → [`CatalogFetch`] parse (CPE-1911 review round 2): every
-    /// field the host can send — `staleRejected`, `integrityRejected`, `offline`, `error` — must
-    /// actually land in the struct, not just `indexOk`/`applied`. This is the leg of the pipe the
-    /// jsdom launcher tests can never reach (they mock `fetch` directly and never touch this parser).
+    /// field the host can send — `alreadyCurrent`, `regressedRejected`, `integrityRejected`,
+    /// `offline`, `error` — must actually land in the struct, not just `indexOk`/`applied`. This is
+    /// the leg of the pipe the jsdom launcher tests can never reach (they mock `fetch` directly and
+    /// never touch this parser). The two version-rejection counts are given **different** values so
+    /// a swapped/collapsed pair goes red rather than passing by coincidence (CPE-1924).
     #[test]
     fn fetch_catalog_parses_the_full_rejection_and_error_breakdown() {
         let (writer, sink) = buffer();
@@ -582,8 +591,9 @@ mod tests {
                 result: Ok(json!({
                     "indexOk": true,
                     "applied": ["claude", "aider"],
-                    "rejected": 5,
-                    "staleRejected": 2,
+                    "rejected": 9,
+                    "alreadyCurrent": 2,
+                    "regressedRejected": 4,
                     "integrityRejected": 3,
                     "offline": false,
                     "error": null,
@@ -593,7 +603,8 @@ mod tests {
         let res = h.join().unwrap().unwrap();
         assert!(res.index_ok);
         assert_eq!(res.applied, 2);
-        assert_eq!(res.stale_rejected, 2);
+        assert_eq!(res.already_current, 2);
+        assert_eq!(res.regressed_rejected, 4);
         assert_eq!(res.integrity_rejected, 3);
         assert!(!res.offline);
         assert_eq!(res.error, None);

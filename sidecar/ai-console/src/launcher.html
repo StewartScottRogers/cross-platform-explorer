@@ -1806,7 +1806,8 @@ async function relaunch(s) {
   if (ok) $("history-overlay").hidden = true;
 }
 // --- Catalog refresh (CPE-374/376): fetch + apply the signed agent catalog, then re-render. ---
-// CPE-1911: "nothing changed" is NOT one situation — it's genuinely-current, a corrupt/mis-signed
+// CPE-1911: "nothing changed" is NOT one situation — it's genuinely-current, already-on-the-latest,
+// a catalog that has regressed to older versions (CPE-1924), a corrupt/mis-signed
 // publish, or an outright failed/offline fetch, and the user must be able to tell those apart
 // instead of always reading the same reassuring "up to date" line. The failure/corruption states
 // below are real "heads up" moments — their existing agents are untouched and safe to use, but
@@ -1831,22 +1832,21 @@ async function refreshCatalog() {
       // manifest signature, or content that doesn't match the index) — a corrupt or mis-signed
       // publish, not "nothing to apply".
       setMsg("The published catalog looks corrupted or mis-signed, so nothing was installed. Your existing agents are untouched and safe to use — no action needed on your end.", "warn");
-    } else if (r.indexOk && r.staleRejected > 0) {
-      // CPE-1911 review round 3: this used to warn "the publishing pipeline may be stuck", but that
-      // is NOT what staleRejected>0 means. anti-rollback (sidecar/host/src/catalog.rs,
-      // EntryVerdict::Rollback / is_upgrade_over) fires whenever a listed entry's version is not
-      // STRICTLY GREATER than what's installed — i.e. it can't tell "==" (you already have the
-      // latest — the routine, healthy outcome of checking again before the next release) from "<"
-      // (the index regressed to something older — genuinely broken). Under the release pipeline's
-      // timestamp-based versioning (.github/workflows/release.yml, VERSION=$(date +%s), stamped
-      // uniformly per run), "==" is the overwhelmingly common case: everyone who checks twice
-      // between releases hits this branch. So say only what's true in BOTH cases and diagnose
-      // neither, and treat it as the routine "you're current" outcome it almost always is — not a
-      // warning. A real fix needs sidecar/host/src/catalog.rs to report the regressed-vs-current
-      // distinction itself; that's a trust-engine change and deliberately out of scope for this PR
-      // (tracked as CPE-1924: "the catalog cannot tell 'already on the latest' from 'the index
-      // regressed' — both collapse into Rollback").
-      setMsg("Nothing newer than what you have is currently published, so nothing was installed — your agents are unchanged.", true);
+    } else if (r.indexOk && r.regressedRejected > 0) {
+      // CPE-1924: the published catalog names an entry OLDER than the one already installed — the
+      // index has gone backwards. Anti-rollback refused it (nothing was installed, existing agents
+      // untouched), and unlike the "==" branch below this really does mean something upstream
+      // regressed, so it's the one version-rejection worth a heads-up. Checked BEFORE the
+      // already-current branch: if a mixed publish produces both, the regression is what matters.
+      setMsg("Heads up: the published agent catalog has gone backwards — it's offering versions older than the ones you already have, so nothing was installed. Your agents are unchanged and safe to use; the publishing pipeline is the thing that needs a look, not anything on your end.", "warn");
+    } else if (r.indexOk && r.alreadyCurrent > 0) {
+      // CPE-1924: every listed entry names EXACTLY the version already installed. This is the
+      // routine, healthy outcome of checking again between releases — under the release pipeline's
+      // timestamp versioning (.github/workflows/release.yml, VERSION=$(date +%s), stamped uniformly
+      // per run) it is what almost every check returns — so it reads calm (green), like the plain
+      // "up to date" branch. Before CPE-1924 the host could not tell this from the regression above
+      // and both arrived as one count, which is why this used to be worded to diagnose neither.
+      setMsg("You already have the latest published agents — nothing new to install.", true);
     } else if (r.indexOk) {
       setMsg("Agents are already up to date.", true);
     } else {
