@@ -580,9 +580,11 @@ mod tests {
         stage_bundle(s1.path(), &[("claude", br#"{"id":"claude","v":"NEW"}"#, 5)], &k);
         let r1 = apply_bundle(s1.path(), out.path(), std::slice::from_ref(&pk), &mut installed, &[]);
         assert!(r1.index_ok);
-        assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::AlreadyCurrent)]);
+        // Asserted FIRST and on its own: if the reporting split ever becomes a trust change, this
+        // is the line that names the violation.
         assert!(r1.applied.is_empty(), "an already-current entry must NEVER be applied");
         assert!(!r1.applied.contains(&"claude".to_string()));
+        assert_eq!(r1.rejected, vec![("claude".to_string(), ApplyOutcome::AlreadyCurrent)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
         assert_eq!(installed.get("claude"), Some(&5)); // version map untouched
 
@@ -591,8 +593,8 @@ mod tests {
         stage_bundle(s2.path(), &[("claude", br#"{"id":"claude","v":"OLD"}"#, 3)], &k);
         let r2 = apply_bundle(s2.path(), out.path(), &[pk], &mut installed, &[]);
         assert!(r2.index_ok);
-        assert_eq!(r2.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
         assert!(r2.applied.is_empty(), "a regressed entry must NEVER be applied");
+        assert_eq!(r2.rejected, vec![("claude".to_string(), ApplyOutcome::Rollback)]);
         assert_eq!(std::fs::read(out.path().join("claude.json")).unwrap(), b"GOOD"); // untouched
         assert_eq!(installed.get("claude"), Some(&5));
 

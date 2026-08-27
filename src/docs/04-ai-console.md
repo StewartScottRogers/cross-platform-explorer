@@ -67,6 +67,18 @@ it anywhere.
 - **Reset to the shipped agents** — undoes any updates, back to what shipped with the app.
 - **Roll back a version…** — steps an agent back to a previous signed version.
 
+**What the result message means.** "Check for updates now" tells you which of several different
+"nothing changed" situations you're in, because they are not the same thing:
+
+- *You already have the latest published agents* — the published catalog offers exactly the
+  versions you're running. Routine and healthy; nothing to do.
+- *The published catalog has gone backwards* — it's offering **older** versions than the ones you
+  already have. Your agents are left untouched (updates are only ever accepted going forwards), so
+  nothing is broken on your machine — but the publishing side needs a look.
+- *The published catalog looks corrupted or mis-signed* — signatures didn't check out, so nothing
+  was installed. Again, your existing agents are untouched and safe to use.
+- *Couldn't check / you're offline* — the check never completed. Nothing changed; try again later.
+
 ## Recent…
 
 Click **Recent…** for a list of past sessions, kept across restarts. **Relaunch** reopens one with the
