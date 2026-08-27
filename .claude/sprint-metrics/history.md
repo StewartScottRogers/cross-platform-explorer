@@ -1685,3 +1685,32 @@ already uses, which exists because "everything else happened to pass" is not "ev
 Corollary worth carrying: **CPE-1893's guard was real but conditional.** It made the job fail loudly
 at `gh release upload` — *only when the signing key was present*. With the key unset, every step was
 gated off and the job ended **green having published nothing**. A green job is not even suspicious.
+
+## 2026-08-27 — record evidence in its DURABLE form, because evidence decays too
+
+PR #1063's Reviewer settled a rebase question with a precise fact: *"the merge base of the branch and
+`origin/main` is `6312b87b`, which is #1058's squash-merge commit."* The Foreman relayed it and asked
+the worker to record the rebase in the Work Log.
+
+The worker went to write it down and found **the evidence had already decayed** — a second rebase had
+moved the merge base to `3d4276f8`. Writing "the merge base is `6312b87b`" would have been a **fresh
+stale claim, in the entry written specifically to prevent stale claims.**
+
+It recorded the durable form instead:
+
+    git merge-base --is-ancestor 6312b87b HEAD   -> true
+
+That statement stays true across every future rebase. The sha-equality one was true for one tree.
+
+**Rule: when recording evidence, prefer the form that survives the next commit.** "X is an ancestor of
+HEAD" over "the merge base is X"; "this test reds when Y changes" over "this test passed at sha Z".
+This is the same defect family as CPE-1933 (provenance claims) one level up — the claim is about the
+*repository state* rather than about the code, and repository state moves faster than anything else.
+
+Two smaller instances from the same round, both caught by their authors before pushing:
+
+- Correcting a comment's cause list, the worker's **first draft was also wrong** — it wrote "four
+  early returns" where a grep of the function shows **five failure exits, four distinct causes** (the
+  parse step contributes two). It grepped rather than recalled, on the second try.
+- Reviewing its own diff it saw `CPE-1955` showing as **deleted** — its `origin/main` ref predated the
+  Foreman filing that ticket. Re-fetched rather than resolving the phantom deletion.
