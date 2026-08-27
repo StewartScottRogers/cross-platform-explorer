@@ -37,19 +37,19 @@ was added anywhere in that PR — confirmed by diffing every added `.svelte` lin
 
 ## Acceptance criteria
 
-- [ ] Strip comments before counting. `.svelte` files carry `//`, `/* */` and `<!-- -->`; the repo
+- [x] Strip comments before counting. `.svelte` files carry `//`, `/* */` and `<!-- -->`; the repo
       already has `stripShellComment`/`logicalLines` in `src/lib/preview/shellScriptLines.ts` as
       precedent for the "strip before matching" shape, though the languages differ.
-- [ ] Prefer matching where a colour can actually appear — a `#hex` in a CSS value position — over
+- [x] Prefer matching where a colour can actually appear — a `#hex` in a CSS value position — over
       matching it anywhere in the file. A regex that only fires inside `<style>` blocks and inline
       `style=` attributes would remove this whole class of false positive.
-- [ ] **Re-baseline deliberately after the fix, once, and say so.** The current 399 was accumulated
+- [x] **Re-baseline deliberately after the fix, once, and say so.** The current 399 was accumulated
       with false positives in it, so the true count is lower. Recount from scratch rather than
       subtracting the two we happen to know about — CPE-1922 is open on exactly this failure mode in
       the manual-test burndown, where a running total was patched forward instead of counted.
-- [ ] Red-proof both directions: a genuinely new hard-coded colour must still fail, and a comment
+- [x] Red-proof both directions: a genuinely new hard-coded colour must still fail, and a comment
       citing `#1044` must not.
-- [ ] Sweep for the same shape in the repo's other content-scanning guards — anything matching a
+- [x] Sweep for the same shape in the repo's other content-scanning guards — anything matching a
       short hex-ish or numeric pattern across a whole file rather than in a syntactic position.
 
 ## Notes
@@ -88,3 +88,31 @@ recounted), **CPE-1929** (guards that do not measure what they appear to).
   Swept for the same whole-file-content-scan shape in other guards — see the PR description /
   Foreman report for the findings; no other guard was changed by this ticket.
   `npm run check` clean. Full `npx vitest run`: 336 files / 4631 tests passed.
+- **2026-08-27 USMST (round 2)** — Reviewer (UAT on PR #1049) independently re-implemented round 1's
+  matcher, confirmed the 86/399 → 85/276 recount exactly, then categorised all 123 dropped
+  occurrences and found round 1's PR description was factually wrong for three: real, live
+  hard-coded colours the narrowing had silently dropped, not comment/attribute noise.
+  Fixed `FileList.svelte:340`'s `badge.style.cssText = "...color:#fff;..."` by adding
+  `scriptStyleAssignmentValues()` to `hexColourSites()` — a quote-and-backslash-escape-aware
+  char-by-char scan of `.style.*` JS assignments (the earlier `stripShellComment` precedent's own
+  cautionary tale, addressed this time rather than repeated). Brought the total to 277 (files count
+  unchanged at 85).
+  `ColorRulesDialog.svelte:27`'s `newColor` default swatch and `:129`'s `rule.color ?? "#888888"`
+  picker fallback are genuinely data the user picks their own value over, not app theming — added
+  explicit exemption comments at both sites plus an entry in the ratchet's top-of-file exemption
+  list (next to Icon/TerminalPanel), so the omission reads as a decision, not an accident.
+  `TerminalPanel.svelte`'s 4 xterm `theme:` values drop is consistent with the file's pre-existing
+  exemption but now moves them from counted-but-tolerated to structurally invisible — recorded
+  honestly in the ratchet's history log.
+  Also widened `STYLE_ATTR` to catch the literal form of a `style:` directive (`style:color="#fff"`)
+  — `style:display={...}` (TerminalPanel.svelte:240, no hex today) stays undiscovered by design and
+  is documented as such rather than silently ignored.
+  Restored the `#` in `MacroRunConfirm.svelte:35,163` now that PR #1044 (CPE-1891) merged to `main`
+  — merged `origin/main` into this branch first, cleanly, no conflicts.
+  New baseline: 85 files / 277 occurrences. Added 6 more synthetic `hexColourSites()` tests
+  (round 2): `.style.<prop>` assignment, the exact FileList.svelte concatenated-cssText shape,
+  a backslash-escaped-quote adversarial case, a literal `style:` directive, and the two
+  ColorRulesDialog exemption shapes staying quiet — 19 tests total, all green. Red-proofed again
+  against the real ratchet with a scratch `.style.cssText` colour (deleted after): reds at
+  `86 > 85`, clean on removal.
+  `npm run check` clean.

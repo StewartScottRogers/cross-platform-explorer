@@ -24,6 +24,10 @@
   let sizeMax = "";
   let days = "7";
   let isDirValue = true;
+  // A starting swatch for a NEW rule's colour picker — a value the user immediately overrides by
+  // picking their own, not app theming. Deliberately exempt from the CPE-1534 hard-coded-hex
+  // ratchet (src/app.css.test.ts) for that reason, same as the fallback on the `rule.color ?? ...`
+  // input below.
   let newColor = "#e2504b";
   let newLabel = "";
 
@@ -124,6 +128,9 @@
             aria-label="Enable rule"
             on:change={() => toggle(rule.id)}
           />
+          <!-- #888888 is a colour-picker fallback for a rule saved before this field existed, not
+               app theming — a value the user picks their own over. Deliberately exempt from the
+               CPE-1534 hard-coded-hex ratchet (src/app.css.test.ts), same as `newColor` above. -->
           <input
             type="color"
             value={rule.color ?? "#888888"}

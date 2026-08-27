@@ -157,7 +157,14 @@ describe("app.css theme-token layering (CPE-1534)", () => {
 // happens) but must not grow past it, i.e. no new inline hex sneaking into a component instead
 // of reaching for a --token. Pre-existing hex in icons/terminal-theme mirrors/etc. is intentional
 // and out of scope for CPE-1534 (a pure app.css refactor) — this is a growth guard, not a
-// zero-tolerance rule.
+// zero-tolerance rule. Deliberate exemptions, and why each is a decision rather than an accident:
+//   - Icon.svelte's SVG `fill=`/`stroke=` art — decorative icon colour, not app theming.
+//   - TerminalPanel.svelte's xterm `theme: {...}` object — xterm paints to canvas, which cannot
+//     take a CSS var; the literals mirror app.css tokens by the file's own comment.
+//   - ColorRulesDialog.svelte's `newColor = "#e2504b"` default and `rule.color ?? "#888888"`
+//     fallback (CPE-1931 Reviewer round) — a starting swatch and a colour-picker fallback are
+//     VALUES THE USER CHOOSES FROM (like a `<input type="color">`'s own default), not the app's
+//     own chrome, so they were never tokenizable in the first place.
 const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 
 // CPE-1931: a colour can only ever land in a `.svelte` file in a CSS value position — inside a
@@ -173,11 +180,85 @@ const HEX_LITERAL = /#[0-9a-fA-F]{3,8}\b/g;
 // this scan too — that is not a new exemption, just this file's existing "icons are intentional and
 // out of scope" note (above) now enforced structurally instead of by accident.
 const STYLE_BLOCK = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
-const STYLE_ATTR = /\bstyle\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/gi;
+const STYLE_ATTR = /\b(?:style|style:[a-zA-Z][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/gi;
+const STYLE_ASSIGNMENT_START = /\.style\.(?:cssText|[a-zA-Z][\w-]*)\s*=\s*/g;
+
+// CPE-1931 Reviewer round (UAT on PR #1049): the first cut of this narrowing dropped a real, live
+// hard-coded colour -- FileList.svelte's `badge.style.cssText = "...color:#fff;..."` -- because
+// neither STYLE_BLOCK nor STYLE_ATTR reaches a `<script>`-side `.style` assignment. Closed by
+// `scriptStyleAssignmentValues` below, which walks character-by-character (same "track quote
+// state" shape as `stripShellComment`/`logicalLines` in `releaseHangHardening.test.ts`, but --
+// unlike that precedent -- WITH backslash-escape awareness inside quotes, since a `\"` inside a
+// `.style.cssText` string is exactly the shape that precedent's own cautionary tale got wrong) so
+// a string-concatenated assignment like FileList.svelte's (two literals joined by `+`, with `;`
+// characters INSIDE each CSS-value string long before the real statement-ending `;`) is read whole
+// rather than truncated at the first semicolon.
+//
+// The same round widened STYLE_ATTR (above) to also match the literal form of a `style:` directive
+// (`style:color="#fff"`) -- `style:display={...}` (TerminalPanel.svelte:240, no hex today) still
+// is not covered, because a `{...}` expression's value lives in JS, not the template text; a
+// literal hex written INSIDE that expression as `style:color={"#fff"}` would still evade this
+// scan. No live site does that today -- documented here rather than fixed, since a general
+// JS-expression scan is out of this ticket's proportion.
+
+/** Every literal string segment assigned to a DOM node's `.style` (`.style.cssText = "..."` /
+ *  `.style.color = "..."`), concatenation included, up to the real (outside-any-quote) statement
+ *  terminator. Quote-aware and backslash-escape-aware char-by-char, on purpose: a naive
+ *  `/\.style\.\w+\s*=\s*([^;]+);/` stops at the FIRST `;` it sees, which for `.cssText` is almost
+ *  always INSIDE the first quoted CSS-declaration string (CSS uses `;` as its own separator), long
+ *  before the statement's real end. */
+function scriptStyleAssignmentValues(source: string): string[] {
+  const values: string[] = [];
+  const startRe = new RegExp(STYLE_ASSIGNMENT_START.source, STYLE_ASSIGNMENT_START.flags);
+  let m: RegExpExecArray | null;
+  while ((m = startRe.exec(source)) !== null) {
+    let i = m.index + m[0].length;
+    let quote: string | null = null;
+    let value = "";
+    while (i < source.length) {
+      const ch = source[i];
+      if (quote) {
+        if (ch === "\\" && i + 1 < source.length) {
+          value += ch + source[i + 1];
+          i += 2;
+          continue;
+        }
+        if (ch === quote) {
+          quote = null;
+          i += 1;
+          continue;
+        }
+        value += ch;
+        i += 1;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "/") {
+        while (i < source.length && source[i] !== "\n") i += 1;
+        continue;
+      }
+      if (ch === "/" && source[i + 1] === "*") {
+        i += 2;
+        while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i += 1;
+        i += 2;
+        continue;
+      }
+      if (ch === ";") break;
+      i += 1;
+    }
+    values.push(value);
+  }
+  return values;
+}
 
 /** Every hex-literal match sitting in a real CSS value position in `.svelte` source: inside
- *  `<style>` block bodies and inline `style="..."`/`style='...'` attribute values, each with CSS
- *  comments stripped first so a comment inside a `<style>` block can't be miscounted either. */
+ *  `<style>` block bodies, inline `style="..."`/`style:prop="..."` attribute values, and JS
+ *  `.style.*` string assignments -- each with comments stripped first, so a comment sitting in
+ *  any of the three still can't be miscounted. */
 function hexColourSites(source: string): string[] {
   const sites: string[] = [];
   let m: RegExpExecArray | null;
@@ -192,6 +273,10 @@ function hexColourSites(source: string): string[] {
     const value = m[1] !== undefined ? m[1] : (m[2] ?? "");
     const clean = stripComments(value);
     const hits = clean.match(HEX_LITERAL);
+    if (hits) sites.push(...hits);
+  }
+  for (const value of scriptStyleAssignmentValues(source)) {
+    const hits = value.match(HEX_LITERAL);
     if (hits) sites.push(...hits);
   }
   return sites;
@@ -253,19 +338,33 @@ function hexColourSites(source: string): string[] {
 //     stopped being a hypothetical the moment the repo's ticket numbers crossed into all-hex
 //     territory: it sent PR #1044 red on two comments, not a colour, in the CPE-1900s. Replaced the
 //     whole-file scan with `hexColourSites()` (above), which only looks where a colour can actually
-//     land — `<style>` block bodies and inline `style="..."` attribute values — stripping CSS
-//     comments from each first, so a `/* ... #1044 ... */` inside a `<style>` block can't be
-//     miscounted either. Re-baselined from scratch per the ticket's explicit instruction (recount,
-//     don't patch the old total forward by subtracting the two known false positives — CPE-1922's
-//     failure mode): walked every `.svelte` file fresh with the new matcher. Icon.svelte dropped out
-//     of the "has hex" set entirely — its hex was always in SVG `fill=`/`stroke=` attributes, never
-//     a `style=` value, so it was never really in this ratchet's stated scope (consistent with this
-//     file's pre-existing "icons are intentional and out of scope" note above — now enforced
-//     structurally instead of by luck). New baseline: 85 files / 276 occurrences (399 − 123; the gap
-//     is comments, doc examples, and non-`style=` attributes the old whole-file regex was never
-//     entitled to count as colours).
+//     land, stripping CSS comments from each first. Re-baselined from scratch per the ticket's
+//     explicit instruction (recount, don't patch the old total forward by subtracting the two known
+//     false positives — CPE-1922's failure mode). First cut: 85 files / 276 occurrences.
+//  7. CPE-1931 Reviewer round (UAT on PR #1049): independently re-implemented step 6's matcher,
+//     confirmed the 86/399 → 85/276 recount exactly, then categorised all 123 dropped occurrences —
+//     and found step 6's own PR description claim, that the gap was "comments, doc examples, and
+//     non-`style=` attributes the old regex was never entitled to count," was FACTUALLY WRONG for
+//     three of them, which were real, live hard-coded colours the narrowing had silently dropped:
+//       - FileList.svelte:340's `badge.style.cssText = "...color:#fff;..."` — a genuine CSS value
+//         built as a JS string and assigned straight onto a DOM node's `.style`, invisible to a
+//         matcher that only looked inside `<style>`/`style=`. Fixed by adding
+//         `scriptStyleAssignmentValues()` (above), which now counts it — bringing the total up one,
+//         to 277 (the files count stays 85: FileList.svelte was already in the "has hex" set for
+//         its other 6 style-block/style-attr occurrences).
+//       - ColorRulesDialog.svelte:27's `newColor = "#e2504b"` default swatch and :129's
+//         `rule.color ?? "#888888"` picker fallback — genuinely data the user picks their own value
+//         over, not app theming, so left OUT of the counted set — but now an EXPLICIT, reasoned
+//         exemption (see the top-of-file exemption list above and the comments at both sites)
+//         instead of a silent, accidental one.
+//     TerminalPanel.svelte's 4 xterm `theme: {...}` values (background/foreground/cursor/
+//     selectionBackground) also dropped, consistent with this file's own pre-existing "icons and
+//     terminal-theme mirrors are intentional and out of scope" note — but honestly: that moves them
+//     from COUNTED-BUT-TOLERATED to STRUCTURALLY INVISIBLE to this ratchet, losing growth-visibility
+//     for that one category even though growth was never the thing being watched there. New
+//     baseline after both fixes: 85 files / 277 occurrences.
 const BASELINE_FILES_WITH_HEX = 85;
-const BASELINE_TOTAL_HEX_OCCURRENCES = 276;
+const BASELINE_TOTAL_HEX_OCCURRENCES = 277;
 
 function walkSvelte(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -345,6 +444,46 @@ describe("hexColourSites() matches only CSS value positions (CPE-1931)", () => {
 
   it("does not count an SVG fill=/stroke= attribute (out of this ratchet's scope, same as Icon.svelte)", () => {
     const svelte = `<svg><path fill="#ffd166" stroke="#e0a800" /></svg>\n`;
+    expect(hexColourSites(svelte)).toEqual([]);
+  });
+
+  // CPE-1931 Reviewer round (UAT on PR #1049): the coverage added below in response to the three
+  // real drops it found — FileList.svelte's `.style.cssText` assignment, and confirmation that the
+  // two ColorRulesDialog.svelte data-not-theming sites stay deliberately quiet.
+  it("catches a hex literal in a simple .style.<prop> = \"...\" JS assignment", () => {
+    const svelte = `<script>\n  el.style.color = "#123456";\n</script>\n`;
+    expect(hexColourSites(svelte)).toEqual(["#123456"]);
+  });
+
+  it("catches a hex literal in a .style.cssText assignment built from concatenated strings whose CSS declarations carry internal semicolons before the real statement end (the exact FileList.svelte:340 shape)", () => {
+    const svelte = `<script>
+  function setDragBadge() {
+    badge.style.cssText =
+      "position:absolute; top:-1000px; left:-1000px; padding:4px 10px; border-radius:6px;" +
+      "background:var(--accent); color:#fff; font:600 12px system-ui,sans-serif; white-space:nowrap;";
+  }
+</script>
+`;
+    expect(hexColourSites(svelte)).toEqual(["#fff"]);
+  });
+
+  it("does not truncate a .style.cssText assignment at a backslash-escaped quote inside the string", () => {
+    const svelte = `<script>\n  el.style.cssText = "content: \\"x\\"; color:#fff;";\n</script>\n`;
+    expect(hexColourSites(svelte)).toEqual(["#fff"]);
+  });
+
+  it("catches a hex literal in a literal style:prop=\"...\" directive attribute", () => {
+    const svelte = `<div style:color="#654321" />\n`;
+    expect(hexColourSites(svelte)).toEqual(["#654321"]);
+  });
+
+  it("does not count a plain (non-.style, non-style=) variable holding a hex default — data the user picks over, not app theming, same shape as ColorRulesDialog.svelte's newColor", () => {
+    const svelte = `<script>\n  let newColor = "#e2504b";\n</script>\n<div />\n`;
+    expect(hexColourSites(svelte)).toEqual([]);
+  });
+
+  it("does not count a hex fallback in a plain attribute binding — same shape as ColorRulesDialog.svelte's rule.color ?? \"#888888\" colour-picker fallback", () => {
+    const svelte = `<input type="color" value={rule.color ?? "#888888"} />\n`;
     expect(hexColourSites(svelte)).toEqual([]);
   });
 });
