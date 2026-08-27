@@ -25,7 +25,18 @@
 //! | Windows  | `NtCreateFile` with `RootDirectory` = the parent handle, `FILE_OPEN_REPARSE_POINT` per component | yes |
 //! | Linux    | `openat2(RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS)`, falling back to the walk below | yes |
 //! | Unix     | `openat`/`mkdirat` with `O_NOFOLLOW`, one component at a time | yes |
-//! | other    | [`crate::batch_media::open_no_follow`] by path — **not** atomic, see [`ATOMIC`] | no |
+//!
+//! **There is deliberately no fourth row.** The module is `#[cfg(any(unix, windows))]` and
+//! `backup::copy_one_verified` keeps no path-based fallback for a target without a handle-relative
+//! open. An earlier revision shipped one — a `#[cfg(not(any(unix, windows)))]` arm plus an
+//! `open_beneath::ATOMIC` `const bool` the caller branched on, so CPE-1889's two `canonicalize` checks
+//! stayed in the source "for that target". PR #1043's reviewer extracted that arm and compiled it:
+//! **two `E0308`s and an `E0507`**. It had never been built by anything, `const bool` (unlike `cfg`)
+//! keeps `dead_code` silent, and the only two callers of `backup::parent_contained` were inside the
+//! branch it guarded — so a security check with no test coverage sat behind a fallback that could not
+//! exist. Deleted rather than repaired: a safety net nobody has ever compiled is worse than no net,
+//! because it is read as one. A platform without `openat` or `NtCreateFile` now fails to build this
+//! crate, loudly, which is the correct answer for a filesystem app.
 //!
 //! **Windows needs the NT layer and there is no way around it.** Win32 has no handle-relative open:
 //! `CreateFileW` takes a path and re-parses it from a drive letter every time. `NtCreateFile` takes an
@@ -54,20 +65,12 @@
 //!   and genuinely *is* an object inside the root; the write still comes out at its other name. That is
 //!   [`crate::fsutil::copy_file_onto_no_follow_with_wording`]'s `facts.links > 1` refusal, on the same
 //!   handle this module returns, and it is deliberately not duplicated here.
-//! - **On a platform with neither `openat` nor `NtCreateFile` it is not atomic at all** — see [`ATOMIC`].
+//! - **It does not exist on a platform with neither `openat` nor `NtCreateFile`** — the module is not
+//!   compiled there and the crate does not build, deliberately. See the "no fourth row" note above.
 
 use std::ffi::OsStr;
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
-
-/// Whether the per-component walk on this target is genuinely atomic with the open.
-///
-/// `true` on Unix and Windows — every platform this app ships on. `false` on anything else, where the
-/// fallback below opens by path and a caller that has its own path-based containment checks must keep
-/// running them. Exposed as a `const` rather than a `cfg` so the caller reads as ordinary code and both
-/// branches type-check on every target: `backup::copy_one_verified` guards its pre-write
-/// `parent_contained` calls with `if !ATOMIC`, and the optimiser deletes the dead half.
-pub(crate) const ATOMIC: bool = cfg!(any(unix, windows));
 
 /// A destination root, resolved and **held open** for the life of a run.
 ///
@@ -78,9 +81,7 @@ pub(crate) const ATOMIC: bool = cfg!(any(unix, windows));
 pub(crate) struct RootDir {
     /// The already-canonicalised root path. Kept for error messages only — never re-opened.
     path: PathBuf,
-    /// The open directory handle every component is resolved against. Absent only on a platform with
-    /// no handle-relative open, where [`ATOMIC`] is `false` and the fallback opens by path.
-    #[cfg(any(unix, windows))]
+    /// The open directory handle every component is resolved against.
     dir: File,
 }
 
@@ -123,20 +124,7 @@ fn tick() {}
 /// deliberately **does** follow a link at the root itself, because the root is the location the user
 /// chose and a link there is their own arrangement, not a redirect planted underneath them.
 pub(crate) fn open_root(real_root: &Path) -> std::io::Result<RootDir> {
-    #[cfg(any(unix, windows))]
-    {
-        Ok(RootDir { path: real_root.to_path_buf(), dir: sys::open_root_dir(real_root)? })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        if !real_root.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the backup destination is not a directory",
-            ));
-        }
-        Ok(RootDir { path: real_root.to_path_buf() })
-    }
+    Ok(RootDir { path: real_root.to_path_buf(), dir: sys::open_root_dir(real_root)? })
 }
 
 /// Open `root/rel` for writing — creating the file, and any missing directories along the way — without
@@ -181,11 +169,18 @@ pub(crate) fn create_beneath(root: &RootDir, rel: &Path) -> Result<Opened, Strin
 /// platform refused. `at` is the failing component's path **relative to the root**, which is the part
 /// the user can act on.
 fn refuse(root: &Path, at: &Path, why: &str) -> String {
+    // **The tail must not contain the words any test uses to identify a CAUSE.** It used to end
+    // "…a component that is a link, or that cannot be opened, stops the entry", which put the literal
+    // phrase `is a link` into *every* refusal this module produces — so
+    // `assert!(err.contains("is a link"))` passed for a permission error, a vanished name, or a plain
+    // file sitting where a directory should be. Two tests were asserting exactly that and proving
+    // nothing; the Linux harness for PR #1043 round 2 caught it by asserting the *negative* case.
+    // Keep boilerplate and diagnosis lexically disjoint.
     format!(
         "refusing to write inside the backup destination {root:?}: the path component {at:?} {why}. \
          Nothing was written for this entry — each component is opened relative to the one before it \
-         so that nothing can be swapped in underneath the write, and a component that is a link, or \
-         that cannot be opened, stops the entry rather than being resolved."
+         so that nothing can be swapped in underneath the write, and any component that cannot be \
+         opened, or that stands in for another name, stops the entry rather than being resolved."
     )
 }
 
@@ -303,6 +298,64 @@ mod sys {
         }
     }
 
+    /// `IO_REPARSE_TAG_NAME_SURROGATE` — the high bit Microsoft sets on exactly those reparse tags
+    /// that make a name **stand in for another name**: `IO_REPARSE_TAG_SYMLINK` (`0xA000000C`),
+    /// `IO_REPARSE_TAG_MOUNT_POINT` (`0xA0000003`, junctions), and the other surrogates. It is *not*
+    /// set on tags that merely decorate an object that is still itself — OneDrive Files-On-Demand
+    /// placeholders (`IO_REPARSE_TAG_CLOUD*`), NTFS dedup, WOF/WIM compression, ProjFS, app-exec links.
+    const IO_REPARSE_TAG_NAME_SURROGATE: u32 = 0x2000_0000;
+
+    /// Is this directory handle a name surrogate — a link, junction or mount point — as opposed to
+    /// merely carrying *some* reparse tag?
+    ///
+    /// **The distinction is a shipped-behaviour bug, measured on both sides** (PR #1043 Security
+    /// Auditor). The first cut of this walk refused on `FILE_ATTRIBUTE_REPARSE_POINT` alone. On
+    /// `origin/main` a destination holding `dst/real/` and a junction `dst/link -> dst/real` copies
+    /// `link/x.txt` with `ok = true`; on that first cut the same entry came back `ok = false`. That is
+    /// correct for the junction — it *is* a surrogate, and refusing it is this ticket's whole point,
+    /// even pointing back inside the root — but the same attribute bit is set by **OneDrive
+    /// Files-On-Demand**, and a backup destination inside a OneDrive folder with Known Folder Move is
+    /// an ordinary user setup. Refusing every entry beneath a placeholder directory would mean
+    /// "backups to OneDrive stop working", reported as a handful of red rows in a 100,000-entry run
+    /// that nobody reads.
+    ///
+    /// So the question asked is the surrogate bit off `FILE_ATTRIBUTE_TAG_INFO`, which is precisely
+    /// the bit that separates "this name stands for another name" from "this object is itself, with a
+    /// filter attached". Same one handle query as before, a different information class.
+    ///
+    /// **Fails open, deliberately, and it is safe to.** A handle whose tag cannot be read returns
+    /// `false` and the walk continues — because the containment does not rest here: if the object
+    /// really is a surrogate, the *next* component's handle-relative open fails with
+    /// `ERROR_CANT_RESOLVE_FILENAME` and the entry is refused anyway (measured by neutering this
+    /// check entirely and re-running the CPE-1889 junction harm test — still refused). What this
+    /// buys is the sentence that names the link, one component earlier.
+    ///
+    /// **Not staged in a test**, and said plainly rather than implied: a non-surrogate directory
+    /// reparse point needs OneDrive, dedup or ProjFS to create, none of which a unit test can stage on
+    /// a CI runner. The surrogate side is covered (every junction test in this crate goes through this
+    /// branch); the non-surrogate side rests on the documented meaning of the bit.
+    fn name_surrogate_at(dir: &File) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Storage::FileSystem::{
+            FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_ATTRIBUTE_TAG_INFO,
+        };
+        // SAFETY: `dir` is a live `File` whose handle is only borrowed; `info` is a correctly-sized
+        // out-parameter matching the information class. Read-only query, nothing closed here.
+        unsafe {
+            let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+            let ok = GetFileInformationByHandleEx(
+                HANDLE(dir.as_raw_handle() as isize),
+                FileAttributeTagInfo,
+                std::ptr::addr_of_mut!(info).cast(),
+                u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>()).unwrap_or(0),
+            )
+            .is_ok();
+            ok && info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                && info.ReparseTag & IO_REPARSE_TAG_NAME_SURROGATE != 0
+        }
+    }
+
     /// NT status codes are not Win32 error codes, and `io::Error` speaks Win32. Translating means a
     /// refusal reads as "Access is denied." rather than as `0xC0000022`.
     fn io_err(status: NTSTATUS) -> std::io::Error {
@@ -347,11 +400,18 @@ mod sys {
             // through the path the user sees. Refuse instead: this is the measured attack shape, and a
             // backup that silently writes somewhere the user cannot find is its own defect.
             //
-            // One `GetFileInformationByHandle` per directory component, on a handle already open. It
+            // One `GetFileInformationByHandleEx` per directory component, on a handle already open. It
             // is the only per-component cost this walk adds over the opens themselves; there is no way
             // to ask NT "and fail if it was a reparse point" as part of the create.
+            //
+            // **It refuses a NAME SURROGATE, not every reparse point** — see [`name_surrogate_at`].
+            // This is diagnostics rather than the containment: PR #1043's Security Auditor neutered
+            // this branch and re-ran the CPE-1889 junction harm test, and the write was *still*
+            // refused, because NT returns `ERROR_CANT_RESOLVE_FILENAME` on the **next** component when
+            // you open relative to a reparse-point handle. The kernel is what contains; this is what
+            // names the cause. That is also why failing open (`is_some_and`) is acceptable here.
             tick();
-            if crate::batch_media::handle_facts(&dir).is_some_and(|f| f.is_reparse_point) {
+            if name_surrogate_at(&dir) {
                 return Err(refuse(&root.path, &sofar, WHY_LINK));
             }
             held = Some(dir);
@@ -403,10 +463,44 @@ mod sys {
         CString::new(name.as_bytes()).map_err(|_| ())
     }
 
+    /// Was `name` a symlink, asked of the **parent handle** and never following anything?
+    ///
+    /// This runs only on a component that has already failed to open, so it costs nothing in the
+    /// ordinary case, and it answers the question the errno cannot. Linux and macOS both report
+    /// **`ENOTDIR`** for a symlink at a component opened with `O_DIRECTORY` — and `ENOTDIR` is equally
+    /// what a *regular file* sitting at a directory component produces. Those two need different
+    /// sentences: one is the attack this module exists for, the other is an ordinary mistake. So the
+    /// answer comes from `fstatat(AT_SYMLINK_NOFOLLOW)` rather than from guessing at an errno.
+    ///
+    /// It is a second look at a name, so in principle the name could have changed since the failed
+    /// open. Harmless, and worth stating: nothing is opened or written on the strength of it, the
+    /// entry is refused either way, and the only thing at stake is which sentence the user reads.
+    fn link_at(parent: RawFd, name: &CString) -> bool {
+        // SAFETY: `parent` is borrowed from a live `File`, `name` outlives the call, and `st` is a
+        // correctly-sized out-parameter. Read-only query, no ownership transfer.
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstatat(parent, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) != 0 {
+                return false;
+            }
+            st.st_mode & libc::S_IFMT == libc::S_IFLNK
+        }
+    }
+
     /// Open (creating if absent) one directory component relative to `parent`.
     ///
-    /// `O_NOFOLLOW` is what makes it atomic: if the name is a symlink the **open itself** fails with
-    /// `ELOOP`, so there is no window in which the name could be checked and then followed.
+    /// `O_NOFOLLOW` is what makes it atomic: if the name is a symlink the **open itself** fails, so
+    /// there is no window in which the name could be checked and then followed.
+    ///
+    /// **It does not fail with `ELOOP`, and an earlier revision of this file assumed it did.** With
+    /// `O_DIRECTORY` also set, Linux's `do_open()` reaches the `LOOKUP_DIRECTORY` check (`-ENOTDIR`)
+    /// before `may_open()`'s `S_IFLNK -> -ELOOP` case, so a symlink at an *intermediate* component
+    /// returns **`ENOTDIR`**; xnu has the same `v_type != VDIR -> ENOTDIR` ordering. Only the final
+    /// component — opened without `O_DIRECTORY` by [`child_file`] — actually yields `ELOOP`.
+    /// Containment was never affected (the open failed either way), but the *message* read "could not
+    /// be opened (Not a directory)" instead of naming the link, and two tests asserting the link
+    /// wording reddened on ubuntu. Measured by PR #1043's reviewer on WSL2 kernel 6.6.87 and
+    /// reproduced here. Classification is therefore [`link_at`]'s job, never the errno's.
     fn child_dir(parent: RawFd, name: &CString) -> std::io::Result<File> {
         tick();
         // SAFETY: `parent` is borrowed from a live `File`; `name` is a NUL-terminated C string that
@@ -498,16 +592,34 @@ mod sys {
         let call = |flags: i32| -> Result<RawFd, std::io::Error> {
             let how = OpenHow {
                 flags: flags as u64,
-                mode: 0o666,
+                // **Zero unless we are creating, and this is not cosmetic.** The kernel's
+                // `build_open_flags()` rejects `!WILL_CREATE(flags) && how->mode != 0` with `EINVAL`,
+                // so a hard-coded `0o666` made the *open-existing* call fail every single time.
+                // Measured by PR #1043's reviewer:
+                //
+                // ```text
+                // create O_CREAT|O_EXCL mode=0666 -> fd 5
+                // open-existing         mode=0666 -> -1 EINVAL
+                // open-existing         mode=0    -> fd 6
+                // ```
+                //
+                // The consequence was not merely two wasted syscalls: `EINVAL` is in the latch set
+                // below, so the **first overwrite in a run turned `openat2` off process-wide**, and
+                // every entry of the `update` list — the case this module's own doc calls the common
+                // one — silently fell back to the walk. Nothing surfaced it, because the fast path
+                // swallows its errors by design.
+                mode: if flags & libc::O_CREAT != 0 { 0o666 } else { 0 },
                 resolve: RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
             };
             tick();
             // SAFETY: `SYS_openat2` takes (dirfd, path, *const open_how, size). `c` and `how` outlive
-            // the call; the size passed matches the struct the kernel is given.
+            // the call; the size passed matches the struct the kernel is given. `rootfd` is widened to
+            // `c_long` explicitly: it rides in a variadic argument list, where an `i32` and the
+            // `c_long` the kernel stub reads are not the same slot on LP64.
             let r = unsafe {
                 libc::syscall(
                     libc::SYS_openat2,
-                    rootfd,
+                    rootfd as libc::c_long,
                     c.as_ptr(),
                     std::ptr::addr_of!(how),
                     std::mem::size_of::<OpenHow>(),
@@ -531,6 +643,13 @@ mod sys {
                 // ENOSYS (pre-5.6), EPERM (seccomp) and EINVAL (unknown `open_how`) all mean "this
                 // kernel will never answer" — remember it so the run stops paying a syscall per file
                 // to find that out again. Anything else is a per-entry answer the walk will re-derive.
+                //
+                // **This latch is process-wide and permanent, so it is only ever set from errors that
+                // are a property of the kernel, never of the entry.** One wrongly-latching call turns
+                // the fast path off for every backup this process runs afterwards — which is exactly
+                // what the `mode` bug above did, from a single overwrite. Nothing is unsafe when it
+                // happens (the walk is the authority), but it is invisible, so the bar for adding an
+                // errno here is that no per-file condition can produce it.
                 if matches!(e.raw_os_error(), Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EINVAL)) {
                     SUPPORTED.store(2, Ordering::Relaxed);
                     return None;
@@ -570,9 +689,11 @@ mod sys {
                 None => root.dir.as_raw_fd(),
             };
             let dir = child_dir(parent, &c).map_err(|e| {
-                // `ELOOP` here is `O_NOFOLLOW` refusing a symlink at this component — the measured
-                // attack shape — and it deserves the sentence that says so rather than an errno.
-                if e.raw_os_error() == Some(libc::ELOOP) {
+                // Classified by asking the filesystem, NOT by reading the errno — see [`link_at`].
+                // A symlink at an intermediate component reports `ENOTDIR` on Linux and macOS, and so
+                // does a plain file sitting where a directory should be; they need different
+                // sentences and the errno cannot tell them apart.
+                if link_at(parent, &c) {
                     refuse(&root.path, &sofar, WHY_LINK)
                 } else {
                     refuse(&root.path, &sofar, &format!("could not be opened ({e})"))
@@ -590,7 +711,13 @@ mod sys {
             None => root.dir.as_raw_fd(),
         };
         let (file, created) = child_file(parent, &c).map_err(|e| {
-            if e.raw_os_error() == Some(libc::ELOOP) {
+            // The final component carries no `O_DIRECTORY`, so this one really does come back `ELOOP`
+            // on Linux — but it is classified the same way as the directory components above, so this
+            // function has one rule rather than two that merely agree today. That also covers
+            // **FreeBSD, which returns `EMLINK` for an `O_NOFOLLOW` refusal**: an errno allow-list
+            // would have been wrong on a third platform, which is the argument for asking the
+            // filesystem instead of the error code.
+            if link_at(parent, &c) {
                 refuse(&root.path, &sofar, WHY_LINK)
             } else {
                 refuse(&root.path, &sofar, &format!("could not be opened for writing ({e})"))
@@ -602,34 +729,6 @@ mod sys {
 
 // ---------------------------------------------------------------------------------------------
 // Anything else: no handle-relative open exists, so this is the pre-CPE-1896 path-based behaviour.
-// ---------------------------------------------------------------------------------------------
-#[cfg(not(any(unix, windows)))]
-mod sys {
-    use super::{refuse, Opened, RootDir};
-    use std::ffi::OsStr;
-    use std::path::PathBuf;
-
-    pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, String> {
-        // Not atomic, and [`super::ATOMIC`] says so, so the caller has kept its path-based containment
-        // checks running. Nothing here pretends otherwise.
-        let mut path = root.path.to_path_buf();
-        let mut rel = PathBuf::new();
-        for d in dirs {
-            path.push(d);
-            rel.push(d);
-        }
-        if !dirs.is_empty() {
-            std::fs::create_dir_all(&path)
-                .map_err(|e| refuse(root.path, &rel, &format!("could not be created ({e})")))?;
-        }
-        path.push(last);
-        rel.push(last);
-        let (file, created) = crate::batch_media::open_no_follow(&path)
-            .map_err(|e| refuse(root.path, &rel, &format!("could not be opened for writing ({e})")))?;
-        Ok(Opened { file, created })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +798,37 @@ mod tests {
             b"USER DATA",
             "HARM: the walk wrote through a link at an intermediate component"
         );
+        drop(root);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The **negative** half of the link classification, and it is the half that keeps the positive
+    /// half honest: an ordinary file sitting where a directory component should be is refused too, but
+    /// must **not** be described as a link.
+    ///
+    /// This exists because the errno cannot tell the two apart. On Linux and macOS a symlink at a
+    /// component opened with `O_DIRECTORY` reports `ENOTDIR` — and so does a plain file at that same
+    /// component. An earlier revision classified on `ELOOP`, which is simply the wrong error on both
+    /// platforms (and `EMLINK` on FreeBSD); the fix asks `fstatat(AT_SYMLINK_NOFOLLOW)` instead, and
+    /// this test is what proves the answer discriminates rather than always saying "link".
+    ///
+    /// It also guards the wording split that made the sibling assertions meaningful: while
+    /// [`refuse`]'s shared tail still contained the phrase "is a link", *every* refusal matched
+    /// `contains("is a link")` and both link tests passed for any failure at all.
+    #[test]
+    fn a_plain_file_where_a_directory_belongs_is_refused_but_not_called_a_link() {
+        let d = scratch("notdir");
+        std::fs::write(d.join("sub"), b"i am a file, not a directory").unwrap();
+        let root = open_root(&d).unwrap();
+        let e = create_beneath(&root, Path::new("sub/x.txt")).unwrap_err();
+        assert!(
+            !e.contains("is a link"),
+            "a plain file at a directory component must NOT be reported as a link — that is the \
+             classification this module gets from `fstatat`, not from the errno, because both cases \
+             report ENOTDIR: {e}"
+        );
+        assert!(e.contains("sub"), "the refusal must still name the component: {e}");
+        assert!(!d.join("sub").is_dir(), "nothing may have replaced the file with a directory");
         drop(root);
         let _ = std::fs::remove_dir_all(&d);
     }

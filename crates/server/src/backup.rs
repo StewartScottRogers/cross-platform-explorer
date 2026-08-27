@@ -120,33 +120,6 @@ pub const BACKUP_NOT_CONFIRMED: &str =
      it must be re-invoked with an explicit confirmation (only BackupDashboard's Run/Restore buttons, \
      or the drive-connect scheduler acting on a job the user ticked auto-run for, should ever set it)";
 
-/// The CPE-1889 refusal: `dst`'s parent directory does not resolve inside the backup destination.
-///
-/// **Deliberately does not name a link as the cause**, for the reason `copilot::confinement_refusal`
-/// records after CPE-1750's UAT measured the over-claim: [`crate::fsutil::confined_to_resolved_root`]
-/// answers one bit, and its "no" covers two different truths — the path really does lead out, **or**
-/// the OS would not say where it leads (`EACCES`, `ELOOP`, a Windows sharing violation) and the guard
-/// fails closed. Refusing is right for both; asserting the first when the truth is the second sends a
-/// user hunting for a junction that is not there. The sentence states what was established (it does not
-/// stay inside) and names both possible causes without picking one.
-///
-/// Wording, not just facts: this reaches a screen. `apply_backup_plan_walk` turns it into an
-/// [`OpResult::err`], `BackupDashboard.svelte` renders the first one under the status pill, and the
-/// auto-run notice repeats it — so it has to read as an explanation to the person whose backup just
-/// reported a failure, not as a stack frame.
-fn parent_contained(parent: &Path, real_dst_root: &Path) -> Result<(), String> {
-    if crate::fsutil::confined_to_resolved_root(parent, real_dst_root) {
-        return Ok(());
-    }
-    Err(format!(
-        "refusing to back up into {parent:?}: it does not stay inside the backup destination \
-         {real_dst_root:?}. Either a link or junction along that path redirects it outside the \
-         destination, or the system would not say where it leads — either way the copied bytes would \
-         land somewhere this backup was never pointed at, and outside anything the job's own history \
-         can account for."
-    ))
-}
-
 /// The CPE-1896 **landing check**: after the bytes are written, establish that they went into a file
 /// inside the backup destination — and that it is *the file this call just wrote*. Returns the resolved
 /// destination, which is then the only path the verify read-back is allowed to open.
@@ -642,29 +615,14 @@ fn copy_one_verified(
     real_dst_root: &Path,
     verify: bool,
 ) -> Result<(), String> {
-    // CPE-1889's checks (1) and (2), kept ONLY for a target where the per-component walk below is not
-    // atomic — see [`crate::open_beneath::ATOMIC`]. On Unix and Windows (every platform this ships on)
-    // this whole block is a compile-time `false` and the optimiser deletes it, which is where the two
-    // `canonicalize` calls per file went. It is not deleted from the source, because on a target with
-    // no handle-relative open the walk degrades to a path open and these checks are then the only
-    // containment there is.
-    if !crate::open_beneath::ATOMIC {
-        // `safe_join` guarantees at least one named component, so a `None` parent is unreachable — but
-        // a guard that silently does nothing on an input it did not expect is the shape this whole
-        // family of tickets keeps finding, so it refuses instead of skipping the check.
-        let parent = dst.parent().ok_or_else(|| {
-            format!("refusing to write {dst:?}: it has no parent directory to contain it")
-        })?;
-        parent_contained(parent, real_dst_root)?;
-        // `metadata` follows links deliberately: a junction at `parent` answers `is_dir() == true`
-        // here, and that is fine — check (1) has already refused it. All this decides is whether there
-        // is any directory to create, and hence whether check (2) has anything new to confirm.
-        if !std::fs::metadata(parent).is_ok_and(|m| m.is_dir()) {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            parent_contained(parent, real_dst_root)?;
-        }
-    }
-
+    // CPE-1889's checks (1) and (2) used to run here — a `canonicalize` of the parent before
+    // `create_dir_all` and another after it. Both are **gone**, not disabled: the walk below opens
+    // every component against the previous component's handle, so there is no path left for them to
+    // resolve and nothing they could add. An intermediate revision of this PR kept them behind an
+    // `open_beneath::ATOMIC` `const bool` "for a target with no handle-relative open"; the reviewer
+    // then compiled that target's arm and found it had never built (two `E0308`s and an `E0507`), which
+    // made this block dead code that `dead_code` could not see and left `parent_contained` with no
+    // reachable caller. Deleted together. See the "no fourth row" note on [`crate::open_beneath`].
     let copied = crate::fsutil::copy_file_onto_destination_handle(
         src,
         dst,
