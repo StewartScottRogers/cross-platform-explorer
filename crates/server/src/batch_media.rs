@@ -2134,6 +2134,34 @@ pub(crate) fn open_existing_no_follow(path: &std::path::Path) -> std::io::Result
     opts.open(path)
 }
 
+/// Open an **existing** file for READING without following a link at the final component (CPE-1896).
+///
+/// [`open_existing_no_follow`]'s read-only twin, and the difference is load-bearing rather than
+/// stylistic. `backup::landed_inside` opens the file it has just written purely to read its identity
+/// back off the handle, and a backup legitimately copies **read-only files** — `copy_file_onto_no_follow`
+/// carries the source's permissions onto the destination, so asking for write access there would fail
+/// with `PermissionDenied` on exactly the ordinary case and turn every read-only file in a backup into
+/// a reported failure. Read access is all an identity probe needs.
+///
+/// No `create` mode at all: the caller is asking about something that must already exist, and
+/// materialising an empty file at a name that vanished would answer the wrong question entirely. Same
+/// no-follow flags as its siblings, so the handle is addressable by [`handle_facts`] on identical terms.
+pub(crate) fn open_existing_no_follow_read(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT_U32);
+    }
+    opts.open(path)
+}
+
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
 /// keep it non-destructive + collision-free when `non_destructive`, and summarise. Ordered like `inputs`.
 /// **Not purely in-memory** despite the module's original "no filesystem" framing (CPE-1623): computing
