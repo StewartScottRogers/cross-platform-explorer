@@ -72,3 +72,29 @@ subsystems), **CPE-1898** (the source leg has no containment assertion either).
 Worth reading CPE-1896's audit before starting: the handle-identity approach is described there in
 enough detail to implement, including why the hard-link route to forging an identity match is already
 refused by the existing `facts.links > 1` branch at `fsutil.rs:1494`.
+
+## Closed 2026-08-27 — fixed by CPE-1896, verified by CPE-1913's worker
+
+**Not fixed by its own ticket. Closed because CPE-1896 made it unreachable, and then someone checked
+rather than assumed.**
+
+CPE-1913's worker was asked to determine whether this ticket was subsumed **by testing, not by
+reading**, and it did:
+
+- **Green on current `main`:** a junction `dst/Photos -> dst/Trash` planted inside the destination now
+  gives `ok: false` with a refusal naming the component — *the path component "Photos" is a link (a
+  symlink, junction or other reparse point)* — and nothing lands in `dst/Trash`.
+- **Red with the pre-CPE-1896 open substituted** (`batch_media::open_no_follow` in place of
+  `create_beneath`), reproducing this ticket's report **byte for byte**:
+  `OpResult { ok: true, error: "", outcome: Applied }` with `trash_has_photo = true`.
+
+**Why:** CPE-1896's per-component walk refuses a name surrogate at **every** component and never asks
+where the path ends up — so "both paths are inside the root", which is what made this case slip
+through before, stopped being a question the code asks.
+
+AC4 is answered (refuse, naming the component) and AC5 holds by construction — Restore is the same
+walk with the roots swapped.
+
+**The fixture is now a permanent test** rather than a closed ticket's anecdote:
+`backup::tests::cpe_1912_a_junction_inside_the_destination_never_silently_redirects_a_subtree`, landed
+in PR #1050, with a liveness write so an inert fixture cannot pass.
