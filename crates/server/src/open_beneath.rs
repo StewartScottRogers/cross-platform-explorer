@@ -910,7 +910,7 @@ mod sys {
         for name in dirs {
             sofar.push(name);
             let c = cname(name).map_err(|()| {
-                refuse(root, &sofar, "contains a NUL byte, which no filesystem name can hold")
+                refuse(root, sofar, "contains a NUL byte, which no filesystem name can hold")
             })?;
             let parent = match held.as_ref() {
                 Some(f) => f.as_raw_fd(),
@@ -922,9 +922,9 @@ mod sys {
                 // does a plain file sitting where a directory should be; they need different
                 // sentences and the errno cannot tell them apart.
                 if link_at(parent, &c) {
-                    refuse_link(root, &sofar)
+                    refuse_link(root, sofar)
                 } else {
-                    refuse(root, &sofar, &format!("could not be opened ({e})"))
+                    refuse(root, sofar, &format!("could not be opened ({e})"))
                 }
             })?;
             held = Some(dir);
