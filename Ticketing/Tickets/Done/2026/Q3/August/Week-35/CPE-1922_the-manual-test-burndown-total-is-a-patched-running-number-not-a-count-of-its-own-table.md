@@ -3,7 +3,7 @@ id: CPE-1922
 title: MANUAL-TEST-BURNDOWN.md's MVD total is a patched running number, not a count of its own table — it has drifted 2-4 rows in both directions
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -205,3 +205,50 @@ derived total, so the measurer keeps working whichever PR lands first. Its basel
 which is a **lowering** — always legal, and the entry is `unenforced` anyway. Its `docs/design/RATCHETS.md`
 enumeration table quotes `16`; whoever merges second should update that cell to `13`. No file is touched
 by both PRs, so there is no merge conflict.
+
+## Closed 2026-08-27 — merged as PR #1055, after three rounds
+
+**Reviewer APPROVE.** True count **12**; the header said **16** — drift of **+4, overstating the
+debt**. Independently reproduced by the Reviewer with its own counter (no import of the new module),
+and it matches PR #1042's UAT recount reached by a different method (bare grep vs a GFM parser). The
+gap predates #1042, so every dated delta line since the 2026-07-25 baseline had been reconciling
+forward from an already-wrong number. Header now **13** — reset from the count, not patched, with one
+row this shift added.
+
+### Grep could not have found this; rendering could
+
+The ledger was malformed in two ways invisible in raw text:
+
+- a **blank line inside the Ledger had detached rows #10–#14** — no header, no delimiter, so GitHub
+  rendered them as a paragraph of pipe characters, not a table;
+- **row #3 was wrapped across ten physical lines**, each rendering as its own single-cell row.
+
+Base file rendered **4 tables, not 8**, with the Ledger showing **18** body rows instead of 14.
+Also fixed: three tables with no header/delimiter, a `🟡 partial` marker in use but absent from the
+Legend, and a cell containing an **escaped** pipe (`\|`, a grep alternation) that a naive
+`split("|")` reads as an extra column — now pinned on the real file at line 521.
+
+### Three rounds, and the last two findings were the interesting ones
+
+1. **The parser gated on `startsWith("|")`, but GFM allows three leading spaces.** Indent a table by
+   two: the rendered page a human reads is **byte-identical**, both safety floors still pass, the
+   count silently drops 13 → 10 — and the test then reds telling the next shift to *write 10 into the
+   header*. A silent under-count laundered as verified, in the module whose own header comment
+   declares that impossible. Four-plus spaces now reds too, because at that width **GFM itself loses
+   the table** (8 → 7 rendered), so it is always a mistake.
+2. **A new debt table logged in a *blockquote* passed every check** with 3 MVD rows uncounted — `>` is
+   not whitespace, so the loose matcher and the parser's gate moved together. One character
+   (`/^[\s>]*\|/`), applied to the annotation matcher too, because a table *announced* from inside a
+   blockquote has to be seen to be announced.
+
+Floor A is now derived (`parsed === announced`) rather than hardcoded, and `fencedLines` is shared so
+the test and the parser cannot disagree about what a fence is.
+
+### Deferred deliberately, and filed
+
+**CPE-1946** — CPE-1263 sits in an `excluded` table whose stated criterion is "no retiring ticket",
+but its residual is render/gui-smoke and **CPE-1819 is live and named by Ledger row #12 as the shared
+blocker**. By the file's own rule it is countable debt, so the total is 13 and arguably 14. Not
+counted here because promoting it would have moved the recount off **12** — the only independent
+cross-check the number has. The ledger now states the discrepancy with its ticket and the exact
+arithmetic, so the decision is filed and assignable rather than a prose promise about "the next pass".

@@ -3,7 +3,7 @@ id: CPE-1923
 title: `verify-release-artifacts` passes at exit 0 on three hostile manifests — including a genuinely-signed **downgrade** to an older installer
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -444,3 +444,63 @@ rather than merely lax (the real signed names contain spaces).
 **Merged-tree verification:** `cargo clippy --locked --all-targets -- -D warnings` clean;
 `cargo doc --no-deps` clean; `cargo test --locked` 133 pass / 0 fail; `npm run check` 0/0;
 `npm test` 339 files / 4,700 tests / 0 failures; lockfile pre-flight `0 stale of 17`.
+
+## Closed 2026-08-27 — merged as PR #1053, after four rounds
+
+**Reviewer APPROVE + Security Auditor SEC PASS.** Both gates found the same two blocking defects
+**independently, without seeing each other's reports** — which is the strongest signal this crew
+produces.
+
+### The fix this ticket asked for was the wrong fix, twice over
+
+**Two of this ticket's own proposed rules were wrong against reality**, and the worker found out by
+reading the published releases before writing any code:
+
+- `Explorer_(Sidecar)_` is **not** what the bundler emits — it emits `Cross-Platform.Explorer.Sidecar._…`
+  and `…Sidecar.-…` for the RPM. That token would have rejected **100% of real sidecar assets**.
+- The `.nsis.zip` / `.AppImage.tar.gz` extension sets are the `v1Compatible` spellings; this repo ships
+  `createUpdaterArtifacts: true`, i.e. plain `.exe`/`.msi`/`.AppImage`/`.deb`/`.rpm`.
+
+Both corrections were independently re-verified by the Reviewer against `gh release view`.
+
+### And the first implementation still did not close the bug
+
+Round 3 bound the version to the **uploaded asset filename** — which the declared threat model
+(release-asset write, no signing key) lets the attacker choose as freely as the bytes:
+
+    old 0.1.0 installer, own name          -> exit 1
+    THE SAME BYTES AND SIGNATURE,
+    uploaded as ..._0.57.70_x64-setup.exe  -> exit 0   "OK: verified 1 of 1"
+
+The remedy was already in the file and being discarded: **minisign's trusted comment is covered by
+the global signature**, and `tauri-bundler` writes `file:<original name>` into it. `lib.rs:243` called
+`minisign::verify` and threw the comment away. The final fix binds to that signed name and **deletes**
+the name-based rule rather than keeping both — two anti-rollback rules reading different inputs could
+only ever disagree. The auditor verified the cryptographic premise in minisign's own source rather
+than taking it on trust.
+
+Five rename attacks moved 0 → 1. Round 4 closed **SEC-9**: the version check got the signed-name pass
+and the *platform/asset mapping* check did not, so the same rename put a Linux `.deb` under
+`windows-x86_64` at exit 0 — denial-of-update.
+
+### Two guards that could not tell you they were broken
+
+- The worker's **first SEC-9 probe fixtures did not isolate** — written against the sidecar product
+  with plain-named artifacts, so the *channel* pass refused them. They would have "reproduced" the bug
+  for the wrong reason and gone green on a fix that did nothing. Caught only by sabotaging the new
+  pass and watching a control fail alongside.
+- The **empty-`version` guard initially reddened nothing** — added with no test behind it.
+
+Both are the shadowed-guard shape (CPE-1929), in the PR whose subject is checks that pass for the
+wrong reason. Three instances in one ticket.
+
+### Residuals, all filed
+
+**CPE-1942** — the macOS `.app.tar.gz` exemption. The Foreman and the Auditor both expected the
+trusted comment to close it; the worker downloaded the real `.sig` assets and found **macOS's signed
+name is versionless too**. Narrowed from "any signed bytes under a macOS-looking name" to "a genuine
+macOS tarball from another release of this product", not closed.
+**CPE-1943** — prerelease/build siblings, the channel prefix test, loose platform keys, and (F-D) the
+mapping rule being OS-granular so same-OS payload substitution is admitted.
+**CPE-1944** — CI runs no `cargo doc` at all; **three** doc defects landed in this one ticket with
+nothing catching them, in the crate whose module docs *are* the argument for why the gate is sound.
