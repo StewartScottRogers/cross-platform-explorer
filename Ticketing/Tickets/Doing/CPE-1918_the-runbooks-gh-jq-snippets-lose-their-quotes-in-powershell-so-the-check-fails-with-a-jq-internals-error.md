@@ -203,22 +203,58 @@ the *guard itself* had holes. All six are fixed in this PR rather than filed, an
 fixture in `runbookJqQuoting.test.ts`** — a guard's known evasions belong in its own test table, not in
 a review transcript.
 
-It also sharpened the `ConvertFrom-Json` finding, which was worse than first reported. With the
-pipe-into-`Where-Object` form and a job name that **exists** on the run:
+### RETRACTED (round 3): the `ConvertFrom-Json` trap is fail-SAFE, not fail-open
+
+**This Work Log, `RELEASING.md` and `run.md` all previously said the broken form makes the publish
+check *pass*, "exactly wrong on the cancelled/partial-matrix run". That was wrong, and it was mine —
+the reviewer raised a version of it, I sharpened it into bold text in two runbooks, and neither of us
+had executed the scenario the claim named.** Struck and replaced everywhere.
+
+What was actually measured, round 1, was a run where **all four jobs succeeded** and the searched-for
+job was one of them. That is a *correct* pass. Generalising it to "the check then passes" was an
+inference, not a measurement.
+
+Re-measured on real PS 5.1 with controlled job arrays, TRAP = pipe-into-`Where-Object`,
+FIXED = assign-then-pipe:
 
 ```
-matched job count = 4
-matched names: create-release | release-sidecar (ubuntu-latest, unix, linux) | ... | ...
--not $job                     = False
-$job.conclusion -ne 'success' = False
-RESULT: *** GUARD PASSES *** -- would publish, on a 4-job array not a single job
+S1 partial matrix (target SKIPPED, a leg CANCELLED) -- the case the doc named
+   TRAP : matched=4  conc -ne success=True  => THROWS
+   FIXED: matched=1  conc -ne success=True  => THROWS
+S2 target SUCCESS, sibling FAILED
+   TRAP : matched=3  conc -ne success=True  => THROWS
+   FIXED: matched=1  conc -ne success=False => PASSES
+S3 all success  => both PASS
+S4 target absent => both THROW
+S5 target failed => both THROW
 ```
 
-So it is not a stylistic fix: the publish check silently degrades from "the verify job succeeded" to
-"**some** job on this run succeeded", which is exactly wrong on the cancelled/partial-matrix run the
-gate exists to catch. Measured detail worth keeping: when the name is **absent** it still fires
-correctly (count 0, guard fires) — which is precisely why this hides during casual testing. Both
-runbooks now say this in full.
+The mechanism the doc stated was **backwards**. `-ne` on an array is a *filter*, not a boolean:
+
+```
+@('success','failure') -ne 'success'  ->  failure   [bool]=True
+@('success','success') -ne 'success'  ->  ''        [bool]=False
+```
+
+So `$job.conclusion -ne "success"` is false only when **every** conclusion is `success` — not "as long
+as any job succeeded". Three consequences:
+
+1. **S1, the scenario both runbooks named, THROWS under the trap** — identically to the correct form.
+   The partial-matrix run is not a case the trap waves through.
+2. **The trap can never pass where the correct form throws.** Passing requires every conclusion to be
+   `success`, which entails the target's own.
+3. Its real failure mode is the **opposite**: S2, where it *refuses* a publish the correct form
+   allows, with a garbled message. Measured:
+   `(conclusion: success success cancelled skipped)` instead of `(conclusion: skipped)`.
+
+A genuine bug — wrong answer, unreadable message — but **fail-safe**. The fix stands; only the
+justification was wrong.
+
+**Note what this was: a doc asserting a mechanism nobody had executed — inside the PR whose entire
+subject is snippets that were never run.** That is CPE-1933's shape exactly, one level up from the
+original bug, and it survived a round of review before being caught. The lesson generalises past
+snippets: a *rule* stated in a runbook is as much a provenance claim as a command in one, and
+"reasoned from how PowerShell works" is the same evidence class as "it looks right".
 
 **F1 — a `--jq` whose filter sits on the PowerShell continuation line evaded entirely.** The most
 realistic reintroduction shape, because the shipped snippets already break immediately *before*
@@ -240,7 +276,11 @@ Red-proofed on the real file: `RELEASING.md:116  lang=console`.
 **F4 — indented and 4-backtick fences were invisible.** The old `/^```(\S*)\s*$/` was column-0 only.
 This was **not** latent: re-parsing the real files showed **seven** blocks the guard had never seen —
 `README.md:145` and `:209` (both `bash`), `.claude/commands/sprint.md:692`,
-`ticketing-organize.md:87`, `skills-organise.md:71` and `:128`. `run.md` is a numbered-step document,
+`ticketing-organize.md:87`, `skills-organise.md:71` and `:128`, and
+`docs/design/VAULT-SECURITY.md:308` (the 4-space-indented untagged pair at 307/309). *(That last one
+was missing from the first version of this list, which said "seven" and then named six — corrected in
+review. Verified: none of the seven contains a `gh` command or a jq flag, so none was hiding a live
+bug; the hole was in coverage, not in the tree.)* `run.md` is a numbered-step document,
 so the next `gh` snippet added inside a list item would have been unguarded. The parser now handles
 leading indentation and fences of 3+ backticks (a closing fence must be at least as long as its
 opener, so a block can contain a ``` line of its own — previously that mis-parsed the language as
@@ -260,8 +300,35 @@ class already regressed once.
 **F7 — ticket hygiene.** ACs ticked, with AC #1 explicitly annotated as *not followed, because it was
 disproved*. Line-number citation replaced with the offending text.
 
+### Known gaps in the guard, recorded rather than fixed
+
+All four are now one-line entries in `runbookJqQuoting.test.ts`'s header, so the next reader sees the
+guard's limits next to its rules rather than having to rediscover them:
+
+1. **Blockquoted fences evade** (`> ```powershell`). None today, but `RELEASING.md` already uses
+   blockquote callouts — including the `$jobs` note rewritten above. Stripping a `> ` prefix is easy;
+   doing it without breaking a fence that interleaves with a quote boundary is not, so it is left.
+2. **`--jq $q` is a miss** — the quotes live on the assignment line, not the flag. That is **row 4 of
+   this ticket's own measured-broken table** ("a variable does not help"), so the doc names a broken
+   shape the guard cannot pin. Acknowledged explicitly; the doc is the only control for that one.
+3. **`Select-String … -q "z"` would be a false red** (PowerShell accepts `-q` as a unique prefix of
+   `-Quiet`). None today; if one appears, exempt `Select-String` rather than loosen the flag matcher.
+4. **Tilde fences** were a gap and are now **fixed** — it cost one character class. A fence opens on
+   three or more backticks *or* tildes and closes only on the **same** character, so a `~~~` block is
+   not terminated by a ``` line. Two fixtures added (tilde block; and `` `` `` is not a fence).
+
+### A second escaping trap, hit while making this very fix
+
+Worth recording because it is the ticket's own subject biting one level down. Patching the fence regex
+through a shell heredoc into Python wrote a literal `\x02` into the source — the `\2` backreference was
+eaten by an escaping layer and reinterpreted as an octal escape. It compiled, and the regex silently
+became "two or more markers" with no backreference. Caught only by dumping `repr()` of the line rather
+than reading it. Same lesson as the ticket: **check the bytes, don't reason about the escaping.** The
+final edit was made with a tool that does literal replacement, no shell layer.
+
 Re-verified after all of the above: the restored `RELEASING.md` snippet still runs verbatim —
-`runId=32645968281  jobs parsed=4`, crafted message emitted. Guard: 15 tests green.
+`runId=32645968281  jobs parsed=4`, crafted message emitted. Guard: 17 tests green; a scan confirmed no
+stray control characters anywhere in the test file.
 
 ### Deliberately not done
 

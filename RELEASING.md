@@ -129,19 +129,30 @@ if (-not $job -or $job.conclusion -ne "success") {
 }
 ```
 
-> **`$jobs` is assigned first on purpose — this is a correctness fix, not a style one.** In Windows
+> **`$jobs` is assigned first on purpose — it is a real bug, but a *fail-safe* one.** In Windows
 > PowerShell 5.1 `ConvertFrom-Json` emits a JSON array as a **single** pipeline object, so
 > `… | ConvertFrom-Json | Where-Object { $_.name -ceq '…' }` evaluates `$_.name` against the whole
-> array. When the name exists the array comparison is non-empty, `Where-Object` reads that as true, and
-> **all** jobs pass the filter — `$job` becomes the entire array, `-not $job` is false, and
-> `$job.conclusion -ne "success"` is false as long as *any* job succeeded. **The check then passes.**
-> It has silently degraded from "the verify job succeeded" to "some job on this run succeeded", which
-> is precisely wrong on a cancelled or partial-matrix run — the case the gate exists to catch.
+> array. When the name exists the comparison is non-empty, `Where-Object` reads that as true, and
+> `$job` becomes the **entire array**. The gate then answers *"did every job on this run succeed?"*
+> instead of *"did the verify job succeed?"* — because `@(…) -ne 'success'` is an array **filter**, so
+> `$job.conclusion -ne "success"` is false only when **every** conclusion is `success`.
 >
-> Measured on real run `32645968281`: `matched job count = 4`, both `if` arms false, result *would
-> publish*. Note it fires correctly when the name is **absent** (count 0), which is how this hides
-> during casual testing. Assigning to `$jobs` and piping the variable enumerates it, so exactly one job
-> matches. (Verified, CPE-1918.)
+> Measured on real PS 5.1 with controlled job arrays:
+>
+> | scenario | trap | correct form |
+> |---|---|---|
+> | target `skipped`, a leg `cancelled` (partial matrix) | matched=4, **THROWS** | matched=1, **THROWS** |
+> | target `success`, a sibling `failed` | matched=3, **THROWS** | matched=1, **PASSES** |
+> | all `success` | PASSES | PASSES |
+> | target absent | THROWS | THROWS |
+> | target `failure` | THROWS | THROWS |
+>
+> So it **can never allow a publish the correct form refuses** — passing requires every conclusion to
+> be `success`, which entails the target's own. Its actual failure mode is the opposite: it *refuses* a
+> publish the correct form allows (row 2), and its refusal message lists every job's conclusion instead
+> of the one that matters — `(conclusion: success success cancelled skipped)` rather than
+> `(conclusion: skipped)`. Wrong, and confusing at 2am, but never unsafe. Assigning to `$jobs` and
+> piping the variable enumerates it, so exactly one job matches. (Verified, CPE-1918.)
 
 `--limit 1` assumes you check this immediately after dispatching — if another sidecar dispatch races
 yours, resolve the run by its `displayTitle`/`createdAt` instead of trusting "most recent" (`run.md`'s

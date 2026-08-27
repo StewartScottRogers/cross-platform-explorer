@@ -100,15 +100,20 @@ if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish
 # tag (so its `displayTitle` carries the tag), or verify the job by hand per RELEASING.md instead.
 
 # CPE-1918 again: `--jq` only plucks the sub-tree (no `"` in the filter); the name match is
-# PowerShell's. `$jobs` is assigned BEFORE being piped on purpose -- that is a CORRECTNESS fix, not a
-# style one. In PS 5.1 `ConvertFrom-Json` emits a JSON array as ONE pipeline object, so
+# PowerShell's. `$jobs` is assigned BEFORE being piped on purpose -- a real bug, but a FAIL-SAFE one.
+# In PS 5.1 `ConvertFrom-Json` emits a JSON array as ONE pipeline object, so
 # `… | ConvertFrom-Json | Where-Object { $_.name -ceq … }` compares the WHOLE array; when the name
-# exists the comparison is truthy and EVERY job passes the filter. $verifyJob then holds all of them,
-# `-not $verifyJob` is false, and the `conclusion -ne "success"` test below is false as long as ANY
-# job succeeded -- so the gate PASSES, having quietly degraded from "the verify job succeeded" to
-# "some job on this run succeeded". That is exactly wrong on the cancelled/partial-matrix run the gate
-# exists to catch. Measured on real run 32645968281: matched job count = 4, both arms false, would
-# publish. It fires correctly when the name is ABSENT, which is how it hides in casual testing.
+# exists the comparison is truthy and $verifyJob ends up holding EVERY job. The gate then answers
+# "did every job on this run succeed?" instead of "did the verify job succeed?", because
+# `@(…) -ne 'success'` is an array FILTER -- false only when EVERY conclusion is `success`.
+#
+# Measured on real PS 5.1 with controlled job arrays: on a partial matrix (target skipped, a leg
+# cancelled) the broken form THROWS, exactly as the correct one does. It can never allow a publish the
+# correct form refuses -- passing requires every conclusion to be `success`, which entails the
+# target's own. Its actual failure mode is the reverse: with the target `success` and a sibling
+# `failed` it REFUSES a publish the correct form allows, and its message lists every job's conclusion
+# -- `(conclusion: success success cancelled skipped)` instead of `(conclusion: skipped)`. Wrong and
+# confusing, never unsafe.
 $jobs = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
   --jq '.jobs' | ConvertFrom-Json
 $verifyJob = $jobs | Where-Object { $_.name -ceq $jobName }

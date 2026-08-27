@@ -28,6 +28,24 @@
 // fenced block containing a `gh` command line names a specific shell — not merely *some* info string,
 // because a PowerShell snippet mislabelled ```console is skipped by the first test AND satisfies a
 // naive "has a tag" check, making it doubly invisible.
+//
+// KNOWN GAPS, measured and deliberately left open (CPE-1918 review round 2). Each is a shape this
+// guard does NOT catch. They are recorded here rather than fixed because none exists in the tree
+// today and each fix risks more than it buys; if one ever appears, fix it and delete its line.
+//
+//   1. Blockquoted fences evade: `> ```powershell` is not seen at all. Not hypothetical — RELEASING.md
+//      already uses blockquote callouts, including the `$jobs` note right beside the fixed snippet.
+//      Stripping a `> ` prefix per line is easy; doing it without breaking a fence that interleaves
+//      with a quote boundary is not, so it is left.
+//   2. `--jq $q`, where the filter was assigned to a variable on an earlier line, is a miss: the
+//      quotes live on the assignment, not the flag. This is row 4 of the measured table above — the
+//      doc names a broken shape this guard cannot pin. The doc is the control for that one.
+//   3. `Select-String … -q "z"` would be a FALSE red: PowerShell accepts `-q` as a unique prefix of
+//      `-Quiet`. None in the tree today; if one appears, exempt `Select-String` rather than loosening
+//      the flag matcher.
+//   4. Tilde fences (`~~~powershell`) were a gap and are now handled — a fence opens on three or more
+//      backticks OR tildes and closes only on the SAME character, so a tilde block is not closed by a
+//      backtick line.
 import { describe, it, expect } from "vitest";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -58,24 +76,25 @@ function walk(dir: string, out: string[]): void {
 export type Block = { lang: string; lines: string[]; startLine: number };
 
 /**
- * Every backtick-fenced block in `md`, with its info string ("" when untagged) and the 1-based line
- * number of its first content line.
+ * Every fenced block in `md`, with its info string ("" when untagged) and the 1-based line number of
+ * its first content line.
  *
- * Handles **indented** fences (a fence inside a numbered list item — `run.md` is a numbered-step
- * document and four such fences already exist in the scanned set) and fences of **more than three**
- * backticks (a closing fence must be at least as long as its opener, which is how a block can contain
- * a ``` line of its own).
+ * Handles **indented** fences (a fence inside a list item — `run.md` is a numbered-step document, and
+ * re-parsing the real files found SEVEN such blocks the column-0-only version had never seen), fences
+ * of **more than three** markers (a closing fence must be at least as long as its opener, which is how
+ * a block can contain a ``` line of its own), and **tilde** fences. A block closes only on the same
+ * marker character it opened with, so a `~~~` block is not terminated by a ``` line.
  */
 export function fencedBlocks(md: string): Block[] {
   const lines = md.replace(/^﻿/, "").split(/\r?\n/);
   const blocks: Block[] = [];
-  let open: (Block & { ticks: number }) | null = null;
+  let open: (Block & { ticks: number; char: string }) | null = null;
   for (let i = 0; i < lines.length; i++) {
-    const fence = /^\s*(`{3,})\s*(\S*)\s*$/.exec(lines[i]);
+    const fence = /^\s*(([`~])\2{2,})\s*(\S*)\s*$/.exec(lines[i]);
     if (open) {
       // A closing fence is bare and at least as long as the opener; anything else is content.
-      if (fence && fence[2] === "" && fence[1].length >= open.ticks) {
-        const { ticks: _ticks, ...block } = open;
+      if (fence && fence[3] === "" && fence[2] === open.char && fence[1].length >= open.ticks) {
+        const { ticks: _ticks, char: _char, ...block } = open;
         blocks.push(block);
         open = null;
       } else {
@@ -83,10 +102,18 @@ export function fencedBlocks(md: string): Block[] {
       }
       continue;
     }
-    if (fence) open = { lang: fence[2].toLowerCase(), lines: [], startLine: i + 2, ticks: fence[1].length };
+    if (fence) {
+      open = {
+        lang: fence[3].toLowerCase(),
+        lines: [],
+        startLine: i + 2,
+        ticks: fence[1].length,
+        char: fence[2],
+      };
+    }
   }
   if (open) {
-    const { ticks: _ticks, ...block } = open;
+    const { ticks: _ticks, char: _char, ...block } = open;
     blocks.push(block);
   }
   return blocks;
@@ -280,6 +307,25 @@ describe("evasions this guard used to have (CPE-1918 review)", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].lang).toBe("powershell");
     expect(blocks[0].lines).toHaveLength(2);
+  });
+
+  it("F4c: a tilde fence is scanned, and is not closed by a backtick line", () => {
+    const md = ["~~~powershell", "```", `gh run view 1 --json jobs --jq '.jobs[] | select(.name=="x")'`, "~~~", ""].join(
+      "\n",
+    );
+    const blocks = fencedBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].lang).toBe("powershell");
+    expect(blocks[0].lines).toHaveLength(2);
+    // The inner "```" ends in a backtick, so the joiner folds it into the next line — one logical
+    // line, and the bad filter is still caught.
+    const joined = logicalLines(blocks[0].lines);
+    expect(joined).toHaveLength(1);
+    expect(badJqArgs(joined[0][1])).toHaveLength(1);
+  });
+
+  it("a two-marker line is not a fence", () => {
+    expect(fencedBlocks(["``", "not a fence", "``", ""].join("\n"))).toEqual([]);
   });
 
   it("comment lines may still quote the broken form while explaining it", () => {
