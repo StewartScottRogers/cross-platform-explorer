@@ -315,3 +315,51 @@ be argued in the work log.
   OK) — `node --check` confirms valid syntax. A loaded-runner cold start cannot be reproduced on this
   machine, so the honest claim is **did not regress locally**, not "fixed, verified" — the actual proof
   is the next CI run on the pushed SHA.
+
+- **2026-08-27 — Round 7: merged `origin/main` into the branch — this PR was 27 commits behind, and a
+  green check on the branch alone was evidence about the branch, not about what actually lands on
+  `main` once squashed.** Five PRs had merged tonight (#1040, #1041, #1042, #1045, #1038) touching files
+  this PR also touches — `fsutil.rs`, `src-tauri/src/lib.rs`, `.github/workflows/ci.yml`,
+  `scripts/dev-harness/layout-guard/engine.mjs` — so this was resolved deliberately rather than trusted
+  to the eventual squash-merge to sort out blind.
+
+  **One real conflict, in `engine.mjs`:** `main` had landed CPE-1914's `CDP_NAVIGATE_TIMEOUT_MS` (the
+  sibling constant round 6's fix was written to sit "alongside") in the same spot round 6 added
+  `CDP_ENDPOINT_TIMEOUT_MS`. Resolved by keeping BOTH constants, reordering so `CDP_NAVIGATE_TIMEOUT_MS`
+  comes first (it's `main`'s, and the `CDP_ENDPOINT_TIMEOUT_MS` comment now cross-references it instead
+  of the temporary "does not exist on this branch yet" language, which would have gone stale and wrong
+  the moment this merge landed. Rewrote that comment to explain WHY the two stay separate constants
+  rather than folding into one (they gate two independently-slow waits — endpoint-up vs.
+  first-navigate-ack — so collapsing them would hide which one actually expired) while still reusing the
+  same 40000ms for both, same reasoning as before. Everything else — `.github/workflows/ci.yml`
+  (CPE-1916's apt-get hardening + this ticket's own CPE-1817 name-list entry),
+  `src-tauri/src/lib.rs` — auto-merged clean with zero markers; CPE-1896 (#1043) is confirmed not merged
+  to `main` yet, so no conflict there as expected.
+
+  **Verified both sides survived, not just that it compiles** (the coordinator's own bar, matching what
+  CPE-1883's worker did on its own merge tonight):
+  - `npm run harness:layout-guard` — **14 case/width combinations now, up from 12** (main's
+    `statusbar-focus-reveal` case, CPE-1883, is in), all OK. Confirms `CDP_ENDPOINT_TIMEOUT_MS` is still
+    wired to `waitForHttp`'s call site after the merge, not silently dropped.
+  - `npx vitest run` — **335 files, 4628 tests, 0 failures** (up from 4615 pre-merge; the extra passing
+    tests are `main`'s). Notably `src/lib/msrvSync.test.ts`, which round 4 flagged as a local-only
+    CRLF-checkout false failure, now passes clean too — `main` picked up CPE-1902
+    ("msrvsync-test-is-not-crlf-safe-so-it-fails-spuriously-on-windows") in the interim, which fixed
+    exactly that.
+  - `npm run check` — clean, 0 errors/warnings.
+  - `cargo clippy --all-targets -- -D warnings` — clean in both feature modes, both `crates/server`
+    (default, and `--features pdf-thumb,video-thumb,waveform,dicom-thumb`) and `src-tauri` (default, and
+    `--features sidecar-platform`).
+  - Re-ran `overwrite_confirmed_no_follow_never_writes_through_a_dangling_link` specifically (round 5's
+    macOS fix) with `--nocapture` — still passes, still stages the link for real, confirming the merge
+    didn't disturb `fsutil.rs` (it wasn't part of `main`'s incoming diff to this file at all — CPE-1911
+    and others landed elsewhere).
+  - Re-verified the CPE-1817 count after merge: `lib.rs` still has exactly 10
+    `require_staged_reason("trash_roundtrip", ..)` call sites, the CI step's lists still total 10
+    (2 linux-only + 8 shared, `cpe_1891_macro_convert_confirmed_overwrite_...` still present) — `main`'s
+    incoming commits added none.
+
+  **Noted, not acted on unilaterally:** a further PR (#1046, CPE-1881) merged to `main` in the few
+  minutes between fetching and pushing this merge. Left it for the coordinator to call rather than
+  chasing a moving target on my own judgment — the scope agreed was "the five PRs that merged tonight,"
+  and re-merging on every further landing risks never converging.
