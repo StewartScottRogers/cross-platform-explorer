@@ -248,3 +248,73 @@ smuggled into this one. **Recommend the Foreman file it.**
 - That the live 404 clears — it will **not** from a plain release alone while `/releases/latest/`
   resolves to a `-sidecar` release (CPE-1894/1908/1909).
 - The gap's end date, and whether any client-visible state needs correcting after resumption.
+
+### 2026-08-27 — worker, review round 1 (PR #1064, CHANGES REQUESTED)
+
+Both blockers were in code **this PR added**, and both were the defect class the ticket exists to
+eliminate — a guard that reports success while not guarding. Recording them here rather than only in
+the PR, because "the fix introduced a smaller copy of the bug" is the part worth remembering.
+
+**Blocker 1 — the pre-upload gate failed OPEN on a non-integer count.** `[ "${entries:-0}" -lt 1 ]`
+exits **2** (not 1) when `$entries` is not one integer, and inside an `if` an exit of 2 is
+indistinguishable from a plain "false". So the zero-entry check was **skipped**, the step exited 0,
+and it went on to upload — the only trace being `[: integer expected` on stderr. Reachable with real
+`jq` via a concatenated JSON stream (`{"entries":[]}{"entries":[{…}]}`), which jq reports one length
+per document for, at exit 0. Fixed by validating the shape first with a `case` (no subshell, so no
+repeat of the pipefail/SIGPIPE trap on the sibling step), then comparing.
+
+**Blocker 2 — the honesty gate lied in this ticket's own headline scenario.** On a tag with no signing
+key the detect step exits 1, so `HAS_KEY` reaches the terminal gate **empty**, not `"false"`. The gate
+then printed `no catalog signing key configured and this is not a tag build — nothing was published,
+and nothing was expected to be`. **Both clauses false**, in precisely the situation the ticket was
+filed about, from the step commented as "the single place this job's honesty is decided". The job was
+still red via step `k`, so only the summary line lied — which for that step is the same defect in a
+smaller place. Fixed by reading the trigger (`RELEASE_BUILD`) directly instead of inferring it from a
+missing output; the tag case is now its own `::error::` and exit 1. The adjacent "Only reachable on a
+NON-tag trigger" comment was also wrong and is gone.
+
+**Non-blocking, both fixed:**
+
+- **The ratchet was not derived at run time.** The workflow list was hard-coded to the four files that
+  happen to carry `needs:` chains; **8** exist. That is exactly the CPE-1932 rule this PR's own body
+  invokes. Now read from the directory with the near-empty backstop that rule requires.
+- **Three tests passed vacuously where `jq` is absent** (`if (!hasJq) return;` reports a green PASS for
+  a test that never ran). Worse than reported: **`jq` is absent on this machine**, so the "a real
+  one-entry bundle → exit 0" case would have *failed* had it ever run — the vacuous pass was hiding a
+  test that could not work locally at all. Probes moved to module scope and every guard converted to
+  `it.skipIf(...)`, so un-runnable cases now report as **skipped**, visibly not-run. The three are
+  additionally driven by a faithful `jq` stub (its whole contract with this step is: print the count,
+  exit non-zero when the document will not parse), so they run everywhere, with real-jq corroboration
+  kept as separate `skipIf` tests for CI's ubuntu runner.
+
+**Two residuals named in the workflow rather than fixed**, as asked: the `.sig` is checked for
+presence, never **validity** (a garbage signature passes — verifying it needs the client's verify path,
+which is CPE-1954's `VerifiedIndex` work); and the post-upload check reads `.assets[].name` but not
+`.size`, so a zero-byte asset would pass (the honest version is a re-download-and-verify, which is
+`verify-published-manifest`'s shape and wants its own ticket).
+
+**Red-proofs for the fixes.** 42 tests now (40 runnable here, 2 skipped for absent `jq`; all 42 on CI).
+Every assertion is on the step's **own diagnostic**, not merely on a non-zero exit — the reviewer's
+methodological note applies directly: its first harness produced a wall of green PASSes that were all
+artifacts (rc=127 unreachable temp paths, `set -u` aborts, non-executable stubs), each satisfying
+"expect non-zero" for the wrong reason.
+
+- **Whole-file mutation vs `main`: 31 of 40 runnable tests fail** (was 23/33 before this round).
+- **Targeted mutation, one fix at a time:** removing only the `case` shape-check kills exactly the two
+  blocker-1 tests; removing only the outcome gate's tag branch kills exactly the two blocker-2 tests.
+- Blocker 1 is also proved at the mechanism level — raw bash showing `[ "0\n1" -lt 1 ]` exits 2, the
+  `if` branch is not taken, the script continues — plus a regression demo running the shipped body
+  with only the `case` removed, which exits **0** and would have uploaded.
+- The concatenated-stream claim is corroborated against **real jq** where present, so the stub is shown
+  faithful rather than convenient.
+
+**One more vacuous green, caught in the tooling.** The first targeted-mutation script for blocker 2
+matched a structurally identical `if [ "${RELEASE_BUILD:-}" = "true" ]` block in the *unrelated*
+`verify-published-manifest` job earlier in the file, mutated that instead, and the suite stayed green —
+which briefly read as "the guard doesn't work". The script's own no-op guard could not fire, because
+the pattern *did* match something. Re-anchored on the gate's own error text. Same lesson as the
+reviewer's: a green result is only evidence once you have shown what it would take to make it red.
+
+**Rebase note.** `main` had meanwhile added CPE-1953's own numbers-corrected sections and filed
+**CPE-1956** for the `ci.yml`-behind-`lockfile-preflight` chain this PR's enumeration recommended.
+Both merged in; the recommendation is now tracked.

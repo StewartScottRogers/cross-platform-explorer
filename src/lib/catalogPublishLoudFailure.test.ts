@@ -21,8 +21,8 @@
 // What is deliberately NOT proven here: that a real tagged release publishes a real catalog
 // end to end. That requires cutting a release — an outward-facing publishing action — and was not
 // done. See the PR body for exactly what that leaves open.
-import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { describe, it, expect } from "vitest";
+import { readFileSync, writeFileSync, readdirSync, mkdtempSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -169,15 +169,17 @@ function stubGhWorks(): boolean {
   return r.status === 0 && r.stdout.includes("STUB-GH");
 }
 
-let hasBash = false;
-let hasJq = false;
-let ghStubWorks = false;
-beforeAll(() => {
-  hasBash = bashAvailable();
-  if (!hasBash) return;
-  hasJq = toolAvailable("jq");
-  ghStubWorks = stubGhWorks();
-});
+// CPE-1953 review, non-blocking finding 4: these probes used to run in `beforeAll` and each test
+// began `if (!hasBash) return;`. An early `return` inside a test body makes vitest report a **green
+// PASS for a test that never ran** -- three of the tests here did exactly that on a machine without
+// `jq`, so "33 tests" silently meant 30 and the mutation-kill count was a lower bound nobody could
+// see. That is the same "green means nothing happened" shape this entire file exists to eliminate,
+// reproduced in the file eliminating it. Probing at MODULE scope (spawnSync is synchronous, so this
+// is safe at collection time) lets `it.skipIf(...)` mark the un-runnable cases as **skipped** in the
+// reporter, where they are visibly not-run rather than indistinguishable from a pass.
+const hasBash = bashAvailable();
+const hasJq = hasBash && toolAvailable("jq");
+const ghStubWorks = hasBash && stubGhWorks();
 
 const VALID_INDEX = JSON.stringify({ entries: [{ id: "demo", version: 1_800_000_000 }] });
 
@@ -189,8 +191,7 @@ const VALID_INDEX = JSON.stringify({ entries: [{ id: "demo", version: 1_800_000_
 // because a green job is not even suspicious. This is the identical hole CPE-1923 finding 4 closed
 // for `verify-published-manifest`; the catalog job was not given the same treatment at the time.
 describe('"Detect catalog signing key" cannot report a green no-op on a tag build (CPE-1953)', () => {
-  it("key present on a tag build -> has=true, exit 0", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("key present on a tag build -> has=true, exit 0", () => {
     const r = execStep(runBody("Detect catalog signing key"), {
       env: { KEY: "deadbeef".repeat(8), RELEASE_BUILD: "true" },
     });
@@ -198,8 +199,7 @@ describe('"Detect catalog signing key" cannot report a green no-op on a tag buil
     expect(r.output).toContain("has=true");
   });
 
-  it("NO key on a tag build -> the step FAILS, and never writes has=false for the gates to read", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("NO key on a tag build -> the step FAILS, and never writes has=false for the gates to read", () => {
     const r = execStep(runBody("Detect catalog signing key"), {
       env: { KEY: "", RELEASE_BUILD: "true" },
     });
@@ -211,8 +211,7 @@ describe('"Detect catalog signing key" cannot report a green no-op on a tag buil
     expect(r.output).not.toContain("has=false");
   });
 
-  it("NO key on a NON-tag build -> the graceful has=false arm is preserved, exit 0", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("NO key on a NON-tag build -> the graceful has=false arm is preserved, exit 0", () => {
     const r = execStep(runBody("Detect catalog signing key"), {
       env: { KEY: "", RELEASE_BUILD: "false" },
     });
@@ -220,8 +219,7 @@ describe('"Detect catalog signing key" cannot report a green no-op on a tag buil
     expect(r.output).toContain("has=false");
   });
 
-  it("REGRESSION DEMO: the pre-CPE-1953 one-liner returned exit 0 + has=false on that same tag build", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("REGRESSION DEMO: the pre-CPE-1953 one-liner returned exit 0 + has=false on that same tag build", () => {
     // The literal body that shipped until this ticket. Executed here so the fix above is a measured
     // change in behaviour, not an assertion about a body nobody ever ran.
     const old = 'if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi';
@@ -243,8 +241,7 @@ describe('CPE-1893\'s "fail loudly at gh release upload" claim, exercised (CPE-1
     "catalog-out/catalog-index.json.sig": "sig\n",
   };
 
-  it("no release object for the tag (total matrix failure) -> the step exits NON-ZERO, not skipped-quiet", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("no release object for the tag (total matrix failure) -> the step exits NON-ZERO, not skipped-quiet", () => {
     const r = execStep(runBody("Upload catalog assets to the release"), {
       env: { TAG: "v9.9.9", GH_TOKEN: "x" },
       files,
@@ -256,8 +253,7 @@ describe('CPE-1893\'s "fail loudly at gh release upload" claim, exercised (CPE-1
     expect(r.all).toContain("release not found");
   });
 
-  it("release object exists -> the step exits 0 and passes the tag + the bundle glob to gh", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("release object exists -> the step exits 0 and passes the tag + the bundle glob to gh", () => {
     const r = execStep(runBody("Upload catalog assets to the release"), {
       env: { TAG: "v9.9.9", GH_TOKEN: "x" },
       files,
@@ -276,47 +272,55 @@ describe('CPE-1893\'s "fail loudly at gh release upload" claim, exercised (CPE-1
 describe('"Verify the signed bundle before uploading it" catches a zero-work sign (CPE-1953)', () => {
   const body = () => runBody("Verify the signed bundle before uploading it");
 
-  it("no catalog-index.json at all -> fails before anything is uploaded", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("no catalog-index.json at all -> fails before anything is uploaded", () => {
     const r = execStep(body(), { files: { "catalog-out/README": "nothing useful\n" } });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("::error::");
     expect(r.all).toContain("nothing to publish");
   });
 
-  it("an EMPTY catalog-index.json -> fails (a zero-byte file is not a published catalog)", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("an EMPTY catalog-index.json -> fails (a zero-byte file is not a published catalog)", () => {
     const r = execStep(body(), { files: { "catalog-out/catalog-index.json": "" } });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("nothing to publish");
   });
 
-  it("index present but its detached signature missing -> fails (clients verify before applying)", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("index present but its detached signature missing -> fails (clients verify before applying)", () => {
     const r = execStep(body(), { files: { "catalog-out/catalog-index.json": VALID_INDEX } });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("detached signature");
   });
 
-  it("index + sig with zero entries[] -> fails as the 'succeeding at zero work' shape", () => {
-    if (!hasBash || !hasJq) return;
+  // The three cases below turn on what `jq` REPORTS, and `jq` is absent from many dev machines
+  // (confirmed absent on this author's). Gating them on `hasJq` is what produced the review's
+  // finding-4 vacuous passes -- and worse than reported: on a jq-less machine the "real one-entry
+  // bundle -> exit 0" case would have FAILED had it run, because the step correctly reds when jq is
+  // missing. So they are driven by a faithful `jq` stub instead, reproducing the only contract this
+  // step has with jq (print the count on stdout; exit non-zero when the document will not parse).
+  // That makes them run everywhere. The genuine article is exercised separately, below, on any
+  // machine that has it -- and CI's ubuntu runner always does.
+  const jqStub = (stdout: string, code = 0) =>
+    code === 0 ? `printf '%s\\n' "${stdout}"; exit 0` : `echo "jq: parse error" >&2; exit ${code}`;
+
+  it.skipIf(!hasBash)("index + sig with zero entries[] -> fails as the 'succeeding at zero work' shape", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": JSON.stringify({ entries: [] }),
         "catalog-out/catalog-index.json.sig": "sig\n",
       },
+      stubs: { jq: jqStub("0") },
     });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("zero entries");
   });
 
-  it("index + sig that is not JSON at all -> fails as corrupt, not as a silent abort", () => {
-    if (!hasBash || !hasJq) return;
+  it.skipIf(!hasBash)("index + sig that is not JSON at all -> fails as corrupt, not as a silent abort", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": "{ truncated",
         "catalog-out/catalog-index.json.sig": "sig\n",
       },
+      stubs: { jq: jqStub("", 5) },
     });
     expect(r.status).not.toBe(0);
     // The `if ! entries=$(jq ...)` shape (CPE-1893 UAT round 1) is what lets the diagnostic print at
@@ -324,8 +328,19 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
     expect(r.all).toContain("not parseable JSON");
   });
 
-  it("a real one-entry bundle -> exit 0 and entries=1 published to $GITHUB_OUTPUT", () => {
-    if (!hasBash || !hasJq) return;
+  it.skipIf(!hasBash)("a one-entry bundle -> exit 0 and entries=1 published to $GITHUB_OUTPUT", () => {
+    const r = execStep(body(), {
+      files: {
+        "catalog-out/catalog-index.json": VALID_INDEX,
+        "catalog-out/catalog-index.json.sig": "sig\n",
+      },
+      stubs: { jq: jqStub("1") },
+    });
+    expect(r.status).toBe(0);
+    expect(r.output).toContain("entries=1");
+  });
+
+  it.skipIf(!hasBash || !hasJq)("REAL JQ corroboration: a genuine one-entry bundle -> exit 0, entries=1", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": VALID_INDEX,
@@ -336,8 +351,91 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
     expect(r.output).toContain("entries=1");
   });
 
-  it("with jq absent from PATH entirely, the step still fails LOUD -- never green", () => {
-    if (!hasBash) return;
+  // ── Review blocker 1: the entry-count comparison must not fail OPEN ─────────────────────────
+  // `[ "$x" -lt 1 ]` exits **2** when $x is not a single integer, and inside an `if` that reads as
+  // plain "false" -- so the zero-entry check was skipped and the step exited 0 and went on to
+  // upload. Both halves are proved: the raw bash mechanism (so the claim about `[` is not taken on
+  // faith), and the shipped step against real jq output that triggers it.
+  it.skipIf(!hasBash)('MECHANISM: `[ "0\\n1" -lt 1 ]` exits 2, and an `if` cannot tell 2 from false', () => {
+    const r = spawnSync(
+      "bash",
+      ["-c", 'entries=$(printf "0\\n1"); if [ "${entries:-0}" -lt 1 ]; then echo TOOK-LT-BRANCH; fi; echo "step-continued"'],
+      { encoding: "utf8" },
+    );
+    // The whole defect in three lines: the guard branch is not taken, the script carries on, and the
+    // only trace is a stderr line nobody reads.
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain("TOOK-LT-BRANCH");
+    expect(r.stdout).toContain("step-continued");
+    expect(r.stderr).toContain("integer expected");
+  });
+
+  const CONCATENATED_STREAM = '{"entries":[]}{"entries":[{"id":"demo","version":1800000000}]}';
+
+  it.skipIf(!hasBash)("a multi-line count -- the step must REFUSE it, not upload", () => {
+    // Two JSON documents back to back. Real jq prints one length per document and exits 0, so
+    // `entries` arrives as "0\n1" -- an honest reading failure that the old comparison turned into a
+    // pass. Driven by the stub so this runs everywhere; the real-jq version follows.
+    const r = execStep(body(), {
+      files: {
+        "catalog-out/catalog-index.json": CONCATENATED_STREAM,
+        "catalog-out/catalog-index.json.sig": "sig\n",
+      },
+      stubs: { jq: 'printf \'%s\\n\' 0 1; exit 0' },
+    });
+    expect(r.status).not.toBe(0);
+    // Assert on the step's OWN diagnostic, not merely on a nonzero exit -- a nonzero exit can be
+    // earned for entirely the wrong reason (the review's own harness produced a wall of green PASSes
+    // that were rc=127 "bash not found" and `set -u` aborts).
+    expect(r.all).toContain("which is not one non-negative integer");
+    expect(r.all).toContain("that is how a guard fails open");
+    expect(r.output).not.toContain("entries=");
+  });
+
+  it.skipIf(!hasBash)("a count that is not a number at all is refused with the same diagnostic", () => {
+    const r = execStep(body(), {
+      files: {
+        "catalog-out/catalog-index.json": VALID_INDEX,
+        "catalog-out/catalog-index.json.sig": "sig\n",
+      },
+      // Stub jq so this case runs everywhere, including where jq is absent. It stands in for any
+      // future jq/schema change that stops yielding a bare integer.
+      stubs: { jq: 'echo "null"; exit 0' },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.all).toContain("which is not one non-negative integer");
+  });
+
+  it.skipIf(!hasBash || !hasJq)("REAL JQ: a concatenated stream really does make jq print two counts at exit 0", () => {
+    // Corroborates that the stub above is faithful rather than a convenient fiction: this is what
+    // genuine jq does with the same bytes. Skipped, visibly, where jq is absent.
+    const r = spawnSync("bash", ["-c", `printf '%s' '${CONCATENATED_STREAM}' | jq -r '.entries | length'`], {
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim().split(/\r?\n/)).toEqual(["0", "1"]);
+  });
+
+  it.skipIf(!hasBash)("REGRESSION DEMO: the pre-review comparison accepted that same multi-line count and passed", () => {
+    // The shipped body with only the shape-validation `case` removed -- i.e. exactly what this PR
+    // originally proposed. It exits 0 and would have gone on to upload.
+    const withoutShapeCheck = body().replace(/\s*case "\$entries" in[\s\S]*?esac\n/, "\n");
+    expect(withoutShapeCheck, "the case block must still be findable for this demo to mean anything").not.toContain(
+      'case "$entries" in',
+    );
+    const r = execStep(withoutShapeCheck, {
+      files: {
+        "catalog-out/catalog-index.json": CONCATENATED_STREAM,
+        "catalog-out/catalog-index.json.sig": "sig\n",
+      },
+      stubs: { jq: 'printf \'%s\\n\' 0 1; exit 0' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("integer expected");
+    expect(r.all).not.toContain("zero entries"); // the guard branch was never taken -- failing OPEN
+  });
+
+  it.skipIf(!hasBash)("with jq absent from PATH entirely, the step still fails LOUD -- never green", () => {
     // Property that holds on every machine regardless of what is installed: this step has no path
     // to exit 0 without having actually read the index. A missing tool is a red step, not a pass.
     const r = execStep(`PATH=/nonexistent-cpe-1953\n${body()}`, {
@@ -355,8 +453,7 @@ describe('"Confirm the catalog is actually on the release" reads back the PUBLIS
   const body = () => runBody("Confirm the catalog is actually on the release");
   const env = { TAG: "v9.9.9", GH_TOKEN: "x" };
 
-  it("both assets present on the release -> exit 0", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("both assets present on the release -> exit 0", () => {
     const r = execStep(body(), {
       env,
       stubs: { gh: 'printf "%s\\n" catalog-index.json catalog-index.json.sig latest.json; exit 0' },
@@ -365,8 +462,7 @@ describe('"Confirm the catalog is actually on the release" reads back the PUBLIS
     expect(r.stdout).toContain("confirmed on v9.9.9");
   });
 
-  it("PIPEFAIL TRAP: a match must not be inverted into a miss (the herestring, not a pipe)", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("PIPEFAIL TRAP: a match must not be inverted into a miss (the herestring, not a pipe)", () => {
     // Direct demonstration of the bug the herestring avoids: under `pipefail`, `grep -q` matching
     // early closes the pipe, printf takes SIGPIPE, and the PIPELINE reports 141 -- so the piped
     // form would report the asset MISSING precisely when it is present. A long asset list makes the
@@ -381,8 +477,7 @@ describe('"Confirm the catalog is actually on the release" reads back the PUBLIS
     expect(r.all).not.toContain("does not carry");
   });
 
-  it("upload 'succeeded' but the release carries only unrelated assets -> exit 1, names what is missing", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("upload 'succeeded' but the release carries only unrelated assets -> exit 1, names what is missing", () => {
     const r = execStep(body(), {
       env,
       stubs: { gh: 'printf "%s\\n" latest.json some-installer.exe; exit 0' },
@@ -392,8 +487,7 @@ describe('"Confirm the catalog is actually on the release" reads back the PUBLIS
     expect(r.all).toContain("catalog-index.json");
   });
 
-  it("only the index, no signature -> still exit 1 (a catalog no client will apply is not published)", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("only the index, no signature -> still exit 1 (a catalog no client will apply is not published)", () => {
     const r = execStep(body(), {
       env,
       stubs: { gh: 'printf "%s\\n" catalog-index.json; exit 0' },
@@ -402,8 +496,7 @@ describe('"Confirm the catalog is actually on the release" reads back the PUBLIS
     expect(r.all).toContain("catalog-index.json.sig");
   });
 
-  it("the read-back itself fails -> exit 1; a lookup failure is never taken as evidence of success", () => {
-    if (!hasBash || !ghStubWorks) return;
+  it.skipIf(!hasBash || !ghStubWorks)("the read-back itself fails -> exit 1; a lookup failure is never taken as evidence of success", () => {
     const r = execStep(body(), {
       env,
       stubs: { gh: 'echo "HTTP 503" >&2; exit 1' },
@@ -412,11 +505,16 @@ describe('"Confirm the catalog is actually on the release" reads back the PUBLIS
     expect(r.all).toContain("NOT evidence the upload worked");
   });
 
-  it("PIPEFAIL TRAP, shown directly: the piped form reports failure on a MATCH; the herestring does not", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("PIPEFAIL TRAP, shown directly: the piped form can report failure on a MATCH; the herestring cannot", () => {
     // The `catalog` job's confirm step is written with a herestring for this reason. Proved the way
     // catalogPublishFreshnessGuard.test.ts proves its own set -e finding -- by running both shapes
-    // rather than asserting one is better. A long list makes printf reach the SIGPIPE reliably.
+    // rather than asserting one is better.
+    //
+    // SCOPE, stated honestly (CPE-1953 review): this inversion is SIZE-GATED. It needs roughly
+    // 28,912-88,912 bytes of asset names -- about 2,000-6,000 assets -- for printf to still be
+    // writing when grep exits early. A real release carries ~20, so the piped form would have worked
+    // in practice. This is a latent shape avoided before it shipped, not a bug that bit; the huge
+    // generated list below exists precisely because the realistic input would NOT reproduce it.
     const gen = "for i in $(seq 1 50000); do echo filler-$i; done";
     const piped = spawnSync(
       "bash",
@@ -451,39 +549,63 @@ describe('"Catalog publish outcome" makes a non-publishing run RED (CPE-1953)', 
     CONFIRM: "success",
     ENTRIES: "3",
     TAG: "v9.9.9",
+    // release.yml triggers on tag pushes only, so this is what a real run always carries.
+    RELEASE_BUILD: "true",
   };
 
-  it("a complete, confirmed publish -> exit 0 and says how many entries shipped", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("a complete, confirmed publish -> exit 0 and says how many entries shipped", () => {
     const r = execStep(body(), { env: ok });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("agent catalog published for v9.9.9");
     expect(r.stdout).toContain("3 entr");
   });
 
-  it("no key on a non-tag build -> exit 0, but says out loud that nothing was published", () => {
-    if (!hasBash) return;
-    const r = execStep(body(), { env: { ...ok, HAS_KEY: "false" } });
+  it.skipIf(!hasBash)("no key on a NON-tag build -> exit 0, and the notice is true: nothing was published or expected", () => {
+    const r = execStep(body(), { env: { ...ok, HAS_KEY: "false", RELEASE_BUILD: "false" } });
     expect(r.status).toBe(0);
     expect(r.all).toContain("::notice::");
-    expect(r.all).toContain("nothing was published");
+    expect(r.all).toContain("nothing was published, and nothing was expected to be");
   });
 
-  it.each([
+  // ── Review blocker 2: the gate must not describe a tag build as "not a tag build" ────────────
+  // On a tag with no signing key the detect step exits 1, so `HAS_KEY` reaches this gate EMPTY --
+  // not "false". The first version of this branch printed a ::notice:: reading "this is not a tag
+  // build — nothing was published, and nothing was expected to be", both clauses false, in the exact
+  // scenario the ticket was filed for. The job was still red via step `k`, so the outcome was right
+  // and only the SUMMARY LINE lied -- which, for the step commented as "the single place this job's
+  // honesty is decided", is the same defect in a smaller place.
+  it.skipIf(!hasBash)("THIS TICKET'S HEADLINE SCENARIO: tag build, key unset, HAS_KEY empty -> red, and the message is true", () => {
+    const r = execStep(body(), {
+      env: { HAS_KEY: "", SIGN: "", BUNDLE: "", UPLOAD: "", CONFIRM: "", ENTRIES: "", TAG: "v9.9.9", RELEASE_BUILD: "true" },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.all).toContain("::error::");
+    expect(r.all).toContain("on a TAG build (v9.9.9)");
+    expect(r.all).toContain("a publish WAS expected");
+    // The two false clauses must be gone, not merely accompanied by a truer one.
+    expect(r.all).not.toContain("this is not a tag build");
+    expect(r.all).not.toContain("nothing was expected to be");
+  });
+
+  it.skipIf(!hasBash)("HAS_KEY=false on a tag build is treated the same way -- the trigger decides, not the missing output", () => {
+    const r = execStep(body(), { env: { ...ok, HAS_KEY: "false", RELEASE_BUILD: "true" } });
+    expect(r.status).not.toBe(0);
+    expect(r.all).toContain("a publish WAS expected");
+  });
+
+  it.skipIf(!hasBash).each([
     ["SIGN", "build+sign"],
     ["BUNDLE", "verify-bundle"],
     ["UPLOAD", "upload"],
     ["CONFIRM", "confirm-on-release"],
   ])("a %s outcome of 'skipped' -> exit 1 naming %s", (key, label) => {
-    if (!hasBash) return;
     const r = execStep(body(), { env: { ...ok, [key]: "skipped" } });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("was NOT published");
     expect(r.all).toContain(label);
   });
 
-  it("THE SHAPE THIS TICKET IS ABOUT: key present, every step skipped -> exit 1, not a green no-op", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("THE SHAPE THIS TICKET IS ABOUT: key present, every step skipped -> exit 1, not a green no-op", () => {
     const r = execStep(body(), {
       env: { HAS_KEY: "true", SIGN: "", BUNDLE: "", UPLOAD: "", CONFIRM: "", ENTRIES: "", TAG: "v9.9.9" },
     });
@@ -492,8 +614,7 @@ describe('"Catalog publish outcome" makes a non-publishing run RED (CPE-1953)', 
     expect(r.all).toContain("<none>");
   });
 
-  it("a failed upload -> exit 1 and points at the freshness backstop for how stale this may get", () => {
-    if (!hasBash) return;
+  it.skipIf(!hasBash)("a failed upload -> exit 1 and points at the freshness backstop for how stale this may get", () => {
     const r = execStep(body(), { env: { ...ok, UPLOAD: "failure" } });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain("catalog-freshness.yml");
@@ -587,7 +708,21 @@ describe("every needs:-chained job across the workflows has a recorded skip verd
     "ci.yml/msrv": { guarded: false, why: CI_PREFLIGHT },
   };
 
-  const files = ["release.yml", "release-sidecar.yml", "gui-smoke.yml", "ci.yml"];
+  // CPE-1953 review, non-blocking finding 3: this list was hard-coded to the four files that happen
+  // to contain `needs:` chains today, which is precisely the "enumerate, don't recall" failure
+  // CLAUDE.md's CPE-1932 rule names (and which this PR's own body invokes) -- a chain added in one of
+  // the other four workflow files would simply not be looked at. Derived from the directory now, with
+  // the near-empty backstop that rule also requires, so a glob that silently stops matching reads as
+  // a failure rather than as a vacuously-satisfied table.
+  const files = readdirSync(WORKFLOWS)
+    .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
+    .sort();
+
+  it("derives the workflow list at run time and finds a plausible number of them (CPE-1932)", () => {
+    expect(files.length).toBeGreaterThanOrEqual(6);
+    expect(files).toContain("release.yml");
+    expect(files).toContain("ci.yml");
+  });
 
   it("enumerates the same set the verdict table records -- a new chained job fails this test", () => {
     const found: string[] = [];

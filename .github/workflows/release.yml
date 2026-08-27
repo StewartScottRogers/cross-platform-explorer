@@ -563,6 +563,11 @@ jobs:
             ls -la catalog-out 2>/dev/null || echo "(catalog-out does not exist)"
             exit 1
           fi
+          # RESIDUAL, named deliberately (CPE-1953 review): this checks the signature is PRESENT and
+          # non-empty, never that it VERIFIES. A garbage `.sig` passes here. That is scoped out on
+          # purpose — verifying it needs the public key and the same verify path a client uses, which
+          # is CPE-1954's `VerifiedIndex` work, not a shell one-liner bolted on here. This step's
+          # claim is therefore exactly "a signature file was produced", not "the bundle is valid".
           if [ ! -s "${index}.sig" ]; then
             echo "::error::${index} exists but its detached signature ${index}.sig is missing or empty. Every client verifies the signature before applying (CPE-372), so an unsigned index publishes a catalog nobody can use."
             exit 1
@@ -574,7 +579,24 @@ jobs:
             echo "::error::${index} is not parseable JSON — catalog-sign wrote a corrupt or truncated index."
             exit 1
           fi
-          if [ "${entries:-0}" -lt 1 ]; then
+          # CPE-1953 review, blocker 1: `[ "$x" -lt 1 ]` exits **2** (not 1) when $x is not a single
+          # integer, and inside an `if` an exit of 2 is indistinguishable from a plain "false" — so
+          # the zero-entry check below was SKIPPED and this step exited 0, going on to upload, while
+          # bash printed only `[: integer expected` to stderr. That is this ticket's own defect class
+          # (a guard failing OPEN and reporting success) inside the guard added to prevent it.
+          # It is reachable with REAL jq, not just a stub: a concatenated JSON stream
+          # (`{"entries":[]}{"entries":[{…}]}`) makes jq print one length per document and exit 0,
+          # yielding a multi-line `entries`. Validate the SHAPE first, then compare. `case` rather
+          # than a `grep -Eq` pipeline deliberately — no subshell, and so no repeat of the pipefail
+          # /SIGPIPE trap noted on the confirm step below. Red-proofed by execution in
+          # src/lib/catalogPublishLoudFailure.test.ts.
+          case "$entries" in
+            "" | *[!0-9]*)
+              echo "::error::could not read a single entry count from ${index}: jq returned [${entries}], which is not one non-negative integer. Refusing to treat an unreadable count as a passing one — that is how a guard fails open."
+              exit 1
+              ;;
+          esac
+          if [ "$entries" -lt 1 ]; then
             echo "::error::${index} parses but has zero entries[] — this is the 'succeeding at zero work' shape catalog-freshness.yml's header warns about, caught here at publish time instead of up to 14 days later."
             exit 1
           fi
@@ -619,14 +641,25 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # RESIDUAL, named deliberately (CPE-1953 review): this asserts the assets are PRESENT BY
+          # NAME, never that they have bytes — `--json assets` also carries `.size`, and a zero-byte
+          # `catalog-index.json` would pass this check. Left as-is rather than half-fixed: a size>0
+          # test would still not prove the uploaded bytes match what was signed locally, and the
+          # honest version of that check is a re-download-and-verify, which is `verify-published-
+          # manifest`'s shape and wants its own ticket rather than an inline approximation here.
           if ! names=$(gh release view "$TAG" --json assets --jq '.assets[].name'); then
             echo "::error::could not read back the asset list for ${TAG} after uploading. A lookup failure is NOT evidence the upload worked — refusing to report success on it (CPE-1794's lesson, applied here)."
             exit 1
           fi
           # A HERESTRING, not `printf ... | grep -q`: under `pipefail` a `grep -q` that matches early
           # closes the pipe, printf takes SIGPIPE, and the PIPELINE reports 141 — so the piped form
-          # sets `missing` on the very case where the asset was FOUND. Exactly the inverted-verdict
-          # shape this ticket exists to prevent; red-proofed in catalogPublishLoudFailure.test.ts.
+          # can set `missing` on the very case where the asset was FOUND. Stated precisely, because
+          # the first version of this comment overstated it (CPE-1953 review): the inversion is
+          # SIZE-GATED, needing roughly 28,912–88,912 bytes of asset names (~2,000–6,000 assets) for
+          # printf to still be writing when grep exits. A real release carries ~20, so the piped form
+          # would have worked in practice — this is a latent inverted-verdict shape that never
+          # shipped, avoided rather than a bug that bit. Both shapes are executed in
+          # catalogPublishLoudFailure.test.ts.
           missing=""
           for want in catalog-index.json catalog-index.json.sig; do
             grep -Fxq "$want" <<< "$names" || missing="${missing} ${want}"
@@ -654,11 +687,22 @@ jobs:
           CONFIRM: ${{ steps.confirm.outcome }}
           ENTRIES: ${{ steps.bundle.outputs.entries }}
           TAG: ${{ github.ref_name }}
+          RELEASE_BUILD: ${{ github.ref_type == 'tag' }}
         run: |
           set -uo pipefail
           if [ "${HAS_KEY:-}" != "true" ]; then
-            # Only reachable on a NON-tag trigger — the detect step above is fatal on a tag with no
-            # key. Kept explicit so a future non-tag trigger says out loud that it published nothing.
+            # CPE-1953 review, blocker 2. `HAS_KEY` is empty in TWO different situations, and an
+            # earlier version of this branch collapsed them into one sentence that was false in the
+            # more important of the two: a tag build where the detect step FAILED (so `has` was never
+            # written) got told "this is not a tag build — nothing was expected to be [published]",
+            # both clauses wrong, in the exact scenario this ticket was filed for. The job was still
+            # red via step `k`, so the outcome was right and the SUMMARY LINE lied — which for a step
+            # whose whole job is to say what happened is the same defect in a smaller place. Read the
+            # trigger directly rather than inferring it from a missing output.
+            if [ "${RELEASE_BUILD:-}" = "true" ]; then
+              echo "::error::no catalog signing key was available on a TAG build (${TAG}), so nothing was published and a publish WAS expected. See the 'Detect catalog signing key' step above for why — it fails deliberately rather than letting this job go green having shipped no agent catalog."
+              exit 1
+            fi
             echo "::notice::no catalog signing key configured and this is not a tag build — nothing was published, and nothing was expected to be."
             exit 0
           fi
