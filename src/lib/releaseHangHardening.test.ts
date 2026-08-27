@@ -18,7 +18,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
-import { logicalLines } from "./preview/shellScriptLines";
+import { logicalLines } from "./shellScriptLines";
 
 const WORKFLOWS = join(process.cwd(), ".github", "workflows");
 
@@ -76,7 +76,7 @@ const HARDENING_FLAGS =
  *  re-deriving a third copy. */
 const APT_COMMAND_WORD = /(?<![\w-])apt(?:-get)?(?![\w-])/;
 
-// stripShellComment()/logicalLines() now live in src/lib/preview/shellScriptLines.ts (CPE-1908
+// stripShellComment()/logicalLines() now live in src/lib/shellScriptLines.ts (CPE-1908
 // round 2) so channelPurityCoverage.test.ts can reuse the exact same comment/continuation
 // handling instead of a second hand-rolled stripper. Imported at the top of this file.
 

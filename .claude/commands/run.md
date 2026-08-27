@@ -64,10 +64,16 @@ if ("<TAG>".EndsWith("-sidecar")) {
   $jobName = "verify-published-manifest-sidecar"
   # workflow_dispatch runs have no tag-bearing headBranch to match on -- release-sidecar.yml sets
   # `run-name: "Release (sidecar) ${{ inputs.tag }}"` (CPE-1908) specifically so the tag shows up in
-  # displayTitle instead. Assumes you're checking shortly after dispatch; if another sidecar dispatch
-  # raced yours, resolve by createdAt too rather than trusting "most recent" alone.
+  # displayTitle instead. EXACT match, not `contains` (CPE-1908 round 3, R2-4 -- a security-relevant
+  # fix on the publish path): `contains("<TAG>")` also matches an honestly-dispatched run for a
+  # DIFFERENT, decoy tag that merely contains this one as a substring (e.g. a tampered
+  # "v1.2.3-sidecar-decoy" run's displayTitle "Release (sidecar) v1.2.3-sidecar-decoy" contains
+  # "v1.2.3-sidecar"), so a same-day decoy dispatch could get matched, read as `success`, and this
+  # step would then wave an UNVERIFIED draft through to `gh release edit --draft=false`. Assumes
+  # you're checking shortly after dispatch; if another sidecar dispatch for the SAME tag raced yours,
+  # resolve by createdAt too rather than trusting "most recent" alone.
   $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
-    --json databaseId,displayTitle --jq ".[] | select(.displayTitle | contains(\"<TAG>\")) | .databaseId" |
+    --json databaseId,displayTitle --jq ".[] | select(.displayTitle == \"Release (sidecar) <TAG>\") | .databaseId" |
     Select-Object -First 1
 } else {
   $workflow = "release.yml"
@@ -76,6 +82,12 @@ if ("<TAG>".EndsWith("-sidecar")) {
     --json databaseId,headBranch --jq ".[] | select(.headBranch==\"<TAG>\") | .databaseId" | Select-Object -First 1
 }
 if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish" }
+# This is fail-closed and correct, not a broken release, if it's the SIDECAR branch above: every
+# sidecar run dispatched before `release-sidecar.yml` gained its `run-name:` (CPE-1908) has
+# `displayTitle` equal to the plain workflow name, not "Release (sidecar) <TAG>", so it can never
+# match here and this throws for every such pre-existing draft. If you hit this on a draft that
+# predates `run-name:`, don't read it as broken: dispatch a fresh `release-sidecar.yml` run for the
+# tag (so its `displayTitle` carries the tag), or verify the job by hand per RELEASING.md instead.
 
 $verifyJobJson = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
   --jq ".jobs[] | select(.name==\"$jobName\")"
