@@ -999,15 +999,46 @@ async macroPlan(macro: ActionMacro, inputs: string[]) : Promise<Result<PlannedOp
 }
 },
 /**
+ * Preflight-scan a macro run for destination collisions **before anything is applied** (CPE-1891):
+ * resolves `macro_` over `inputs` exactly like `macro_run` will (same `root` scope guard), then checks
+ * every rename/move/convert destination against the real filesystem — read-only stats, never a write.
+ * 
+ * `MacroRunConfirm` calls this before offering Run, so a 200-file batch shows its whole collision set
+ * up front ("N of 200 need confirmation to overwrite") instead of discovering them one at a time via
+ * repeated all-or-nothing run/rollback cycles — the actual defect CPE-1891 was filed against: a single
+ * collision at file #150 used to burn through 149 real writes only to undo every one of them, with no
+ * way to say "yes, overwrite" and no visibility into which other names would collide too. A
+ * `confirmable` collision (a plain pre-existing name) may be overwritten by re-calling `macro_run`
+ * with `confirmed_overwrite: true`; a non-confirmable one (a link, live or dangling) is still reported
+ * here so the user can see it, but stays refused no matter what — CPE-1734's rule, unconditionally.
+ */
+async macroPreflight(macro: ActionMacro, inputs: string[], root: string) : Promise<Result<MacroCollision[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("macro_preflight", { macro, inputs, root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Run `macro_` over `inputs`, scoped to `root`: resolves + scope-checks via CPE-1187
  * (`macro_run::resolve`), then physically applies each op. All-or-nothing — if any step fails
  * partway, everything already applied is rolled back automatically via the recorded inverses
  * before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
  * frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
+ * 
+ * **`confirmed_overwrite` (CPE-1891).** The engine itself refuses an unconfirmed collision, not just
+ * the UI — the same posture `batch_execute::execute_plan_walk` already takes for the Batch-Media
+ * engine (CPE-1599): a devtools call, a future automation surface, or a stale `MacroRunConfirm` that
+ * skipped `macro_preflight` must not get a free overwrite just by setting the flag on a run that never
+ * actually had a confirmable collision to begin with, and conversely must never be able to talk this
+ * engine into writing through a link no matter what it passes. Nothing has been applied yet when this
+ * check runs, so a refusal here costs nothing to roll back — it is the fix for the wasted-work half of
+ * CPE-1891, independent of whatever the frontend does with the collision list.
  */
-async macroRun(macro: ActionMacro, inputs: string[], root: string) : Promise<Result<ResolvedRun, string>> {
+async macroRun(macro: ActionMacro, inputs: string[], root: string, confirmedOverwrite: boolean) : Promise<Result<ResolvedRun, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("macro_run", { macro, inputs, root }) };
+    return { status: "ok", data: await TAURI_INVOKE("macro_run", { macro, inputs, root, confirmedOverwrite }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -5281,6 +5312,31 @@ at_end: boolean;
  * character boundary instead of a true line boundary (one pathologically long line).
  */
 line_aligned: boolean }
+/**
+ * One resolved rename/move/convert destination that is currently occupied on the real filesystem —
+ * found by a preflight scan run **before** any op in a [`ResolvedRun`] is applied (CPE-1891). This
+ * module stays pure and touches no filesystem itself; the scan that produces these lives in the apply
+ * layer (`src-tauri`'s `macro_preflight_collisions`, alongside `macro_apply_run`) for the same reason
+ * that layer already owns every other real-filesystem decision this module's own doc comment
+ * describes.
+ * 
+ * `confirmable` is the whole point of this ticket: **true** for an ordinary occupied name (a plain
+ * pre-existing file) — a `macro_run` call with `confirmed_overwrite: true` may overwrite it. **false**
+ * for a link (live or dangling) or a slot that could not be read at all — CPE-1734's write-through
+ * refusal stays absolute no matter what the user confirms; a link collision is still reported here so
+ * the user can SEE it (the same visibility CPE-1869 established for the revert hold-back list), it
+ * just has no confirm that unblocks it.
+ */
+export type MacroCollision = { 
+/**
+ * Index into `ResolvedRun::ops`/`inverses`, so the caller can correlate a collision back to the
+ * exact op it belongs to.
+ */
+op_index: number; from: string; to: string; 
+/**
+ * `"rename"` / `"move"` / `"convert"` — the only kinds a collision can occur at.
+ */
+kind: string; confirmable: boolean; reason: string }
 /**
  * One step in a macro. Each variant maps to an existing op primitive.
  */

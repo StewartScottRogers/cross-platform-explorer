@@ -6916,7 +6916,7 @@ fn template_import(app: tauri::AppHandle, json: String) -> Result<TemplateCatalo
 // original bytes from the trash rather than lossily re-encoding; and `macro_apply_run` snapshots
 // the pre-run tag state so a `tag` step's undo never strips a label the path already had.
 use cpe_server::action_macro::{ActionMacro, PlannedOp};
-use cpe_server::macro_run::ResolvedRun;
+use cpe_server::macro_run::{MacroCollision, ResolvedRun};
 use cpe_server::macro_store::{Catalog as MacroCatalog, MacroSummary};
 
 /// Save (insert or replace by name) a macro and persist. Returns the updated catalog.
@@ -6973,11 +6973,43 @@ fn macro_plan(macro_: ActionMacro, inputs: Vec<String>) -> Result<Vec<PlannedOp>
     Ok(cpe_server::action_macro::plan(&macro_, &inputs))
 }
 
+/// Preflight-scan a macro run for destination collisions **before anything is applied** (CPE-1891):
+/// resolves `macro_` over `inputs` exactly like `macro_run` will (same `root` scope guard), then checks
+/// every rename/move/convert destination against the real filesystem — read-only stats, never a write.
+///
+/// `MacroRunConfirm` calls this before offering Run, so a 200-file batch shows its whole collision set
+/// up front ("N of 200 need confirmation to overwrite") instead of discovering them one at a time via
+/// repeated all-or-nothing run/rollback cycles — the actual defect CPE-1891 was filed against: a single
+/// collision at file #150 used to burn through 149 real writes only to undo every one of them, with no
+/// way to say "yes, overwrite" and no visibility into which other names would collide too. A
+/// `confirmable` collision (a plain pre-existing name) may be overwritten by re-calling `macro_run`
+/// with `confirmed_overwrite: true`; a non-confirmable one (a link, live or dangling) is still reported
+/// here so the user can see it, but stays refused no matter what — CPE-1734's rule, unconditionally.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn macro_preflight(macro_: ActionMacro, inputs: Vec<String>, root: String) -> Result<Vec<MacroCollision>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = cpe_server::macro_run::resolve(&macro_, &inputs, &root).map_err(|errs| errs.join("; "))?;
+        Ok(macro_preflight_collisions(&resolved))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Run `macro_` over `inputs`, scoped to `root`: resolves + scope-checks via CPE-1187
 /// (`macro_run::resolve`), then physically applies each op. All-or-nothing — if any step fails
 /// partway, everything already applied is rolled back automatically via the recorded inverses
 /// before the error is returned. On success, returns the applied `ResolvedRun`; hang onto it (the
 /// frontend keeps it in memory) and pass it to `macro_undo` to reverse the whole run later.
+///
+/// **`confirmed_overwrite` (CPE-1891).** The engine itself refuses an unconfirmed collision, not just
+/// the UI — the same posture `batch_execute::execute_plan_walk` already takes for the Batch-Media
+/// engine (CPE-1599): a devtools call, a future automation surface, or a stale `MacroRunConfirm` that
+/// skipped `macro_preflight` must not get a free overwrite just by setting the flag on a run that never
+/// actually had a confirmable collision to begin with, and conversely must never be able to talk this
+/// engine into writing through a link no matter what it passes. Nothing has been applied yet when this
+/// check runs, so a refusal here costs nothing to roll back — it is the fix for the wasted-work half of
+/// CPE-1891, independent of whatever the frontend does with the collision list.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn macro_run(
@@ -6985,8 +7017,10 @@ async fn macro_run(
     macro_: ActionMacro,
     inputs: Vec<String>,
     root: String,
+    confirmed_overwrite: bool,
 ) -> Result<ResolvedRun, String> {
     let resolved = cpe_server::macro_run::resolve(&macro_, &inputs, &root).map_err(|errs| errs.join("; "))?;
+    macro_refuse_unconfirmed_collisions(&resolved, confirmed_overwrite)?;
     // Every path a resolved op touches is the user's doing (CPE-1101), same as rename_entry/move_exact.
     note_app_op(&app, || {
         resolved
@@ -6996,9 +7030,95 @@ async fn macro_run(
             .collect()
     });
     let ctx = server_ctx::TauriCtx::new(&app);
-    tauri::async_runtime::spawn_blocking(move || macro_apply_run(&ctx, resolved))
+    tauri::async_runtime::spawn_blocking(move || macro_apply_run(&ctx, resolved, confirmed_overwrite))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// The defensive re-check behind `macro_run`'s `confirmed_overwrite` gate (CPE-1891), split out so it
+/// is unit-testable without a live `tauri::AppHandle` (same reason every other fn in this section is
+/// split from its command wrapper). Scans `resolved` for collisions and decides which ones are still
+/// blocking given `confirmed_overwrite`:
+///
+/// - `confirmed_overwrite == false` — ANY collision blocks, confirmable or not, so the whole run
+///   refuses before a single op is applied.
+/// - `confirmed_overwrite == true` — only a non-confirmable collision (a link) still blocks; a plain
+///   occupied name is allowed through. CPE-1734's rule stays absolute regardless of the flag.
+fn macro_refuse_unconfirmed_collisions(resolved: &ResolvedRun, confirmed_overwrite: bool) -> Result<(), String> {
+    let blocking: Vec<MacroCollision> = macro_preflight_collisions(resolved)
+        .into_iter()
+        .filter(|c| !confirmed_overwrite || !c.confirmable)
+        .collect();
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<String> = blocking.iter().map(|c| c.to.clone()).collect();
+    Err(if confirmed_overwrite {
+        format!(
+            "macro run refused: {} destination name(s) are links and can never be overwritten, \
+             confirmed or not: {}",
+            blocking.len(),
+            names.join(", "),
+        )
+    } else {
+        format!(
+            "macro run refused: {} destination name(s) already exist and were not confirmed for \
+             overwrite: {}. Call macro_preflight to see the full collision set, or re-run with \
+             confirmed_overwrite: true to overwrite the plain ones.",
+            blocking.len(),
+            names.join(", "),
+        )
+    })
+}
+
+/// Real-filesystem collision scan behind `macro_preflight` and `macro_run`'s own defensive re-check
+/// (CPE-1891): for every rename/move/convert op whose `to` differs from its `from`, classify what
+/// currently occupies `to` — matching each kind's real apply-time guard (`rename`/`move` go through
+/// `rename_into_slot`'s `symlink_slot_refusal`; `convert` goes through `create_slot_link_refusal`) so a
+/// preflight verdict never disagrees with what actually applying the run would do. Read-only: only
+/// ever stats a path, never opens or writes one.
+fn macro_preflight_collisions(run: &ResolvedRun) -> Vec<MacroCollision> {
+    run.ops
+        .iter()
+        .enumerate()
+        .filter_map(|(op_index, op)| {
+            if !matches!(op.kind.as_str(), "rename" | "move" | "convert") || op.from == op.to {
+                return None;
+            }
+            let to_path = Path::new(&op.to);
+            // The link half is checked with the kind-appropriate probe: `convert` writes through a
+            // link (create-shaped), `rename`/`move` destroy one (rename-shaped) — see
+            // `create_slot_link_refusal`'s and `symlink_slot_refusal`'s own docs for why the two are
+            // not interchangeable. Either way, a link is never confirmable (CPE-1734).
+            let link_refusal = if op.kind == "convert" {
+                cpe_server::fsutil::create_slot_link_refusal(to_path)
+            } else {
+                cpe_server::fsutil::symlink_slot_refusal(to_path)
+            };
+            if let Some(reason) = link_refusal {
+                return Some(MacroCollision {
+                    op_index,
+                    from: op.from.clone(),
+                    to: op.to.clone(),
+                    kind: op.kind.clone(),
+                    confirmable: false,
+                    reason,
+                });
+            }
+            let occupied_msg = format!(
+                "\"{}\" already exists",
+                to_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            );
+            cpe_server::fsutil::clobber_refusal(to_path, &occupied_msg).map(|reason| MacroCollision {
+                op_index,
+                from: op.from.clone(),
+                to: op.to.clone(),
+                kind: op.kind.clone(),
+                confirmable: true,
+                reason,
+            })
+        })
+        .collect()
 }
 
 /// Undo a previously-applied `ResolvedRun` (as returned by `macro_run`) by replaying its inverses
@@ -7024,20 +7144,26 @@ async fn macro_undo(app: tauri::AppHandle, run: ResolvedRun) -> Result<(), Strin
 /// correction (CPE-1194): just before applying each `tag` op, the pre-run tag state at its path is
 /// snapshotted, and if the label was already present, that op's inverse is rewritten from `"untag"`
 /// to `"tag"` (a no-op restore) so undo never strips a label the user had before the run.
-fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun) -> Result<ResolvedRun, String> {
+///
+/// `confirmed_overwrite` (CPE-1891) is threaded to every FORWARD op only — never to a rollback or undo
+/// inverse. Rollback/undo restores `from`, a name the forward op just vacated a moment ago, which
+/// should be free again by construction; if something else has since claimed it, that is a new,
+/// genuinely surprising collision worth surfacing as a rollback failure (the existing "ROLLBACK ALSO
+/// FAILED" path below), never something to silently force through.
+fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun, confirmed_overwrite: bool) -> Result<ResolvedRun, String> {
     for applied in 0..run.ops.len() {
         let op = run.ops[applied].clone();
         if op.kind == "tag" && macro_tag_already_present(ctx, &op.from, &op.detail) {
             run.inverses[applied].kind = "tag".to_string();
         }
-        if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to) {
+        if let Err(e) = macro_apply_op(ctx, &op.from, &op.kind, &op.detail, &op.to, confirmed_overwrite) {
             // Roll back the already-applied ops in reverse. Collect any rollback failures rather
             // than discarding them: if an inverse itself fails (e.g. a file was externally moved
             // or locked between apply and rollback), the filesystem is left partially modified and
             // the caller MUST be told the truth — never claim "(rolled back)" when it didn't.
             let mut rollback_errs = Vec::new();
             for inv in run.inverses[..applied].iter().rev() {
-                if let Err(re) = macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to) {
+                if let Err(re) = macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to, false) {
                     rollback_errs.push(re);
                 }
             }
@@ -7057,10 +7183,11 @@ fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun) -> Result<Resolved
     Ok(run)
 }
 
-/// Replay `run.inverses` in reverse order — the undo of a completed `macro_run`.
+/// Replay `run.inverses` in reverse order — the undo of a completed `macro_run`. Never confirmed
+/// (CPE-1891) — see `macro_apply_run`'s doc for why undo/rollback stays unconfirmed unconditionally.
 fn macro_apply_inverses(ctx: &dyn ServerCtx, run: &ResolvedRun) -> Result<(), String> {
     for inv in run.inverses.iter().rev() {
-        macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to)?;
+        macro_apply_op(ctx, &inv.from, &inv.kind, &inv.detail, &inv.to, false)?;
     }
     Ok(())
 }
@@ -7068,30 +7195,64 @@ fn macro_apply_inverses(ctx: &dyn ServerCtx, run: &ResolvedRun) -> Result<(), St
 /// Bridge one resolved (or inverse) op to its real primitive. `kind` is `"rename"` / `"move"` /
 /// `"convert"` / `"tag"` / `"untag"` (the inverse-only kind of a tag step) / `"restore_convert"`
 /// (the inverse-only kind of a convert step, per `macro_run::InverseOp`; CPE-1194).
-fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to: &str) -> Result<(), String> {
+///
+/// `confirmed_overwrite` (CPE-1891) only ever affects `rename`/`move`/`convert`, and only ever
+/// bypasses the PLAIN-occupied refusal at `to` — never the link refusal (CPE-1734's absolute rule,
+/// unchanged). `rename`/`move` route through `macro_rename_bridge`, a bridge scoped to the macro engine
+/// alone rather than a new parameter on `rename_entry_impl`/`move_exact_impl` — those two also back the
+/// general-purpose `rename_entry`/`move_exact` commands, and this ticket is about the macro engine's
+/// own confirm-and-retry escape hatch, not every rename/move call site in the app.
+fn macro_apply_op(
+    ctx: &dyn ServerCtx,
+    from: &str,
+    kind: &str,
+    detail: &str,
+    to: &str,
+    confirmed_overwrite: bool,
+) -> Result<(), String> {
     match kind {
         "rename" => {
-            let new_name = Path::new(to)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| format!("bad rename target {to:?}"))?
-                .to_string();
-            rename_entry_impl(ctx, from.to_string(), new_name).map(|_| ())
-        }
-        "move" => {
-            let results = move_exact_impl(ctx, vec![(from.to_string(), to.to_string())]);
-            match results.into_iter().next() {
-                Some(r) if r.ok => Ok(()),
-                Some(r) => Err(r.error),
-                None => Err("move produced no result".to_string()),
+            if confirmed_overwrite {
+                macro_rename_bridge(ctx, from, to)
+            } else {
+                let new_name = Path::new(to)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| format!("bad rename target {to:?}"))?
+                    .to_string();
+                rename_entry_impl(ctx, from.to_string(), new_name).map(|_| ())
             }
         }
-        "convert" => macro_convert_in_place(from, to, detail),
+        "move" => {
+            if confirmed_overwrite {
+                macro_rename_bridge(ctx, from, to)
+            } else {
+                let results = move_exact_impl(ctx, vec![(from.to_string(), to.to_string())]);
+                match results.into_iter().next() {
+                    Some(r) if r.ok => Ok(()),
+                    Some(r) => Err(r.error),
+                    None => Err("move produced no result".to_string()),
+                }
+            }
+        }
+        "convert" => macro_convert_in_place(from, to, detail, confirmed_overwrite),
         "restore_convert" => macro_restore_converted(from, to),
         "tag" => macro_add_tag(ctx, from, detail),
         "untag" => macro_remove_tag(ctx, from, detail),
         other => Err(format!("unknown macro op kind {other:?}")),
     }
+}
+
+/// Apply one resolved `rename`/`move` op **with the user's explicit overwrite confirmation** (CPE-1891)
+/// — called only from `macro_apply_op`'s `confirmed_overwrite` branch. Mirrors
+/// `rename_entry_impl`/`move_exact_impl`'s tail exactly (guard, `fs::rename`, tag + schedule retag);
+/// the guard is `rename_into_confirmed_slot`, which still refuses a link unconditionally (CPE-1734) and
+/// only ever bypasses the plain-occupied refusal a confirm is allowed to bypass.
+fn macro_rename_bridge(ctx: &dyn ServerCtx, from: &str, to: &str) -> Result<(), String> {
+    cpe_server::fsutil::rename_into_confirmed_slot(Path::new(from), Path::new(to))?;
+    let _ = cpe_server::tags::retag(ctx, from, to);
+    let _ = cpe_server::snapshot_schedule::reschedule(ctx, from, to);
+    Ok(())
 }
 
 /// Re-encode the image at `from` to the `detail` extension and write it at `to`, then route the
@@ -7128,7 +7289,17 @@ fn macro_apply_op(ctx: &dyn ServerCtx, from: &str, kind: &str, detail: &str, to:
 /// the original was trashed out from under a file the user could no longer find at either name. Once
 /// the write-through case is a genuine `Err` (this commit), "only trash `from` once the bytes are
 /// really at `to`" falls out of the existing `?` chain rather than needing a new flag.
-fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), String> {
+///
+/// **`confirmed_overwrite` (CPE-1891).** The link half of the guard (`create_slot_link_refusal`) is
+/// unconditional either way — a confirm authorises overwriting the user's OWN file, never writing
+/// through a link to a path the user never named. When `confirmed_overwrite` is true, only the
+/// PLAIN-occupied half (`clobber_refusal`) is skipped, and the write itself goes through
+/// `overwrite_confirmed_no_follow` instead of `create_exclusive` — that function cannot claim an
+/// already-occupied name (its whole atomicity comes from requiring the slot be FREE), so the confirmed
+/// path needs the no-follow-open-existing sibling instead. `false` reproduces the original guard order
+/// and write mechanism exactly (`create_slot_link_refusal` then `clobber_refusal` is literally what
+/// `create_slot_refusal` does), so every pre-CPE-1891 test's wording and behaviour is unchanged.
+fn macro_convert_in_place(from: &str, to: &str, detail: &str, confirmed_overwrite: bool) -> Result<(), String> {
     if from == to {
         return Ok(());
     }
@@ -7137,28 +7308,38 @@ fn macro_convert_in_place(from: &str, to: &str, detail: &str) -> Result<(), Stri
     // Guard BEFORE touching `from` at all: a refused Convert must cost nothing and leave nothing
     // behind, and checking here also means an occupied/linked `to` never triggers the read + re-encode
     // work below for a write that was never going to land.
-    if let Some(e) = cpe_server::fsutil::create_slot_refusal(
-        to_path,
-        &format!(
-            "{to}: already exists — a macro Convert step claims the new name rather than editing the \
-             file that is already there, so (matching the Batch-Media engine) it refuses an unconfirmed \
-             overwrite instead of silently replacing it"
-        ),
-    ) {
+    if let Some(e) = cpe_server::fsutil::create_slot_link_refusal(to_path) {
         return Err(e);
+    }
+    if !confirmed_overwrite {
+        if let Some(e) = cpe_server::fsutil::clobber_refusal(
+            to_path,
+            &format!(
+                "{to}: already exists — a macro Convert step claims the new name rather than editing \
+                 the file that is already there, so (matching the Batch-Media engine) it refuses an \
+                 unconfirmed overwrite instead of silently replacing it"
+            ),
+        ) {
+            return Err(e);
+        }
     }
     let bytes = fs::read(from).map_err(|e| format!("could not read {from}: {e}"))?;
     let converted = cpe_server::batch_transform::apply_ops(
         &bytes,
         &[cpe_server::batch_media::MediaOp::Convert { to_ext: detail.to_string() }],
     )?;
-    // `O_CREAT|O_EXCL`, not `fs::write`: the guard above is a probe-then-open and therefore TOCTOU by
-    // construction (CPE-1718's own doc comment on `create_exclusive`), so this is the belt behind it —
-    // it does not follow a link at the final component even if one appears in the race window.
-    let mut file =
-        cpe_server::fsutil::create_exclusive(to_path).map_err(|e| format!("could not write {to}: {e}"))?;
-    file.write_all(&converted).map_err(|e| format!("could not write {to}: {e}"))?;
-    drop(file);
+    if confirmed_overwrite {
+        cpe_server::fsutil::overwrite_confirmed_no_follow(to_path, &converted)?;
+    } else {
+        // `O_CREAT|O_EXCL`, not `fs::write`: the guard above is a probe-then-open and therefore TOCTOU
+        // by construction (CPE-1718's own doc comment on `create_exclusive`), so this is the belt
+        // behind it — it does not follow a link at the final component even if one appears in the race
+        // window.
+        let mut file = cpe_server::fsutil::create_exclusive(to_path)
+            .map_err(|e| format!("could not write {to}: {e}"))?;
+        file.write_all(&converted).map_err(|e| format!("could not write {to}: {e}"))?;
+        drop(file);
+    }
     trash::delete(from).map_err(|e| format!("could not trash {from}: {e}"))?;
     Ok(())
 }
@@ -12860,6 +13041,7 @@ pub fn run() {
             macro_export,
             macro_import,
             macro_plan,
+            macro_preflight,
             macro_run,
             macro_undo,
             native_tags_name,
@@ -13754,6 +13936,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         macro_export,
         macro_import,
         macro_plan,
+        macro_preflight,
         macro_run,
         macro_undo,
         native_tags_name,
@@ -14608,7 +14791,7 @@ mod tests {
             steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
 
         let store = cpe_server::tags::load(&ctx).unwrap();
         assert!(store.get(&input).unwrap().tags().contains(&"done".to_string()));
@@ -14640,7 +14823,7 @@ mod tests {
         let root = work.path().to_string_lossy().to_string();
         let input = file.to_string_lossy().to_string();
         let resolved = cpe_server::macro_run::resolve(&mac, &[input], &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
 
         let moved = dest.join("b.txt");
         assert!(moved.exists(), "file should have been renamed then moved");
@@ -14672,7 +14855,7 @@ mod tests {
         let inputs = vec![a.to_string_lossy().to_string(), missing.to_string_lossy().to_string()];
         let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
 
-        let err = macro_apply_run(&ctx, resolved).unwrap_err();
+        let err = macro_apply_run(&ctx, resolved, false).unwrap_err();
         assert!(err.contains("rolled back"), "got: {err}");
 
         // The first (successful) step's effect must have been rolled back.
@@ -14708,7 +14891,7 @@ mod tests {
             steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
         // The apply layer must have corrected the tag step's inverse to a no-op restore.
         assert_eq!(applied.inverses[0].kind, "tag", "pre-existing label ⇒ inverse must not be untag");
 
@@ -14744,7 +14927,7 @@ mod tests {
             steps: vec![cpe_server::action_macro::MacroStep::Tag { label: "done".into() }],
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
-        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
         assert_eq!(applied.inverses[0].kind, "untag", "no pre-existing label ⇒ inverse stays untag");
 
         macro_apply_inverses(&ctx, &applied).unwrap();
@@ -15118,7 +15301,7 @@ mod tests {
         };
         let resolved = cpe_server::macro_run::resolve(&mac, std::slice::from_ref(&input), &root).unwrap();
         assert_eq!(resolved.inverses[0].kind, "restore_convert");
-        let applied = macro_apply_run(&ctx, resolved).unwrap();
+        let applied = macro_apply_run(&ctx, resolved, false).unwrap();
 
         let converted = work.path().join("photo.jpg");
         assert!(converted.exists(), "converted file should exist");
@@ -15143,6 +15326,278 @@ mod tests {
                 .collect();
             let _ = trash::os_limited::purge_all(ours);
         });
+    }
+
+    /// **CPE-1891 end to end**: a macro Convert step whose `to` is a plain pre-existing file is refused
+    /// unconfirmed, exactly as CPE-1734 established, but a confirmed re-run overwrites it and still
+    /// trashes the original — the confirm-and-retry escape hatch this ticket adds, proven on the real
+    /// OS trash rather than just the in-memory write primitive `overwrite_confirmed_no_follow`'s own
+    /// fsutil tests already cover.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn cpe_1891_macro_convert_confirmed_overwrite_replaces_the_plain_target_and_still_trashes_the_original() {
+        let trash_guard = lock_real_trash();
+        let trash_staged = trash_roundtrip_available(&trash_guard);
+        if !cpe_server::fsutil::require_staged_reason("trash_roundtrip", cfg!(target_os = "linux"), trash_staged) {
+            cpe_server::skip_notice!(
+                "skipping CPE-1891 confirmed-overwrite convert test: this environment cannot \
+                 delete→list→restore via the OS trash — CPE-1268 (cause: {})",
+                trash_staged.err().unwrap_or("(the probe reported success; CPE_STAGING_SABOTAGE forced this skip)")
+            );
+            return;
+        }
+
+        let work = tempfile::tempdir().unwrap();
+        let original = work.path().join("photo.png");
+        let original_bytes = cpe_1194_test_png_bytes();
+        fs::write(&original, &original_bytes).unwrap();
+        let to = work.path().join("photo.jpg");
+        fs::write(&to, b"SOMEONE ELSE'S JPG, NOT A LINK").unwrap();
+
+        // Unconfirmed: refused exactly as CPE-1734 pinned, original and target both untouched.
+        let e = macro_convert_in_place(&original.to_string_lossy(), &to.to_string_lossy(), "jpg", false)
+            .expect_err("unconfirmed must still refuse a plain occupied target");
+        assert!(e.contains("already exists"), "got: {e}");
+        assert_eq!(fs::read(&to).unwrap(), b"SOMEONE ELSE'S JPG, NOT A LINK");
+        assert!(original.exists());
+
+        // Confirmed: the plain target IS overwritten, and the original is trashed same as the
+        // unconfirmed success path.
+        macro_convert_in_place(&original.to_string_lossy(), &to.to_string_lossy(), "jpg", true)
+            .expect("a confirmed overwrite of a plain target must succeed");
+        assert!(!original.exists(), "the original must be trashed once the confirmed write lands");
+        let converted_bytes = fs::read(&to).unwrap();
+        assert_ne!(
+            converted_bytes, b"SOMEONE ELSE'S JPG, NOT A LINK",
+            "the plain target's bytes must have been replaced by the converted image"
+        );
+        assert_ne!(converted_bytes, original_bytes, "a JPG re-encode must differ from the source PNG bytes");
+
+        let _ = trash::os_limited::list().map(|items| {
+            let ours: Vec<_> = items.into_iter().filter(|i| i.name.to_string_lossy() == "photo.png").collect();
+            let _ = trash::os_limited::purge_all(ours);
+        });
+    }
+
+    /// **CPE-1891**: confirmed overwrite is never a licence to write through a link — CPE-1734's rule
+    /// generalised. Runs on every runner (dangling link only, via the privilege-free junction
+    /// fallback); the live-link leg is already covered by `cpe_1734_convert_refuses_a_live_link_at_to…`
+    /// and by `overwrite_confirmed_no_follow_never_writes_through_a_dangling_link`'s fsutil sibling.
+    #[test]
+    fn cpe_1891_macro_convert_confirmed_overwrite_still_refuses_a_dangling_link() {
+        let d = scratch("cpe1891_convert_link");
+        let from = d.join("photo.png");
+        let original_bytes = cpe_1734_test_png_bytes();
+        fs::write(&from, &original_bytes).unwrap();
+        let to = d.join("photo.jpg");
+        if !cpe_server::fsutil::make_dangling_link(&to) {
+            cpe_server::skip_notice!(
+                "[CPE-1891] SKIPPED the dangling-link leg: this machine could not create a link at {}.",
+                to.display()
+            );
+            return;
+        }
+        let target = cpe_server::fsutil::dangling_link_target(&to);
+
+        let e = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg", true)
+            .expect_err("a link must be refused even with a confirmed overwrite");
+
+        assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        assert!(!target.exists(), "the link's target must not have been conjured");
+        assert!(from.exists(), "the original must not be trashed when the write was refused");
+        assert_eq!(fs::read(&from).unwrap(), original_bytes);
+    }
+
+    // ---- CPE-1891: the up-front preflight scan + confirm gate, ahead of `macro_apply_run` -----------
+    // `macro_preflight_collisions` and `macro_refuse_unconfirmed_collisions` are what let `macro_run`
+    // refuse a colliding batch BEFORE applying a single op, instead of burning through every op ahead
+    // of the collision and then rolling all of them back — the actual defect this ticket was filed
+    // against. Every "refuses" test below asserts the filesystem was untouched, not just the `Result`,
+    // to prove that instant-refusal claim rather than just that SOME error came back.
+
+    #[test]
+    fn macro_preflight_collisions_flags_a_plain_occupied_rename_target_as_confirmable() {
+        let d = scratch("preflight-plain");
+        let a = d.join("a.txt");
+        fs::write(&a, b"hi").unwrap();
+        let existing = d.join("taken.txt");
+        fs::write(&existing, b"already here").unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+        assert_eq!(resolved.ops[0].to, existing.to_string_lossy(), "sanity: resolve is fs-blind, so it plans right onto the pre-existing file");
+
+        let collisions = macro_preflight_collisions(&resolved);
+        assert_eq!(collisions.len(), 1, "got: {collisions:?}");
+        assert!(collisions[0].confirmable, "a plain pre-existing file must be reported as confirmable");
+        assert_eq!(collisions[0].to, existing.to_string_lossy());
+        assert_eq!(collisions[0].op_index, 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn macro_preflight_collisions_flags_a_dangling_link_convert_target_as_not_confirmable() {
+        let d = scratch("preflight-link");
+        let a = d.join("a.png");
+        fs::write(&a, b"hi").unwrap();
+        let link = d.join("a.jpg");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            cpe_server::skip_notice!(
+                "[CPE-1891] SKIPPED the dangling-link preflight leg: this machine could not create a \
+                 link at {}.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "c".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Convert { to_ext: "jpg".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+
+        let collisions = macro_preflight_collisions(&resolved);
+        assert_eq!(collisions.len(), 1, "got: {collisions:?}");
+        assert!(!collisions[0].confirmable, "a link must be reported as NOT confirmable");
+        assert!(collisions[0].reason.contains("is a link"), "got: {}", collisions[0].reason);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn macro_preflight_collisions_reports_nothing_for_a_free_destination() {
+        let d = scratch("preflight-free");
+        let a = d.join("a.txt");
+        fs::write(&a, b"hi").unwrap();
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "free.txt".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+        assert!(macro_preflight_collisions(&resolved).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn macro_refuse_unconfirmed_collisions_refuses_up_front_and_touches_nothing() {
+        // Two inputs: the FIRST would apply cleanly, the SECOND collides. Pre-CPE-1891 this scenario
+        // would apply op 0, fail op 1, and roll op 0 back — real writes for nothing. Post-fix, this
+        // guard refuses the whole run before `macro_apply_run` is ever called, so op 0 never runs at
+        // all: proven here by asserting the filesystem, not just the returned `Result`.
+        let d = scratch("guard-refuse");
+        let a = d.join("a.txt");
+        fs::write(&a, b"a-bytes").unwrap();
+        let b = d.join("b.txt");
+        fs::write(&b, b"b-bytes").unwrap();
+        let existing = d.join("b-renamed.txt");
+        fs::write(&existing, b"already here").unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "{stem}-renamed.{ext}".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let inputs = vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()];
+        let resolved = cpe_server::macro_run::resolve(&mac, &inputs, &root).unwrap();
+
+        let e = macro_refuse_unconfirmed_collisions(&resolved, false).unwrap_err();
+        assert!(e.contains("b-renamed.txt"), "must name the colliding destination: {e}");
+
+        assert!(a.exists(), "op 0's input must be untouched — it never ran");
+        assert!(!d.join("a-renamed.txt").exists(), "op 0's output must not exist — it never ran");
+        assert!(b.exists(), "op 1's input must be untouched");
+        assert_eq!(fs::read(&existing).unwrap(), b"already here", "the collision target must be untouched");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn macro_refuse_unconfirmed_collisions_passes_through_once_the_only_collision_is_confirmed() {
+        let d = scratch("guard-confirm");
+        let a = d.join("a.txt");
+        fs::write(&a, b"hi").unwrap();
+        let existing = d.join("taken.txt");
+        fs::write(&existing, b"already here").unwrap();
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+
+        assert!(
+            macro_refuse_unconfirmed_collisions(&resolved, true).is_ok(),
+            "a confirmed plain collision must pass the gate"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn macro_refuse_unconfirmed_collisions_still_refuses_a_dangling_link_even_when_confirmed() {
+        let d = scratch("guard-link-confirm");
+        let a = d.join("a.txt");
+        fs::write(&a, b"hi").unwrap();
+        let link = d.join("linked.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            cpe_server::skip_notice!(
+                "[CPE-1891] SKIPPED the dangling-link guard leg: this machine could not create a link \
+                 at {}.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "linked.txt".into() }],
+        };
+        let root = d.to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+
+        let e = macro_refuse_unconfirmed_collisions(&resolved, true)
+            .expect_err("a link collision must stay refused even when confirmed_overwrite is true");
+        assert!(e.contains("links") && e.contains("never"), "got: {e}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cpe_1891_macro_apply_run_with_confirmed_overwrite_replaces_a_plain_occupied_rename_target() {
+        let config = tempfile::tempdir().unwrap();
+        let ctx = cpe_server::ctx::HeadlessCtx::new(config.path());
+        let work = tempfile::tempdir().unwrap();
+        let a = work.path().join("a.txt");
+        fs::write(&a, b"NEW CONTENT").unwrap();
+        let existing = work.path().join("taken.txt");
+        fs::write(&existing, b"OLD CONTENT").unwrap();
+
+        let mac = cpe_server::action_macro::ActionMacro {
+            name: "r".into(),
+            steps: vec![cpe_server::action_macro::MacroStep::Rename { template: "taken.txt".into() }],
+        };
+        let root = work.path().to_string_lossy().to_string();
+        let resolved = cpe_server::macro_run::resolve(&mac, &[a.to_string_lossy().to_string()], &root).unwrap();
+
+        // Unconfirmed: refused up front, nothing touched (the full end-to-end flow a real
+        // `macro_run` call makes: resolve, then the guard, before `macro_apply_run` ever runs).
+        let guard_err = macro_refuse_unconfirmed_collisions(&resolved, false).unwrap_err();
+        assert!(guard_err.contains("taken.txt"), "got: {guard_err}");
+        assert!(a.exists());
+        assert_eq!(fs::read(&existing).unwrap(), b"OLD CONTENT");
+
+        // Confirmed: the guard passes, and applying actually overwrites the target's bytes.
+        assert!(macro_refuse_unconfirmed_collisions(&resolved, true).is_ok());
+        macro_apply_run(&ctx, resolved, true).unwrap();
+        assert!(!a.exists(), "the source name is consumed by the rename");
+        assert_eq!(
+            fs::read(&existing).unwrap(),
+            b"NEW CONTENT",
+            "a confirmed overwrite must replace the target's bytes"
+        );
     }
 
     // ---- CPE-1734: macro Convert's `to` is a name being CLAIMED, and must refuse a link or an ------
@@ -15188,7 +15643,7 @@ mod tests {
         // negative assertion below, so a drifted copy would pass vacuously and cover nothing.
         let target = cpe_server::fsutil::dangling_link_target(&to);
 
-        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg");
+        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg", false);
 
         assert!(
             !target.exists(),
@@ -15257,7 +15712,7 @@ mod tests {
             return;
         }
 
-        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg");
+        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg", false);
 
         assert_eq!(
             fs::read(&victim).unwrap(),
@@ -15294,7 +15749,7 @@ mod tests {
         let to = d.join("photo.jpg");
         fs::write(&to, b"SOMEONE ELSE'S JPG, NOT A LINK").unwrap();
 
-        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg");
+        let r = macro_convert_in_place(&from.to_string_lossy(), &to.to_string_lossy(), "jpg", false);
 
         assert_eq!(
             fs::read(&to).unwrap(),
