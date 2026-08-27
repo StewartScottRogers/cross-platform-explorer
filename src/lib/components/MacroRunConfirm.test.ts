@@ -13,10 +13,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 
-// Mirrors MacroRunConfirm.svelte's own `genericizeReason` (CPE-1891, Visual Critic round 3): the
-// hoisted per-kind sentence strips the leading `"<path>" ` clause, since the hoisted sentence is
-// shared across possibly-many collisions and must not look tied to just the first one's path.
-const genericized = (reason: string) => reason.replace(/^"[^"]*"\s*/, "This destination ");
+// The two hazard sentences EXACTLY as the box must render them (CPE-1928): differentiator first,
+// path stripped (CPE-1891, Visual Critic round 3 — the hoisted sentence is shared across
+// possibly-many collisions and must not look tied to just the first one's path), and the remedy both
+// kinds share lifted out to `SHARED_REMEDY` so it is stated once. Pinned as literals rather than
+// re-derived from the fixture by a mirrored transform, so a copy change has to be made here too.
+const RENAME_HAZARD_SENTENCE =
+  "Renaming onto a link destroys it — the link is removed and its target is left orphaned.";
+const CONVERT_HAZARD_SENTENCE =
+  "Creating a file at a link's name writes THROUGH it — the bytes would land at the link's target, " +
+  "a path you did not name, and a failure part-way would then delete the link itself.";
+const SHARED_REMEDY = "Nothing was changed; remove the link first if that is what you meant.";
 
 const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
 vi.mock("../invoke", () => ({
@@ -49,7 +56,11 @@ const BLOCKED_COLLISION = {
   to: "/work/a_v2.txt",
   kind: "rename",
   confirmable: false,
-  reason: '"/work/a_v2.txt" is a link, and renaming onto a link destroys it — the link is removed and its target is left orphaned',
+  // Verbatim `classify_symlink_slot` (crates/server/src/fsutil.rs), remedy tail included -- the tail is
+  // exactly what CPE-1928 hoists out, so a fixture clipped short of it could not exercise the hoist.
+  reason:
+    '"/work/a_v2.txt" is a link, and renaming onto a link destroys it — the link is removed and its ' +
+    "target is left orphaned. Nothing was changed; remove the link first if that is what you meant",
 };
 // Same shape, the CONVERT-flavored wording (CPE-1891 follow-up: the two must read differently, not just
 // share a generic "is a link" header).
@@ -59,7 +70,12 @@ const CONVERT_BLOCKED_COLLISION = {
   to: "/work/b.jpg",
   kind: "convert",
   confirmable: false,
-  reason: '"/work/b.jpg" is a link, and creating a file at a link\'s name writes THROUGH it — the bytes would land at the link\'s target, a path you did not name',
+  // Verbatim `classify_create_slot` -- note its remedy tail says "Nothing was WRITTEN", the rename
+  // guard's says "Nothing was CHANGED"; both must reduce to the one shared remedy line.
+  reason:
+    '"/work/b.jpg" is a link, and creating a file at a link\'s name writes THROUGH it — the bytes ' +
+    "would land at the link's target, a path you did not name, and a failure part-way would then " +
+    "delete the link itself. Nothing was written; remove the link first if that is what you meant",
 };
 // A THIRD blocked item, same "rename-move" bucket as BLOCKED_COLLISION but a DIFFERENT path/reason
 // string -- proves the dedup is by hazard kind, not by exact reason text.
@@ -69,7 +85,9 @@ const MOVE_BLOCKED_COLLISION = {
   to: "/work/Archive/c.txt",
   kind: "move",
   confirmable: false,
-  reason: '"/work/Archive/c.txt" is a link, and renaming onto a link destroys it — the link is removed and its target is left orphaned',
+  reason:
+    '"/work/Archive/c.txt" is a link, and renaming onto a link destroys it — the link is removed and ' +
+    "its target is left orphaned. Nothing was changed; remove the link first if that is what you meant",
 };
 
 beforeEach(() => {
@@ -227,13 +245,26 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     const reasons = screen.getAllByTestId("blocked-reason").map((el) => el.textContent);
 
     expect(reasons).toHaveLength(2);
-    expect(reasons).toContain(genericized(BLOCKED_COLLISION.reason));
-    expect(reasons).toContain(genericized(CONVERT_BLOCKED_COLLISION.reason));
-    // Genericizing BLOCKED_COLLISION and MOVE_BLOCKED_COLLISION's reasons yields the IDENTICAL string
-    // (same "destroys it" wording, only their raw paths differed) -- which is exactly the point: they
-    // share one bucket and therefore one rendered sentence, so there is nothing further to assert about
-    // MOVE_BLOCKED_COLLISION's reason specifically once its path is stripped.
-    expect(genericized(MOVE_BLOCKED_COLLISION.reason)).toEqual(genericized(BLOCKED_COLLISION.reason));
+    // CPE-1928: pinned as whole strings, in first-appearance order. Each is the OTHER's negative case
+    // too -- the pair are asserted distinct below, so neither assertion can be satisfied by the wrong
+    // hazard's sentence.
+    expect(reasons[0]).toEqual(RENAME_HAZARD_SENTENCE);
+    expect(reasons[1]).toEqual(CONVERT_HAZARD_SENTENCE);
+    expect(RENAME_HAZARD_SENTENCE).not.toEqual(CONVERT_HAZARD_SENTENCE);
+    // ...and distinct where it matters: at the START, which is the whole point of CPE-1928. A reader
+    // who takes in only the first few words must already know which hazard this is, so the sentences
+    // are required to diverge inside their opening run of words, not merely somewhere.
+    const opening = (s: string) => s.split(" ").slice(0, 4).join(" ");
+    expect(opening(RENAME_HAZARD_SENTENCE)).not.toEqual(opening(CONVERT_HAZARD_SENTENCE));
+    // The shared remedy is stated ONCE, below both, and is absent from each hazard sentence -- the
+    // duplicated closing clause was half of what made the two read as one paragraph twice.
+    expect(screen.getAllByTestId("blocked-remedy")).toHaveLength(1);
+    expect(screen.getByTestId("blocked-remedy").textContent).toEqual(SHARED_REMEDY);
+    for (const reason of reasons) expect(reason).not.toContain("remove the link first");
+    // MOVE_BLOCKED_COLLISION shares BLOCKED_COLLISION's bucket and therefore its one rendered sentence
+    // (same "destroys it" wording, only their raw paths differed) -- so its own reason text has nothing
+    // further to assert once the path is stripped; that it is folded in is what `toHaveLength(2)` says.
+    expect(MOVE_BLOCKED_COLLISION.reason).toContain("renaming onto a link destroys it");
     // The two variants must actually read differently -- a shared generic sentence would defeat the
     // point (rename/move "destroys" the link; convert "writes THROUGH" it).
     expect(screen.getByTestId("blocked-collisions").textContent).toContain("destroys it");
@@ -243,11 +274,39 @@ describe("MacroRunConfirm collision confirm-and-retry (CPE-1891)", () => {
     for (const reason of reasons) {
       expect(reason).not.toContain(BLOCKED_COLLISION.to);
       expect(reason).not.toContain(CONVERT_BLOCKED_COLLISION.to);
-      expect(reason).toMatch(/^This destination /);
+      expect(reason).not.toContain(MOVE_BLOCKED_COLLISION.to);
     }
     // All three PATHS still appear in the plain path list below the reason(s), including the
     // move-kind item whose own reason text was folded into the rename/move sentence above.
     expect(screen.getByTestId("blocked-collisions").textContent).toContain("/work/Archive/c.txt");
+  });
+
+  it("with only ONE hazard kind, folds the shared remedy back into that sentence instead of leaving a lone line", async () => {
+    // CPE-1928's other half: the remedy is hoisted out because TWO sentences repeating it read as one
+    // paragraph twice. With a single sentence there is nothing to de-duplicate, and a remedy stranded on
+    // its own line below would read as a second, contentless hazard -- so it closes its own sentence.
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "macro_plan") return PLAN;
+      if (cmd === "macro_preflight") return [CONVERT_BLOCKED_COLLISION];
+      return null;
+    });
+
+    render(MacroRunConfirm, { macro: MACRO, inputs: ["/work/b.png"], root: "/work" });
+    await screen.findByTestId("blocked-collisions");
+    const reasons = screen.getAllByTestId("blocked-reason").map((el) => el.textContent);
+
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toEqual(`${CONVERT_HAZARD_SENTENCE} ${SHARED_REMEDY}`);
+    // Specifically the CONVERT hazard, not the rename one -- the fold must not launder the two into a
+    // single generic sentence, which is the failure mode this whole area keeps circling.
+    expect(reasons[0]).toContain("writes THROUGH it");
+    expect(reasons[0]).not.toContain("destroys it");
+    expect(reasons[0]).not.toEqual(`${RENAME_HAZARD_SENTENCE} ${SHARED_REMEDY}`);
+    expect(screen.queryByTestId("blocked-remedy")).toBeNull();
+    // ...and the remedy is still SAID -- folding it in must not drop it.
+    expect(screen.getByTestId("blocked-collisions").textContent).toContain("remove the link first");
+    // The path stays the list's job, not the sentence's (CPE-1891).
+    expect(reasons[0]).not.toContain(CONVERT_BLOCKED_COLLISION.to);
   });
 
   it("shows a dim note stating why Run is blocked, next to the button, when a link collision is present", async () => {

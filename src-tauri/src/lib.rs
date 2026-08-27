@@ -7024,6 +7024,15 @@ async fn macro_preflight(macro_: ActionMacro, inputs: Vec<String>, root: String)
 /// this engine into writing through a link no matter what it passes (`MacroCollision::confirmable` is
 /// never influenced by this list). Nothing has been applied yet when this check runs, so a refusal here
 /// costs nothing to roll back.
+///
+/// **The set is keyed by NAME, not by file identity** (PR #1044 reviewer's probe, written down under
+/// CPE-1928 so it is not rediscovered): deleting the confirmed occupant and creating a *different*
+/// plain file at that exact name between confirm and Run still authorises the overwrite. Judged
+/// acceptable — it is a name the user was shown and ticked; a *link* at that name flips `confirmable`
+/// false and is refused unconditionally; a hard-linked one is refused on the handle; and every
+/// un-ticked name fails closed. Pinning identity would need a handle or `dev`/`ino` carried across two
+/// IPC calls, which this repo does only *within* a call, and Batch-Media's plan-to-execute re-check is
+/// likewise path-based across that same boundary.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn macro_run(

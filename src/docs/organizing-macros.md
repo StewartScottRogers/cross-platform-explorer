@@ -127,10 +127,11 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   you were shown and ticked are overwritten — a collision that shows up somewhere else is still refused.
   **This can't be undone**: the panel says so, and *Result + Undo* above explains why.
 - A collision with a **link** (a shortcut, symlink, or similar) is listed the same way but is **never**
-  confirmable — no checkbox unblocks it, and Run stays disabled while one is present. One sentence under
-  the heading explains why (a Rename/Move step would destroy the link; a Convert step would write
-  through it and land the bytes at a path you never named — two different hazards, worded differently);
-  remove or rename the link first if that's really what you meant.
+  confirmable — no checkbox unblocks it, and Run stays disabled while one is present. Under the heading,
+  one sentence per hazard present explains why, each **opening on what makes it different**: *"Renaming
+  onto a link destroys it…"* for a Rename/Move step, *"Creating a file at a link's name writes THROUGH
+  it…"* for a Convert. The remedy they share — remove or rename the link first if that's really what you
+  meant — is said **once**, below them.
 - **Copy all N names** — each list has its own copy button, copying that list's destinations to the
   clipboard one per line, for a batch larger than the on-screen preview shows. The blocked list's is the
   one you'll reach for most: those are the names you have to go rename or remove by hand before you can
@@ -144,7 +145,9 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   genuine undo, not a lossy round-trip.
 - **Scope guard.** Every resolved rename/move/convert destination must land inside the folder the macro
   was run from — a maliciously- or accidentally-crafted rename template containing `..`/path separators
-  can't write outside it. This is checked before anything runs.
+  can't write outside it. This is checked before anything runs. A separator that stays *inside* the root
+  is allowed and **relocates** the file: a Rename template of `sub/{stem}.{ext}` lands the file in
+  `sub/`, exactly where the plan preview says it will.
 - **No pickers.** The Move destination and any `{ask:label}` answer are plain text fields — there's no
   Browse dialog for either.
 - **The run-flow Undo is separate from Ctrl+Z.** It only exists in the confirm dialog right after a run;

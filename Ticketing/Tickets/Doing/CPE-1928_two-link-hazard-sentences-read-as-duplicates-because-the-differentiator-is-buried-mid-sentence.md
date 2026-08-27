@@ -3,7 +3,7 @@ id: CPE-1928
 title: the two link-hazard sentences read as duplicates, because the only differing clause is buried mid-sentence
 type: task
 priority: Low
-status: Open
+status: In Progress
 tags: ready
 estimate: XS
 created: 2026-08-27
@@ -78,3 +78,63 @@ here changes behaviour, and the Critic passed the PR with this noted as non-bloc
 
 Related: **CPE-1891** (the collision panel), **CPE-1892** (the copy-held-back-paths button's rough
 edges), **CPE-1869** (the list-copy pattern both reuse).
+
+## Work Log
+
+**2026-08-27 — implemented (option B, as decided in the ticket; not re-litigated).**
+
+`MacroRunConfirm.svelte` now splits each backend link-refusal `reason` into two parts before rendering:
+
+- **The lead** (`"<path>" is a link, and `) is dropped, so the sentence STARTS on its differentiator —
+  `Renaming onto a link destroys it — …` / `Creating a file at a link's name writes THROUGH it — …`.
+  Path-stripping is still what CPE-1891 required; it just no longer leaves `This destination is a
+  link, and` standing in front of the only words that differ.
+- **The tail** (`Nothing was changed/written; remove the link first if that is what you meant`) is
+  hoisted out and printed ONCE beneath both sentences, as `Nothing was changed; remove the link first
+  if that is what you meant.` ("changed" covers "written").
+
+With a **single** hazard kind present there is nothing to de-duplicate and a lone remedy line would
+read as a second, contentless hazard — so it is folded back onto that one sentence and no separate
+remedy element renders. A `reason` that does not match the link shape (the guards' "could not check
+whether … is a link" arms) falls through to CPE-1891's `genericizeReason` unchanged.
+
+Both-hazards box: **7 lines of near-duplicate prose → 4 lines of two distinguishable sentences + 1
+shared remedy line**, differentiators in the first two words of each.
+
+**Tests** — `MacroRunConfirm.test.ts`'s fixtures now carry the **verbatim** backend reasons including
+their remedy tails (they had been clipped short of the tail, so nothing could have exercised the
+hoist). The wording assertions are pinned as whole-string literals, plus:
+
+- each hazard sentence's assertion is the OTHER's negative case (`RENAME_HAZARD_SENTENCE !==
+  CONVERT_HAZARD_SENTENCE`, asserted), so neither can be satisfied by the wrong hazard's sentence;
+- the two are asserted to diverge within their **first four words**, not merely somewhere — a test
+  that only checked they differ eventually would pass the very shape this ticket is about;
+- the remedy is asserted present exactly once (`getAllByTestId("blocked-remedy")` length 1) and absent
+  from every hazard sentence;
+- the new single-hazard test asserts the folded sentence is specifically the CONVERT one (`contains
+  "writes THROUGH it"`, `not.toContain "destroys it"`, `not.toEqual` the rename-flavoured fold), so the
+  fold cannot launder the two kinds into one generic sentence.
+
+CPE-1891's no-path property is untouched and still asserted (now against all three fixtures' `to`).
+
+**Also folded in from this ticket's two doc one-liners:**
+
+- `macro_run`'s doc comment now records that `confirmed_overwrite` is keyed by **name, not file
+  identity**, with why that is acceptable and what pinning identity would cost. (A doc comment on a
+  `#[tauri::command]` ⇒ `src/lib/bindings.gen.ts` regenerated via `export_bindings`, or CI's
+  Typed-bindings drift guard reds.)
+- `src/docs/organizing-macros.md` now states that a Rename template containing a separator **relocates
+  within the root** (`sub/{stem}.{ext}` lands in `sub/`, as the plan preview always promised), and its
+  collision bullet is rewritten to describe the new differentiator-first / remedy-once shape (CPE-579).
+
+**Visual evidence** (branch-only, per convention — not committed to `main`), captured off-screen via
+headless Edge against the `?case=many` harness, the only case that puts both hazards on screen:
+
+- `.claude/sprint-metrics/visual-evidence/cpe-1928-{light,dark}-many-blocked.png`
+- `.claude/sprint-metrics/visual-evidence/cpe-1928-{light,dark}-single-hazard-remedy-folded.png`
+
+Kept under new CPE-1928 names rather than overwriting `cpe-1891-{light,dark}-many-blocked.png`, so the
+Critic has the before/after pair side by side and no sibling PR touching that file conflicts.
+
+`npm run check` clean; `npm test` 4693/4693 green (incl. the `bidiEscape.guard` registry, which needed
+`text:blockedRemedy` recording — a frontend constant, no backend text in it).

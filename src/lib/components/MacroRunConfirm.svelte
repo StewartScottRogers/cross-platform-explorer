@@ -116,26 +116,58 @@
     return reason.replace(/^"[^"]*"\s*/, "This destination ");
   }
 
-  /** One representative `reason` sentence per DISTINCT hazard the blocked set contains (CPE-1891
-   *  Visual Critic pass): every `rename`/`move` collision shares the same "destroys the link" wording
-   *  (both are refused by the same backend guard, `symlink_slot_refusal`) and every `convert` collision
-   *  shares the same "writes THROUGH it" wording (`create_slot_link_refusal`) — the two hazards are
-   *  genuinely different and both need saying, but a THIRD `move` alongside a rename would just repeat
-   *  the first sentence, which is exactly the "N copies of one paragraph" this hoists past. Order
-   *  matches first appearance in `blocked` for a stable, non-flickering readout. */
-  function representativeReasons(items: MacroCollision[]): string[] {
+  /** The identical opening (`… is a link, and `) and identical closing (`Nothing was
+   *  changed/written; remove the link first …`) both backend link refusals carry. With BOTH hazard
+   *  kinds present those bracketed the one differing clause in matching prose, so the two sentences
+   *  read as the same paragraph twice (CPE-1928). Split them off here: the lead is dropped so the
+   *  sentence STARTS on its differentiator, and the remedy is hoisted out to be stated once. */
+  const HAZARD_LEAD = /^"[^"]*"\s+is a link, and\s+/;
+  const REMEDY_TAIL = /\.\s*Nothing was (?:changed|written); remove the link first if that is what you meant\.?\s*$/;
+  /** The shared remedy, worded once for both kinds ("changed" covers "written"). */
+  const SHARED_REMEDY = "Nothing was changed; remove the link first if that is what you meant.";
+
+  /** One hazard sentence, differentiator first (CPE-1928): `"<path>" is a link, and renaming onto a
+   *  link destroys it — …` becomes `Renaming onto a link destroys it — …`, with the shared remedy
+   *  stripped for separate display. A `reason` that does not have that shape (the guards' "could not
+   *  check whether … is a link" arms) falls back to CPE-1891's `genericizeReason` unchanged. */
+  function hazardSentence(reason: string): string {
+    const body = reason.replace(REMEDY_TAIL, "");
+    const lead = HAZARD_LEAD.exec(body);
+    if (!lead) return genericizeReason(body);
+    const rest = body.slice(lead[0].length).replace(/\.\s*$/, "");
+    return `${rest.charAt(0).toUpperCase()}${rest.slice(1)}.`;
+  }
+
+  /** One representative sentence per DISTINCT hazard the blocked set contains (CPE-1891 Visual Critic
+   *  pass): every `rename`/`move` collision shares the same "destroys the link" wording (both are
+   *  refused by the same backend guard, `symlink_slot_refusal`) and every `convert` collision shares
+   *  the same "writes THROUGH it" wording (`create_slot_link_refusal`) — the two hazards are genuinely
+   *  different and both need saying, but a THIRD `move` alongside a rename would just repeat the first
+   *  sentence, which is exactly the "N copies of one paragraph" this hoists past. Order matches first
+   *  appearance in `blocked` for a stable, non-flickering readout.
+   *
+   *  CPE-1928 adds the second half: `remedy` is the shared closing clause, returned separately so it is
+   *  printed ONCE below both sentences. With a single hazard present a lone remedy line would read as
+   *  orphaned, so it is folded back onto that one sentence and `remedy` comes back empty. */
+  function representativeReasons(items: MacroCollision[]): { sentences: string[]; remedy: string } {
     const seenKinds = new Set<string>();
-    const out: string[] = [];
+    const sentences: string[] = [];
+    let sawLinkHazard = false;
     for (const c of items) {
       const bucket = c.kind === "convert" ? "convert" : "rename-move";
       if (!seenKinds.has(bucket)) {
         seenKinds.add(bucket);
-        out.push(genericizeReason(c.reason));
+        sawLinkHazard ||= HAZARD_LEAD.test(c.reason);
+        sentences.push(hazardSentence(c.reason));
       }
     }
-    return out;
+    if (!sawLinkHazard) return { sentences, remedy: "" };
+    if (sentences.length === 1) return { sentences: [`${sentences[0]} ${SHARED_REMEDY}`], remedy: "" };
+    return { sentences, remedy: SHARED_REMEDY };
   }
-  $: blockedReasons = representativeReasons(blocked);
+  $: blockedHazard = representativeReasons(blocked);
+  $: blockedReasons = blockedHazard.sentences;
+  $: blockedRemedy = blockedHazard.remedy;
 
   async function copyCollisionPaths(list: MacroCollision[], which: "blocked" | "confirmable") {
     try {
@@ -237,9 +269,15 @@
             {blocked.length} destination{blocked.length === 1 ? "" : "s"} can’t be overwritten — a link,
             never confirmable
           </div>
+          <!-- CPE-1928: each sentence LEADS with what makes its hazard different, and the remedy both
+               share is printed once beneath them — with both kinds present the old shape opened and
+               closed identically twice over, so it scanned as one paragraph repeated. -->
           {#each blockedReasons as reason}
             <div class="collision-reason" data-testid="blocked-reason">{reason}</div>
           {/each}
+          {#if blockedRemedy}
+            <div class="collision-reason remedy" data-testid="blocked-remedy">{blockedRemedy}</div>
+          {/if}
           <ul class="collision-list">
             {#each blockedPreview.listed as c (c.op_index)}
               <li title={displaySafePath(c.to)}>{displaySafePath(c.to)}</li>
@@ -372,6 +410,9 @@
      ordinary prose, `var(--text)` (never `var(--danger)`: the red BORDER above is the "this is refused"
      signal; MENUS.md's no-red-text-for-destructive convention holds here even off a menu). */
   .collision-reason { margin-top: 4px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
+  /* The one shared remedy (CPE-1928) sits a touch clear of the hazard sentences it closes, so it reads
+     as their common conclusion rather than as a third hazard. */
+  .collision-reason.remedy { margin-top: 7px; }
   .collision-list { margin: 6px 0 0; padding-left: 18px; color: var(--text-dim); max-height: 120px; overflow: auto; }
   .collision-list li { overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 11.5px; }
   .collision-list li.more { list-style: none; margin-left: -18px; font-family: inherit; }
