@@ -82,8 +82,15 @@ actually in, rather than reporting every outcome as the same reassuring line:
   affected ("1 of the 4 published agent entries…"), so a single bad entry doesn't read as a
   wholesale failure. Updates are only ever accepted going forwards, which is exactly why nothing
   was installed here.
-- *The published catalog looks corrupted or mis-signed* — signatures didn't check out, so nothing
-  was installed. Again, your existing agents are untouched and safe to use.
+- *The published catalog looks corrupted or mis-signed* — the catalog listing verified, but the
+  individual agent definitions it named didn't, so nothing was installed. Again, your existing
+  agents are untouched and safe to use.
+- *The published catalog was refused* — the catalog **listing** itself was rejected before any part
+  of it was read, so nothing was fetched or written at all. That covers a listing whose signature
+  doesn't check out, one written for a newer version of the app, and one naming an agent under a
+  name the app won't use as a filename. The app deliberately doesn't guess between them in the
+  message, because all three are publishing-side faults with the same answer for you: nothing
+  changed, and there is nothing to do.
 - *Couldn't check / you're offline* — the check never completed. Nothing changed; try again later.
 - *Your record of installed agent versions is unreadable* — the app keeps a small local file noting
   which version of each agent you have. It is how updates are only ever accepted going forwards. If
