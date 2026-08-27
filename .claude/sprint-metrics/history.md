@@ -1572,3 +1572,46 @@ Two related lessons from the same fix:
    pins the surrounding boilerplate as lexically disjoint from `"is a link"`. When a guard trips,
    check whether the replacement can be *tighter* than the original — relaxing it to green is the
    move that creates a shadowed guard.
+
+## 2026-08-27 — a green STATIC suite is not evidence a code path is unreachable
+
+PR #1059's worker ran five sabotages. Four reddened. The fifth — a by-path `remove_file` placed
+*after* the Unix handle-relative descent — stayed green, and it reasoned that `O_NOFOLLOW` refuses at
+the component so the leaf is never reached. Clean, plausible, and it wrote the conclusion into the
+module's **design narrative** as a finding rather than a miss.
+
+The Reviewer did not argue with the reasoning. It ran the **race harness the same PR had just built**
+and never pointed at that question:
+
+    pristine (unlinkat)                        200 trials    0 files deleted outside the root
+    by-path remove_file after the descent      200 trials   94 files deleted outside the root
+
+The leaf *is* reached on every successful delete, and a by-path leaf **re-resolves the whole path from
+the root**, which a concurrent rename redirects. `O_NOFOLLOW` only makes the leaf unreachable with a
+hostile name in a **static fixture**.
+
+Two rules from this:
+
+1. **Reachability is a claim, and a static suite cannot support it.** If a PR ships a race or fuzz
+   harness, run it against the reachability question before concluding anything. Now a standing line
+   in every dispatch prompt.
+2. **A wrong "this is unreachable" note is worse than no note.** It invites a future maintainer to
+   swap the primitive back for the by-path call and reintroduce a 94-in-200 escape with green CI. The
+   fix is to correct the narrative in *all three* places it was written — PR body, ticket Work Log,
+   and the function's own doc — and specifically **not** to add CPE-1929's untestable-backstop
+   annotation, which would cement the false claim.
+
+Sibling finding from the same review, same family: `apply_delete` computed a permanent-vs-transient
+classification and **discarded** it — `Refused.permanent` is read only in the *write* loop. Replacing
+the branch with an unconditional `transient` left the suite at 2419/0 unchanged, while the shipped
+user-facing doc asserted the distinction was real. **A branch no test can distinguish is not a
+feature, and documenting it to users makes it a false promise.**
+
+## 2026-08-27 — the janitor pruned a live reviewer's worktree twice in one shift
+
+Two independent reviewers (#1052's and #1058's) had their round-1 worktrees pruned out from under them
+mid-review and had to re-create them from the PR head. Nothing was lost either time and `main` was
+never touched, but it is the known [[janitor-prune-breaks-agent-resume]] hazard costing real re-setup
+time on **agents that are still attached to an open PR**. If a cleanup pass runs during a sprint, it
+must skip every worktree whose agent has an open PR in the queue — not just the ones currently
+executing.
