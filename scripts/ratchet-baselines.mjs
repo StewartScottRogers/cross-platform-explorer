@@ -11,15 +11,26 @@
 //
 // What this does: measures every registered baseline at HEAD and at a base revision (the merge base /
 // the branch point), and fails when one INCREASED. A raise stays possible — it is occasionally
-// legitimate — but never quiet: it must be accompanied, in the same diff, by a row in the raise ledger
+// legitimate — but never quiet: it must be accompanied, IN THIS DIFF, by a NEW row in the raise ledger
 // (`docs/design/RATCHETS.md`) naming the baseline, the exact old and new values, the owning ticket and
-// the reason. A ledger row that does not match the actual movement does not authorise it.
+// the reason.
+//
+// THE GOVERNING RULE, because every real hole found in review broke it: **a measurement this guard
+// cannot make must be RED, never a number and never a skip.** A measurer that returns the wrong value
+// passes a raise, which is the entire defect. So:
+//   - a baseline constant that stops being a bare integer literal (`= 200 + 78`) throws, it does not
+//     take the first integer it sees;
+//   - an allowlist whose entries include a spread (`...MORE_GAPS`) throws, it does not count the
+//     spread as one element;
+//   - a literal that is not the whole initialiser (`[...].concat(X)`) throws;
+//   - a baseline that cannot be measured at the BASE revision is an error, not a free pass — git's own
+//     rename detection is followed first, and anything still unresolved must be declared;
+//   - a ledger row that already existed at the base revision authorises nothing: a row is a one-time
+//     licence for the raise made in its own diff, not a standing permit.
 //
 // Enumeration, not recall (CPE-1932): `REGISTRY` below is the enumerated list, and
 // `src/lib/ratchetBaselines.test.ts` fails CI if a file in the tree declares something ratchet-shaped
-// and is neither registered here nor listed in `NOT_A_RATCHET` with a stated reason. A new ratchet
-// therefore cannot be added without either getting this guard for free or saying out loud why it does
-// not need it.
+// and is neither registered here nor listed in `NOT_A_RATCHET` with a stated reason.
 //
 // No dependencies on purpose: CI runs this with the runner's preinstalled `node`, with no `npm ci` and
 // no toolchain, so the whole job is a checkout plus a few hundred milliseconds.
@@ -38,13 +49,28 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** Where a legitimate raise has to be written down, loudly, in the same diff that raises it. */
 export const LEDGER_PATH = "docs/design/RATCHETS.md";
 
+/**
+ * A measurement that could not be made. Never coerced to a number anywhere — it travels as itself all
+ * the way to `evaluate`, which turns it into a red.
+ * @typedef {{ failed: string }} Unmeasurable
+ */
+
+/**
+ * @param {unknown} v
+ * @returns {v is Unmeasurable}
+ */
+export function isUnmeasurable(v) {
+  return typeof v === "object" && v !== null && typeof (/** @type {Unmeasurable} */ (v).failed) === "string";
+}
+
 // ---------------------------------------------------------------------------------------------
 // A source scanner just big enough to count the entries of a literal without a real parser.
 //
 // Counting entries with a regex is what makes this class of tooling lie: a `,` inside a string, a
 // nested object, or a `//` comment all break naive counting, and the failure mode is a count that
 // silently drifts rather than an error. So: a small state machine that knows about strings (all three
-// kinds, escapes and `${}` substitutions included) and both comment forms, and nothing else.
+// kinds, escapes and `${}` substitutions included) and both comment forms, and nothing else — plus a
+// hard refusal on any construct whose element count it cannot know.
 // ---------------------------------------------------------------------------------------------
 
 /** The closing bracket for each opening one this scanner tracks. */
@@ -127,6 +153,10 @@ function endOfString(src, open) {
 /**
  * Split the INSIDE of an array/object literal into its top-level elements. Trailing commas and
  * comment-only tails produce no element.
+ *
+ * **Refuses a spread.** `[...MORE_GAPS, "x"]` has an element count this scanner cannot know — the
+ * spread might contribute six entries or none. Counting it as one is how a real 14 -> 17 raise
+ * reported itself as `14 -> 12 LOWERED` and exited 0 (CPE-1934 review, F1). Unknowable must be red.
  * @param {string} inner
  * @returns {string[]}
  */
@@ -162,7 +192,17 @@ export function splitTopLevel(inner) {
     i++;
   }
   parts.push(inner.slice(start));
-  return parts.map(stripComments).filter((p) => p.trim().length > 0);
+  const elements = parts.map(stripComments).filter((p) => p.trim().length > 0);
+  for (const el of elements) {
+    if (el.trim().startsWith("...")) {
+      throw new Error(
+        `this literal spreads another value into itself (${JSON.stringify(el.trim().slice(0, 40))}), so its real ` +
+          `entry count is not knowable from this file alone. A spread would be counted as ONE entry, which ` +
+          `under-reports the debt and can turn a raise into a "LOWERED" pass. Write the entries out literally.`,
+      );
+    }
+  }
+  return elements;
 }
 
 /**
@@ -215,18 +255,54 @@ function literalStart(src, name) {
   return i;
 }
 
+/**
+ * The literal must be the WHOLE initialiser. `[...] .concat(MORE)` / `[...].slice(1)` measure the
+ * bracket span and silently ignore the rest, which under-reports. Anything but `;` (optionally after
+ * `as const`) after the closing bracket is refused.
+ * @param {string} src
+ * @param {number} end   index just past the literal's closing bracket
+ * @param {string} name
+ * @returns {void}
+ */
+function assertLiteralIsWholeInitialiser(src, end, name) {
+  const tail = src.slice(end);
+  const skipped = /^\s*(?:as\s+const\s*)?/.exec(tail);
+  const next = tail[(skipped ? skipped[0].length : 0)];
+  if (next !== ";") {
+    throw new Error(
+      `\`const ${name}\`'s literal is not the whole initialiser — it is followed by ` +
+        `${JSON.stringify(tail.slice(0, 30).replace(/\s+/g, " "))} rather than \`;\`. Whatever follows would be ` +
+        `ignored, so the measured count could be lower than the real one. Keep the baseline a plain literal.`,
+    );
+  }
+}
+
 // --- the measurement shapes the baselines in this repo actually take ---------------------------
 
 /**
  * A baseline stored as a bare integer, e.g. `const BASELINE_FILES_WITH_HEX = 85;`.
+ *
+ * Deliberately strict: the ENTIRE initialiser must be one integer. An earlier version took the first
+ * integer after `=`, so `= 200 + 78` (a real 277 -> 278 raise) measured as `200` and reported
+ * `277 -> 200 LOWERED`, exit 0 — a complete all-green bypass from a one-line edit (CPE-1934 review, F1).
  * @param {string} name
  * @returns {(src: string) => number}
  */
 export function numericConst(name) {
   return (src) => {
-    const m = new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?const\\s+${name}\\b[^=\\n]*=\\s*(\\d[\\d_]*)`).exec(src);
-    if (!m) throw new Error(`no numeric \`const ${name}\` found`);
-    return Number(m[1].replace(/_/g, ""));
+    const m = new RegExp(`(?:^|\\n)[ \\t]*(?:export[ \\t]+)?const[ \\t]+${name}\\b[^=\\n]*=([^\\n]*)`).exec(src);
+    if (!m) throw new Error(`no \`const ${name}\` declaration found`);
+    const raw = stripComments(m[1])
+      .replace(/;\s*$/, "")
+      .trim();
+    if (!/^\d[\d_]*$/.test(raw)) {
+      throw new Error(
+        `\`const ${name}\` is no longer a plain integer literal — its initialiser reads ${JSON.stringify(raw)}. ` +
+          `This guard refuses to guess a number out of an expression: a measurer that returns the WRONG value ` +
+          `passes a raise, which is exactly the defect it exists to stop. Keep the baseline a bare integer.`,
+      );
+    }
+    return Number(raw.replace(/_/g, ""));
   };
 }
 
@@ -239,7 +315,9 @@ export function arrayLength(name) {
   return (src) => {
     const open = literalStart(src, name);
     if (src[open] !== "[") throw new Error(`\`const ${name}\` is not an array literal`);
-    return splitTopLevel(src.slice(open + 1, endOfSpan(src, open) - 1)).length;
+    const end = endOfSpan(src, open);
+    assertLiteralIsWholeInitialiser(src, end, name);
+    return splitTopLevel(src.slice(open + 1, end - 1)).length;
   };
 }
 
@@ -253,9 +331,10 @@ export function recordOfArraysTotal(name) {
   return (src) => {
     const open = literalStart(src, name);
     if (src[open] !== "{") throw new Error(`\`const ${name}\` is not an object literal`);
-    const inner = src.slice(open + 1, endOfSpan(src, open) - 1);
+    const end = endOfSpan(src, open);
+    assertLiteralIsWholeInitialiser(src, end, name);
     let total = 0;
-    for (const entry of splitTopLevel(inner)) {
+    for (const entry of splitTopLevel(src.slice(open + 1, end - 1))) {
       const bracket = entry.indexOf("[");
       if (bracket === -1) throw new Error(`\`const ${name}\` entry has no array value: ${entry.slice(0, 60)}`);
       total += splitTopLevel(entry.slice(bracket + 1, endOfSpan(entry, bracket) - 1)).length;
@@ -282,7 +361,8 @@ export function jsonArrayLength(prop) {
 // THE ENUMERATION.
 //
 // Every ratchet-style baseline in the tree: a stored count or allowlist that is only ever supposed to
-// shrink. Found 2026-08-27 by four independent sweeps, not from memory (see docs/design/RATCHETS.md).
+// shrink. Found 2026-08-27 by four independent sweeps, not from memory (see docs/design/RATCHETS.md),
+// and independently re-derived by the CPE-1934 Reviewer with a wider vocabulary — nothing missed.
 // `unenforced: true` means the baseline is real but deliberately not gated here — with the reason
 // written down, because an unexplained omission is how an enumeration rots.
 // ---------------------------------------------------------------------------------------------
@@ -410,6 +490,14 @@ export const NOT_A_RATCHET = [
     file: "gui-smoke/wdio.conf.ts",
     reason: "REPLAY_BASELINE_NAME is a test fixture filename for the activity-replay baseline feature.",
   },
+  {
+    file: "scripts/organize-done.mjs",
+    reason: "THRESHOLD is how many Done tickets trigger a reorganise — a workflow trigger, not debt owed.",
+  },
+  {
+    file: "scripts/ratchet-baselines.mjs",
+    reason: "This guard's own REGISTRY: the list OF ratchets, not a ratchet. Its completeness is tested separately.",
+  },
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -417,9 +505,11 @@ export const NOT_A_RATCHET = [
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * A declared raise. `from === null` means "this baseline is new/unmeasurable at the base revision",
+ * written in the ledger as `| id | new -> N | CPE-NNNN | why |`.
  * @typedef {object} LedgerRow
  * @property {string} id
- * @property {number} from
+ * @property {number | null} from
  * @property {number} to
  * @property {string} ticket
  * @property {string} reason
@@ -427,19 +517,33 @@ export const NOT_A_RATCHET = [
 
 /**
  * Parse the raise ledger's table rows out of `docs/design/RATCHETS.md`.
- * Row shape: `| <id> | <from> -> <to> | CPE-NNNN | reason |`
+ * Row shape: `| <id> | <from> -> <to> | CPE-NNNN | reason |`, where `<from>` is an integer or `new`.
  * @param {string} md
  * @returns {LedgerRow[]}
  */
 export function parseLedger(md) {
   /** @type {LedgerRow[]} */
   const rows = [];
-  const rowRe = /^\|\s*`?([a-z0-9-]+)`?\s*\|\s*(\d+)\s*(?:->|→)\s*(\d+)\s*\|\s*(CPE-\d+)\s*\|\s*(.+?)\s*\|$/;
+  const rowRe = /^\|\s*`?([a-z0-9-]+)`?\s*\|\s*(\d+|new)\s*(?:->|→)\s*(\d+)\s*\|\s*(CPE-\d+)\s*\|\s*(.+?)\s*\|$/;
   for (const line of md.split(/\r?\n/)) {
     const m = rowRe.exec(line.trim());
-    if (m) rows.push({ id: m[1], from: Number(m[2]), to: Number(m[3]), ticket: m[4], reason: m[5] });
+    if (m) {
+      rows.push({ id: m[1], from: m[2] === "new" ? null : Number(m[2]), to: Number(m[3]), ticket: m[4], reason: m[5] });
+    }
   }
   return rows;
+}
+
+/**
+ * True when `rows` contains a row authorising exactly this movement.
+ * @param {LedgerRow[]} rows
+ * @param {string} id
+ * @param {number | null} from
+ * @param {number} to
+ * @returns {LedgerRow | undefined}
+ */
+function findRow(rows, id, from, to) {
+  return rows.find((r) => r.id === id && r.from === from && r.to === to);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -455,32 +559,89 @@ export function parseLedger(md) {
 
 /**
  * Decide whether the movement between `base` and `head` is allowed.
- * Lowering is always fine. Raising needs an exact matching ledger row.
+ *
+ * Lowering is always fine. Raising needs a ledger row that matches exactly AND that is **new in this
+ * diff** — a row already present at the base revision is a spent licence, not a standing permit
+ * (CPE-1934 review, F2). A baseline that could not be measured at either end is an error, never a
+ * pass (F1/F3).
+ *
  * @param {Baseline[]} registry
- * @param {Record<string, number | null | undefined>} base  null/absent = did not exist at the base revision
- * @param {Record<string, number | undefined>} head
- * @param {LedgerRow[]} ledger
+ * @param {Record<string, number | Unmeasurable | null | undefined>} base  null = absent at the base revision
+ * @param {Record<string, number | Unmeasurable | undefined>} head
+ * @param {LedgerRow[]} ledger        the ledger in the working tree
+ * @param {LedgerRow[]} [baseLedger]  the ledger at the base revision
  * @returns {Verdict}
  */
-export function evaluate(registry, base, head, ledger) {
+export function evaluate(registry, base, head, ledger, baseLedger = []) {
   /** @type {string[]} */
   const messages = [];
   /** @type {string[]} */
   const errors = [];
 
+  /**
+   * @param {string} id
+   * @param {number | null} from
+   * @param {number} to
+   * @returns {{ row?: LedgerRow; spent?: LedgerRow }}
+   */
+  function licence(id, from, to) {
+    const row = findRow(ledger, id, from, to);
+    if (!row) return {};
+    const spent = findRow(baseLedger, id, from, to);
+    return spent ? { spent } : { row };
+  }
+
   for (const b of registry) {
     const before = base[b.id];
     const after = head[b.id];
+
+    // --- head end -----------------------------------------------------------------------------
     if (after === undefined || after === null) {
       errors.push(
-        `${b.id}: could not be measured in the working tree — the guard cannot verify it, which is a red, not a pass.`,
+        `${b.id} (${b.file}): could not be measured in the working tree — the guard cannot verify it, ` +
+          `which is a red, not a pass.`,
+      );
+      continue;
+    }
+    if (isUnmeasurable(after)) {
+      errors.push(
+        `${b.id} (${b.file}): could not be measured in the working tree — ${after.failed} A guard that ` +
+          `cannot measure must go red, never green and never a guessed number.`,
+      );
+      continue;
+    }
+
+    // --- base end -----------------------------------------------------------------------------
+    if (isUnmeasurable(before)) {
+      errors.push(
+        `${b.id} (${b.file}): could not be measured at the BASE revision — ${before.failed} Without a base ` +
+          `value the guard cannot tell whether this baseline moved, so it goes red rather than assuming it did not.`,
       );
       continue;
     }
     if (before === undefined || before === null) {
-      messages.push(`  ${b.id}: new at this revision (${after}) — nothing to compare against.`);
+      // The file does not exist at the base revision AND git's rename detection found no predecessor.
+      // Treating that as "new, nothing to compare" is how a rename silently resets a ratchet (F3), so
+      // it has to be declared like any other raise.
+      const { row, spent } = licence(b.id, null, after);
+      if (row) {
+        messages.push(
+          `  ${b.id}: new at this revision (${after}), declared in ${LEDGER_PATH} under ${row.ticket}: ${row.reason}`,
+        );
+        continue;
+      }
+      errors.push(
+        `${b.id} (${b.file}): has no value at the base revision — the file does not exist there and git's rename ` +
+          `detection found no predecessor for it. That would reset the ratchet to whatever it says today. If the ` +
+          `file really is new in this diff, declare it: add \`| ${b.id} | new -> ${after} | CPE-NNNN | why |\` to ` +
+          `${LEDGER_PATH}. If it was renamed, keep the rename detectable (rename in its own commit, or split the ` +
+          `content change out) so the old value can be read.` +
+          (spent ? ` (A row for this already existed at the base revision; a row authorises one raise, in its own diff.)` : ""),
+      );
       continue;
     }
+
+    // --- movement -----------------------------------------------------------------------------
     if (after < before) {
       messages.push(`  ${b.id}: ${before} -> ${after} LOWERED (${b.what})`);
       continue;
@@ -496,10 +657,21 @@ export function evaluate(registry, base, head, ledger) {
       );
       continue;
     }
-    const row = ledger.find((r) => r.id === b.id && r.from === before && r.to === after);
+
+    const { row, spent } = licence(b.id, before, after);
     if (row) {
       messages.push(
         `  ${b.id}: ${before} -> ${after} RAISED, and declared in ${LEDGER_PATH} under ${row.ticket}: ${row.reason}`,
+      );
+      continue;
+    }
+    if (spent) {
+      errors.push(
+        `${b.id} (${b.file}) went UP: ${before} -> ${after}, and the ledger row that would authorise it ` +
+          `(${spent.ticket}) ALREADY EXISTED at the base revision. A ledger row is a one-time licence for the ` +
+          `raise made in its own diff, not a standing permit — otherwise burning a baseline back down and ` +
+          `re-raising it later passes silently under someone else's ticket. Add a NEW row, under the ticket that ` +
+          `owns THIS raise.`,
       );
       continue;
     }
@@ -520,45 +692,115 @@ export function evaluate(registry, base, head, ledger) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Measure every registered baseline in the working tree.
- * @returns {Record<string, number>}
+ * Measure every registered baseline in the working tree. A measurer that throws yields an
+ * `Unmeasurable` for that one baseline rather than aborting the run: the others still get reported,
+ * and `evaluate` turns the failure into a named `::error::` instead of a bare Node stack trace.
+ * @returns {Record<string, number | Unmeasurable>}
  */
 export function measureWorkingTree() {
-  /** @type {Record<string, number>} */
+  /** @type {Record<string, number | Unmeasurable>} */
   const out = {};
   for (const b of REGISTRY) {
     const p = join(REPO_ROOT, b.file);
-    if (!existsSync(p)) throw new Error(`${b.id}: ${b.file} does not exist — the registry has drifted from the tree.`);
-    out[b.id] = b.measure(readFileSync(p, "utf8"));
+    if (!existsSync(p)) {
+      out[b.id] = { failed: `${b.file} does not exist — the registry has drifted from the tree.` };
+      continue;
+    }
+    try {
+      out[b.id] = b.measure(readFileSync(p, "utf8"));
+    } catch (e) {
+      out[b.id] = { failed: `${b.file}: ${e instanceof Error ? e.message : String(e)}` };
+    }
   }
   return out;
 }
 
 /**
- * Measure every registered baseline at a git revision. A baseline whose file did not exist there is
- * reported as `null` (new), never silently as 0 — 0 would read as "it was at zero and you raised it".
+ * Paths renamed between `ref` and the working tree, as `new path -> old path`. Used so a baseline
+ * whose file was renamed is still read at the base revision instead of looking brand new (F3).
  * @param {string} ref
- * @returns {Record<string, number | null>}
+ * @returns {Map<string, string>}
+ */
+export function renameMapAtRef(ref) {
+  /** @type {Map<string, string>} */
+  const map = new Map();
+  try {
+    const out = execFileSync("git", ["diff", "--find-renames", "--diff-filter=R", "--name-status", ref, "--"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    for (const line of out.split("\n")) {
+      const parts = line.split("\t");
+      if (parts.length === 3 && parts[0].startsWith("R")) map.set(parts[2].trim(), parts[1].trim());
+    }
+  } catch {
+    /* no rename information available; the caller treats an unresolved file as an error, not a pass */
+  }
+  return map;
+}
+
+/**
+ * Read one repo-relative path at a git revision, or `null` if it does not exist there.
+ * @param {string} ref
+ * @param {string} file
+ * @returns {string | null}
+ */
+function showAtRef(ref, file) {
+  try {
+    return execFileSync("git", ["show", `${ref}:${file}`], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Measure every registered baseline at a git revision. A baseline whose file did not exist there is
+ * reported as `null` (and `evaluate` makes that an error, not a free pass); a baseline whose file IS
+ * there but does not measure is reported as `Unmeasurable`, never silently as a number.
+ * @param {string} ref
+ * @returns {Record<string, number | Unmeasurable | null>}
  */
 export function measureAtRef(ref) {
-  /** @type {Record<string, number | null>} */
+  /** @type {Record<string, number | Unmeasurable | null>} */
   const out = {};
+  const renames = renameMapAtRef(ref);
   for (const b of REGISTRY) {
-    /** @type {string} */
-    let src;
-    try {
-      src = execFileSync("git", ["show", `${ref}:${b.file}`], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
-    } catch {
+    let path = b.file;
+    let src = showAtRef(ref, path);
+    if (src === null) {
+      const previous = renames.get(b.file);
+      if (previous) {
+        path = previous;
+        src = showAtRef(ref, path);
+      }
+    }
+    if (src === null) {
       out[b.id] = null;
       continue;
     }
-    out[b.id] = b.measure(src);
+    try {
+      out[b.id] = b.measure(src);
+    } catch (e) {
+      out[b.id] = { failed: `${path} at ${ref}: ${e instanceof Error ? e.message : String(e)}` };
+    }
   }
   return out;
+}
+
+/**
+ * The raise ledger at a git revision (empty when the file does not exist there — which is correct:
+ * nothing was authorised before the ledger existed).
+ * @param {string} ref
+ * @returns {LedgerRow[]}
+ */
+export function ledgerAtRef(ref) {
+  const src = showAtRef(ref, LEDGER_PATH);
+  return src === null ? [] : parseLedger(src);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -571,10 +813,18 @@ function main() {
 
   if (cmd === "print") {
     const head = measureWorkingTree();
+    let bad = 0;
     for (const b of REGISTRY) {
+      const v = head[b.id];
       const gated = b.unenforced ? "   (enumerated, not gated)" : "";
-      console.log(`${b.id.padEnd(36)} ${String(head[b.id]).padStart(5)}   ${b.file}${gated}`);
+      if (isUnmeasurable(v)) {
+        bad++;
+        console.error(`::error::${b.id}: ${v.failed}`);
+      } else {
+        console.log(`${b.id.padEnd(36)} ${String(v).padStart(5)}   ${b.file}${gated}`);
+      }
     }
+    if (bad > 0) process.exit(1);
     return;
   }
 
@@ -601,8 +851,9 @@ function main() {
     const base = measureAtRef(baseRef);
     const ledgerPath = join(REPO_ROOT, LEDGER_PATH);
     const ledger = existsSync(ledgerPath) ? parseLedger(readFileSync(ledgerPath, "utf8")) : [];
+    const baseLedger = ledgerAtRef(baseRef);
 
-    const verdict = evaluate(REGISTRY, base, head, ledger);
+    const verdict = evaluate(REGISTRY, base, head, ledger, baseLedger);
     console.log(`Ratchet baselines, working tree vs ${baseRef} (${REGISTRY.length} enumerated):`);
     for (const m of verdict.messages) console.log(m);
     if (!verdict.ok) {
@@ -619,4 +870,12 @@ function main() {
   process.exit(2);
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main();
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  try {
+    main();
+  } catch (e) {
+    // Never let an unexpected throw reach the runner as a bare stack trace: CI reads `::error::`.
+    console.error(`::error::ratchet guard failed unexpectedly: ${e instanceof Error ? e.stack : String(e)}`);
+    process.exit(1);
+  }
+}

@@ -9,8 +9,10 @@
 // landing unregistered.
 //
 // Red-proofed in BOTH directions on purpose (a guard only ever seen to pass is the exact defect
-// CPE-1934 is about): `evaluate` is pure, so the raise case and the lower case are both driven here
-// with real inputs, not just observed once by hand.
+// CPE-1934 is about). The "SABOTAGE FIXTURES" block below is the important half: three one-line
+// edits a real developer could make innocently, each of which took the FIRST version of this guard
+// all-green while a baseline was genuinely raised. Every one is a permanent test case now, because
+// the first round proved the SAFE variant (a plain rename reds) and never tried the dangerous one.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
@@ -24,6 +26,7 @@ import {
   splitTopLevel,
   endOfSpan,
   measureWorkingTree,
+  isUnmeasurable,
   numericConst,
   arrayLength,
   jsonArrayLength,
@@ -33,22 +36,30 @@ import {
 const ROOT = resolve(__dirname, "..", "..");
 
 /**
- * The declaration shapes a ratchet takes in this tree. Deliberately matches DECLARATIONS, not prose:
- * an earlier draft keyed on the bare words and lit up on every test file that merely discusses an
- * allowlist in a comment, which would have made the exclusion list below meaningless noise.
+ * The declaration shapes a ratchet takes. Deliberately matches DECLARATIONS, not prose: keying on the
+ * bare words lit up on every test file that merely discusses an allowlist in a comment, which would
+ * have made the exclusion list below meaningless noise.
+ *
+ * Widened in review round 2: the first cut keyed only on ALLOWLIST/ALLOWED_LINES/KNOWN_GAPS/
+ * KNOWN_FAILING/BASELINE, so a future `const FOO_OFFENDERS = [...]` in a NEW file would have escaped
+ * entirely — `APP_MARKUP_OFFENDERS` was covered only by the accident of living in a file that also
+ * declares an `*_ALLOWLIST`. OFFENDER, SUPPRESS, TOLERAT, WAIVER, OPTOUT, EXEMPT, EXCLUD, DEBT,
+ * GRANDFATHER, LEGACY_, REGISTRY, CEILING, THRESHOLD, PENDING and EXISTING are the rest of the
+ * vocabulary this class of list gets named with.
  */
 const RATCHET_SHAPED =
-  /(?:^|\n)[ \t]*(?:export[ \t]+)?const[ \t]+[A-Za-z0-9_]*(?:ALLOWLIST|ALLOW_LIST|ALLOWED_LINES|KNOWN_GAPS|KNOWN_FAILING|BASELINE)[A-Za-z0-9_]*[ \t]*(?::[^=\n]*)?=/;
+  /(?:^|\n)[ \t]*(?:export[ \t]+)?const[ \t]+[A-Za-z0-9_]*(?:ALLOWLIST|ALLOW_LIST|ALLOWED_LINES|ALLOWED_|KNOWN_GAPS|KNOWN_FAILING|BASELINE|OFFENDER|SUPPRESS|TOLERAT|WAIVER|WAIVED|OPTOUT|OPT_OUT|EXEMPT|EXCLUD|DEBT|GRANDFATHER|LEGACY_|REGISTRY|CEILING|THRESHOLD|PENDING|EXISTING)[A-Za-z0-9_]*[ \t]*(?::[^=\n]*)?=/;
 
 /** Source roots a ratchet could plausibly live in. */
 const SCAN_ROOTS = ["src", "gui-smoke", "scripts"];
+const SCANNED_EXT = /\.(ts|mts|mjs|js)$/;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (name === "node_modules" || name === "dist" || name === "target") continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p, out);
-    else if (/\.(ts|mts|mjs|js)$/.test(name)) out.push(p);
+    else if (SCANNED_EXT.test(name)) out.push(p);
   }
   return out;
 }
@@ -64,6 +75,149 @@ function ratchetShapedFiles(): string[] {
   }
   return hits.sort();
 }
+
+/** Registered baselines whose file the scan above is actually capable of seeing. */
+function registeredScannableFiles(): string[] {
+  return [
+    ...new Set(
+      REGISTRY.map((b) => b.file).filter(
+        (f) => SCANNED_EXT.test(f) && SCAN_ROOTS.some((r) => f === r || f.startsWith(`${r}/`)),
+      ),
+    ),
+  ].sort();
+}
+
+// -------------------------------------------------------------------------------------------------
+// SABOTAGE FIXTURES — the three all-green bypasses found in review, each now permanent.
+//
+// The rule they all encode: a measurement this guard cannot make must be RED, never a number and
+// never a skip. A measurer that returns the WRONG value passes a raise, which is the whole defect.
+// -------------------------------------------------------------------------------------------------
+
+describe("SABOTAGE F1 — a baseline constant that stops being a plain integer", () => {
+  // Review input, verbatim: `const BASELINE_TOTAL_HEX_OCCURRENCES = 200 + 78;` is a real 277 -> 278
+  // raise. The first version's `=\s*(\d[\d_]*)` took the first integer and stopped, measuring 200 and
+  // reporting `277 -> 200 LOWERED` with exit 0 — a complete all-green bypass from one line.
+  it("THROWS on `= 200 + 78` rather than measuring 200", () => {
+    expect(() => numericConst("BASELINE_TOTAL_HEX_OCCURRENCES")(`const BASELINE_TOTAL_HEX_OCCURRENCES = 200 + 78;`))
+      .toThrow(/no longer a plain integer literal/);
+  });
+
+  it("throws on every other expression form that hides the real value", () => {
+    const N = numericConst("N");
+    expect(() => N(`const N = 277 + 1;`)).toThrow(/plain integer/);
+    expect(() => N(`const N = Number("278");`)).toThrow(/plain integer/);
+    expect(() => N(`const N = OTHER;`)).toThrow(/plain integer/);
+    expect(() => N(`const N = 278 as number;`)).toThrow(/plain integer/);
+  });
+
+  it("still reads the honest forms", () => {
+    expect(numericConst("N")(`const N = 85;`)).toBe(85);
+    expect(numericConst("N")(`export const N: number = 1_234;`)).toBe(1234);
+    expect(numericConst("N")(`const N = 85; // CPE-1534 baseline`)).toBe(85);
+  });
+
+  it("an unmeasurable baseline reaches evaluate as a RED, not as a number", () => {
+    const v = evaluate(FAKE, { demo: 10 }, { demo: { failed: "src/x.ts: is no longer a plain integer literal" } }, []);
+    expect(v.ok).toBe(false);
+    expect(v.errors.join("\n")).toContain("never green and never a guessed number");
+  });
+});
+
+describe("SABOTAGE F1b — an allowlist that spreads another list into itself", () => {
+  // Review input: replacing four literal KNOWN_GAPS_ALLOWLIST entries with `...MORE_GAPS` (6 names) is
+  // a real 14 -> 17 raise. The first version counted the spread as ONE element and reported
+  // `14 -> 12 LOWERED`, exit 0.
+  it("THROWS on a spread element rather than counting it as one", () => {
+    expect(() => splitTopLevel(`"a", "b", ...MORE_GAPS`)).toThrow(/spreads another value into itself/);
+    expect(() => arrayLength("A")(`const A: string[] = ["a", "b", ...MORE_GAPS];`)).toThrow(/spreads another value/);
+  });
+
+  it("throws when the whole array is a spread of another array", () => {
+    expect(() => arrayLength("A")(`const A = [...MORE_GAPS];`)).toThrow(/spreads another value/);
+  });
+
+  it("throws when a Record's value array spreads", () => {
+    expect(() => recordOfArraysTotal("R")(`const R = { "a.svelte": ["1", ...MORE] };`)).toThrow(/spreads another value/);
+  });
+
+  it("refuses a literal that is not the whole initialiser (the count would ignore the rest)", () => {
+    expect(() => arrayLength("A")(`const A = ["a"].concat(MORE_GAPS);`)).toThrow(/not the whole initialiser/);
+    expect(() => arrayLength("A")(`const A = ["a", "b"].slice(1);`)).toThrow(/not the whole initialiser/);
+  });
+
+  it("still accepts the honest forms, `as const` included", () => {
+    expect(arrayLength("A")(`const A: string[] = ["x", "y"];`)).toBe(2);
+    expect(arrayLength("A")(`const A = ["x", "y"] as const;`)).toBe(2);
+    expect(arrayLength("A")(`const A: string[] = [];`)).toBe(0);
+  });
+});
+
+describe("SABOTAGE F2 — reusing a ledger row that already existed at the base revision", () => {
+  // Review input: commit `| hex-occurrences | 277 -> 278 | CPE-1111 |` as the BASE with no baseline
+  // change, then bump 277 -> 278 in the working tree alone. The first version read only the
+  // working-tree ledger and exited 0, citing that row. Realistic: hex-occurrences went 276 -> 277 last
+  // week, so burn back down and re-raise later and it passes silently under someone else's ticket.
+  const row = [{ id: "demo", from: 10, to: 11, ticket: "CPE-1111", reason: "an older, already-spent raise" }];
+
+  it("FAILS when the authorising row was already in the ledger at the base", () => {
+    const v = evaluate(FAKE, { demo: 10 }, { demo: 11 }, row, row);
+    expect(v.ok).toBe(false);
+    expect(v.errors.join("\n")).toContain("ALREADY EXISTED at the base revision");
+    expect(v.errors.join("\n")).toContain("one-time licence");
+  });
+
+  it("PASSES the same row when this diff is the one that adds it", () => {
+    const v = evaluate(FAKE, { demo: 10 }, { demo: 11 }, row, []);
+    expect(v.ok).toBe(true);
+    expect(v.messages.join("\n")).toContain("RAISED, and declared");
+  });
+
+  it("an unrelated pre-existing row does not spend this one", () => {
+    const other = [{ id: "demo", from: 5, to: 6, ticket: "CPE-9", reason: "a different, older raise" }];
+    expect(evaluate(FAKE, { demo: 10 }, { demo: 11 }, [...row, ...other], other).ok).toBe(true);
+  });
+});
+
+describe("SABOTAGE F3 — renaming a baseline's file to reset its ratchet", () => {
+  // Review input: `git mv src/docs.coverage.test.ts src/docsCoverage.test.ts` + registry update + 3 new
+  // allowlist entries. The first version mapped a failed `git show <base>:<file>` to null and treated a
+  // null base as "new at this revision" -> pass: a real 14 -> 17 went unnoticed at exit 0. Note the
+  // asymmetry that made it a bug rather than a choice: head-side unmeasurable was RED, base-side GREEN.
+  it("FAILS when a baseline has no value at the base and no rename was detected", () => {
+    const v = evaluate(FAKE, { demo: null }, { demo: 17 }, []);
+    expect(v.ok).toBe(false);
+    const msg = v.errors.join("\n");
+    expect(msg).toContain("no value at the base revision");
+    expect(msg).toContain("reset the ratchet");
+    expect(msg).toContain("new -> 17"); // and tells you the exact declaration that would make it legal
+  });
+
+  it("FAILS when the base file exists but does not measure — base-side unmeasurable is red too", () => {
+    const v = evaluate(FAKE, { demo: { failed: "demo.ts at abc123: no `const X` declaration found" } }, { demo: 11 }, []);
+    expect(v.ok).toBe(false);
+    expect(v.errors.join("\n")).toContain("could not be measured at the BASE revision");
+  });
+
+  it("PASSES a genuinely new baseline when this diff declares it new", () => {
+    const declared = [{ id: "demo", from: null, to: 17, ticket: "CPE-2", reason: "brand-new guard landing here" }];
+    const v = evaluate(FAKE, { demo: null }, { demo: 17 }, declared, []);
+    expect(v.ok).toBe(true);
+    expect(v.messages.join("\n")).toContain("new at this revision (17), declared");
+  });
+
+  it("does not accept a `new ->` declaration that was already spent at the base", () => {
+    const declared = [{ id: "demo", from: null, to: 17, ticket: "CPE-2", reason: "brand-new guard landing here" }];
+    expect(evaluate(FAKE, { demo: null }, { demo: 17 }, declared, declared).ok).toBe(false);
+  });
+
+  it("parses `| id | new -> N | CPE-N | why |` from the ledger", () => {
+    const rows = parseLedger("| `docs-known-gaps` | new -> 17 | CPE-1234 | brand-new guard |");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].from).toBeNull();
+    expect(rows[0].to).toBe(17);
+  });
+});
 
 // -------------------------------------------------------------------------------------------------
 // The scanner. Counting literal entries with a naive regex is how this class of tool starts lying —
@@ -110,17 +264,6 @@ describe("literal scanner", () => {
 });
 
 describe("measurement shapes", () => {
-  it("numericConst reads the integer, underscores and type annotations included", () => {
-    expect(numericConst("N")(`const N = 85;`)).toBe(85);
-    expect(numericConst("N")(`export const N: number = 1_234;`)).toBe(1234);
-    expect(() => numericConst("N")(`const M = 1;`)).toThrow(/no numeric/);
-  });
-
-  it("arrayLength counts top-level entries of a typed array literal", () => {
-    expect(arrayLength("A")(`const A: string[] = ["x", "y"];`)).toBe(2);
-    expect(arrayLength("A")(`const A: string[] = [];`)).toBe(0);
-  });
-
   it("recordOfArraysTotal counts recorded entries, not keys", () => {
     const src = `const R: Record<string, string[]> = {\n "a.svelte": ["1","2","3"],\n "b.svelte": ["4"],\n};`;
     expect(recordOfArraysTotal("R")(src)).toBe(4);
@@ -129,6 +272,11 @@ describe("measurement shapes", () => {
   it("jsonArrayLength reads the named array", () => {
     expect(jsonArrayLength("cases")(`{"cases":[1,2,3]}`)).toBe(3);
     expect(() => jsonArrayLength("cases")(`{"cases":5}`)).toThrow(/not an array/);
+  });
+
+  it("a renamed constant is a measurement failure, not a number", () => {
+    expect(() => arrayLength("GONE")(`const OTHER = ["a"];`)).toThrow(/no \`const GONE\` declaration found/);
+    expect(() => numericConst("GONE")(`const OTHER = 5;`)).toThrow(/no \`const GONE\` declaration found/);
   });
 });
 
@@ -150,8 +298,9 @@ describe("the enumeration", () => {
     const measured = measureWorkingTree();
     for (const b of REGISTRY) {
       const v = measured[b.id];
-      expect(Number.isInteger(v), `${b.id} measured ${v}, which is not an integer`).toBe(true);
-      expect(v, `${b.id} measured a negative count`).toBeGreaterThanOrEqual(0);
+      expect(isUnmeasurable(v), `${b.id} failed to measure: ${isUnmeasurable(v) ? v.failed : ""}`).toBe(false);
+      expect(Number.isInteger(v), `${b.id} measured ${JSON.stringify(v)}, which is not an integer`).toBe(true);
+      expect(v as number, `${b.id} measured a negative count`).toBeGreaterThanOrEqual(0);
     }
   });
 
@@ -189,19 +338,45 @@ describe("the enumeration stays complete (CPE-1932: enumerate, don't recall)", (
     ).toEqual([]);
   });
 
-  it("the scan actually finds things — a zero-enumeration false green is the failure this exists to stop", () => {
-    expect(ratchetShapedFiles().length).toBeGreaterThanOrEqual(8);
+  // Non-vacuity, derived from the registry rather than a magic number. The first round used a floor of
+  // 8 against 11 real hits, which goes thin the moment a couple of allowlists burn down and get
+  // deleted. This says the real thing instead: the scan must actually SEE every file it is supposed to
+  // be policing, so a broken regex or a broken walk reds instead of reporting a comfortable count.
+  it("the scan finds every registered file it is capable of seeing", () => {
+    const shaped = new Set(ratchetShapedFiles());
+    const missed = registeredScannableFiles().filter((f) => !shaped.has(f));
+    expect(
+      missed,
+      `the ratchet-shape scan no longer matches these REGISTERED baseline files: ${missed.join(", ")}. The scan is ` +
+        `what stops a NEW ratchet landing unregistered, so if it cannot even see the ones we know about it is ` +
+        `not enumerating anything — fix RATCHET_SHAPED or the walk, do not lower this expectation.`,
+    ).toEqual([]);
+  });
+
+  it("the scan also finds every file the exclusion list claims to be about", () => {
+    const shaped = new Set(ratchetShapedFiles());
+    const missed = NOT_A_RATCHET.map((e) => e.file).filter((f) => !shaped.has(f));
+    expect(missed, `NOT_A_RATCHET names files the scan no longer matches: ${missed.join(", ")}`).toEqual([]);
   });
 
   it("no NOT_A_RATCHET entry is stale (it must exist, still match, and not be registered)", () => {
     const registered = new Set(REGISTRY.map((b) => b.file));
-    const shaped = new Set(ratchetShapedFiles());
     for (const e of NOT_A_RATCHET) {
       expect(existsSync(join(ROOT, e.file)), `NOT_A_RATCHET names ${e.file}, which no longer exists`).toBe(true);
-      expect(shaped.has(e.file), `NOT_A_RATCHET names ${e.file}, which no longer matches the ratchet-shaped scan — drop it`).toBe(true);
       expect(registered.has(e.file), `${e.file} is both registered AND excluded — pick one`).toBe(false);
       expect(e.reason.length, `NOT_A_RATCHET entry for ${e.file} has no real reason`).toBeGreaterThan(30);
     }
+  });
+
+  it("the widened shape would catch a future `const FOO_OFFENDERS = [...]` in a brand-new file", () => {
+    // The first cut keyed only on ALLOWLIST-ish words, so this exact declaration escaped unless it
+    // happened to share a file with one.
+    expect(RATCHET_SHAPED.test(`\nconst FOO_OFFENDERS: string[] = ["a"];\n`)).toBe(true);
+    expect(RATCHET_SHAPED.test(`\nexport const SUPPRESSED_RULES = [];\n`)).toBe(true);
+    expect(RATCHET_SHAPED.test(`\nconst TOLERATED_WARNINGS: string[] = [];\n`)).toBe(true);
+    expect(RATCHET_SHAPED.test(`\nconst PENDING_MIGRATIONS = [];\n`)).toBe(true);
+    // ...without matching ordinary code.
+    expect(RATCHET_SHAPED.test(`\nconst rows = await load();\n`)).toBe(false);
   });
 });
 
@@ -222,12 +397,6 @@ describe("evaluate — a lowered baseline sails through", () => {
   it("passes when the count is unchanged", () => {
     expect(evaluate(FAKE, { demo: 10 }, { demo: 10 }, []).ok).toBe(true);
   });
-
-  it("passes when the baseline is new at this revision (nothing to compare against)", () => {
-    const v = evaluate(FAKE, { demo: null }, { demo: 7 }, []);
-    expect(v.ok).toBe(true);
-    expect(v.messages.join("\n")).toContain("new at this revision");
-  });
 });
 
 describe("evaluate — a raised baseline is loud", () => {
@@ -241,19 +410,19 @@ describe("evaluate — a raised baseline is loud", () => {
     expect(msg).toContain(LEDGER_PATH); // and tells you exactly how to make a real raise legal
   });
 
-  it("PASSES a raise declared by an exactly-matching ledger row, and still shouts about it", () => {
-    const ledger = [{ id: "demo", from: 10, to: 11, ticket: "CPE-1", reason: "vendored file we do not own" }];
-    const v = evaluate(FAKE, { demo: 10 }, { demo: 11 }, ledger);
-    expect(v.ok).toBe(true);
-    expect(v.messages.join("\n")).toContain("RAISED, and declared");
-    expect(v.messages.join("\n")).toContain("CPE-1");
-  });
-
   it("does NOT accept a ledger row whose numbers don't match the real movement", () => {
     const stale = [{ id: "demo", from: 9, to: 10, ticket: "CPE-1", reason: "an older, already-spent raise" }];
     expect(evaluate(FAKE, { demo: 10 }, { demo: 11 }, stale).ok).toBe(false);
     const wrongId = [{ id: "other", from: 10, to: 11, ticket: "CPE-1", reason: "a row for a different baseline" }];
     expect(evaluate(FAKE, { demo: 10 }, { demo: 11 }, wrongId).ok).toBe(false);
+  });
+
+  it("a net-zero diff does not mask a raise — each baseline is judged on its own", () => {
+    const two = [FAKE[0], { id: "other", file: "o.ts", what: "other offenders", measure: () => 0 }];
+    const v = evaluate(two, { demo: 10, other: 10 }, { demo: 13, other: 7 }, []);
+    expect(v.ok).toBe(false);
+    expect(v.errors.join("\n")).toContain("demo");
+    expect(v.messages.join("\n")).toContain("other: 10 -> 7 LOWERED");
   });
 
   it("lets an explicitly unenforced baseline rise, and prints the reason instead of the number alone", () => {
@@ -283,12 +452,16 @@ describe("the raise ledger", () => {
     }
   });
 
+  it("says a row is spent by the diff that adds it, not a standing permit", () => {
+    expect(ledgerSrc.toLowerCase()).toContain("one-time");
+  });
+
   it("parses the real file without inventing rows from the enumeration table above it", () => {
     // The doc holds two tables. Only rows shaped `| id | N -> M | CPE-N | why |` are raises; the
     // enumeration table must not leak in as a phantom authorisation.
     for (const row of parseLedger(ledgerSrc)) {
       expect(REGISTRY.some((b) => b.id === row.id), `ledger row names unknown baseline ${row.id}`).toBe(true);
-      expect(row.to).toBeGreaterThan(row.from);
+      if (row.from !== null) expect(row.to).toBeGreaterThan(row.from);
     }
   });
 
@@ -318,8 +491,8 @@ describe("CI wiring", () => {
   });
 
   it("checks out enough history for the base revision to resolve", () => {
-    // A shallow checkout would make `git show <base>:<file>` fail for every baseline, which the script
-    // reports as "new at this revision" — a silent all-green. Depth is what stops that.
+    // A shallow checkout would make `git show <base>:<file>` fail for every baseline — which is now an
+    // error rather than a silent all-green, but depth is still what makes the guard useful at all.
     expect(ratchetGuardJob()).toContain("fetch-depth: 0");
   });
 
@@ -327,5 +500,20 @@ describe("CI wiring", () => {
     const job = ratchetGuardJob();
     expect(job).toContain("github.event.pull_request.base.sha");
     expect(job).toContain("github.event.before");
+  });
+});
+
+describe("the written guidance matches the code", () => {
+  it("CLAUDE.md and RATCHETS.md both say the row must be NEW in this diff (F2)", () => {
+    const claude = readFileSync(join(ROOT, "CLAUDE.md"), "utf8");
+    const doc = readFileSync(join(ROOT, LEDGER_PATH), "utf8");
+    // The first round's wording said "the same diff adds a row" while the code accepted any row in the
+    // working tree, base included. The docs and the code have to agree, or the doc is the lie.
+    expect(claude).toContain("not already present at the base");
+    expect(doc).toContain("not already present at the base");
+  });
+
+  it("RATCHETS.md records the counts-not-identities limitation", () => {
+    expect(readFileSync(join(ROOT, LEDGER_PATH), "utf8")).toContain("counts, not identities");
   });
 });

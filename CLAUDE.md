@@ -108,8 +108,12 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   stores its baseline as a literal **inside the file it guards**, so a PR could raise the number in the
   same diff that violated it and pass. `scripts/ratchet-baselines.mjs` + the `ratchet-guard` CI job now
   measure every enumerated baseline against the merge base and **red on an increase**. Lowering always
-  sails through; a raise stays possible but must be declared, in the same diff, as a row in
-  `docs/design/RATCHETS.md` naming the baseline, the exact old/new values, the ticket and the reason.
+  sails through; a raise stays possible but must be declared as a row in `docs/design/RATCHETS.md`
+  naming the baseline, the exact old/new values, the ticket and the reason — and that row must be **new
+  in the raising diff** (one **not already present at the base** revision). A row is a one-time licence,
+  never a standing permit. Keep every baseline a **plain literal**: an expression, a spread, or a
+  `.concat` is refused rather than guessed at, because a measurer that returns the wrong number passes
+  a raise, which is the whole defect.
   **Adding a new ratchet needs no wiring** — `src/lib/ratchetBaselines.test.ts` fails CI if a
   ratchet-shaped declaration appears in a file that is neither registered nor explicitly excluded with a
   reason. Full standard + the enumeration: [docs/design/RATCHETS.md](docs/design/RATCHETS.md).

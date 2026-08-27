@@ -27,22 +27,49 @@ so it costs a checkout plus a few hundred milliseconds.
 Three properties, deliberately:
 
 1. **Lowering always sails through.** Fixing debt must never need paperwork.
-2. **Raising is still possible — never quiet.** A raise passes only if the same diff adds a row to
-   the ledger below naming the baseline, the *exact* old and new values, the owning ticket, and why.
-   A row that doesn't match the actual movement authorises nothing.
-3. **A guard that cannot measure goes red, not green.** An unresolvable base revision, a missing file,
-   or a literal the scanner can't parse fails the job. "0 of 0 checked" is the CPE-1932 anti-pattern.
+2. **Raising is still possible — never quiet.** A raise passes only if the ledger below carries a row
+   naming the baseline, the *exact* old and new values, the owning ticket, and why — **and that row is
+   not already present at the base revision**. A row is a **one-time** licence for the raise made in
+   its own diff, not a standing permit: otherwise burning a baseline back down and re-raising it later
+   would pass silently under someone else's ticket. A row that doesn't match the actual movement
+   authorises nothing.
+3. **A guard that cannot measure goes red, not green — and never a guessed number.** This is the one
+   the first implementation got wrong three ways, so it is worth stating as a rule rather than a hope:
+   a measurer that returns the *wrong* value passes a raise, which is the whole defect. Concretely, all
+   of these fail the job rather than producing a number:
+   - a baseline constant that stops being a bare integer (`= 200 + 78`, `= Number("278")`);
+   - an allowlist that spreads another list into itself (`[...MORE_GAPS, "x"]`), or whose literal isn't
+     the whole initialiser (`[...].concat(MORE)`);
+   - a constant that was renamed, or a file that was deleted;
+   - a baseline with no value **at the base revision**: git's own rename detection is followed first,
+     and anything still unresolved must be declared as `| id | new -> N | CPE-NNNN | why |`. Head-side
+     and base-side unmeasurable are treated identically — the asymmetry (head red, base green) is
+     exactly how a rename could reset a ratchet;
+   - an unresolvable base revision, or no base revision at all.
+
+   "0 of 0 checked" is the CPE-1932 anti-pattern; so is "measured something, just not the truth".
 
 ## Adding a new ratchet — you get the guard for free
 
-`src/lib/ratchetBaselines.test.ts` scans the tree for ratchet-shaped declarations
-(`const *ALLOWLIST*`, `*ALLOWED_LINES*`, `*KNOWN_GAPS*`, `*KNOWN_FAILING*`, `*BASELINE*`) and fails
-if a matching file is neither in `REGISTRY` nor in `NOT_A_RATCHET` with a stated reason. So a new
-ratchet cannot land without either being gated or saying out loud why it doesn't need to be.
+`src/lib/ratchetBaselines.test.ts` scans `src/`, `gui-smoke/` and `scripts/` for ratchet-shaped
+*declarations* — `const *X*` where X is any of ALLOWLIST, ALLOW_LIST, ALLOWED_LINES, ALLOWED_,
+KNOWN_GAPS, KNOWN_FAILING, BASELINE, OFFENDER, SUPPRESS, TOLERAT, WAIVER, WAIVED, OPTOUT, OPT_OUT,
+EXEMPT, EXCLUD, DEBT, GRANDFATHER, LEGACY_, REGISTRY, CEILING, THRESHOLD, PENDING, EXISTING — and
+fails if a matching file is neither in `REGISTRY` nor in `NOT_A_RATCHET` with a stated reason. So a
+new ratchet cannot land without either being gated or saying out loud why it doesn't need to be.
+
+The scan's non-vacuity check is derived from the registry, not a magic floor: it asserts the scan
+still matches **every registered baseline file** and every file the exclusion list names, so a broken
+regex or a broken tree-walk reds instead of reporting a comfortable count of nothing.
 
 To register one, add a `REGISTRY` entry in `scripts/ratchet-baselines.mjs` with a stable `id`, the
 file, one line saying what the number counts, and a `measure` — one of `numericConst`,
-`arrayLength`, `recordOfArraysTotal`, `jsonArrayLength`, or a small function of your own.
+`arrayLength`, `recordOfArraysTotal`, `jsonArrayLength`, or a small function of your own. Keep the
+baseline a **plain literal**: a bare integer, or an array/object literal with its entries written out.
+Anything the scanner cannot count exactly (an expression, a spread, a `.concat`) is refused by design.
+
+A brand-new baseline has no value at the base revision, so its first commit declares it:
+`| <id> | new -> <N> | CPE-NNNN | why this guard is landing here |`.
 
 ## The enumeration
 
@@ -85,10 +112,27 @@ happened quietly. **None was inflated.**
   the ratchet's clause 2 fails the job the moment a listed case starts passing, so an entry that is no
   longer needed reds every run rather than sitting there.
 
+## What this guard does *not* catch
+
+Written down here rather than only in a PR body, because a limitation nobody can find is
+indistinguishable from a bug.
+
+**It measures counts, not identities.** A diff that removes one offender and adds a different one
+leaves the count flat and passes. Catching that needs per-entry identity diffing — which the
+exact-equality guards (`bidi-render-registry`, `bidi-app-markup-offenders`, and every allowlist's own
+"no stale entries" test) already do within their own domains, and which would be a much larger change
+here. Accepted as out of scope for CPE-1934.
+
 ## Raise ledger
 
-A row here is what makes a raise legal. `from`/`to` must match the movement exactly, or the guard
-still fails.
+A row here is what makes a raise legal. Two conditions, both required:
+
+- `from`/`to` must match the actual movement **exactly**;
+- the row must be **new in the diff that raises the baseline** — a row already present at the base
+  revision is a spent licence and authorises nothing.
+
+`from` is an integer, or `new` when the baseline has no value at the base revision at all (a
+brand-new guard, or a rename git could not follow).
 
 | baseline | from → to | ticket | why this raise is right |
 |----------|-----------|--------|-------------------------|
