@@ -539,6 +539,30 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
     std::fs::rename(src, target).map_err(|e| e.to_string())
 }
 
+/// `fs::rename` onto a slot the caller has decided, **with the user's explicit confirmation**, to
+/// overwrite (CPE-1891) — the CONFIRMED counterpart to [`rename_into_slot`], scoped to the macro
+/// engine's confirm-and-retry escape hatch: a saved macro's Rename/Move step refuses an occupied
+/// destination the same way every other name-claiming site does, and this is what lets a re-run with
+/// `confirmed_overwrite: true` proceed anyway.
+///
+/// Still refuses outright if `target` is a link (live or dangling): matching CPE-1734's absolute rule
+/// (a confirm authorises overwriting the user's OWN file, never destroying a link to a path the user
+/// never named), this keeps [`rename_slot_refusal`]'s link half — [`symlink_slot_refusal`] — and drops
+/// only its occupancy half ([`clobber_refusal`]). `symlink_slot_refusal` alone is sufficient to answer
+/// "is anything at this name a link at all": live and dangling links both read `Ok(true)` from
+/// `symlink_metadata`'s `is_symlink()`, since that call never follows the final component either way —
+/// there is no live/dangling split to reproduce here the way the unconfirmed combinator has one.
+pub fn rename_into_confirmed_slot(src: &Path, target: &Path) -> Result<(), String> {
+    if let Some(e) = symlink_slot_refusal(target) {
+        return Err(e);
+    }
+    // Same sanctioned `fs::rename` as `rename_into_slot`, guarded the same way — only the guard's
+    // occupancy half is missing, deliberately, because overwriting the user's own confirmed target is
+    // the entire point of this entry point.
+    #[allow(clippy::disallowed_methods)]
+    std::fs::rename(src, target).map_err(|e| e.to_string())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // CPE-1765 — the name-pick → write GAP, closed by CLAIMING the name instead of re-checking it
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -2611,6 +2635,94 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
         opts.mode(mode);
     }
     opts.open(path)
+}
+
+/// Overwrite the file at `target` with `bytes`, refusing to follow a link at the final component
+/// (CPE-1891) — the CONFIRMED counterpart to [`create_exclusive`]: where that function only ever
+/// claims a FREE name, this is for a caller (currently only the macro engine's Convert step) that has
+/// already established — via its own preflight, [`create_slot_link_refusal`] — that `target` is a
+/// plain, already-occupied name, and the user has explicitly confirmed overwriting it.
+///
+/// Still refuses outright if `target` turns out at open time to be a link: the confirm authorises
+/// overwriting the user's OWN file, never writing through a link to a path the user never named
+/// (CPE-1734's absolute rule, which this ticket generalises to the whole macro engine's confirm gate,
+/// not just Convert).
+///
+/// Reuses [`crate::batch_media::open_no_follow`]'s exact `O_NOFOLLOW`/`FILE_FLAG_OPEN_REPARSE_POINT`
+/// flags rather than a second hand-rolled `OpenOptions` — that function's own doc explains why a
+/// second copy of those constants is exactly the thing to avoid — so there remains exactly one
+/// definition of "never follow a link at the final component" in this crate. The post-open
+/// `symlink_metadata` re-check mirrors [`copy_file_onto_no_follow`]'s belt-and-braces: a wrong or
+/// ignored no-follow flag on some platform must not be the only thing standing between a link and a
+/// write.
+///
+/// **The hard-link hole (CPE-1891 PR #1044 review round 2), closed the same way
+/// [`copy_file_onto_no_follow_with_wording`] closes it.** The `symlink_metadata` re-check above answers
+/// a PATH question and this function is the "claiming/writing" sibling of that one — CPE-1896's whole
+/// point was that a path re-check is never the last word once a handle is open, because a hard link is
+/// not a reparse point at all: `symlink_metadata` reports it as an utterly ordinary file, so the
+/// no-follow open above succeeds, the path check above passes, and without this the write would land at
+/// EVERY name the object has — including one outside the macro's scope root, which `within_root` cannot
+/// see because a hard link resolves to itself. Demonstrated on this ticket: a hard link from inside the
+/// macro root to a name outside it made a confirmed Convert write the new bytes at the outside name too,
+/// with `overwrite_confirmed_no_follow` reporting `Ok`. [`crate::batch_media::handle_facts`] reads the
+/// open handle's own identity (`GetFileInformationByHandle` on Windows / `fstat` on Unix) — a question a
+/// path swap cannot defeat — and refuses `is_reparse_point` (a junction that `is_symlink` may not tag as
+/// a link, per that function's own doc) and `links > 1` (a hard link), exactly as
+/// [`copy_file_onto_no_follow_with_wording`] does for its callers. `None` only on a platform whose
+/// identity model `batch_media` does not know, where the path check above is the whole defence, same as
+/// every other caller of `handle_facts`.
+pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let (mut file, created) = crate::batch_media::open_no_follow(target)
+        .map_err(|e| format!("{}: could not open for writing: {e}", target.display()))?;
+    if std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        drop(file);
+        if created {
+            let _ = std::fs::remove_file(target);
+        }
+        return Err(format!(
+            "{}: is a link, and writing to a link's name writes THROUGH it — refusing even though \
+             overwrite was confirmed, because a confirm authorises overwriting a plain file, never \
+             writing through a link",
+            target.display()
+        ));
+    }
+    if let Some(facts) = crate::batch_media::handle_facts(&file) {
+        let why = if facts.is_reparse_point {
+            Some(
+                "is a reparse point (a link, junction or stand-in for another name), and writing to it \
+                 writes THROUGH it"
+                    .to_string(),
+            )
+        } else if facts.is_dir {
+            Some("is a directory, so there is nothing here a file's bytes could replace".to_string())
+        } else if facts.links > 1 {
+            Some(format!(
+                "has {} names (it is hard-linked), and writing here would change the content at every \
+                 one of them — including any that live outside the macro's scope root, which no path \
+                 check can see because a hard link resolves to itself",
+                facts.links
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            drop(file);
+            if created {
+                let _ = std::fs::remove_file(target);
+            }
+            return Err(format!(
+                "{}: {why} — refusing even though overwrite was confirmed, because a confirm authorises \
+                 overwriting a plain file, never writing through a link or a name that resolves to more \
+                 than one entry",
+                target.display()
+            ));
+        }
+    }
+    file.set_len(0).map_err(|e| format!("{}: could not truncate: {e}", target.display()))?;
+    file.write_all(bytes).map_err(|e| format!("{}: could not write: {e}", target.display()))?;
+    Ok(())
 }
 
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -6257,6 +6369,159 @@ mod tests {
             );
             assert!(e.contains("is a link"), "the refusal must say what is in the way: {e}");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1891: the macro engine's confirmed-overwrite escape hatch --------------------------
+    // `rename_into_confirmed_slot` / `overwrite_confirmed_no_follow` are the two primitives behind a
+    // saved macro's Rename/Move/Convert step proceeding onto an occupied name once the user has
+    // explicitly confirmed it — and CPE-1734's absolute rule (a confirm may overwrite a plain file,
+    // never write through a link) must survive the new bypass unchanged. Every test below asserts on
+    // the FILESYSTEM, not just the `Result`, for the same reason the CPE-1734 tests do.
+
+    #[test]
+    fn rename_into_confirmed_slot_overwrites_a_plain_occupied_target() {
+        let d = scratch("confirmed-rename-plain");
+        let src = d.join("a.txt");
+        std::fs::write(&src, b"new bytes").unwrap();
+        let target = d.join("b.txt");
+        std::fs::write(&target, b"old bytes, about to be replaced").unwrap();
+
+        rename_into_confirmed_slot(&src, &target).expect("a confirmed overwrite of a plain file must succeed");
+
+        assert!(!src.exists(), "the source name is consumed by the rename");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new bytes");
+    }
+
+    #[test]
+    fn rename_into_confirmed_slot_still_refuses_a_dangling_link() {
+        // CPE-1734's rule, generalised: a confirm authorises overwriting the user's OWN file, never a
+        // link. Runs on every runner — `make_dangling_link` falls back to a privilege-free junction.
+        let d = scratch("confirmed-rename-link");
+        let src = d.join("a.txt");
+        std::fs::write(&src, b"new bytes").unwrap();
+        let link = d.join("dangling.txt");
+        if !make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the dangling-link leg of rename_into_confirmed_slot: this machine \
+                 could not create a link at {}. NOTHING in this test covered the link route on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = rename_into_confirmed_slot(&src, &link)
+            .expect_err("a link must be refused even with a confirmed overwrite");
+
+        assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        assert!(src.exists(), "the source must survive the refusal — nothing was renamed");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link must survive the refusal, never destroyed by a confirmed overwrite"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn overwrite_confirmed_no_follow_overwrites_a_plain_occupied_target() {
+        let d = scratch("confirmed-write-plain");
+        let target = d.join("photo.jpg");
+        std::fs::write(&target, b"old bytes, about to be replaced").unwrap();
+
+        overwrite_confirmed_no_follow(&target, b"NEW CONVERTED BYTES")
+            .expect("a confirmed overwrite of a plain file must succeed");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW CONVERTED BYTES");
+    }
+
+    /// **Round 5 correction:** this test originally asserted `e.contains("is a link")`
+    /// unconditionally, which reddened `macos-latest` while `ubuntu-latest`/`windows-latest` stayed
+    /// green — the exact class of bug [`overwrite_confirmed_no_follow`]'s own doc comment already
+    /// names and already has a measured fix pattern for ("The `ELOOP` half of that is measured, not
+    /// reasoned"): on Windows the no-follow open succeeds on the reparse point and the post-open
+    /// `symlink_metadata` check is what refuses, wording it "is a link"; on Unix `O_NOFOLLOW` makes
+    /// the open ITSELF fail (`ELOOP`) before either post-open check is ever reached, so the wording
+    /// there is `open_no_follow`'s own `"could not open for writing: ..."` wrapper instead. The
+    /// refusal is real on every platform — nothing is ever written through the link, proven below on
+    /// the filesystem, not just the `Result` — only the SENTENCE is platform-specific, so only the
+    /// Windows leg pins it, per that doc comment's own prescription: "assert the class ... freely;
+    /// gate any assertion on the sentence itself behind `cfg!(windows)`."
+    #[test]
+    fn overwrite_confirmed_no_follow_never_writes_through_a_dangling_link() {
+        let d = scratch("confirmed-write-link");
+        let link = d.join("dangling.jpg");
+        if !make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the dangling-link leg of overwrite_confirmed_no_follow: this \
+                 machine could not create a link at {}. NOTHING in this test covered the link route on \
+                 this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let target = dangling_link_target(&link);
+
+        let e = overwrite_confirmed_no_follow(&link, b"NEW CONVERTED BYTES")
+            .expect_err("a link must be refused even with a confirmed overwrite");
+
+        if cfg!(windows) {
+            assert!(e.contains("is a link"), "must say it IS a link: {e}");
+        }
+        assert!(
+            !target.exists(),
+            "the link's target must not have been conjured by a write-through (result was refused: {e})"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link must survive the refusal"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **PR #1044 review round 2, Blocker 1.** `symlink_metadata` alone cannot see this: a hard link is
+    /// not a reparse point, so it reads as an utterly ordinary file, and the pre-fix code confirmed
+    /// this writes through it — corrupting the OTHER name's content, including a name outside the
+    /// macro's scope root, which `within_root` cannot see either (a hard link resolves to itself).
+    /// Mirrors `batch_execute::tests::link_as_final_component_hard_link_alias_is_refused_even_with_confirmed_overwrite`,
+    /// the sibling engine's version of the identical proof.
+    #[test]
+    fn overwrite_confirmed_no_follow_refuses_a_hard_linked_destination() {
+        let d = scratch("confirmed-write-hardlink");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must not be touched".to_vec();
+        std::fs::write(&victim, &victim_original).unwrap();
+
+        // `link.jpg`'s NAME is the one the macro is about to write to; its DATA is the same file as
+        // `victim`, which lives OUTSIDE the scope this test is standing in for.
+        let link = d.join("link.jpg");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1891] SKIPPED the hard-link leg of overwrite_confirmed_no_follow: this machine \
+                 could not create a hard link at {}. NOTHING in this test covered the hard-link route \
+                 on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = overwrite_confirmed_no_follow(&link, b"CONVERTED BYTES")
+            .expect_err("a hard-linked destination must be refused even with a confirmed overwrite");
+
+        assert!(e.contains("hard-linked") || e.contains("names"), "got: {e}");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            victim_original,
+            "the hard-linked victim's ACTUAL bytes on disk must be untouched — the whole point of this \
+             test is that a Result alone does not prove that (result was: {e})"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

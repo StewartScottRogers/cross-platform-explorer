@@ -72,3 +72,19 @@ failed to build and the worker diagnosed *why* rather than working around it.
 
 Related: **CPE-1896** (where it was found), **CPE-1927** (a different flavour of test that does not
 prove what it appears to).
+
+## Second named lead, added 2026-08-27 (from CPE-1931's sweep)
+
+CPE-1931's worker ran a research-only sweep across every guard/ratchet test in `src/`, `gui-smoke/`
+and the Rust guards in `crates/updater-verify` and `crates/server`, looking for the same shape it had
+just fixed. Result: **no other guard shares the risky hex/numeric-over-whole-file shape.** One
+lower-risk relative worth checking here:
+
+**`src/lib/lockfileLockedGuard.test.ts`** regexes **raw `.yml` text** for cargo subcommands and strips
+only **whole-line** `#` comments, not trailing ones. Same raw-text-rather-than-syntactic-position
+fragility as the pre-CPE-1787 apt-get guards. It is **not** a hex/ticket-number collision risk — it
+matches literal cargo subcommand words — but its siblings (`ciAptGetHardening`, `releaseHangHardening`
+and others) have already migrated to `parseYaml`, and this one has not.
+
+A trailing `# cargo build --locked` in a comment would therefore count as a real invocation. Worth
+the two-sabotage check and, if confirmed, the same `parseYaml` migration its siblings already had.
