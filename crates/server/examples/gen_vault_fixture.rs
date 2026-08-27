@@ -14,7 +14,11 @@
 //! Regenerate with:
 //!   cargo run -p cpe-server --example gen_vault_fixture
 //! then paste the printed base64 into `VAULT_FIXTURE_BASE64` in gui-smoke/wdio.conf.ts. The passphrase
-//! is `VAULT_FIXTURE_PASSPHRASE` there — keep both in sync with the constants below.
+//! is `VAULT_FIXTURE_PASSPHRASE` there. (CPE-1950 removed the "keep both in sync" instruction that used
+//! to sit here: the constants below are now compared against `wdio.conf.ts` by
+//! `src/lib/guiSmokeFixtureLiterals.test.ts` on every PR, so asking the reader to remember was both
+//! unbacked and redundant. The base64 blob itself is NOT derivable — regenerating it is a manual step,
+//! which is what this example exists for.)
 
 use std::io::Write;
 

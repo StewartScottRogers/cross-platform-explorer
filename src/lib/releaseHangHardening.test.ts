@@ -73,6 +73,14 @@ function findStep(job: WorkflowJob, name: string): WorkflowStep {
 // path segment like `/etc/apt/sources.list.d/` stopped counting as an apt invocation THERE and kept
 // counting HERE. Two suites, both green, both claiming to hold the same regex, holding two. Nothing
 // could have reddened: "verbatim" was prose. One declaration, imported by both, is the fix.
+//
+// SIDE EFFECT of unifying on the CPE-1916 (wider) lookbehind, stated rather than discovered later:
+// this file now also excludes `/` before the command word, so an apt invocation written with an
+// ABSOLUTE PATH -- `/usr/bin/apt-get update` -- would stop being counted as a site here, exactly as it
+// already did in ciAptGetHardening.test.ts. No workflow this file reads contains such a line today
+// (checked across release.yml and release-sidecar.yml), and the narrower alternative reintroduces the
+// `/etc/apt/sources.list.d/` false positive CPE-1916 fixed. If a path-qualified apt invocation is ever
+// added, this filter will miss it -- widen the shared regex in aptGetHardening.ts, not one copy.
 
 // stripShellComment()/logicalLines() now live in src/lib/shellScriptLines.ts (CPE-1908
 // round 2) so channelPurityCoverage.test.ts can reuse the exact same comment/continuation

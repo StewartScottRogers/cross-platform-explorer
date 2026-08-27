@@ -115,12 +115,12 @@ mod fixture {
 /// Join a leaf/relative `name` onto the provider-relative `root` as a FILE path.
 ///
 /// CPE-1950: this **calls** `cpe_vfs::connect::join_remote` rather than reimplementing it. It used to
-/// be a hand-written copy carrying the comment "mirrors `join_remote(..., is_dir: false)`" — a claim
-/// that was false the day it was written, because the copy trimmed and rejoined but never handled the
-/// `is_dir` slash at all, i.e. it mirrored the PRE-CPE-1737 `join_remote`. The rig therefore sent
-/// OpenSSH/vsftpd/mod_dav a path shape production had stopped building, and nothing reddened. Calling
-/// the real function deletes the claim instead of restating it: the compiler now enforces what the
-/// comment used to assert.
+/// be a hand-written copy of the `is_dir: false` join, carrying the comment "mirrors
+/// `join_remote(..., is_dir: false)`" — which was accurate, and byte-for-byte so. What was inaccurate
+/// sat over in `connect.rs`, which pointed at THIS helper as the one carrying the CPE-1737 slashed
+/// shape to the real servers; that is [`remote_dir`] below, not this. Calling the real function
+/// deletes both claims rather than re-wording them: there is one implementation now, and the compiler
+/// enforces it.
 fn remote(root: &str, name: &str) -> String {
     cpe_vfs::connect::join_remote(root, name, false)
 }

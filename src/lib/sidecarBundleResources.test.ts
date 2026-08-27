@@ -501,8 +501,9 @@ describe("shipped bundle — no auto-merged per-platform Tauri config overrides 
  *     `platform_config_guard.rs`), comments stripped first via `rustSource.ts` so a commented-out old
  *     list cannot be mistaken for the live one. Nobody has to remember to write a case: adding a token
  *     to Tauri's `Target` enum on the Rust side alone reds here immediately.
- *  2. **Both implementations execute the same case file**, `platformConfigGuard.cases.json` — this
- *     file below, and `platform_config_guard.rs`'s `both_implementations_agree_on_every_shared_case`.
+ *  2. **Both implementations execute the same case file**, `platformConfigGuard.cases.json` (23 name
+ *     cases + 20 refusal cases) — this file below, and `platform_config_guard.rs`'s
+ *     `both_implementations_agree_on_every_shared_case`.
  *     That covers the behaviour the const cannot express: the `>= 3` segment rule, the ASCII-only case
  *     fold, and the RFC-7396 refusal set (null-deletion at `plugins.updater`, at `plugins`, and at the
  *     root).

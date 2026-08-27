@@ -147,12 +147,24 @@ are closed** (items 1, 2, 3, 4, 7, 9, 15). Every one re-reads its source at run 
 duplication outright; every one was red-proofed by changing the referenced source and watching the
 test fail, and **the red-proof result is written at the site**, not only in the PR body.
 
-**THREE claims were already factually wrong**, not two. The ticket named items 1 and 2; item 7 turned
-out to be a third, found while fixing it.
+**TWO claims were already factually wrong.** The ticket predicted items 1 and 2. Item 2 held; **item 1
+did not** — see below. Item 7 turned out to be a genuine third-that-is-really-the-second, found while
+fixing it. So the count is unchanged at two, but the membership is different from the ticket's guess.
+
+**Correction (PR #1067 review, round 1).** My first draft claimed item 1 was already false and that
+the real-server rig had been testing a stale path shape. That was **wrong**, and the wrong text had
+been written into two source files. `git show b15c9f7b` (CPE-1737 #908) confirms `fn remote_dir` — which
+DOES append the slash — and the `connect.rs` sentence landed in the **same commit**, with
+`assert_slashed_directory_path_round_trips` driving `mkdir`/`stat`/`list`/`delete` through it against
+real OpenSSH/vsftpd/mod_dav from day one. The comment named the **wrong helper** (`remote()` instead of
+`remote_dir()`); its **conclusion was true**. Both doc comments now say that. The refactor stands on
+its own merits — a misnamed cross-file reference is still a claim nothing can check — but it is not
+evidence of drift, and the PR body's "byte-identical" line was the tell that should have stopped the
+first draft.
 
 | # | site | classification | what landed |
 |---|---|---|---|
-| 1 | `crates/vfs/src/connect.rs:236` | **duplication deleted** | `join_remote` is now `pub`; `real_server_conformance.rs`'s `remote()`/`remote_dir()` **call it** instead of reimplementing it. Confirmed false at `real_server_conformance.rs:117` — the copy never appended the `is_dir` slash, i.e. it mirrored the PRE-CPE-1737 shape, so the E2E rig against OpenSSH/vsftpd/mod_dav tested a path shape production had stopped building. Red-proof: the compiler, on every build. |
+| 1 | `crates/vfs/src/connect.rs:236` | **duplication deleted** (claim was MISNAMED, not false) | `join_remote` is now `pub`; `real_server_conformance.rs`'s `remote()`/`remote_dir()` **call it** instead of reimplementing it. The sentence pointed at `remote()`, but the slashed CPE-1737 coverage came from `remote_dir()` — both it and the sentence landed in b15c9f7b, so the conclusion was always true. Red-proof: the compiler, on every build. |
 | 2 | `src/lib/paths.ts:21` | **claim corrected + derived** | Confirmed false at `Sidebar.svelte:261`: `norm("/") === ""` vs `canonicalPath("/") === "/"`. `norm` moved into `paths.ts` as `treePrefixPath` (one definition, Sidebar imports it); `paths.test.ts` derives the REAL relationship — agreement on every non-root input, deliberate divergence at the roots, plus an executed counterfactual showing why (`isAncestorOrSelf`'s `startsWith(a + "/")` needs the root to collapse). Red-proof: `treePrefixPath = canonicalPath` fails 2 of 4. |
 | 3 | `src/lib/sidecarBundleResources.test.ts:268` | **derived, two legs** | HIGHEST value item, and it is done properly. Leg 1: the TS platform-token list is now READ out of `platform_config_guard.rs`'s `TAURI_PLATFORM_TOKENS` (comments stripped), so a token added on one side reds with a SECURITY message and nobody has to write a case. Leg 2: new shared oracle `src/lib/platformConfigGuard.cases.json` (24 name cases + 20 refusal cases) executed by BOTH the TS suite and a new Rust `both_implementations_agree_on_every_shared_case`. Red-proofs: `+"visionos"` on the Rust const reds leg 1; making the Rust matcher demand an extra segment reds leg 2 on `Tauri.<t>.toml`. **Stated limit, at both sites:** a shared oracle catches divergence, not shared blindness — see the `<<`-in-a-quoted-string precedent from #1060. |
 | 4 | `RepoBrowser.svelte:2` | **derived** | `PROVIDER_HOSTS` is exported and `RepoBrowser.test.ts` reads `clone_host()`'s `if/else` chain out of `src-tauri/src/lib.rs`, comments stripped. Checks **both** directions — the backend-adds-a-provider direction is the one that matters — plus that the self-hosted providers are deliberately absent and that `stripRepoUrl` really consumes each derived host (incl. the lookalike-host anchoring). Red-proof: a `sourcehut` branch reds with `git.sr.ht`. |
@@ -166,6 +178,26 @@ out to be a third, found while fixing it.
 consts. Tested in `src/lib/rustSource.test.ts`, including the adversarial "a comment quoting the OLD
 list" case. There is no Rust port of it, so unlike `shellScriptLines.ts` it is pinned by nothing
 cross-language — it is a *reader*, not a reimplementation, so there is no second copy to drift from.
+
+**Round 1 review found the scanner itself was the biggest defect in the PR** (PR #1067, Blocking 2),
+and the finding was correct and reproduced locally. The lifted stripper tracked only `"` strings, and
+its doc asserted every desync failed **loudly**. Both false, and false about the files it is pointed
+at *today*:
+
+| file | scanned by | surviving `///` lines, old scanner | after |
+|---|---|---|---|
+| `src-tauri/src/lib.rs` (`path.contains('"')` at :8253) | `RepoBrowser.test.ts` | **142** (8268–8959) | 0 |
+| `crates/server/src/fsutil.rs` (`r"\\?\UNC\"` at :3379) | `MacroRunConfirm.test.ts` | **31** (from 3385) | 0 |
+
+And silent, not loud: behind a `'"'`, a commented-out `TAURI_PLATFORM_TOKENS` decoy **beat the real
+declaration** — on the updater root-of-trust guard. The three shipped derivations sat outside the
+leaked windows: a parity coincidence, not a property. Now handled: char literals, raw strings
+(incl. `br#"…"#`), and **nested block comments** (legal Rust, and not in the original limitations list
+at all). Plus the reviewer's cheapest suggestion, which is the part that generalises: after stripping,
+**no line may begin with `//`** — a two-line invariant that throws on a desync of any cause, including
+one nobody modelled. It catches all 173 leaked lines. Red-proofed three ways (disabling char literals
+fails 3 tests, raw strings 2, block-comment depth 1); `rustSource.test.ts` now carries a case for each
+shape plus a regression leg over all four scanned files.
 
 ### Left for round 2 — nine items, and why
 
@@ -191,8 +223,14 @@ Not "ran out of time" in every case; several are judgement calls worth restating
   belongs in its own ticket.
 - **12. `entrySearch.ts:159-163,205`**, **13. `spotlightSources.ts:162`**, **14.
   `agentMetricsRollup.ts:94`**, **16. `revert-heldback-copy/main.ts:33`** (LOW). Left as the lowest
-  blast radius. Note for whoever takes 13: the ticket says the folds "already differ in kind" — that
-  is a **live behaviour bug**, not just a stale claim, and should probably be split out.
+  blast radius.
+  **Correction on 13 (PR #1067 review): do NOT split it out — my earlier note was wrong.** I wrote
+  that the differing folds are "a live behaviour bug". They are not. The folds do differ (JS
+  full-Unicode `toLowerCase` vs Rust per-char, plus a length-mismatch fallback), but
+  `basenameMatchPositions` returns `null` when it cannot reproduce the match and
+  `rowHighlightPositions` is `… ?? positions`, so **ranking and order come entirely from the
+  backend**. It is a cosmetic highlight divergence on non-ASCII queries, behind an explicit
+  documented fallback — a LOW nit inside item 13, nothing more. No new ticket.
 
 Scope control was the instruction and it was followed: seven real derivations, each red-proofed,
 rather than sixteen shallow ones.

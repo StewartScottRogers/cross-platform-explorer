@@ -2,14 +2,18 @@
  * Reading facts out of Rust source, for the guards that derive a provenance claim instead of asserting
  * one (CLAUDE.md → "Derive provenance, don't claim it").
  *
- * These two functions were written for `src/lib/components/MacroRunConfirm.test.ts` (CPE-1933, PR
- * #1056 Finding 2) and lived inside it. CPE-1950 needed the same two for
- * `sidecarBundleResources.test.ts` and `RepoBrowser.test.ts`, and this repo has already written four
- * separate hand-rolled strippers before the fifth was caught — so they live here now, with one set of
- * tests (`rustSource.test.ts`), and every Rust-source scanner imports them rather than re-deriving
- * the escape and comment rules. There is no Rust port of this module, so nothing here is pinned by a
- * shared case file the way `shellScriptLines.ts` is; it is a reader, not a reimplementation.
+ * `stripRustComments` and `rustStringLiteralAfter` were written for
+ * `src/lib/components/MacroRunConfirm.test.ts` (CPE-1933, PR #1056 Finding 2) and lived inside it.
+ * CPE-1950 needed them for `sidecarBundleResources.test.ts` and `RepoBrowser.test.ts` too, and this
+ * repo has already written four separate hand-rolled strippers before the fifth was caught — so they
+ * live here now, with one set of tests (`rustSource.test.ts`), and every Rust-source scanner imports
+ * them rather than re-deriving the escape and comment rules. There is no Rust port of this module, so
+ * nothing here is pinned by a shared case file the way `shellScriptLines.ts` is; it is a reader, not a
+ * reimplementation.
  */
+
+/** A line that, after stripping, still opens with `//` — i.e. the strip desynced. */
+const SURVIVING_COMMENT_LINE = /^[ \t]*\/\//m;
 
 /**
  * Blanks Rust line comments and block comments, preserving every offset (comment bytes become spaces)
@@ -23,36 +27,77 @@
  *
  * Stripping comments before scanning kills the class rather than that one shape, and is the same rule
  * `crates/updater-verify/src/workflow_scan.rs` applies to workflows: **anchor on code, never on text a
- * comment can also contain.** Quote-aware, so a `//` inside a string literal (a URL in a message) is
- * left alone.
+ * comment can also contain.**
  *
- * Known limitation, deliberate: this tracks `"` string literals but not Rust CHAR literals, so a `'"'`
- * sitting before the target would open a phantom string and swallow what follows. The failure
- * direction is **loud** — the extractor then finds the wrong item or none at all, and the caller's
- * equality assertion fails — never the silent wrong-value pass this stripping exists to prevent. Add
- * char-literal handling if such a literal ever appears in a scanned file, rather than trusting this
- * note. Raw strings (`r#"…"#`) are not handled either, and fail the same loud way.
+ * Handled, because a scanner that desyncs is worse than no scanner: `"` string literals (with `\`
+ * escapes), **char literals** (`'x'`, `'\''`, `'"'`), **raw strings** (`r"…"`, `r#"…"#`, and the byte
+ * forms `b"…"` / `br#"…"#`) which take no escapes at all, and **nested block comments**, which are
+ * legal Rust and which a depth-less scanner closes one level too early (a block comment containing
+ * another block comment ends at the SECOND close marker, not the first).
+ *
+ * ## The "loud failure" claim, corrected (PR #1067 review)
+ *
+ * An earlier version of this doc asserted that a desync fails **loudly** — "never the silent
+ * wrong-value pass this stripping exists to prevent" — and listed char literals and raw strings as
+ * accepted, hypothetical gaps. That was wrong on both counts, and it was wrong **about files this
+ * module is pointed at today**:
+ *
+ * - `src-tauri/src/lib.rs:8253` contains `path.contains('"')`. Under the old scanner that char literal
+ *   opened a phantom string that swallowed **142 `///` lines** (8268–8959) — a window that ends only
+ *   3000 lines before `clone_host`, which `RepoBrowser.test.ts` reads.
+ * - `crates/server/src/fsutil.rs:3379` contains a raw string ending in a backslash (`r"\\?\UNC\"`),
+ *   which the old scanner read as an escape over the closing quote, swallowing **31 lines**.
+ *
+ * And the failure was **silent, not loud**: with a `'"'` earlier in the file, a commented-out decoy
+ * `// pub const TAURI_PLATFORM_TOKENS: &[&str] = &["macos", "EVIL"];` beat the real declaration below
+ * it — on the updater root-of-trust guard. The three derivations shipped in CPE-1950 happened to sit
+ * outside the leaked windows, which is why they were green: **a parity coincidence, not a property.**
+ *
+ * So this function now (a) handles those shapes and (b) does not rely on being right. After stripping
+ * it asserts the invariant that catches a desync of ANY cause, including one nobody has thought of:
+ * **no line may still begin with `//`.** If the scanner walked out of sync, some comment line
+ * survives, and that is what makes the failure genuinely loud — it throws here rather than handing a
+ * caller a plausible wrong answer. It catches all 173 leaked lines above.
+ *
+ * The invariant's own false-positive shape is a multi-line string literal with a line beginning `//`
+ * inside it. No scanned file has one; if one ever appears this throws — loudly, on the side that added
+ * it — rather than passing silently. That direction is the whole point.
+ *
+ * Remaining known gap, stated rather than assumed away: a **lifetime immediately followed by a quote**
+ * (`'a'` as two tokens) would be read as a char literal. That shape is not valid Rust in the positions
+ * that matter, and the invariant above backstops it.
+ *
+ * **Red-proofed, not assumed** (`rustSource.test.ts`). Disabling char-literal handling fails 3 tests
+ * including the real-file regression leg; disabling raw-string handling fails 2; collapsing the block
+ * comment depth counter fails the nesting test. Measured before and after over the four files this
+ * module is pointed at: `lib.rs` 142 → 0 surviving `///` lines, `fsutil.rs` 31 → 0,
+ * `platform_config_guard.rs` 0 → 0, `gen_vault_fixture.rs` 0 → 0. All red-proofs reverted.
  */
 export function stripRustComments(src: string): string {
   const out = src.split("");
   let i = 0;
-  let quote: '"' | null = null;
   while (i < src.length) {
     const ch = src[i];
-    if (quote) {
-      if (ch === "\\") {
-        i += 2;
-        continue;
-      }
-      if (ch === quote) quote = null;
-      i += 1;
+
+    // Raw string: r"…" / r#"…"# / br#"…"# — no escapes inside, terminated by `"` plus the same run of
+    // `#`. Only when the r/br is not the tail of an identifier (`for`, `char`, …).
+    const raw = rawStringEnd(src, i);
+    if (raw !== null) {
+      i = raw;
       continue;
     }
+
     if (ch === '"') {
-      quote = '"';
-      i += 1;
+      i = normalStringEnd(src, i);
       continue;
     }
+
+    if (ch === "'") {
+      // `null` means it is a lifetime, not a char literal — step over the tick and carry on.
+      i = charLiteralEnd(src, i) ?? i + 1;
+      continue;
+    }
+
     if (ch === "/" && src[i + 1] === "/") {
       while (i < src.length && src[i] !== "\n") {
         out[i] = " ";
@@ -60,16 +105,94 @@ export function stripRustComments(src: string): string {
       }
       continue;
     }
+
     if (ch === "/" && src[i + 1] === "*") {
-      const end = src.indexOf("*/", i + 2);
-      const stop = end < 0 ? src.length : end + 2;
-      for (let j = i; j < stop; j += 1) if (out[j] !== "\n") out[j] = " ";
-      i = stop;
+      // Nested block comments are legal Rust; count depth rather than taking the first `*/`.
+      const from = i;
+      let depth = 0;
+      while (i < src.length) {
+        if (src[i] === "/" && src[i + 1] === "*") {
+          depth += 1;
+          i += 2;
+          continue;
+        }
+        if (src[i] === "*" && src[i + 1] === "/") {
+          depth -= 1;
+          i += 2;
+          if (depth === 0) break;
+          continue;
+        }
+        i += 1;
+      }
+      for (let j = from; j < i; j += 1) if (out[j] !== "\n") out[j] = " ";
       continue;
     }
+
     i += 1;
   }
-  return out.join("");
+
+  const stripped = out.join("");
+  const leak = SURVIVING_COMMENT_LINE.exec(stripped);
+  if (leak) {
+    const line = stripped.slice(0, leak.index).split("\n").length;
+    throw new Error(
+      `stripRustComments desynced: a comment line survived the strip at line ${line}. Something in ` +
+        `this source walked the scanner out of sync (an unhandled literal form, most likely), so the ` +
+        `stripped text cannot be trusted and anything derived from it would be a plausible WRONG ` +
+        `answer. Fix the scanner, not the caller — see this function's doc (CPE-1950, PR #1067).`,
+    );
+  }
+  return stripped;
+}
+
+/** Index just past the normal `"…"` string literal opening at `i`. */
+function normalStringEnd(src: string, i: number): number {
+  let j = i + 1;
+  while (j < src.length) {
+    if (src[j] === "\\") {
+      j += 2;
+      continue;
+    }
+    if (src[j] === '"') return j + 1;
+    j += 1;
+  }
+  return src.length;
+}
+
+/**
+ * If a raw string opens at `i`, the index just past its terminator; otherwise `null`. The `r`/`br`
+ * must not be the tail of a longer identifier, or `for` and `char` would each look like one.
+ */
+function rawStringEnd(src: string, i: number): number | null {
+  let j = i;
+  if (src[j] === "b") j += 1;
+  if (src[j] !== "r") return null;
+  if (i > 0 && /[A-Za-z0-9_]/.test(src[i - 1])) return null;
+  j += 1;
+  let hashes = 0;
+  while (src[j] === "#") {
+    hashes += 1;
+    j += 1;
+  }
+  if (src[j] !== '"') return null;
+  const terminator = `"${"#".repeat(hashes)}`;
+  const close = src.indexOf(terminator, j + 1);
+  return close < 0 ? src.length : close + terminator.length;
+}
+
+/**
+ * If a CHAR literal opens at `i`, the index just past its closing tick; otherwise `null` (a lifetime).
+ * Handles `'x'`, an escape (`'\n'`, `'\''`, `'\\'`), and an astral scalar stored as a surrogate pair.
+ */
+function charLiteralEnd(src: string, i: number): number | null {
+  if (src[i + 1] === "\\") {
+    const close = src.indexOf("'", i + 3);
+    return close < 0 ? null : close + 1;
+  }
+  if (src[i + 2] === "'") return i + 3;
+  const hi = src.charCodeAt(i + 1);
+  if (hi >= 0xd800 && hi <= 0xdbff && src[i + 3] === "'") return i + 4;
+  return null;
 }
 
 /**
