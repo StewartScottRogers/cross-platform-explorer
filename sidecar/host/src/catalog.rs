@@ -324,25 +324,22 @@ pub struct ApplyReport {
 ///   it's rejected and its previously-applied copy is left untouched.
 /// - Accepted manifests + their `.sig` are written to `out` and `installed` is bumped. Offline by
 ///   construction (reads local staging); the remote fetch that fills `staging` is a separate wrapper.
-pub fn apply_bundle(
-    staging: &Path,
-    out: &Path,
-    trusted_keys: &[String],
-    installed: &mut VersionMap,
-    pinned: &[String],
-) -> ApplyReport {
-    apply_bundle_with(staging, out, trusted_keys, installed, pinned, &[])
-}
-
-/// As [`apply_bundle`], but with an audited per-agent **downgrade override** (CPE-383): ids listed
-/// in `allow_downgrade` may be applied even when the bundle's `version` is not newer than the
-/// installed one — used to roll an agent back to a specific previously-published version. The
-/// override is deliberately narrow: it applies **only** to the named ids and only relaxes the
-/// anti-rollback rule; index-signature, per-manifest signature, and content-hash binding are all
-/// still enforced, and any id **not** in `allow_downgrade` still gets full anti-rollback. On accept,
-/// `installed` is set to the (older) version so subsequent normal fetches upgrade from there.
-/// A pinned agent is still frozen (pin wins over a rollback request).
-pub fn apply_bundle_with(
+///
+/// Also supports an audited per-agent **downgrade override** (CPE-383): ids listed in
+/// `allow_downgrade` may be applied even when the bundle's `version` is not newer than the installed
+/// one — used to roll an agent back to a specific previously-published version. The override is
+/// deliberately narrow: it applies **only** to the named ids and only relaxes the anti-rollback
+/// rule; index-signature, per-manifest signature, and content-hash binding are all still enforced,
+/// and any id **not** in `allow_downgrade` still gets full anti-rollback. On accept, `installed` is
+/// set to the (older) version so subsequent normal fetches upgrade from there. A pinned agent is
+/// still frozen (pin wins over a rollback request).
+///
+/// **`pub(crate)` on purpose (CPE-1940).** This takes the version map as a caller-supplied
+/// `&mut VersionMap`, which is precisely the shape that let the fail-open bug exist: a caller
+/// outside this module could write `load_versions(p).unwrap_or_default()` and hand in an empty
+/// baseline, making every entry look like a first install. Callers outside `catalog.rs` go through
+/// [`apply_bundle_at`], which reads the baseline itself and can only read it fail-closed.
+pub(crate) fn apply_bundle_with(
     staging: &Path,
     out: &Path,
     trusted_keys: &[String],
@@ -444,7 +441,7 @@ fn write_entry(out: &Path, id: &str, bytes: &[u8], sig: &str) -> std::io::Result
 }
 
 /// Build + sign a catalog bundle from agent manifests (CPE-377) — the release-side counterpart to
-/// [`apply_bundle`]. Given `(id, manifest_bytes)` pairs, a 32-byte ed25519 seed (hex), and a
+/// [`apply_bundle_at`]. Given `(id, manifest_bytes)` pairs, a 32-byte ed25519 seed (hex), and a
 /// monotonic `version` stamped on every entry, returns the files to publish as release assets:
 /// `catalog-index.json` (+ `.sig`) and each `<id>.json` (+ `.sig`). The output verifies under
 /// [`verify_index`] / [`gate_manifest`] with the seed's public key.
@@ -496,6 +493,19 @@ mod tests {
     }
     fn sign(k: &SigningKey, msg: &[u8]) -> String {
         hex::encode(k.sign(msg).to_bytes())
+    }
+    /// The no-downgrade-override call, which used to be a `pub fn` beside `apply_bundle_with`.
+    /// It had no production callers — every real path now goes through `apply_bundle_at`, which
+    /// reads the baseline fail-closed — so it lives here, where a future caller outside this module
+    /// cannot reach for it and hand in an empty `VersionMap` (CPE-1940).
+    fn apply_bundle(
+        staging: &Path,
+        out: &Path,
+        trusted_keys: &[String],
+        installed: &mut VersionMap,
+        pinned: &[String],
+    ) -> ApplyReport {
+        apply_bundle_with(staging, out, trusted_keys, installed, pinned, &[])
     }
     fn index_json(id: &str, sha: &str, version: u64) -> String {
         format!(
@@ -918,11 +928,13 @@ mod tests {
         // local file: no signing key, no network position.
         const SABOTAGE: &[u8] = b"{ this is not a version map";
         std::fs::write(&vpath, SABOTAGE).unwrap();
-        let err = apply_bundle_at(stage.path(), out.path(), &[pk], &vpath, &[], &[])
-            .expect_err("a corrupt map must refuse the whole apply");
-        assert!(matches!(err, VersionMapError::Corrupt(_)), "got {err:?}");
+        let outcome = apply_bundle_at(stage.path(), out.path(), &[pk], &vpath, &[], &[]);
 
-        // The two facts that matter, both read back off the disk.
+        // The two facts that matter, read back off the disk, asserted FIRST. Deliberately ahead of
+        // any assertion about the returned value: under the regression this guards, the on-disk
+        // damage is the finding, so it must be the thing that reddens. Asserting the error kind
+        // first would panic before these ever ran and report a missing `Err` instead of a
+        // reinstalled ancient agent and a baseline pushed backwards.
         assert_eq!(
             std::fs::read(out.path().join("claude.json")).unwrap(),
             b"GOOD-v9",
@@ -933,6 +945,9 @@ mod tests {
             SABOTAGE,
             "a refused run rewrote the version map on disk"
         );
+        // Only then: it was refused, and refused for the right reason.
+        let err = outcome.expect_err("a corrupt map must refuse the whole apply");
+        assert!(matches!(err, VersionMapError::Corrupt(_)), "got {err:?}");
     }
 
     /// The other half of the same distinction: **absent** is not corrupt. A first run legitimately

@@ -645,5 +645,42 @@ mod tests {
         assert!(!res2.index_ok);
         assert!(res2.offline);
         assert_eq!(res2.error.as_deref(), Some("fetch failed: status code 404"));
+        assert!(!res2.version_map_unreadable);
+    }
+
+    /// The **rollback** hop of the same pipe (CPE-1940). `rollback_catalog` builds its own
+    /// `CatalogFetch` from the same host reply, so the local-baseline refusal has to be parsed here
+    /// too — a rollback runs the identical fetch+apply and is refused the identical way. The first
+    /// round of CPE-1940 threaded this flag through the refresh route only, and the rollback route
+    /// dropped it silently, turning the refusal into a bare `applied: 0`.
+    #[test]
+    fn rollback_catalog_parses_the_local_baseline_refusal_too() {
+        let (writer, sink) = buffer();
+        let client = Arc::new(BrokerClient::new(writer));
+        let c = client.clone();
+        let h = std::thread::spawn(move || {
+            BrokerDialogs::new(c).rollback_catalog("v0.1.0", &["claude".to_string()])
+        });
+
+        let id = wait_for_request(&client, &sink);
+        client.deliver(
+            id,
+            Response {
+                result: Ok(json!({
+                    "indexOk": false,
+                    "applied": [],
+                    "rejected": 0,
+                    "versionMapUnreadable": true,
+                    "error": "installed-version map is corrupt: expected value",
+                })),
+            },
+        );
+        let res = h.join().unwrap().unwrap();
+        assert!(res.version_map_unreadable);
+        assert_eq!(res.error.as_deref(), Some("installed-version map is corrupt: expected value"));
+        // The shape that made the refusal indistinguishable from a benign "that version lacks
+        // this agent" once it reached the launcher.
+        assert_eq!(res.applied, 0);
+        assert!(!res.index_ok);
     }
 }

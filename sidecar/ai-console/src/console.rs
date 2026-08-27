@@ -1442,6 +1442,11 @@ impl ConsoleState {
     /// `POST /api/catalog/rollback {tag, agents}` → roll the chosen `agents` back to a specific prior
     /// published version `tag` (CPE-383): an audited per-agent downgrade override. Hot-reloads on
     /// apply. `agents` empty ⇒ nothing to do.
+    ///
+    /// Returns `{ indexOk, applied, tag, agents, versionMapUnreadable, error }`. The last two match
+    /// the refresh route's contract (CPE-1940): this path runs the *same* `host.fetch_catalog` and
+    /// the same fail-closed baseline read, so it can be refused the same way and must be able to
+    /// say so, rather than letting the refusal masquerade as `applied: 0`.
     fn handle_catalog_rollback(&self, body: &str) -> Response {
         let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
         let tag = v["tag"].as_str().unwrap_or("").trim().to_string();
@@ -1462,9 +1467,24 @@ impl ConsoleState {
                 } else {
                     self.registry.read().unwrap().len()
                 };
+                // CPE-1940: carry the local-baseline refusal and the error text through, exactly as
+                // the refresh route does. Without them a corrupt `versions.json` reaches the
+                // launcher as a bare `applied: 0`, which renders as the calm, green "that version
+                // may not include this agent" — blaming the published version for a refusal on the
+                // user's own machine, with no recovery step and no end to it. This is a state the
+                // fail-closed change *creates*: pre-fix, a corrupt map made rollback silently
+                // succeed (`allow_downgrade` + an empty baseline ⇒ `Newer` ⇒ `Accept`), so there
+                // was no refusal here to report.
                 Response::json(
-                    json!({ "indexOk": res.index_ok, "applied": res.applied, "tag": tag, "agents": agents_now })
-                        .to_string(),
+                    json!({
+                        "indexOk": res.index_ok,
+                        "applied": res.applied,
+                        "tag": tag,
+                        "agents": agents_now,
+                        "versionMapUnreadable": res.version_map_unreadable,
+                        "error": res.error,
+                    })
+                    .to_string(),
                 )
             }
             Err(e) => bad(e),
@@ -2465,8 +2485,10 @@ mod tests {
         fn list_catalog_versions(&self) -> Result<Vec<crate::broker_client::CatalogVersion>, String> {
             Err("n/a".into())
         }
+        /// Scripted the same way as `fetch_catalog` — rollback runs the identical host call, so the
+        /// route's JSON must be pinned identically (CPE-1940).
         fn rollback_catalog(&self, _tag: &str, _agents: &[String]) -> Result<crate::broker_client::CatalogFetch, String> {
-            Err("n/a".into())
+            Ok(self.result.clone())
         }
         fn fetch_model_snapshot(&self) -> Result<(String, String), String> {
             Err("n/a".into())
@@ -2550,6 +2572,67 @@ mod tests {
         assert_eq!(v["applied"], 0);
         assert_eq!(v["indexOk"], false);
         assert_eq!(v["offline"], false);
+    }
+
+    /// The **sibling route**, which the first round of CPE-1940 missed. `/api/catalog/rollback` runs
+    /// the same `host.fetch_catalog` through the same fail-closed baseline read, so a corrupt
+    /// `versions.json` refuses it identically — and the refusal arrives as a bare `applied: 0`,
+    /// which the launcher renders in the calm, green "that version may not include this agent"
+    /// line. That blames the published version for a fault on the user's own machine.
+    ///
+    /// Worse, it is a state this change *creates*: pre-fix, a corrupt map made rollback silently
+    /// **succeed** (`allow_downgrade` + an empty baseline ⇒ `Newer` ⇒ `Accept`), so there was no
+    /// misleading refusal to report before. Both fields must survive this hop.
+    #[test]
+    fn catalog_rollback_route_forwards_the_local_baseline_refusal_too() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("agents");
+        let post = |dialogs: crate::broker_client::CatalogFetch| {
+            let registry = AgentRegistry::load_from_dirs(std::slice::from_ref(&dir));
+            let st = ConsoleState::with_backends(
+                registry,
+                "/repo".into(),
+                Arc::new(crate::broker_client::MemSecrets::default()),
+                Arc::new(crate::presets::MemPresets::default()),
+                Arc::new(CatalogRefreshDialogs { result: dialogs }),
+                Arc::new(crate::history::MemHistory::default()),
+            );
+            let r = route(&st, &Request {
+                method: "POST".into(),
+                path: "/api/catalog/rollback".into(),
+                body: r#"{"tag":"v0.1.0","agents":["claude"]}"#.into(),
+                ..Default::default()
+            });
+            serde_json::from_slice::<Value>(&r.body).unwrap()
+        };
+
+        let refused = post(crate::broker_client::CatalogFetch {
+            index_ok: false,
+            applied: 0,
+            already_current: 0,
+            regressed_rejected: 0,
+            integrity_rejected: 0,
+            offline: false,
+            version_map_unreadable: true,
+            error: Some("installed-version map is corrupt: expected value".into()),
+        });
+        assert_eq!(refused["versionMapUnreadable"], true);
+        assert_eq!(refused["error"], "installed-version map is corrupt: expected value");
+        // The shape that made it indistinguishable from a benign "that version lacks this agent".
+        assert_eq!(refused["applied"], 0);
+        assert_eq!(refused["tag"], "v0.1.0");
+
+        // A normal rollback still reports cleanly, with the flag off — the refusal branch must not
+        // swallow the success case.
+        let applied = post(crate::broker_client::CatalogFetch {
+            index_ok: true,
+            applied: 1,
+            version_map_unreadable: false,
+            error: None,
+            ..Default::default()
+        });
+        assert_eq!(applied["applied"], 1);
+        assert_eq!(applied["versionMapUnreadable"], false);
+        assert!(applied["error"].is_null());
     }
 
     #[test]

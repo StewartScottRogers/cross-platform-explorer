@@ -125,5 +125,46 @@ check in `VerifiedIndex::open` ⇒ **2** tests red, one of them the pre-existing
 existing index-signature guard.
 
 **Verification.** `sidecar/host`: 112 pass, clippy `--locked --all-targets -D warnings` clean.
-`src-tauri`: 285 pass, clippy clean in **both** feature modes (plain and `sidecar-platform`). No
-`src/`, dependency, or `specta::Type` changes.
+`src-tauri`: 285 pass, clippy clean in **both** feature modes (plain and `sidecar-platform`).
+`src/` changes are `src/docs/04-ai-console.md` and `src/lib/ai-console-launcher.test.ts`, so
+`npm run check` was run (0 errors, 0 warnings). No dependency or `specta::Type` changes.
+
+**2026-08-27, review round 2 — Security Auditor SEC PASS; Reviewer CHANGES REQUESTED.**
+
+**Blocking, and it was the same defect on the sibling route.** The flag was threaded through the
+**refresh** route only. `/api/catalog/rollback` runs the same `host.fetch_catalog` → the same
+`do_fetch_catalog` → the same `apply_bundle_at`, so a corrupt map refuses it identically — but
+`handle_catalog_rollback` emitted only `{indexOk, applied, tag, agents}`, dropping both
+`versionMapUnreadable` and `error`. Measured through a stub, the refusal arrived as
+`{"agents":12,"applied":0,"indexOk":false,"tag":"v0.1.0"}`, which `applyRollback` rendered in the
+**green success colour** as *"Nothing changed (that version may not include this agent)"* — blaming
+the published version for a fault on the user's own machine, with no recovery step.
+
+And it is a state **this change creates**: pre-fix, a corrupt map made rollback silently *succeed*
+(`allow_downgrade` + an empty baseline ⇒ `Newer` ⇒ `Accept`), so there was no misleading refusal to
+report before. Fixed, and pinned at all four hops — host JSON (shared), the broker parse
+(`rollback_catalog_parses_the_local_baseline_refusal_too`), the console route
+(`catalog_rollback_route_forwards_the_local_baseline_refusal_too`), and the launcher branch, which
+is checked **before** the `applied > 0` / else pair.
+
+**Also taken:**
+
+- The F-A test's filesystem assertions ran *after* `expect_err`, so under the regression they guard
+  the panic came from the missing `Err` and the two `fs::read` comparisons never evaluated. Reordered
+  so the on-disk facts are asserted first. Re-verified under sabotage: the failure is now
+  `the installed manifest was overwritten with ancient content`, printing `ANCIENT` against
+  `GOOD-v9` — the damage is the thing that reddens.
+- `apply_bundle_with` is now `pub(crate)`, closing the door on a future caller writing
+  `load_versions(p).unwrap_or_default()` + `apply_bundle_with`. `apply_bundle` had the identical
+  hazard and identical exposure, so closing only one would have been a half-fix; it had no production
+  callers at all, so it moved into the test module as a helper (zero test-body churn).
+- **"Reset to the shipped agents" cannot clear the `Unreadable` case it was offered for** —
+  `handle_catalog_reset` uses `remove_file`, which fails on the directory-in-place shape that
+  `an_unreadable_version_map_is_a_refusal_too` constructs. Rather than widen a reset handler that
+  recursively deletes inside the catalog dir, both messages and the docs now say the reset clears the
+  usual case and name deleting the file by hand as the fallback — no universal-sounding cure for a
+  state it cannot always clear.
+- Docs wording: it refuses the **apply**, not "the whole check" — the download already happened.
+
+Deferred to **CPE-1949** (filed by the Foreman): sanitising `entry.id` post-verify, the absent-map
+route, the `pub` visibility sweep, and the predictable staging dir.

@@ -704,6 +704,43 @@ describe("Agent Deck launcher — catalog controls", () => {
     expect(w.document.getElementById("msg").textContent).toMatch(/rolled back to v0\.1\.0/i);
   });
 
+  // CPE-1940, the sibling route the first round missed. A rollback runs the same fetch+apply as a
+  // refresh, so a damaged local versions.json refuses it identically — arriving as a bare
+  // `applied: 0`, which is exactly the shape of the benign "that version lacks this agent" case.
+  // Without its own branch the user is told, in the success colour, that the *published version* is
+  // at fault, with no way out and no end to it.
+  it("rollback refused by a damaged local version record says so, instead of blaming the published version", async () => {
+    const { w } = await mountLauncher((path) => {
+      if (path === "/api/catalog/versions")
+        return { versions: [{ tag: "v0.1.0", publishedAt: "2026-07-01T00:00:00Z", prerelease: false }] };
+      if (path === "/api/catalog/rollback")
+        return {
+          indexOk: false,
+          applied: 0,
+          tag: "v0.1.0",
+          agents: 1,
+          versionMapUnreadable: true,
+          error: "installed-version map is corrupt: expected value at line 1 column 3",
+        };
+      return {};
+    });
+    w.document.getElementById("agent").value = "claude";
+    w.document.getElementById("rollback-agents").click();
+    await new Promise((r) => setTimeout(r, 0));
+    w.document.getElementById("rollback-version").value = "v0.1.0";
+    w.document.getElementById("rollback-apply").click();
+    await new Promise((r) => setTimeout(r, 0));
+    const msg = w.document.getElementById("msg");
+    expect(msg.textContent).toMatch(/local record of installed agent versions/i);
+    expect(msg.textContent).toMatch(/Reset to the shipped agents/i);
+    // Must NOT be the benign line that blames the published version for a local fault.
+    expect(msg.textContent).not.toMatch(/may not include this agent/i);
+    expect(msg.textContent).not.toMatch(/rolled back to/i);
+    // …and not in the success colour, which is what `applied: 0` used to render as here.
+    expect(msg.style.color).toBe("rgb(208, 138, 26)"); // amber #d08a1a
+    expect(msg.style.color).not.toBe("rgb(58, 157, 74)"); // not green #3a9d4a
+  });
+
   it("version rollback with no published versions shows a message and no overlay", async () => {
     const { w } = await mountLauncher((path) =>
       path === "/api/catalog/versions" ? { versions: [] } : {},
