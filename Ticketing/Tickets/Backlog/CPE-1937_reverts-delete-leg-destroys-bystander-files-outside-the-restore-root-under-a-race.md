@@ -1,6 +1,6 @@
 ---
 id: CPE-1937
-title: revert can **silently delete** a bystander file through a junction pointing inside the restore root — `applied: 1`, no skip, no error
+title: revert's delete leg destroys bystander files **outside the restore root** under a race — 596 in 200 trials, every one counted as `applied`
 type: bug
 priority: High
 status: Open
@@ -61,6 +61,38 @@ mitigation narrows the window; it does not close it.
       than stack them — is the pattern to follow.
 - [ ] Once fixed, correct `src/docs/safety-undo.md`, which CPE-1913 is amending in the interim to stop
       presenting revert as fully converted.
+
+
+## Blast radius raised 2026-08-27 — it reaches OUTSIDE the root, measured
+
+PR #1050's independent Security Auditor corroborated the inside-the-root case above **and then went
+further**, applying CPE-1896's racing double-rename (`root/sub` <-> `root/junc -> OUTSIDE`) to this
+same leg:
+
+    [A8b delete raced out of the root]  trials=200  FILES_DELETED_OUTSIDE=596
+                                        applied_total=4327  swaps=1835
+
+**596 bystander files destroyed outside the destination across 200 trials.** Every one counted in
+`applied`. None in `skipped`. No `held_back`. No error. This is the **CPE-1896 escape shape at a
+destructive leg with no handle guard at all** — strictly worse than the inside-only case this ticket
+was originally filed for, which is why the title and priority were raised.
+
+The auditor also confirmed the CPE-1823 delete stand-down does **not** save it: an ordinary plan — a
+non-empty, fully restorable checkpoint whose deletes are not accompanied by a refused write — reaches
+`apply_delete` directly. That is exactly the fixture it used.
+
+## AC2 answered with evidence (2026-08-27)
+
+The second acceptance criterion below asked whether `snapshot_capture::restore` is genuinely dead.
+**It is** — the auditor grepped `crates/` and `src-tauri/` and found the only non-doc references are
+`revert_engine`'s own tests and `snapshot_prune`'s test. But it also **measured** that it carries the
+same defect:
+
+    [A9 point_outside=false]  REDIRECTED=true   verdict=Ok(())   victim="CAPTURED BYTES"
+    [A9 point_outside=true ]  REDIRECTED=false  verdict=Err("... escapes ...")
+
+Identical on `main` and on PR #1050's branch. It has no production caller, but it **is** a public API
+of `cpe-server` and a second live copy of the CPE-1912 shape. Delete it or convert it; do not leave it.
 
 ## Notes
 
