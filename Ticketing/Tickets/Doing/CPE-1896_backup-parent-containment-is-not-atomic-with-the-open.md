@@ -529,6 +529,163 @@ a clean commit — never over uncommitted work.
   self-cleaning `ScratchDir` guard with the escape target a sibling directory *inside* it; nothing was
   installed or changed machine-wide.
 
+## 2026-08-27 — ROUND 2 on PR #1043: Reviewer CHANGES REQUESTED + Security Auditor findings
+
+**The containment itself was confirmed sound by three independent passes** before any of this. The
+Reviewer audited `nt_child`/`walk` line by line ("this code is correct" — every `OBJECT_ATTRIBUTES`
+field, no handle leak on any path, MAX_PATH-free) and reproduced the probe both ways on its own
+machine (400 trials → 0 escapes; sabotaged → **119 of 120** escaped). UAT ran it independently: 0/400.
+The Security Auditor ran 1,100 trials across three probe shapes — including its own 3-level chain with
+the junction at `a/b` giving two race windows — for **0 escapes, 0 silent successes**, and could not
+get round the fix by hard link at the leaf, by swapping the root mid-run, or with 39 hostile path
+shapes. Every blocker below was in the arm I had flagged as never executed, or in prose.
+
+- **2026-08-27 (Worker) — I found a way to execute the Unix arm, so B1/B2 are measured rather than
+  reasoned.** This is a Windows machine, which is why the Unix arm shipped unexecuted in round 1. WSL2
+  is present (kernel 6.6.87.2) but has **no C toolchain**, so `cargo` cannot link there. The route that
+  worked: `rustup target add x86_64-unknown-linux-musl` (machine-global, **left installed**, see
+  shared-machine note below), then cross-build a **static musl** binary on Windows with
+  `-C linker=rust-lld` and run it under WSL. The harness crate lived in `.unixcheck/` inside this
+  worktree and **extracts the Unix arm verbatim from the shipping file** with a script rather than
+  hand-copying it, so it cannot drift from what CI compiles; it was deleted before the final commit.
+  `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin` std were already installed, so both CI arms can
+  also be *type-checked* from here without a linker.
+
+- **2026-08-27 (Worker) — B1: classify a link by asking the filesystem, not by reading the errno.
+  RED then GREEN on a real Linux kernel.**
+
+  `child_dir` opens each directory component with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`, and the code
+  mapped only `ELOOP` to the link wording. Linux's `do_open()` reaches the `LOOKUP_DIRECTORY` check
+  (`-ENOTDIR`) **before** `may_open()`'s `S_IFLNK -> -ELOOP`, so a symlink at an *intermediate*
+  component reports `ENOTDIR`; xnu has the same ordering, and FreeBSD returns `EMLINK` — the errno
+  test was wrong on three platforms. Containment always held; the *message* was wrong.
+
+  ```text
+  errno classification (as shipped in round 1)   intermediate: victim_intact=true says_link=FALSE
+                                                 "the path component "sub" could not be opened
+                                                  (Not a directory (os error 20))"
+  fstatat(AT_SYMLINK_NOFOLLOW) classification    intermediate: victim_intact=true says_link=TRUE
+  ```
+
+  Fixed with a `link_at()` helper that runs **only on a component that already failed to open**, so it
+  costs nothing in the ordinary case.
+
+- **2026-08-27 (Worker) — and the two assertions the Reviewer flagged were proving NOTHING anyway.**
+  Found by the harness, not by the review: `refuse()`'s shared tail ended "…and a component that **is
+  a link**, or that cannot be opened, stops the entry", which put the literal phrase `is a link` into
+  *every* refusal this module produces. `assert!(err.contains("is a link"))` therefore passed for a
+  permission error, a vanished name, or a plain file sitting where a directory belongs — both
+  `open_beneath`'s test and `backup.rs`'s CPE-1889 assertion were green for the wrong reason. The tail
+  is reworded so boilerplate and diagnosis are lexically disjoint, and a new test,
+  `a_plain_file_where_a_directory_belongs_is_refused_but_not_called_a_link`, pins the **negative**
+  case — which is the only thing that proves the classification discriminates rather than always
+  answering "link". This is the repo's recurring defect (a guard that proves nothing) caught in my own
+  work.
+
+- **2026-08-27 (Worker) — B2: the `openat2` fast path was dead for every overwrite. Measured both
+  ways.** `open_how.mode` was `0o666` unconditionally; the kernel's `build_open_flags()` rejects
+  `!WILL_CREATE(flags) && mode != 0` with `EINVAL`, and `EINVAL` is in the process-wide latch set — so
+  the **first overwrite in a run turned the fast path off for the whole process**, and every
+  `update`-list entry (the case the module doc calls the common one) fell into the walk, invisibly,
+  because the fast path swallows errors by design. Now `mode: if flags & O_CREAT != 0 { 0o666 } else
+  { 0 }`. Measured on WSL2 with the syscall counter, 10 overwrites of an existing `a/b/f.txt`:
+
+  ```text
+  mode: 0o666 unconditionally (the bug)    8 walk-syscalls/file   fast path dead, full walk every time
+  mode: 0 when not creating (the fix)      2 walk-syscalls/file   fast path serves the overwrite
+  ```
+
+  `rootfd` is also widened to `c_long` for the variadic `syscall()` call, and the latch now carries a
+  comment saying it is process-wide and permanent and must only ever be set by kernel-property errors.
+
+- **2026-08-27 (Worker) — B3: deleted the fallback that had never compiled.** The
+  `#[cfg(not(any(unix, windows)))]` arm passed `root.path` (a `PathBuf` behind `&RootDir`) to
+  `refuse(&Path, …)`: two `E0308`s and an `E0507` when the Reviewer extracted and built it. Because
+  `ATOMIC` was a `const bool` rather than a `cfg`, `dead_code` stayed silent, and the only two callers
+  of `parent_contained` sat inside the block it guarded — a security check with no coverage behind a
+  fallback that could not exist. **Deleted together**: the fallback `sys` module, `ATOMIC`, the
+  `if !ATOMIC` block, and `parent_contained`. `open_beneath` is now `#[cfg(any(unix, windows))]` with
+  no fourth arm, so an unsupported target fails the build loudly. (`confined_to_resolved_root` stays —
+  it is `pub` in `fsutil` with its own test, not orphaned.)
+
+- **2026-08-27 (Worker) — N1/F1: refuse a NAME SURROGATE, not every reparse point.** Confirmed by the
+  Auditor's measurement on both sides: on `origin/main` a destination holding `dst/real/` and a
+  junction `dst/link -> dst/real` copies `link/x.txt` with `ok = true`; on round 1 the same entry came
+  back `ok = false`. Correct for the junction — it is a surrogate and refusing it is the point, even
+  pointing back inside the root — but `FILE_ATTRIBUTE_REPARSE_POINT` is equally set by **OneDrive
+  Files-On-Demand**, NTFS dedup/HSM, WOF and ProjFS, and a backup destination inside a OneDrive folder
+  with Known Folder Move is an ordinary setup. It now reads `FILE_ATTRIBUTE_TAG_INFO` and tests
+  `ReparseTag & IO_REPARSE_TAG_NAME_SURROGATE (0x2000_0000)` — same one handle query, different
+  information class. **The non-surrogate side is not staged in a test and I say so at the function**: a
+  cloud placeholder needs OneDrive/dedup/ProjFS to create and cannot be staged on a CI runner. The
+  Auditor also showed this branch is *diagnostics*, not containment — neutering it entirely still
+  refused the CPE-1889 junction, because NT answers `ERROR_CANT_RESOLVE_FILENAME` on the next
+  component — so failing open here is safe. The new refusal is documented for the user in
+  `src/docs/safety-undo.md`.
+
+- **2026-08-27 (Worker) — F2: the residual's stated reason was wrong, and the truth differs per
+  platform.** Round 1 said the attacker "can only relocate a directory the backup itself owns … and
+  `rename` cannot put a directory onto an existing non-empty one" — one reason offered for all
+  platforms. Rewritten as three:
+  - **Windows: unreachable.** Windows refuses to rename a directory with an open descendant whatever
+    the share mode. Auditor-instrumented (rename timestamp vs the instant `apply_backup_plan`
+    returned), moving the leaf's parent and grandparent during 192 MiB and 768 MiB copies: **218 and 30
+    attempts, every one `Access is denied (os error 5)`, zero mid-flight escapes.** Also recorded at
+    the residual: this is Windows' own open-descendant rule, **not** the held handle — `SHARE_ALL`
+    deliberately includes `FILE_SHARE_DELETE` (so a run cannot stop the user deleting their own backup
+    folder), so the handle grants no veto. A reader must not conflate the two.
+  - **Linux with `openat2`: immune** — re-resolves from the root fd every call.
+  - **Unix fallback walk (macOS, and Linux when the fast path declines): genuinely open.** POSIX
+    `rename` has no such restriction, and the old reason is **false** here: renaming into a *new name
+    inside* a pre-existing sensitive directory succeeds, and both the directory name and the filename
+    come from the source tree, so an actor controlling the source picks the whole landing path. Only
+    `landed_inside` saves this case.
+  - Also recorded, because it produces a false positive: a residual test without an ordering proof
+    reports an escape that is really the racer winning *after* the plan returned (the Auditor's first
+    un-instrumented attempt reported "100,663,296 bytes outside the root, ok:true" this way).
+
+- **2026-08-27 (Worker) — F3: "`landed_inside` catches it on every platform" was an over-claim.** It
+  short-circuits to the path answer alone when `handle_facts` returns `None` or the identity
+  `is_degenerate()` (network redirectors returning a zeroed file index). On such a destination the
+  residual is **silent, not loud** — and a backup destination is often exactly that kind of volume. Now
+  says "every platform with a usable file identity", names the two short-circuits, and cross-references
+  CPE-1895 and CPE-1915.
+
+- **2026-08-27 (Worker) — F4/N4: the handle description was wrong in the safe direction.** `held =
+  Some(dir)` drops the previous handle, so exactly **two** handles are live (the root and the deepest
+  component so far), not one per level. No accumulation on deep trees, and the residual's blast radius
+  is one directory rather than the chain. Corrected in both files.
+
+- **2026-08-27 (Worker) — the smaller notes.** **N2** (Win32-unaddressable names — `sub.`, `sp `,
+  `NUL`, `a/b/c.txt:stream`): NT does no Win32 normalisation, so these create real, contained, but
+  unaddressable objects; today only `backup::safe_join`'s `win32_name_is_unstable` filter prevents it,
+  and that is in the *caller*. Documented at `create_beneath` with the specific hazard a second caller
+  would hit — the handle written and the object `landed_inside` inspects would be different files.
+  (Not moved into the module: one owner for the vocabulary.) **N3**: the two `remove_file(dst)` calls
+  in `fsutil` are now named as the only path writes left, with why they are bounded (they only run on a
+  name this call exclusively created moments ago) and what closing them would cost. **N5**: the two
+  `unwrap_or` conversions in `nt_child` now return `STATUS_NAME_TOO_LONG` instead of silently
+  substituting a truncated `Length`, and the `unsafe` block is split so only `mem::zeroed`, the
+  `NtCreateFile` call and `File::from_raw_handle` are inside one. **`open_root` needs read access** on
+  the destination, so a write-only destination directory now fails the whole plan where `main`
+  succeeded — rare and loud, recorded at the function with what the fix would be (`FILE_TRAVERSE` /
+  `O_PATH`, no macOS equivalent).
+
+- **2026-08-27 (Worker) — round 2 guardrails.** `cargo test` in `crates/server`: **2402 passed, 0
+  failed, 10 ignored**, plus every integration binary green. Windows race probe re-run after all of the
+  above: **400 trials, 0 escapes**. Unix harness on WSL2 kernel 6.6.87.2: **5 of 5 pass**.
+  `cargo clippy --all-targets -- -D warnings` clean in plain, `--features index`, `--features specta`.
+  No new dependency crate. No `specta::Type` touched. **Honest note:** one full `cargo test` run during
+  this round reported a single lib failure that did not reproduce across two subsequent full runs and
+  whose name I did not capture; the machine is shared with other agents and scratch-dir contention is
+  the likely cause, but I cannot prove that, so it is recorded rather than dismissed.
+
+- **2026-08-27 (Worker) — SHARED MACHINE.** `rustup target add x86_64-unknown-linux-musl` was run and
+  **left installed** — it is additive, and removing it could break a sibling agent mid-run. Nothing
+  else machine-global was touched: no `apt`, no `winget`, no PATH edit, no global git config. The WSL
+  Ubuntu distro was used read-only (a static binary was executed in it; nothing was installed there —
+  it still has no C toolchain).
+
 ## What the atomic half should build first
 
 A `#[cfg(test)]` synchronous injection hook between the containment check and the destination open, so a

@@ -1501,6 +1501,16 @@ pub(crate) fn copy_file_onto_destination_handle(
     // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
     // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.
     // Copied in shape from `batch_media::open_output_verified`, and for its reason.
+    //
+    // **The two `remove_file(dst)` cleanups below are the only PATH writes left in this function, and
+    // that is worth naming** (CPE-1896 PR #1043, N3), since the whole thesis of the CPE-1896 caller is
+    // that the destination is addressed by handle and never by path. They are bounded and deliberate:
+    // they run only on `created`, i.e. a name **this call** claimed with an exclusive create moments
+    // ago and is now abandoning, so the worst a racing swap achieves is that the cleanup unlinks
+    // something else — it cannot make this function *write* anywhere, and the entry is refused either
+    // way. Doing it properly needs a handle-relative unlink (`FileDispositionInfo` on Windows,
+    // `unlinkat` on the parent fd on Unix), which means threading the parent handle out of
+    // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
     if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         drop(w);
         if created {

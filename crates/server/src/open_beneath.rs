@@ -67,6 +67,24 @@
 //!   handle this module returns, and it is deliberately not duplicated here.
 //! - **It does not exist on a platform with neither `openat` nor `NtCreateFile`** — the module is not
 //!   compiled there and the crate does not build, deliberately. See the "no fourth row" note above.
+//!
+//! # How many handles are actually open, since the residual is reasoned from it
+//!
+//! **Exactly two: the root, and the deepest component reached so far.** The walk assigns
+//! `held = Some(dir)` each time it descends, which drops the previous directory's handle immediately,
+//! so nothing accumulates on a deep tree. An earlier revision of `backup::copy_one_verified`'s residual
+//! paragraph said the walk "holds a handle on each intermediate directory" — both the Reviewer and the
+//! Security Auditor of PR #1043 flagged it independently. The conclusion is unchanged and the blast
+//! radius is smaller than described: an actor renaming a directory out from under the walk can affect
+//! **one** directory, the one currently being descended into, not the chain.
+//!
+//! On Windows that rename is refused by the OS for as long as a descendant is open — 248 instrumented
+//! attempts, every one `Access is denied` — and it is worth saying explicitly that this is **not**
+//! because the held handle blocks it: [`sys::SHARE_ALL`] deliberately includes `FILE_SHARE_DELETE`, so
+//! the handle grants no such veto and is still the right choice (without it, a run would stop the user
+//! deleting their own backup folder). The protection is Windows' own open-descendant rule, which is a
+//! different mechanism from the share mode. POSIX has no equivalent rule at all; see the per-platform
+//! breakdown on `backup::copy_one_verified`.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -123,6 +141,16 @@ fn tick() {}
 /// Resolve and hold the root. `real_root` must already be canonical — this does not resolve it, and
 /// deliberately **does** follow a link at the root itself, because the root is the location the user
 /// chose and a link there is their own arrangement, not a redirect planted underneath them.
+///
+/// **It opens the root for READ, which is a new requirement on the destination.** A directory handle
+/// is what every subsequent component is resolved against, and both `openat` and `NtCreateFile` need
+/// one; there is no write-only equivalent. So a **write-only destination directory**, which the
+/// pre-CPE-1896 engine could copy into perfectly well (it only ever created and wrote files by path),
+/// now fails — and fails the *whole plan*, since `apply_backup_plan_walk` treats an unopenable root as
+/// a refusal to run. Rare (an ordinary backup destination is readable by the user who chose it, and
+/// mirror mode already lists it) and loud rather than silent, so it is recorded here rather than
+/// worked around. If it ever turns up in the field, the fix is `FILE_TRAVERSE`-only on Windows and
+/// `O_PATH` on Linux, neither of which macOS has an equivalent for.
 pub(crate) fn open_root(real_root: &Path) -> std::io::Result<RootDir> {
     Ok(RootDir { path: real_root.to_path_buf(), dir: sys::open_root_dir(real_root)? })
 }
@@ -136,11 +164,33 @@ pub(crate) fn open_root(real_root: &Path) -> std::io::Result<RootDir> {
 /// engine — this re-establishes it, since the guarantee costs nothing and the module is the one place
 /// the property has to hold.
 ///
+/// # What it does NOT filter, and why a second caller must add it (CPE-1896 PR #1043, N2)
+///
+/// **Windows name normalisation.** Win32 strips trailing dots and spaces from a path's final
+/// component and maps the DOS device names; the **NT** layer this module opens through does neither.
+/// So `sub./f.txt`, `sp /g.txt`, `NUL`, `con/x.txt` and `a/b/c.txt:stream` all create real objects
+/// here, correctly **contained** beneath the root (the Security Auditor fired 30 such shapes straight
+/// into this function and got zero bytes outside it — `CON`/`NUL`/`COM1` become ordinary files, which
+/// is strictly safer than the Win32 path, where they would have gone to a device). But several of them
+/// are then **unaddressable by any Win32 caller**, including this app: the user cannot open or delete
+/// what was written.
+///
+/// Today the only production caller, `backup::copy_one_verified`, is protected because
+/// `backup::safe_join` refuses [`crate::fsutil::win32_name_is_unstable`] components *before* calling
+/// here. That is a filter in the caller, not in this module, and this PR itself recommends wiring
+/// `open_beneath` into the four other resolve-then-write legs. **A caller without that filter would
+/// get a handle on one object while `backup::landed_inside`'s path-based half inspected a different
+/// one** — the two would silently disagree. The rule is deliberately left in `safe_join` rather than
+/// duplicated (one owner for the vocabulary), so the obligation is recorded here instead: a new caller
+/// applies `win32_name_is_unstable` itself, or a future change moves the filter down into this
+/// function for everyone.
+///
 /// # Errors
 ///
 /// A refusal names the component it stopped at, relative to the root, and says whether the component
 /// was a link (the attack shape) or simply could not be opened (a permission, sharing or vanished-name
-/// problem). Both are refusals: this module never guesses.
+/// problem). Both are refusals: this module never guesses. The two are distinguished by asking the
+/// filesystem, never by the errno — see `sys::link_at` on Unix and `sys::name_surrogate_at` on Windows.
 pub(crate) fn create_beneath(root: &RootDir, rel: &Path) -> Result<Opened, String> {
     let mut parts: Vec<&OsStr> = Vec::new();
     for c in rel.components() {
@@ -228,6 +278,10 @@ mod sys {
     /// needs.
     const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 
+    /// `STATUS_NAME_TOO_LONG`. Returned for the two unreachable-but-not-ignorable length conversions in
+    /// [`nt_child`], so they refuse rather than silently substituting a wrong value.
+    const STATUS_NAME_TOO_LONG: NTSTATUS = NTSTATUS(0xC000_0106_u32 as i32);
+
     /// Every open here shares its object the way `CreateFileW` callers in this crate do, so holding a
     /// directory handle open for a run does not stop anyone else reading, writing or deleting names in
     /// it. Without `FILE_SHARE_DELETE` in particular, a held root handle would block the user from
@@ -255,14 +309,23 @@ mod sys {
         options: NTCREATEFILE_CREATE_OPTIONS,
     ) -> Result<File, NTSTATUS> {
         let mut wide: Vec<u16> = name.encode_wide().collect();
-        let bytes = u16::try_from(wide.len().saturating_mul(2)).unwrap_or(u16::MAX);
+        // A `UNICODE_STRING` counts BYTES in a `u16`, so a component of more than 32,767 UTF-16 units
+        // cannot be described. No filesystem accepts one (NTFS caps a component at 255), so this is
+        // unreachable — which is exactly why it must not be papered over. An earlier revision used
+        // `unwrap_or(u16::MAX)`, which would have handed NT a *truncated* length and opened some other
+        // name entirely. Refusing turns an impossible input into an impossible-to-misread refusal.
+        let bytes = u16::try_from(wide.len().saturating_mul(2))
+            .map_err(|_| STATUS_NAME_TOO_LONG)?;
         let mut us = UNICODE_STRING {
             Length: bytes,
             MaximumLength: bytes,
             Buffer: windows::core::PWSTR(wide.as_mut_ptr()),
         };
         let oa = OBJECT_ATTRIBUTES {
-            Length: u32::try_from(std::mem::size_of::<OBJECT_ATTRIBUTES>()).unwrap_or(0),
+            // Same reasoning: a wrong `Length` here makes NT reject or misread the structure, and
+            // `unwrap_or(0)` would have guaranteed the wrong value rather than reported it.
+            Length: u32::try_from(std::mem::size_of::<OBJECT_ATTRIBUTES>())
+                .map_err(|_| STATUS_NAME_TOO_LONG)?,
             RootDirectory: HANDLE(parent.as_raw_handle() as isize),
             ObjectName: &mut us,
             Attributes: OBJ_CASE_INSENSITIVE,
@@ -270,14 +333,15 @@ mod sys {
             SecurityQualityOfService: std::ptr::null(),
         };
         tick();
+        // SAFETY: zeroing `IO_STATUS_BLOCK` is valid — it is a plain `repr(C)` out-parameter of
+        // integers and a union of two pointer-sized values, with no niche and no invariant to uphold.
+        let mut iosb: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+        let mut h = HANDLE::default();
         // SAFETY: `oa` borrows `us`, which borrows `wide`; all three outlive the call. `parent` is a
         // live `File`, so its handle is valid and is only *borrowed* by `RootDirectory` — NT does not
-        // take ownership of it. `h` and `iosb` are correctly-sized out-parameters. On success the
-        // returned handle is wrapped in a `File` exactly once, which is what closes it.
-        unsafe {
-            let mut h = HANDLE::default();
-            let mut iosb: IO_STATUS_BLOCK = std::mem::zeroed();
-            let status = NtCreateFile(
+        // take ownership of it. `h` and `iosb` are correctly-sized out-parameters.
+        let status = unsafe {
+            NtCreateFile(
                 &mut h,
                 access,
                 &oa,
@@ -289,13 +353,14 @@ mod sys {
                 options,
                 None,
                 0,
-            );
-            if status.is_ok() {
-                Ok(File::from_raw_handle(h.0 as RawHandle))
-            } else {
-                Err(status)
-            }
+            )
+        };
+        if !status.is_ok() {
+            return Err(status);
         }
+        // SAFETY: NT reported success, so `h` is a fresh handle this call owns. It is wrapped exactly
+        // once, and the resulting `File` is what closes it — no other path touches `h` after this.
+        Ok(unsafe { File::from_raw_handle(h.0 as RawHandle) })
     }
 
     /// `IO_REPARSE_TAG_NAME_SURROGATE` — the high bit Microsoft sets on exactly those reparse tags

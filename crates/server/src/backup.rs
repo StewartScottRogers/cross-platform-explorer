@@ -189,12 +189,23 @@ pub const BACKUP_NOT_CONFIRMED: &str =
 ///
 /// It is deliberately **kept**, for two reasons that are not "belt and braces":
 ///
-/// 1. **It covers the walk's one genuine residual.** The walk holds a handle on each intermediate
-///    directory; an actor who renames one of those *directory objects* out of the root mid-copy takes
-///    the write with it, because we keep writing into the object we hold. `openat2(RESOLVE_BENEATH)`
-///    is immune (it re-resolves from the root fd and the kernel enforces the property), the fallback
-///    walk is not, and this check catches it afterwards on every platform: the entry's path no longer
-///    resolves to anything inside the root, so it refuses.
+/// 1. **It covers the walk's one genuine residual, and on the Unix fallback walk it is the *only*
+///    thing that does** — see the per-platform breakdown on [`copy_one_verified`]. An actor who
+///    renames the directory object the walk is descending into out of the root mid-copy takes the
+///    write with it. Windows refuses that rename outright while a descendant is open (measured, 248
+///    attempts, all `Access is denied`) and `openat2(RESOLVE_BENEATH)` re-resolves from the root fd,
+///    but POSIX `rename` has no such restriction, so on macOS — and on Linux whenever the `openat2`
+///    fast path declines — this check is the whole defence.
+///
+///    **It catches it on every platform with a usable file identity, which is not every platform.**
+///    When [`crate::batch_media::handle_facts`] returns `None`, or the identity is
+///    [`crate::batch_media::FileIdentity::is_degenerate`] (network redirectors that answer
+///    `GetFileInformationByHandle` with a zeroed file index), this function short-circuits to the path
+///    answer alone. On such a destination the residual is **silent rather than loud** — the path
+///    resolves to something inside the root and nothing objects. That is a real gap on exactly the
+///    kind of volume a backup destination often is; CPE-1895 owns the network-destination work, and
+///    CPE-1915's `GetFinalPathNameByHandleW` / `F_GETPATH` route would close it by asking the handle
+///    for its own path instead of comparing identities.
 /// 2. **It is the only cross-check on a new, unsafe, platform-specific walk.** Deleting the detector
 ///    in the same change that introduces the prevention would leave a `NtCreateFile`/`openat` bug with
 ///    nothing but tests standing between it and a user's files.
@@ -440,16 +451,29 @@ fn landed_inside(
 /// [`crate::open_beneath::ATOMIC`] is `false`, which is no platform this app ships on. That is where
 /// two `canonicalize` calls per file went; see the cost section.
 ///
-/// **The residual, stated because it is real and specific.** The walk holds a handle on each
-/// intermediate directory. An actor who *renames one of those directory objects out of the root* while
-/// the copy is in flight moves the write with it — we keep writing into the object we hold, wherever
-/// that object now lives. This is strictly weaker than the bug it replaces: the attacker can only
-/// relocate a directory the backup itself owns, so the bytes cannot be aimed at a pre-existing
-/// `.ssh` or Startup folder the way a planted junction aimed them, and `rename` cannot put a
-/// directory *onto* an existing non-empty one. `openat2(RESOLVE_BENEATH)` is immune (it re-resolves
-/// from the root fd every call and the kernel enforces the beneath property), so on Linux the residual
-/// only exists on the fallback walk. [`landed_inside`] catches it after the fact on every platform —
-/// which is the main reason it is kept rather than deleted as redundant.
+/// **The residual, and the reason it is safe is DIFFERENT ON EACH PLATFORM — an earlier draft of this
+/// paragraph gave one reason for both and it was wrong on Unix.** The shape: the walk holds an open
+/// handle on the directory it is currently descending into, and an actor who *renames that directory
+/// object out of the root* while the copy is in flight moves the write with it, because the bytes go
+/// into the object we hold, wherever it now lives.
+///
+/// - **Windows: unreachable, measured.** Windows refuses to rename a directory that has an open
+///   descendant, whatever the share mode — `FILE_SHARE_DELETE` does not buy the attacker this. PR
+///   #1043's Security Auditor instrumented the ordering (timestamp of the successful rename against
+///   the instant `apply_backup_plan` returned) and moved both the leaf's parent and its grandparent
+///   during 192 MiB and 768 MiB copies: **218 and 30 attempts, every one `Access is denied
+///   (os error 5)`, zero mid-flight escapes.** *If you re-test this, instrument the ordering.* The
+///   auditor's first un-instrumented run reported "100,663,296 bytes outside the root, ok: true" —
+///   that was its racer winning *after* the plan returned, which is not an escape.
+/// - **Linux with `openat2`: immune.** `RESOLVE_BENEATH` re-resolves from the root fd on every call
+///   and the kernel enforces the beneath property, so a moved directory simply is not found.
+/// - **The Unix fallback walk (macOS, and Linux without `openat2`): genuinely open, and only
+///   [`landed_inside`] catches it.** POSIX `rename` has no open-descendant restriction. The earlier
+///   claim that "the attacker can only relocate a directory the backup itself owns, so the bytes
+///   cannot be aimed at a pre-existing `.ssh`" is **false** here: `rename` into a *new name inside* a
+///   pre-existing sensitive directory succeeds, and since both the directory name and the filename
+///   come from the source tree, an actor who controls the source picks the whole landing path. What
+///   actually saves this case is the post-write check, not the shape of the attack.
 ///
 /// [`landed_inside`] also records the one configuration where even that honesty degrades (a volume
 /// whose `GetFileInformationByHandle` returns a degenerate identity), and it is stated there rather

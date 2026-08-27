@@ -98,12 +98,23 @@ Three details are worth knowing, because they are deliberate:
     anyone to swap anything, because the file is opened inside the folder the app is already holding
     open. Measured: a test that races the backup 400 times, renaming folders underneath it as fast as
     it can, no longer gets a single byte written outside the destination.
+  - **What this now refuses that it used to allow: a shortcut *inside* your backup destination.** If
+    your destination contains a folder shortcut — a junction or symbolic link, including one that
+    points at another folder inside the same destination — entries underneath it are now reported as
+    failures rather than copied through it. Previously they copied. This is deliberate: the app cannot
+    tell your deliberate shortcut from one someone else planted, and following it is exactly how files
+    ended up outside the destination. If you rely on one, back up the real folder it points at instead.
+    Cloud-placeholder folders are **not** affected — OneDrive Files-On-Demand, deduplication and
+    similar are a different kind of marker, and the app checks for the specific "this name stands for
+    another name" flag rather than for any marker at all, so a destination inside OneDrive keeps
+    working.
   - **The one thing it still cannot promise.** If someone with write access *renames one of your backup
     folders out of the backup destination* while the job is copying into it, the copy follows that
-    folder — the app is writing into the folder itself, not into its name. That is much weaker than
-    what it replaces: the files can only end up inside a folder the backup itself owns, never aimed at
-    a folder of your own that someone chose. And it is still caught after the fact, so the job reports
-    those entries as failures rather than successes (next bullet).
+    folder — the app is writing into the folder itself, not into its name. On Windows this is not
+    reachable at all: Windows refuses to rename a folder while something inside it is open. On macOS,
+    and on older Linux systems, it is reachable, and what protects you there is the after-the-fact
+    check in the next bullet — which reports those entries as failures rather than successes, except on
+    the handful of network filesystems that cannot tell one file from another.
   - **If it happens anyway, the job now tells you** (CPE-1896). That instant-of-the-write swap was
     measured, and it used to end in the worst possible way: the file landed outside your backup folder,
     overwriting whatever was already there, and the run reported it as a **success** with no error —
