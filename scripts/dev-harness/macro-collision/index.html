@@ -1,0 +1,44 @@
+<!doctype html>
+<!--
+  CPE-1891 verification harness — visual evidence for the macro-run collision confirm panel (PR #1044
+  review rounds: hard-link hole, blanket-confirm scoping, undo irreversibility, and the Visual Critic's
+  reason-rendering redesign). Mounts the REAL `MacroRunConfirm.svelte` with a shimmed
+  `window.__TAURI_INTERNALS__.invoke` (see main.ts) so `macro_plan`/`macro_preflight` return canned data
+  through the REAL invoke.ts + bindings.gen.ts client — nothing about the component itself is mocked.
+
+  `?case=blocked` — a link-only collision (the panel this round added a reason sentence + copy button
+    to).
+  `?case=mixed`   — one confirmable + one blocked collision together, with the confirm checkbox
+    auto-clicked after mount, so the screenshot shows the should-fix: Run stays disabled and labelled
+    plain "Run", never "Overwrite N and Run", while a blocked collision is present.
+  `?case=many`    — THREE blocked collisions (rename + move, sharing one hazard bucket, plus a convert
+    in the other) — Visual Critic round 3, item 1: proves the hoisted per-kind reason sentence reads as
+    a general statement ("This destination is a link…") rather than naming only the FIRST collision's
+    own path while the list below shows several different ones.
+
+  Loads the app's real `src/app.css` so the panel renders with real theme tokens; `?theme=dark` flips
+  `documentElement.dataset.theme` the same way `src/lib/theme.ts` does in the real app.
+
+  Usage: load `index.html?case=blocked&theme=light` (etc).
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1891 harness — MacroRunConfirm collision panel</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html, body { margin: 0; padding: 0; }
+      body { background: var(--bg); font-family: system-ui, sans-serif; }
+      #readout {
+        position: fixed; top: 8px; left: 8px; max-width: 380px;
+        background: #000; color: #0f0; font-size: 11px; padding: 6px 8px; white-space: pre-wrap;
+        font-family: monospace; z-index: 999;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="readout">booting…</pre>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
