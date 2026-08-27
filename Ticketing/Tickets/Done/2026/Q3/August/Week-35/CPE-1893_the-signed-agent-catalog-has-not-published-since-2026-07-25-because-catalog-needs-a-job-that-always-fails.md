@@ -3,7 +3,7 @@ id: CPE-1893
 title: the signed agent catalog has not published since 2026-07-25, because `catalog` needs a job that always fails
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-26
