@@ -72,14 +72,24 @@ if ("<TAG>".EndsWith("-sidecar")) {
   # step would then wave an UNVERIFIED draft through to `gh release edit --draft=false`. Assumes
   # you're checking shortly after dispatch; if another sidecar dispatch for the SAME tag raced yours,
   # resolve by createdAt too rather than trusting "most recent" alone.
-  $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
-    --json databaseId,displayTitle --jq ".[] | select(.displayTitle == \"Release (sidecar) <TAG>\") | .databaseId" |
-    Select-Object -First 1
+  # CPE-1918: the match is done in PowerShell, NOT in a `--jq` filter. Windows PowerShell 5.1 strips
+  # `"` when marshalling an argument to a native exe's argv, and BOTH escapes people reach for fail
+  # (`'…"x"…'` arrives unquoted; `"…\"x\"…"` arrives corrupted as `" x\)`), so any `--jq` selector
+  # carrying a string literal is broken here. `-ceq` is exact AND case-sensitive, which is what jq's
+  # `==` was doing and what the decoy-tag reasoning above requires. See RELEASING.md, "PowerShell and
+  # `gh --jq`", before rewriting this.
+  $runs = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
+    --json databaseId,displayTitle | ConvertFrom-Json
+  $runId = ($runs | Where-Object { $_.displayTitle -ceq "Release (sidecar) <TAG>" } |
+    Select-Object -First 1).databaseId
 } else {
   $workflow = "release.yml"
   $jobName = "verify-published-manifest"
-  $runId = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
-    --json databaseId,headBranch --jq ".[] | select(.headBranch==\"<TAG>\") | .databaseId" | Select-Object -First 1
+  # Same CPE-1918 rule, and the exact match matters just as much here: `release.yml` runs exist for
+  # BOTH `v0.57.69` and `v0.57.69-sidecar`, and the former is a substring of the latter.
+  $runs = gh run list --repo StewartScottRogers/cross-platform-explorer --workflow=$workflow `
+    --json databaseId,headBranch | ConvertFrom-Json
+  $runId = ($runs | Where-Object { $_.headBranch -ceq "<TAG>" } | Select-Object -First 1).databaseId
 }
 if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish" }
 # This is fail-closed and correct, not a broken release, if it's the SIDECAR branch above: every
@@ -89,10 +99,25 @@ if (-not $runId) { throw "no $workflow run found for tag <TAG> -- do not publish
 # predates `run-name:`, don't read it as broken: dispatch a fresh `release-sidecar.yml` run for the
 # tag (so its `displayTitle` carries the tag), or verify the job by hand per RELEASING.md instead.
 
-$verifyJobJson = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
-  --jq ".jobs[] | select(.name==\"$jobName\")"
-if (-not $verifyJobJson) { throw "no $jobName job found on run $runId -- do not publish" }
-$verifyJob = $verifyJobJson | ConvertFrom-Json
+# CPE-1918 again: `--jq` only plucks the sub-tree (no `"` in the filter); the name match is
+# PowerShell's. `$jobs` is assigned BEFORE being piped on purpose -- a real bug, but a FAIL-SAFE one.
+# In PS 5.1 `ConvertFrom-Json` emits a JSON array as ONE pipeline object, so
+# `… | ConvertFrom-Json | Where-Object { $_.name -ceq … }` compares the WHOLE array; when the name
+# exists the comparison is truthy and $verifyJob ends up holding EVERY job. The gate then answers
+# "did every job on this run succeed?" instead of "did the verify job succeed?", because
+# `@(…) -ne 'success'` is an array FILTER -- false only when EVERY conclusion is `success`.
+#
+# Measured on real PS 5.1 with controlled job arrays: on a partial matrix (target skipped, a leg
+# cancelled) the broken form THROWS, exactly as the correct one does. It can never allow a publish the
+# correct form refuses -- passing requires every conclusion to be `success`, which entails the
+# target's own. Its actual failure mode is the reverse: with the target `success` and a sibling
+# `failed` it REFUSES a publish the correct form allows, and its message lists every job's conclusion
+# -- `(conclusion: success success cancelled skipped)` instead of `(conclusion: skipped)`. Wrong and
+# confusing, never unsafe.
+$jobs = gh run view $runId --repo StewartScottRogers/cross-platform-explorer --json jobs `
+  --jq '.jobs' | ConvertFrom-Json
+$verifyJob = $jobs | Where-Object { $_.name -ceq $jobName }
+if (-not $verifyJob) { throw "no $jobName job found on run $runId -- do not publish" }
 
 # ONLY `success` may proceed to 1c. Anything else -- `failure`, `cancelled`, `skipped`, or the job
 # missing entirely -- means STOP.
