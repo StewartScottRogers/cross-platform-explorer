@@ -185,7 +185,7 @@
   }
   .dialog.fill { width: 100%; height: 100%; border: none; border-radius: 0; box-shadow: none; max-width: none; max-height: none; }
   header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex: 0 0 auto; }
-  .cd-id { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 1px 7px; flex: 0 0 auto; }
+  .cd-id { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent-text); border: 1px solid var(--accent); border-radius: 5px; padding: 1px 7px; flex: 0 0 auto; }
   h2 { font-size: 16px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cd-drill { height: 26px; padding: 0 10px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-alt); flex: 0 0 auto; white-space: nowrap; }
   .cd-drill:hover { background: rgba(128,128,128,0.14); }
@@ -200,7 +200,7 @@
   .cd-body :global(code) { font-family: ui-monospace, monospace; background: rgba(128,128,128,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .cd-body :global(pre) { background: rgba(128,128,128,0.12); padding: 8px 10px; border-radius: 6px; overflow: auto; }
   .cd-body :global(ul), .cd-body :global(ol) { padding-left: 20px; }
-  .cd-body :global(a) { color: var(--accent); }
+  .cd-body :global(a) { color: var(--accent-text); }
   .cd-msg { color: var(--text-dim); padding: 14px 0; font-size: 13px; }
   .cd-msg.err { color: var(--danger); }
   .cd-msg.dim { color: var(--text-faint); }

@@ -104,7 +104,7 @@
   .links { margin-bottom: 18px; }
   .link {
     padding: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
     background: transparent;
   }

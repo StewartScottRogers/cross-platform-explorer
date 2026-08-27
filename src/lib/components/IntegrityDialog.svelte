@@ -137,7 +137,7 @@
   .paths { display: flex; gap: 8px; }
   .path { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
   .status-line { display: flex; gap: 12px; margin: 8px 2px; font-size: 12px; color: var(--text-dim); }
-  .note { color: var(--accent); }
+  .note { color: var(--accent-text); }
   .report { height: 44vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 6px; }
   .counts { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 10px; font-size: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
   .counts.alarm { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }

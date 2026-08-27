@@ -225,7 +225,7 @@
     background: var(--surface-alt); padding: 8px; border-radius: var(--radius); overflow-x: auto;
   }
   .nb-markdown :global(code) { font-family: var(--mono); }
-  .nb-markdown :global(a) { color: var(--accent); }
+  .nb-markdown :global(a) { color: var(--accent-text); }
   .nb-code, .nb-raw {
     margin: 0; padding: 10px 12px; overflow-x: auto; white-space: pre; overflow-wrap: normal;
     font-family: var(--mono); font-size: 12px; color: var(--text);

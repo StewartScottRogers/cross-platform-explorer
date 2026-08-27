@@ -788,7 +788,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .rowp .to { color: var(--accent); }
+  .rowp .to { color: var(--accent-text); }
   .rowp .summary { color: var(--text-dim); }
   .arrow { color: var(--text-faint); }
   .capped { color: var(--text-faint); font-size: 11px; padding: 4px 4px 0; }

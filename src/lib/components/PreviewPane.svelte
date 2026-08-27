@@ -1639,5 +1639,5 @@
     overflow-x: auto;
   }
   .preview-markdown :global(code) { font-family: var(--mono); }
-  .preview-markdown :global(a) { color: var(--accent); }
+  .preview-markdown :global(a) { color: var(--accent-text); }
 </style>

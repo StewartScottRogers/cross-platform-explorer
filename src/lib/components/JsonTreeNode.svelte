@@ -123,8 +123,12 @@
 </div>
 
 <style>
-  /* Theme-only colours throughout (MENUS.md) — every value below is an existing app.css token, no new
-     ones introduced (CPE-1492/1493 WCAG guard doesn't need updating). */
+  /* Theme-only colours throughout (MENUS.md) — every value below is an app.css token, never a hex.
+     CPE-1919 replaced the original claim on this line ("no new ones introduced, so the WCAG guard
+     doesn't need updating") with a guard: being all-tokens is NOT the same as being legible, since
+     a token can be calibrated for a role other than the one it's used in here. Every colour role
+     below is now enumerated and measured against every surface this tree is painted on, in all
+     four themes, by src/app.css.accent-text-contrast.test.ts. */
   .jt-node { font-family: var(--mono); font-size: 12px; }
   .jt-row {
     display: flex;
@@ -142,7 +146,12 @@
   .jt-punct { color: var(--text-faint); }
   .jt-summary { color: var(--text-faint); }
   .jt-val { overflow-wrap: anywhere; white-space: pre-wrap; }
-  .jt-val.jt-string { color: var(--accent); }
+  /* CPE-1919: --accent-text, NOT --accent. --accent is tuned for solid fills + icon glyphs (a 3:1
+     bar); painted here as 12px running text it measured 3.70:1 on --bg / 3.21:1 on the --surface
+     ground `.preview-pane` actually paints / 3.43:1 on the `.jt-row:hover` fill in the dark theme,
+     all under WCAG 1.4.3's 4.5:1. See src/app.css.accent-text-contrast.test.ts, which re-derives
+     every colour role in this file from this stylesheet rather than a hand-kept list. */
+  .jt-val.jt-string { color: var(--accent-text); }
   .jt-val.jt-number,
   .jt-val.jt-boolean { color: var(--text); }
   .jt-val.jt-null { color: var(--text-faint); font-style: italic; }

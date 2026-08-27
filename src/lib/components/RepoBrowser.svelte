@@ -432,7 +432,7 @@
   .repo-status { padding: 6px 14px; font-size: 12px; min-height: 20px; opacity: .85;
     border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .repo-status.error { color: #e0706b; opacity: 1; }
-  .repo-status.ok { color: var(--accent); opacity: 1; }
+  .repo-status.ok { color: var(--accent-text); opacity: 1; }
 
   .repo-crumbs { display: flex; align-items: center; gap: 4px; padding: 6px 14px; font-size: 12px;
     border-bottom: 1px solid var(--border); overflow-x: auto; white-space: nowrap; }

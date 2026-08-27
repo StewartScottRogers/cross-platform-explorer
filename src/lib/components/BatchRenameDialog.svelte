@@ -211,7 +211,7 @@
     white-space: nowrap;
   }
   .rowp .to {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .rowp.dim {
     opacity: 0.45;

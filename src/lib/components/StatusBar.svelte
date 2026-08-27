@@ -276,7 +276,7 @@
      for why. */
   .filtered-hidden {
     position: relative;
-    color: var(--accent);
+    color: var(--accent-text);
     max-width: 45%;
     min-width: 0;
     overflow: hidden;

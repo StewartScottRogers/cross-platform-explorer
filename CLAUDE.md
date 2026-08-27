@@ -93,6 +93,18 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   busy-tracking wrapper), **never** from `@tauri-apps/api/core`, so a slow command app-wide raises the
   OS wait cursor for free. Operations that render their own progress use `rawInvoke` + the guard-test
   allowlist. Full convention: [docs/design/BUSY-CURSOR.md](docs/design/BUSY-CURSOR.md).
+- **Accent colour: `--accent` fills and rings, `--accent-text` reads (CPE-1919).** `--accent` backs
+  three roles with three different WCAG bars — a solid button **fill** under white text (3:1), an
+  **icon glyph / focus ring / border** (3:1), and **running text** (4.5:1) — and one value cannot be
+  optimal for all three. It is tuned for the first two, so painting it as body text shipped the JSON
+  preview's string values at **3.70:1** in the dark theme, with every palette guard green because
+  each asserted `--accent` only at the loosest of its bars. **A token backing several roles gets
+  pinned at the loosest one, and that assertion then reads like coverage.** So: `color:` on text you
+  read → `--accent-text`; `background`, `border-color`, focus rings, and icon glyphs → `--accent`.
+  Never the reverse — white on `--accent-text` is 3.53:1 (dark), under the UI floor.
+  `src/app.css.accent-text-contrast.test.ts` pins both directions, derives the JSON preview's colour
+  roles from the component CSS rather than a list, and derives the **painted** surfaces
+  (`.preview-pane`'s background, `.jt-row:hover`'s fill) instead of assuming `--bg`.
 - **Pills / chips / badges ("tick-tacks")** — a row of pills must **reflow**: the container wraps the
   pills onto more rows and grows its height (`display:flex; flex-wrap:wrap; gap`), while each pill keeps
   its text on **one line** and doesn't shrink (`white-space:nowrap; flex:0 0 auto`; add
