@@ -122,9 +122,14 @@ jobs:
         with:
           workspaces: "./crates/updater-verify -> target"
 
-      - name: Updater pubkey/endpoints pin — base config (CPE-1873)
+      - name: Updater pin — base config + auto-merged per-platform configs (CPE-1873, CPE-1903)
+        # CPE-1903: this used to name ONE test target (`--test pinned_pubkey_guard`). Selecting test
+        # targets by name is the same enumeration mistake this ticket exists to remove — it silently
+        # skips the crate's `--lib` unit tests and any guard added in a new `tests/*.rs` file, which is
+        # exactly where CPE-1903's derivation tests live. Run the whole crate instead, so a guard added
+        # tomorrow gates this workflow without anyone remembering to edit this line.
         working-directory: crates/updater-verify
-        run: cargo test --test pinned_pubkey_guard
+        run: cargo test --locked
 
       - name: Setup Node
         uses: actions/setup-node@v4

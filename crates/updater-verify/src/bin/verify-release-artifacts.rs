@@ -148,6 +148,40 @@ fn main() -> ExitCode {
         }
     }
 
+    // CPE-1903: the pin above compares the BASE config's values against compiled-in constants. It
+    // cannot see a file Tauri merges on top of that config AUTOMATICALLY -- no `--config` flag, no
+    // workflow involvement: `tauri-utils::config::parse::read_from` reads `tauri.conf.json` and then
+    // merges `tauri.<platform>.conf.json` / `.json5` / `Tauri.<platform>.toml` from the same directory
+    // via RFC 7396, on every build for that platform. CPE-1873 round 3 closed that with a `#[test]`
+    // over three hardcoded `.json` filenames; `.json5` and `Tauri.<os>.toml` walked straight past it,
+    // and a `#[test]` never reaches THIS path -- the one `release.yml`'s tag-triggered
+    // `verify-published-manifest` job actually runs. So the check lives here too, and it derives the
+    // filenames by scanning the directory instead of listing them (see
+    // `cpe_updater_verify::platform_config_guard` for why enumeration kept failing).
+    //
+    // Deliberately OUTSIDE the `--skip-pin-check` block. That flag exists because this crate's own
+    // fixtures scaffold throwaway keypairs unrelated to the pinned VALUES; this check compares no
+    // values and reads no constants, so that rationale does not reach it, and the tag path keeps this
+    // leg even if the flag is ever passed.
+    let conf_dir = match conf.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    match cpe_updater_verify::scan_for_platform_config_updater_overrides(&conf_dir) {
+        Ok(hits) if !hits.is_empty() => {
+            return fail(&cpe_updater_verify::platform_config_override_message(&conf_dir, &hits));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return fail(&format!(
+                "SECURITY (CPE-1903): cannot list {} to check for per-platform Tauri config files that \
+                 would override the updater pin ({e}). Refusing to proceed -- an unreadable config \
+                 directory is not the same as a clean one.",
+                conf_dir.display()
+            ));
+        }
+    }
+
     // --- Build a basename -> path index of every file under the search dirs, and find latest.json ---
     //
     // CPE-1872 (security-audit finding 2): this used to be `index.entry(name).or_insert_with(...)` --
@@ -234,6 +268,10 @@ fn main() -> ExitCode {
 
     println!("verify-release-artifacts (CPE-1058)");
     println!("  config     : {}", conf.display());
+    println!(
+        "  platform cfgs: no auto-merged per-platform config in {} sets plugins.updater (CPE-1903)",
+        conf_dir.display()
+    );
     println!("  version    : {version}");
     println!("  manifest   : {}", manifest_path.display());
     println!("  search dirs: {}", search_dirs.len());

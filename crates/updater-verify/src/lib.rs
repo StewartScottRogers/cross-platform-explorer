@@ -27,6 +27,16 @@ use base64::Engine as _;
 pub mod pinned_pubkey;
 pub use pinned_pubkey::{EXPECTED_TAURI_UPDATER_ENDPOINTS, EXPECTED_TAURI_UPDATER_PUBKEY};
 
+// CPE-1903 — the per-platform config files Tauri merges AUTOMATICALLY (no `--config` flag), derived
+// from a directory scan rather than enumerated by filename. See that module's doc for why the
+// enumeration this replaces failed three rounds running.
+pub mod platform_config_guard;
+pub use platform_config_guard::{
+    is_auto_merged_platform_config_name, platform_config_override_message,
+    platform_config_updater_refusal, scan_for_platform_config_updater_overrides,
+    PlatformConfigOverride, TAURI_PLATFORM_TOKENS,
+};
+
 /// Standard base64 (with padding) — the alphabet Tauri uses for both the config pubkey and signatures.
 const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 

@@ -15,7 +15,7 @@
 // `release-sidecar` job passes to `tauri-action` for each shipped OS (see its matrix + the
 // `args:` line under "Build and publish sidecar-enabled release").
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC_TAURI = join(process.cwd(), "src-tauri");
@@ -244,42 +244,181 @@ describe("shipped sidecar bundle — updater root of trust survives the FULL ove
   });
 });
 
-// CPE-1873 finding 6 (round 3 — independent Security Auditor, DEMONSTRATED): Tauri merges a
-// per-platform config file AUTOMATICALLY, with no `--config` flag involved at all --
-// `tauri-utils::config::parse::read_from` reads `tauri.conf.json` and then looks for
-// `tauri.macos.conf.json` / `tauri.linux.conf.json` / `tauri.windows.conf.json` next to it and merges
-// each via RFC 7396, unconditionally, on every build. None of the three exists in this repo today, and
-// none is in CONFIG_CHAIN (which only lists overlays release-sidecar.yml explicitly passes via
-// `--config`). Proven: a `src-tauri/tauri.windows.conf.json` containing only a `plugins.updater`
-// override left every guard in this file AND crates/updater-verify's entire suite green, while shipping
-// an attacker's pubkey/endpoints on every Windows build -- plain channel and sidecar both, since this
-// mechanism has nothing to do with `--config` and fires on a plain `tauri.conf.json` read too.
+// CPE-1903 (supersedes CPE-1873 finding 6): Tauri merges a per-platform config file AUTOMATICALLY,
+// with no `--config` flag and no workflow involvement — `tauri-utils::config::parse::read_from` reads
+// `tauri.conf.json` and then merges a per-platform file from the same directory via RFC 7396, on every
+// build for that platform. Whatever that file sets wins, `plugins.updater.pubkey`/`.endpoints`
+// included, and it appears in no `--config` chain, so CONFIG_CHAIN above cannot see it.
 //
-// This does not try to merge/validate those files' content -- it just refuses their EXISTENCE with a
-// `plugins.updater` key, since none is supposed to exist at all right now. Mirrors
-// `no_automatic_per_platform_config_overrides_the_updater_pin` in
-// crates/updater-verify/tests/pinned_pubkey_guard.rs (same check, Rust side, covers the base/tag path).
-describe("shipped bundle — no automatic per-platform Tauri config overrides the updater pin (CPE-1873 finding 6)", () => {
-  (["tauri.windows.conf.json", "tauri.macos.conf.json", "tauri.linux.conf.json"] as const).forEach(
-    (fileName) => {
-      it(`${fileName}: does not exist, or exists without a plugins.updater key`, () => {
-        const path = join(SRC_TAURI, fileName);
-        if (!existsSync(path)) return; // doesn't exist -- the expected, safe state today.
-        const config = loadConfig(fileName);
-        const hasUpdaterKey =
-          isPlainObject(config) && isPlainObject(config.plugins) && "updater" in config.plugins;
-        expect(
-          hasUpdaterKey,
-          `src-tauri/${fileName} exists and sets plugins.updater. Tauri merges this file into the ` +
-            `build AUTOMATICALLY (no --config flag needed) on every OS build that matches its name, so ` +
-            `it can silently override the pinned pubkey/endpoints exactly like a --config overlay can, ` +
-            `without ever appearing in CONFIG_CHAIN or being reachable by any --config-based guard. If ` +
-            `this is deliberate: it must not set plugins.updater at all -- put any real key/endpoint ` +
-            `change through tauri.conf.json (or a --config overlay already in CONFIG_CHAIN) so the ` +
-            `existing pins actually see it. If not: STOP, this file's plugins.updater block is not ` +
-            `trustworthy (CPE-1873).`,
-        ).toBe(false);
-      });
-    },
+// CPE-1873 round 3 closed this by hardcoding three `.json` filenames. Tauri's real surface is FIFTEEN:
+// `ConfigFormat::into_platform_file_name` crosses three formats (`tauri.<t>.conf.json`,
+// `tauri.<t>.conf.json5`, `Tauri.<t>.toml`) with five `Target` variants (macos/windows/linux/
+// android/ios), `does_supported_file_name_exist` returns true if ANY enabled format's platform file
+// exists, and `do_parse` falls through json -> json5 -> toml. Both non-`.json` formats were
+// demonstrated ingesting an attacker config through this repo's own installed `@tauri-apps/cli` while
+// every guard reported green.
+//
+// So this does not name files: it lists the directory and classifies what is actually there.
+// `readdirSync` reports the on-disk spelling, so an ASCII-lowercased shape match behaves identically
+// on a case-insensitive NTFS build runner and on the byte-exact `ubuntu-latest` host where
+// `release-sidecar.yml`'s `verify-updater-pin` job runs this file. Round 3's `existsSync(join(dir,
+// name))` was a LOOKUP, and therefore silently blind on exactly that host while Windows merged the
+// file anyway.
+//
+// Mirrors `crates/updater-verify/src/platform_config_guard.rs` (the Rust side, which additionally runs
+// inside `verify-release-artifacts` so it reaches `release.yml`'s tag path — no `#[test]` and no
+// vitest can). Keep the two derivations in lockstep; the Rust module doc carries the full rationale.
+
+/** The second dot-segment of every name `ConfigFormat::into_platform_file_name` can produce. */
+const TAURI_PLATFORM_TOKENS: readonly string[] = ["macos", "windows", "linux", "android", "ios"];
+
+/** ASCII-only case fold, so this matches the Rust side's `to_ascii_lowercase` exactly. */
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/**
+ * Does `fileName` name a config file Tauri merges automatically? Matched by shape — `tauri` `.`
+ * <platform token> `.` <at least one more segment> — never by a particular spelling of the tail, so a
+ * format Tauri adds tomorrow is covered without anyone editing a list. Deliberately NOT matched:
+ * `tauri.conf.json` / `Tauri.toml` (the base config, pinned by value above) and `tauri.sidecar.*`
+ * (the explicit `--config` overlays, covered by CONFIG_CHAIN) — their second segment is not a
+ * platform token, which is exactly the property Tauri itself keys on.
+ */
+function isAutoMergedPlatformConfigName(fileName: string): boolean {
+  const segments = asciiLower(fileName).split(".");
+  return (
+    segments.length >= 3 && segments[0] === "tauri" && TAURI_PLATFORM_TOKENS.includes(segments[1])
   );
+}
+
+/**
+ * Why this per-platform config file must be refused, or `null` if it is clean.
+ *
+ * Refused for CARRYING a `plugins.updater` key — never for merely existing, never by comparing its
+ * value to the pin. A per-platform file setting only `plugins.cli` stays allowed; a
+ * `{"plugins":{"updater":null}}` is refused, because under RFC 7396 a `null` DELETES the base
+ * config's updater block. Both were deliberate CPE-1873 round-3 choices, preserved verbatim.
+ *
+ * Strict JSON is inspected structurally. Anything else (JSON5, TOML, or a `.json`-named file holding
+ * JSON5 — which Tauri's `do_parse` accepts) gets a conservative textual scan, because no JSON5/TOML
+ * parser is carried here on purpose and a guard on the root of trust must not silently pass a format
+ * it cannot read.
+ */
+function platformConfigUpdaterRefusal(text: string): string | null {
+  let parsed: unknown;
+  let parsedAsStrictJson = true;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsedAsStrictJson = false;
+  }
+  if (parsedAsStrictJson) {
+    const hasUpdaterKey =
+      isPlainObject(parsed) && isPlainObject(parsed.plugins) && "updater" in parsed.plugins;
+    return hasUpdaterKey
+      ? "exists and sets a `plugins.updater` key. Tauri merges this file into the build automatically " +
+          "via RFC 7396, so that key decides the shipped updater's root of trust -- and a `null` there " +
+          "DELETES the pinned block just as effectively as a value replaces it"
+      : null;
+  }
+  if (/updater/i.test(text)) {
+    return (
+      "exists, is not strict JSON (so this guard cannot parse it structurally -- no JSON5/TOML parser " +
+      "is carried here on purpose), and mentions `updater`. Refused rather than guessed at"
+    );
+  }
+  if (text.includes("\\")) {
+    return (
+      "exists, is not strict JSON (so this guard cannot parse it structurally), and contains backslash " +
+      "escape sequences that could spell a `plugins.updater` key without the literal token ever " +
+      "appearing. Refused rather than guessed at"
+    );
+  }
+  return null;
+}
+
+/** Every auto-merged per-platform config in `src-tauri/` that sets `plugins.updater`. */
+function scanForPlatformConfigUpdaterOverrides(): { fileName: string; reason: string }[] {
+  return readdirSync(SRC_TAURI, { withFileTypes: true })
+    .filter((e) => e.isFile() && isAutoMergedPlatformConfigName(e.name))
+    .flatMap((e) => {
+      const reason = platformConfigUpdaterRefusal(readFileSync(join(SRC_TAURI, e.name), "utf8"));
+      return reason === null ? [] : [{ fileName: e.name, reason }];
+    })
+    .sort((a, b) => a.fileName.localeCompare(b.fileName));
+}
+
+describe("shipped bundle — no auto-merged per-platform Tauri config overrides the updater pin (CPE-1903)", () => {
+  it("src-tauri/ holds no per-platform config file that sets plugins.updater, in any format or casing", () => {
+    const hits = scanForPlatformConfigUpdaterOverrides();
+    expect(
+      hits,
+      `SECURITY (CPE-1903): a per-platform Tauri config file in src-tauri/ can override the updater's ` +
+        `root of trust:\n` +
+        hits.map((h) => `  - ${h.fileName} ${h.reason}`).join("\n") +
+        `\n\nTauri picks these up with NO --config flag: read_from() merges ` +
+        `tauri.<platform>.conf.json / .json5 / Tauri.<platform>.toml next to tauri.conf.json via RFC ` +
+        `7396 on every build for that platform, so such a file is invisible to the base-config pin, ` +
+        `invisible to the CONFIG_CHAIN guard above, and ships on the plain AND sidecar channels alike. ` +
+        `If deliberate: it must not set plugins.updater at all -- route any real key/endpoint change ` +
+        `through tauri.conf.json (or a --config overlay already in CONFIG_CHAIN) and update ` +
+        `crates/updater-verify/src/pinned_pubkey.rs in the same commit. If not deliberate: STOP, this ` +
+        `commit's builds are not trustworthy.`,
+    ).toEqual([]);
+  });
+
+  // The derivation itself, exercised directly. These are the cases round 3's three-filename list let
+  // through, asserted here so the next variant has to beat the SHAPE, not a spelling.
+  it("matches every filename Tauri can auto-merge — 3 formats x 5 targets, any casing", () => {
+    const everyName = TAURI_PLATFORM_TOKENS.flatMap((t) => [
+      `tauri.${t}.conf.json`,
+      `tauri.${t}.conf.json5`,
+      `Tauri.${t}.toml`,
+    ]);
+    expect(everyName).toHaveLength(15);
+    for (const name of everyName) expect(isAutoMergedPlatformConfigName(name), name).toBe(true);
+    for (const name of [
+      "Tauri.Windows.Conf.json",
+      "TAURI.WINDOWS.CONF.JSON",
+      "tauri.WINDOWS.conf.JSON5",
+      "Tauri.LINUX.Toml",
+      "tauri.windows.conf.yaml", // a format Tauri has not shipped yet
+    ]) {
+      expect(isAutoMergedPlatformConfigName(name), name).toBe(true);
+    }
+  });
+
+  it("does not match the base config or the explicit --config overlays", () => {
+    for (const name of [
+      "tauri.conf.json",
+      "tauri.conf.json5",
+      "Tauri.toml",
+      "tauri.sidecar.conf.json",
+      "tauri.sidecar.windows.conf.json",
+      "tauri.sidecar.pdfium.macos.conf.json",
+      "Cargo.toml",
+      "tauri.windows",
+      "notauri.windows.conf.json",
+    ]) {
+      expect(isAutoMergedPlatformConfigName(name), name).toBe(false);
+    }
+  });
+
+  it("refuses a plugins.updater key in every format, including an RFC 7396 delete", () => {
+    expect(platformConfigUpdaterRefusal(`{"plugins":{"updater":{"pubkey":"x"}}}`)).not.toBeNull();
+    expect(platformConfigUpdaterRefusal(`{"plugins":{"updater":null}}`)).not.toBeNull();
+    expect(
+      platformConfigUpdaterRefusal(`// c\n{ plugins: { updater: { pubkey: 'x' } } }`),
+    ).not.toBeNull();
+    expect(platformConfigUpdaterRefusal(`[plugins.updater]\npubkey = "x"\n`)).not.toBeNull();
+    expect(platformConfigUpdaterRefusal(`plugins.updater.pubkey = "x"\n`)).not.toBeNull();
+    expect(platformConfigUpdaterRefusal(`{ plugins: { "\\u0075pdater": {} } }`)).not.toBeNull();
+  });
+
+  it("still allows a per-platform file that does not touch the updater", () => {
+    expect(platformConfigUpdaterRefusal(`{"plugins":{"cli":{"args":[]}}}`)).toBeNull();
+    expect(platformConfigUpdaterRefusal(`{"bundle":{"targets":["msi"]}}`)).toBeNull();
+    expect(platformConfigUpdaterRefusal(`[plugins.cli]\ndescription = "hi"\n`)).toBeNull();
+  });
 });
