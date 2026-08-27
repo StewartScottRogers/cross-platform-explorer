@@ -91,8 +91,24 @@ ordinary design-kinship prose. The sweep ran in three passes, and then a fourth 
    (`artifact_binding.rs:719`, "Exactly as `release-sidecar.yml` invokes it") — missed for one
    reason: a capital E.
 
-Final classification across both passes: **20 HARD**, **7 already derived / self-annulled**,
-**150 SOFT (not defects)**. Full breakdown in the PR body.
+**The bucket counts, reconciled (Reviewer, round 3).** Round 2's table read "20 HARD / 7 derived
+/ 150 SOFT" printed under "215 candidates", and 20 + 7 + 150 = 177 does not partition 215. In a
+ticket about claims that do not survive checking, that is the wrong place to be loose. Measured on
+this branch:
+
+| | count | how it was obtained |
+|---|---:|---|
+| candidate **lines** (pass 3, `-i`) | **216** | grep output, one row per matching line |
+| distinct **sites** | **210** | lines in one file within 4 of each other collapsed — one claim usually spans several lines of a doc comment, and several of the 30 phrasings can match inside it |
+| **HARD** | **20** | enumerated exhaustively, every one read individually |
+| **already derived / self-annulled** | **7** | enumerated exhaustively |
+| **SOFT (not defects)** | **183** | **residual**: 210 − 20 − 7 |
+
+So the three buckets partition **by construction**: HARD and already-derived are exhaustive lists,
+and SOFT is defined as everything else. The earlier "150" (and round 1's "108") were *estimates* of
+the SOFT bucket rather than a computed residual, which is why they did not add up. Collapsing
+multi-line comments accounts for only 6 of the gap (216 → 210); the rest was the estimate. Nothing
+was dropped — the arithmetic was wrong, not the classification.
 
 **Correcting a claim this Work Log itself made.** Round 1 justified widening the file set by saying
 the seed "omits `*.yml`, which is exactly where CPE-1872's defect lived". That is **false**, and it
@@ -164,6 +180,40 @@ its walker anchored on "the first `format!(` after the fn", and PR #1056's Revie
 adversarial source that beat it **silently** — a comment quoting the old message. It now strips Rust
 comments (quote-aware) before scanning, killing the class rather than that one shape.
 
+### The shared oracle immediately earned itself: a latent bug in `shellScriptLines.ts`
+
+The cross-language case file was added to stop the Rust port drifting from the TypeScript reference.
+Its first real act was to catch a bug **in the reference**, and to show the port was the safer side.
+
+Input `done <<< "names"` — a here-string whose word is a quoted **literal** rather than `$names`:
+
+```
+Rust: ["done <<< \"names\"", "echo after"]    correct
+TS:   ["done <<< \"names\""]                  swallows the rest of the script
+```
+
+`HEREDOC_START`'s `(?!<)` only refuses a match beginning at the **first** `<` of `<<<`. The engine
+retries from the **second**, where `<<` consumes chars 2-3, the lookahead sees a space and passes,
+and the `\1` backreference closes on the quoted word — opening a phantom heredoc named `names` that
+skips every following line.
+
+That is a **false negative**, and this module's own header calls that direction the unsafe one for a
+presence-implies-coverage ratchet: a real unhardened `apt-get`, or a real `--expect-channel`, sitting
+after such a line drops out of the scan and the guard reports clean. `shellScriptLines.ts` backs
+`channelPurityCoverage.test.ts` and `releaseHangHardening.test.ts`, so both were exposed. **Latent,
+not live** — no such shape exists in the repo today, and the real `$names` form at
+`release-sidecar.yml:760` never matched (`$` is not `[A-Za-z_]`).
+
+Fixed by requiring **both** guards, `(?<!<)<<(?!<)`. Two cases added to the shared file (the bare
+shape, and a here-string co-occurring with a real heredoc on one line, which the fix must still
+open). Red-proofed by reverting the lookbehind: both new cases fail with `echo after` swallowed.
+
+This belongs to **CPE-1936**'s family (heredoc gaps in `shellScriptLines`) — that ticket's owner can
+treat this shape as **already closed**. Noted at the site too.
+
+Shipping a shared oracle whose two halves are known to disagree would have been worse than not
+having one, so this was fixed here rather than deferred.
+
 ### Red-proofs (each derivation made to go red by changing the referenced source)
 
 | # | Change to the referenced source | Result |
@@ -184,14 +234,26 @@ All sources restored; `git diff --numstat` clean, no whole-file rewrites.
 The lower-blast-radius HARD hits are **classified, not derived**, and filed as **CPE-1950** with
 blast radius and a suggested fix each. Two of them (`connect.rs:236`, `paths.ts:21`) are **already
 factually wrong today** — the drift has happened and nobody noticed — which makes them the cheapest
-wins in that ticket. The 150 SOFT hits are not defects and need no action.
+wins in that ticket. The 183 SOFT sites are not defects and need no action.
 
-### A Reviewer claim that did not hold
+### A disputed finding, resolved: the file changed under us
 
-The review asked me to drop `MacroRunConfirm.test.ts` from CLAUDE.md's worked examples on the grounds
-that it "contains no runtime derivation (`grep readFileSync` → nothing)". It does: `readFileSync` at
-line 15, and the derivation at lines 470-548 reads `crates/server/src/fsutil.rs` and asserts
-byte-equality. The citation is kept — and the walker hardened so it earns the citation.
+Round 2 recorded this as "a Reviewer claim that did not hold". That framing was itself an unchecked
+claim about a tree I had not looked at — the exact failure mode this ticket exists to kill — so here
+is the measurement.
+
+**Both readings were correct, for different trees.** The review asked me to drop
+`MacroRunConfirm.test.ts` from CLAUDE.md's worked examples because it "contains no runtime derivation
+(`grep readFileSync` → nothing)". At `ed4d9f61`, the base it was given, that file was **357 lines with
+no `readFileSync`** — the grep was right. At `1ec1f22c`, my round-2 base after **#1056 landed**, it is
+**548 lines with `readFileSync` at `:15`** and the derivation at `:507+`. The claim was true when made
+and stopped being true when #1056 merged; I checked the post-rebase tree and reported a contradiction
+that was really a rebase.
+
+The citation therefore **stands**, and the review earned its keep anyway: it red-proofed the new
+hardening by making `stripRustComments` the identity and getting
+`expected 'the OLD wording {}' to deeply equal 'the CURRENT wording {}'` — load-bearing, not
+decorative.
 
 ### Pattern recorded
 

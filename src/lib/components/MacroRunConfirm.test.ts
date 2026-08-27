@@ -508,7 +508,14 @@ describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-cop
    *  Stripping comments before scanning kills the class rather than that one shape, and is the same
    *  rule `crates/updater-verify/src/workflow_scan.rs` applies to workflows: **anchor on code, never
    *  on text a comment can also contain.** Quote-aware, so a `//` inside a string literal (a URL in a
-   *  message) is left alone. */
+   *  message) is left alone.
+   *
+   *  Known limitation, deliberate: this tracks `"` string literals but not Rust CHAR literals, so a
+   *  `'"'` sitting before the target fn would open a phantom string and swallow what follows. The
+   *  failure direction is **loud** — the extractor then finds the wrong `format!` or none at all, and
+   *  the byte-equality assertion below fails — never the silent wrong-message pass this stripping
+   *  exists to prevent. `fsutil.rs` contains no such literal today; add char-literal handling if one
+   *  ever appears, rather than trusting this note. */
   function stripRustComments(src: string): string {
     const out = src.split("");
     let i = 0;
