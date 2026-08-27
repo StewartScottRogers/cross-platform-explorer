@@ -160,6 +160,12 @@ time = { version = "0.3", features = ["std"] }
 # which needs no dependency.
 [target.'cfg(unix)'.dependencies]
 xattr = "1"
+# `openat`/`mkdirat`/`openat2` for `open_beneath` (CPE-1896): std offers no handle-relative open, so a
+# per-component walk that a racing rename cannot redirect needs the raw syscalls. **Adds no crate to
+# either lockfile** — `libc` is already resolved here (via `xattr`, `rayon`, `rusqlite`, ...) and in the
+# shipped app's lockfile too; this only names the existing edge directly, the same reasoning the
+# `ureq`/`sha1`/`oid-registry` entries above record.
+libc = "0.2"
 
 # One-shot OS high-contrast accessibility signal read (CPE-1546, epic CPE-1496). macOS reads
 # `NSWorkspace.accessibilityDisplayShouldIncreaseContrast` — same objc2 family the app already trusts
@@ -197,10 +203,19 @@ junction = "1"
 # still gated behind the unstable `windows_by_handle` feature (rust-lang/rust#63010) on stable Rust, so the
 # same already-vendored `windows` crate is the only way to read a file's identity (volume serial + file
 # index) and hard-link count without a new dependency.
+# `Wdk_Foundation` + `Wdk_Storage_FileSystem` + `Win32_System_IO` (CPE-1896) add `NtCreateFile`,
+# `OBJECT_ATTRIBUTES` and `IO_STATUS_BLOCK` for `open_beneath`'s handle-relative, per-component
+# destination open. NOT a new dependency — the same already-vendored `windows` 0.56, three more
+# feature flags, so `cargo tree` and both lockfiles gain no crate. Win32 has no handle-relative open at
+# all (`CreateFileW` re-parses a full path every time), so the NT layer is the only way to make a
+# backup's containment check atomic with the write; see the module doc for why that matters.
 windows = { version = "0.56", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
 ] }

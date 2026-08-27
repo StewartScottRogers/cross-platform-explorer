@@ -1424,6 +1424,51 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
     dst: &Path,
     wording: LinkGuardWording,
 ) -> Result<CopiedOnto, String> {
+    copy_file_onto_destination_handle(src, dst, wording, || {
+        crate::batch_media::open_no_follow(dst)
+            .map(|(file, created)| crate::open_beneath::Opened { file, created })
+            .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))
+    })
+}
+
+/// The same copy, onto a destination handle **the caller opens** (CPE-1896).
+///
+/// # Why this split exists, and why it is the whole of the atomic fix on this side
+///
+/// [`copy_file_onto_no_follow_with_wording`] opens `dst` **by path**, which means the kernel resolves
+/// every one of its directory components at that moment — after whatever containment check the caller
+/// ran, and therefore inside the window a racing rename can use to redirect the write. Every guard on
+/// the caller's side is a path question; this open was the matching path *answer*, and no amount of
+/// re-checking closes the gap between them.
+///
+/// [`crate::open_beneath::create_beneath`] resolves the destination one component at a time, each
+/// relative to the handle of the component before it, so the object it returns is beneath the root **by
+/// construction** rather than by a check that could be stale. Handing that handle in here is what lets
+/// the backup engine use it: the copy keeps every guard it already had — the reparse-point refusal, the
+/// directory refusal, the hard-link refusal, all read off the very handle the bytes go through — and
+/// simply stops being the one step that re-asks the path.
+///
+/// `created` must mean what [`crate::batch_media::open_no_follow`]'s second return value means: *this*
+/// call brought the name into existence, established by an exclusive create rather than by a preceding
+/// `exists()`. It is what decides whether a refusal removes the destination it just made.
+///
+/// **The destination opener is a closure, not an already-open handle, and the ordering is the reason.**
+/// This function opens and describes the **source** first, and only then the destination. Taking a
+/// ready-made handle would invert that: an unreadable source would leave behind an empty file this call
+/// had already created at `dst` — a new, silent way for a failed entry to change the user's tree, and
+/// exactly the class of regression this ticket's family exists to stop. The closure preserves the old
+/// order exactly, so nothing is created until the source is known to be copyable.
+///
+/// The belt-and-braces `symlink_metadata(dst)` check below is deliberately kept even for a handle that
+/// came from the atomic walk. It costs one path stat and it is the only thing standing if a hard-coded
+/// no-follow constant is ever wrong on a platform this crate does not test — the same reasoning
+/// `batch_media` records for its own copy of that check.
+pub(crate) fn copy_file_onto_destination_handle(
+    src: &Path,
+    dst: &Path,
+    wording: LinkGuardWording,
+    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, String>,
+) -> Result<CopiedOnto, String> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
     // write the app's own checkpoint content, where `src` is a path inside the app's private checkpoint
@@ -1451,8 +1496,7 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
         );
     }
 
-    let (mut w, created) = crate::batch_media::open_no_follow(dst)
-        .map_err(|e| format!("{}: could not open the destination for writing: {e}", dst.display()))?;
+    let crate::open_beneath::Opened { file: mut w, created } = open_dst()?;
 
     // Belt and braces for a platform whose `O_NOFOLLOW` constant this crate hard-codes and could in
     // principle get wrong: if the name is a link at all, refuse regardless of what the open returned.

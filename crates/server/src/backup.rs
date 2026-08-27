@@ -538,32 +538,45 @@ fn landed_inside(
 fn copy_one_verified(
     src: &Path,
     dst: &Path,
+    rel: &Path,
+    root: &crate::open_beneath::RootDir,
     real_dst_root: &Path,
     verify: bool,
 ) -> Result<(), String> {
-    // `safe_join` guarantees at least one named component, so a `None` parent is unreachable — but a
-    // guard that silently does nothing on an input it did not expect is the shape this whole family of
-    // tickets keeps finding, so it refuses instead of skipping the check.
-    let parent = dst
-        .parent()
-        .ok_or_else(|| format!("refusing to write {dst:?}: it has no parent directory to contain it"))?;
-
-    // (1) BEFORE `create_dir_all`, so a refusal leaves no directory debris outside the root.
-    parent_contained(parent, real_dst_root)?;
-
-    // `metadata` follows links deliberately: a junction at `parent` answers `is_dir() == true` here,
-    // and that is fine — check (1) has already refused it. All this decides is whether there is any
-    // directory to create, and hence whether check (2) has anything new to confirm.
-    if !std::fs::metadata(parent).is_ok_and(|m| m.is_dir()) {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        // (2) Confirm what was just created, immediately before the write.
+    // CPE-1889's checks (1) and (2), kept ONLY for a target where the per-component walk below is not
+    // atomic — see [`crate::open_beneath::ATOMIC`]. On Unix and Windows (every platform this ships on)
+    // this whole block is a compile-time `false` and the optimiser deletes it, which is where the two
+    // `canonicalize` calls per file went. It is not deleted from the source, because on a target with
+    // no handle-relative open the walk degrades to a path open and these checks are then the only
+    // containment there is.
+    if !crate::open_beneath::ATOMIC {
+        // `safe_join` guarantees at least one named component, so a `None` parent is unreachable — but
+        // a guard that silently does nothing on an input it did not expect is the shape this whole
+        // family of tickets keeps finding, so it refuses instead of skipping the check.
+        let parent = dst.parent().ok_or_else(|| {
+            format!("refusing to write {dst:?}: it has no parent directory to contain it")
+        })?;
         parent_contained(parent, real_dst_root)?;
+        // `metadata` follows links deliberately: a junction at `parent` answers `is_dir() == true`
+        // here, and that is fine — check (1) has already refused it. All this decides is whether there
+        // is any directory to create, and hence whether check (2) has anything new to confirm.
+        if !std::fs::metadata(parent).is_ok_and(|m| m.is_dir()) {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            parent_contained(parent, real_dst_root)?;
+        }
     }
 
-    let copied = crate::fsutil::copy_file_onto_no_follow_with_wording(
+    let copied = crate::fsutil::copy_file_onto_destination_handle(
         src,
         dst,
         crate::fsutil::LinkGuardWording::BACKUP,
+        // THE atomic half of CPE-1896. The destination is opened one component at a time, each
+        // relative to the handle of the one before it, starting from the root handle this run opened
+        // once — so there is no moment at which a rename can put a junction between the check and the
+        // write, because there is no second lookup of any parent to race. Missing directories are
+        // created the same way, inside the handle we hold, which is why no refusal can leave directory
+        // debris outside the root either.
+        || crate::open_beneath::create_beneath(root, rel),
     )?;
 
     // (3) AFTER the write (CPE-1896): where did the bytes actually go? This is the only check in the
@@ -687,6 +700,22 @@ pub fn apply_backup_plan_walk(
         }
     };
 
+    // CPE-1896: hold the resolved destination root **open** for the whole run, once. Every write below
+    // is resolved component-by-component against this handle rather than by re-parsing a path, which is
+    // what makes each entry's containment atomic with its own open. Opened here, next to the
+    // `canonicalize` it pairs with, so the inner loop pays neither.
+    //
+    // A root that resolves but will not open is a whole-plan refusal, for the same reason an
+    // unresolvable one is: with no anchor there is no containment question that can be answered, and
+    // every write in the run would be back to trusting a path.
+    let root_handle = crate::open_beneath::open_root(&real_dst_root).map_err(|e| {
+        format!(
+            "refusing to run the backup plan: the destination folder {real_dst_root:?} could not be \
+             opened ({e}), so the files cannot be written into it in a way that can be checked. \
+             Reconnect the drive or share and run the job again."
+        )
+    })?;
+
     for rel in copy.iter().chain(update.iter()) {
         let joined = (
             safe_join(&src_root, rel, PlanEntry::Write),
@@ -699,7 +728,7 @@ pub fn apply_backup_plan_walk(
                 continue;
             }
         };
-        match copy_one_verified(&src, &dst, &real_dst_root, verify) {
+        match copy_one_verified(&src, &dst, Path::new(rel), &root_handle, &real_dst_root, verify) {
             Ok(()) => emit(OpResult::ok(&dst)),
             Err(e) => emit(OpResult::err(&dst, e)),
         }
@@ -760,6 +789,21 @@ mod tests {
 
     fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::scratch_dir(&format!("cpe-backup-{tag}"))
+    }
+
+    /// Drive one entry through [`copy_one_verified`] the way `apply_backup_plan_walk` does — resolving
+    /// the destination root, opening it once, and naming the entry by its plan-relative path (CPE-1896).
+    /// A test that hand-built the arguments differently from the engine would be exercising a shape
+    /// production never runs.
+    fn copy_one(
+        src: &std::path::Path,
+        dst_root: &std::path::Path,
+        rel: &str,
+        verify: bool,
+    ) -> Result<(), String> {
+        let real = fs::canonicalize(dst_root).unwrap();
+        let root = crate::open_beneath::open_root(&real).unwrap();
+        copy_one_verified(src, &dst_root.join(rel), std::path::Path::new(rel), &root, &real, verify)
     }
 
     /// Build a destination tree worth losing: a top-level file, a nested directory, and a file inside
@@ -1182,7 +1226,7 @@ mod tests {
         let src = d.join("src.txt");
         fs::write(&src, b"BACKUP SOURCE").unwrap();
 
-        let outcome = copy_one_verified(&src, &dst, &fs::canonicalize(&backup_root).unwrap(), false);
+        let outcome = copy_one(&src, &backup_root, "h.txt", false);
 
         // HARM FIRST, on the filesystem, before the verdict is looked at.
         assert_eq!(
@@ -1231,7 +1275,7 @@ mod tests {
         let src = d.join("src.txt");
         fs::write(&src, b"BACKUP SOURCE").unwrap();
 
-        let outcome = copy_one_verified(&src, &dst, &fs::canonicalize(&backup_root).unwrap(), false);
+        let outcome = copy_one(&src, &backup_root, "link.txt", false);
 
         assert_eq!(
             fs::read(&victim).ok().as_deref(),
@@ -1363,8 +1407,12 @@ mod tests {
             results[0]
         );
         assert!(
-            results[0].error.contains("outside"),
-            "the refusal must say the destination resolves outside the backup root: {:?}",
+            results[0].error.contains("\"sub\"") && results[0].error.contains("is a link"),
+            "the refusal must name the offending component AND say a link is what stopped it. \
+             CPE-1889's wording said the destination 'resolves outside the backup root', which was the \
+             only thing a path resolution could establish; CPE-1896 replaced that resolution with a \
+             per-component walk that never resolves the whole path at all, so the refusal now names \
+             the exact component — strictly more, not less, than the old assertion: {:?}",
             results[0]
         );
         let _ = fs::remove_dir_all(&d);
