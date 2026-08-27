@@ -384,7 +384,7 @@
           window boundary. `top: 50%; transform: translateY(-50%);` centres it in the bar instead,
           matching how a deliberate popover reads rather than a mis-anchored one.
        3. Dark-theme contrast: no `color` here means this inherits the PILL's `var(--accent)` — dark
-          `#0078e0` on `--surface #2b2b2b` measures 3.21:1 for a full sentence of 12px body text, under
+          `--accent` on `--surface` measures 3.21:1 for a full sentence of 12px body text, under
           the 4.5:1 AA floor (light is 5.5:1, fine). `--accent` is correctly a NON-text accent by design
           (focus rings, icons — see `app.css.dark-contrast.test.ts:270`, which only asserts >=3:1 on
           purpose), so that guard has no reason to catch a full sentence of body text using it — its
