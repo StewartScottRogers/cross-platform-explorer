@@ -1817,3 +1817,34 @@ entry says to run the two sabotages and write the numbers into the comment — a
 argued the measurement in the PR body while the code comment merely asserted. On a ticket whose
 thesis is that an argument is not a measurement, that was the one place the diff argued where it
 could have measured.
+
+## 2026-08-27 — a token that backs several roles gets pinned at the LOOSEST of them
+
+CPE-1919 was filed as "dark-theme JSON string values measure 3.70:1". The real defect was structural:
+`--accent` backs **three** roles with **two** different WCAG bars — a solid button fill under white
+text and an icon/ring/border (1.4.11, **3:1**), and running text (1.4.3, **4.5:1**). CPE-1632 tuned the
+dark value for the first two; `JsonTreeNode.svelte` paints the third.
+
+**And the guard was green the whole time.** `dark-contrast.test.ts` *does* assert `--accent` against
+`--bg`/`--surface` — at `>= 3:1`, labelled *"used as text/icon/focus-ring accent"*. The pairing was
+**enumerated at the wrong bar**, not missing. That assertion reads exactly like coverage.
+
+**Rule: a design token that serves more than one role needs a token per BAR, not per colour.** When a
+guard names several roles in one label, that is the tell — it is grading all of them at whichever bar
+is loosest. The fix here split `--accent` (chrome, 3:1) from `--accent-text` (running text, 4.5:1),
+left `--accent` untouched so no button or ring moved, and put 22 text sites on the new token while 12
+icon-glyph sites deliberately stayed.
+
+Two things the sweep found that nobody had reported:
+
+- **hc-dark's `--accent` was 4.48:1 on `--surface-alt`** — a second live failure, in a *high-contrast*
+  theme, found only because the worker measured **every** token against **every** painted surface
+  rather than the one the ticket named.
+- **The ticket's own 3.70:1 was against the wrong ground.** `.preview-pane` paints `--surface`, so the
+  real reading is **3.21:1**, and `.jt-row:hover` repaints to `--surface-alt` — a third surface no
+  palette guard measured text against at all.
+
+**Corollary: derive the painted surface, don't assume it.** The new guard reads the ground out of
+`.preview-pane`'s background and `.jt-row:hover`'s fill, and **throws if either stops setting one**, so
+it cannot grade against a colour nobody paints. Same shape as the provenance rule: derive it, or do
+not claim it.
