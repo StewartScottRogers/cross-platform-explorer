@@ -3,7 +3,7 @@ id: CPE-1880
 title: the dispatch contract does not stop the stall — five agents in one run, three after being handed the exact command
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-23
