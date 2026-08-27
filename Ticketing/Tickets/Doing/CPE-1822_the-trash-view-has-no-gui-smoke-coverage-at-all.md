@@ -3,7 +3,7 @@ id: CPE-1822
 title: the Trash view has no gui-smoke coverage at all, so three visual tickets shipped unphotographed
 type: task
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: M
 created: 2026-08-20
