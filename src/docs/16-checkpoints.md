@@ -126,7 +126,9 @@ The cases you may meet:
 - **A file that could not be restored this time** (locked, or its stored content is missing). This is the
   temporary case: run the revert again once that is fixed and the held-back cleanups apply. If the same
   revert also hit one of the permanent cases above, running it again clears only the temporary half — the
-  screen says which situation you are in.
+  screen says which situation you are in. Its own **Failed** list is bounded and scrollable the same way
+  the refused-writes list is, and carries the same **Copy all** button, so a large batch of failures (a
+  couple hundred locked files, say) is no harder to get out of the app than a large batch of refusals.
 
 One Windows-only side effect of writing onto the file rather than replacing it: a restored file no longer
 picks up the **"downloaded from the internet" mark** that the captured original carried, and a file that

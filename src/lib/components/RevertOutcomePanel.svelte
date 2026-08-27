@@ -95,13 +95,21 @@
    * held-back preview above — but an uncapped list scrolls, and scrolling is not the same as "you can
    * get the whole list out of the app". This is the same "copy all" escape hatch CPE-1869 built for the
    * held-back list, mirrored for the write-refusal group: gated on there being a group at all
-   * (`writeRefusalCount > 0`), never shown for plain genuine failures, which have no single set worth
-   * naming as one thing.
+   * (`groupedFailures.length > 0`), never shown for plain genuine failures, which have no single set
+   * worth naming as one thing.
    */
-  $: showCopyRefusedAffordance = summary.writeRefusalCount > 0 && summary.allWriteRefusalPaths.length > 0;
+  // CPE-1881 round 5 (item 1) — gated on `groupedFailures`, the SAME set the box below actually
+  // renders, never on `summary.writeRefusalCount`/`summary.allWriteRefusalPaths`. Those backend
+  // scalars/arrays and `groupedFailures` (derived from `write_refusal.paths` Set membership) agree in
+  // the common case, but a duplicate path, a count/paths mismatch, or a refused path with no matching
+  // `failed` entry makes them diverge — the exact "heading undercounts its own list" defect round 4
+  // fixed once already, reopened here through a second field. See `groupedFailures.length`/
+  // `absoluteWriteRefusalPaths` below, which are the single source of truth for both the heading and
+  // this affordance/copy button.
+  $: showCopyRefusedAffordance = groupedFailures.length > 0;
   $: absoluteWriteRefusalPaths = (() => {
     const prefix = root.replace(/[\\/]+$/, "");
-    return summary.allWriteRefusalPaths.map((p) => (prefix ? `${prefix}/${p}` : p));
+    return groupedFailures.map((f) => (prefix ? `${prefix}/${f.path}` : f.path));
   })();
   let copiedRefused = false;
   let copyRefusedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -133,6 +141,32 @@
    */
   $: genuineFailures = summary.failures.filter((f) => !f.grouped);
   $: groupedFailures = summary.failures.filter((f) => f.grouped);
+
+  /**
+   * **CPE-1881 round 5 (item 4).** HELD BACK and REFUSED both got a "copy all" escape hatch
+   * (CPE-1869, round 3); FAILED never did, despite being the SAME shape — an uncapped list in the SAME
+   * ~10-row scroll region — and the ticket's own hypothetical (a batch of 200 locked files) lands here,
+   * not in REFUSED. Mirrors `copyWriteRefusalPaths` exactly, gated on the SAME rendered list
+   * (`genuineFailures`) rather than any derived count, for the same reason item 1 moved the other two
+   * boxes off `summary.*` scalars.
+   */
+  $: showCopyFailedAffordance = genuineFailures.length > 0;
+  $: absoluteFailedPaths = (() => {
+    const prefix = root.replace(/[\\/]+$/, "");
+    return genuineFailures.map((f) => (prefix ? `${prefix}/${f.path}` : f.path));
+  })();
+  let copiedFailed = false;
+  let copyFailedTimer: ReturnType<typeof setTimeout> | undefined;
+  async function copyFailedPaths() {
+    try {
+      await navigator.clipboard.writeText(formatPathsForClipboard(absoluteFailedPaths));
+      copiedFailed = true;
+      clearTimeout(copyFailedTimer);
+      copyFailedTimer = setTimeout(() => (copiedFailed = false), 1500);
+    } catch {
+      /* clipboard unavailable — every failed path is still on screen, just scrolled to reach */
+    }
+  }
 </script>
 
 <div class="ro" data-testid={testid}>
@@ -182,10 +216,27 @@
     <!-- CPE-1881 round 4 (Critic finding 1) — genuine failures now get their own box, so its own count
          is exactly what it contains. Bounded to the same ~10-row scroll region as the refused box below
          (D1's fix, extended here for consistency and against the same hypothetical: a batch of 200
-         locked files would have hit the identical guillotined-list defect the ticket started with). -->
+         locked files would have hit the identical guillotined-list defect the ticket started with).
+         CPE-1881 round 5 (item 4) — HELD BACK and REFUSED both had a copy-all button; this box, capped
+         at the same ~10 rows against the exact "batch of 200 locked files" case, did not. -->
     <div class="ro-failures-box" data-testid="{testid}-failed">
       <div class="ro-failures-head">
         <span class="ro-held-label">{displaySafeName(`Failed (${genuineFailures.length})`)}</span>
+        {#if showCopyFailedAffordance}
+          <button
+            class="mini ro-copy"
+            data-testid="{testid}-copy-failed-paths"
+            on:click={copyFailedPaths}
+            title="Copy every failed path to the clipboard, one per line"
+          >
+            <Icon name={copiedFailed ? "check" : "copy"} size={13} />
+            {displaySafeName(
+              copiedFailed
+                ? "Copied"
+                : `Copy all ${genuineFailures.length} failed path${genuineFailures.length === 1 ? "" : "s"}`,
+            )}
+          </button>
+        {/if}
       </div>
       <ul class="ro-failures ro-failures-warn">
         {#each genuineFailures as f (f.path)}
@@ -199,40 +250,37 @@
     </div>
   {/if}
 
-  {#if summary.writeRefusalReason}
-    <!-- CPE-1881: the shared explanation for a whole group of write refusals (currently only the
-         hard-link rule), stated once — the write-side counterpart to `.ro-held` above. The refused paths
-         themselves are still listed individually below in the "Refused" box, each with its own short
-         per-path fact; this block is only the paragraph that used to be repeated on every one of them.
-         CPE-1881 round 4 (Critic finding 3) — labelled "WHY", not "Refused": the box right below it is
-         ALSO headed "Refused (N)", and having both grey boxes say the same word reintroduced the exact
-         held-back/refusal ambiguity the round-2 labels existed to close, one box over. -->
-    <div class="ro-held" data-testid="{testid}-write-refusal">
-      <!-- Wrapped defensively (the CPE-1757 bidi-escape guard's own suggested fix for a new raw render):
-           unlike `f.error` above, this text never embeds a path today — `revert_engine.rs` builds it from
-           a count and static wording only — but there is no structural guarantee that stays true, so this
-           costs nothing and closes the gap before it can open. -->
-      <div class="ro-held-label">Why</div>
-      <div class="ro-held-reason">{displaySafeName(summary.writeRefusalReason)}</div>
-    </div>
-  {/if}
-
   {#if groupedFailures.length}
-    <!-- CPE-1881 round 3 (D1), round 4 (Critic findings 1+2). Was a bare, unbounded `<ul>` mixing
-         genuine failures in with grouped refusals — the Visual Critic found a 200-row list ran flush
-         against the host dialog's own border with no scroll cue (read as guillotined, not "scroll for
-         more"), AND that mixing the two kinds in one list made this box's own heading undercount
-         whenever a genuine failure was also present. Bounded to ~10 rows with a real (now themed,
-         finding 2) scrollbar, and now holds ONLY the grouped rows `groupedFailures` already filtered
-         above — this box's count is exactly what's inside it. The DATA stays uncapped: every grouped
-         row is still in the DOM and reachable, only the on-screen HEIGHT is capped, same principle as
-         the held-back block's capped preview + copy-all button above. -->
+    <!-- CPE-1881 round 3 (D1), round 4 (Critic findings 1+2), round 5 (item 1 + item 2).
+         - item 1: heading and copy button now derive from `groupedFailures.length`/
+           `absoluteWriteRefusalPaths` (built from `groupedFailures` itself), never from the backend
+           scalars `summary.writeRefusalCount`/`summary.allWriteRefusalPaths` — those can diverge from
+           what this box actually renders (a duplicate path, a count/paths mismatch, a refused path with
+           no matching `failed` entry), which is the exact "heading undercounts its own list" defect
+           round 4 already fixed once, reopened here through a second field.
+         - item 2: the WHY paragraph is now nested INSIDE this box, above the list it explains, instead
+           of sitting beside it as an identically-styled peer box (`.ro-held`) with nothing binding it to
+           what it explains. Every grey box in this panel is now structurally uniform (one outer surface
+           per topic), and three stacked surfaces collapse to two. -->
     <div class="ro-failures-box" data-testid="{testid}-refused">
+      {#if summary.writeRefusalReason}
+        <!-- CPE-1881 round 4 (Critic finding 3) — labelled "WHY", not "Refused": the list heading right
+             below is ALSO "Refused (N)", and having both say the same word would reintroduce the exact
+             held-back/refusal ambiguity the round-2 labels existed to close, one clause over. Wrapped
+             defensively (the CPE-1757 bidi-escape guard's own suggested fix for a new raw render):
+             unlike `f.error` below, this text never embeds a path today — `revert_engine.rs` builds it
+             from a count and static wording only — but there is no structural guarantee that stays
+             true, so this costs nothing and closes the gap before it can open. -->
+        <div class="ro-refusal-why" data-testid="{testid}-write-refusal">
+          <div class="ro-held-label">Why</div>
+          <div class="ro-held-reason">{displaySafeName(summary.writeRefusalReason)}</div>
+        </div>
+      {/if}
       <div class="ro-failures-head">
         <!-- Wrapped defensively (same reasoning as `writeRefusalReason` above): purely a count + static
              wording today, never a path, but the wrap costs nothing and the guard requires it for any
              new raw render either way. -->
-        <span class="ro-held-label">{displaySafeName(`Refused (${summary.writeRefusalCount})`)}</span>
+        <span class="ro-held-label">{displaySafeName(`Refused (${groupedFailures.length})`)}</span>
         {#if showCopyRefusedAffordance}
           <button
             class="mini ro-copy"
@@ -244,14 +292,17 @@
             {displaySafeName(
               copiedRefused
                 ? "Copied"
-                : `Copy all ${summary.writeRefusalCount} refused path${summary.writeRefusalCount === 1 ? "" : "s"}`,
+                : `Copy all ${groupedFailures.length} refused path${groupedFailures.length === 1 ? "" : "s"}`,
             )}
           </button>
         {/if}
       </div>
       <ul class="ro-failures ro-failures-dim">
         {#each groupedFailures as f (f.path)}
-          <!-- `f.error` is NOT safe text — see the identical comment on the Failed box above. -->
+          <!-- `f.error` is NOT safe text — see the identical comment on the Failed box above. It is
+               also now the SHORT per-file link count alone (CPE-1881 round 5, item 5) — the WHY
+               paragraph right above already says what a hard link is and why it was refused, so
+               repeating that on every one of up to 200 rows restated both the box heading and WHY. -->
           <li><span class="ro-fail-path" title={displaySafePath(f.path)}>{displaySafePath(f.path)}</span> — {displaySafeName(f.error)}</li>
         {/each}
       </ul>
@@ -301,6 +352,12 @@
     background: var(--surface-alt);
   }
   .ro-failures-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  /* CPE-1881 round 5 (item 2) — the WHY paragraph nested inside `.ro-failures-box`, above the
+     `.ro-failures-head`/list it explains. Deliberately UNBORDERED and un-surfaced (unlike the old
+     `.ro-held` peer box it replaces): the border and background are already carried by the parent
+     `.ro-failures-box`, so this is spacing only — a second nested surface here would just be the same
+     "peer section, not part of what it's inside" problem one layer down. */
+  .ro-refusal-why { margin-bottom: 8px; }
   /* CPE-1881 round 3 (D1) — bounded to ~10 rows (~200px) so a 200-entry list stops growing the dialog
      and reads as "scroll for more" (a real scrollbar track) instead of running flush against the host
      dialog's border with nothing to signal there is more below. The DATA is never capped — every row is
@@ -313,7 +370,14 @@
      a light-theme-only failure), leaving only the half-clipped last row as a scroll cue there. Styled
      explicitly off `--border-strong` below, which clears 3:1 in both themes already (used for this same
      box's own border). `scrollbar-color` covers Firefox; the `::-webkit-scrollbar-*` pseudo-elements
-     cover Chromium/WebView2, which is what this app itself ships on. */
+     cover Chromium/WebView2, which is what this app itself ships on.
+     CPE-1881 round 5 — re-measured, NOT acted on (recorded so a future `--border-strong` edit doesn't
+     take this under the floor without anyone noticing): this scrollbar thumb now measures 3.33:1 in
+     dark theme (down from round 4's 9.62:1 — `--border-strong` has since moved, and both themes now
+     derive this thumb from it) and 3.71:1 in light theme. Both still clear the 3:1 WCAG UI-component
+     floor, but neither is comfortable margin any more — dark went from "obviously fine" to "just barely
+     fine" in one unrelated token change. Do not nudge `--border-strong` darker in either theme without
+     re-checking this thumb; it is the tightest consumer of that token on this panel. */
   .ro-failures {
     margin: 6px 0 0; padding: 0 4px 0 18px;
     max-height: 200px; overflow-y: auto;

@@ -190,7 +190,12 @@ impl Refused {
     /// runs (see `fsutil::copy_file_onto_no_follow_with_wording`'s doc on why re-running cannot help).
     fn hard_linked(links: u64) -> Self {
         Self {
-            reason: format!("this file has {links} names (it is hard-linked)"),
+            // CPE-1881 round 5 (item 5) — shortened further: the box heading ("Refused (N)") and the
+            // WHY paragraph directly above the list already say what a hard link is and why it was
+            // refused; repeating "this file has N names (it is hard-linked)" on every one of up to 200
+            // rows restated both. The link COUNT is the one fact that genuinely differs per file and is
+            // worth keeping; the explanation is now said once, above the list, not per row.
+            reason: format!("{links} hard link{}", if links == 1 { "" } else { "s" }),
             permanent: true,
             grouped: true,
         }
@@ -533,13 +538,24 @@ pub fn execute_restore(
         // wording used to do — points them at something that cannot succeed.
         Some(HeldBack::new(
             HeldBackOutcome::HeldBackByCheckpoint,
+            // CPE-1881 round 5 — the reason used to name only `unrestorable.len()` ("1 of this
+            // checkpoint's entries…") and leave the deletion count to the headline/copy-button alone,
+            // one box over. A reader scanning numbers saw 1, 2, 2 across three separate places and had
+            // to infer the connection themselves. Naming both counts in the SAME clause — "so N
+            // deletions are held back:" — states the causal chain (1 unrestorable name is why N
+            // deletions are withheld) instead of leaving it implicit, and the trailing colon now
+            // introduces the list rendered right below this paragraph.
             format!(
-                "{} of this checkpoint's entries cannot be restored on this computer ({}{}), so \"this \
-                 file is not in the checkpoint\" cannot be trusted — deleting it may destroy a file the \
-                 checkpoint does hold, under a name spelled differently here.",
+                "{} of this checkpoint's entries cannot be restored on this computer ({}{}) — \"this \
+                 file is not in the checkpoint\" cannot be trusted, and deleting on that premise may \
+                 destroy a file the checkpoint does hold under a name spelled differently here — so \
+                 {} deletion{} {} held back:",
                 unrestorable.len(),
                 named.join(", "),
-                if more > 0 { format!(", and {more} more") } else { String::new() }
+                if more > 0 { format!(", and {more} more") } else { String::new() },
+                deletes.len(),
+                if deletes.len() == 1 { "" } else { "s" },
+                if deletes.len() == 1 { "is" } else { "are" },
             ),
             &format!(
                 "There is no fix for this on this computer: those names are stored in the checkpoint \
@@ -1296,8 +1312,10 @@ mod tests {
         // Refused per file, loudly, with a reason — never silently skipped (CPE-1803/1804/1805/1816).
         assert_eq!(report.skipped.len(), 1, "fixture is inert: nothing was refused: {report:?}");
         assert_eq!(report.skipped[0].0, "h.txt", "the wrong entry was refused: {report:?}");
+        // CPE-1881 round 5 (item 5): the per-path reason is now the short "N hard links" fact alone —
+        // the "hard-linked"/"why" explanation lives once in `write_refusal.reason` instead.
         assert!(
-            report.skipped[0].1.contains("hard-linked"),
+            report.skipped[0].1.contains("hard link"),
             "the refusal must name the cause the user has to act on: {report:?}"
         );
         assert!(
@@ -1400,6 +1418,63 @@ mod tests {
             "CPE-1881 acceptance criterion — one explanation, not 200: total {total_after} bytes for \
              {N} entries (pre-fix measured 84,180 bytes on this exact fixture size): {report:?}"
         );
+    }
+
+    /// **CPE-1881 round 5, item 3 — name both counts in one clause.**
+    ///
+    /// The unrestorable-name hold-back's reason paragraph named only `unrestorable.len()` ("1 of this
+    /// checkpoint's entries…"); the deletion count it withholds only ever showed up in the headline
+    /// ("2 deletions held back") and the copy-button label ("Copy all 2 held-back paths"), one grey box
+    /// over (`RevertOutcomePanel.svelte`). A reader scanning the panel saw 1, 2, 2 in three separate
+    /// places with nothing connecting them. This pins that both counts now appear together, in the
+    /// reason's own clause — the exact fixture shape (1 unrestorable name, 2 deletes) captured in
+    /// `.claude/sprint-metrics/visual-evidence/cpe-1881-{light,dark}-held-back-and-refused.png`.
+    #[test]
+    fn cpe_1881_round5_unrestorable_reason_names_both_counts() {
+        let store = scratch("1881-r5-counts-store");
+        fs::create_dir_all(store.join("blobs")).unwrap();
+        let root = scratch("1881-r5-counts-root");
+        fs::write(root.join("added-01.png"), b"user file 1").unwrap();
+        fs::write(root.join("added-02.png"), b"user file 2").unwrap();
+
+        let mut checkpoint = Snapshot::new();
+        // One checkpoint key this platform cannot restore — the permanent hold-back.
+        checkpoint.insert(
+            "notes: draft.txt".to_string(),
+            crate::restore_plan::FileState::new("1881r5aaaa", 3),
+        );
+        let report = execute_restore(
+            &[
+                RestoreAction { path: "added-01.png".to_string(), op: RestoreOp::Delete },
+                RestoreAction { path: "added-02.png".to_string(), op: RestoreOp::Delete },
+            ],
+            &root.to_string_lossy(),
+            &store.to_string_lossy(),
+            &checkpoint,
+        );
+
+        assert!(
+            root.join("added-01.png").exists() && root.join("added-02.png").exists(),
+            "fixture is inert: a delete actually ran, so nothing was held back: {report:?}"
+        );
+        let group = live_hold_back(&report);
+        assert_eq!(group.outcome, HeldBackOutcome::HeldBackByCheckpoint, "{group:?}");
+
+        // This fixture's unrestorable-entry count, "1".
+        assert!(
+            group.reason.contains("1 of this checkpoint's entries cannot be restored"),
+            "{group:?}"
+        );
+        // This fixture's deletion count, "2" — must be in the SAME reason string as the entry count,
+        // not left for the headline/copy-button to state alone.
+        assert!(
+            group.reason.contains("so 2 deletions are held back"),
+            "the reason must name the deletion count it withholds, in the same clause as the \
+             unrestorable-entry count that causes it: {group:?}"
+        );
+
+        let _ = fs::remove_dir_all(&store);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// **CPE-1845 review round 2 — a permanent refusal must not be reported as "run it again".**

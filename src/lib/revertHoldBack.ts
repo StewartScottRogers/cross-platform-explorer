@@ -111,8 +111,10 @@ export type RevertSummary = {
    * **CPE-1881.** The shared explanation for a whole group of write refusals with the SAME cause
    * (currently only the hard-link rule) — stated once, the write-side counterpart to {@link reason}.
    * `""` when nothing was grouped. The refused paths themselves are already in {@link failures} (each
-   * with its own short per-path fact, e.g. "this file has 3 names (it is hard-linked)" — the backend
-   * shortened these once the shared paragraph moved here, so nothing duplicates and nothing is lost);
+   * with its own short per-path fact, e.g. "3 hard links" — the backend shortened these once the shared
+   * paragraph moved here (round 1), then shortened them again to just the per-file link count once the
+   * "hard-linked"/why explanation had a home right above the list (round 5, item 5), so nothing
+   * duplicates and nothing is lost);
    * this is purely the paragraph {@link failures}' short per-path text alone cannot state economically.
    */
   writeRefusalReason: string;

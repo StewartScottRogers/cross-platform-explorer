@@ -250,3 +250,73 @@ and "say nothing" — **the third option was not considered.**
     coexistence proof) via the same temporary, uncommitted harness pattern as round 3 (built fresh each
     round, deleted after use). `npm run check` and the full `vitest` suite (4605/4607 — same 2
     pre-existing unrelated `msrvSync.test.ts` failures) green; no Rust files touched this round.
+- **2026-08-27 (round 5, final — merges after this) USMST** — Picked up on a fresh worktree after the
+  prior worker was gone; branch already Reviewer-APPROVED and UAT-PASSED. Five items, all landed:
+  1. **MUST FIX — a latent recurrence of the exact bug round 4 removed.** The `Refused` box gated on and
+     rendered `groupedFailures` (derived from `write_refusal.paths` `Set` membership) but headed itself
+     with `summary.writeRefusalCount`, a separate backend scalar (`write_refusal.count`) that can diverge
+     from `paths` on a duplicate path, a count/paths mismatch, or a refused path with no matching `failed`
+     entry — silently reopening "this box's own heading undercounts its own list" through a second field.
+     Same shape on the copy button: labelled with `writeRefusalCount`, copied `allWriteRefusalPaths`.
+     Fixed by deriving BOTH the heading and the copy button (label and clipboard payload) from
+     `groupedFailures.length`/`groupedFailures.map(f => f.path)` — the exact set the `<ul>` renders —
+     never from the two backend scalars again. Proved with a new
+     `src/lib/components/RevertOutcomePanel.test.ts`: a fixture with `write_refusal.count: 3` against only
+     2 matching `skipped` entries. Confirmed RED first (temporarily reverted the heading/button back to
+     `summary.writeRefusalCount`, ran the test, got the exact predicted failure —
+     `expected 'Why checkpoint entries…Refused (3)…Copy all 3 refused paths' to contain 'Refused (2)'` /
+     `'Copy all 2 refused paths'` — then restored the fix and reran GREEN). Also added tests for items 2,
+     4, and 5 in the same file (5 tests total).
+  2. **Nested the WHY paragraph inside the REFUSED box, above its list.** `.ro-held` (WHY) and
+     `.ro-failures-box` (REFUSED) were styled identically (same border/radius/background), so WHY read as
+     a peer section with nothing binding it to what it explains — worse in the combined held-back+refused
+     screenshot, where HELD BACK carries its own explanation inline and WHY sat detached one box over.
+     Moved the WHY markup inside `.ro-failures-box`, added an unbordered `.ro-refusal-why` (spacing only —
+     the border/background are already the parent's) instead of the old `.ro-held` peer styling. Three
+     stacked grey surfaces collapse to two; every box in the panel is now structurally uniform. The word
+     "WHY" is unchanged.
+  3. **One clause, both counts.** The unrestorable-entry hold-back's reason paragraph
+     (`revert_engine.rs`, the `!unrestorable.is_empty()` branch) named only the unrestorable-entry count
+     ("1 of this checkpoint's entries cannot be restored…"); the deletion count it withholds only ever
+     appeared in the headline ("2 deletions held back") and the copy button ("Copy all 2 held-back
+     paths"), one box over — a reader scanning numbers saw 1, 2, 2 with nothing connecting them. Reworded
+     the `format!` to end "...under a name spelled differently here — so {N} deletion{s} {is/are} held
+     back:", naming the causal chain in one clause and colon-introducing the list right below it. Pinned
+     with a new Rust test, `cpe_1881_round5_unrestorable_reason_names_both_counts` (1 unrestorable name, 2
+     deletes — the exact fixture shape in the held-back-and-refused screenshot), asserting the reason
+     contains both `"1 of this checkpoint's entries cannot be restored"` and `"so 2 deletions are held
+     back"`. Updated the one test whose assertion depended on this string's OLD trailing clause structure;
+     no other test referenced this branch's exact wording.
+  4. **Gave the FAILED box a copy button.** HELD BACK and REFUSED both had "Copy all N … paths"
+     (CPE-1869/round 3); FAILED — capped at the same ~10-row scroll region against the ticket's own "batch
+     of 200 locked files" hypothetical — never did. Added `copyFailedPaths`/`showCopyFailedAffordance`/
+     `absoluteFailedPaths`, mirroring `copyWriteRefusalPaths` exactly, gated on the rendered
+     `genuineFailures` list (same reasoning as item 1, not a derived count).
+  5. **Shortened the repeated per-row refusal suffix to "— N hard links".** Every refused row repeated
+     "this file has N names (it is hard-linked)" — up to 200 times — restating both the box heading and
+     the WHY paragraph now sitting directly above it. Decided call, not a question, per the brief:
+     `Refused::hard_linked` in `revert_engine.rs` now builds `"{N} hard link{s}"` alone; the "why"
+     explanation lives once, above. Updated the one test asserting the old `"hard-linked"` substring on
+     this specific per-path reason (`cpe_1857_an_overwrite_through_a_hard_link_never_reaches_the_outside_file`)
+     to assert `"hard link"` instead; the GROUP paragraph's own `"hard-linked"` wording (a different string,
+     asserted by a different test) is untouched.
+  - **Comment added, not acted on, per the brief:** recorded in `.ro-failures`'s CSS comment that the
+    scroll-region scrollbar thumb now measures 3.33:1 in dark theme (down from round 4's 9.62:1 —
+    `--border-strong` has moved since) and 3.71:1 in light theme; both clear the 3:1 floor but neither is
+    comfortable margin, and a future `--border-strong` edit should re-check this thumb before landing.
+  - `src/docs/16-checkpoints.md`: noted the FAILED list is now bounded/scrollable with the same Copy-all
+    button as HELD BACK/REFUSED (item 4).
+  - Re-ran the full `cpe-server` suite (2398 tests, including the new
+    `cpe_1881_round5_unrestorable_reason_names_both_counts`), `cargo clippy --all-targets -D warnings`
+    (both feature modes), `npm run check`, and the full `vitest` suite (4610/4612 — same 2 pre-existing
+    unrelated `msrvSync.test.ts` CRLF-checkout failures every prior round also hit). No specta-typed
+    struct changed, so no `bindings.gen.ts` regen was needed.
+  - Re-captured all six `cpe-1881-{light,dark}-{host-dialog,long-path-wrap,held-back-and-refused}.png`
+    screenshots via a fresh temporary, uncommitted harness (`scripts/dev-harness/cpe1881-r5/` +
+    `vite.harness.cpe1881-r5.config.ts`, port 48812 — deliberately unusual since this machine runs several
+    concurrent agents; the target page's own title was confirmed with a `curl` grep before screenshotting,
+    per the round-3 hazard where a bare headless-Chrome invocation once returned an unrelated already-open
+    window). Captured via `claude-in-chrome`, not a raw headless-Chrome CLI call. Harness and vite config
+    deleted after use; killed only the exact PID bound to port 48812, nothing else on the shared machine.
+  - Pushed to the existing branch `cpe-1881-refusal-reporting` / PR #1046. This closes the ticket's last
+    round; the PR is expected to merge from here.
