@@ -3,7 +3,7 @@ id: CPE-1929
 title: sweep for **shadowed guards** — a check that is simultaneously safe and unverifiable, because an earlier check answers on the same fact
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -316,3 +316,74 @@ so far was found that way. None was found by reading the code** — including bo
   as though it were a fact about the code is how a comment starts lying without anyone editing it.
 - `src-tauri` `cargo test --lib`: **230 passed / 0 failed**. Added on review — this PR changes refusal
   *wording*, and `src-tauri` asserts on some of it, so clippy alone was not enough there.
+
+## Closed 2026-08-27 — merged as PR #1066, after three rounds
+
+**Reviewer APPROVE (both rounds) + Security Auditor SEC PASS.** Merged over an unrelated red:
+`gui-smoke shard 2` was failing on **CPE-1960**, a genuine intermittent GUI regression in a spec this
+diff does not touch, filed High with a worker on it. Every other check green.
+
+### The two-sabotage check found what it was built to find, plus one the ticket never named
+
+| site | disable the later guard | force its predicate to lie | verdict |
+|---|---|---|---|
+| `batch_media::open_output_verified` (the named lead) | 2,423/0 — identical to baseline | nothing changed at that site | **shadowed** |
+| `fsutil::overwrite_confirmed_no_follow` (**found by the sweep**) | 2,423/0 unchanged | — | **shadowed** |
+
+Both shadowed by a `symlink_metadata` path check, because on Windows `std`'s `is_symlink` reads the
+same name-surrogate reparse bit the handle check reads.
+
+### The judgement that mattered: reordering alone would have made a real bug live
+
+`fsutil` got **reorder AND narrow**. The only input reaching that guard past the path check is a
+**non-surrogate reparse point** — and **CPE-1896 established those must be written, not refused**
+(a dehydrated cloud placeholder is an ordinary file). So the naive fix for a shadowed guard would have
+converted a safe-but-unverifiable check into an actively wrong one. It now narrows to
+`reparse_name_surrogate`.
+
+`batch_media` got **reorder, not delete**, on the opposite reasoning: the handle check is strictly
+**broader** than the path check shadowing it — it sees non-surrogate reparse points the path check
+cannot. A new **non-surrogate GUID reparse-point** fixture makes a previously-unverifiable guard
+verifiable for the first time.
+
+### Two live false negatives in `lockfileLockedGuard`
+
+Delete both real `cargo check --locked` preflights from `gui-smoke.yml`, leave a trailing `#` comment:
+**6/0 green**. A real backslash-continuation `cargo \` / `test --all-targets` with no `--locked`:
+**6/0 green**. Migrated to `parseYaml` + the shared `logicalLines` — **not** a fifth hand-rolled
+stripper — with parity independently re-derived at **79 = 79** by transcribing the old scanner.
+
+### What the gauntlet added
+
+- **The message assertion was proved load-bearing by execution.** With the `fsutil` handle refusal
+  disabled, the surviving *path* check answers *"is a link, and writing to a link's name writes
+  THROUGH it"* — so `contains("is a link")` **would have passed for free**. The shipped
+  `"stands in for another name"` is what fails.
+- The Auditor built an 8-class **truth table** on the code and confirmed the single verdict change
+  versus `main` is the intended one, then showed the narrowing cannot become a containment escape:
+  `open_no_follow` always passes `FILE_FLAG_OPEN_REPARSE_POINT`, demonstrated by disabling **all four**
+  guards and finding the outside victim byte-identical.
+- The new `MIN_CARGO_INVOCATIONS` floor closes more than claimed: a simulated partial narrowing fails
+  **all five** files, and **under the old `> 0`, three of the five would have passed in silence.**
+- The Reviewer **injected an unguarded `needs:` chain into a workflow the old hard-coded list never
+  opened**, and the newly-derived ratchet went red naming it.
+
+### And a measured race that is not this PR's fault
+
+The Auditor found `overwrite_confirmed_no_follow`'s `links > 1` guard is **TOCTOU-racy** — **17
+destroyed / 1,000** on this code, **30 / 1,000** on a replica of `main`'s body in the same run. This
+PR **halves** the window; check-then-use remains. Filed as **CPE-1958** and fixed in PR #1070 (36/2,000
+→ 0/2,000), which in turn disproved the assumption that `batch_media` was safe.
+
+### Mechanisation, answered honestly
+
+Not worth full automation: the "disable it" half is `cargo-mutants`, the "force the predicate to lie"
+half needs a human to define what a lie *is* for a given predicate, and **neither produces the
+conclusion** — which earlier check shadows it, and reorder vs delete, is a judgement. A **Shadowed
+guards** entry now sits in `CLAUDE.md` telling the next person to run the pair by hand **and write the
+numbers into the comment**.
+
+Filed: **CPE-1957** (three sites located to the line, shadowing check named, **no** sabotage run — and
+raised to Medium because site 1 carries the same bare-reparse-bit defect fixed here), **CPE-1958**,
+**CPE-1959** (the doctrine split: `fsutil` writes a non-surrogate reparse point, `batch_media` refuses
+it, and only the refusal is pinned by a test).
