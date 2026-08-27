@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { formatShardAbort, isTransportDead } from "./lib/driverHealth.js";
 import { resetAppState } from "./lib/resetAppState.js";
 import { assignShardSpecs, parseShardId, shardResultFilePrefix } from "./lib/shard.js";
 import { listSpecFiles, specRunPath } from "./lib/specFiles.js";
@@ -1044,6 +1045,27 @@ function seedSamplesFixture(tmpDir: string): void {
 let tauriDriver: ChildProcess | undefined;
 let shuttingDown = false;
 
+// --- CPE-1955: bounded containment for a mid-shard WebDriver transport death -------------------------
+// See `lib/driverHealth.ts`'s header for the measured four-failure chain this exists for, and
+// `recoverSession` below for how the budget is spent. Worker-local like `tauriDriver` above: each worker
+// is its own process with its own fresh import of this file, so one shard can never lend or borrow
+// another's budget.
+
+/** How many times ONE worker may respawn tauri-driver mid-shard. One. This is a bounded in-job retry,
+ *  never an exemption: when it is spent, `respawnTauriDriver` throws, the shard is marked aborted, and the
+ *  ratchet reds exactly as it does today. Raising this would trade a fast, legible red for a slow one —
+ *  each respawn costs a full driver + app cold start — and would not fix anything a single restart cannot,
+ *  since a transport that dies twice in one shard is a real, reportable defect and not a blip. */
+const MAX_DRIVER_RESPAWNS = 1;
+let driverRespawnsUsed = 0;
+
+/** Latched once the transport is confirmed gone AND the respawn budget is spent. Suppresses further
+ *  doomed `resetAppState` attempts (which cannot succeed and buried the diagnosis under ~10k lines of
+ *  identical stack traces in all four observed failures). It does NOT suppress, skip, or excuse any spec:
+ *  every remaining file's runnables still execute, still fail against the dead socket, and are still
+ *  recorded and reported by name. */
+let shardAborted = false;
+
 // CPE-1866: which spec file the most recently seen test/hook belonged to — `beforeTest`/`beforeHook`
 // below use a change in this value to detect "a new spec file's runnables have started" and trigger the
 // reset. Module-level and worker-local exactly like `tauriDriver` above: each worker is its own process
@@ -1156,28 +1178,200 @@ function flushFileResult(file: string): void {
  *  one new failure mode this ticket introduces. */
 async function handleRunnableStart(file: string): Promise<void> {
   if (file === currentSpecFile) return;
-  if (currentSpecFile !== undefined) flushFileResult(currentSpecFile);
+  const previous = currentSpecFile;
+  if (previous !== undefined) flushFileResult(previous);
   const label = path.basename(file);
   logPhase("handleRunnableStart:newFile", label);
-  if (currentSpecFile === undefined) {
+
+  // CPE-1955 — THE ATTRIBUTION FIX, and the single line that turns the four observed "only 1 of 14
+  // reported" failures into a named diagnosis. `currentSpecFile` used to be assigned at the very END of
+  // this function, i.e. only on the path where the reset SUCCEEDED. `flushFileResult` is only ever
+  // called with `currentSpecFile` (here, and once more from the worker-level `after` hook), so the
+  // moment the reset path below threw, `currentSpecFile` froze on the last file that had reset cleanly
+  // — and stayed frozen for the rest of the shard. Every later spec's runnables still ran, still failed
+  // against the dead transport, and `afterTest`/`afterHook` still accumulated their results into
+  // `fileResults` (WDIO swallows a throwing config hook rather than aborting the worker —
+  // `executeHooksWithArgs` in `@wdio/utils` resolves with the error and `testFrameworkFnWrapper` carries
+  // on to the runnable, which is why the cascade kept going), but NOTHING ever flushed those
+  // accumulators to disk. Thirteen spec files' worth of loud, attributable evidence was recorded and
+  // then dropped on the floor, leaving the ratchet to report the aftermath — 1/14 reported, 0 new
+  // failing cases — instead of the cause. Measured, not inferred: the failing run's own
+  // `gui-smoke-results-ubuntu-shard-2` artifact (run 33107885332) contains exactly one file,
+  // `wdio-shard-2-of-4-archive-browse.smoke.json`, for a shard that had visibly executed all fourteen.
+  //
+  // Advancing it HERE, before anything that can throw, means each spec file's own accumulator is the one
+  // that gets flushed at the next transition regardless of what happens in between. A shard that dies
+  // now reports every spec BY NAME with its real error, which is still RED (loudly so — see
+  // `formatShardAbort`'s note about not mistaking one death for N regressions) and no longer a mystery.
+  // It also means the reset is attempted exactly ONCE per spec file, which is what this mechanism always
+  // claimed to do: the old freeze made `file !== currentSpecFile` true for every subsequent runnable, so
+  // a dead transport re-attempted the reset two-to-four times per file and buried the log in ~10k lines
+  // of identical stack traces.
+  currentSpecFile = file;
+
+  if (previous === undefined) {
     logPhase("handleRunnableStart:firstFileSkipReset", label);
-  } else {
-    const { tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
+    return;
+  }
+  // CPE-1955: once the transport is confirmed gone and the bounded respawn is spent, re-running the
+  // reset for every remaining file cannot succeed — it only buries the diagnosis. Skip it and let each
+  // remaining file's own runnables fail against the dead socket, which is the honest record of what
+  // happened to them and is exactly what makes them appear in the ratchet by name.
+  if (shardAborted) {
+    logPhase("handleRunnableStart:skipResetShardAborted", label);
+    return;
+  }
+  const { tmpDir } = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
+  try {
+    await resetAppState(tmpDir);
+    logPhase("handleRunnableStart:resetDone", label);
+  } catch (err) {
+    console.error(
+      `[gui-smoke] resetAppState failed before ${label} — restarting the session and retrying once:`,
+      err,
+    );
+    logPhase("handleRunnableStart:resetFailedRestartingSession", label);
     try {
-      await resetAppState(tmpDir);
-      logPhase("handleRunnableStart:resetDone", label);
-    } catch (err) {
-      console.error(
-        `[gui-smoke] resetAppState failed before ${label} — restarting the session and retrying once:`,
-        err,
-      );
-      logPhase("handleRunnableStart:resetFailedRestartingSession", label);
-      await browser.reloadSession();
+      await recoverSession(err);
       await resetAppState(tmpDir);
       logPhase("handleRunnableStart:resetDoneAfterSessionRestart", label);
+    } catch (recoveryErr) {
+      // CPE-1955: distinguish "the retry also failed" (pre-existing behaviour: throw, this file fails
+      // loudly and attributably, mocha moves on) from "the WHOLE transport is gone" (new: say so once,
+      // in terms a reader can act on, and stop re-attempting a reset that provably cannot work).
+      if (isTransportDead(recoveryErr) || isTransportDead(err)) {
+        shardAborted = true;
+        console.error(formatShardAbort(label, remainingSpecsAfter(file), recoveryErr));
+        logPhase("handleRunnableStart:shardAbortedTransportDead", label);
+      }
+      throw recoveryErr;
     }
   }
-  currentSpecFile = file;
+}
+
+/** CPE-1955: how many of this shard's spec files come AFTER `file`, for the abort diagnosis. Falls back
+ *  to 0 (rendered as "it was the last one") rather than guessing when the file isn't in the shard plan —
+ *  an unsharded local run has no plan, and a wrong count in a diagnostic must not be stated confidently. */
+function remainingSpecsAfter(file: string): number {
+  if (!SHARD_SPECS) return 0;
+  const idx = SHARD_SPECS.indexOf(path.basename(file));
+  if (idx < 0) return 0;
+  return SHARD_SPECS.length - idx - 1;
+}
+
+/** CPE-1955 — the bounded containment. `browser.reloadSession()` alone is the RIGHT answer to an app that
+ *  has wedged (it asks the live driver for a brand-new session with the same capabilities, i.e. a genuine
+ *  fresh app launch), and it demonstrably works: job 98697809924 recovered that way in 35.4 s from the
+ *  identical reset failure on the identical spec. But it is powerless when the failure is the driver
+ *  itself being gone, because its very first act is `DELETE /session/<id>` to a socket that no longer has
+ *  anyone behind it. In the four observed failures that DELETE is the last thing that happens before
+ *  tauri-driver starts logging "connection closed before message completed" and then "Connection refused
+ *  (os error 111)" for the rest of the shard.
+ *
+ *  So: when the cause looks like the transport rather than the app, restart tauri-driver FIRST (which
+ *  respawns the native WebKitWebDriver behind it and re-runs the same both-ports readiness wait
+ *  `beforeSession` uses), then reload the session against the fresh proxy. The respawn budget is ONE per
+ *  worker — see `MAX_DRIVER_RESPAWNS`. Bounded, inside the job, and when it is spent this throws, the
+ *  shard is marked aborted, and the ratchet reds exactly as it does today: this is containment, never an
+ *  exemption, and it cannot turn a red run green. */
+async function recoverSession(cause: unknown): Promise<void> {
+  if (isTransportDead(cause)) await respawnTauriDriver();
+  try {
+    await browser.reloadSession();
+  } catch (err) {
+    // The reload itself is also where the transport death is FIRST observable when the reset failed for
+    // an ordinary app-level reason (the observed chain: a soft breadcrumb assertion, then the DELETE
+    // that kills the driver). One more bounded attempt, if the budget has not already been spent.
+    if (!isTransportDead(err)) throw err;
+    await respawnTauriDriver();
+    await browser.reloadSession();
+  }
+}
+
+/** CPE-1955: kill the current tauri-driver, WAIT for it to actually exit (so its listening sockets are
+ *  released before the replacement tries to bind the same two fixed ports — a `.kill()` returns the
+ *  instant SIGTERM is queued, not when the process is gone, and racing that would have the readiness
+ *  wait below succeed against the DYING listener), then start a fresh one. Throws once the budget is
+ *  spent so the caller reds rather than looping. */
+async function respawnTauriDriver(): Promise<void> {
+  if (driverRespawnsUsed >= MAX_DRIVER_RESPAWNS) {
+    throw new Error(
+      `[gui-smoke] the WebDriver transport is gone and the tauri-driver respawn budget (${MAX_DRIVER_RESPAWNS}) is spent — not retrying again (CPE-1955)`,
+    );
+  }
+  driverRespawnsUsed += 1;
+  console.error(
+    `[gui-smoke] the WebDriver transport looks gone — respawning tauri-driver (respawn ${driverRespawnsUsed} of ${MAX_DRIVER_RESPAWNS}, CPE-1955)`,
+  );
+  logPhase("respawnTauriDriver:start", "(worker)");
+  const dying = tauriDriver;
+  tauriDriver = undefined; // supersede first: the old child's own exit handler checks identity below
+  if (dying) await killAndWaitForExit(dying, 10_000);
+  logPhase("respawnTauriDriver:oldProcessGone", "(worker)");
+  await startTauriDriver("(respawn)");
+  logPhase("respawnTauriDriver:driverReady", "(worker)");
+}
+
+/** Sends SIGTERM, waits up to `budgetMs` for the real `exit`, then escalates to SIGKILL and waits again.
+ *  Resolves either way — a driver we could not kill is a problem the caller's own readiness wait will
+ *  surface as a loud, bounded failure, not something to hang the whole worker on. */
+function killAndWaitForExit(child: ChildProcess, budgetMs: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      setTimeout(finish, 1_000);
+    }, budgetMs);
+    let done = false;
+    function finish(): void {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    }
+    child.once("exit", finish);
+    child.kill();
+  });
+}
+
+/** Spawns tauri-driver and does not return until BOTH its front door (its own port) and its back door
+ *  (the native WebKitWebDriver/msedgedriver it spawns) are actually accepting connections. Extracted from
+ *  `beforeSession` by CPE-1955 so the mid-shard respawn above starts the driver by exactly the same path,
+ *  readiness waits included, rather than a second hand-rolled copy that could drift from it.
+ *
+ *  The `error`/`exit` handlers are bound to the child they were attached to and no-op if `tauriDriver` has
+ *  since moved on — a deliberate respawn supersedes the old process before killing it, and its eventual
+ *  `exit` must NOT be read as "the driver died unexpectedly" and take the worker down with `process.exit(1)`. */
+async function startTauriDriver(specLabel: string): Promise<void> {
+  const child = spawn(
+    TAURI_DRIVER_BIN,
+    ["--port", String(TAURI_DRIVER_PORT), "--native-port", String(NATIVE_DRIVER_PORT)],
+    { stdio: [null, process.stdout, process.stderr] },
+  );
+  tauriDriver = child;
+  child.on("error", (error) => {
+    if (tauriDriver !== child) return;
+    console.error("[gui-smoke] tauri-driver error:", error);
+    process.exit(1);
+  });
+  child.on("exit", (code) => {
+    if (tauriDriver !== child) return; // superseded by a CPE-1955 respawn — expected, not a failure
+    if (!shuttingDown) {
+      console.error("[gui-smoke] tauri-driver exited early with code:", code);
+      process.exit(1);
+    }
+  });
+  // Front door first (fast: a bare TCP bind) — see the CPE-1772 half of `beforeSession`'s comment.
+  await waitForPort("127.0.0.1", TAURI_DRIVER_PORT, 10_000, "tauri-driver");
+  logPhase("beforeSession:frontDoorReady", specLabel);
+  // Back door second (slower: a whole other driver binary has to start) — see the CPE-1832 half of that
+  // comment. This is the actual fix for the observed "Connection refused" evidence.
+  await waitForPort(
+    "127.0.0.1",
+    NATIVE_DRIVER_PORT,
+    20_000,
+    "the native WebDriver (WebKitWebDriver/msedgedriver, spawned by tauri-driver)",
+  );
 }
 
 function killTauriDriver() {
@@ -1529,32 +1723,7 @@ export const config: WebdriverIO.Config = {
   beforeSession: async (_config, _capabilities, specs) => {
     const specLabel = specLabelFrom(specs as readonly string[] | undefined);
     logPhase("beforeSession:start", specLabel);
-    tauriDriver = spawn(
-      TAURI_DRIVER_BIN,
-      ["--port", String(TAURI_DRIVER_PORT), "--native-port", String(NATIVE_DRIVER_PORT)],
-      { stdio: [null, process.stdout, process.stderr] },
-    );
-    tauriDriver.on("error", (error) => {
-      console.error("[gui-smoke] tauri-driver error:", error);
-      process.exit(1);
-    });
-    tauriDriver.on("exit", (code) => {
-      if (!shuttingDown) {
-        console.error("[gui-smoke] tauri-driver exited early with code:", code);
-        process.exit(1);
-      }
-    });
-    // Front door first (fast: a bare TCP bind) — see the CPE-1772 half of the comment above.
-    await waitForPort("127.0.0.1", TAURI_DRIVER_PORT, 10_000, "tauri-driver");
-    logPhase("beforeSession:frontDoorReady", specLabel);
-    // Back door second (slower: a whole other driver binary has to start) — see the CPE-1832 half of
-    // the comment above. This is the actual fix for the observed "Connection refused" evidence.
-    await waitForPort(
-      "127.0.0.1",
-      NATIVE_DRIVER_PORT,
-      20_000,
-      "the native WebDriver (WebKitWebDriver/msedgedriver, spawned by tauri-driver)",
-    );
+    await startTauriDriver(specLabel);
     // CPE-1866: everything from `beforeSession:start` to here is the driver-process phase — spawning
     // tauri-driver and waiting for both its front door (bare TCP bind) and back door (the native
     // WebKitWebDriver/msedgedriver binary actually starting) to accept connections. NONE of this has

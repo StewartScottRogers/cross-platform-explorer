@@ -519,6 +519,46 @@ jobs (CPE-1266's already-tracked long-term direction); `if: always()` here is th
 mitigation meanwhile, because the harm in PR #900 was a human misreading a cancelled log, not the
 cancellation itself being wrong.
 
+### "SUITE DID NOT COMPLETE — only 1 of N reported" means a driver death, not a mystery (CPE-1955)
+
+If a shard reds with `SUITE DID NOT COMPLETE: expected N spec file(s) ... but only 1 reported any
+result` and **0 new failing cases**, that specific shape is a diagnosed defect with a name, not a flake
+to re-run. On 2026-08-27 it hit `shard 2` four times on four unrelated PRs (#1039 twice, #1056, #1063),
+always identically, and each occurrence was re-run green — which is what made it look like infrastructure
+noise for a whole day.
+
+**The measured chain** (read from the four job logs, not inferred — job ids are in
+`lib/driverHealth.ts`'s header):
+
+1. `handleRunnableStart` runs `resetAppState` before the shard's **second** spec file and it fails with
+   an ordinary app-level assertion — `expected the breadcrumb to show "cpe-gui-smoke-xxxxxx" ...`, the
+   CPE-1728 slow-renderer signature. Soft failure; CPE-1866's recovery path is meant to absorb it.
+2. That recovery calls `browser.reloadSession()`, whose first act is `DELETE /session/<id>`.
+3. ~600 ms later the **native driver behind tauri-driver** is gone: tauri-driver logs, in its own voice,
+   `connection closed before message completed`, then `Connection refused (os error 111)` for the rest of
+   the shard. (It does not always die — job 98697809924 recovered from the identical step 1 in 35.4 s.
+   That is why this is intermittent.)
+4. Every later spec's before-hook then failed instantly against the dead socket — **and was silently
+   dropped**, because `currentSpecFile` was only advanced on the reset's success path, so
+   `flushFileResult` stayed pinned to spec #1 forever. Thirteen spec files' worth of loud, attributable
+   evidence was recorded into `fileResults` and never written. The failing run's own results artifact
+   contains exactly one file, for a shard that had visibly executed all fourteen.
+
+**It was the shard's CONTENTS, not the shard index.** The trigger is `checkpoint-restore.smoke.ts`
+(shard 2's spec #2) tripping the reset; the blast radius was a generic containment bug that would have
+hit any shard whose reset ever failed. In the same run, shards 1/3/4 logged **zero** reset failures.
+
+**What changed.** `wdio.conf.ts` now advances `currentSpecFile` *before* the reset, so a shard that dies
+reports **every** spec by name with its real error (still red — more loudly, not less); the reset is
+attempted once per file rather than 2-4 times, which removes ~10k lines of duplicate stack traces; and a
+transport death (`lib/driverHealth.ts#isTransportDead`) triggers **one** bounded tauri-driver respawn
+before giving up. When that budget is spent the job prints a `[gui-smoke] SHARD ABORTED` block naming the
+spec it died in, the cause, and — importantly — that the N failures after it are **one death, not N
+regressions**, so nobody files N `known-failing.json` entries for them.
+
+**The ratchet was never the problem and was not touched.** `incomplete=true ⇒ RED` (CPE-1753) is correct
+and stays. This is containment plus legibility, never an exemption; nothing here can turn a red run green.
+
 ### The stress-harness "session death" is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702)
 
 CPE-1679's
