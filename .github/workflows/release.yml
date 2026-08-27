@@ -398,6 +398,37 @@ jobs:
   # (catalog-freshness.yml) is the independent backstop for every other way this bundle could stop
   # shipping without a `release`-job failure at all (e.g. this job "succeeding" at zero work because
   # the signing-key secret got unset) — see that workflow's header comment.
+  #
+  # ── CPE-1953: the coupling decision, recorded ───────────────────────────────────────────────────
+  # This ticket asked whether `needs: release` is the right coupling at all, given that a broken
+  # INSTALLER build silently stopped AGENT-CATALOG updates for every user — two failures with very
+  # different blast radii chained to one condition. The answer, deliberately, is **keep `needs:
+  # release` and make every remaining silent path loud instead**, because the dependency is not mere
+  # ordering that could be dropped: this job's only publishing action is `gh release upload "$TAG"`,
+  # which needs the release object that `release`/tauri-action CREATES. A fully decoupled `catalog`
+  # job would start at t=0 and race that creation — turning today's deterministic, diagnosable
+  # coupling into a nondeterministic upload failure that is strictly WORSE to read. So the coupling
+  # stays; what changes is that no path through this job may finish green without having published.
+  #
+  # Three ways this job could still end green having shipped nothing, all closed below:
+  #   1. NO SIGNING KEY (the big one). Every real step here is `if: steps.k.outputs.has == 'true'`,
+  #      so with `CPE_CATALOG_SIGNING_KEY` unset the job RAN, skipped all of them, and concluded
+  #      `success` — a vacuous success indistinguishable in the run summary from a real publish.
+  #      This is the identical hole CPE-1923 finding 4 found and fixed for
+  #      `verify-published-manifest`'s `Detect updater signing key` above, and this job was not
+  #      given the same treatment at the time. It is now the SAME shape, using the SAME
+  #      `RELEASE_BUILD: github.ref_type == 'tag'` test and the same preserved `has=false`
+  #      non-tag arm — not a second, differently-reasoned mechanism.
+  #   2. ZERO-WORK SIGN. `catalog-sign` exiting 0 having written no (or an empty, or an
+  #      entry-less) `catalog-index.json` — `Verify the signed bundle` below reads the actual file
+  #      the client actually fetches and fails on it, BEFORE the upload.
+  #   3. UPLOAD THAT ATTACHED NOTHING USEFUL. `Confirm the catalog is actually on the release` below
+  #      re-reads the release's asset list from GitHub afterwards and requires
+  #      `catalog-index.json` (+ its `.sig`) to be there by name — so an upload that "succeeded"
+  #      while attaching the wrong files, or that landed on an object that then lost them, is red
+  #      here rather than discovered ~14 days later by catalog-freshness.yml.
+  # The `!cancelled()` job-level `if:` (CPE-1893) is what makes a failed `release` job leave this one
+  # RUNNING; these three make what it does while running impossible to mistake for a publish.
   catalog:
     needs: release
     if: ${{ !cancelled() }}
@@ -405,12 +436,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # CPE-1953: byte-for-byte the same vacuous-success argument (and very nearly the same script)
+      # as `Detect updater signing key` in `verify-published-manifest` above — see CPE-1923 finding
+      # 4 there for the full reasoning, which transfers without modification. In short: this workflow
+      # is triggered ONLY by a version-tag push, so on the tag path there is no legitimate "nothing
+      # to publish" state. A tag means a release is being cut; a release cut with no catalog signing
+      # key is a release that silently stops updating every user's agent roster, not an exempt one.
+      #
+      # The `has=false` arm is deliberately kept rather than deleted: it is the arm a non-tag trigger
+      # would take if one is ever added, and keeping it means the three downstream
+      # `if: steps.k.outputs.has == 'true'` gates are untouched — which matters because
+      # `src/lib/catalogPublishFreshnessGuard.test.ts` pins that those gates still exist. Failing
+      # HERE closes the hole without moving the gate any guard depends on.
       - name: Detect catalog signing key
         id: k
+        shell: bash
         env:
           KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
+          RELEASE_BUILD: ${{ github.ref_type == 'tag' }}
         run: |
-          if [ -n "$KEY" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; fi
+          set -euo pipefail
+          if [ -n "${KEY:-}" ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${RELEASE_BUILD:-}" = "true" ]; then
+            echo "::error::CPE_CATALOG_SIGNING_KEY is not set, but this run is CUTTING A RELEASE. Without it every step below SKIPS and this job still reports success — a green run that published no agent catalog at all, which is exactly how the catalog went unpublished for 33 days (CPE-1953/CPE-1893). Set the secret, or do not cut this release. This step will not report a green no-op."
+            exit 1
+          fi
+          echo "has=false" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         if: steps.k.outputs.has == 'true'
@@ -476,7 +530,9 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build + sign the catalog bundle
+        id: sign
         if: steps.k.outputs.has == 'true'
+        shell: bash
         env:
           # A 32-byte ed25519 seed (hex). Generate once; its public key goes in CATALOG_TRUSTED_KEYS.
           CPE_CATALOG_SIGNING_KEY: ${{ secrets.CPE_CATALOG_SIGNING_KEY }}
@@ -489,8 +545,174 @@ jobs:
           cargo run --locked --release --quiet --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
             sidecar/ai-console/agents catalog-out "$VERSION"
 
-      - name: Upload catalog assets to the release
+      # CPE-1953, hole 2 (zero-work sign). `catalog-sign` exiting 0 is not evidence it produced
+      # anything a client can use. This reads the EXACT file a real client fetches
+      # (`catalog-index.json`, per catalog_sign.rs's own doc header and catalog-freshness.yml's fetch
+      # URL) and requires it to exist, be non-empty, parse, and carry at least one entry with the
+      # anti-rollback `version` stamp the freshness check reads. Deliberately BEFORE the upload, so a
+      # useless bundle never reaches the release at all rather than being detected afterwards.
+      - name: Verify the signed bundle before uploading it
+        id: bundle
         if: steps.k.outputs.has == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          index=catalog-out/catalog-index.json
+          if [ ! -s "$index" ]; then
+            echo "::error::catalog-sign exited 0 but produced no non-empty ${index} — there is nothing to publish. Uploading anyway would leave the release looking like it carries a catalog while every client's fetch 404s or reads an empty index (CPE-1953)."
+            ls -la catalog-out 2>/dev/null || echo "(catalog-out does not exist)"
+            exit 1
+          fi
+          # RESIDUAL, named deliberately (CPE-1953 review): this checks the signature is PRESENT and
+          # non-empty, never that it VERIFIES. A garbage `.sig` passes here. That is scoped out on
+          # purpose — verifying it needs the public key and the same verify path a client uses, which
+          # is CPE-1954's `VerifiedIndex` work, not a shell one-liner bolted on here. This step's
+          # claim is therefore exactly "a signature file was produced", not "the bundle is valid".
+          if [ ! -s "${index}.sig" ]; then
+            echo "::error::${index} exists but its detached signature ${index}.sig is missing or empty. Every client verifies the signature before applying (CPE-372), so an unsigned index publishes a catalog nobody can use."
+            exit 1
+          fi
+          # `if ! var=$(...)` rather than a bare assignment: under `set -e` a bare failing command
+          # substitution aborts the step BEFORE the diagnostic can be printed (the CPE-1893 UAT
+          # round-1 finding, red-proofed in catalogPublishFreshnessGuard.test.ts).
+          if ! entries=$(jq -r '.entries | length' "$index"); then
+            echo "::error::${index} is not parseable JSON — catalog-sign wrote a corrupt or truncated index."
+            exit 1
+          fi
+          # CPE-1953 review, blocker 1: `[ "$x" -lt 1 ]` exits **2** (not 1) when $x is not a single
+          # integer, and inside an `if` an exit of 2 is indistinguishable from a plain "false" — so
+          # the zero-entry check below was SKIPPED and this step exited 0, going on to upload, while
+          # bash printed only `[: integer expected` to stderr. That is this ticket's own defect class
+          # (a guard failing OPEN and reporting success) inside the guard added to prevent it.
+          # It is reachable with REAL jq, not just a stub: a concatenated JSON stream
+          # (`{"entries":[]}{"entries":[{…}]}`) makes jq print one length per document and exit 0,
+          # yielding a multi-line `entries`. Validate the SHAPE first, then compare. `case` rather
+          # than a `grep -Eq` pipeline deliberately — no subshell, and so no repeat of the pipefail
+          # /SIGPIPE trap noted on the confirm step below. Red-proofed by execution in
+          # src/lib/catalogPublishLoudFailure.test.ts.
+          case "$entries" in
+            "" | *[!0-9]*)
+              echo "::error::could not read a single entry count from ${index}: jq returned [${entries}], which is not one non-negative integer. Refusing to treat an unreadable count as a passing one — that is how a guard fails open."
+              exit 1
+              ;;
+          esac
+          if [ "$entries" -lt 1 ]; then
+            echo "::error::${index} parses but has zero entries[] — this is the 'succeeding at zero work' shape catalog-freshness.yml's header warns about, caught here at publish time instead of up to 14 days later."
+            exit 1
+          fi
+          echo "entries=${entries}" >> "$GITHUB_OUTPUT"
+          echo "signed catalog bundle carries ${entries} entr(y|ies); files to upload:"
+          ls -la catalog-out
+
+      # CPE-1893's own claim lives here: with `if: ${{ !cancelled() }}` above, a total-matrix
+      # `release` failure leaves NO release object for this tag, and `gh release upload` then exits
+      # non-zero ("release not found") — the job FAILS LOUDLY instead of skipping grey. That claim
+      # had never once been exercised against a real release (every skip in the history predates
+      # CPE-1893), so it is now red-proofed by execution in
+      # src/lib/catalogPublishLoudFailure.test.ts, which runs THIS step's own `run:` body with a stub
+      # `gh` that reproduces GitHub's real not-found response.
+      - name: Upload catalog assets to the release
+        id: up
+        if: steps.k.outputs.has == 'true'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" catalog-out/* --clobber
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" catalog-out/* --clobber
+
+      # CPE-1953, hole 3 (an upload that attached nothing useful). `gh release upload` succeeding
+      # proves a transfer happened, not that the release now carries the file a client asks for by
+      # name. Re-reading the asset list from GitHub afterwards is the only check that survives a
+      # future edit to the upload glob, a partially-applied `--clobber`, or an object that lost its
+      # assets — and it is the same "verify the PUBLISHED state, not the local intent" principle
+      # `verify-published-manifest` above already applies to latest.json.
+      #
+      # Like that job, this step declares no `permissions:` and inherits the workflow-level
+      # `contents: write`. That is load-bearing for the same documented reason: `gh release view`
+      # against a DRAFT release 404s on the unauthenticated `GET /releases/tags/{tag}` lookup and
+      # falls back to a listing call needing push access. tauri-action creates the release as a
+      # draft, so this read is always a draft read on a normal run.
+      - name: Confirm the catalog is actually on the release
+        id: confirm
+        if: steps.k.outputs.has == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # RESIDUAL, named deliberately (CPE-1953 review): this asserts the assets are PRESENT BY
+          # NAME, never that they have bytes — `--json assets` also carries `.size`, and a zero-byte
+          # `catalog-index.json` would pass this check. Left as-is rather than half-fixed: a size>0
+          # test would still not prove the uploaded bytes match what was signed locally, and the
+          # honest version of that check is a re-download-and-verify, which is `verify-published-
+          # manifest`'s shape and wants its own ticket rather than an inline approximation here.
+          if ! names=$(gh release view "$TAG" --json assets --jq '.assets[].name'); then
+            echo "::error::could not read back the asset list for ${TAG} after uploading. A lookup failure is NOT evidence the upload worked — refusing to report success on it (CPE-1794's lesson, applied here)."
+            exit 1
+          fi
+          # A HERESTRING, not `printf ... | grep -q`: under `pipefail` a `grep -q` that matches early
+          # closes the pipe, printf takes SIGPIPE, and the PIPELINE reports 141 — so the piped form
+          # can set `missing` on the very case where the asset was FOUND. Stated precisely, because
+          # the first version of this comment overstated it (CPE-1953 review): the inversion is
+          # SIZE-GATED, needing roughly 28,912–88,912 bytes of asset names (~2,000–6,000 assets) for
+          # printf to still be writing when grep exits. A real release carries ~20, so the piped form
+          # would have worked in practice — this is a latent inverted-verdict shape that never
+          # shipped, avoided rather than a bug that bit. Both shapes are executed in
+          # catalogPublishLoudFailure.test.ts.
+          missing=""
+          for want in catalog-index.json catalog-index.json.sig; do
+            grep -Fxq "$want" <<< "$names" || missing="${missing} ${want}"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::the upload reported success but ${TAG} does not carry:${missing}. Assets actually present:"
+            printf '%s\n' "$names"
+            exit 1
+          fi
+          echo "confirmed on ${TAG}: catalog-index.json + catalog-index.json.sig"
+
+      # CPE-1953 — the single place this job's honesty is decided. `if: always()` so it reports even
+      # when an earlier step failed or skipped: its whole job is to make sure the words "catalog:
+      # success" in a run summary can only ever mean a catalog was published. Any step above that is
+      # neither `success` nor a legitimately-configured skip lands here as a RED status with the
+      # reason spelled out, rather than as a grey job nobody reads.
+      - name: Catalog publish outcome
+        if: always()
+        shell: bash
+        env:
+          HAS_KEY: ${{ steps.k.outputs.has }}
+          SIGN: ${{ steps.sign.outcome }}
+          BUNDLE: ${{ steps.bundle.outcome }}
+          UPLOAD: ${{ steps.up.outcome }}
+          CONFIRM: ${{ steps.confirm.outcome }}
+          ENTRIES: ${{ steps.bundle.outputs.entries }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_BUILD: ${{ github.ref_type == 'tag' }}
+        run: |
+          set -uo pipefail
+          if [ "${HAS_KEY:-}" != "true" ]; then
+            # CPE-1953 review, blocker 2. `HAS_KEY` is empty in TWO different situations, and an
+            # earlier version of this branch collapsed them into one sentence that was false in the
+            # more important of the two: a tag build where the detect step FAILED (so `has` was never
+            # written) got told "this is not a tag build — nothing was expected to be [published]",
+            # both clauses wrong, in the exact scenario this ticket was filed for. The job was still
+            # red via step `k`, so the outcome was right and the SUMMARY LINE lied — which for a step
+            # whose whole job is to say what happened is the same defect in a smaller place. Read the
+            # trigger directly rather than inferring it from a missing output.
+            if [ "${RELEASE_BUILD:-}" = "true" ]; then
+              echo "::error::no catalog signing key was available on a TAG build (${TAG}), so nothing was published and a publish WAS expected. See the 'Detect catalog signing key' step above for why — it fails deliberately rather than letting this job go green having shipped no agent catalog."
+              exit 1
+            fi
+            echo "::notice::no catalog signing key configured and this is not a tag build — nothing was published, and nothing was expected to be."
+            exit 0
+          fi
+          failed=""
+          [ "${SIGN:-}" = "success" ] || failed="${failed} build+sign(${SIGN:-<none>})"
+          [ "${BUNDLE:-}" = "success" ] || failed="${failed} verify-bundle(${BUNDLE:-<none>})"
+          [ "${UPLOAD:-}" = "success" ] || failed="${failed} upload(${UPLOAD:-<none>})"
+          [ "${CONFIRM:-}" = "success" ] || failed="${failed} confirm-on-release(${CONFIRM:-<none>})"
+          if [ -n "$failed" ]; then
+            echo "::error::the agent catalog was NOT published for ${TAG}. Non-success steps:${failed}. Every user's agent roster stays on whatever was last published until this is fixed — see CPE-1953, and .github/workflows/catalog-freshness.yml for how stale that is allowed to get before the independent backstop fires."
+            exit 1
+          fi
+          echo "agent catalog published for ${TAG}: ${ENTRIES:-?} entr(y|ies), confirmed present on the release."
