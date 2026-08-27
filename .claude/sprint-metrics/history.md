@@ -1615,3 +1615,36 @@ never touched, but it is the known [[janitor-prune-breaks-agent-resume]] hazard 
 time on **agents that are still attached to an open PR**. If a cleanup pass runs during a sprint, it
 must skip every worktree whose agent has an open PR in the queue — not just the ones currently
 executing.
+
+## 2026-08-27 — real Linux `sidecar-host` runs now work too
+
+CPE-1949's worker extended the WSL sysroot at `~/lintools` rootlessly — `pkgconf`, `libpkgconf7`,
+`libdbus-1-dev`, `libsystemd-dev` unpacked with `dpkg-deb -x`, plus a `~/lintools/bin/pkg-config`
+wrapper that sets `PKG_CONFIG_SYSROOT_DIR`. Two earlier workers had reported `sidecar-host` as
+unbuildable there (`libdbus-sys` needs headers the base sysroot lacks) and fell back to
+Windows-only verification.
+
+So the crew now gets real Linux runs for **`crates/server` and `sidecar/host`**. Say so in dispatch
+prompts for both.
+
+**The `/mnt/z` staleness gotcha is confirmed and has now produced a false green twice.** Cargo reported
+`Finished in 0.53s` and ran stale code against a sabotage. **`touch` the file inside WSL before every
+run.**
+
+## 2026-08-27 — a `pub(crate)` test seam can leak across tests
+
+CPE-1937's worker added `BETWEEN_DESCENT_AND_LEAF`, a `#[cfg(test)]` injection seam, to close a real
+CI coverage hole — the right fix, and the Auditor proved it absent from a **linked non-test binary**
+(strings 0, symbols 0, against a test-binary control of 3/3; the only rlib occurrence is in
+`lib.rmeta`, which the linker discards).
+
+But it can be **left armed**: arm the hook, run a delete whose *descent* refuses so the seam is never
+reached and nothing consumes it, and the next unrelated delete fires it. Measured
+`still_armed_after_refused_descent = true`, `fired_on_next_unrelated_delete = 1` on both platforms.
+The seam is `pub(crate)`, so any module's tests can arm it, and under `--test-threads=1` libtest
+shares one thread — so a leak crosses tests.
+
+**Rule: a test injection seam must clear on drop (RAII) or at entry to the function it instruments,
+not rely on the instrumented path being reached.** `WALK_SYSCALLS` has no such guard either, and its
+only consumer prints an unasserted number — so there is no existing pattern to copy, and the next
+module reusing this machinery (`copilot::apply_op` + `renameat`) is the one at risk.
