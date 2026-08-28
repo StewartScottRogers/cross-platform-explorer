@@ -12,11 +12,16 @@ created: 2026-08-28
 ## Summary
 
 Found by CPE-1964's worker while re-deriving the `temp_dir()` enumeration. Three sites build the
-**same fixed** path and create it with **`create_dir_all`**:
+**same fixed** path; **two** of them create it with **`create_dir_all`**, and the third only reads
+and deletes (corrected in CPE-1964 round 2 — the original wording put `create_dir_all` on all three):
 
-- `sidecar/ai-console/src/session_diag.rs:33`
-- `sidecar/ai-console/src/session_supervisor.rs:151`
-- `sidecar/host/src/reaper.rs:61`
+- `sidecar/ai-console/src/session_diag.rs:33` builds it; `:52` creates it with `create_dir_all`
+- `sidecar/ai-console/src/session_supervisor.rs:151` builds it; `write_port_file` at `:144` creates it
+  with `create_dir_all`
+- `sidecar/host/src/reaper.rs:61` builds it — **no `create_dir_all` here**; `reap_orphan_session_daemons`
+  only tests `port_file.exists()` and `remove_file`s it (`:79`). It is still in scope: it is a *reader
+  and deleter* of the same redirectable path, so a planted link makes it consult — and unlink —
+  something inside the attacker's directory.
 
 `create_dir_all` is the primitive CPE-1952 established will **follow a junction/symlink into an
 attacker-chosen directory**, and this path is **not even timestamped** — `cpe-swarm-<millis>` was at

@@ -237,6 +237,41 @@ fn main() {
         return;
     }
 
+    // CPE-1964: sweep mission directories older than 24h out of the OS temp directory. Missions must
+    // exist on disk (separate `--swarm-mcp` processes coordinate through them), so unlike CPE-1952's
+    // staging directory they cannot simply be deleted at the source — and nothing used to remove
+    // them, which is how 55 accumulated in one real `%TEMP%`. Deliberately here rather than in an
+    // RAII guard on the mission thread: the live coordination panel reads that directory, and the
+    // moment you most want to read what the agents said is right after the mission ends.
+    //
+    // On a background thread so a slow or huge temp directory cannot delay the handshake below; the
+    // sweep refuses everything that is not plainly ours (name shape, real directory not a link, our
+    // `members.json` roster, old enough) and fails closed on any unreadable entry, so a detached
+    // thread cannot do damage unobserved. It is deliberately not joined at shutdown — each removal
+    // deletes the roster last instead, so a console that exits mid-delete leaves a directory the next
+    // sweep still recognises. See `swarm_mission_dir` for the full argument.
+    std::thread::spawn(|| {
+        let r = ai_console::swarm_mission_dir::sweep_stale_mission_dirs_now();
+        if !r.removed.is_empty() || r.failed > 0 {
+            // `kept` counts only entries the sweep *considered* — a mission-shaped name it then
+            // refused — never the rest of the temp directory, which runs to thousands of unrelated
+            // entries (CPE-1974) and would read as thousands of mission directories. The prefix is
+            // interpolated from the production constant rather than spelled here, because exactly one
+            // file is allowed to spell it (`src/lib/tempDirSites.test.ts` fails CI otherwise).
+            let prefix = ai_console::swarm_mission_dir::MISSION_PREFIX;
+            ai_console::session_diag::trace(
+                "sidecar",
+                &format!(
+                    "CPE-1964 mission-dir sweep: removed {}, left {} {prefix}* entries alone \
+                     (still in retention, or not plainly ours), could not remove {}",
+                    r.removed.len(),
+                    r.skipped,
+                    r.failed
+                ),
+            );
+        }
+    });
+
     let stdin = std::io::stdin();
     // A single shared writer so the main loop and the broker client never interleave
     // partial lines on stdout (CPE-344).
