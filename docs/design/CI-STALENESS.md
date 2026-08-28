@@ -234,7 +234,26 @@ board carrying every real `ci.yml` check and a `security.yml` spelled that way �
 `{"state":"ok", …, "detail":"every job \`main\` requires from ci.yml produced a check here"}`: round
 3's `pull_request_target` defect character for character, detail string included. `readOnBlock` now
 refuses an unbalanced `[`/`{` on the `on:` line and answers `unknown`, which `coverageOf` blocks on
-by name. **Read the list above as "at least these", the way `readOnBlock`'s header says and this
+by name.
+
+> **OPERATOR CONSEQUENCE — read this first if `ci-poll` has started refusing every PR at once.**
+> `unknown` is fail-closed, and it is **not a property of one board**: it is a property of a *workflow
+> file on `main`*. So the first time anyone in this repo writes an `on:` this scanner cannot read — a
+> multi-line flow `on: [push,` / `  pull_request]`, a YAML anchor or alias, a block scalar `on: >` —
+> `ci-poll` returns **exit 5, `CI VERDICT: completed coverage-unknown`, on EVERY PR**, until that
+> `on:` is rewritten. It names the file and the reason it could not read it: *"could not classify the
+> `on:` block of `<file>` (`on:` uses a flow collection that does not close on its own line), so
+> whether its jobs must judge this PR is unknown — 'did not run', not 'nothing to check'. Read that
+> workflow's `on:` key."*
+>
+> **That is the intended behaviour**, and it is the right trade: the alternative is the confident
+> `false` that returned `coverage=ok` with a whole workflow's guard set missing. But it is a
+> repo-wide stop rather than one PR's problem, and **the fix is a one-line edit to the workflow, not
+> a change to the poller** — put the `on:` in block form, or close the flow collection on its own
+> line. There is no `--no-coverage`-shaped escape to reach for, deliberately — `ci-poll`'s whole
+> argument surface is `--run` / `--pr` / `--budget` / `--interval`.
+
+**Read the list above as "at least these", the way `readOnBlock`'s header says and this
 paragraph's predecessor did not** — a sub-list under an "at least these" heading does not inherit the
 hedge, and this one was read as complete for a round.
 

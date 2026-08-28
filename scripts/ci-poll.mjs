@@ -471,7 +471,9 @@ export function scanWorkflowJobs(source) {
     // needs it fail-closed, because a truncated job list silently SHRINKS what `main` requires.
     // Red-proofed: `if (false && …)` here reds exactly `a column-0 comment inside \`jobs:\` no longer
     // truncates the job list` — 1 failed / 74 skipped under `-t "no longer truncates the job list"`,
-    // re-measured in round 3 (round 2 wrote `69 skipped`, taken at 70 tests; the file holds 75 now).
+    // re-measured in round 3 (round 2 wrote `69 skipped`, taken at 70 tests). ROUND 6: the file holds
+    // **76**, and that filter selects the same single test — `1 of 76 / 75 skipped` (measured). Only
+    // the denominator moved; the failed set, which is the claim, did not.
     if (/^[\t ]*#/.test(line)) continue;
     if (/^\S/.test(line)) {
       // A new top-level key ends the jobs block.
@@ -776,6 +778,13 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  *     reproduced round 3's `pull_request_target` defect exactly, `detail` string included. It now
  *     answers `unknown`, which is fail-closed but again not understanding: the workflow stops the poll
  *     rather than being read. A real flow parser would read it; that is the fix if one ever lands here.
+ *     SPELL THE OPERATIONAL CONSEQUENCE OUT, because `unknown` is a property of a FILE, not of a
+ *     board: the first `on:` in this repo written any of these three ways makes `ci-poll` exit 5
+ *     `completed coverage-unknown` — naming that file and this `why` — on EVERY PR until the `on:` is
+ *     rewritten. Right, and loud, but repo-wide, and the fix is one line in the workflow, not here.
+ *     Also in `docs/design/CI-STALENESS.md` §2d, which is what an operator reads when the guard
+ *     starts refusing everything; a consequence recorded only at the site is a consequence nobody
+ *     finds in the ten minutes they spend deciding whether to bypass the gate.
  * Every example named above was RUN, not reasoned about, and the answers are the ones written next to
  * them — round 2's list claimed two shapes landed in `unknown` and one of them landed in `false`.
  *
@@ -798,15 +807,30 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  * in round 5) `a multi-line flow \`on:\` was a confident \`false\` …`, whose five comment positions
  * include a column-0 one — **3 failed / 10 passed / 63 skipped** under `-t "fails CLOSED"`.
  * RE-MEASURED IN ROUNDS 3, 4 AND 5: round 2 wrote `1 failed / 5 passed / 64 skipped` here, round 3
- * `2 failed / 10 passed`, and the describe has grown 70 → 75 → 76. A red-proof's counts go stale the
+ * `2 failed / 10 passed`, and the FILE has grown 70 → 75 → 76 tests. A red-proof's counts go stale the
  * moment tests are added beside it, so re-run rather than copy one forward.
  *
+ * WHAT THE NUMBERS IN THIS HEADER COUNT — ROUND 6, DERIVED BY RUNNING IT, because this one itemisation
+ * has now been wrong in three consecutive rounds and always in the same two ways. Both are the same
+ * mistake: reading a count off the SOURCE when every figure here is the RUNNER's.
+ *   • `npx vitest run src/lib/ciPollFailClosed.test.ts` → **76 tests**. The file holds **68 literal
+ *     `it(` across 16 `describe(`s**; the eight-test gap is table-driven, two of those `it(` sitting
+ *     inside `for (const c of cases)` loops that expand to **3** and **7** (measured by filtering on
+ *     each one's title). So the source count and the test count differ by design and neither round's
+ *     "N tests from M `it(` blocks" was ever going to hold by inspection.
+ *   • `-t "fails CLOSED"` selects **13 of the 76** (63 skipped) — but NOT "the describe". `-t` is a
+ *     substring filter over the whole test name, not a describe selector: **12** of the 13 come from
+ *     the CPE-1970 `on:`-block describe, and the thirteenth is `fails CLOSED when the workflow scan
+ *     comes back empty …`, which lives in an unrelated describe and matched on its own title. It is
+ *     inert for these sabotages — it is one of the `passed` in every row below and never one of the
+ *     `failed` — but the filter has never been the describe, and three rounds of prose said it was.
+ *
  * ROUND 3'S OWN RED-PROOFS, all five run against `-t "fails CLOSED"`, each number measured rather
- * than predicted. RE-RUN IN ROUND 4, and AGAIN IN ROUND 5 — round 5 added one `it` to this describe,
- * so the filter now selects **13 of 76** (63 skipped) and every `passed` below moved by one even
- * where nothing about the sabotage changed. That is the stale-count trap the paragraph above warns
- * about, arriving on schedule for the third round running. THE FAILED SETS ARE THE CLAIM; the passed
- * counts are bookkeeping.
+ * than predicted. RE-RUN IN ROUND 4, AGAIN IN ROUND 5, AND AGAIN IN ROUND 6 — round 5 added one `it`
+ * to the CPE-1970 describe, so the filter selects **13 of 76** (63 skipped) and every `passed` below
+ * moved by one even where nothing about the sabotage changed. That is the stale-count trap the
+ * paragraph above warns about, arriving on schedule for the third round running. THE FAILED SETS ARE
+ * THE CLAIM; the passed counts are bookkeeping.
  *
  * AND ONE OF THE FIVE CAME BACK GREEN THE FIRST TIME ROUND 5 RAN IT — 13 passed, 0 failed — which
  * looked like a lost red-proof and was a broken harness: a scripted `replace` of the bare string
@@ -815,7 +839,8 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  * scanner, and the failure is silent in the safe-looking direction: a green run reads as "the test
  * does not cover this" when the truth is "the test was never given anything to notice". Anchored on
  * `prPathFiltered: prAts.every(filtered)` it reds as it always did. If you automate these, assert the
- * patched file DIFFERS FROM THE ORIGINAL IN CODE, not merely that the string was found.
+ * patched file DIFFERS FROM THE ORIGINAL IN CODE, not merely that the string was found. AND THAT IS
+ * A PROPERTY OF THE WHOLE LIST, NOT AN ANECDOTE ABOUT ONE RECIPE — enumerated at the end of it.
  *   • `PR_EVENTS` back to `["pull_request"]` → **4 failed / 9 passed**: `classifies
  *     \`pull_request_target\` …`, `the PR-event list is a literal pair …`, `\`prPathFiltered\` needs
  *     EVERY PR trigger filtered …`, `a \`#\` inside a quoted scalar …`. Note `every real workflow in
@@ -864,6 +889,44 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  *     so the naive count answers 1 and refuses a line the classifier reads correctly today — a fix
  *     that buys a new false positive. Behaviour changes, so the guard is not shadowed on that leg
  *     either.
+ *
+ * ROUND 6 — THE PROSE-COLLISION HAZARD IS GENERAL TO THE TEN RECIPES ABOVE, NOT A STORY ABOUT ONE OF
+ * THEM. Round 5 wrote it up as an anecdote about `prAts.every(filtered)`; that is the same mistake as
+ * "the ONE standing blind spot", and this repo's own lesson is that if you find yourself writing about
+ * THE instance, check first whether the hazard is general to the set. It is. ENUMERATED with the
+ * command below over revision `36601fa7` — the state in which round 5 called it a one-off — rather
+ * than recalled:
+ *   • FIVE of the ten have an anchor whose FIRST occurrence is PROSE, an entry in this very list:
+ *     `splitInlineComment`, `split.rest`, `prAts.every(filtered)`, `events.push(key[2])`,
+ *     `inlineDepth !== 0`. A scripted first-match `replace` of any of them patches documentation,
+ *     changes no behaviour, and reports a green run — the failure round 5 hit once, available five
+ *     times over.
+ *   • TWO ARE AMBIGUOUS RATHER THAN PROSE-SHADOWED, AND THE DIFF-IN-CODE ASSERTION DOES NOT SAVE
+ *     THESE — it is satisfied by patching the WRONG code site. `isComment(lines[i])` has two code
+ *     sites, the `on:`-finder and the block-body skip, told apart only by the ORDER of their two
+ *     operands; `split.rest` likewise has two, the `on:`-line rest and the block-body key, where
+ *     patching the first is a DIFFERENT sabotage that reds a different test — a plausible-looking
+ *     result that is not the one you asked for. For a two-site anchor, assert WHICH SITE MOVED.
+ *   • ONE (`/^pull_request_target$/`) has NO code site in this file at all; that recipe's target is
+ *     in `ciPollFailClosed.test.ts`, so a scripted patch of `ci-poll.mjs` touches only prose.
+ *   • TWO were clean at `36601fa7`: `PR_EVENTS = ` (unique) and the anchor/alias refusal's `/^[&*]/`.
+ * AND THIS PARAGRAPH BROKE ONE OF THOSE TWO — measured, not predicted. Run the command over the file
+ * you are reading and NINE of the ten are prose-first: `/^[&*]/` joined the five (the mention above
+ * precedes the refusal it names) and so did `isComment(lines[i])`, previously merely two-sited.
+ * Exactly ONE survives, `PR_EVENTS = `, and for no reason worth relying on — its declaration simply
+ * sits ABOVE this docblock, so a first-match `replace` reaches the code before the prose. Naming an
+ * anchor is itself an occurrence, and the command's own array contains every one of them. That is
+ * not a flaw in writing this down; it is the strongest available statement of the hazard: THERE IS
+ * NO VERSION OF THIS HEADER THAT DOCUMENTS THE TRAP WITHOUT SETTING IT. So "keep the list short" is
+ * not a remedy and neither is "grep and eyeball whether it looks like code" — only the diff-in-code
+ * assertion, plus the which-site check for the two-site anchors, survives contact with this file.
+ *   node -e 'const s=require("fs").readFileSync(process.argv[1],"utf8").split(/\r?\n/);
+ *     for(const a of ["PR_EVENTS = ","splitInlineComment","split.rest","prAts.every(filtered)",
+ *       "events.push(key[2])","inlineDepth !== 0","isComment(lines[i])","/^pull_request_target$/"]){
+ *       const p=[],c=[]; s.forEach((l,i)=>{if(l.includes(a))(/^\s*(\*|\/\*|\/\/)/.test(l)?p:c).push(i+1)});
+ *       console.log(a,"prose",p,"code",c); }' scripts/ci-poll.mjs
+ * and, for the `36601fa7` column, the same script over
+ * `git show 36601fa7:scripts/ci-poll.mjs` written to a scratch file. Both invocations were run.
  *
  * Same no-dependency line-scan discipline as `scanWorkflowJobs`; `scripts/` has no `node_modules`.
  *
@@ -1280,7 +1343,8 @@ export function coverageOf(checkNames, baseFiles) {
     // Red-proofed: restoring the blanket `if (present === 0)` reds exactly `a PR-triggered workflow
     // with NO path filter that contributed nothing is UNJUDGED, not excused` — 1 failed / 4 passed /
     // 70 skipped under `-t "narrow ON PURPOSE"`, re-measured in round 3 (round 2's `69 skipped` was
-    // taken when the file held 70 tests; it holds 75 now).
+    // taken when the file held 70 tests). ROUND 6: the file holds **76**, and that filter selects the
+    // same five tests — `5 of 76 / 71 skipped` (measured). Only the denominator moved.
     if (present === 0 && on.prPathFiltered) silentWorkflows.push(file);
     else {
       if (present > 0) judgedWorkflows.push(file);
@@ -1689,7 +1753,14 @@ export function verdictClass(decision, latest, unexplainedSkips = [], coverage =
   // classifies as PR-triggered, which is one of this rung's inputs:
   //   · disable the rung                                 → 3 failed / 72 passed
   //   · force `coverageOf` to always answer `ok`         → 12 failed / 63 passed
-  // Both red. The 3 are a STRICT SUBSET of the 12 (`REFUSES the #1056 board`, `names the guard that did
+  // RE-RUN AGAIN in round 6, at 76 tests, AND THE ARITHMETIC ANSWER WOULD HAVE BEEN WRONG — which is
+  // why they are re-run rather than adjusted. Round 5 added one `it`, so "12 failed / 64 passed" is the
+  // obvious carry-forward; measured, it is:
+  //   · disable the rung                                 → 3 failed / 73 passed
+  //   · force `coverageOf` to always answer `ok`         → 13 failed / 63 passed
+  // The new test (`a multi-line flow \`on:\` was a confident \`false\` …`) lands in the SECOND set, not
+  // the passed column: it drives a `security.yml` through `coverageOf`, so forcing `ok` reds it too.
+  // Both red. The 3 are a STRICT SUBSET of the 13 (`REFUSES the #1056 board`, `names the guard that did
   // not judge it`, `counts the gap on the machine-readable totals line`), which is the shape that says
   // the rung is reached rather than shadowed: sabotaging only the rung still reds, so no earlier check
   // in the ladder is answering this question first.
