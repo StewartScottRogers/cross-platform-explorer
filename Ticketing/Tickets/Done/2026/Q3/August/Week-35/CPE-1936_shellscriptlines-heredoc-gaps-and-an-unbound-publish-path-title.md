@@ -3,7 +3,7 @@ id: CPE-1936
 title: `shellScriptLines` mis-parses two heredoc forms, and the publish path's expected run title is bound to nothing
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -356,3 +356,65 @@ Two further CPE-1932 gaps the Reviewer found and did not ask for here:
   `[features]` section**, so `--all-features` is identical to the default build and its instant second
   run is a legitimate cache hit, not a stale green.
 - Every sabotage reverted; the working tree carries only the intended comment diff.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1080, **fully green (25/25)**, after two rounds.
+
+**These two files are the repo's designated tool for the CPE-1933 rule** — CLAUDE.md names
+`src/lib/shellScriptLines.ts` and its Rust port `crates/updater-verify/src/workflow_scan.rs` so a guard
+reading a workflow does not accidentally parse a **comment** quoting the old value and pass silently.
+So a mis-parse here is a **silent false-green in every consumer**, not a local defect.
+
+**N8 was live, and the number is the headline.** A `<<` inside a **quoted string** opened a phantom
+heredoc that swallowed everything after it. `ffmpeg-pin-freshness.yml` writes
+`echo "failures<<PINFAIL_EOF" >> "$GITHUB_OUTPUT"` in three places, so the whole-file scan went
+**142 → 302** logical lines (**+160**) and the per-step scan **198 → 222**, split 31→39 and 35→51 across
+the two `check-pins` steps. The newly-visible lines include an `exit 1` and an entire `::error::` branch.
+`releaseHangHardening.test.ts:539` records that CPE-1849 folded that workflow into `GUARDED` — **so the
+hardening scan really was blind to those lines**, and nothing answered wrongly only because the blind
+window happened to contain **no `curl`, no `apt`, no `--expect-channel`, no `--locked`**. Established by
+**reading** the 21 newly-visible lines, not inferred.
+
+**N7 was the opposite failure.** An indented terminator closed a plain `<<EOF` early, so the heredoc
+**body** leaked out and read as scanned code.
+
+**The two are dangerous in opposite directions**, which is why both mattered: N8 drops a real unhardened
+command *out* of the hardening and lockfile scans (they conclude "nothing left unhardened"); N7 lets a
+heredoc body read *as* channel-purity coverage.
+
+**Both were reproduced in the shared oracle BEFORE either parser was touched**, and both went red in
+**both languages** on the same JSON — which doubles as proof the Rust port genuinely reads
+`shellScriptLines.cases.json` at run time. Its Reviewer verified that by editing one `expected` and
+watching `cargo test the_port_matches` panic naming the case.
+
+**A judgement call that was forced, not preferred.** N7's rule is **bash-relative, not column-0**:
+`release-sidecar.yml:71`'s `cat > "$notes_file" <<'EOF'` and its `EOF` both sit at **column 10**
+(`cat -A` confirmed), and `release_workflow_wiring.rs` scans that file whole — so a literal column-0 rule
+would leave the heredoc open for ~294 lines and **empty the scan**. The rule adopted (terminator alone,
+indented no more than its opener) reduces to bash exactly when the opener is at column 0. Verified
+against real bash 5.3.15.
+
+**Round 2 fixed a claim in the file about being honest.** The guard's own paragraph named the **fence
+filter** as the half carrying today's prose. Its Reviewer ran both sabotages against the real `run.md`:
+dropping the fence filter → **6/6 green**; dropping *both* it and the comment stripping → **6/6 green**.
+**Neither is reached today.** Nothing there is untestable — both halves have synthetic coverage — so the
+defect was precisely a green suite sitting beside a false statement about which half is load-bearing.
+Corrected with both numbers at the site.
+
+**And a bash-agreement claim bash does not give:** for `echo \"<<EOF\"` bash's delimiter is `` EOF" ``,
+not bare `EOF`, so closing on bare `EOF` resumes scanning a body line as code. Requalified as a **KNOWN
+GAP** in the partially-quoted-delimiter family rather than as agreement. Two further comment inaccuracies
+(`≤` vs "less than"; "strips leading tabs" where the code accepts any indent) were fixed **in the Rust
+twin in lockstep**.
+
+**Gaps enumerated rather than assumed:** `git grep -- '<<' .github/workflows` returns nine lines — three
+real `<<'EOF'` openers at column ≥10, the three N8 `echo` shapes, three `<<<` here-strings — and
+`git grep -- '<<' -- '*.sh'` returns **none at all**. No `<<-` anywhere, so all three documented gaps are
+theoretical here.
+
+**Two out-of-scope enumeration gaps became CPE-1969:** `lockfileLockedGuard.test.ts` hard-codes **5 of 8**
+workflow files, and **no consumer scans `.github/workflows/scripts/*.sh` at all** — three scripts the
+workflows invoke. That second one is the interesting half: **extracting shell from a `run:` block into a
+script file is ordinary good refactoring, and it silently removes that shell from every guard.** Same
+defect one level up — the parser now reads its input correctly, and the input still is not everything.
