@@ -4617,3 +4617,71 @@ owes no row"*, and the test reads only `Object.keys`. A reviewer added `reviewer
 new function and the membership test went **green**. One `expect` over `Object.values` makes the sentence
 true. **A structure whose *shape* is asserted and whose *content* is not will be filled with an empty
 string the first time someone is in a hurry.**
+
+## When you harden a path, measure the ORDINARY case — the attack case will not tell you
+
+2026-08-28, PR #1098 (CPE-1963).
+
+The fix was correct: commit the staging rename by **handle** rather than by name, so an attacker who
+relinks the temp file cannot redirect the commit. Every attack measurement was right — 7/3,000 aliased
+before, 0/3,000 after, with the delete-only control at 0 both times, and a counter proving 17,302–24,246
+attacks actually landed so the zero was a zero rather than an attack that never staged.
+
+**And it broke the ordinary save.** The non-`Ex` rename form cannot replace a destination that has **any**
+handle open on it. The author met that refusal — as **their own** handle, in 17 failing tests on unattacked
+outputs — and fixed it by closing ours earlier. The identical refusal fires for **anyone else's** handle,
+and on Windows those are routine: Defender, the Search indexer, Explorer's preview and thumbnail handlers,
+OneDrive, media players.
+
+It was found by a Reviewer doing the one thing the whole PR had no reason to do: **an ordinary,
+unattacked overwrite with a second `std::fs::File::open` held across it.**
+
+| | result | bytes at the name |
+|---|---|---|
+| merge base | `Ok(())` | NEW |
+| PR head | **`Err` — Access is denied. (os error 5)** | **OLD** |
+
+**The general shape.** A hardening PR's test suite is built around the attack. Every fixture plants
+something; every assertion is about a refusal. The unattacked path is *assumed* to be covered by the
+existing suite — and it was, except that the existing suite never holds a second handle, because nothing
+before this change cared. **The regression lived exactly in the gap between "what the old code was tested
+for" and "what the new code newly depends on."**
+
+So: when a change swaps a primitive, **enumerate what the OLD primitive tolerated that the new one does
+not**, and measure one case per item. `std::fs::rename` tolerated a third-party handle. `renameat`'s
+Windows equivalent does not. That is a one-line difference in a man page and a user-visible failure on a
+machine with an antivirus.
+
+### The second half, which is the part worth copying
+
+The fix for the regression was *not* "switch to the `Ex` form". It was **switch, then price the switch**:
+`FILE_RENAME_INFO.Flags` needs Windows 10 1607+, and POSIX-semantics rename is **NTFS-only** — FAT32,
+exFAT and some redirectors refuse it. Since the same function also serves the backup path, `Ex`-only would
+have traded a rare failure for **every write failing on an exFAT USB drive**.
+
+So the old form stays as a fallback behind a test seam, **with a sabotage that states its cost in one
+number**: force every `Ex` attempt to fail and the suite goes **2,459 passed / 1 failed** against a
+2,460/0 baseline — the single failure being precisely the behaviour the fallback cannot deliver. That is
+the honest form of a compatibility fallback: not "we kept it just in case", but *here is the exact set of
+things that stop working when it is used, and it has one member.*
+
+### And the guard for it passed for the wrong reason
+
+The flagship fixture reached `[CPE-1963] reported` on Windows, not `prevented` — the attacker's `unlink`
+sets a delete disposition on the staged handle, so the **rename itself refuses** before the identity check
+runs. It proved *"a delete-pending handle cannot be renamed"*, not *"the relinked name is not part of the
+commit"*. CPE-1929's reads-as-coverage shape, in the file's headline guard.
+
+Getting a fixture that exercises the real property took **three spellings**, and the two that fail are
+worth as much as the one that works: `unlink` delete-marks, and `rename(aside → tmp)` **also** delete-marks
+because `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` marks the file it replaces. Only
+`rename(tmp → a free name)` then `link(victim, tmp)` marks nothing and reaches `prevented`. All three are
+recorded at the site — *knowing which rename spellings delete-mark the object is the finding*, not a
+footnote to it.
+
+**A Foreman error, recorded because it is the same class:** I relayed this to the author as *"your
+reviewer's suggested shape was wrong."* It was not — the shipped shape is exactly what the Reviewer
+measured and proposed; the author had refuted a **third** variant nobody suggested. The mis-attribution
+never reached the tree (the author checked the ticket, both commit messages and the PR body and found it
+in none of them) — but it would have, and it would have been indistinguishable from a measured fact. **A
+Foreman's summary of a review is itself a claim, and it is the one nobody re-derives.**
