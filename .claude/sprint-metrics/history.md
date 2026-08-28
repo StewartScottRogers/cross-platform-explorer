@@ -2173,3 +2173,37 @@ Also worth keeping: the guard **states what it does not catch** — a notice tha
 one assembled into a variable first, a test module not called `mod tests`. A guard that publishes its
 own blind spots is the opposite of the day's other defect, where green tests sat beside claims nobody
 had run.
+
+## 2026-08-27 — the ticket that exists because coverage claims went unmeasured shipped an unmeasured coverage claim
+
+The lineage, in order, all on the same two files:
+
+1. **CPE-1919 round 2** — contrast ratios written as measured were estimated (`3.53`/`1.90` vs the real
+   `2.81`/`2.44`).
+2. **CPE-1919 round 3** — *"there is no general theme-parity guard in this repo"*, false for the `dark`
+   block, disproved by deletion. **CPE-1962 was filed to close that gap.**
+3. **CPE-1962's own PR** — its new guard header says the `hc-dark` deletion is now caught by
+   *"the first two"* files. Its Reviewer ran that deletion against the second one: **fully green, 22/22.**
+   Only `hc-contrast.test.ts` changed behaviour. Third unmeasured coverage claim, in the guard header
+   whose stated job is recording **measured** coverage, in the PR filed because of the first two.
+
+Plus a fourth of the same family in the same diff: a red-proof tally written as `(1 failed, 23 passed)`
+in a file with 23 tests, where 22 pass — **and the same PR records 22 correctly elsewhere**, so the
+diff contradicts itself.
+
+**Why it keeps happening is worth naming precisely.** Every author here was careful, and each one
+measured the thing they were *changing*. What none of them measured was the sentence *about other
+files* they wrote while doing it — because that sentence feels like description, not like a claim.
+It is a claim, it is cheap to check (delete the token, run the other file's tests), and it lands in a
+comment that the next reader trusts precisely because a green test sits beside it.
+
+**The countermeasure that works is not "be careful" — it is that every coverage sentence names the
+deletion that proves it.** The reviews that caught all four did the same thing each time: they deleted
+something and ran the other file. That is a five-minute check and it has now caught four defects in
+three PRs.
+
+Worth recording on the other side of the ledger too: this PR's new guard, on its very first run,
+found `--log-warn` missing from **both** high-contrast blocks — the log viewer's WARN badge at 10.5px
+measuring **3.54 / 3.28 / 2.94** in hc-dark, below AA's 4.5:1 floor on every surface, in the
+*high-contrast* theme. An independent from-spec WCAG implementation reproduced every digit. The guard
+is worth having; its header just has to be as measured as its assertions.
