@@ -345,9 +345,10 @@ fn the_index_sha256_identifies_content_but_cannot_order_it() {
         .expect("sign new");
 
     // Read the index the way every consumer now must (CPE-1954): `CatalogIndex::from_json` is
-    // `pub(crate)`, so the only door from outside the crate is `VerifiedIndex::open`. That is not a
-    // concession to the guard — the bundle is genuinely signed by `SEED`, so opening it properly is
-    // both available and more faithful to what a client does.
+    // private and `CatalogIndex` derives no `Deserialize`, so `VerifiedIndex::open` is not merely the
+    // preferred door from here — it is the only one that compiles. That is not a concession to a
+    // guard: the bundle is genuinely signed by `SEED`, so opening it properly is also more faithful
+    // to what a client does.
     let sha_of = |files: &[(String, Vec<u8>)]| -> String {
         let pick = |name: &str| {
             files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()).expect("bundle member")

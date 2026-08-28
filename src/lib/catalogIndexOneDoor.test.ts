@@ -16,17 +16,44 @@
  * which is the shape this repo keeps rediscovering (CPE-1958's `carry_protections` was the same
  * species: the guard still worked, a change elsewhere simply stopped calling it).
  *
- * So the invariant this file makes statable is: **no site outside `catalog.rs` turns index bytes
- * into a `CatalogIndex`.** With that true, "verified" is not a property a reader has to remember to
- * ask for; it is the only thing on offer.
+ * So the invariant worth having is: **no site outside `catalog.rs` turns index bytes into a
+ * `CatalogIndex`.** With that true, "verified" is not a property a reader has to remember to ask
+ * for; it is the only thing on offer. Round 2 makes rustc the thing that holds it — see below.
  *
- * ## Why a scanner as well as the compiler
+ * ## The compiler owns the invariant; this file pins the two facts it rests on
  *
- * `CatalogIndex::from_json` is `pub(crate)` as of this ticket, so rustc itself refuses the
- * convenient spelling from outside the module — a stronger guarantee than any test. But
- * `CatalogIndex` is still a `pub` type deriving `Deserialize`, so an outside caller can write
- * `serde_json::from_str::<CatalogIndex>(…)` and get the identical unchecked document. **The
- * compiler closes the front door; this closes the back one.** Neither alone is the invariant.
+ * Round 1 of CPE-1954 tried to hold the invariant with `pub(crate) fn from_json` **plus** the text
+ * sweep below, and said in three places that the two together were the invariant. They were not.
+ * While `CatalogIndex` was `pub` and derived `Deserialize`, at least eight spellings produced the
+ * identical unchecked document while matching none of the sweep's regexes: a local `type` alias, a
+ * `use … as` alias, a generic helper's turbofish, a `#[serde(flatten)]` wrapper, return-position
+ * inference, `Self::from_json` from another module in the crate, a `TryFrom` impl, and a
+ * `Vec<CatalogIndex>` annotation. All eight were compiled and run; the alias form reached
+ * `bundle/../outside/evil.json` with this file 16/16 green. A guard whose bypass list is open-ended
+ * is not an invariant, and the surrounding green test made the overstatement read as verified — the
+ * CPE-1933 shape.
+ *
+ * Round 2 closed it structurally instead, because it was cheap: **nothing outside `sidecar/host`
+ * names `CatalogIndex` at all**, so
+ *
+ * - `CatalogIndex` and `CatalogEntry` no longer derive `Deserialize` — the derive moved to private
+ *   `WireIndex`/`WireEntry` in `catalog.rs`. Every one of those eight vectors is now
+ *   `error[E0277]: the trait bound `CatalogIndex: Deserialize<'de>` is not satisfied`, and so is the
+ *   ninth nobody has thought of;
+ * - both are `#[non_exhaustive]`, so another crate cannot assemble one field-by-field either
+ *   (`error[E0639]`);
+ * - `from_json` is now fully private, not `pub(crate)`, closing the in-crate `Self::from_json` route.
+ *
+ * **This file no longer claims to close a back door — there is no back door left for it to close.**
+ * What it does instead is (a) assert those three source facts, so a diff that re-adds `Deserialize`
+ * or re-widens `from_json` reds here with an explanation rather than silently restoring the eight
+ * vectors, and (b) keep the sweep as a cheap tripwire that names the right fix if someone re-widens
+ * things and then writes the natural spelling. **The sweep is not, and never was, exhaustive** —
+ * a diff that reintroduces `Deserialize` and then uses an alias passes it, which is why (a) exists.
+ *
+ * What nothing here can catch, said plainly: a caller who declares their **own** struct, parses
+ * catalog bytes into it, and interpolates its `id` into a path. That is a reimplementation of the
+ * subsystem rather than a door onto this type, and no visibility rule or scanner detects it.
  *
  * ## Anchoring (CPE-1933)
  *
@@ -58,7 +85,12 @@ const THE_FIXED_SITE = "sidecar/host/src/bin/catalog_sign.rs";
  */
 const MIN_RUST_FILES = 200;
 
-/** Every spelling that yields an unchecked `CatalogIndex` from bytes or text. */
+/**
+ * The spellings this sweep recognises. **Not the set of spellings that would work** — see the header:
+ * an alias, a turbofish through a generic helper, a `#[serde(flatten)]` wrapper and five others slip
+ * past all three of these. They are compile errors now for a different reason (no `Deserialize` on
+ * the public types); this list is a tripwire, not the invariant.
+ */
 const UNCHECKED_PARSE: { what: string; re: RegExp }[] = [
   { what: "CatalogIndex::from_json", re: /CatalogIndex::from_json/g },
   {
@@ -165,13 +197,71 @@ describe("CPE-1954: VerifiedIndex is the only door onto a catalog index", () => 
       .toBe(true);
 
     const src = readFileSync(join(ROOT, THE_ONE_DOOR), "utf8");
-    // The compiler half of the invariant: rustc, not this test, refuses the convenient spelling
-    // from outside the module.
-    expect(
-      src,
-      "CatalogIndex::from_json must stay pub(crate) — the visibility IS the front-door guard",
-    ).toContain("pub(crate) fn from_json");
     expect(src).toContain("pub fn open_reported(");
+  });
+
+  /**
+   * The three source facts the compiler-enforced invariant actually rests on. This is the part of
+   * the file that carries weight; the sweep above is a tripwire. Asserted against `catalog.rs`
+   * itself rather than recalled, so re-adding the derive or re-widening the visibility reds here
+   * with the reason attached (CPE-1933: derive, do not claim).
+   */
+  describe("the structural closure rustc enforces", () => {
+    const src = readFileSync(join(ROOT, THE_ONE_DOOR), "utf8");
+    const { code } = codeOf(src);
+
+    /** The `#[derive(...)]` list attached to `pub struct <name>`, comments already stripped. */
+    function derivesOn(name: string): string {
+      const m = code.match(
+        new RegExp(`((?:#\\[[^\\]]*\\]\\s*)*)pub struct ${name}\\b`),
+      );
+      expect(m, `no \`pub struct ${name}\` in ${THE_ONE_DOOR} — this guard is reading stale source`)
+        .toBeTruthy();
+      return m![1];
+    }
+
+    it.each(["CatalogIndex", "CatalogEntry"])(
+      "%s does not derive Deserialize, so no alias/turbofish/flatten can conjure one",
+      (name) => {
+        const attrs = derivesOn(name);
+        expect(attrs, `${name}'s attributes: ${attrs}`).not.toMatch(/\bDeserialize\b/);
+      },
+    );
+
+    it.each(["CatalogIndex", "CatalogEntry"])(
+      "%s is #[non_exhaustive], so another crate cannot assemble one field-by-field either",
+      (name) => {
+        expect(derivesOn(name)).toMatch(/#\[non_exhaustive\]/);
+      },
+    );
+
+    it("the only Deserialize in the module is on a private wire type", () => {
+      // Every `#[derive(...)]` mentioning Deserialize must sit on a NON-`pub` struct.
+      const derives = [
+        ...code.matchAll(
+          /#\[derive\(([^)]*)\)\]\s*(?:#\[[^\]]*\]\s*)*(pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)/g,
+        ),
+      ];
+      const publicDeserialisable = derives
+        .filter((m) => /\bDeserialize\b/.test(m[1]) && m[2])
+        .map((m) => m[3]);
+      expect(
+        publicDeserialisable,
+        `these public structs in ${THE_ONE_DOOR} derive Deserialize. A pub type that deserialises ` +
+          `is a door onto an unchecked catalog index that no scanner can close — the derive belongs ` +
+          `on a private wire type converted inside from_json. CPE-1954.`,
+      ).toEqual([]);
+    });
+
+    it("from_json is private — not pub, not pub(crate)", () => {
+      expect(code, "from_json must still exist; it is the one parse").toMatch(/fn from_json\s*\(/);
+      expect(
+        code,
+        `from_json is the only route from bytes to a CatalogIndex. \`pub(crate)\` still let another ` +
+          `module in this crate write \`Self::from_json\`; there is no caller outside catalog.rs and ` +
+          `there should never be one.`,
+      ).not.toMatch(/pub(?:\s*\([^)]*\))?\s+fn from_json/);
+    });
   });
 
   it("the site this ticket rerouted still goes through the door", () => {
@@ -223,6 +313,26 @@ describe("the detector's own red-proof", () => {
     ["a block comment", "    /* let i: CatalogIndex = serde_json::from_slice(b)?; */"],
     ["a doc comment", "    /// see CatalogIndex::from_json for the unchecked form"],
   ])("stays green on %s", (_what, line) => {
+    expect(uncheckedParsesIn(wrap(line))).toEqual([]);
+  });
+
+  /**
+   * The sweep's blind spots, pinned rather than described. Each of these compiled, ran, and reached
+   * `bundle/../outside/evil.json` against round 1's source while this file stayed 16/16 green; each
+   * is `error[E0277]` now that `CatalogIndex` has no `Deserialize`. They are listed here so that
+   * anyone who re-adds the derive — and therefore puts the invariant back in the sweep's hands —
+   * sees exactly what the sweep does not cover, instead of trusting a green run.
+   */
+  it.each([
+    ["a local type alias", "    type Idx = catalog::CatalogIndex;\n    let i: Idx = serde_json::from_slice(b)?;"],
+    ["a use-as alias", "    let i: Aliased = serde_json::from_slice(b)?;"],
+    ["a generic helper's turbofish", "    let i = parse_it::<CatalogIndex>(text)?;"],
+    ["a serde(flatten) wrapper", "    let w: Wrapper = serde_json::from_slice(b)?;"],
+    ["return-position inference", "    fn f(s: &str) -> Result<CatalogIndex, E> { Ok(serde_json::from_str(s)?) }"],
+    ["Self::from_json from elsewhere in the crate", "    let i = Self::from_json(text)?;"],
+    ["a TryFrom impl", "    let w: Wrapper = Bytes(b).try_into()?;"],
+    ["a Vec<CatalogIndex> annotation", "    let v: Vec<CatalogIndex> = vec![serde_json::from_slice(b)?];"],
+  ])("is KNOWN NOT to catch %s (compiler's job, not this file's)", (_what, line) => {
     expect(uncheckedParsesIn(wrap(line))).toEqual([]);
   });
 

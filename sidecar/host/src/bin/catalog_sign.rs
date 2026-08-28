@@ -73,11 +73,13 @@ fn keygen(args: &[String]) {
 /// door's own reachability was measured rather than argued: see the CPE-1929 pair recorded at the
 /// `is_valid_entry_id` refusal in `catalog.rs` (5 red disabled, 7 red with the predicate lying).
 ///
-/// The `pub(crate)` on `CatalogIndex::from_json` means rustc now refuses the old spelling from this
-/// binary outright — reintroducing it here is `error[E0624]: associated function `from_json` is
-/// private`, measured. The back door (`serde_json::from_str::<CatalogIndex>`) stays open to the
-/// compiler and is closed by `src/lib/catalogIndexOneDoor.test.ts`, which sweeps every tracked
-/// `.rs` file.
+/// **rustc, not a test, is what keeps this routing.** `CatalogIndex::from_json` is private to
+/// `catalog.rs`, so the old spelling here is `error[E0624]: associated function `from_json` is
+/// private`; and `CatalogIndex` no longer derives `Deserialize` (the derive lives on a private wire
+/// type), so every way of spelling the parse from this binary — an alias, a turbofish, a
+/// `#[serde(flatten)]` wrapper, return-position inference — is `error[E0277]: the trait bound
+/// `CatalogIndex: Deserialize<'de>` is not satisfied`. Both measured 2026-08-28; the `WireIndex` doc
+/// in `catalog.rs` records why round 1's scanner-based version of this claim was not true.
 fn verify(args: &[String]) {
     if args.len() != 4 {
         eprintln!("usage: {} verify <dir> <pubkey-hex>", args[0]);

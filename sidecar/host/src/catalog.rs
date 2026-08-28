@@ -22,7 +22,12 @@ pub const CATALOG_SCHEMA_VERSION: u16 = 1;
 
 /// One agent manifest named by the index. `sha256` binds the entry to exact manifest content;
 /// `version` is a monotonic counter used for anti-rollback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **No `Deserialize`, and `#[non_exhaustive]`, on purpose (CPE-1954).** See [`WireIndex`] for the
+/// whole argument: between them, no code outside this module can conjure one of these from
+/// attacker-supplied bytes, nor build one field-by-field from a shape it parsed itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct CatalogEntry {
     pub id: String,
     /// The manifest's own agent-schema version (CPE-278/300), carried for migration decisions.
@@ -44,29 +49,100 @@ pub struct CatalogEntry {
 }
 
 /// A signed list of catalog entries. Verified as a whole via a detached signature over its bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// **No `Deserialize`, and `#[non_exhaustive]`, on purpose (CPE-1954)** — see [`WireIndex`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[non_exhaustive]
 pub struct CatalogIndex {
     pub schema_version: u16,
-    #[serde(default)]
     pub entries: Vec<CatalogEntry>,
+}
+
+/// The on-the-wire shape of an index, and **the only `Deserialize` in this module**.
+///
+/// # Why the public types cannot be deserialised (CPE-1954, round 2)
+///
+/// [`CatalogIndex`]'s invariant is *"nobody holds one of these until the detached signature
+/// verified"*, because every field in it — `id` above all, which consumers interpolate into
+/// filesystem paths and fetch URLs — is attacker-controlled until then. [`VerifiedIndex::open`]
+/// is the only place that check happens.
+///
+/// Round 1 of this ticket made `from_json` non-public and had a **scanner**
+/// (`src/lib/catalogIndexOneDoor.test.ts`) sweep tracked `.rs` files for
+/// `serde_json::from_str::<CatalogIndex>`, on the theory that visibility closed the front door and
+/// text-matching closed the back one. It did not: while `CatalogIndex` was `pub` **and** derived
+/// `Deserialize`, at least eight spellings produced the identical unchecked document while matching
+/// none of the regexes — a local `type` alias, a `use … as` alias, a generic helper's turbofish
+/// (`parse_it::<CatalogIndex>`), a `#[serde(flatten)]` wrapper, return-position inference,
+/// `Self::from_json` from another module in this crate, a `TryFrom` impl, and a
+/// `Vec<CatalogIndex>` annotation. A guard whose bypass list is open-ended is not the invariant, and
+/// saying it was is the CPE-1933 shape: a claim a green test appears to vouch for.
+///
+/// So the derive moved here instead, to a **private** type, and the conversion into the public one
+/// runs only inside [`CatalogIndex::from_json`] — which is itself private and reachable only via
+/// [`VerifiedIndex::open_reported`], after the signature. Every one of those eight vectors is now a
+/// compile error outside this module (`the trait bound `CatalogIndex: Deserialize<'_>` is not
+/// satisfied`), and so is the ninth nobody has thought of yet. `#[non_exhaustive]` on both public
+/// types closes the remaining construction route: another crate cannot assemble one field-by-field
+/// out of a shape it parsed itself.
+///
+/// The one thing still possible, said plainly rather than left to be discovered: a caller may of
+/// course declare their **own** struct, deserialise catalog bytes into it, and interpolate its `id`
+/// into a path. That is not a back door onto this type — it is a reimplementation of the subsystem,
+/// which no visibility rule and no scanner could ever detect, and it is out of scope for this
+/// invariant.
+///
+/// The wire types are `#[serde(rename = …)]` to the public names so serde's own error text (which
+/// reaches an operator through `catalog-sign verify`) still names the document they wrote.
+#[derive(Deserialize)]
+#[serde(rename = "CatalogIndex")]
+struct WireIndex {
+    schema_version: u16,
+    #[serde(default)]
+    entries: Vec<WireEntry>,
+}
+
+/// The on-the-wire shape of one entry. Private for the reason given on [`WireIndex`]; field-for-field
+/// identical to [`CatalogEntry`], so what serde accepts is unchanged by the split.
+#[derive(Deserialize)]
+#[serde(rename = "CatalogEntry")]
+struct WireEntry {
+    id: String,
+    schema_version: u16,
+    sha256: String,
+    version: u64,
+}
+
+impl From<WireIndex> for CatalogIndex {
+    fn from(w: WireIndex) -> Self {
+        Self {
+            schema_version: w.schema_version,
+            entries: w.entries.into_iter().map(CatalogEntry::from).collect(),
+        }
+    }
+}
+
+impl From<WireEntry> for CatalogEntry {
+    fn from(w: WireEntry) -> Self {
+        Self { id: w.id, schema_version: w.schema_version, sha256: w.sha256, version: w.version }
+    }
 }
 
 impl CatalogIndex {
     /// Parse an index **without checking anything about it**.
     ///
-    /// `pub(crate)` on purpose (CPE-1954). Every field of the result is attacker-controlled — `id`
-    /// above all, which every consumer interpolates into a path or a URL — so this is the wrong door
-    /// for anyone outside this module: [`VerifiedIndex::open`] is the right one, and it is
-    /// implemented in terms of this. The visibility is the enforcement; making it a *comment* is the
-    /// shape this ticket exists to stop.
+    /// Private on purpose (CPE-1954), and the *only* route from bytes to a [`CatalogIndex`] that
+    /// exists anywhere. Every field of the result is attacker-controlled, so this is the wrong door
+    /// for everyone — including the rest of this crate. [`VerifiedIndex::open`] is the right one,
+    /// and it is implemented in terms of this. Round 1 left this `pub(crate)`, which still let
+    /// another module in this crate write `Self::from_json`; there is no caller outside this module
+    /// and there should never be one, so the visibility now says so.
     ///
-    /// What the visibility does **not** cover, stated rather than left to be discovered: `Self`
-    /// is `pub` and derives `Deserialize`, so an outside caller can still write
-    /// `serde_json::from_str::<CatalogIndex>(…)` and get the same unchecked document. That back door
-    /// is closed by a scanner instead — `src/lib/catalogIndexOneDoor.test.ts` enumerates every
-    /// tracked `.rs` file and refuses either spelling outside this file.
-    pub(crate) fn from_json(s: &str) -> Result<Self, String> {
-        serde_json::from_str(s).map_err(|e| e.to_string())
+    /// The enforcement is the compiler, at both ends: this function is private, and [`WireIndex`]
+    /// holds the only `Deserialize`. Neither is a comment, which is the shape this ticket exists to
+    /// stop.
+    fn from_json(s: &str) -> Result<Self, String> {
+        serde_json::from_str::<WireIndex>(s).map(Self::from).map_err(|e| e.to_string())
     }
     pub fn get(&self, id: &str) -> Option<&CatalogEntry> {
         self.entries.iter().find(|e| e.id == id)
@@ -292,7 +368,7 @@ impl VerifiedIndex {
         // make `index()` return a document nobody signed, and `gate_manifest` reads that document to
         // decide what is *listed*. A partial index is not a verified index.
         //
-        // **CPE-1929 pair, measured on this refusal 2026-08-28** (baseline: 122 lib + 29 integration
+        // **CPE-1929 pair, measured on this refusal 2026-08-28** (baseline: 122 lib + 26 integration
         // tests all green, `Compiling sidecar-host` observed on every run — a cached "Finished in
         // 0.5s" would have proved nothing). Disabled (`find(|e| false && !is_valid_entry_id(…))`):
         // **5 red** — 3 lib (`one_escaping_id_refuses_the_whole_signed_index…`,
@@ -1655,6 +1731,15 @@ mod tests {
     /// `open` is `open_reported().ok()` — pinned behaviourally rather than by reading the source, so
     /// a future edit that gives either one an extra check (or drops one) reds here. This is the
     /// invariant that lets the gating callers keep the `Option` form without a second gate existing.
+    ///
+    /// **One case per [`IndexRefusal`] variant, plus the accepting one.** Round 1 of CPE-1954 left
+    /// out `NotUtf8` and `Unparseable`, and `NotUtf8` was the arm that mattered: reimplementing
+    /// `open` with `from_utf8_lossy` (keeping the schema and id checks) makes it accept a signed
+    /// non-UTF-8 index that `open_reported` refuses — a divergence on the security property this
+    /// ticket added — and the whole lib suite stayed green (122 passed, 0 failed). `open` is the
+    /// constructor `do_fetch_catalog` and `apply_bundle_*` gate on, so a divergence there is the
+    /// expensive one. Sabotage re-run after adding the two arms: **1 red**, this test, naming
+    /// `signed + not UTF-8`.
     #[test]
     fn open_and_open_reported_accept_exactly_the_same_inputs() {
         let (k, pk) = keypair(1);
@@ -1662,10 +1747,18 @@ mod tests {
         let good = index_json("claude", "00", 1);
         let evil = index_json("../../pwned", "00", 1);
         let future = r#"{"schema_version":99,"entries":[]}"#.to_string();
+        // A lone 0xFF inside a field serde ignores: `from_utf8_lossy` turns it into U+FFFD and
+        // leaves a document that still parses, so "it happens not to parse anyway" is not a
+        // defence — the refusal has to be the encoding check itself.
+        let mut not_utf8 = br#"{"schema_version":1,"note":"#.to_vec();
+        not_utf8.extend_from_slice(b"\"\xff\",\"entries\":[]}");
+        let unparseable = b"{\"schema_version\":1,\"entries\":".to_vec();
         let cases: Vec<(&str, Vec<u8>, String)> = vec![
             ("signed + valid", good.clone().into_bytes(), sign(&k, good.as_bytes())),
             ("signed + hostile id", evil.clone().into_bytes(), sign(&k, evil.as_bytes())),
             ("signed + future schema", future.clone().into_bytes(), sign(&k, future.as_bytes())),
+            ("signed + not UTF-8", not_utf8.clone(), sign(&k, &not_utf8)),
+            ("signed + unparseable", unparseable.clone(), sign(&k, &unparseable)),
             ("unsigned", good.clone().into_bytes(), "00".to_string()),
             ("wrong key", good.clone().into_bytes(), sign(&keypair(9).0, good.as_bytes())),
             ("garbage", b"nope".to_vec(), "not hex".to_string()),
