@@ -4214,3 +4214,39 @@ rather than negotiating it down. And the doc claim needs correcting either way.
 One more thing the reviewer did that I should have: **it read the failure's arithmetic.** CI reported
 2491 passed against a default `--lib` of 2444, so **the failure was in one of that step's *feature* runs**,
 not the default one. I had read the failure and not the count beside it.
+
+## 2026-08-29 — two instruments, two complementary holes, and I recorded only half of it
+
+Yesterday I wrote that #1093's worker was right to decline my literal instruction. I said to grep the
+file's bytes for a trigger name; it parsed the events instead, because `ci.yml` carries sixty lines of
+commentary inside its `on:` block and a comment *mentioning* a trigger would have reddened the guard.
+That reasoning was correct and the reviewer confirmed it: **all five** comment positions produce no red
+under the parse, and **a text grep reds on every one of them.**
+
+**And the reviewer then found what the parse gives up.** A YAML flow collection may span lines; the
+scanner captures only the remainder of the `on:` line, so a trigger on a **continuation line** is
+invisible to it. End to end, a workflow written `on: [push,\n  pull_request]` produces a confident
+`false`, no `unjudged` row, no `silentWorkflows` entry — **character-for-character round 3's defect,
+including the detail string.**
+
+**A raw grep would have caught that one.**
+
+So the honest position is not "the worker was right and I was wrong". **Neither instrument dominates.**
+The grep sees text a parser skips and is fooled by prose; the parser understands structure and stops at
+the line the regex bounded. Each is stronger exactly where the other is weak, and **the round-4 write-up
+framed the parse as the correct choice without saying what it cost.**
+
+**So the rule, and it is the same one this PR keeps teaching in new costumes: when you replace one
+mechanism with another, state what the old one caught that the new one does not.** One sentence. It is
+also the honest answer to *"why not just grep"*, which the next reader will ask.
+
+**My own record needed the correction too.** I wrote up the decline as a clean win for the worker and a
+clean loss for me, because that was the shape of the evidence I had at the time. It was half the picture,
+and I published it as the whole one — which is precisely the defect I have been logging in workers all
+shift, committed by the person keeping the log. **The fix is the same for me as for them: say what the
+measurement covered, and what it did not.**
+
+Two smaller things from the same review, both the closed-list shape yet again: *"what still gets through:
+X and Y"* written as a pair in two files, in a document whose enclosing bullet says "AT LEAST THESE" —
+**a sub-list does not inherit its parent's hedge.** And two files still calling something *"the one
+standing blind spot"*, a count sitting inside a header that declares the list open.
