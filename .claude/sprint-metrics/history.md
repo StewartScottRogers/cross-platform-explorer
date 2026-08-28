@@ -3252,3 +3252,30 @@ glyph bug** — agreement with the suppressor off is 51%, one point above the ba
 for keeping the older, stricter flatness check fatal rather than letting the new one replace it. A
 weaker check that arrives with an honest account of what it misses is worth more than a stronger one
 that arrives without.
+
+## 2026-08-28 — the reviewer ran the converse, and it was the more informative direction
+
+#1092's round 2 pinned a filter that must skip one file type and keep another. Its red-proof reverted the
+filter and watched two tests red — correct, and what was asked for.
+
+Its reviewer re-ran that, then ran the direction nobody had: **forced the filter over-broad so it archived
+nothing**, and found that case caught too — by a **pre-existing** assertion, not by either new test. So the
+filter is pinned in both directions, and the new tests only cover one of them.
+
+**That is worth generalising, because "skips too much" is the failure a filter's own test almost never
+looks for.** You write a filter to exclude something; you prove it excludes it. Nothing in that loop asks
+whether it now excludes more than intended, and a filter that drops everything satisfies the assertion
+you wrote. Here the safety net already existed by luck of an older test. **When a change adds an
+exclusion, red-proof both edges: revert it, and widen it.** The second one takes the same thirty seconds
+and is the half that finds an over-eager predicate.
+
+The same review is a good example of enumerating instead of trusting. Asked whether the fixture was
+representative, it did not check the two file types the author named — it **enumerated every writer into
+that directory** and established there is no third, ruling out the obvious candidate by reading config
+(`reporters: ["spec"]` with no `outputDir`, so wdio writes no JSON of its own). It also confirmed CI's
+step order **from the workflow rather than from the comment claiming it**, and checked the two filename
+prefixes cannot collide. Three separate places where the cheap move was to accept a stated fact.
+
+And it verified the one new number written into a code comment — a CI job's suite-step duration — **against
+the API**: 119 seconds exactly, whole job 181. After a shift in which numbers in comments have been wrong
+four times, checking the one that was newly added is exactly the right instinct.
