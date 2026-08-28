@@ -3,7 +3,7 @@ id: CPE-1970
 title: merging on stale checks silently bypasses every guard that landed in between — measured on PR #1056, and `main` has no branch protection to prevent it
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -410,3 +410,53 @@ disabling the rung → **3 failed / 72 passed**; forcing `coverageOf` to always 
 | the 2 skipped | both in `catalogPublishLoudFailure.test.ts`, gated on `jq`, not installed on this machine — unchanged since round 1 |
 | `src/lib/ciPollFailClosed.test.ts` alone | **75 passed, 0 failed, 0 skipped** (70 after round 2, 63 after round 1) |
 | Rust | untouched — no crate changed |
+
+## Closing record — merged as PR #1093 (`2eec70c4`), 2026-08-29
+
+**Six rounds, five independent reviews. This ticket measured the Foreman's own merge procedure and the
+number came back against it: 15 of 186 merges were never judged by a guard `main` already required, and
+14 of the 15 fall in the window's last 36 hours — this crew's own work.**
+
+**The definition is the deliverable.** The ticket proposed comparing a PR's newest check timestamp against
+a guard-adding commit. What shipped is stronger and both-sided: **did a job `main` already required
+produce any check at all on this PR's board?** — board from the rollup, required set parsed out of the
+merged commit's own workflows, neither recalled. The timestamp instrument was **rejected by measurement**:
+#1056's newest run finished **67 seconds** before its merge, so "the run predates the guard" would have
+called it clean. **And the write-up keeps the instrument that failed** — a cheaper git-tree check missed
+one PR and wrongly flagged another, because GitHub builds `pull_request` checks from the merge ref, not
+the head tree. The next person reaches for the cheap one first.
+
+**The headline was wrong twice and corrected twice.** 16 became 15 when a reviewer showed one flagged PR
+*was* the ticket that renamed the job it was flagged for — and the write-up's own *"zero rename noise"*
+had been tested by job **id** while the matcher keys on the **label**. The CI timings were re-taken paged
+to exhaustion (793 runs, median 60.9, p90 81.8) after the originals turned out to come from a
+`--limit`-capped list covering the last 27 hours of a 14-day window. **The recommendation survived; the
+numbers selling it did not**, and costing it honestly changed it — serialised CI tops out near the crew's
+current throughput, so the answer is protection **plus a merge queue**.
+
+**And the false trap was occupying the slot where a real one belonged.** §2d warned that a path filter
+would leave a required check pending forever on ticket-only PRs; the filter is on the `push:` trigger and
+the workflow says so eleven lines above. Withdrawing it surfaced what actually matters: **407 of 589
+commits in the window carry no PR number at all.** Sixty-nine percent of `main`'s movement is direct
+pushes, which no required-status-check configuration touches.
+
+**Three fail-opens were closed inside the guard being built.** A column-0 comment in an `on:` block
+removed a whole workflow from the required set with `coverage=ok`; `pull_request_target` returned a
+confident `false`; a multi-line flow collection did the same. All three now reach a **tri-state
+`unknown`** that blocks — *"did not run", not "nothing to check"*. The whole-workflow carve-out was
+**measured before being closed**: 0 of 186 boards were missing `CI` or `GUI smoke`, so closing it cost
+zero added firings.
+
+**The most instructive finding is about the tests, not the code.** Re-running the ten red-proofs, one came
+back green — **a scripted sabotage had patched its own entry in the header's recipe list**, four lines
+above the code. The test correctly reported nothing wrong. Enumerating the rest: **five of ten anchor
+strings occur in prose before code**, and two more resolve to two code sites. Writing that paragraph up
+**broke one of the two remaining clean anchors**, which is recorded as the point rather than hidden —
+there is no version of this header that documents the trap without setting it, so the mechanical check
+(*assert the patched file differs in code*) is the only remedy.
+
+**Left for the user, deliberately:** the branch-protection settings themselves. `docs/design/CI-STALENESS.md`
+§2 states which settings, what they cost, and the merge-queue requirement, in a form actionable in one
+sitting.
+
+Gates on the merge sha: 26 checks green, `GUI smoke (windows-latest)` skipped by design.
