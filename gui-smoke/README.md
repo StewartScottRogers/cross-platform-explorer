@@ -854,6 +854,30 @@ on the blank area of a **populated** folder (the CPE-1157 repro), asserts the em
 and carries a MutationObserver/`contextmenu` probe that pinned CPE-1157's root cause (menu opened then
 closed ~5 ms later because `paneContext` didn't `stopPropagation`).
 
+## Scrolling an element into view — `lib/scrollIntoView.ts` (CPE-1960)
+
+**Never call WebdriverIO's `element.scrollIntoView()` command in this suite.** It does not call the DOM
+API — it injects a real mouse wheel through the driver, and since **webdriverio 9.31.4** (pulled in by
+CPE-1945's `npm audit fix`, PR #1065) that wheel carries **no `origin`**, so it lands at viewport
+**(0, 0)** with a real delta computed from the element's rect. Measured against Chrome 151 with that
+exact build, scrolling an already-on-screen `.ctx .flyout .row` emits
+`{"type":"scroll","x":0,"y":0,"deltaX":560,"deltaY":222}`.
+
+On WebKitGTK (the Linux CI driver) that stray wheel relocates the webview's hover target. Any
+hover-opened surface goes with it: `Submenu.svelte`'s `on:mouseleave` closed the Run-macro flyout that
+`macro-param-prompt.smoke.ts` was about to click, and the spec died with
+`element (".ctx .flyout .row") still not existing after 5000ms` on **every completed shard-2 run** from
+2026-08-27 22:27Z onward — a permanent red on `gui-smoke-linux-verdict`. (The same command is also the
+source of the `Failed to execute "scrollIntoView" using WebDriver Actions API: move target out of
+bounds` noise `lib/logSignature.ts` classifies as an environment marker.)
+
+Use `scrollIntoViewCentered(el)` from `lib/scrollIntoView.ts`, which runs the page's own
+`Element.scrollIntoView({ block: "center" })` inside `element.execute`. It is a correct no-op for
+`position: fixed` menu/dialog rows (which the app already clamps fully on screen and which can never be
+scrolled), and for the rows that genuinely are below the fold it scrolls their **real** scrollable
+ancestor — `.filelist-pane` — which the wheel-at-(0,0) never did, because this app's document does not
+scroll at all. `lib/scrollIntoViewUsage.test.ts` fails the build if the command comes back.
+
 ## Visual-regression comparator — `lib/compare.ts` (CPE-1170)
 
 Burns down `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` row 3 ("Visual / theme regression").

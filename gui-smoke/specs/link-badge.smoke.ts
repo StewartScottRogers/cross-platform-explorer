@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
+import { scrollIntoViewCentered } from "../lib/scrollIntoView.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -78,8 +79,7 @@ describe("CPE-1208 — headless GUI smoke: the link badge + broken-target state"
     // so the observer never fires and the badge never even calls the backend. Scroll it into view
     // first (same convention drive-menu.smoke.ts/home-item-menu.smoke.ts/vault.smoke.ts already use)
     // so the fetch is actually kicked off before we assert on its resolved state.
-    await goodRow!.scrollIntoView({ block: "center" });
-    await browser.pause(150);
+    await scrollIntoViewCentered(goodRow!);
 
     const badge = await goodRow!.$('[data-testid="link-badge"]');
     await badge.waitForExist({ timeout: 5_000, timeoutMsg: "expected the intact symlink row to show a link badge" });
@@ -123,8 +123,7 @@ describe("CPE-1208 — headless GUI smoke: the link badge + broken-target state"
     // CPE-1481: same lazy-fetch reasoning as the intact-symlink test above — scroll the row into
     // view so the IntersectionObserver actually kicks off the `linkStatus` fetch this assertion polls
     // for below.
-    await brokenRow!.scrollIntoView({ block: "center" });
-    await browser.pause(150);
+    await scrollIntoViewCentered(brokenRow!);
 
     const badge = await brokenRow!.$('[data-testid="link-badge"]');
     // CPE-1481: belt-and-braces beyond the scrollIntoView above — transfer-panel.smoke.ts already
