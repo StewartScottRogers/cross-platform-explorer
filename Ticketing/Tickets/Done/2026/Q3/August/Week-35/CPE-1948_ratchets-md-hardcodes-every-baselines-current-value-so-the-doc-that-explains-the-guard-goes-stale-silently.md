@@ -3,7 +3,7 @@ id: CPE-1948
 title: `RATCHETS.md`'s enumeration table hardcodes every baseline's current value, so the doc explaining the guard goes stale the moment any baseline legitimately moves
 type: task
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -170,3 +170,51 @@ cell is the correct trade: it was the load-bearing example of the defect, and th
 Byte-wise line-ending check after the edits: `RATCHETS.md` 206 CRLF / 206 LF / 0 bare CR / no BOM
 (was 191/191; +19 / -4 lines), `ratchet-baselines.mjs` still pure LF (1143/1143 with 0 CRLF),
 `ratchetsDoc.test.ts` untouched at 216/216 — `--numstat` 19/4 and 12/0, not a line-ending rewrite.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1081, **fully green (25/25)**, after two rounds.
+
+**The doc was already stale within a day of the table landing** — the second such row in 24 hours.
+`bidi-render-registry` read **1552** against a measured **1553**; the other eleven matched. Its
+Reviewer wrote its **own** bracket-depth scanner (a different algorithm from the measurer's) and
+recounted all twelve from the guard files directly, confirming exactly one stale row and **no second**.
+
+**Assert over delete, and the deciding argument was not the obvious one.** Keeping the numbers costs a
+guard; deleting them costs nothing. The Reviewer's endorsement is the reason to prefer assert:
+***delete does not remove the failure mode*** — someone re-adds the numbers within a month because the
+page is worse without them, and they are unguarded again. The scale of a debt is what distinguishes a
+rounding error (`warn-token-allowlist`, 0) from a project (`bidi-render-registry`, 1553), and a page
+that hides that behind `node scripts/ratchet-baselines.mjs print` is honest and useless.
+
+**The whole-cell match is load-bearing, and the proof is in the data it had to parse.** The real
+pre-PR cell read `14 — **enumerated, not gated** (13 → 14 on 2026-08-27, CPE-1946)` — a
+leading-digits scanner **would** have read `14` and left the qualifier unasserted forever. The Reviewer
+ran **15 value-cell attacks and 7 structural ones**: bold, parenthetical, comma-grouped, `+`-prefixed,
+HTML comment, zero-width space, nbsp, fullwidth digits, backticks, footnote marker, empty cell, escaped
+pipes, a second same-header table (including inside a fenced block), a row split across lines — **all
+refused**. Only benign normalisations accepted.
+
+**Registered-but-undocumented tested three ways**, including **reordered** rows, confirming the id
+comparison is an ordered array and not a set.
+
+**Where the stale row came from is bigger than the row** — and became **CPE-1970 (High)**. PR #1056's
+last CI run was created 16:29Z, `ratchet-guard` landed on `main` at 17:42:59Z, and #1056 merged at
+18:36:20Z, so **that guard never judged it** and its legitimate 1552 → 1553 raise went in undeclared.
+The Reviewer confirmed all three timestamps and found the decisive fact: **`ratchet-guard` is absent
+from `ci.yml` at #1056's head SHA — grep count 0.** It *could not* have judged it. Two corrections came
+with that: the "16:29Z run" actually **finished at 18:35:13Z, one minute before the merge**, so a
+recency check would have waved it straight through; and a partial re-run of GUI smoke at 17:47Z did not
+help, because `ratchet-guard` lives in `ci.yml`.
+
+**Round 2 declined the retroactive licence row, and the argument is the keeper.** A row is a
+**licence**, not a history entry — meaningful only inside the diff that performs the raise. The
+movement had already merged, so `compare origin/main` sees **1553 on both sides**: the licence is
+***unconsumable by construction***, not merely unused. And an empty ledger's entire value is the
+reading *"no raise got past the guard"* — once rows can appear retroactively, their absence stops
+meaning that.
+
+**Two structural parser gaps were found and correctly attributed to what closes them:** a blank line
+mid-table silently truncates the row list, and an adjacent 4-column table gets absorbed. Both are
+caught — but by the **ordered id comparison**, not by the parser. Said at the site, so the next reader
+does not remove the check actually doing the work.
