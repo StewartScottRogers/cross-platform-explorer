@@ -661,6 +661,9 @@ export function readWorkflowSources(dir) {
  * @property {"pull-request"|"other"|"unknown"} trigger  `unknown` = the `on:` block could not be read
  * @property {boolean} prPathFiltered  EVERY PR-scoped trigger present carries its own
  *           `paths:`/`paths-ignore:` — so GitHub was entitled to skip the workflow on some diffs
+ * @property {string[]} events  the event names read out of `on:`, comments already stripped — the
+ *           evidence behind `trigger`, so a caller can ask about a name this module does not know.
+ *           `[]` when `trigger === "unknown"`. See `readOnBlock`'s return for the flow-form caveat.
  * @property {string} why  one clause, for the operator, when `trigger === "unknown"`
  */
 
@@ -730,9 +733,24 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  * it; an enumeration that reads as exhaustive is how a gap reads as coverage.
  *   • THE PR-EVENT LIST IS A LITERAL PAIR (`PR_EVENTS`). A third PR-scoped event name — one GitHub
  *     adds later, or one nobody here has heard of — lands in `other` and drops its whole workflow out
- *     of the required set silently. This is the shape `pull_request_target` had until round 3, and
- *     nothing in the code can notice the next one; only the enumeration test's `toEqual` will, and only
- *     once someone writes a workflow using it.
+ *     of the required set silently, which is the shape `pull_request_target` had until round 3.
+ *     Nothing in `readOnBlock` can notice the next one: it compares against a list, and a name not on
+ *     the list is simply not a PR event as far as this code is concerned.
+ *     ROUND 4 — AND THE ENUMERATION TEST'S `toEqual` CANNOT NOTICE IT EITHER, which is what round 3
+ *     wrote here. `prTriggered` is a FILTER: a workflow classified `other` is REMOVED from the array,
+ *     so `toEqual(["ci.yml","gui-smoke.yml"])` still holds and the suite stays green. That `toEqual`
+ *     can only red on OVER-inclusion, or on one of those two dropping out — never on a new file the
+ *     classifier decided to ignore. Measured over the real `HEAD` workflow set plus one hypothetical
+ *     file: `+review-gate.yml (on: pull_request_review:)` → `classify=false`, `toEqual` PASSES;
+ *     `+future.yml (on: pull_request_v2:)` → `classify=false`, `toEqual` PASSES. Round 3's other
+ *     backstop, a text grep for the `pull_request_target` LITERAL, caught only that one name.
+ *     So the guard is now the name-shaped one it always claimed to be: `readOnBlock` returns the
+ *     `events` it parsed, and `ciPollFailClosed.test.ts` reds on any parsed `on:` event matching
+ *     `/^pull_request[_a-z0-9]*$/` that is NOT in `PR_EVENTS` — so `pull_request_v2` reds on the day
+ *     it lands, by shape rather than by anyone having heard of it. What still gets through: a
+ *     PR-scoped event GitHub names something else entirely (`merge_group` is the live example — it
+ *     runs on a merge queue, not a PR, and is deliberately not in `PR_EVENTS`), and any workflow
+ *     whose `on:` block answers `unknown`, since an unread block yields no `events` to check.
  *   • FLOW MAPPING. `on: {pull_request: {paths: ['src/**']}}` is legal and DOES carry a path filter;
  *     the inline branch reports `prPathFiltered: false` for it (measured). That over-blocks — such a
  *     workflow's silence is called unjudged rather than excused — so there is no exposure, but see the
@@ -754,12 +772,17 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  * copy one forward.
  *
  * ROUND 3'S OWN RED-PROOFS, all five run against `-t "fails CLOSED"` (75 tests, 63 skipped by the
- * filter), each number measured rather than predicted:
+ * filter), each number measured rather than predicted. RE-RUN IN ROUND 4 on this revision, because
+ * round 4 edited test bodies inside that describe and a red-proof measured on a different revision is
+ * exactly the stale-count trap the paragraph above warns about — all five numbers came back the same:
  *   • `PR_EVENTS` back to `["pull_request"]` → **4 failed / 8 passed**: `classifies
  *     \`pull_request_target\` …`, `the PR-event list is a literal pair …`, `\`prPathFiltered\` needs
  *     EVERY PR trigger filtered …`, `a \`#\` inside a quoted scalar …`. Note `every real workflow in
  *     this repo still classifies …` stays GREEN — this repo has no `pull_request_target` workflow, so
- *     the enumeration alone could not have caught it. That is why the four above exist.
+ *     the enumeration alone could not have caught it. That is why the four above exist. Re-measured in
+ *     round 4 and still green, which is the SAME fact as round 4's finding above: an enumeration built
+ *     on a filtered list cannot red on an event the filter decided to ignore. Round 3 wrote that fact
+ *     correctly here and its opposite two lines up in the blind-spot bullet.
  *   • `splitInlineComment` back to `s.replace(/(^|\s)#.*$/, "$1")` → **2 failed / 10 passed**:
  *     `a \`#\` inside a quoted scalar …` and `an unclassifiable \`on:\` is \`null\` …`.
  *   • the block-body key read off the raw line instead of `split.rest` → **1 failed / 11 passed**:
@@ -768,6 +791,19 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  *     `\`prPathFiltered\` needs EVERY PR trigger filtered …`.
  *   • the anchor refusal disabled (`if (false && …)`) → **1 failed / 11 passed**:
  *     `an unclassifiable \`on:\` is \`null\` …`.
+ *
+ * ROUND 4'S OWN RED-PROOFS, same filter, same 63 skipped — both target the new `events` field, and
+ * both land on `every real workflow in this repo still classifies …`, the test round 3 correctly said
+ * `PR_EVENTS` alone could not red:
+ *   • `events.push(key[2])` suppressed (`if (false) events.push(…)`) → **1 failed / 11 passed**. This
+ *     is the one that matters: an `events` that silently came back `[]` would leave the
+ *     unknown-PR-event assertion green forever, so the test carries an inline POSITIVE CONTROL over
+ *     the real files plus a hypothetical `pull_request_v2` workflow rather than trusting an empty
+ *     `toEqual([])`.
+ *   • the shape check narrowed back to round 3's literal (`/^pull_request_target$/`) →
+ *     **1 failed / 11 passed**, `expected [] to deeply equal [ 'future.yml: pull_request_v2' ]`. The
+ *     generalisation is load-bearing, not decoration: revert it and the case the blind-spot bullet is
+ *     about goes silent again.
  *
  * Same no-dependency line-scan discipline as `scanWorkflowJobs`; `scripts/` has no `node_modules`.
  *
@@ -780,7 +816,7 @@ export function readOnBlock(source) {
   const isComment = (/** @type {string} */ l) => /^[\t ]*#/.test(l);
   const indentOf = (/** @type {string} */ l) => (/^[\t ]*/.exec(l)?.[0] ?? "").replace(/\t/g, "        ").length;
   /** @type {(why: string) => OnBlock} */
-  const unknown = (why) => ({ trigger: "unknown", prPathFiltered: false, why });
+  const unknown = (why) => ({ trigger: "unknown", prPathFiltered: false, events: [], why });
   const isPrEvent = (/** @type {string} */ k) => PR_EVENTS.includes(k);
   // `\b` will not do here: `\bpull_request\b` does NOT match inside `pull_request_target`, because `_`
   // is a word character — which is half of why the exact-string comparison went unnoticed for a round.
@@ -847,7 +883,17 @@ export function readOnBlock(source) {
     // this is unreachable in practice; round 2 nevertheless answered a confident `other` for it, which
     // silently dropped the whole workflow. Fail closed instead.
     if (/^[&*]/.test(inlineRest)) return unknown("`on:` uses a YAML anchor or alias, which is not resolved");
-    return { trigger: prEventRe.test(inlineRest) ? "pull-request" : "other", prPathFiltered: false, why: "" };
+    // `events` here is a TOKEN SWEEP, not a parse: `on: ['a #b', pull_request]` yields `a`, `b`,
+    // `pull_request`, because this branch never separates a flow scalar from a key. Stated rather
+    // than hidden, and it is the safe direction for the only consumer — the unknown-PR-event guard
+    // in `ciPollFailClosed.test.ts` asks whether any name here looks PR-scoped and is not in
+    // `PR_EVENTS`, so over-reporting reds a workflow that is fine rather than passing one that is not.
+    return {
+      trigger: prEventRe.test(inlineRest) ? "pull-request" : "other",
+      prPathFiltered: false,
+      events: inlineRest.match(/[A-Za-z_][A-Za-z0-9_-]*/g) ?? [],
+      why: "",
+    };
   }
 
   // Block form. Children are every line indented deeper than `on:` itself, comments and blanks skipped.
@@ -865,15 +911,17 @@ export function readOnBlock(source) {
   // and an unfiltered `pull_request_target:` still runs on every diff, and stopping at the first key
   // would have excused its silence.
   /** @type {number[]} */ const prAts = [];
+  /** @type {string[]} */ const events = [];
   for (const i of body) {
     if (indentOf(lines[i]) !== childIndent) continue;
     const split = splitInlineComment(lines[i]);
     if (split.unterminated) return unknown(`unterminated quote in the \`on:\` block: ${lines[i].trim()}`);
     const key = /^(?:-[\t ]*)?(["']?)([A-Za-z_][A-Za-z0-9_-]*)\1[\t ]*(:.*)?$/.exec(split.rest);
     if (!key) return unknown(`unrecognised line in the \`on:\` block: ${lines[i].trim()}`);
+    events.push(key[2]);
     if (isPrEvent(key[2])) prAts.push(i);
   }
-  if (prAts.length === 0) return { trigger: "other", prPathFiltered: false, why: "" };
+  if (prAts.length === 0) return { trigger: "other", prPathFiltered: false, events, why: "" };
 
   const filtered = (/** @type {number} */ prAt) => {
     for (const i of body) {
@@ -883,7 +931,7 @@ export function readOnBlock(source) {
     }
     return false;
   };
-  return { trigger: "pull-request", prPathFiltered: prAts.every(filtered), why: "" };
+  return { trigger: "pull-request", prPathFiltered: prAts.every(filtered), events, why: "" };
 }
 
 /**

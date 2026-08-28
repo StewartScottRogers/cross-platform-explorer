@@ -204,8 +204,25 @@ pull request and both land their check runs on the rollup, so both are required 
 round 3 the classifier compared the key to `"pull_request"` exactly and a `pull_request_target`-only
 workflow dropped out of the required set with no trace at all — a bare `coverage=ok`. There is no such
 workflow in this repo today, and that too is asserted by the same test rather than written down here.
+
 The event list is a literal pair, so it is also the classifier's one standing blind spot: a *third*
-PR-scoped event would classify as "not PR-triggered" and only that `toEqual` would notice.
+PR-scoped event classifies as "not PR-triggered" and drops its workflow out of the required set.
+**Round 4 corrected what that blind spot costs.** The earlier text here said "only that `toEqual`
+would notice" — it would not. `prTriggered` is a *filter*, so a workflow classified `other` is
+**removed** from the array and `toEqual(["ci.yml","gui-smoke.yml"])` still holds; it can only red on
+over-inclusion, or on one of those two dropping out. Measured against the real workflow set plus one
+hypothetical file, `on: pull_request_review:` and `on: pull_request_v2:` each classify `false` and
+each leave that assertion **green**. The classifier, the enumeration and round 3's
+`pull_request_target` text grep were all silent on the same case at once.
+
+What notices now is a **shape** check, not a name: `readOnBlock` returns the event names it parsed,
+and the same test reds on any parsed `on:` event matching `/^pull_request[_a-z0-9]*$/` that is not in
+`PR_EVENTS` — with an inline positive control asserting a hypothetical `pull_request_v2` workflow
+does fire it. Still uncovered, and deliberately: a PR-scoped event GitHub names something else
+entirely (`merge_group`), and any workflow whose `on:` block reads `unknown`, which yields no parsed
+events to check. `pull_request_review` and `pull_request_review_comment` are excluded from
+`PR_EVENTS` **by decision, not omission** — they fire on a review, not on `opened`/`synchronize`, so
+requiring their checks would refuse every PR nobody has reviewed yet.
 
 **What is actually true and worth knowing before you click:**
 

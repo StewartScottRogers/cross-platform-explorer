@@ -650,6 +650,10 @@ describe("ci-poll: the coverage check is narrow ON PURPOSE, and its carve-outs a
 // this had no comment handling at all.
 describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never quietly false (CPE-1970)", () => {
   const CI = readFileSync(join(REPO, ".github", "workflows", "ci.yml"), "utf8");
+  // A PR-scoped event name this classifier has never heard of — the "one GitHub adds later" case the
+  // header's blind-spot bullet is about. Deliberately not a real event: the point is that the guard
+  // fires on the SHAPE of the name, so nobody has to have heard of it first.
+  const FUTURE_PR_EVENT = "on:\n  pull_request_v2:\n    branches: [main]\njobs:\n  f:\n    name: Future\n";
 
   it("a column-0 comment inside `on:` no longer deletes the workflow from the required set", () => {
     // The red-proof, run by hand before the fix: `true` for the real file, `false` for the same bytes
@@ -671,9 +675,15 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
       "on:\n  - push\n  - pull_request\n",
       "on: # a trailing comment\n  pull_request:\n",
       // Round 3. A trailing comment in the `on:` BLOCK BODY, which round 2's header claimed to strip
-      // and did not — it answered `unknown` (fail-closed, but `coverage=unknown` on every board until
-      // someone deleted the comment).
+      // and did not — the SEQUENCE spelling answered `unknown` (fail-closed, but `coverage=unknown` on
+      // every board until someone deleted the comment).
       "on:\n  - push\n  - pull_request  # only PRs\n",
+      // ROUND 4 — the MAPPING spelling below never exhibited that bug, and round 3's comment implied it
+      // did. Re-measured against round 2's own module (`git show <round-2>:scripts/ci-poll.mjs`):
+      //   `on:\n  - push\n  - pull_request  # only PRs`   round 2 → `unknown`       round 3+ → `true`
+      //   `on:\n  push:\n  pull_request:  # only PRs`     round 2 → `true` ALREADY  round 3+ → `true`
+      // Round 2's key regex ended `(:.*)?$`, which swallowed `:  # only PRs` whole. Worth keeping as a
+      // case; not worth attributing a failure it never had.
       "on:\n  push:\n  pull_request:  # only PRs\n",
     ]) {
       expect(workflowTriggersPullRequest(src), src).toBe(true);
@@ -710,12 +720,29 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
   });
 
   it("the PR-event list is a literal pair, named — the standing blind spot the header points at", () => {
-    // Nothing in the code can notice a THIRD PR-scoped event name; only this assertion will, and only
-    // once someone writes a workflow using it. That is exactly the shape `pull_request_target` had.
+    // Nothing in `readOnBlock` can notice a THIRD PR-scoped event name: it compares against a list.
+    // ROUND 4 — and round 3's claim that "only the enumeration test's `toEqual` will" was FALSE, in
+    // three places at once (here, the header, and §2d). That `toEqual` runs over a FILTERED array, so
+    // an unrecognised event drops out and leaves it green; see the shape-based `unknownPrLike` guard
+    // in `every real workflow in this repo still classifies …`, which is what actually notices now.
     expect([...PR_EVENTS].sort()).toEqual(["pull_request", "pull_request_target"]);
-    expect(workflowTriggersPullRequest("on:\n  pull_request_review:\n"), "a PR-adjacent event we do NOT class as one").toBe(
-      false,
-    );
+    // WHY `pull_request_review` IS NOT IN THE PAIR, stated rather than left to read as an oversight:
+    // it fires on a review being submitted, NOT on `opened`/`synchronize`, so a `pull_request_review`
+    // workflow legitimately produces no check run on a PR nobody has reviewed yet. Classing it as
+    // PR-triggered would put its jobs in the required set and make `coverage` refuse EVERY unreviewed
+    // PR — over-blocking, which is the outcome that gets the gate aliased away. Same for
+    // `pull_request_review_comment`. This is a DECISION, not the blind spot bullet 1 describes; the
+    // `unknownPrLike` guard still reds if one lands, so the decision gets re-taken with a file in hand
+    // rather than silently inherited.
+    for (const src of [
+      "on:\n  pull_request_review:\n",
+      "on:\n  pull_request_review_comment:\n",
+      "on: [pull_request_review]\n",
+    ]) {
+      expect(workflowTriggersPullRequest(src), `${src} — a PR-adjacent event we deliberately do NOT class as one`).toBe(
+        false,
+      );
+    }
   });
 
   it("`prPathFiltered` needs EVERY PR trigger filtered, not the first one found", () => {
@@ -803,14 +830,47 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
       .map((f) => f.file)
       .sort();
     expect(prTriggered).toEqual(["ci.yml", "gui-smoke.yml"]);
-    // This `toEqual` is also the ONLY thing that can notice a new PR-scoped event arriving in this
-    // repo: `PR_EVENTS` is a literal pair, so a workflow triggered by a third one would classify as
-    // `other` and vanish from the required set. Today there is no `pull_request_target` here at all —
-    // asserted, because the header says so and a header that says so unasserted is how round 3 started.
-    const prtUsers = (base!.files as { file: string; text: string }[])
-      .filter((f) => /(^|[^A-Za-z0-9_-])pull_request_target([^A-Za-z0-9_-]|$)/.test(f.text))
-      .map((f) => f.file);
-    expect(prtUsers, "a `pull_request_target` workflow landed — re-read `readOnBlock`'s header").toEqual([]);
+    // ROUND 4. That `toEqual` canNOT notice a new PR-scoped event arriving, which is what round 3
+    // wrote here and in the header. `prTriggered` is a FILTER — a workflow classified `other` is
+    // REMOVED from the array, so the `toEqual` still holds and the suite stays green; it can only red
+    // on OVER-inclusion, or on `ci.yml`/`gui-smoke.yml` dropping out. Measured over this same
+    // `readBaseWorkflowSources("HEAD")` set plus one hypothetical file: `review-gate.yml`
+    // (`on: pull_request_review:`) and `future.yml` (`on: pull_request_v2:`) both classify `false` and
+    // both leave the `toEqual` GREEN. Round 3's second backstop was a text grep for the
+    // `pull_request_target` LITERAL, which caught that one name and nothing else — so for the case the
+    // header is actually about, "one GitHub adds later", all three were silent at once.
+    //
+    // So the check is by SHAPE, off the parsed `on:` keys rather than the raw bytes: `readOnBlock`
+    // now returns the `events` it read (comments already stripped, per CLAUDE.md rule 2 — a raw grep
+    // would match `pull_request_review` sitting in one of `ci.yml`'s ~60 lines of `on:` commentary).
+    // Anything that LOOKS PR-scoped and is not a name this module knows reds here, naming the file.
+    const unknownPrLike = (base!.files as { file: string; text: string }[])
+      .flatMap((f) => readOnBlock(f.text).events.map((e) => ({ file: f.file, event: e })))
+      .filter((x) => /^pull_request[_a-z0-9]*$/.test(x.event) && !PR_EVENTS.includes(x.event))
+      .map((x) => `${x.file}: ${x.event}`)
+      .sort();
+    expect(
+      unknownPrLike,
+      "a PR-shaped event this classifier does not know landed — decide if it belongs in `PR_EVENTS`, then re-read `readOnBlock`'s header",
+    ).toEqual([]);
+    // POSITIVE CONTROL, inline rather than left to whoever remembers to red-proof: the same expression
+    // over the same real files plus one hypothetical `pull_request_v2` workflow DOES fire. Without
+    // this, an `events` that silently came back `[]` would leave the assertion above green forever —
+    // which is precisely the failure mode round 3 shipped one guard earlier.
+    const withFuture = [...(base!.files as { file: string; text: string }[]), { file: "future.yml", text: FUTURE_PR_EVENT }];
+    expect(
+      withFuture
+        .flatMap((f) => readOnBlock(f.text).events.map((e) => ({ file: f.file, event: e })))
+        .filter((x) => /^pull_request[_a-z0-9]*$/.test(x.event) && !PR_EVENTS.includes(x.event))
+        .map((x) => `${x.file}: ${x.event}`),
+    ).toEqual(["future.yml: pull_request_v2"]);
+    // …and the classifier itself still says `false` for it, so the `toEqual` above genuinely could not
+    // have caught it. Both halves of round 4's finding, asserted side by side.
+    expect(workflowTriggersPullRequest(FUTURE_PR_EVENT)).toBe(false);
+    expect([...withFuture].filter((f) => workflowTriggersPullRequest(f.text)).map((f) => f.file).sort()).toEqual([
+      "ci.yml",
+      "gui-smoke.yml",
+    ]);
     // §2d of docs/design/CI-STALENESS.md rests on this: NEITHER carries a `pull_request:` path filter,
     // so no PR in this repo can legitimately be missing either workflow's checks.
     for (const f of base!.files as { file: string; text: string }[]) {
