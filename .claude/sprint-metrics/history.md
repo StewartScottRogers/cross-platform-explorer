@@ -1934,3 +1934,32 @@ Two properties worth copying:
 undeclared over one that searches.** Searching is bounded by the query you thought of; declaring is
 bounded by the thing itself. Same shape as *enumerate, don't recall* (CPE-1932) — but stronger,
 because it does not depend on the enumeration being right either.
+
+## 2026-08-27 — "there is no guard for this" is a claim about other files, and needs measuring like any other
+
+PR #1069 (CPE-1919) added a careful comment recording that the repo has **no general theme-parity
+guard** — written specifically so nobody would trust an unchecked assumption about coverage. Its
+round-3 Reviewer deleted a token and ran the tests: `dark-contrast.test.ts` **caught it by name**,
+because that file already carries a fixture-independent symmetric check. `hc-contrast.test.ts` did
+not. So the note was wrong in the *safe-sounding* direction — it understated existing coverage, which
+sends the follow-up ticket at the wrong half of the problem and tells the next maintainer that
+light↔dark parity is unguarded when it is guarded.
+
+The lesson is narrower and more useful than "measure your claims": **a negative claim about coverage
+feels like an observation and is actually a claim about several other files at once.** "There is no X
+in this repo" is the same species as CPE-1933's provenance claims — untested by construction, and made
+*more* dangerous by sitting inside a comment whose whole purpose is to be trusted. It is also
+cheap to check, and the check is a deletion, not a read. Both of this PR's blockers, in consecutive
+rounds, were unmeasured claims: first a contrast ratio stated as measured when it was estimated, then
+a coverage gap stated as total when it was partial. Same author, same care, same defect twice.
+
+Filed as **CPE-1962**, and the fix turned out to be nine lines copied three times rather than a design.
+
+## 2026-08-27 — the janitor deleted a live worktree again, mid-review
+
+PR #1069's Reviewer reported its worktree `agent-a8a8bc5e076a3faf8` was removed by the janitor while
+it was working. It rebuilt from `origin/` and lost nothing, so this cost minutes rather than work —
+but it is the **second** occurrence of [[janitor-never-rmrf-active-worktrees]], and the first one
+clobbered a live worker and dirtied `main`. A reviewer's worktree looks idle exactly when it is
+thinking, so "no recent writes" is not a liveness signal. The janitor's skip rule needs to key off
+**the agent registry**, not filesystem mtime.
