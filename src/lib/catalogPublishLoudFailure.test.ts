@@ -666,6 +666,9 @@ describe('"Catalog publish outcome" makes a non-publishing run RED (CPE-1953)', 
   const body = () => runBody("Catalog publish outcome");
   const ok = {
     HAS_KEY: "true",
+    // CPE-1951 added the monotonic lower-bound gate ahead of the sign step, and this gate accounts
+    // for it like every other. A run where it did not succeed did not publish.
+    LOWERBOUND: "success",
     SIGN: "success",
     BUNDLE: "success",
     // CPE-1978's real signature check. The gate reads it like every other step, so a `skipped` or
@@ -720,6 +723,7 @@ describe('"Catalog publish outcome" makes a non-publishing run RED (CPE-1953)', 
   });
 
   it.skipIf(!hasBash).each([
+    ["LOWERBOUND", "lower-bound"],
     ["SIGN", "build+sign"],
     ["BUNDLE", "verify-bundle"],
     ["SIGVERIFY", "verify-signatures"],

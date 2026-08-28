@@ -1485,6 +1485,12 @@ function guardLogicalLines(): string[] {
  * `(read …)`, `jq f|mapfile -t a`, `{ read …; }`) went from bound to `[]` in the diff that fixed
  * four others. Round 9 re-measured those six against bash and only TWO of them bind in the enclosing
  * shell at all — see `filledTargets`' OVER-reported bullet.
+ * Closed in round 11, the EIGHTH, and it was on round 10's own blind-spot list with the wrong
+ * direction beside it: `quotedEnd` did not skip expansions while `expansionEnd` skipped quoted
+ * spans, so `"$(echo ")")"` closed at the inner quote and emitted the expansion's `)` as a
+ * metacharacter, which ends the command. Listed as "extra tokens, not a swallow"; measured as
+ * fail-OPEN. Closed by mutual recursion — which then needed a memo, because the naive version is
+ * exponential on an unterminated nest (n=36 costs 8.2s through this path, n=45 no answer in 110s).
  * Closed in round 10, the SIXTH and SEVENTH, both inside round 9's own fix: `expansionEnd` balanced
  * brackets without honouring quotes (so a quoted closer ended the span early and the rest of the
  * line collapsed into one token — the swallow round 9 closed in the `"` branch, back through the
@@ -1634,6 +1640,14 @@ function guardLogicalLines(): string[] {
  *     need to be — same subshell argument as the pipe and the parens above (measured: `v=$(read -r
  *     x)` leaves `x` UNSET), and round 9's expansion span restores the `[]` that round 8's tokenizer
  *     had turned back into `["x"]`.
+ * ROUND 11 CLOSED THE ONE ROUND 10 LISTED, which is the more interesting correction: the shape was
+ * enumerated, in the right half, under the right "at least these" framing — and the DIRECTION
+ * written beside it ("a short span, i.e. extra tokens, not a swallow") was wrong. Extra tokens are
+ * not harmless when one of them is a metacharacter, because `filledTargets` ends the command there;
+ * `read -p "$(echo ")")" -r x` answered `["REPLY"]` while bash bound `x`. Two sentences in the same
+ * docblock then disagreed — a listed fail-open under a policy saying fail-opens are closed in code —
+ * so the entry is closed in code (mutual recursion, memoized) and the policy now states the test
+ * that decides which shapes may be listed at all: only those whose failure stays WITHIN one token.
  * ROUND 10 CLOSED THREE MORE, all found by review or by the widened corpus rather than by this
  * list, and all of them the same "one entrance" shape: a QUOTED closing delimiter inside `${…}` /
  * `$(…)` (which ended the span early AND then collapsed the whole rest of the line into one token,
@@ -1647,6 +1661,21 @@ function guardLogicalLines(): string[] {
  * hides a live `read` from a default-DENY scan — the same fail-open the `fail-OPEN branch` test
  * measures away for `dropSingleQuoted`'s unterminated `'`. It is now an ordinary character, and the
  * `an unterminated `"` does not swallow the rest of the line` row is the red-proof.
+ * ROUND 11's red-proofs, no-jq baseline **27 passed / 60 skipped** (round 10's 26 plus the
+ * termination guard). Round 11's review found no new defect — it found that round 10 had written
+ * the wrong DIRECTION on a shape it correctly enumerated, and the fix turned a listed gap into a
+ * closed one:
+ *   * `if (false && c === "$")` in `quotedEnd`, i.e. the mutual recursion off -> **2 failed /
+ *     25 passed**: 12 corpus lines (the `dqSubOddQuote` spelling, 4 free-text options x 3 binding
+ *     contexts) and exactly the two nesting rows. The BALANCED row stays green under it, which is
+ *     the measurement behind "the everyday spelling was always correct" — the fix is not what makes
+ *     ordinary `"$(f "$x")"` work. Re-run WITH jq 1.7.1 on PATH: **2 failed / 85 passed /
+ *     0 skipped**, same two tests, same 12 lines, against the with-jq baseline of **87 passed /
+ *     0 skipped**.
+ *   * the memo disabled (`const hit = undefined` in both functions) -> **1 failed**, the
+ *     termination guard, `expected 8194 to be less than 1000`. That number is the whole reason the
+ *     guard is shaped the way it is; see its comment for what the first draft got wrong.
+ *
  * ROUND 10's red-proofs, same convention — no-jq baseline **26 passed / 60 skipped**, and the first
  * re-run with jq to show the leg is still jq-independent. This is the first round whose review found
  * CODE defects rather than claim-scope ones, and both were the same shape as rounds 6-9: a class
@@ -1745,25 +1774,77 @@ const SHELL_META = /^[;|&(){}<>`]$/;
  */
 const TAKES_ARG = { read: "adinNptu", mapfile: "dnOsuCc" } as const;
 /**
+ * A per-tokenization cache of "where does the span starting at index `i` end". `shellTokens` makes
+ * one and threads it through, so `quotedEnd` and `expansionEnd` never re-scan the same start twice.
+ * ONE map is unambiguous because the two functions are called at disjoint positions by construction
+ * — `quotedEnd` only where `line[i]` is a quote, `expansionEnd` only where it is `$`.
+ *
+ * It is a correctness-preserving cache, but it is NOT optional. Round 11's first draft of the mutual
+ * recursion below had no memo and each failed nested scan re-scanned the whole suffix, which is
+ * exponential in the nesting depth. Measured on a line of `"` + `$(echo "` repeated n times, i.e.
+ * an UNTERMINATED nest, which is the shape that never short-circuits:
+ *     n=30 (246 chars) 107ms | n=35 (286) 1,142ms | n=40 (326) 14,898ms | n=45 no answer in 110s
+ * — roughly x13 per +5, so a 370-character logical line takes minutes. With the memo the same
+ * generator at n=2000 (a 16KB line) answers `["REPLY"]` in 55ms. A tokenizer that hangs on an input
+ * is worse than one that answers it wrongly, because CI reports the second and stalls on the first;
+ * `…terminates on a pathological nested span…` below is the guard, and its own timeout is the
+ * mechanism.
+ */
+type SpanMemo = Map<number, number>;
+/**
  * The end index (inclusive) of the quoted span that starts at `line[i]`, which must be one of
  * `"`, `'` or a backtick — or -1 when it never closes on this line. `'` takes NOTHING literally
  * except its own closer (the shell expands nothing inside it, and a backslash is a plain
- * character); `"` and a backtick honour `\`.
+ * character); `"` and a backtick honour `\` AND, since round 11, hold an embedded `${…}` / `$(…)`
+ * whole via `expansionEnd`.
  *
  * ONE function, called from every branch that consumes such a span, because round 10's two
- * fail-opens were both "the class was fixed at one entrance and left open at the others".
+ * fail-opens were both "the class was fixed at one entrance and left open at the others" — and the
+ * mutual recursion with `expansionEnd` is round 11's instance of exactly that: `expansionEnd` had
+ * skipped quoted spans since round 10 while `quotedEnd` did not skip expansions, so a `"` span
+ * holding a `$( )` that itself holds a `"` closed at the INNER quote. Round 10's span table called
+ * that "a short span, i.e. extra tokens, not a swallow" — measured, and wrong in the direction that
+ * matters: one of those extra tokens is the expansion's `)`, `filledTargets` ends the command at a
+ * metacharacter, and the shape therefore fails **OPEN**.
+ *     read -p "$(echo ")")" -r q0 <<< "hello"            -> ["REPLY"], bash binds q0
+ *     mapfile -C "$(printf ")")" -c 1 -t q1 < "$f"       -> ["MAPFILE"], bash binds q1
+ * Tokens for the first: ["read","-p","\"$(echo \"",")","\")\"","-r","q0",…]. It needs an ODD `"`
+ * inside the substitution; the balanced everyday spellings were correct throughout and still are
+ * (measured: `"$(printf 'v: %s' "$x")"`, `"prefix $(printf '%s' "$x") suffix"`,
+ * `"$(printf '%s' "cb")"`, `read -d "$(printf '%s' "$x")"` — all bound, all agreed). No live
+ * exposure either: the guard script's two `read` lines carry no substitution and the taint set is 12
+ * at rounds 7 through 11. It is closed in CODE rather than written down because that is what this
+ * file's own policy says to do with a fail-open, and round 10 left the two sentences disagreeing.
  */
-function quotedEnd(line: string, i: number): number {
+function quotedEnd(line: string, i: number, memo: SpanMemo = new Map()): number {
+  const hit = memo.get(i);
+  if (hit !== undefined) return hit;
+  const save = (v: number): number => {
+    memo.set(i, v);
+    return v;
+  };
   const q = line[i];
-  const escapes = q !== "'";
+  if (q === "'") {
+    // Nothing is special inside `'…'`, a backslash included, so there is no recursion here.
+    for (let j = i + 1; j < line.length; j += 1) if (line[j] === "'") return save(j);
+    return save(-1);
+  }
   for (let j = i + 1; j < line.length; j += 1) {
-    if (escapes && line[j] === "\\") {
+    const c = line[j];
+    if (c === "\\") {
       j += 1;
       continue;
     }
-    if (line[j] === q) return j;
+    if (c === "$") {
+      const e = expansionEnd(line, j, memo);
+      if (e !== -1) {
+        j = e;
+        continue;
+      }
+    }
+    if (c === q) return save(j);
   }
-  return -1;
+  return save(-1);
 }
 /**
  * The end index (inclusive) of the balanced `${…}` / `$(…)` / `$((…))` span that starts at
@@ -1789,9 +1870,15 @@ function quotedEnd(line: string, i: number): number {
  * span via `quotedEnd`, and an UNTERMINATED quote inside the expansion returns -1, which is this
  * function's stated fail direction rather than a second swallow.
  */
-function expansionEnd(line: string, i: number): number {
+function expansionEnd(line: string, i: number, memo: SpanMemo = new Map()): number {
+  const hit = memo.get(i);
+  if (hit !== undefined) return hit;
+  const save = (v: number): number => {
+    memo.set(i, v);
+    return v;
+  };
   const open = line[i + 1];
-  if (open !== "{" && open !== "(") return -1;
+  if (open !== "{" && open !== "(") return save(-1);
   const close = open === "{" ? "}" : ")";
   let depth = 0;
   for (let j = i + 1; j < line.length; j += 1) {
@@ -1801,18 +1888,18 @@ function expansionEnd(line: string, i: number): number {
       continue;
     }
     if (c === '"' || c === "'" || c === "`") {
-      const q = quotedEnd(line, j);
-      if (q === -1) return -1; // unterminated inside the expansion: refuse, never swallow
+      const q = quotedEnd(line, j, memo);
+      if (q === -1) return save(-1); // unterminated inside the expansion: refuse, never swallow
       j = q;
       continue;
     }
     if (c === open) depth += 1;
     else if (c === close) {
       depth -= 1;
-      if (depth === 0) return j;
+      if (depth === 0) return save(j);
     }
   }
-  return -1;
+  return save(-1);
 }
 /**
  * One logical line's words, with the properties `filledTargets` needs and which no single regex gave
@@ -1846,37 +1933,61 @@ function expansionEnd(line: string, i: number): number {
  *   `\X`        | this loop, inline    | n/a, exactly 2 chars   | a trailing `\` is guarded by
  *               |                      |                        | `i + 1 < line.length` and is an
  *               |                      |                        | ordinary character
- *   `"…"`       | `quotedEnd`          | honours `\`; `'` and a | ordinary character (round 9)
- *               |                      | backtick are literal   |
+ *   `"…"`       | `quotedEnd`          | honours `\`, and holds | ordinary character (round 9)
+ *               |                      | an embedded `${…}` /   |
+ *               |                      | `$(…)` whole via       |
+ *               |                      | `expansionEnd` (round  |
+ *               |                      | 11). `'` is literal    |
  *               |                      | inside `"` per POSIX   |
  *   `'…'`       | `quotedEnd`          | nothing is special     | ordinary character
  *               |                      | inside `'…'`, `\`      |
- *               |                      | included               |
- *   `` `…` ``   | `quotedEnd`          | honours `\`            | falls through to the
+ *               |                      | included — so this is  |
+ *               |                      | the one branch that    |
+ *               |                      | does NOT recurse       |
+ *   `` `…` ``   | `quotedEnd`          | same as `"…"`          | falls through to the
  *               |                      |                        | metacharacter branch, i.e. its
  *               |                      |                        | own token (SHELL_META has it)
  *   `${…}`      | `expansionEnd`       | skips `'`/`"`/backtick | -1, so the `$` is an ordinary
  *   `$(…)`      | `expansionEnd`       | spans via `quotedEnd`  | character — never a swallow
  *   `$((…))`    | `expansionEnd`       | (round 10's F1 fix)    |
  *
+ * The `"…"` and `${…}` rows are MUTUALLY recursive as of round 11, memoized per line (`SpanMemo`),
+ * and `…terminates on a pathological nested span…` is the guard that the memo stays.
+ *
  * AT LEAST these are still not held, and the halves are stated separately (CLAUDE.md's round-9
  * rule — never a count, and say which half each is in):
- *   * CATCHABLE, not caught today: a `"` span containing a `$( … )` that itself contains a `"`
- *     (`"$(echo ")")"`, which bash accepts) — `quotedEnd` closes at the inner quote. It would take
- *     mutual recursion between `quotedEnd` and `expansionEnd`; the direction on failure is a short
- *     span, i.e. extra tokens, not a swallow. `$'…'` and `$"…"` are likewise read as `$` plus an
- *     ordinary quoted span.
+ *   * CATCHABLE, not caught today: `$'…'` and `$"…"` are read as `$` plus an ordinary quoted span,
+ *     so `$'it\'s'` splits at the escaped quote rather than honouring ANSI-C escapes. Measured
+ *     against bash: it does not move the binding on any shape run so far, and the direction is a
+ *     short span. **Read that last clause knowing what it cost.** Round 10 wrote exactly it —
+ *     "a short span, i.e. extra tokens, not a swallow" — about the `"$(… " …)"` nesting, and it was
+ *     wrong in the direction this file exists for: one of the extra tokens was the expansion's `)`,
+ *     `filledTargets` ends the command at a metacharacter, and the shape failed **OPEN**
+ *     (`read -p "$(echo ")")" -r x` -> `["REPLY"]`, bash binds `x`). "Extra tokens" is not a synonym
+ *     for "harmless"; a metacharacter among them ends the command. That one is now closed in code.
  *   * CANNOT be settled by this tokenizer: a here-document body, which is not on this logical line
  *     at all (`logicalLines` joins `\`-continuations only). That is `shellScriptLines`' job.
  * Round 7's regex and round 8's loop both swallowed to end of line on an unterminated `"`, which
  * hides text from a default-deny scan; nothing in the script trips any of this today (the live
- * taint set is 12 at rounds 7, 8, 9 and 10), so these are latent holes rather than shipped
+ * taint set is 12 at rounds 7 through 11), so these were latent holes rather than shipped
  * fail-opens — and they are closed in the code rather than written down, because the file's stated
  * premise is default-deny and its headline is fail-open zero.
+ *
+ * THE POLICY IS NOW CONSISTENT WITH THE LIST, which it was not at round 10: that round wrote the
+ * sentence above AND left a fail-open sitting in the list under it, described as the milder
+ * direction. Both halves of a contradiction can be individually reasonable and it is still a
+ * contradiction, so the rule, stated once: **a shape whose failure ends the command — anything that
+ * emits a metacharacter token or swallows text — is closed in code, never listed.** Only shapes
+ * whose failure is a short or long span WITHIN one token may be listed, and the entry must say
+ * which, measured, not reasoned. The remaining `$'…'` entry qualifies under that rule and was
+ * checked against it rather than assumed into it.
  */
 function shellTokens(line: string): string[] {
   const out: string[] = [];
   let cur = "";
+  // One memo for the whole line — see `SpanMemo`. Without it the mutual recursion below is
+  // exponential in the nesting depth of an UNTERMINATED span (measured; numbers at `SpanMemo`).
+  const memo: SpanMemo = new Map();
   const flush = () => {
     if (cur !== "") out.push(cur);
     cur = "";
@@ -1889,7 +2000,7 @@ function shellTokens(line: string): string[] {
       continue;
     }
     if (ch === '"' || ch === "'" || ch === "`") {
-      const end = quotedEnd(line, i);
+      const end = quotedEnd(line, i, memo);
       if (end !== -1) {
         cur += line.slice(i, end + 1);
         i = end;
@@ -1899,7 +2010,7 @@ function shellTokens(line: string): string[] {
       // branch below; a backtick falls through to the metacharacter branch, which is its own token.
     }
     if (ch === "$") {
-      const end = expansionEnd(line, i);
+      const end = expansionEnd(line, i, memo);
       if (end !== -1) {
         cur += line.slice(i, end + 1);
         i = end;
@@ -2874,6 +2985,31 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
         lines: ["mapfile -C `echo cb` -c 1 -t p25 < <(jq -r .n f)", "printf '%s\\n' \"${p25[0]}\" >&2"],
         want: ["p25"],
       },
+      // ── Round 11: the other half of round 10's fix, and the entry round 10 put on the
+      // "CATCHABLE, not caught today" list with the wrong DIRECTION. `expansionEnd` skipped quoted
+      // spans; `quotedEnd` did not skip expansions; so a `"` span holding a `$( )` that itself holds
+      // a `"` closed at the inner quote. Round 10 called that "a short span … not a swallow" —
+      // measured, it emits the expansion's `)` as a METACHARACTER token, `filledTargets` ends the
+      // command there, and the shape fails OPEN. Both bind in bash 5.3.15. Closed by making the two
+      // functions mutually recursive (memoized — see `SpanMemo` for why that is not optional).
+      {
+        label: "a `\"` span holds a `$( … )` that itself holds a `\"`",
+        lines: ['read -p "$(echo ")")" -r q0 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$q0\" >&2"],
+        want: ["q0"],
+      },
+      {
+        label: "...and the same nesting on `mapfile`'s callback",
+        lines: ['mapfile -C "$(printf ")")" -c 1 -t q1 < <(jq -r .n f)', "printf '%s\\n' \"${q1[0]}\" >&2"],
+        want: ["q1"],
+      },
+      {
+        // The everyday spelling, pinned in the SAFE direction so the fix above cannot be mistaken
+        // for the thing that made balanced nesting work — it always did (measured at round 10's
+        // head: `["n0"]`). The failure needs an ODD `"` inside the substitution.
+        label: "a BALANCED `\"$(f \"$x\")\"` was always right, and still is",
+        lines: ['read -p "$(printf \'v: %s\' "$x")" -r n0 <<< "$(jq -r .n x)"', "printf '%s\\n' \"$n0\" >&2"],
+        want: ["n0"],
+      },
     ];
     const got = cases.map(({ lines }) => {
       const parsed = logicalLines(lines.join("\n"));
@@ -2924,13 +3060,13 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
    * figures in this docblock that its own runner contradicted (a "295 of which bash binds" that the
    * runner put at 225, and an over-report count quoted as a line count). The live figures are in the
    * assertion messages, which compute them; this table is provenance for the tokenizer comparison,
-   * which no assertion prints. Recorded at round 10's head, bash 5.3.15, Windows:
-   *     {"lines":525,"bashBinds":303,"declaredNonBinding":210,
-   *      "r7":[117,0],"r8":[141,108],"now":[0,202],"onlyR7":54,"onlyR8":78}
-   * i.e. of 525 generated lines bash binds on 303; the round-7 tokenizer fails open on 117 and the
-   * round-8 one on 141, 54 of them exclusive to round 7 and 78 exclusive to round 8 — the trade,
+   * which no assertion prints. Recorded at round 11's head, bash 5.3.15, Windows:
+   *     {"lines":615,"bashBinds":357,"declaredNonBinding":246,
+   *      "r7":[135,0],"r8":[153,136],"now":[0,238],"onlyR7":68,"onlyR8":86}
+   * i.e. of 615 generated lines bash binds on 357; the round-7 tokenizer fails open on 135 and the
+   * round-8 one on 153, 68 of them exclusive to round 7 and 86 exclusive to round 8 — the trade,
    * still symmetric in the sense the sensitivity check asserts (each loses lines the other keeps).
-   * Today's tokenizer fails open on 0 and over-reports 202, every one of them inside the 210 lines
+   * Today's tokenizer fails open on 0 and over-reports 238, every one of them inside the 246 lines
    * whose CONTEXT cannot bind, which is assertion 2 and is itself now confirmed against bash rather
    * than asserted from the context table.
    */
@@ -3013,6 +3149,15 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     // default branch and the argument really is the quoted `}`.
     { id: "qcloseBrace", applies: (s) => s.freeText && !s.isTarget, render: (o, _s, v) => `-${o} \${${v}_unset:-"}"}` },
     { id: "qcloseParen", applies: (s) => s.freeText && !s.isTarget, render: (o) => `-${o} $(printf '%s' ')')` },
+    // Round 11. `dqSub` is the everyday balanced spelling, sweeping the SAFE side so the fix cannot
+    // be mistaken for what makes ordinary nesting work; `dqSubOddQuote` is the failing one — a `"`
+    // span whose `$( … )` carries an ODD `"`, which is what closed the outer span early.
+    { id: "dqSub", applies: (s) => !s.isTarget, render: (o, s) => `-${o} "$(printf '%s' '${s.value}')"` },
+    {
+      id: "dqSubOddQuote",
+      applies: (s) => s.freeText && !s.isTarget,
+      render: (o) => `-${o} "$(printf "%s" ")")"`,
+    },
   ];
   const CORPUS_CONTEXTS: { id: string; binds: boolean; piped: boolean; wrap: (c: string) => string }[] = [
     { id: "plain", binds: true, piped: false, wrap: (c) => c },
@@ -3186,6 +3331,52 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     ).toEqual([]);
   });
 
+  it(
+    "...and terminates on a pathological nested span, which the memo is the only reason it does",
+    () => {
+      // Round 11. Making `quotedEnd` and `expansionEnd` mutually recursive closed a fail-open and
+      // opened a HANG: on an UNTERMINATED nest every failed inner scan re-scanned the whole suffix.
+      // Measured on this generator without the memo — n=30 (246 chars) 107ms, n=35 1,142ms, n=40
+      // 14,898ms, n=45 no answer in 110s, about x13 per +5. A tokenizer that hangs is worse than one
+      // that answers wrongly: CI reports the second and stalls on the first.
+      //
+      // THE SIZE IS CHOSEN SO THE UNMEMOIZED RUN FINISHES AND FAILS, and that took a correction
+      // worth writing down. The first draft asserted nothing about time, set a 5,000ms test timeout
+      // and said "the assertion is the TIMEOUT" — measured, and false: **vitest cannot interrupt a
+      // synchronous hot loop**, so with the memo disabled the run did not fail at 5s, it ran past
+      // 600s and had to be killed. A timeout is not an assertion over synchronous code; only an
+      // elapsed-time check the loop actually reaches is. The `30000` below is a backstop that
+      // bounds the damage, not the guard.
+      //
+      // So the timing probe runs FIRST and at a depth where the unmemoized cost RETURNS: measured
+      // in the sabotage state, n=36 costs **8,194ms** through this path (n=38 was 23,176ms — too
+      // close to the backstop on a slower runner). That is 8x the bar below and a quarter of the
+      // backstop. The margin in the shipped direction is enormous: memoized, n=36 is microseconds,
+      // so a 1,000ms bar cannot flake on a loaded machine.
+      const NEST_DEPTH = 36;
+      const nest = (n: number) => `read -p "${'$(echo "'.repeat(n)} -r deep`;
+      const t0 = Date.now();
+      expect(filledTargets(nest(NEST_DEPTH)), "an unterminated nest must fall back, not bind").toEqual([
+        "REPLY",
+      ]);
+      const elapsed = Date.now() - t0;
+      expect(
+        elapsed,
+        `tokenizing a ${NEST_DEPTH}-deep unterminated nest took ${elapsed}ms; memoized it is microseconds. ` +
+          "The `SpanMemo` threading has been broken somewhere, the cost is exponential in the " +
+          "nesting depth again, and the next input a few characters longer is a hang rather than a " +
+          "failure — which CI reports as nothing at all.",
+      ).toBeLessThan(1000);
+      // Only once the cheap probe has passed: the sizes that would hang outright, plus a balanced
+      // deep nest, because terminating quickly on rubbish is worth nothing if the real shape is
+      // read wrongly.
+      expect(filledTargets(nest(2000)), "a 16KB unterminated nest must still fall back").toEqual(["REPLY"]);
+      const closed = `read -p "${'$(echo "'.repeat(200)}x${'")'.repeat(200)}" -r deep <<< "hi"`;
+      expect(filledTargets(closed), "a balanced 200-deep nest is one option argument").toEqual(["deep"]);
+    },
+    30000,
+  );
+
   it("...and no logical line of the script ever reaches the stripper's fail-OPEN branch", () => {
     // `dropSingleQuoted` consumes an unterminated `'` to end of line, matching the shell. Round 4's
     // comment called that "the fail-CLOSED direction … it can only hide code, never invent it" —
@@ -3282,6 +3473,8 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
       // Round 10 F6 widened the scan to function-VALUED consts, so these five arrive here too.
       // Each is a local closure or a fixture builder, none of them a scanner.
       flush: "a local closure inside a tokenizer; it appends to that tokenizer's output array",
+      save: "a local closure inside `quotedEnd`/`expansionEnd` that writes one `SpanMemo` entry",
+      nest: "builds a pathological INPUT line for the termination guard; it reads nothing",
       score:
         "a closure inside the corpus test that calls `filledTargets` and counts; the shell question " +
         "is delegated whole, and it decides nothing about the grammar itself",
