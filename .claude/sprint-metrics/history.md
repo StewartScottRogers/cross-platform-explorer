@@ -4324,3 +4324,44 @@ multi-line flow to land in `unjudged`; it lands in `unknown`, because round 3 co
 well-understood event, whereas here **nothing read the continuation line at all** — so *"did not run"* is
 the honest state, and it happens to be the louder one. **Naming where you departed from the brief and why
 is what makes a divergence reviewable instead of a surprise.**
+
+## 2026-08-29 — a CPE-1929 sabotage pair split across platforms, and neither column shows it alone
+
+#1089's round 5 ran the standard pair on Windows and reported **A-disable green, B-lie red**, concluding
+the `policy: true` side was *reachable but structurally uncovered*. Round 6 ran the same pair on both
+platforms:
+
+```
+                       Windows --lib        Linux --lib
+A disable  (false &&)   2456 / 0  GREEN      2444 / 1  RED
+B lie      (true ||)    2455 / 1  RED        2445 / 0  GREEN
+```
+
+**Each sabotage's fixture is unconstructible on the other platform** — B's needs a foreign process's
+share mode, A's needs a rename NTFS refuses. **Both arms are covered. Neither column shows it.**
+
+**This is a new failure mode for CPE-1929's own procedure**, and it is worse than the shadowing it was
+written to catch, because it produces a *plausible* verdict rather than an obviously odd one. Round 5's
+"uncovered but reachable" reads as careful — it names a real limit, it is stated at the site, and it is
+**wrong**, because the covering test exists on the platform nobody ran. **A single-platform sabotage pair
+does not measure coverage; it measures coverage-on-that-platform**, and in a crate whose whole subject is
+per-platform filesystem semantics, that distinction is the norm rather than the exception.
+
+**So the rule: run both sabotages on every platform the code is `cfg`-gated for, and report the matrix,
+not the pair.** Two cells is a claim about two cells.
+
+Three other things from the round, all good practice.
+
+**The discriminator was re-run on the fix**, not merely on the defect — 20/20 at every gap including
+200 ms with all twenty EEXIST recovered, `changed_outside == 0` throughout. **A fix for a race is not
+demonstrated by the race passing once; it is demonstrated by the discriminator that broke it no longer
+breaking it.**
+
+**The failing feature set was derived rather than recalled** — test counts listed per feature set until
+one matched CI's arithmetic. `--features index` yields 2492 run against CI's 2491 passed + 1 failed. That
+is the "read the failure's arithmetic" lesson from two ticks ago, carried out properly.
+
+**And it improved on the reviewer's own fixture while adopting it.** Conceding *"your objection stands
+and mine doesn't"*, it then pointed the planted symlink at **a separate empty directory outside the
+root**, so *"nothing through the link"* means what it says rather than counting the claim's own pre-link
+stub. **Taking a correction and then tightening it is the strongest form of agreement available.**
