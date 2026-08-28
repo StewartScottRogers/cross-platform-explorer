@@ -113,6 +113,7 @@ already makes for `sectionDocs.test.ts` and `keymap.test.ts`.
 | `bidi-render-registry` | `src/lib/bidiEscape.guard.test.ts` | component render sites showing a raw filesystem name (CPE-1757/1885) | 1555 |
 | `bidi-app-markup-offenders` | `src/lib/bidiEscape.guard.test.ts` | the same, in `App.svelte`'s markup | 31 |
 | `bidi-app-script-basename-allowlist` | `src/lib/bidiEscape.guard.test.ts` | `App.svelte` `<script>` `baseName()` calls skipping `displaySafeName` | 2 |
+| `launcher-contrast-not-flat-exemptions` | `scripts/dev-harness/launcher-contrast/run.mjs` | launcher sites exempted from the pixel leg's flat-ground condition (CPE-1966) | 1 |
 | `manual-test-mvd` | `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` | still-manual verification surfaces (MVD) | 14 — **enumerated, not gated** |
 
 `manual-test-mvd` is enumerated but deliberately **not** gated: the MVD legitimately *rises* whenever
@@ -165,8 +166,12 @@ indistinguishable from a bug.
 parsing. Getting this wrong is the *safe* direction, which is why it is documented rather than fixed:
 an unmasked regex can only ADD apparent entries (`["a", /x,y/, "b"]` counts 4, not 3), which
 over-reports debt and therefore fails closed on a raise; and a quote inside a regex masks at most to
-the end of its own line, yielding a "no declaration found" red rather than a wrong number. No
-registered baseline contains a regex today. Stated plainly because a hand-rolled character scanner
+the end of its own line, yielding a "no declaration found" red rather than a wrong number.
+**One registered baseline does contain a regex** — `launcher-contrast-not-flat-exemptions`, whose
+single entry is `match: /\bselect#/`. That one is measured correctly (`arrayLength` returns 1, and 2
+when a second entry is appended; checked both ways at CPE-1966 round 7) because the regex contains no
+quote, no comma and no bracket. A future entry whose regex contains any of those is the hazard this
+paragraph is about, and it fails toward a red. Stated plainly because a hand-rolled character scanner
 over JS is the shape that produced several bugs in this repo in one week, every one found by
 adversarial input rather than by reading — so assume the next one is there and probe for it.
 
@@ -203,4 +208,5 @@ fix for it is requiring up-to-date checks before merge, not backdating a licence
 
 | baseline | from → to | ticket | why this raise is right |
 |----------|-----------|--------|-------------------------|
+| launcher-contrast-not-flat-exemptions | new → 1 | CPE-1966 | A brand-new baseline, so it has no value at the base revision and its first commit has to declare it. The list names launcher sites the pixel cross-check may not require to sample as one flat colour; its single entry is the native `<select>`, whose UA-painted dropdown arrow is foreground content inside the element's own border box that `-webkit-text-fill-color: transparent` cannot hide and no inset can exclude. It is registered because an exempted site keeps only the weaker majority check, and that check's margin against the known glyph defect is **one sample** (the bar needs 23 of 45; the glyph sabotage measured 23). |
 | bidi-render-registry | 1553 → 1555 | CPE-1925 | Two new render sites in `BackupDashboard.svelte`: `plan.createDirs.length` and `plan.skippedDirs.length`. Both are `.length` **numbers** — no filesystem-derived text can reach either — and they exist to make the backup plan's own counts honest, which is the whole ticket: a run that recreates folders, or that declines to carry ones it could not read, previously showed neither. The one value in that block that IS a path, `sd.path`, goes through `displaySafePath` and therefore does not appear in the registry at all; the wording that could have lived in three more ternaries was moved into the surrounding static text instead, to keep this raise at two rather than seven. |

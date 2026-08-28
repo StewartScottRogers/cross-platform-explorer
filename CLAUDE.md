@@ -260,6 +260,18 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      (`DELETING_ON_VALID_JS`) asserting the worse fact out loud, plus that `stripScriptBodiesChecked`
      throws on it. A test file with more than one case table should also assert **which tables its
      oracles sweep**, so a family held back from the enumeration is visible rather than merely absent.
+     **And that assertion must DERIVE its list of tables from the file's own source, not recall it**
+     (CPE-1932 again, one scope in). Round 6 wrote the list by hand; round 7 ran the two sabotages and
+     measured that it caught "registered the table, forgot the sweep" (1 red) and **missed** "declared
+     a table and mentioned it nowhere" (65/65 green) — which is the exact half the assertion exists
+     for. Scanning the file for `^const X: Case[] =` and requiring each name to appear closes the
+     class; a decoy inside a comment reds, which is the safe direction.
+     **Also: a claim about how many families exist is measured over whatever found them.** Round 6
+     called `DELETING_ON_VALID_JS` "the honest third category" while the same commit shipped the
+     generator that produces two more (`of` before a `/=`, and `yield`/`await` as plain identifiers in
+     sloppy code — both pre-existing since round 3, both caught by `stripScriptBodiesChecked`). Run the
+     committed generator and split its output before writing a number, and say which generator and
+     which seed the number came from.
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
      never actually re-reads its source is the same defect with extra steps. Write the red-proof's
      **result at the site**, not only in the PR body — a code comment that merely asserts, next to a

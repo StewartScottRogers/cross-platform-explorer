@@ -574,6 +574,12 @@ export const REGISTRY = [
     measure: arrayLength("APP_SCRIPT_BASENAME_ALLOWLIST"),
   },
   {
+    id: "launcher-contrast-not-flat-exemptions",
+    file: "scripts/dev-harness/launcher-contrast/run.mjs",
+    what: "launcher sites exempted from the pixel leg's flat-ground condition (CPE-1966)",
+    measure: arrayLength("NOT_FLAT_BY_DESIGN_EXEMPTIONS"),
+  },
+  {
     id: "manual-test-mvd",
     file: ".claude/qa-architecture/MANUAL-TEST-BURNDOWN.md",
     what: "still-manual verification surfaces (MVD) the QA Architect drives toward zero",

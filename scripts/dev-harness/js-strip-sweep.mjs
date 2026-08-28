@@ -19,12 +19,23 @@
 // a change can be scored as "N fixed, M regressed" instead of asserted to be an improvement. That
 // comparison is how round 6 found that round 5's paren accounting fixed 45 shapes and broke 4.
 //
-// EXIT CODE. This is an EXPLORATION tool, not a gate — the gate is `src/lib/jsSource.test.ts`, whose
-// `DELETING_GAPS` table pins the shapes that are known to delete and derives that none of them
-// parses. A plain run therefore exits 0 even when it lists desyncs, because a declared gap is
-// expected to show up here; duplicating the gap list into this file would just be a second copy to
-// rot. `--compare` exits 1 on a REGRESSION — a shape the older revision got right and this one does
-// not — which is the question the tool exists to answer.
+// WHAT A LISTED DESYNC IS, AND WHICH TABLE TO TRIAGE IT AGAINST. Every input here PARSES before
+// stripping — `corpus()` keeps nothing else — so **everything this tool lists is valid JavaScript
+// being corrupted**. In particular nothing it lists can be a `DELETING_GAPS` entry: `jsSource.test.ts`
+// derives that no entry in that table parses, which makes the intersection with this corpus empty by
+// construction. The tables to check a desync against are the two that hold shapes which delete VALID
+// JavaScript — `DELETING_ON_VALID_JS` and `DELETING_ON_VALID_JS_CONTEXTUAL`. A desync matching
+// neither is a family nobody has written down yet; add it there.
+//
+// (Rounds 1-6 of this file said the opposite — "check it against `DELETING_GAPS`… a declared gap is
+// expected to show up here" — which sent the reader to the one table it is impossible to hit.)
+//
+// EXIT CODE. This is an EXPLORATION tool, not a gate — the gate is `src/lib/jsSource.test.ts`. A plain
+// run exits 0 even when it lists desyncs, because the declared-and-mitigated families above show up
+// here on every run and duplicating them into this file would just be a second copy to rot. What
+// makes shipping those families survivable is not this exit code, it is `stripScriptBodiesChecked`
+// throwing on the result. `--compare` exits 1 on a REGRESSION — a shape the older revision got right
+// and this one does not — which is the question the tool exists to answer.
 
 import vm from "node:vm";
 import { execFileSync } from "node:child_process";
@@ -184,18 +195,28 @@ function desyncs(strip, inputs) {
   return out;
 }
 
+/**
+ * Temp dirs to remove on the way out. ONE `exit` listener for all of them, registered once at module
+ * scope: registering it inside `stripperAt`'s `finally` added a listener per call, which is a leak
+ * the moment anything calls that function more than once (round 7's nit; one call today).
+ *
+ * An imported ES module cannot be unloaded, so the directory has to outlive the import and can only
+ * be cleaned up at exit.
+ */
+const TEMP_DIRS = [];
+process.on("exit", () => {
+  for (const dir of TEMP_DIRS) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
 /** The stripper as it was at `ref`, loaded from a temp file (the module has no runtime deps). */
 async function stripperAt(ref) {
   const dir = mkdtempSync(path.join(tmpdir(), "cpe-jsstrip-"));
+  TEMP_DIRS.push(dir);
   const file = path.join(dir, "jsSource.mjs");
   writeFileSync(file, execFileSync("git", ["show", `${ref}:src/lib/jsSource.mjs`], {
     cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 24,
   }));
-  try {
-    return (await import(pathToFileURL(file).href)).stripJsComments;
-  } finally {
-    process.on("exit", () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
-  }
+  return (await import(pathToFileURL(file).href)).stripJsComments;
 }
 
 const compareTo = process.argv.includes("--compare")
@@ -213,8 +234,10 @@ let regressions = 0;
 
 console.log(`${inputs.length} deduped parseable inputs generated`);
 console.log(`working tree: ${now.size} desync(s) (parsed in, does NOT parse out)`);
-console.log("(a desync here is not automatically a bug — check it against DELETING_GAPS in");
-console.log(" src/lib/jsSource.test.ts, which is where declared gaps are pinned and derived)");
+console.log("(every input above PARSES before stripping, so every desync listed is VALID JavaScript being");
+console.log(" corrupted — none of them can be a DELETING_GAPS entry, since no entry in that table parses.");
+console.log(" Triage against DELETING_ON_VALID_JS and DELETING_ON_VALID_JS_CONTEXTUAL in");
+console.log(" src/lib/jsSource.test.ts; a desync matching neither is a family nobody has tabled yet.)");
 
 if (compareTo) {
   const old = desyncs(await stripperAt(compareTo), inputs);

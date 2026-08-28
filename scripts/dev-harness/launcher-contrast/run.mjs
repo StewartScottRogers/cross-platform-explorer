@@ -55,8 +55,19 @@ const THIN_MARGIN = 0.25;
  *
  * Adding an entry is a real decision — the site stops being evidence that the compositing model is
  * right, and keeps only the weaker majority check. Prefer fixing the sampler.
+ *
+ * **This is a RATCHET, and it is named so the class guard can see it (CPE-1934, round 7).** It was
+ * `NOT_FLAT_BY_DESIGN`, which contains none of `ratchetBaselines.test.ts`'s vocabulary words, so
+ * appending a second entry reddened nothing — an unratcheted allowlist inside a PR whose subject is
+ * unratcheted allowlists. It is now registered as `launcher-contrast-not-flat-exemptions` in
+ * `scripts/ratchet-baselines.mjs` and carries a row in `docs/design/RATCHETS.md`, so growing it needs
+ * a declared, ticketed raise.
+ *
+ * It earns that more than most: an exempted site keeps ONLY the majority check, and the margin
+ * between the majority bar and the known glyph defect is exactly one sample — the bar needs 23 of 45
+ * and the sabotage in `engine.mjs`'s red-proof B1 measured the weakest agreement at 51%, i.e. 23.
  */
-const NOT_FLAT_BY_DESIGN = [
+const NOT_FLAT_BY_DESIGN_EXEMPTIONS = [
   {
     match: /\bselect#/,
     why:
@@ -256,6 +267,7 @@ function analyse(res) {
   const pixelUnreadable = [];
   const pixelOffscreen = [];
   const pixelNotFlat = [];
+  const pixelUnrendered = [];
   for (const scheme of ["light", "dark"]) {
     const d = res.schemes[scheme];
     if (!d.pixels) continue;
@@ -267,7 +279,7 @@ function analyse(res) {
     // named exemption and a global tolerance.
     for (const p of d.pixels) {
       if (p.share === p.total) continue;
-      if (NOT_FLAT_BY_DESIGN.some((x) => x.match.test(p.path))) continue;
+      if (NOT_FLAT_BY_DESIGN_EXEMPTIONS.some((x) => x.match.test(p.path))) continue;
       pixelNotFlat.push(
         `${scheme}: ${p.path} sampled ${p.distinct} colour(s) in ${p.total} interior points ` +
           `(mode ${p.painted} x${p.share}; border box ${p.rect.w}x${p.rect.h}, safe box ` +
@@ -287,10 +299,23 @@ function analyse(res) {
     // A site the sampler could not read at all. Reported rather than dropped from the denominator:
     // a silently skipped site prints exactly like a site that passed, which is round 5's defect in a
     // different costume. These were being dropped before round 6 — all `counts.size === 0`, silently
-    // `continue`d — so "59 verified" was really "59 verified and 4 not mentioned".
+    // `continue`d.
+    //
+    // Round 7 is why that sentence no longer ends "so '59 verified' was really '59 verified and 4 not
+    // mentioned'." That figure was measured at ONE of the two silent drops. The line immediately
+    // above the one round 6 fixed was still a bare `continue` — the `w < 10 || h < 10` guard in
+    // `engine.mjs` — and instrumented it drops **161 sites per scheme** against those 4. Both are now
+    // collected, and the not-verified population is printed as its own counted buckets instead of
+    // being summarised in a sentence.
     for (const u of d.pixelUnsamplable ?? []) {
       (u.offscreen ? pixelOffscreen : pixelUnreadable).push(`${scheme}: ${u.path} — ${u.reason}`);
     }
+    // NOT FATAL, and the reason is the leg's stated scope rather than a judgement call: the pixel
+    // cross-check screenshots ONE state (base), so every site that only exists inside a panel this
+    // state does not show is a zero-size box here. That is out of scope, not unverified-and-ignored —
+    // but the two print identically when one of them prints nothing at all, which is the whole point
+    // of the bucket. Printed grouped by selector, since this bucket is much larger than the others.
+    for (const u of d.pixelUnrendered ?? []) pixelUnrendered.push({ scheme, ...u });
   }
 
   const legsDown = legsThatDidNotRun(res);
@@ -298,7 +323,8 @@ function analyse(res) {
     && !pixelUnreadable.length && !pixelNotFlat.length && !legsDown.length;
   return {
     measured, sites, checked, failures, unmatched,
-    pixelBad, pixelWeak, pixelEmpty, pixelUnreadable, pixelOffscreen, pixelNotFlat, legsDown, clean,
+    pixelBad, pixelWeak, pixelEmpty, pixelUnreadable, pixelOffscreen, pixelNotFlat, pixelUnrendered,
+    legsDown, clean,
   };
 }
 
@@ -323,7 +349,10 @@ function main() {
           pixelGroundsUnreadable: a.pixelUnreadable,
           pixelGroundsOffscreen: a.pixelOffscreen,
           pixelGroundsNotFlat: a.pixelNotFlat,
-          pixelGroundsUnreadable: a.pixelUnreadable,
+          // Not verified because the site does not render in the ONE state this leg screenshots.
+          // Non-fatal and in the verdict anyway: what was not verified is several counted buckets,
+          // not one number and not silence.
+          pixelGroundsNotRendered: a.pixelUnrendered.map((u) => `${u.scheme}: ${u.path} — ${u.reason}`),
           legsThatDidNotRun: a.legsDown,
         },
       }, null, 2));
@@ -356,7 +385,7 @@ function main() {
     }
     console.log("");
 
-    const { measured, sites, checked, failures, unmatched, pixelBad, pixelWeak, pixelEmpty, pixelUnreadable, pixelOffscreen, pixelNotFlat, legsDown } = a;
+    const { measured, sites, checked, failures, unmatched, pixelBad, pixelWeak, pixelEmpty, pixelUnreadable, pixelOffscreen, pixelNotFlat, pixelUnrendered, legsDown } = a;
 
     const wanted = opt("--site");
     const listed = flag("--all") ? sites : wanted ? sites.filter((s) => key(s).toLowerCase().includes(wanted.toLowerCase())) : [];
@@ -399,8 +428,16 @@ function main() {
         const worst = d.pixels.reduce((m, p) => Math.min(m, p.agreeing / p.total), 1);
         const flat = d.pixels.filter((p) => p.share === p.total).length;
         const off = (d.pixelUnsamplable ?? []).filter((u) => u.offscreen).length;
+        // The DENOMINATOR. "N verified" on its own is only honest if nothing else happened, and three
+        // other things can: a site off the viewport, a site whose safe box collapsed, and — by far the
+        // largest — a site that does not render at all in the one state this leg screenshots. The
+        // first and third are counted on this line; the second is FATAL and gets its own block below,
+        // so it can never be read as a footnote. Round 7 added the third; before it, that population
+        // was not printed anywhere.
+        const notRendered = (d.pixelUnrendered ?? []).length;
         console.log(`  ${scheme}: pixel cross-check — ${d.pixels.length} grounds screenshot-verified, ${bad.length} where the prediction is not most of the interior` +
-          (off ? `, ${off} UNVERIFIED (off the captured viewport)` : ""));
+          (off ? `, ${off} UNVERIFIED (off the captured viewport)` : "") +
+          (notRendered ? `, ${notRendered} NOT RENDERED in the screenshotted state` : ""));
         console.log(`      weakest agreement ${(worst * 100).toFixed(0)}% of samples within 1/255 of the prediction (bar: >50%); ${flat}/${d.pixels.length} grounds sampled a single flat colour`);
         for (const p of bad.slice(0, 8)) console.log(`      predicted ${p.predicted} painted ${p.painted} (delta ${p.delta})  ${p.path}  [agreeing ${p.agreeing}/${p.total}, ${p.distinct} distinct]`);
         if (bad.length > 8) console.log(`      ... and ${bad.length - 8} more`);
@@ -541,7 +578,7 @@ function main() {
       console.log("");
       console.log(
         `PIXEL CROSS-CHECK IS NOT WELL-DETERMINED — ${pixelNotFlat.length} ground(s) did not sample a single\n` +
-          "flat colour, and no entry in NOT_FLAT_BY_DESIGN covers them. Something is painted inside those\n" +
+          "flat colour, and no entry in NOT_FLAT_BY_DESIGN_EXEMPTIONS covers them. Something is painted inside those\n" +
           "elements that the compositing model does not know about, or the safe sample box is reaching\n" +
           "geometry it should be excluding. Fix the model or the sampler; declaring a new exemption costs\n" +
           "that site's evidence, so it is the last resort rather than the first.",
@@ -573,6 +610,30 @@ function main() {
       );
       for (const l of pixelUnreadable.slice(0, 8)) console.log(`      ${l}`);
       if (pixelUnreadable.length > 8) console.log(`      ... and ${pixelUnreadable.length - 8} more`);
+    }
+    if (pixelUnrendered.length) {
+      // NOT fatal, and the largest of the three not-verified buckets by a wide margin. It exists
+      // because the alternative — an unconditional `continue` in the sampler — made these sites print
+      // exactly like sites that passed, which is the same defect round 6 fixed one line further down
+      // and measured at 4. This one is measured at 161 per scheme.
+      console.log("");
+      console.log(
+        `PIXEL CROSS-CHECK DID NOT REACH ${pixelUnrendered.length} SITE(S) — they render at a size no ground can\n` +
+          "be read out of (mostly 0x0) in the ONE state this leg screenshots. That is the leg's stated scope,\n" +
+          "not a disagreement — but scope has to be COUNTED, or \"N verified\" reads as \"N is all there was\".\n" +
+          "Grouped by selector; the count after each is light+dark combined.",
+      );
+      const grouped = new Map();
+      for (const u of pixelUnrendered) {
+        const size = /^border box ([0-9.]+x[0-9.]+)/.exec(u.reason);
+        // Named `bucketKey`, not `key`: `key` is this file's site-identity helper and shadowing it
+        // inside a reporting block is the kind of thing that reads fine and behaves surprisingly.
+        const bucketKey = `${u.path} @ ${size ? size[1] : "not in the document"}`;
+        grouped.set(bucketKey, (grouped.get(bucketKey) ?? 0) + 1);
+      }
+      const ranked = [...grouped].sort((a2, b2) => b2[1] - a2[1]);
+      for (const [k, n] of ranked.slice(0, 12)) console.log(`      x${String(n).padStart(3)}  ${k}`);
+      if (ranked.length > 12) console.log(`      ... and ${ranked.length - 12} more distinct selector/size pairs`);
     }
     if (pixelEmpty.length) {
       console.log("");

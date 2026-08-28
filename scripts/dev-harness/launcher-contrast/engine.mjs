@@ -1005,10 +1005,12 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
 
       let pixels = null;
       let pixelUnsamplable = [];
+      let pixelUnrendered = [];
       if (verifyPixels) {
         const probe = await verifyAgainstPixels(client, all.filter((s) => s.scheme === scheme && s.state === "base" && s.role === "text"));
         pixels = probe.rows;
         pixelUnsamplable = probe.unsamplable;
+        pixelUnrendered = probe.unrendered;
       }
 
       schemes[scheme] = {
@@ -1024,6 +1026,7 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
         systemColours: { Canvas: base.canvas, CanvasText: base.canvasText, Field: base.field, ButtonFace: base.buttonFace },
         sites: all, matched: setup.matched, mounted: setup.mounted, forced, animations: animMeta.count, pixels,
         pixelUnsamplable,
+        pixelUnrendered,
         // ── WORK DONE, per leg, per scheme (round-3 blocker 1) ─────────────────────────────────
         // `run.mjs` checks SIX of these per scheme — five floors and one ceiling (`stateSkips`, which
         // reds when it is ABOVE zero). Three — `baseReadings`, `stateReadings`,
@@ -1133,7 +1136,7 @@ export function pseudoRulesFromCss() {
  *     the same 1/255 the verdict uses. This replaces "the mode equals the prediction", which could be
  *     satisfied by a plurality of 13 out of 45.
  *   * the DETERMINACY check — the interior must sample as ONE flat colour, with the exceptions
- *     declared by selector in `run.mjs`'s `NOT_FLAT_BY_DESIGN` (today: native `<select>`, whose UA
+ *     declared by selector in `run.mjs`'s `NOT_FLAT_BY_DESIGN_EXEMPTIONS` (today: native `<select>`, whose UA
  *     dropdown arrow is foreground content no inset can exclude).
  * Round 5 asserted flatness with no exemptions and called it "the strongest form of the condition".
  * It was strong, and it was also measuring the PAGE rather than the model: it reddened CI on
@@ -1164,7 +1167,7 @@ export function pseudoRulesFromCss() {
  *      weakest agreement drops from 98% to **51%** — a single point above the majority bar. Note what
  *      that says: the majority check ALONE would have let this through. The flatness condition is what
  *      catches it, which is why it is fatal rather than advisory.
- *   B2. The exemption list is load-bearing too, not decoration. Changing `NOT_FLAT_BY_DESIGN`'s one
+ *   B2. The exemption list is load-bearing too, not decoration. Changing `NOT_FLAT_BY_DESIGN_EXEMPTIONS`'s one
  *      pattern so it matches nothing gives **exit 1, 4 grounds flagged**, naming both `<select>`s in
  *      both schemes at 44/45. So the list is what those sites are passing on, and removing an entry
  *      reds rather than quietly widening.
@@ -1182,11 +1185,27 @@ const MIN_SAMPLE_BOX = 3;
 /**
  * Pixels of antialiasing to keep clear of every painted edge, on both axes.
  *
- * TWO, not one, and derived rather than tried: layout positions on this page are fractional
- * (`.tab-close` sits at y=285.50, `.tab` at x=1169.4), and an edge that falls mid-pixel is blended
- * across the pixel on EITHER side of the boundary. One pixel clears an edge that happens to land on
- * an integer; two clears one that does not. Measured on this page: at AA=1, 29 of 59 light grounds
- * came back non-flat purely from edge blending; at AA=2, 0 do.
+ * TWO is the SMALLEST value the mechanism permits — a derived floor, not a uniquely determined
+ * number, and round 7 corrected the wording because "derived rather than tried" read as the latter.
+ *
+ * The mechanism: layout positions on this page are fractional (`.tab-close` sits at y=285.50, `.tab`
+ * at x=1169.4), and an edge that falls mid-pixel is blended across the pixel on EITHER side of the
+ * boundary. One pixel clears an edge that happens to land on an integer; two clears one that does
+ * not. So the mechanism predicts "at least 2" and says nothing about an upper bound.
+ *
+ * Measured on this page, one run per value:
+ *   - AA=1 -> exit 1. 30 of 59 light grounds flat (29 non-flat) and 39 of 59 dark, purely from edge
+ *     blending. This is the floor being real rather than cautious.
+ *   - AA=2 -> exit 0. 57 of 59 flat in BOTH schemes; the two that are not are the declared `<select>`
+ *     exemptions. Weakest agreement 98%.
+ *   - AA=3 -> exit 0, and IDENTICAL: 57 of 59 in both schemes, weakest agreement 98%. So 3 is not
+ *     worse, and nothing here distinguishes it from 2.
+ *   - AA=6 -> exit 1. The safe box collapses on 18 grounds and the verified population drops from 59
+ *     to 50 per scheme. So the value is bounded on the other side too, and the harness self-reds
+ *     rather than quietly measuring less.
+ *
+ * Two is chosen as the smallest value that clears the mechanism, because every pixel of inset is a
+ * pixel of the element the leg stops looking at, and AA=6 is what over-insetting costs.
  */
 const PIXEL_AA = 2;
 
@@ -1238,8 +1257,27 @@ async function verifyAgainstPixels(client, textSites) {
   //     with its flex children over-subscribing it, so `.tab-close` hangs 0.63px past the tab's right
   //     edge locally and further on a platform with wider fonts.
   // So the region that is safe to sample is the element's border box intersected with EVERY ancestor's
-  // border box, each shrunk by that element's own worst-case painted geometry. Nothing here is tuned:
-  // each inset is read out of the element it belongs to.
+  // border box, each shrunk by that element's own worst-case painted geometry. No inset here is a
+  // tuned constant: each one is read out of the element it belongs to, in `px`.
+  //
+  // ── TWO GEOMETRIES `pad()` READS AS ZERO, and what the reader gets instead (round 7) ─────────────
+  // "Read out of the element" is true of what it reads; it is not the same as "reads everything".
+  // `nums()` matches `-?[0-9.]+(?=px)`, and Chrome reports an unresolved `border-radius: 50%` as the
+  // literal string `50%`, so:
+  //   * a PERCENTAGE radius contributes 0. Measured by running this `pad()` on synthetic styles: an
+  //     80x80 element at `border-radius: 50%` gets an x-inset of 2 (the AA allowance alone), where the
+  //     equivalent `40px` gets 40. `border-radius: 50%` is already this page's idiom —
+  //     `launcher.html:102` (`.boot-ring`) and `:353` (`.state-dot`) — so this is latent, not
+  //     hypothetical; neither element is a sampled ground today (checked against the `--json` run:
+  //     zero rows matching either selector, in either scheme, in either bucket).
+  //   * a ROTATED element is treated as its axis-aligned bounding box, because that is what
+  //     `getBoundingClientRect()` returns. The page's only `transform: rotate` is `@keyframes
+  //     boot-spin` on `.boot-ring`, inside the boot overlay this leg hides before screenshotting.
+  // Neither is a wrong NUMBER that passes. An under-inset box samples painted geometry, the ground
+  // stops being flat, and the flatness condition is FATAL — so both fail loud, naming the selector
+  // and both box sizes, rather than quietly verifying the wrong pixels. Fixing them means resolving
+  // the percentage against the box (and, for rotation, insetting by the AABB corner reach); that is
+  // worth doing on the day a site with either lands in the sampled set, and the red will say so.
   //
   // ── PAD GEOMETRY, and why the two axes differ ──────────────────────────────────────────────────
   // A corner radius costs only HORIZONTALLY. For a rounded rect with corner radii r, every x in
@@ -1302,9 +1340,27 @@ async function verifyAgainstPixels(client, textSites) {
   const byCid = new Map(rects.map((r) => [r.cid, r]));
   const rows = [];
   const unsamplable = [];
+  const unrendered = [];
   for (const s of textSites) {
     const r = byCid.get(s.cid);
-    if (!r || r.w < 10 || r.h < 10) continue;                      // not rendered, or a zero-size box
+    // NOT RENDERED at screenshot time. This used to be a bare `continue`, and it is by far the
+    // biggest drop in this function: round 7 instrumented it at 161 sites per scheme against the 59
+    // that make it through. Most of them are legitimately out of this leg's scope — the pixel leg
+    // screenshots ONE state (base), so every site that only exists inside a hidden panel is a
+    // 0.00x0.00 box here — but "legitimately out of scope" and "silently gone" are different things,
+    // and the second one reads exactly like a site that passed. So they are collected, counted and
+    // named, exactly like the collapsed-safe-box and off-viewport buckets. NOT fatal: a site the
+    // screenshot cannot contain is a limit of screenshotting one state, not a disagreement.
+    if (!r || r.w < 10 || r.h < 10) {
+      unrendered.push({
+        path: s.path,
+        reason: !r
+          ? "no element carrying this cid existed when the screenshot was taken"
+          : `border box ${r.w.toFixed(2)}x${r.h.toFixed(2)} — under this leg's 10x10 border-box ` +
+            `floor, so no ground is read here and the site is NOT screenshot-verified`,
+      });
+      continue;
+    }
     // A site whose SAFE BOX has collapsed is reported, never silently dropped. Round 5's lesson was
     // that a mode taken over a bad sample reads exactly like a good reading; a site quietly removed
     // from the denominator reads exactly like a site that passed, which is the same defect.
@@ -1375,7 +1431,7 @@ async function verifyAgainstPixels(client, textSites) {
       rect: { w: Math.round(r.w), h: Math.round(r.h), sw: Math.round(r.sw), sh: Math.round(r.sh) },
     });
   }
-  return { rows, unsamplable };
+  return { rows, unsamplable, unrendered };
   } finally {
     await client.evaluate(`(function(){
       var b=document.getElementById("boot-overlay"); if(b) b.style.display="";

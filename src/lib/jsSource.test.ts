@@ -364,15 +364,23 @@ const DELETING_GAPS: Case[] = [
 ];
 
 /**
- * DELETES **VALID JAVASCRIPT** — the honest third category, and strictly worse than `DELETING_GAPS`.
+ * DELETES **VALID JAVASCRIPT** via a mis-read scan that ends on the NEXT regex's `/`. Strictly worse
+ * than `DELETING_GAPS`, and one of TWO tables in this file that hold shapes of that severity — see
+ * `DELETING_ON_VALID_JS_CONTEXTUAL` directly below for the other.
  *
- * Kept apart from that table on purpose. `DELETING_GAPS` earns the word "gap" from a property the
+ * Round 7 is why that sentence is a count rather than a superlative. This docblock used to open "the
+ * honest third category" and the oracle below asserted this was "the only table held back", both
+ * written while exactly one such table existed — and the same commit shipped a generator that
+ * produces two more mechanisms. A quantifier measured over one entry is not a quantifier.
+ *
+ * Kept apart from `DELETING_GAPS` on purpose. That table earns the word "gap" from a property the
  * test below derives: none of its inputs parses, so nothing a real program contains reaches them.
  * These do parse. Putting them in the same list would have quietly falsified that property — the
  * filter reds the moment you try, which is how this table came to exist.
  *
  * Found by a reviewer's independent generator, immediately after round 5 reported "no third family"
- * over a sweep of 38,765 samples that could not express a 27-character input. It is PRE-EXISTING —
+ * over a sweep of 38,765 samples that could not express a 27-character input. (The word "third" in
+ * that sentence is history, not a count of what exists — see the table below.) It is PRE-EXISTING —
  * broken identically in rounds 3, 4 and 5 — and it is not reachable by the paren accounting that
  * fixed the other mis-read shapes, because the scan never gets as far as consulting a paren.
  *
@@ -394,6 +402,81 @@ const DELETING_ON_VALID_JS: Case[] = [
     name: "an object literal in a condition, whose mis-read scan ends on the NEXT regex's `/`",
     input: "if ({} / a) /[//]/.test(s);\nconst survivor = 1;",
     want: "if ({} / a) /[ \nconst survivor = 1;",
+  },
+];
+
+/**
+ * DELETES **VALID JAVASCRIPT** via a CONTEXTUAL KEYWORD — the family the committed sweep found in
+ * round 7, and the reason the table above no longer calls itself the only one.
+ *
+ * PROVENANCE, and why this exists. Round 6 committed `scripts/dev-harness/js-strip-sweep.mjs` so a
+ * negative result could be re-run instead of believed. Round 7 ran it and split its output by hand:
+ * of the 40 desyncs it reports, 32 are the `{} / a` family above (16 distinct inputs, each generated
+ * with and without the fuzzer's prelude) and **8 are not** — 5 opening with `yield`, 2 with `of`, 1
+ * with `await`, and nothing left over. Those 8 collapse to the mechanism below.
+ *
+ * That is a measurement of THIS generator at THIS seed, grouped by a human. It is not a statement
+ * about JavaScript, and NOT a claim that 40 is all there is: the generator can only produce shapes
+ * its context templates and its token list can express, and round 5's sweep of 38,765 samples missed
+ * a 27-character input. Re-run the tool to re-take the number.
+ *
+ * The review that found these split them into two families — `of` before a `/=`, and `yield`/`await`
+ * as identifiers. Measured, the `/=` is incidental: `of /re////c` breaks with a plain `/` and no
+ * compound operator anywhere, so the discriminator is not the operator but membership of
+ * `REGEX_AFTER` by a word that is only a CONTEXTUAL keyword. One mechanism, three words; both of the
+ * review's shapes are pinned below alongside the plain-division one, so nothing is lost by counting
+ * it once.
+ *
+ * MECHANISM. `REGEX_AFTER` in `jsSource.mjs` holds words after which a `/` opens a regex literal.
+ * Three of its members — `of`, `yield`, `await` — are only CONTEXTUAL keywords: each is a perfectly
+ * legal identifier in the right (or, here, the wrong) surrounding grammar, and then the `/` after it
+ * is division. The scanner has no grammar, so it opens a regex-shaped scan anyway; the scan swallows
+ * to the next `/`, and whatever comment opener the swallowed text was hiding is now exposed to the
+ * comment branch at the top of the loop.
+ *
+ * Distinct from the table above even though both are mis-read scans: that one is reached through a
+ * PUNCTUATOR (`}`) and needs the `{`'s context to decide, this one is reached through a WORD and
+ * needs the module goal, the enclosing function's async/generator-ness, and `for`-header position to
+ * decide. Both are parsing; neither is a paren-accounting problem.
+ *
+ * NOT NEWLY BROKEN, measured with the committed tool rather than asserted. `--compare` scores this
+ * revision against each earlier round of this branch as fixed / regressed / pre-existing:
+ * round 3 → 256 / 0 / 40, round 4 (`ca25be56`) → 56 / 0 / 40, round 5 → 40 / 0 / 40. The
+ * pre-existing count is the same 40 desyncs every time, these 8 among them, so nothing about this
+ * family is new and no round of this PR made it worse.
+ *
+ * WHY DECLARED RATHER THAN FIXED. Removing `of`/`yield`/`await` from `REGEX_AFTER` trades this family
+ * for the opposite one: `for (const v of /re/)`, `yield /re/` inside a generator and `await /re/`
+ * inside an async function are all real regex positions, and `FALSE_STRIP_AWAIT`'s blast-radius case
+ * pins the third of those. Telling them apart is the parsing this module does not do. The mitigation
+ * is the same as for the table above and is asserted below rather than described:
+ * `stripScriptBodiesChecked` compiles the result and throws.
+ */
+const DELETING_ON_VALID_JS_CONTEXTUAL: Case[] = [
+  {
+    name: "`of` before a `/=`: the compound operator's own `/` opens the phantom regex",
+    input: "of /= /[//]/;",
+    want: "of /= /[ ",
+  },
+  {
+    name: "the same with a `/*` class — the invented block comment runs to the end of input",
+    input: "of /= /[/*]/;\nconst survivor = 1;",
+    want: "of /= /[ ",
+  },
+  {
+    name: "`of` before a plain division — no `/=` needed, just the word",
+    input: "of /re////c\nconst survivor = 1;",
+    want: "of /re/ \nconst survivor = 1;",
+  },
+  {
+    name: "`yield` as a plain identifier in a sloppy script — JS reads `//*c*/` as a line comment",
+    input: "yield /re//*c*/\nconst survivor = 1;",
+    want: "yield /re/ \nconst survivor = 1;",
+  },
+  {
+    name: "`await` as a plain identifier in a sloppy script — the same shape, the other word",
+    input: "await /re//*c*/\nconst survivor = 1;",
+    want: "await /re/ \nconst survivor = 1;",
   },
 ];
 
@@ -484,7 +567,7 @@ describe("stripJsComments — the declared gaps that DELETE, and why they stay d
 });
 
 describe("stripJsComments — the shapes that delete VALID JavaScript, and what stops them mattering", () => {
-  for (const c of DELETING_ON_VALID_JS) {
+  for (const c of [...DELETING_ON_VALID_JS, ...DELETING_ON_VALID_JS_CONTEXTUAL]) {
     it(`${c.name} — pinned, and it really is valid JavaScript`, () => {
       expect(stripJsComments(c.input)).toBe(c.want);
       // Every half of the claim is measured. "Valid JavaScript in" is the part that makes this worse
@@ -509,19 +592,53 @@ describe("stripJsComments — the oracle that does not depend on anyone writing 
     ...FALSE_KEEP, ...ALREADY_RIGHT, ...KNOWN_GAPS, ...DELETING_GAPS,
   ];
 
-  it("the only table held back from this oracle is DELETING_ON_VALID_JS, and that is why", () => {
+  /**
+   * Every `const X: Case[]` DECLARED IN THIS FILE, read out of its own source (CPE-1932).
+   *
+   * Round 6 wrote this list by hand and it failed the half it existed for. Two sabotages, run:
+   * declaring a new `const FOURTH_FAMILY: Case[]`, registering it in the literal but NOT in `all`,
+   * gave 1 red — correct. Declaring it and registering it in NEITHER gave **65/65 green** — so a
+   * hand-written list catches "remembered the table, forgot the sweep" and misses "a family held back
+   * from the enumeration", which is precisely the sentence the test is there to make true.
+   *
+   * Anchored at column 0 so the regex literal on the line below — indented — cannot match itself. A
+   * decoy inside a comment WOULD be picked up and would red; that is the safe direction (a name in
+   * `tables` that does not exist is a compile error, so the red is loud and immediate), and it is why
+   * this does not need the comment stripper this very file is testing.
+   */
+  function declaredCaseTables(): string[] {
+    const src = readFileSync(join(process.cwd(), "src/lib/jsSource.test.ts"), "utf8");
+    return [...src.matchAll(/^const ([A-Z][A-Z0-9_]*): Case\[\] = \[/gm)].map((m) => m[1]).sort();
+  }
+
+  it("every Case[] table declared in this file is either swept by the oracle or declared held back", () => {
     // An exclusion nobody can see is how a known family goes missing from a green run. `all` is the
-    // enumeration this file's two oracles sweep, so the one table deliberately outside it is named
-    // here and its size asserted — adding a second excluded table without saying so reds.
-    const tables = { FALSE_STRIP, FALSE_STRIP_PAREN, FALSE_STRIP_AWAIT, FALSE_STRIP_EATEN_PAREN,
-      FALSE_KEEP, ALREADY_RIGHT, KNOWN_GAPS, DELETING_GAPS, DELETING_ON_VALID_JS };
+    // enumeration this file's two oracles sweep; every other table has to say out loud that it is
+    // outside it. The KEYS are derived from the source rather than recalled, so a table declared and
+    // then mentioned nowhere reds instead of disappearing.
+    const tables: Record<string, Case[]> = { FALSE_STRIP, FALSE_STRIP_PAREN, FALSE_STRIP_AWAIT,
+      FALSE_STRIP_EATEN_PAREN, FALSE_KEEP, ALREADY_RIGHT, KNOWN_GAPS, DELETING_GAPS,
+      DELETING_ON_VALID_JS, DELETING_ON_VALID_JS_CONTEXTUAL };
+
+    const declared = declaredCaseTables();
+    expect(declared.length, "the source scan found (almost) no Case[] tables — it is not enumerating").
+      toBeGreaterThanOrEqual(9);
+    expect(
+      Object.keys(tables).sort(),
+      "a `const X: Case[]` is declared in this file but missing from `tables` — every table is either " +
+        "swept by the oracle below or named as held back, and one that is in neither is invisible",
+    ).toEqual(declared);
+
     const swept = Object.entries(tables).filter(([, t]) => t.every((c) => all.includes(c)));
     const held = Object.entries(tables).filter(([, t]) => t.every((c) => !all.includes(c)));
-    expect(held.map(([n]) => n)).toEqual(["DELETING_ON_VALID_JS"]);
-    expect(swept.length, "a table is neither swept nor declared held back").toBe(
-      Object.keys(tables).length - 1,
+    // The two held back are the two that delete VALID JavaScript: the `vm.Script` oracle asks whether
+    // stripping BROKE a parse, and these are the shapes that do exactly that on purpose.
+    expect(held.map(([n]) => n).sort()).toEqual(["DELETING_ON_VALID_JS", "DELETING_ON_VALID_JS_CONTEXTUAL"]);
+    expect(swept.length + held.length, "a table is neither swept nor declared held back").toBe(
+      Object.keys(tables).length,
     );
-    expect(all.length).toBe(Object.values(tables).reduce((n, t) => n + t.length, 0) - DELETING_ON_VALID_JS.length);
+    const heldCases = held.reduce((n, [, t]) => n + t.length, 0);
+    expect(all.length).toBe(Object.values(tables).reduce((n, t) => n + t.length, 0) - heldCases);
   });
 
   it("every case that parses before stripping still parses after", () => {
