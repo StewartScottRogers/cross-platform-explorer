@@ -2782,3 +2782,23 @@ sentence, and a parseable shape landing there reds on the day it lands.
 where it is affordable. Here it cost a small state machine and removed a class instead of documenting
 one. The tell that (2) was available: the false claim was false for a *reason*, and the reason was a
 question being asked at the wrong scope.
+
+## 2026-08-28 — on resume, ask the remote what landed, not the agents
+
+The Claude Code process running this shift exited with five agents mid-flight. Their transcripts and
+worktrees survived and all five resumed cleanly, so nothing was lost. The part worth writing down is the
+first thing done before resuming any of them: **read the actual PR head shas off the remote.**
+
+Two of the five had pushed before the cut and three had not — and there was no way to tell which from
+the agent list, the task notification, or my own notes, all of which recorded what each agent had been
+*asked* to do. `gh pr list --json headRefOid` answered it in one call: two heads had moved to the new
+round's sha, three were still sitting on the sha their reviewer had rejected.
+
+Resuming a worker whose push already landed means a second push of the same change; resuming one that
+never pushed and assuming it did means a PR that sits red forever while the Foreman waits for CI on work
+that does not exist. **Both failures come from treating a dispatch record as evidence of an outcome.**
+
+Same shape as the rest of this shift, applied to the crew instead of the code: **the report is not the
+artifact.** A gate table is not the gate, a red-proof written in prose is not a red-proof performed, a
+declared limitation is not a measured one — and an agent's brief is not a description of what is on the
+branch. Every one of those is checkable in about one command, and the check is the cheap half.
