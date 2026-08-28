@@ -2139,3 +2139,37 @@ the bash `[ -lt ]` returning 2. And **job age is now reported but deliberately n
 median run here is 58.9 minutes, so any invented "over N minutes = hung" fires constantly. Report the
 number and the name; let the caller compare against a sibling. I spent an hour today doing that
 comparison by hand.
+
+## 2026-08-27 — a reviewer found the hole by reading and called it latent; the guard found it by running and called it red
+
+PR #1075's Reviewer raised, as a non-blocking **F3**, that a `Scene::planted()` which fails to plant
+its link would `return` and **pass** — *"the doc says it 'skips loudly', but `eprintln!` is captured by
+default, so on a CI leg it would be silent."* It graded this **"latent, not active"**, having verified
+both platforms plant successfully today.
+
+An existing repo guard, `fsutil::tests::skip_notices_never_use_a_captured_print_macro`, disagreed —
+and it was not speculating. It scans the whole repo, found both `eprintln!` skip notices in the new
+`catalog_staging_containment.rs`, and **failed the Windows and macOS legs of the same PR**. Not
+latent. Red, now.
+
+Both found the same hole; only one got the severity right, and the difference is that the guard runs.
+Its message is worth quoting because it is doing the arguing for us:
+
+> these skip notices use a print macro whose output libtest SWALLOWS for a passing test — so they
+> announce a leg that verified nothing to nobody, on the only harness that matters
+> […] **Better still, if the staging mechanism is supposed to work on that platform, use
+> `fsutil::require_staged` and let the leg go RED under CI instead of printing into a green log.**
+
+**The sharpest version of the lesson:** the test in question is the **sensitivity control** for a
+security fix — its whole job is to prove the escape still happens when the fix is disabled. A control
+that silently returns green because it could not set itself up proves nothing, and proves it
+*invisibly*. That is worse than having no control, because the green reads as coverage. The PR's own
+author had already made this exact argument one step earlier, when it strengthened the fixture to
+plant at the **real** temp path instead of a stand-in: *"a stand-in is unreachable by any regression
+and every assertion about it would be unfalsifiable."* The same reasoning applies to its own skip
+path, and neither the author nor the reviewer carried it that one step further.
+
+Also worth keeping: the guard **states what it does not catch** — a notice that never says "skip",
+one assembled into a variable first, a test module not called `mod tests`. A guard that publishes its
+own blind spots is the opposite of the day's other defect, where green tests sat beside claims nobody
+had run.
