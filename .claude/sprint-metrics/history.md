@@ -2654,3 +2654,48 @@ next reader to the shadowing check instead of leaving them to conclude the guard
 Keeping it is still right: it fails closed, and deleting it fails **open**. This is the fourth distinct
 answer the family has produced — redundant → delete; misordered → reorder; unreachable-by-test → build
 the seam; **shadowed but load-bearing → keep, and say what shadows it.**
+
+## 2026-08-28 — a guard whose verdict depends on the checkout's line endings
+
+PR #1090 replaced a comment citing a test that had never existed with a real guard. The guard has two
+opposite failures on the two platforms CI runs:
+
+- **On LF it is red — against itself.** Its comment stripper only cuts at `//`, so the guard's own list
+  of forbidden fragments is scanned as code and it reports its own line as the offender. Both Linux and
+  macOS jobs fail.
+- **On CRLF it is blind.** It locates the end of each exempt helper with `find("\n    }\n")`. **In a
+  CRLF file that pattern occurs zero times** — the CRLF form occurs 230 — so both spans fall back to
+  `src.len()` through an `unwrap_or`, and every line after byte 251,835 of 713,733 counts as "inside a
+  helper". **Roughly 65% of the file, including all three stream extractors and the entire test module,
+  is unguarded on Windows.**
+
+**One `unwrap_or` turned "I could not find the end of this span" into "the span runs to the end of the
+file",** which is the widest possible exemption. That is the fail-open family again, and this time it is
+*inside* a guard: "did not run" reading as "ran and found nothing", the exact rule CLAUDE.md states.
+
+**Two checks, both cheap.** Any scanner over Rust source must be run once against an **LF** checkout and
+once against **CRLF** — this repo has both, because CI is Linux and macOS and development is Windows. And
+**a span locator must fail loudly when it cannot find its end**, never widen to the whole file.
+
+## 2026-08-28 — the red-proof described a mutation the code cannot express
+
+The same guard's doc said it *"fails if `skipped`/`failed` is incremented or `errors` pushed anywhere but
+inside these two helpers"*, and red-proofed that as *"adding `self.failed += 1;` to any extractor leg
+turns this red."*
+
+**Extractor legs have no `self`.** They hold a local `report`. The Reviewer planted `report.failed += 1;`
+and `report.errors.push(...)` directly inside an extractor and the test **stayed green**. The guard can
+only ever catch a new `self`-receiver method inside the one `impl` block — and on Windows, only one
+defined before a particular line.
+
+**The red-proof was not weak, it was impossible** — it named an edit the codebase's own shape forbids.
+And because a red-proof is prose until someone runs it, nothing objected. CLAUDE.md already says *change
+the referenced source and watch the test fail*; the sharper form is: **the mutation you name must be one
+the code can actually express, and you must have performed it.** Write the result at the site — "planted
+X at line N, test failed" — not the intention.
+
+**Related and worse in the same PR:** its headline finding was that a comment cited a test which had
+never existed in any commit. In fixing that, it **planted a fresh phantom citation** — in the module's
+canonical rule block, pointing at the very test the PR had just renamed away. Along with seven other
+sites still asserting the rule the PR inverted. A comment that names a test is derivable in one `git
+grep`; the ones that rot are the ones nobody thinks to grep because they read as background.
