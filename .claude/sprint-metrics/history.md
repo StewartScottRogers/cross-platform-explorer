@@ -2752,3 +2752,33 @@ characterise the direction.
 Worth noting the pattern across this shift: **the narrow re-review — scoped to only what changed since
 the last round — has now found a blocker on this PR three times running**, each one invisible to the
 full review that preceded it, because each was created by the previous round's fix.
+
+## 2026-08-28 — the fix that made the promise true instead of narrowing it
+
+#1087's round-4 blocker offered two ways out. **(1)** Correct the false "known gap" text and pin the
+deleting shapes as cases. **(2)** Change the scanner so the deleting case cannot happen. The worker took
+(2), and the shape of it is worth keeping.
+
+The bug: a regex literal after `)` was read as division, and when its character class contained `//` or
+`/*` the emitted text walked into the comment branches. The instinct is to special-case the class
+contents. **The actual fix was to stop asking the wrong question.** A `)` is now decided by **what its
+`(` opened** — a per-frame paren stack plus a small set of control keywords — never by the `)` itself.
+That is what real tokenizers do, and it is the same correction round 3 made one level down: *decide on
+the previous **token**, not the previous character.* The same mistake, one scope up.
+
+**What made it verifiable, and this is the part round 3 lacked.** Emptying the keyword set now reds
+**6 of 48** tests — the four named cases, an explicit `−144 → 0` measurement, **and the parse oracle
+itself**, because four cases become genuinely unparseable. In round 3 the oracle iterated a table whose
+`)` entry was the benign form, so it could not fire. **An oracle only proves something when the table
+contains a case that can break it.**
+
+And the surviving gaps are now **derived rather than declared**: the remaining deleting shapes sit in
+their own group with `expect(out.length).toBeLessThan(input.length)` — deletion *asserted*, not inferred
+— and a separate test filters that group by "does this parse?" and requires the result empty. So the
+safety property ("everything that still deletes was already broken input") is a test rather than a
+sentence, and a parseable shape landing there reds on the day it lands.
+
+**Prefer the fix that makes the claim true over the fix that narrows the claim to fit the code** —
+where it is affordable. Here it cost a small state machine and removed a class instead of documenting
+one. The tell that (2) was available: the false claim was false for a *reason*, and the reason was a
+question being asked at the wrong scope.
