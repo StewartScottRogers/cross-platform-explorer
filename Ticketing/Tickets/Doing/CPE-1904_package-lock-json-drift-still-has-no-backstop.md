@@ -158,7 +158,10 @@ version key, a vanished file, and an unreadable app identity.
 
 **CPE-1933:** the failure message tells you to run `scripts/release.ps1 -BumpOnly`, so a test reads that
 script and asserts it declares `[switch] $BumpOnly` and that every file the guard checks appears in its
-bump plan. The advice cannot rot into folklore while this file stays green.
+bump plan. The advice cannot rot into folklore while this file stays green. *(Round 2 found this
+particular assertion was itself shadowed and matched prose — see the round-2 entry below; it was
+deleted and the derivation credited to `releaseVersionBump.test.ts`, which really does execute the
+script.)*
 
 **Docs updated because they now say something false.** CLAUDE.md's "Versioning — keep five files in
 sync" claimed "nothing fails when they drift"; RELEASING.md claimed "neither build passes `--locked`".
@@ -167,3 +170,90 @@ Both now describe the two mechanisms and why npm needed a different one.
 **Verification:** `npm run check` 0 errors / 0 warnings. `npm test` **350 files / 5022 passed / 2
 skipped** — delta **+1 file, +19 tests** against the 349 / 5003 / 2 baseline measured at the start of
 this ticket. No Rust touched, so no clippy run was required.
+
+---
+
+### Round 2 (2026-08-27) — review APPROVE, two non-blocking findings, both closed
+
+**F1 — the CPE-1933 test was itself a CPE-1929 shadowed guard, and it matched prose. Deleted.**
+
+`it("names a fix command that actually exists")` asserted `expect(script).toContain(basename(file))`
+against **raw `release.ps1` text, comments included**. That script's header comments name all five
+files repeatedly, so **prose alone satisfied it** — CLAUDE.md's rule 2 ("anchor on code, never on
+prose"; a whole-line-comment filter is not enough) failing inside the test written to honour rule 2.
+
+Sabotage re-run here, the Reviewer's exactly: drop `src-tauri/tauri.conf.json` from release.ps1's
+`$plans` (line 453), from its `Write-Host "Bumped version to …"` summary, and from `Invoke-Git add`, so
+the script genuinely stops bumping *and* staging it. `release.ps1` restored and `cmp`-verified
+byte-identical (md5 `3804ce4f…`) after each run.
+
+| suite | before the fix | after the fix |
+|---|---|---|
+| `appVersionSync.test.ts` | **19 passed** (green while the script was broken) | **19 passed** — but it no longer claims to check the plan |
+| `releaseVersionBump.test.ts` | **10 failed / 55 passed** | unchanged |
+
+The ten include *"release.ps1 plans exactly the files CLAUDE.md's five-files-in-sync list names"* and
+*"stages all five in the release commit"*. Green-while-broken sitting next to a red that caught it:
+safe, unverifiable, and reading as coverage — the exact pair CPE-1929 describes.
+
+**Chose delete over repair (option a), for three reasons.**
+
+1. `releaseVersionBump.test.ts` does not read the script, it **runs** it: `runBump` copies the real
+   `scripts/release.ps1` into a fixture tree and spawns it with `-BumpOnly`, so a renamed switch is a
+   PowerShell parameter-binding failure rather than a passing regex, and `$plans` is joined by **set
+   equality** across three sources (CLAUDE.md's numbered list, its own `FILE_PATHS`, and the argv of
+   every `New-ManifestVersionPlan -Path (Join-Path $repo "…")` call), plus the `Invoke-Git add` line.
+2. A repaired version (comments stripped, scoped to `$plans`, switch anchored `\$BumpOnly\s*\)`) would
+   close the prose hole and leave the **shadowing** untouched — it would still assert a strict subset of
+   what the other file already asserts by equality. CPE-1929's answer to a shadowed guard is
+   reorder-or-delete; there is no reorder available across files, so delete.
+3. It would grow a second PowerShell scanner inside a file about JSON and TOML version fields —
+   CPE-1950's "remove the duplication where it is removable" points the other way.
+
+**What was kept, because it is the one part that is genuinely NOT shadowed:** the script path is parsed
+**out of `FIX_ALL`** (not retyped, or it would be a literal checking itself) and checked to exist.
+`releaseVersionBump.test.ts` reads its own `join(ROOT, "scripts", "release.ps1")` constant and never
+sees `FIX_ALL` (grep: 0 references), so a script moved and updated there but not here leaves the fix
+advice pointing at nothing and only this assertion notices. Red-proofed by pointing `FIX_ALL` at
+`scripts/moved/release.ps1`: **1 failed / 18 passed**, `scripts/moved/release.ps1, which FIX_ALL tells
+a drifting developer to run, does not exist`. Test file then restored `cmp`-identical. The full
+measurement, both columns of the table, and the delete-not-repair argument are written **at the site**,
+per CPE-1933 rule 3.
+
+**F2 — the disclosure named the wrong cost. Fixed at the site and in the message.**
+
+The header framed hard-parsing 34 unrelated Rust manifests as a **speed** cost (55 ms). Reproduced the
+real cost here — appending
+
+```toml
+[package.metadata.cpe1904]
+note = """
+multi-line
+"""
+```
+
+to `crates/mdns/Cargo.toml` (restored afterwards, `cmp`-identical, md5 `10904adc…`) gives
+
+```
+Error: crates/mdns/Cargo.toml: did not parse as TOML (Line 25: multi-line strings ("""…""") are not supported by this preview)
+Tests  no tests        exit 1
+```
+
+The whole file fails to collect, and a dependency bump in an unrelated crate is answered with a message
+about a **preview parser's scope**. So the cost is **coupling**, not speed. Polarity unchanged — a
+manifest this guard cannot read is not one it may skip. Two changes: the header now names that failure
+mode with the reproduction inline, and `readToml`'s throw now points at **`src/lib/preview/toml.ts`**
+and its deliberate gaps, says the fix belongs there if the file is valid TOML, and says why it throws
+instead of skipping. The existing fail-closed case still matches
+(`/src-tauri\/Cargo\.lock: did not parse as TOML/`).
+
+**Not reopened, per review:** the `src-tauri/Cargo.lock` coverage stays despite `cargo metadata
+--locked` exiting 101 — cargo names the file but never the field or the values, its only "help" is the
+`--offline` trap that regenerates the lockfile rather than reporting the stale version, and reaching it
+costs a Rust toolchain plus a preflight run. Here it is ~0 ms of the 400 ms, and covering five of six
+places would have been the exact CPE-1932 enumeration defect.
+
+**Verification (round 2):** rebased on `origin/main` `161930fc`. `npm run check` **0 errors / 0
+warnings**. `npm test` **350 files / 5022 passed / 2 skipped** — delta **+1 file, +19 tests**,
+unchanged by this round (the deleted assertions lived inside a test that is still one test). No Rust
+touched.

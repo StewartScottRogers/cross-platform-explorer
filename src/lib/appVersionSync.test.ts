@@ -82,12 +82,36 @@
 // the human tripwire — the same two-layer shape `npmProjects.test.ts` uses: discovery stays dynamic so
 // a sixth place is CHECKED automatically, and the literal reds so a sixth place is also NOTICED.
 //
-// ## Fail closed
+// ## Fail closed — and what fail-closed really costs here
 //
 // Every reader here throws on a file it cannot read or parse, naming the file and the reason. A guard
-// that skips what it cannot understand reports "all six places agree" while checking four. All 34
-// tracked Cargo manifests parse with the app's own `parseToml` today, measured at 55ms for the set, so
-// strictness is affordable as well as correct.
+// that skips what it cannot understand reports "all six places agree" while checking four.
+//
+// The bill for that is worth stating precisely, because it is NOT the one it looks like. A Cargo
+// manifest has to be parsed before it can say whose it is, so all 34 tracked manifests go through the
+// app's own `src/lib/preview/toml.ts` — including the 33 that turn out to carry no version of ours.
+// They all parse today, in 55ms for the set, so the cost is not speed. The cost is COUPLING:
+// `parseToml` is the PREVIEW parser and has deliberate gaps — multi-line strings are rejected by
+// design — so a manifest that uses one reds this guard, and the person who reds it was editing
+// something else entirely. Measured 2026-08-27: appending
+//
+//     [package.metadata.cpe1904]
+//     note = """
+//     multi-line
+//     """
+//
+// to `crates/mdns/Cargo.toml`, a crate with no connection to the app's version, gives
+//
+//     Error: crates/mdns/Cargo.toml: did not parse as TOML (Line 25: multi-line strings ("""…""")
+//     are not supported by this preview)
+//     Tests  no tests        vitest exit 1
+//
+// — the whole file fails to collect, and a dependency bump is answered with a message about a preview
+// parser's scope. The POLARITY is right and stays (see the truncated-`Cargo.lock` measurement below: a
+// manifest this guard cannot read is not one it may skip); the SIGNPOST was wrong, so `readToml` now
+// names `src/lib/preview/toml.ts` and its known gaps in the failure text. If this ever bites, the fix
+// is to widen `parseToml` — the manifest is valid TOML and the preview simply does not cover it — never
+// to let the sweep skip what it cannot read.
 //
 // Measured on the REAL tree, not only on a fixture: truncating `src-tauri/Cargo.lock` mid-entry gives
 //
@@ -120,7 +144,7 @@
 //     A red-proof that does not verify its own sabotage landed proves nothing.
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { parseToml } from "./preview/toml";
@@ -209,9 +233,28 @@ function readJson(root: string, file: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Parses a Cargo manifest or lockfile, or throws with the file named.
+ *
+ * Reached for all 34 tracked Cargo manifests, not just the app's own — a manifest has to be parsed
+ * before it can say whose it is. So the message points at the PARSER rather than at the version rule:
+ * whoever trips this was almost certainly editing a dependency in an unrelated crate, and telling them
+ * about `package.json` staying in sync would send them the wrong way. See the header for the measured
+ * reproduction (`crates/mdns/Cargo.toml` + a `"""…"""` string).
+ */
 function readToml(root: string, file: string): Record<string, unknown> {
   const result = parseToml(readTracked(root, file));
-  if (!result.ok) throw new VersionPlaceError(`${file}: did not parse as TOML (${result.error})`);
+  if (!result.ok) {
+    throw new VersionPlaceError(
+      `${file}: did not parse as TOML (${result.error}).\n` +
+        `This guard reads EVERY tracked Cargo manifest with src/lib/preview/toml.ts before it can tell ` +
+        `whether that manifest carries the app's version, so an unrelated crate can land here. That ` +
+        `parser is the preview one and has deliberate gaps — multi-line strings ("""…""" and '''…''') ` +
+        `are out of scope by design. If the file above is valid TOML, the fix belongs in ` +
+        `src/lib/preview/toml.ts, not in the version rule. This guard throws rather than skipping a ` +
+        `manifest it cannot read, because a skip would report "all six places agree" while checking five.`,
+    );
+  }
   return result.value;
 }
 
@@ -629,17 +672,48 @@ describe("app version sync — the five files CLAUDE.md says must move together 
     });
   });
 
-  it("names a fix command that actually exists (CPE-1933: derive, do not claim)", () => {
-    // `FIX_ALL` tells a reader to run `scripts/release.ps1 -BumpOnly`. Read the script and check both
-    // halves of that instruction, so the advice cannot rot into folklore while this file stays green.
-    const script = readFileSync(join(ROOT, "scripts", "release.ps1"), "utf8");
-    expect(FIX_ALL).toContain("scripts/release.ps1");
-    expect(FIX_ALL).toContain("-BumpOnly");
-    expect(script).toMatch(/\[switch\]\s*\$BumpOnly/);
-    // And that it really is the all-places bump: every file this guard checks must appear in the
-    // script's plan, or the "rewrites every place at once" claim is false.
-    for (const file of new Set(places.map((p) => p.file))) {
-      expect(script, `${file} is not in release.ps1's bump plan`).toContain(basename(file));
-    }
+  it("names a fix command whose script is really there (CPE-1933: derive, do not claim)", () => {
+    // `FIX_ALL` tells a reader to run `scripts/release.ps1 -BumpOnly`. Exactly ONE part of that claim
+    // is not already derived elsewhere — that the path still resolves — so exactly one thing is
+    // asserted here, and the path is pulled OUT of `FIX_ALL` rather than retyped, or this would be a
+    // literal checking itself.
+    //
+    // Everything else about that command is derived, harder, by `releaseVersionBump.test.ts`: it copies
+    // the REAL `scripts/release.ps1`, EXECUTES it with `-BumpOnly` over fixtures (so a renamed switch
+    // is a PowerShell parameter-binding failure, not a passing regex), asserts all five files read back
+    // at the new version, and joins three sources by SET EQUALITY — CLAUDE.md's numbered five-files
+    // list, its own `FILE_PATHS`, and the argv of every `New-ManifestVersionPlan -Path (Join-Path $repo
+    // "…")` call in the script — plus the `Invoke-Git add` line. That is the CPE-1933 derivation; this
+    // file does not need a weaker second copy of it.
+    //
+    // It HAD one, and it was deleted rather than repaired, for a measured reason (CPE-1929). The first
+    // round looped `expect(script).toContain(basename(file))` over the raw script text, comments and
+    // all. Sabotage, run 2026-08-27: drop `src-tauri/tauri.conf.json` from release.ps1's `$plans`, from
+    // its `Write-Host "Bumped version to …"` summary and from `Invoke-Git add`, so the script genuinely
+    // stops bumping and staging it —
+    //
+    //   this file                  19 passed  (green: release.ps1's header comments name all five files
+    //                                          in prose, and a substring search over raw text cannot
+    //                                          tell a plan from a sentence — CPE-1933's rule 2 exactly)
+    //   releaseVersionBump.test.ts 10 failed / 55 passed, including "release.ps1 plans exactly the
+    //                                          files CLAUDE.md's five-files-in-sync list names" and
+    //                                          "stages all five in the release commit"
+    //
+    // Green while the thing it claimed to check was broken, next to a red that caught it: safe,
+    // unverifiable, and reading as coverage. Repairing it (strip comments, scope to `$plans`, anchor
+    // the switch) would have fixed the prose hole and left the shadowing untouched — the repaired
+    // version still asserts a subset of what `releaseVersionBump.test.ts` asserts by equality — while
+    // growing a second PowerShell scanner inside a file about JSON and TOML version fields. Delete was
+    // the answer.
+    //
+    // The existence check below is the part that is NOT shadowed: `releaseVersionBump.test.ts` reads
+    // its own `join(ROOT, "scripts", "release.ps1")`, so a script MOVED and updated there but not here
+    // leaves `FIX_ALL` pointing at nothing and only this assertion notices.
+    const named = /(\S+release\.ps1)/.exec(FIX_ALL);
+    expect(named, `FIX_ALL no longer names a release.ps1 to run: ${FIX_ALL}`).not.toBeNull();
+    expect(
+      existsSync(join(ROOT, named![1])),
+      `${named![1]}, which FIX_ALL tells a drifting developer to run, does not exist`,
+    ).toBe(true);
   });
 });
