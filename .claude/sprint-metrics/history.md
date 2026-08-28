@@ -4398,3 +4398,39 @@ Also recorded: the itemisation of a test-count delta has now moved three rounds 
 form does not reproduce — *"75 runtime tests from 20 literal `it(` blocks"* against a file with **68**.
 The figures that matter were all verified by running. **A number that has been wrong three times is
 cheaper to delete than to correct a fourth time**, and that is the instruction given.
+
+## 2026-08-29 — a widening is a trade until you measure both directions
+
+#1091's round 7 replaced a regex with a hand-written word walk, verified the new shapes **exhaustively**
+against real bash — `read -N`, `-t`, `-u`, `-i`, bundled forms, `--`, `mapfile -C`, bare `mapfile`,
+metacharacter termination, `read` in a `while` condition — and got every one right.
+
+**It never re-ran the old shapes.** The reviewer did, by swapping the previous regex back in: the new walk
+recognises the builtin **only as a whole whitespace-delimited word**, while the old one anchored on
+`(?:^|[\s!(){};|])`. So `…|read -r leaked`, `read -r a;read -r b < <(…)`, `(read -r x < <(…))` and
+`…|mapfile -t arr2` all bind a name in bash, were bound before, and return `[]` now. **Fixes four,
+loses six.** Swapping the regex back makes the reviewer's four rows green and the round's four red — **a
+clean trade, measured in both directions, in the file's own harness, in one run.**
+
+**So: when you replace a matcher, run the previous matcher's cases through the new one and say what
+moved.** Exhaustive verification of the new behaviour is not evidence about the old — and the second half
+costs one command when the harness is already a table.
+
+**The universal is the sharper half.** The enumeration table answers *"does it bind every name its
+construct can bind"* with a flat **"YES as of round 7"** — written in the round whose own framing is
+*"three rounds running, a universal written at this pass was falsified by an ordinary shape within a
+day."* It lasted a day. **Writing down that you keep making a mistake does not stop you making it; only
+changing the artefact does.**
+
+**And the artefact I asked for was itself incomplete.** I asked for three rows, one per line-scanning
+function; three rows were filled in correctly. The reviewer found **two more functions that qualify** —
+both take shell text and answer a question about it, neither excused — and **ran column 3 for one of
+them** rather than reasoning: its only red is the real-script caller, so the answer is *"partly, and by
+accident"*, the exact finding the table was built to surface, unrecorded because the function was not in
+it.
+
+**A table needs a membership test, not a count.** *"Every function in this file that takes shell text and
+answers a question about it"*, applied by grep, with the excused ones named and why — that is checkable
+by the next reader. **"Three rows" is a claim about how many I thought of**, and I wrote the brief that
+way. Last tick I recorded that the enumeration found a gap on its first outing; it did, and it was also
+missing two rows, and both facts belong in the record.
