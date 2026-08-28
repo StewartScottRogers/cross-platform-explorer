@@ -691,27 +691,41 @@ describe("release.yml's catalog job keeps the structure these red-proofs depend 
 // recalled. This ratchet lists every `needs:`-carrying job across every workflow with a recorded
 // verdict, so a NEW one cannot be added without someone making the same decision explicitly.
 describe("every needs:-chained job across the workflows has a recorded skip verdict (CPE-1932/CPE-1953)", () => {
-  // ci.yml's five build/test jobs all hang off `lockfile-preflight`. Enumerated and recorded here
-  // rather than silently left alone, because it IS the same structural shape -- one job's failure
-  // disabling five others -- with one decisive difference and one open caveat:
-  //   DIFFERENCE: nothing here PUBLISHES. A skipped `backend` job delivers no wrong artifact to any
-  //   user; it withholds a check on a PR that is already red from the preflight itself. The
-  //   `catalog` case was uniquely bad because the skip's consequence (every user's agent roster
-  //   frozen) was invisible from, and unrelated to, the failure that caused it.
-  //   CAVEAT, recorded deliberately and NOT fixed under this ticket: GitHub treats a `skipped`
-  //   required status check as satisfying branch protection. If any of these five is a required
-  //   check, a `lockfile-preflight` failure could in principle let a PR look mergeable with its
-  //   test suite never having run. That is a separate blast radius, a separate fix (a terminal
-  //   `always()` verdict job over the five, mirroring gui-smoke-linux-verdict), and wants its own
-  //   ticket rather than being smuggled into this one.
+  // ci.yml's five build/test jobs all hang off `lockfile-preflight`. CPE-1953 enumerated them here
+  // and recorded the skip as ACCEPTED WITH A CAVEAT, deferring the caveat to its own ticket. That
+  // ticket was CPE-1956, and it is now done: `ci.yml` grew a terminal `ci-verdict` job
+  // (`if: always()`, `needs:` all five) that reds when any of them did not run. So the five stay
+  // recorded as accepted silent skips -- the `needs:` edge is deliberately kept, because it is what
+  // makes the preflight's fail-fast saving real -- but the skip is no longer SILENT, and the
+  // `coveredBy` field below is the derivation that says so.
+  //
+  // The distinction that made the caveat worth a ticket, kept here because it is the reason the two
+  // cases got different fixes:
+  //   `catalog`'s skip was uniquely bad because its consequence (every user's agent roster frozen)
+  //   was invisible from, and unrelated to, the failure that caused it. Nothing in ci.yml PUBLISHES:
+  //   a skipped `backend` delivers no wrong artifact, it withholds a CHECK. But GitHub counts a
+  //   skipped required status check as SATISFIED, and a grey check reads to a human exactly like a
+  //   job that had nothing to do -- so "withholds a check" is only harmless while nobody is relying
+  //   on that check being there. CPE-1956 measured branch protection OFF on 2026-08-27
+  //   (`branches/main/protection` -> 404, `rulesets` -> `[]`), i.e. the hazard was latent, and fixed
+  //   it while it was still cheap rather than after someone turned protection on.
   const CI_PREFLIGHT =
-    "ACCEPTED SILENT SKIP with a recorded caveat: nothing here publishes, and the run is already red " +
-    "from lockfile-preflight itself -- unlike `catalog`, a skip withholds a CHECK rather than freezing " +
-    "something users receive. Caveat: GitHub counts a skipped required check as satisfied, so a " +
-    "terminal always() verdict job over these five is worth its own ticket. See this file's comment.";
+    "ACCEPTED SILENT SKIP, now covered by a terminal verdict (CPE-1956): the `needs:` edge is pure " +
+    "ORDERING -- lockfile-preflight writes no output the five consume -- and it is kept because it is " +
+    "what converts 'one stale lockfile per hour-long matrix run' into 'every stale lockfile in seconds'. " +
+    "Deleting the edge would delete that saving and still not fix the real defect, which was the skip " +
+    "being invisible. `ci.yml/ci-verdict` (always()) reds and names every job that did not run.";
 
-  /** name -> why a silent skip behind a failed `needs:` is (or is not) acceptable here. */
-  const VERDICTS: Record<string, { guarded: boolean; why: string }> = {
+  /**
+   * name -> why a silent skip behind a failed `needs:` is (or is not) acceptable here, and -- for an
+   * accepted skip -- which terminal job still examines the run so the skip cannot pass unnoticed.
+   *
+   * `coveredBy` is DERIVED, not decorative: the test below resolves the named job out of the parsed
+   * workflow and asserts it really exists, really carries an `always()`/`!cancelled()` `if:`, and
+   * really lists this job in its own `needs:`. A prose "it's fine, something else catches it" is the
+   * exact untestable provenance claim CPE-1933 bans.
+   */
+  const VERDICTS: Record<string, { guarded: boolean; why: string; coveredBy?: string }> = {
     "release.yml/verify-published-manifest": {
       guarded: true,
       why: "CPE-1872 finding A: a fail-fast:false matrix can still have published assets, so the integrity gate must run on a failed release. `!cancelled()`.",
@@ -723,6 +737,7 @@ describe("every needs:-chained job across the workflows has a recorded skip verd
     "release-sidecar.yml/release-sidecar": {
       guarded: false,
       why: "ACCEPTED SILENT SKIP, and the blast radius is the same failure rather than a different one: it needs create-release's release OBJECT and verify-updater-pin's go-ahead. With either failed there is literally nothing to build into, and the run is already red from the upstream job -- nothing ships to users independently of it.",
+      coveredBy: "release-sidecar.yml/verify-published-manifest-sidecar",
     },
     "release-sidecar.yml/verify-published-manifest-sidecar": {
       guarded: true,
@@ -731,16 +746,21 @@ describe("every needs:-chained job across the workflows has a recorded skip verd
     "gui-smoke.yml/gui-smoke-linux": {
       guarded: false,
       why: "ACCEPTED SILENT SKIP: a failed build leaves no binary to smoke. The run is red from the build, and the skip has no independent user-facing consequence -- unlike `catalog`, nothing stops being DELIVERED because this did not run.",
+      coveredBy: "gui-smoke.yml/gui-smoke-linux-verdict",
     },
     "gui-smoke.yml/gui-smoke-linux-verdict": {
       guarded: true,
       why: "`always()` -- the verdict must report on a failed or skipped smoke run, which is precisely the terminal-gate shape this ticket adds to `catalog`.",
     },
-    "ci.yml/backend": { guarded: false, why: CI_PREFLIGHT },
-    "ci.yml/crates": { guarded: false, why: CI_PREFLIGHT },
-    "ci.yml/net-e2e": { guarded: false, why: CI_PREFLIGHT },
-    "ci.yml/sidecar": { guarded: false, why: CI_PREFLIGHT },
-    "ci.yml/msrv": { guarded: false, why: CI_PREFLIGHT },
+    "ci.yml/backend": { guarded: false, why: CI_PREFLIGHT, coveredBy: "ci.yml/ci-verdict" },
+    "ci.yml/crates": { guarded: false, why: CI_PREFLIGHT, coveredBy: "ci.yml/ci-verdict" },
+    "ci.yml/net-e2e": { guarded: false, why: CI_PREFLIGHT, coveredBy: "ci.yml/ci-verdict" },
+    "ci.yml/sidecar": { guarded: false, why: CI_PREFLIGHT, coveredBy: "ci.yml/ci-verdict" },
+    "ci.yml/msrv": { guarded: false, why: CI_PREFLIGHT, coveredBy: "ci.yml/ci-verdict" },
+    "ci.yml/ci-verdict": {
+      guarded: true,
+      why: "CPE-1956's gate itself. `always()` -- without it the verdict is skipped by the very failure it exists to report, and a skipped gate is a green PR. Its own wiring (that its needs: covers EVERY job behind lockfile-preflight) is derived in src/lib/ciVerdict.test.ts.",
+    },
   };
 
   // CPE-1953 review, non-blocking finding 3: this list was hard-coded to the four files that happen
@@ -788,6 +808,65 @@ describe("every needs:-chained job across the workflows has a recorded skip verd
     for (const [key, verdict] of Object.entries(VERDICTS)) {
       if (verdict.guarded) continue;
       expect(verdict.why.length, `${key} needs a recorded reason`).toBeGreaterThan(60);
+    }
+  });
+
+  // CPE-1956. The invariant the whole family of tickets (CPE-1753, CPE-1872, CPE-1893, CPE-1953)
+  // has been converging on, stated once and DERIVED: a job may be silently skipped only if some
+  // terminal job still runs and still has it in view. Concretely -- for every accepted silent skip,
+  // `coveredBy` must name a job that (a) exists in the same workflow, (b) carries an `if:` that
+  // survives an upstream failure, and (c) genuinely lists the skipped job in its own `needs:`.
+  //
+  // (c) is the load-bearing clause and the reason this is a derivation rather than a comment: a
+  // terminal job that runs on `always()` but does NOT need the skipped job never sees it, so naming
+  // it as cover would be false while reading as reassurance -- the precise failure mode CPE-1933
+  // describes, where a green test vouches for an unchecked claim.
+  //
+  // What this deliberately does NOT claim: that each covering job reds *specifically because of*
+  // the skip. That is true and demonstrated by execution for `ci.yml/ci-verdict`
+  // (src/lib/ciVerdict.test.ts spawns its real run: body with an all-skipped payload and observes
+  // exit 1) and for `gui-smoke-linux-verdict` (its ratchet reds on MISSING SHARD). For
+  // `verify-published-manifest-sidecar` the claim is only the weaker, checkable one: the run does
+  // not end with the skip unexamined.
+  it("every accepted silent skip names a terminal job that really covers it (CPE-1956)", () => {
+    const accepted = Object.entries(VERDICTS).filter(([, v]) => !v.guarded);
+
+    // Near-empty backstop: if the filter ever matches nothing, this becomes a vacuous pass over the
+    // exact population it is supposed to police.
+    expect(
+      accepted.length,
+      "no accepted silent skips found in VERDICTS -- the table or this filter broke, and an " +
+        "empty population is not the same as a clean one",
+    ).toBeGreaterThanOrEqual(3);
+
+    for (const [key, verdict] of accepted) {
+      const [file, jobName] = key.split("/");
+      expect(
+        verdict.coveredBy,
+        `${key} is an accepted silent skip with no coveredBy. Either name the terminal job that ` +
+          `still examines the run, or guard the job itself -- "the run is red anyway" is not cover, ` +
+          `because a skipped required check counts as satisfied and a grey check reads as N/A.`,
+      ).toBeDefined();
+
+      const [coverFile, coverJob] = String(verdict.coveredBy).split("/");
+      expect(coverFile, `${key}'s coveredBy must name a job in the same workflow`).toBe(file);
+
+      const cover = parseWorkflow(coverFile).jobs[coverJob];
+      expect(cover, `${key} names ${verdict.coveredBy} as cover, but that job does not exist`).toBeDefined();
+
+      const coverIf = cover.if ?? "";
+      expect(
+        /!cancelled\(\)|always\(\)/.test(coverIf),
+        `${key}'s cover ${verdict.coveredBy} has if: (${coverIf || "<absent>"}) -- it would be ` +
+          `skipped by the same upstream failure, so it covers nothing`,
+      ).toBe(true);
+
+      const coverNeeds = Array.isArray(cover.needs) ? cover.needs : cover.needs === undefined ? [] : [cover.needs];
+      expect(
+        coverNeeds.map(String),
+        `${key}'s cover ${verdict.coveredBy} does not list ${jobName} in its needs:, so the skip is ` +
+          `outside its field of view entirely`,
+      ).toContain(jobName);
     }
   });
 });
