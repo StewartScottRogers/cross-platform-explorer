@@ -3496,3 +3496,46 @@ different remedy.**
 The stated miss is honest and worth carrying: a guard added *inside* an existing job — a new test file
 under `Frontend`, a new ratchet under `Ratchet guard` — is invisible to any name-based instrument. Only
 the settings change closes that, and that needs the user.
+
+## 2026-08-28 — twice in one night, a derivation replaced a list and inherited its hole
+
+Yesterday's lesson was *a list is correct exactly once; a derivation is recomputed every run.* Two PRs
+took that seriously within hours of each other, and **both derivations turned out to have the same hole
+the list had.** Both were found the same way: a green sabotage.
+
+**#1091** replaced an enumeration of log sites with a **derived taint set** — every variable assigned from
+a substitution running `gh`/`curl`/`jq`/`cat`. Measured misses: a **transitive** assignment
+(`rel_name="$tag"`) reds only the executed leg, and **deleting a live sanitiser call at an inline
+`$(cat "$jq_err")` leaves the suite fully green** — because the loop iterates *variables*, and that site
+has none.
+
+**#1087** replaced a hand-written list of case tables with a **derived scan** of the file's own source.
+Its documented sabotage reds. **Seven other spellings of the same declaration stay 75/75 green** — `let`,
+`readonly Case[]`, no space after the colon, a line-wrapped annotation, `as Case[]`, `.concat(...)`, and
+**`export const`**, which two other files in this repo already use for exactly this kind of table.
+
+**So the correction to yesterday's lesson: a derivation's *scope* is itself a claim, and its default
+failure mode is that it covers the spelling the author happened to use.** Both scans were written by
+someone looking at the declarations already in the file, and both are exactly wide enough for those.
+Neither author was careless — a regex written from examples is *fitted to the examples*, and nothing about
+running it announces what it did not match.
+
+**Two things make the difference, and they cost about a line each.**
+
+**Write down the shapes the scan cannot see.** #1087's scan will never catch `as Case[]` or a
+`.concat(...)`, no matter how wide the regex gets. Saying so converts an over-claim into a known
+boundary, and the next person extends it instead of trusting it.
+
+**Red-proof a shape you did NOT design for.** Both authors red-proofed the shape their regex was built
+around, which tests the plumbing and not the scope. One decoy in an *unfamiliar* spelling would have
+caught both of these in seconds.
+
+A third, smaller: **the repo already had a wider precedent.** `RATCHET_SHAPED` handles optional `export`,
+leading whitespace and a loose annotation. When you write the second scanner for a job, read the first
+one — it has already met the shapes you have not thought of yet.
+
+And one piece of evidence worth keeping about how these are found: #1087's docblock *did* state a
+limitation — the column-0 anchor, defended as preventing the regex from matching itself. Measured,
+**dropping the anchor returns the identical names**, so it prevents nothing and is precisely what hides
+`export const`. **A stated limitation that is not the load-bearing one reads as diligence and buys
+nothing.**
