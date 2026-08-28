@@ -10,8 +10,11 @@
 //!   CPE-309 I/O trace log into it;
 //! * `session_supervisor::default_port_file` / `write_port_file` — builds it, `create_dir_all`s it,
 //!   writes the session daemon's **port file** into it;
-//! * `sidecar_host::reaper::default_session_daemon_port_file` — builds it (a duplicate, because ADR
-//!   0001 forbids the host depending on this crate) and `remove_file`s the port file at startup.
+//! * `sidecar_host::reaper::default_session_daemon_port_file` — builds it from **a second, duplicate
+//!   spelling of the path** and `remove_file`s the port file at startup. (Round 1 of this ticket
+//!   explained that duplicate as forced, "because ADR 0001 forbids the host depending on this crate".
+//!   **That was false** — see the constants below — and the duplicate is gone: both names now live
+//!   once, in `sidecar-contract`.)
 //!
 //! `create_dir_all` is the primitive CPE-1952 established will walk a pre-existing junction
 //! (Windows) or symlink (Unix) as though it were the directory it points at. So an attacker who

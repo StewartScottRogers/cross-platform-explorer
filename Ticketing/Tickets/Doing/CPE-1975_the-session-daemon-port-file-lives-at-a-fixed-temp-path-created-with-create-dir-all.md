@@ -453,3 +453,81 @@ reader landing on §9 cannot take the wrong count as current.
   guards green.
 - Still unmeasured here and still marked so: every Linux and macOS leg (no C linker in this shift's
   WSL). Those run in CI's 3-OS `sidecar` job.
+
+---
+
+## Round 4 — review response (SEC PASS re-affirmed, one finding)
+
+The shipped behaviour was verified right, every number checked out, and the finding was entirely in
+**the beyond-the-ask test I added in round 3**. Both halves of its CPE-1929 pair came back green —
+this repo's own definition of unreachable. I reproduced both before touching anything.
+
+### The defect: I named a backstop without checking it could fire
+
+Round 3's docstring claimed the test meant *"a future edit routing a must-see message back through
+`trace` alone has a red test standing next to it."*
+
+- **Sabotage 1** — delete the ungated `writeln!` from `discover_or_spawn`, leaving the `trace` call:
+  **423 passed / 0 failed, GREEN** (`Compiling ai-console` present, so not a stale binary).
+  Reproduced here. The test lives in `session_diag`'s unit module and asserts a property of `trace`;
+  **nothing structurally connects it to `discover_or_spawn` or to any call site.**
+- **Sabotage 2** — gate made to lie (`if false && !enabled()`): **GREEN**, because
+  `assert_eq!(log_path().exists(), before)` **compares existence to existence**, and the log
+  pre-exists on any machine where the suite has run (`tests/session_supervisor.rs` and
+  `tests/session_engine_daemon.rs` spawn the real `--session-daemon`, which sets
+  `CPE_AICONSOLE_DIAG` on itself and appends to that very file).
+- And the first assertion was a **duplicate** of one already in
+  `a_byte_trace_is_inert_when_disabled` twenty lines up, pre-dating this PR.
+
+So one leg restated an existing assertion and the other was vacuous. **This is the shift's lesson
+twice in one PR: round 3 fixed a report routed through a channel that was off, and the guard I added
+to protect that fix could not see the thing it named. Check the channel — and check that the guard
+can fire.**
+
+### Took (a): the guard now lives where the regression lives
+
+New `src/lib/consoleRefusalReport.test.ts` derives the shape of `discover_or_spawn`'s error arm from
+the Rust source and asserts it contains an ungated `writeln!(std::io::stderr(), …)` with no
+`enabled()` in that arm. Comment-stripping is **load-bearing rather than ceremonial** here: the
+function is wrapped in ~30 lines of commentary that quote `writeln!(std::io::stderr(), …)` verbatim
+while explaining why it is there, so a raw-text scanner would match the *explanation* and pass with
+the code deleted — CPE-1933's silent-pass shape, reproduced by construction. Same machinery and
+precedent as `MacroRunConfirm.test.ts`.
+
+**Red-proofed by construction:** written while sabotage 1 was still applied, and run — **RED**, naming
+the missing call. Restoring the line turned it green. A second leg derives `trace`'s `if !enabled()
+{ return; }` from *its* source, so the reasoning the first leg rests on reds if the gate ever goes
+away; that leg also went red under sabotage 2.
+
+**Stated blind spot:** this is a tripwire over a code shape, not a proof. It does not show the line is
+reached at run time or that stderr is attached. Proving that needs the console spawned with a planted
+link and its stderr captured — worth doing on the day `discover_or_spawn` acquires a caller, and
+recorded at the site so that is a decision rather than an oversight.
+
+### And (b) as well, since the test was worth keeping but not as written
+
+Renamed to `a_disabled_trace_writes_nothing_to_the_log`. The duplicated `!enabled()` leg is gone, the
+"red test standing next to it" sentence is **deleted and replaced with what actually guards the call
+site**, and the vacuous existence compare is replaced by a **content check against a token no other
+writer can produce** — immune both to the file pre-existing and to a concurrent daemon appending,
+which a length or mtime comparison would not be.
+
+Its CPE-1929 pair, re-run on the repaired test: **gate made to lie → RED, 395 passed / 1 failed**
+(`--lib`), where round 3's version was **green** under the identical sabotage. The other half of the
+pair is explicitly **not claimed** by this test and is owned by the new TS guard.
+
+### The nit
+
+`console_temp_dir.rs`'s site list narrated the third site as a duplicate *"because ADR 0001 forbids
+the host depending on this crate"* — the claim round 2 established is false — 130 lines above its
+correction. Now corrected in place, marked false, and pointed at the constants.
+
+### Round-4 verification
+
+- `sidecar/ai-console` **423 / 0** (no `NOT VERIFIED` notice), `sidecar/host` **153 / 0**,
+  `sidecar/contract` **12 / 0**; clippy clean in all three.
+- `src-tauri` clippy clean in **both** feature modes; `npm run check` 0 errors / 0 warnings; all three
+  CPE-1975 TS guards green (7 tests).
+- The recorded `console_dir_is_real` sabotage figure was **spot-checked rather than assumed** after
+  these edits — 421/2, unchanged, same two tests. Baseline is still 423.
+- Still unmeasured here, still marked so: every Linux and macOS leg.

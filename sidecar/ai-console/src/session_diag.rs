@@ -177,21 +177,66 @@ mod tests {
     /// `CPE_AICONSOLE_SESSION_DAEMON_ADDR` only on the host-injected path, which uses
     /// `SessionDaemonHandle::external` instead. So the report reached nobody.
     ///
-    /// Pinned here rather than left as a comment so that a future edit routing a must-see message
-    /// back through `trace` alone has a red test standing next to it. If this ever fails because a
-    /// fifth env var was added — or because the harness now sets one — the conclusion is not "relax
-    /// the test", it is "`trace` is still not guaranteed on, so must-see messages still need the real
-    /// stderr handle".
+    /// ## What this test does and does NOT guard — corrected in round 4, because it claimed both
+    ///
+    /// Round 3 wrote here that this pins the fact "so that a future edit routing a must-see message
+    /// back through `trace` alone has a red test standing next to it". **That was false and was
+    /// measured false:** deleting the ungated `writeln!` from `session_supervisor::discover_or_spawn`
+    /// and leaving its `trace` call alone left the crate at **423 passed / 0 failed**. This test
+    /// asserts a property of `trace`; nothing structurally connects it to any call site, so it could
+    /// not fire for the regression it named — CLAUDE.md's *"do not name a backstop without checking
+    /// it can fire; one that structurally cannot fire is worse than none, because it reads as one."*
+    ///
+    /// **The call site is guarded by `src/lib/consoleRefusalReport.test.ts`**, which derives the
+    /// shape of that error arm from the Rust source (comments stripped first) and was red-proofed
+    /// against exactly that deletion. This test's job is only the narrower fact its name states.
+    ///
+    /// Round 3 also shipped two weak legs, both now gone: an `assert!(!enabled())` that merely
+    /// restated one already made twenty lines up in `a_byte_trace_is_inert_when_disabled`, and an
+    /// `assert_eq!(log_path().exists(), before)` that **compared existence to existence** — vacuous
+    /// wherever the log already exists, which in this crate's own suite is near-guaranteed because
+    /// `tests/session_supervisor.rs` and `tests/session_engine_daemon.rs` spawn the real
+    /// `--session-daemon`, and it sets `CPE_AICONSOLE_DIAG` on itself and appends to that same file.
+    /// With the gate sabotaged (`if false && !enabled()`) the trace wrote 66 bytes to the real log
+    /// and the test still passed.
+    ///
+    /// So the assertion is now on **content, via a token no other writer can produce** — immune both
+    /// to the file pre-existing and to a concurrent daemon appending to it, which a length or mtime
+    /// comparison would not be.
+    ///
+    /// If this ever fails because a fifth env var was added, or because the harness sets one, the
+    /// conclusion is not "relax the test", it is "`trace` is still not guaranteed on, so must-see
+    /// messages still need the real stderr handle".
+    ///
+    /// ## CPE-1929 pair, re-run on the repaired test (Windows, 2026-08-28)
+    ///
+    /// Round 3's version failed **both** legs green, which is this repo's definition of unreachable.
+    /// The repaired version:
+    ///
+    /// * **gate made to lie** (`if false && !enabled()` in [`trace`], i.e. no gate at all) →
+    ///   **RED**, `cargo test --locked --no-fail-fast --lib` 395 passed / **1 failed**, this test.
+    ///   Round 3's version was **GREEN** under the identical sabotage — the vacuous
+    ///   existence-vs-existence compare — so this is the leg that was bought.
+    /// * the **other** half of the pair, "delete the `writeln!` at the call site", is not this
+    ///   test's to catch and is not claimed here; `src/lib/consoleRefusalReport.test.ts` owns it and
+    ///   was red-proofed against exactly that deletion.
+    ///
+    /// Windows-measured only, like every other pair in this ticket.
     #[test]
-    fn tracing_is_off_by_default_so_it_cannot_carry_a_must_see_message() {
-        assert!(
-            !enabled(),
-            "a default process (this test binary is one) has none of the four diagnostics env vars \
-             set, so `trace` is inert — see this test's doc, and CPE-1975"
+    fn a_disabled_trace_writes_nothing_to_the_log() {
+        let token = format!(
+            "CPE-1975-must-go-nowhere-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
         );
-        // And inert really means inert: no file is created, so nothing observable happened at all.
-        let before = log_path().exists();
-        trace("test", "CPE-1975: this line must go nowhere");
-        assert_eq!(log_path().exists(), before, "a disabled trace must not create the log file");
+        trace("test", &token);
+        let contents = std::fs::read_to_string(log_path()).unwrap_or_default();
+        assert!(
+            !contents.contains(&token),
+            "a disabled `trace` wrote to {} — so `trace` is NOT inert by default, and every place \
+             that relies on it being a real channel (or on it being a silent one) needs re-checking. \
+             See this test's doc and CPE-1975.",
+            log_path().display()
+        );
     }
 }

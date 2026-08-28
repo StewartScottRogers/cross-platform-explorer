@@ -117,6 +117,11 @@ impl SessionDaemonHandle {
                 port_file.display(),
                 handle.port
             );
+            // Guarded by `src/lib/consoleRefusalReport.test.ts`, which derives this arm's shape from
+            // this source (comments stripped first, since the block above quotes the very call it is
+            // checking for) and reds if the ungated `writeln!` goes away. Round 3's attempt to pin
+            // this from `session_diag`'s unit module could not fire — deleting this line left the
+            // crate green at 423/0.
             let _ = writeln!(std::io::stderr(), "[CPE-1975] {msg}");
             session_diag::trace("supervisor", &msg);
         }
