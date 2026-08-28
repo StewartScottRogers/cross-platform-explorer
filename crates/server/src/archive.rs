@@ -4628,28 +4628,40 @@ fn extract_zip_archive_stream(
             // correct outcome" — is a **skip** whether the guard that reached that verdict fired at the
             // claim or at the commit, and everything else is still this entry's failure.
             //
-            // **CPE-1929 pair, run rather than reasoned about** (Windows `--lib`, `Compiling
-            // cpe-server` seen on each run; baseline 2,456 passed / 0 failed / 14 ignored):
+            // **CPE-1929 pair, run rather than reasoned about — and the pair is SPLIT ACROSS
+            // PLATFORMS, which round 5 could not see from one of them** (`Compiling cpe-server` seen on
+            // every run; baselines 2,456 Windows and 2,445 Linux, 0 failed / 14 ignored):
             //
             // ```text
-            // A  disable (`if false && r.policy`)   2456 passed / 0 failed   GREEN
-            // B  lie     (`if true  || r.policy`)   2455 passed / 1 failed   RED
+            //                                       Windows --lib          Linux --lib
+            // A  disable (`if false && r.policy`)   2456 / 0   GREEN(r5)   2444 / 1   RED  (r6)
+            // B  lie     (`if true  || r.policy`)   2455 / 1   RED         2445 / 0   GREEN
             //
-            //   B: cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run
+            //   A (Linux): cpe_1961_a_link_planted_mid_write_skips_that_entry_and_writes_its_neighbours
+            //        left: (2, 1, 0)   right: (2, 0, 1)
+            //   B (Windows): cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run
             //      "two entries written and the blocked one in the FAILED bucket … which is a failure
             //       and not a policy skip: ArchiveReport { done: 2, failed: 0, skipped: 1, … }"
             //        left: (2, 0, 1)   right: (2, 1, 0)
             // ```
             //
-            // **A green and B red is NOT the shadowed signature** — that one is *both* green, and it
-            // means nothing reaches the guard. B reds, so control does reach this fork and the `else`
-            // arm is load-bearing: an I/O commit refusal still has to land in **failed**, and this
-            // change cannot have quietly moved it. What A's green says is narrower and is the honest
-            // caveat: the **`policy: true` side specifically** has no in-tree test, and that is
-            // structural rather than an omission — its only input is a component swapped inside
-            // `io::copy`'s window, so a leg-level fixture would have to *race* the extraction and could
-            // pass by missing it, which is worse than none. What is pinned instead is the two halves
-            // this arm is built from: that `commit` really does produce a `policy: true` refusal
+            // **Both arms are now reached, and neither platform reds both.** Each sabotage is answered
+            // by a fixture the *other* platform cannot construct: B's is Windows-only because it needs
+            // a foreign process's share mode to make a commit fail for an I/O reason, and A's is
+            // Unix-only because NTFS refuses to rename a directory with our staging handle open inside
+            // it. Read the column you are standing in and you will conclude one arm is uncovered; read
+            // the row and it is not. Say which platform a number came from, always.
+            //
+            // **Round 5 wrote that A's green was structural** — *"a leg-level fixture would have to
+            // race the extraction and could pass by missing it, which is worse than none"* — and the
+            // Reviewer built the fixture that refutes it (round 6). The move is to plant on a **signal**
+            // rather than on a timer: the `.cpe-tmp` staging sibling exists only between a successful
+            // claim and its commit, so polling for its appearance and then asserting the plant landed
+            // is fail-closed in *both* directions. Full argument at the test.
+            //
+            // The two halves this arm is built from are still pinned independently, and remain the only
+            // coverage on the platform that cannot construct the leg-level case: that `commit` really
+            // does produce a `policy: true` refusal
             // (`fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`,
             // red-proofed on Linux against a real planted link) and that `policy: false` still reaches
             // `failed` (B, above).
@@ -7496,6 +7508,179 @@ mod tests {
             report.errors
         );
         drop(hold);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 6: the commit-time `policy: true` arm, driven end to end through the real
+    /// extractor** — the fixture rounds 4 and 5 called structurally impossible, and the Reviewer built.
+    ///
+    /// # The objection, and why it does not hold
+    ///
+    /// The note at the commit fork used to say a leg-level fixture *"would have to race the extraction
+    /// and could pass by missing it, which is worse than none"*. That is true of a fixture that plants
+    /// on a **timer**. It is false of one that plants on a **signal**, and this one has a signal: the
+    /// `.cpe-tmp` staging sibling exists **only** between a successful claim and its commit
+    /// ([`crate::fsutil::staging_sibling_name`]), so its appearance is proof that the window is open
+    /// right now rather than a guess that it might be. Polling for it and then asserting that the plant
+    /// landed makes the fixture **fail-closed in both directions**:
+    ///
+    /// - **miss the window** (nothing staged inside the deadline, or the rename lost) → the `planted`
+    ///   assertion reds. It cannot pass by racing badly.
+    /// - **plant after the commit** → the entry lands, `(done, failed, skipped)` is `(3, 0, 0)`, and the
+    ///   `(2, 0, 1)` equality reds. It cannot pass by racing late either.
+    ///
+    /// A middle entry of **192 MB stored** is what buys the margin: `io::copy` is still moving bytes
+    /// through the staging handle for a few hundred milliseconds after the name appears, which is four
+    /// orders of magnitude more than the `rename` + `symlink` the planter needs.
+    ///
+    /// # What it establishes that the two unit halves do not
+    ///
+    /// Round 5 pinned the halves — that `commit` can produce `policy: true`
+    /// (`fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`)
+    /// and that `policy: false` still reaches `failed`. Neither says the **leg** behaves: that the
+    /// verdict reaches `report.skip` rather than `report.fail`, that the run is not aborted, that the
+    /// neighbours on either side are still written, and — the one that matters — that **nothing is
+    /// written through the planted link**. The link here points *outside* the extraction root, so a
+    /// commit that followed it would deposit `big.bin` at a path the user never named. Asserted on the
+    /// filesystem before the `Result` is unwrapped, for the usual reason.
+    ///
+    /// **Unix only, measured rather than assumed** (round 5): NTFS refuses to rename a directory with
+    /// our staging handle open inside it (`ERROR_ACCESS_DENIED`), so the swap cannot be constructed on
+    /// Windows at all. That is an accident of the handle we happen to hold and never a contract — see
+    /// the fsutil test above, whose Windows arm asserts the block by its error code.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1961_a_link_planted_mid_write_skips_that_entry_and_writes_its_neighbours() {
+        let d = scratch("cpe1961-commit-link-fork");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        // Where the planted link points — an empty directory OUTSIDE the extraction root, so a commit
+        // that followed it would be an escape and not merely a misfiling. `pen` is where the real
+        // `out/sub` is parked so its name comes free; the two are kept separate deliberately, so that
+        // `elsewhere` contains nothing the extraction put there before the link existed.
+        let elsewhere = d.join("elsewhere");
+        let pen = d.join("pen");
+        fs::create_dir_all(&elsewhere).unwrap();
+
+        // The poisoned entry in the MIDDLE again, and 192 MB **stored** so the window is wide. Written
+        // a megabyte at a time rather than as one allocation.
+        const CHUNKS: usize = 192;
+        let zip_path = d.join("in.zip");
+        {
+            let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            let stored: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("before.txt", opts).unwrap();
+            w.write_all(b"BEFORE").unwrap();
+            w.start_file("sub/big.bin", stored).unwrap();
+            let mb = vec![b'x'; 1024 * 1024];
+            for _ in 0..CHUNKS {
+                w.write_all(&mb).unwrap();
+            }
+            w.start_file("after.txt", opts).unwrap();
+            w.write_all(b"AFTER").unwrap();
+            w.finish().unwrap();
+        }
+
+        let sub = dest.join("sub");
+        // Raw `fs::rename`, and the `disallowed_methods` allow is the POINT of this test rather than an
+        // exemption from it — the same reason `backup.rs`'s racer carries one. The lint exists because
+        // `rename` replaces its destination silently and destroys a link at it, which is exactly the
+        // primitive the attacker uses here; routing the planter through `fsutil::rename_into_slot`
+        // would make it refuse to do the thing being measured.
+        #[allow(clippy::disallowed_methods)]
+        let planter = {
+            let (sub, elsewhere, pen) = (sub.clone(), elsewhere.clone(), pen.clone());
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while std::time::Instant::now() < deadline {
+                    // **The gate.** A `.cpe-tmp` in `sub/` exists only after this entry's claim
+                    // succeeded and only until its commit renames it away, so seeing one means the
+                    // window is open *now*. No sleep, no timer, no guess.
+                    let staged = fs::read_dir(&sub)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|e| e.file_name().to_string_lossy().ends_with(".cpe-tmp"));
+                    if staged {
+                        // Move the real directory into a holding pen and leave a link to a SEPARATE,
+                        // empty directory behind. The staging handle the extractor is writing through
+                        // follows the real directory; the NAME the commit has to resolve is now a
+                        // symlink pointing outside the root. `elsewhere` starts empty and is reachable
+                        // only through that link, so anything found in it afterwards arrived through
+                        // it — which is what makes the assertion below mean what it says.
+                        if fs::rename(&sub, &pen).is_err() {
+                            return false;
+                        }
+                        return std::os::unix::fs::symlink(&elsewhere, &sub).is_ok();
+                    }
+                    std::thread::yield_now();
+                }
+                false
+            })
+        };
+
+        let cancel = AtomicBool::new(false);
+        let outcome =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+        let planted = planter.join().unwrap();
+
+        // Filesystem first, before the Result is unwrapped.
+        let through_the_link: Vec<_> = fs::read_dir(&elsewhere)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            through_the_link.is_empty(),
+            "the commit followed the planted link and wrote OUTSIDE the extraction root — found \
+             {through_the_link:?}: {outcome:?}"
+        );
+        // The claim had already created `out/sub/big.bin` as an empty destination before the link
+        // existed, and the planter carried that directory off wholesale, so a zero-byte stub survives
+        // in the pen. That is the attacker's own doing and not an escape — but it must never be the
+        // 192 MB payload, which is what a commit that resolved the name late would have put there.
+        let stub = fs::metadata(pen.join("big.bin")).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(stub, 0, "the payload reached the directory the attacker moved aside: {outcome:?}");
+        assert_eq!(
+            fs::read(dest.join("before.txt")).ok().as_deref(),
+            Some(&b"BEFORE"[..]),
+            "the entry before the poisoned one must be written: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("after.txt")).ok().as_deref(),
+            Some(&b"AFTER"[..]),
+            "THE POINT: the entry AFTER it must be written too — a commit refusal is one entry's cost, \
+             never the run's: {outcome:?}"
+        );
+
+        let report = outcome.expect(
+            "a link planted mid-write must cost ONE entry. An Err here is a run abort: the entries \
+             after the poisoned one are never written, and the one error names none of them",
+        );
+        // Both halves of the fail-closed argument, and they must be read together: `planted` says the
+        // window was really hit, the tuple says the verdict was really a skip. Either one alone is
+        // satisfiable by a fixture that raced badly.
+        assert!(
+            planted,
+            "the planter never got the directory swapped, so nothing below is evidence — an extraction \
+             nobody attacked skips nothing no matter what the commit does: {report:?}"
+        );
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (2, 0, 1),
+            "the two neighbours written and the poisoned entry SKIPPED — a planted link is a policy \
+             verdict, and telling the user to clear it and extract again is advice that cannot work: \
+             {report:?}"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("big.bin") && e.contains("is a link")),
+            "and the reason must be recorded against the entry, naming the link: {:?}",
+            report.errors
+        );
+
+        let _ = fs::remove_file(&sub); // the symlink itself, never its target
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -11760,11 +11945,13 @@ mod tests {
     /// test that only asserted `MODES_CHANGED_OUTSIDE == 0` would pass on a runner where the swapper
     /// never got in, which is the invisible-green failure CPE-1952 round 2 is about.
     ///
-    /// The swapper is bounded by a **deadline**, not by a stop flag, precisely so that assertion cannot
-    /// flake into a false alarm on a loaded or single-core runner: the slot is a real file for the rest
-    /// of the process, so a starved thread still stages its swap. That the window is real *during* the
-    /// run is not asserted here — it is the sabotage measurement below, which is where timing evidence
-    /// belongs.
+    /// The swapper is bounded by a **deadline**, not by a stop flag, and **retries on `EEXIST`**,
+    /// precisely so that assertion cannot flake into a false alarm on a loaded or single-core runner:
+    /// the slot is a real file from the commit onwards, so a starved thread still stages its swap. The
+    /// retry is not a relaxation — see the note at the swapper itself for why CPE-1961's
+    /// claim-then-commit staging made the old one-shot form lose 90% of its trials at a 2 ms induced
+    /// gap, and for the discriminator that measured it. That the window is real *during* the run is not
+    /// asserted here — it is the sabotage measurement below, which is where timing evidence belongs.
     ///
     /// # Setuid — measured, not inferred (CPE-1938 round 2, Security Auditor)
     ///
@@ -11849,11 +12036,45 @@ mod tests {
             fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
 
             let slot = dest.join("a.txt");
-            // **Bounded by a deadline rather than by a stop flag, so `swaps` is deterministic.** The
-            // swapper exits the moment it has replaced the slot; with the fix in, `a.txt` is a real
-            // file for the whole run and stays one afterwards, so a thread that was starved during the
-            // extraction still stages its swap and the liveness assertion below cannot flake. The
-            // deadline is the hang guard for the case where nothing ever creates the slot.
+            // **Bounded by a deadline rather than by a stop flag, so `swaps` is deterministic**, and
+            // the swapper **retries on `EEXIST`** rather than giving up on its first attempt. It exits
+            // the moment it has replaced the slot; `a.txt` is a real file once the extraction has
+            // committed and stays one afterwards, so a thread that was starved during the extraction
+            // still stages its swap and the liveness assertion below cannot flake. The deadline is the
+            // hang guard for the case where nothing ever creates the slot.
+            //
+            // **The retry is CPE-1961's doing, and the positive control is what noticed** (round 6,
+            // Reviewer blocker). This comment used to say `a.txt` "is a real file for the WHOLE run",
+            // and until CPE-1961 that was true: the extractor created the name once, opened it, and the
+            // bytes went through that handle — **nothing ever re-created it**. Claim-then-commit
+            // staging re-creates it, because `commit()` renames a `.cpe-tmp` sibling onto that name. So
+            // a swapper preempted in the gap between its `remove_file` and its `symlink` now finds the
+            // name occupied and gets `EEXIST` — a lost trial, contributing nothing to
+            // `changed_outside`, which is exactly the invisible-green shape `swaps == TRIALS` exists to
+            // catch. It caught it on a shared runner, three rounds after the change that broke the
+            // premise, and nothing in that diff pointed here.
+            //
+            // **Discriminator** (an env-gated sleep spliced between the swapper's two syscalls,
+            // identical instrumentation on both revisions, `TRIALS = 20`, real ext4). `main`
+            // (`8c9ddb60`) cannot lose a trial at any inducible gap; the pre-retry head does:
+            //
+            // ```text
+            // gap        main 8c9ddb60   head 66090006     this fixture (retry in)
+            // 0 us       20/20           20/20             20/20   (0 EEXIST)
+            // 200 us     20/20           20/20             20/20   (0 EEXIST)
+            // 2000 us    20/20            2/20  <- CI      20/20  (19 EEXIST, all recovered)
+            // 20000 us   20/20            0/20             20/20  (20 EEXIST, all recovered)
+            // 200000 us  -                -                20/20  (20 EEXIST, all recovered)
+            // ```
+            //
+            // `changed_outside` was 0 in every cell of every column, including the lost ones: **a lost
+            // trial is strictly safer than a won one** (the committed file ends at `a.txt` with no link
+            // present), so the escape assertion was never weakened — the liveness one simply stopped
+            // being evidence. After the commit `a.txt` is a stable real file, so the retry lands
+            // deterministically and `swaps == TRIALS` is a hard equality again rather than a relaxed
+            // bound. Natural (uninstrumented) reproduction did not occur here in ~1,900 trials across
+            // solo, single-core-pinned, `--test-threads 4` and CPU-loaded runs, because this box's ext4
+            // is faster than a GitHub runner; the discriminator is what settles it.
             let swapper = {
                 let (slot, victim) = (slot.clone(), victim.clone());
                 std::thread::spawn(move || {
@@ -11861,7 +12082,11 @@ mod tests {
                     while std::time::Instant::now() < deadline {
                         if fs::symlink_metadata(&slot).map(|m| m.is_file()).unwrap_or(false) {
                             let _ = fs::remove_file(&slot);
-                            return std::os::unix::fs::symlink(&victim, &slot).is_ok();
+                            if std::os::unix::fs::symlink(&victim, &slot).is_ok() {
+                                return true;
+                            }
+                            // `EEXIST` — `commit()`'s rename put a real `a.txt` back in the gap. Keep
+                            // spinning rather than returning: this is the retry the note above is about.
                         }
                         std::thread::yield_now();
                     }

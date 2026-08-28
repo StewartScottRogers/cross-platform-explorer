@@ -2535,8 +2535,11 @@ pub(crate) fn claim_destination_handle<'a>(
     // **All five legs are [`DestinationSite::Beneath`]** — read out of the legs rather than assumed,
     // and round 5's first draft of this table got two rows wrong by assuming otherwise. `ByPath` is not
     // an alternative any of them takes: its only route is [`copy_file_onto_no_follow`] /
-    // [`copy_file_onto_no_follow_with_wording`], whose two remaining in-tree callers
-    // (`backup.rs:2154`, `revert_engine.rs:3574`) are both inside `mod tests`. So `policy: true` at
+    // [`copy_file_onto_no_follow_with_wording`], whose two remaining callers **outside this file**
+    // (`backup.rs:2154`, `revert_engine.rs:3574`) are both inside `mod tests` — as are all twelve
+    // inside it, every one below this file's own `#[cfg(test)] mod tests`. Round 5 wrote "two
+    // remaining in-tree callers", which undercounts by those twelve (round 6 nit); the count was
+    // wrong, the conclusion — **no production caller reaches `ByPath`** — survives it. So `policy: true` at
     // commit is a live input on **every** row below, not only on the two that were reviewed:
     //
     // ```text

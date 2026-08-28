@@ -775,10 +775,17 @@ pub fn download_tree(
         // changes: it is CPE-1709/CPE-1881's standing contract for this leg, which classifies a **link
         // verdict** as neither delivered nor a delivery failure ("not writing is the correct, safe
         // outcome" — `DownloadReport::skipped`'s own doc), and which has produced exactly this
-        // `skipped` + `Ok` for a link found at *claim* time since long before CPE-1961. Whether that
-        // contract is right is a real question and a separate ticket's; what this round fixes is that
-        // the two moments now answer it the same way, so the outcome no longer depends on which
-        // microsecond the link was planted in.
+        // `skipped` + `Ok` for a link found at *claim* time since long before CPE-1961 — verified
+        // against `git show 8c9ddb60:crates/server/src/transfer.rs`, this branch's merge base, where it
+        // is byte-identical. Whether that contract is right is a real question, and it is **CPE-1980**;
+        // what this round fixes is that the two moments now answer it the same way, so the outcome no
+        // longer depends on which microsecond the link was planted in.
+        //
+        // **A ticket rather than a note** (round 6, Reviewer). Round 5 wrote "a separate ticket's" with
+        // no ticket behind it, and an unnamed follow-up is a follow-up nobody can find: the next reader
+        // sees a sentence that sounds resolved. CPE-1980 carries the decision — skip, failure, or a
+        // report shape a caller cannot ignore by accident — along with the measurement that it predates
+        // this branch, so the argument does not have to be reconstructed.
         //
         // **The other leg, and why the two now agree.** `archive::extract_zip_archive_stream` had the
         // identical refusal going to `report.fail` unconditionally — the opposite bucket from this one,
