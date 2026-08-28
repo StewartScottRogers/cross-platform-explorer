@@ -981,6 +981,33 @@ program is holding open so it cannot be replaced"* — which is what Blocker 1's
   the caller splits on the *last* dot — a dotted base name is the caller's job, and a dot arriving anyway
   reads as "not ours", the keeping direction).
 
-### Verification (round 4 — every figure re-taken after the final edit)
+### Verification (round 4 — every figure re-taken after the final edit, on `origin/main` d929fd24)
 
-Filled in below.
+- `crates/server --lib`: Windows **2,455 passed / 0 failed / 14 ignored**; Linux (WSL, `TMPDIR` on ext4)
+  **2,443 / 0 / 14**.
+- `crates/server --tests` on Linux, all 8 integration targets: **21 / 22 / 2 / 1 / 1 / 45 / 16 / 32**, all
+  `ok`, 0 failed.
+- `cargo clippy --all-targets -- -D warnings` on `crates/server`: clean on **Windows** and **Linux**,
+  `Checking cpe-server` present in both, so neither was a cached no-op (sources touched first on Linux —
+  `touch` on `/mnt/z` does not force a rebuild by itself, so the line is the proof). One real hit on the
+  way there and it was this round's own: `clippy::sliced_string_as_bytes` on
+  `head[dot + 1..].as_bytes()` in the new fsutil test, fixed to `&head.as_bytes()[dot + 1..]`.
+- `src-tauri cargo test --lib`: **230 / 0**, unchanged.
+- Frontend: `npm run check` **0 errors / 0 warnings**; `npx vitest run` **358 files, 5,266 passed / 0
+  failed / 2 skipped** — all unchanged from round 3, as expected: this round touched no TypeScript and
+  one user-facing markdown page that no test parses.
+
+**Delta cross-check.** `git diff 104b0bc5 d929fd24 --stat -- crates/server/src` is **empty** — `main`
+moved four commits under this branch and touched none of this crate — so round 3's figures are directly
+comparable rather than needing to be re-derived. `git diff origin/main...HEAD -- crates/server/src` adds
+**12** `#[test]`s, of which **3** are `#[cfg(windows)]`; four of the twelve are this round's:
+
+| test | gated | Windows | Linux |
+|---|---|---|---|
+| `archive::…a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run` | windows | +1 | — |
+| `archive::…a_long_but_legal_entry_name_still_extracts` | none | +1 | +1 |
+| `fsutil::…a_staging_sibling_name_always_fits_in_one_path_component` | none | +1 | +1 |
+| `transfer::…a_local_file_held_open_costs_that_file_not_the_rest_of_the_download` | windows | +1 | — |
+
+So Windows 2,451 → **2,455** (+4) and Linux 2,441 → **2,443** (+2), and the Windows-minus-Linux gap
+widens 10 → **12** by exactly the two new Windows-only tests. Every figure reconciles.
