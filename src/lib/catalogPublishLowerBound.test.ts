@@ -1259,14 +1259,52 @@ function taintedVars(lines: string[]): { tainted: Set<string>; sanitised: Set<st
 }
 
 /**
- * Every single-quoted span replaced by `''`. In POSIX shell a single-quoted string admits no
- * escapes and no substitution whatsoever, so this is exact — and it is what lets the
- * "no surviving `$(`" rule below run over lines whose FIRST argument is a long single-quoted
- * `printf` format string full of prose, backticks and parentheses. Without it, a message that
- * happened to mention `$(cat …)` in prose would red the scan.
+ * Every single-quoted span replaced by `''`. In POSIX shell a single-quoted string admits no escapes
+ * and no substitution whatsoever, so removing them is exact — and it is what lets the
+ * "no surviving `$(`" rule below run over lines whose first argument is a long single-quoted `printf`
+ * format string full of prose, backticks and parentheses. Without it, a message that merely MENTIONS
+ * `$(cat …)` or a `` `command` `` in prose reds the scan.
+ *
+ * A STATE MACHINE, not `/'[^']*'/g`, and the difference is not stylistic. This script writes an
+ * apostrophe inside a single-quoted string the only way sh allows — `'…on %s'"'"'s latest release…'`
+ * — and the regex pairs those quotes WRONG: it consumes `'"'` as a span and then treats the real
+ * prose that follows as unquoted code. Measured on the exit-3 message's shape, whose prose contains
+ * `` `git tag` ``:
+ *     naive  -> printf ''"''s latest release. (ApplyOutcome::Rollback) `git tag` on a non-tip … >&2
+ * i.e. a backtick surviving out of a comment-like string, which the rule below would report as a raw
+ * substitution. Whether that false positive fires at all depends on the parity of apostrophes in the
+ * message — exactly the kind of accidental green CLAUDE.md's "anchor on code, never on prose" is
+ * about. Inside `"…"` a `'` is a literal character, and this scanner knows that.
  */
 function dropSingleQuoted(s: string): string {
-  return s.replace(/'[^']*'/g, "''");
+  let out = "";
+  let i = 0;
+  let dq = false; // inside a double-quoted span, where `'` is an ordinary character
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "\\" && i + 1 < s.length) {
+      out += s.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (ch === '"') {
+      dq = !dq;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" && !dq) {
+      const end = s.indexOf("'", i + 1);
+      out += "''";
+      // An unterminated span runs to end of line; consuming the rest is the fail-CLOSED direction
+      // for a stripper (it can only hide code, never invent it) and matches what the shell does.
+      i = end < 0 ? s.length : end + 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 /** Blanks out every `$(catalog_lb_log_safe …)` call, matching parens, so what remains is the set of
@@ -1404,6 +1442,26 @@ describe("no remote-influenced variable reaches the job log unsanitised (CPE-195
     expect(flagged.length, `expected exactly the first two printfs to be flagged, got:\n${flagged.join("\n")}`).toBe(2);
     expect(flagged[0]).toContain("rel_name");
     expect(flagged[1]).toContain("jq said");
+  });
+
+  it("...and its quote stripper survives the `'\"'\"'` apostrophe idiom this script uses", () => {
+    // The shape at the exit-3 message: an apostrophe inside a single-quoted format string, spelled
+    // the only way sh allows. `/'[^']*'/g` pairs these WRONG and lets the prose after them — which
+    // here contains a backtick — out into the scanned text, where the rule above reads it as a
+    // substitution. Nothing in the script trips that today, which is exactly why it is pinned here
+    // rather than left to the parity of apostrophes in a message someone may reword.
+    const q = "'";
+    const line =
+      `printf ${q}::error::published on %s${q}"${q}"${q}s latest release. ` +
+      `(ApplyOutcome::Rollback) \`git tag\` on a non-tip commit. %s\\n${q} "$a" "$b" >&2`;
+    const stripped = dropSingleQuoted(line);
+    expect(stripped, "prose leaked out of the single-quoted format string").not.toContain("`");
+    expect(stripped).not.toContain("ApplyOutcome");
+    // The double-quoted arguments must survive — they are what the taint scan reads.
+    expect(stripped).toContain('"$a"');
+    expect(stripped).toContain(">&2");
+    // Sanity: a REAL inline substitution in a double-quoted argument is not stripped.
+    expect(dropSingleQuoted(`printf ${q}%s${q} "$(cat f)" >&2`)).toContain("$(cat f)");
   });
 
   it("exit 1 is a shell predicate's boolean, never a code this script returns", () => {
