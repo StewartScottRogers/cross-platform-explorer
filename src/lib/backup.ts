@@ -13,40 +13,149 @@ export interface BackupPlan {
   update: string[];
   /** In dest, absent from source — remove (only in mirror mode). */
   delete: string[];
+  /**
+   * Directories to create in the destination for their own sake (CPE-1925) — the ones no `copy`/
+   * `update` entry would create as a side effect of writing a file into them.
+   *
+   * **Why this exists.** Before it, the plan carried only files, so a directory reached the
+   * destination only implicitly. A source directory with no files anywhere under it — a scaffolded
+   * `logs/`, an output folder, a mount point, anything whose contents are gitignored — had no entry of
+   * any kind, was never created, and the run still reported a clean `ok` for every file it did carry.
+   * The user got a tree whose *shape* had quietly changed, with nothing in the plan, the progress
+   * count, or the result saying so.
+   *
+   * **It is the minimal set.** Only the deepest directory of a chain appears: `a/b/c` creates `a` and
+   * `a/b` on the way, so listing all three would triple the entries for one outcome. And a directory
+   * that already holds a planned file copy is left out entirely, because the copy creates it. A first
+   * full backup of a large tree therefore gains a handful of entries, not one per folder.
+   */
+  createDirs: string[];
+  /**
+   * Source directories this plan **deliberately does not carry**, each with the reason (CPE-1925).
+   *
+   * The scan reports a directory's children short for seven different reasons and only one of them
+   * means "empty" — the table lives on `TreeNode` in `crates/server/src/compare.rs`, which is the code
+   * that decides them. Reduced to what this consumer must act on: the scan could not read all of it
+   * (`unreadable`), or the depth cap stopped at it (`depth-limit`), or the list is complete. Note the
+   * first of those does **not** imply the children list is empty — a partial listing sets it too, and
+   * a partial listing is the dangerous one, because the files that are missing from it diff as
+   * "removed" and a mirror run would delete the destination's only copy. Creating an empty directory
+   * in the destination for either of the two unknowns would
+   * be **asserting a fact the scan never established** — a directory whose contents could not be read
+   * would arrive at the destination looking deliberately empty. So those are excluded from
+   * `createDirs` and named here instead, for the preview and the run summary to show. Silence is the
+   * one answer this ticket does not allow; an empty `skippedDirs` is the ordinary case.
+   */
+  skippedDirs: SkippedDir[];
   /** Count of files already identical. */
   unchanged: number;
 }
 
-function walk(nodes: DiffNode[], prefix: string, mirror: boolean, plan: BackupPlan): void {
+/** One entry of {@link BackupPlan.skippedDirs}: a source directory the plan will not reproduce, and
+ *  which of the two "the scan could not look inside" reasons applies. */
+export interface SkippedDir {
+  path: string;
+  reason: "unreadable" | "depth-limit";
+}
+
+/**
+ * Classify one level of the diff, appending to `plan`.
+ *
+ * Returns whether this level leaves the **enclosing** directory materialised in the destination —
+ * that is, whether the enclosing directory will exist there once the plan has run, either because it
+ * is already in the destination or because some entry below it creates it. That single boolean is
+ * what keeps `createDirs` minimal: a directory only earns an entry when nothing underneath it would
+ * have produced one.
+ */
+function walk(nodes: DiffNode[], prefix: string, mirror: boolean, plan: BackupPlan): boolean {
+  let materialised = false;
   for (const n of nodes) {
     const path = prefix ? `${prefix}/${n.name}` : n.name;
     if (n.isDir) {
-      walk(n.children ?? [], path, mirror, plan); // dirs are implicit; classify their file leaves
+      // A dest-only directory: its file leaves are mirror-delete candidates and nothing about it needs
+      // creating. Its return value is deliberately ignored — the destination side says nothing about
+      // whether the *source* shape is reproduced.
+      if (n.status === "removed") {
+        walk(n.children ?? [], path, mirror, plan);
+        continue;
+      }
+
+      // Does the destination already hold a *directory* at this name? `added` means it holds nothing,
+      // and a file→directory type change — which `diffTrees` emits as `changed` with no `children`
+      // array at all, where every real directory node carries one (possibly empty) — means it holds a
+      // file. Both need the directory created in its own right; the type change will be refused by
+      // the engine with a file standing in the way, and reported per entry, which is still an
+      // improvement on today, where that whole source subtree is dropped without a word.
+      const typeChange = n.children === undefined;
+      const inDest = n.status !== "added" && !typeChange;
+
+      // CPE-1925. The scan could not see inside this source directory (`read_dir` refused, or the
+      // depth cap stopped there), so its emptiness is unknown. Two consequences, both about refusing
+      // to act on an inference:
+      //
+      //  1. It gets no `createDirs` entry. The directory itself is real, but a directory placed in the
+      //     destination *looking deliberately empty* asserts something this scan never established,
+      //     and a restored tree carrying that lie is worse than one visibly missing the folder.
+      //  2. Nothing under it may be mirror-deleted. Its children list is short — often empty, and in
+      //     the partial case (`scan_children` case 5, an entry that failed to read among others that
+      //     did not) short in a way that looks entirely ordinary. Every file the DESTINATION holds
+      //     under that path but the scan did not list diffs as "removed", and a mirror run would delete
+      //     the very copies it exists to protect because one directory could not be fully read. Passing
+      //     `mirror = false` down makes that impossible; the deletes it suppresses are exactly the ones
+      //     derived from an unknown, and a later run that CAN read the directory will still remove
+      //     anything genuinely extraneous.
+      //
+      // Either way the directory is named in `skippedDirs` rather than passed over in silence.
+      const unknown = n.unreadable ? "unreadable" : n.truncated ? "depth-limit" : null;
+      if (unknown) {
+        plan.skippedDirs.push({ path, reason: unknown });
+        // The children that WERE listed are still classified — a partial listing's known files are
+        // copied like any others; it is only the deletes derived from the unlisted ones that are
+        // unsafe. And if one of them creates this directory on its way in, that counts: `walk` runs
+        // first either way (it has the side effects), so the `||` never skips it.
+        if (walk(n.children ?? [], path, false, plan) || inDest) materialised = true;
+        continue;
+      }
+
+      if (walk(n.children ?? [], path, mirror, plan)) {
+        materialised = true; // something below creates this directory on its way in
+        continue;
+      }
+      // Nothing below will create it, so if it is not already in the destination it needs an entry of
+      // its own — this is the empty directory the whole ticket is about.
+      if (!inDest) plan.createDirs.push(path);
+      materialised = true;
     } else {
       switch (n.status) {
         case "added":
           plan.copy.push(path);
+          materialised = true;
           break;
         case "changed":
           plan.update.push(path);
+          materialised = true;
           break;
         case "removed":
           if (mirror) plan.delete.push(path);
           break;
         case "identical":
           plan.unchanged += 1;
+          materialised = true; // it is already there, so its directory is too
           break;
       }
     }
   }
+  return materialised;
 }
 
 /**
  * Plan an incremental backup of `source` onto `dest`. Diffs dest→source (CPE-777): source-only files are
- * copied, differing files updated, identical skipped, and dest-only files deleted only when `mirror`. Pure.
+ * copied, differing files updated, identical skipped, and dest-only files deleted only when `mirror`.
+ * Source directories that no file copy would create are carried in `createDirs`, and the ones whose
+ * contents the scan could not see are named in `skippedDirs` rather than guessed at (CPE-1925). Pure.
  */
 export function planBackup(source: CompareNode[], dest: CompareNode[], mirror = false): BackupPlan {
-  const plan: BackupPlan = { copy: [], update: [], delete: [], unchanged: 0 };
+  const plan: BackupPlan = { copy: [], update: [], delete: [], createDirs: [], skippedDirs: [], unchanged: 0 };
   // diffTrees(left=dest, right=source): right-only → "added" (copy), left-only → "removed" (delete).
   walk(diffTrees(dest, source), "", mirror, plan);
   return plan;
@@ -98,13 +207,14 @@ export function unattendedBackupConsent(job: Pick<BackupJob, "autoRun">): boolea
  */
 export function unattendedBackupArgs(
   job: Pick<BackupJob, "source" | "dest" | "autoRun">,
-  plan: Pick<BackupPlan, "copy" | "update" | "delete">,
+  plan: Pick<BackupPlan, "copy" | "update" | "delete" | "createDirs">,
 ): {
   sourceRoot: string;
   destRoot: string;
   copy: string[];
   update: string[];
   deletePaths: string[];
+  createDirs: string[];
   verify: boolean;
   confirmed: boolean;
 } {
@@ -114,6 +224,10 @@ export function unattendedBackupArgs(
     copy: plan.copy,
     update: plan.update,
     deletePaths: plan.delete,
+    // CPE-1925: carried here as well as from the dashboard, because an unattended run is exactly the
+    // one nobody is watching — a scheduled job that silently reshaped the tree would go unnoticed for
+    // as long as the backup went unread.
+    createDirs: plan.createDirs,
     verify: true,
     confirmed: unattendedBackupConsent(job),
   };

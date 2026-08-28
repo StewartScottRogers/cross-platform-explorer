@@ -149,6 +149,33 @@ Three details are worth knowing, because they are deliberate:
     with source and destination swapped) — and there, the destination is your **live** file tree, where
     a pre-existing second name is more likely than on a fresh backup destination.
 
+- **Backup jobs now carry empty folders — and say which ones they cannot (CPE-1925).** Until this
+  change a backup plan contained only *files*, so a folder reached your backup destination only as a
+  side effect of copying a file into it. A folder with nothing under it — a scaffolded `logs/`, an
+  output folder, a mount point, anything whose contents are excluded from version control — had no
+  entry of any kind, was never created, and the run still reported a clean result for every file it
+  did carry. Restoring such a backup gave you a tree whose *shape* had quietly changed, with nothing
+  anywhere saying so.
+  - **What you see now.** The Dry-run summary counts folders alongside copies, updates and deletes,
+    so you can see them before the run; the progress count includes them; and each one is reported
+    individually, so a folder that could not be created is a visible failure with a reason rather
+    than an absence you discover later.
+  - **Restore is covered too**, because it is the same engine with source and destination swapped —
+    a round trip reproduces the folder structure, not only the files.
+  - **Folders this backup will not carry, and why you are told.** A folder the app could not read,
+    or one deeper than the scan's folder-depth limit, comes back looking childless without actually
+    being empty. Creating an empty folder in your backup for one of those would be claiming something
+    the app never checked, so it does not: those folders are listed in the Dry-run summary — and in
+    the notification for an unattended, auto-run job — as *not carried*, with the reason. Nothing
+    under such a folder is deleted by a **mirror** job either: an unreadable source folder used to
+    make a mirror run delete the destination's copies of everything inside it, because "I could not
+    look" and "there is nothing there" were the same answer.
+  - **What a folder brings with it, stated plainly: only its existence.** Permissions, ownership,
+    timestamps and Windows folder attributes (hidden, system, compressed, encrypted) are **not**
+    copied from the source, so a restored folder can have different permissions from the original.
+    That is the same limit the file side already has — a backup copy carries the bytes and not the
+    file's other properties — and it is a named gap rather than a silent one.
+
 - **Three more operations write the same careful way now: extracting a `.zip`, downloading a folder
   from a server, and putting a checkpoint's *file contents* back** (CPE-1913). They all used to check
   where a file was going and then, some moments later, write it by name — the same shape the backup job

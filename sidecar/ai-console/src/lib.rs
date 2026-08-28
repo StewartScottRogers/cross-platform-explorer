@@ -98,6 +98,11 @@ pub mod swarm_live;
 pub use swarm_live::{assume_success, LaunchPlanner, SwarmDriver};
 pub mod swarm_plan;
 pub use swarm_plan::ProductionPlanner;
+
+// How a mission directory is created (exclusive `create_dir`, unguessable name) and how stale ones
+// are swept (CPE-1964). Kept out of `console.rs` so the creation primitive is drivable by a test at a
+// path it planted a link at.
+pub mod swarm_mission_dir;
 pub use session_client::{SessionClient, StreamMsg};
 
 pub use plugins::{install_plugin, uninstall_plugin, PluginApplier, PluginManifest, PluginRegistry};

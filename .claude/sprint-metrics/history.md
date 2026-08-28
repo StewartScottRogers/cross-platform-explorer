@@ -2355,3 +2355,115 @@ quote. Derive **both sides**, and report **what moved in each direction**, not t
 This is the fourth stale-number finding of the shift and the first where the number was arguably
 *right* while the thing it described was wrong. The earlier three were plain staleness; this one
 survived a correction, because correcting a net to a different net does not test the decomposition.
+
+## 2026-08-28 — the anchor validator validated a copy
+
+CPE-1966 built a contrast-sweep harness whose best feature was that it **refuses to run** unless it
+reproduces five known WCAG anchors — `#000/#fff = 21.00`, `#767676/#fff = 4.54`, and two compositing
+values. That validator fired for real during development: the author's first draft had **3.95 from
+memory** where 50% black over white is **3.98**. A measurement tool that will not start until it can
+prove it measures correctly. It is the right idea.
+
+Its Reviewer then multiplied the **probe's** `ratio()` by 1.6 and got:
+
+```
+  #000/#fff  21    50% black/white  3.98    #767676/#fff  4.54
+  1306 raw readings -> 786 distinct sites, 384 enforced
+  light: pixel cross-check — 59 grounds screenshot-verified, 0 disagreeing by more than 1/255
+PASS — every enforced site clears its bar in both schemes.          EXIT=0
+```
+
+**All five anchors green. Both independent cross-checks clean. PASS, exit 0. Every number 60% wrong.**
+
+The validator exercises the **module-level** maths in `engine.mjs`. Every site ratio is computed by a
+**second, independent implementation inside the probe source** that runs in the page — and no anchor
+ever touches it. The harness had two copies of the same arithmetic and validated the one that does not
+produce the answers.
+
+**Two more safeguards failed the same way in the same PR.** `--verify-pixels` — the second independent
+path, and the PR's strongest claim — reported *"59 disagreeing by more than 1/255"* and **exited 0**,
+because the exit condition never consulted it. And the fixture-provenance check, which exists so the
+harness cannot measure a DOM the app no longer renders, is a raw `includes` over unstripped script
+text: **a comment mentioning the old class name satisfies it** — CPE-1933 rule 2, in the file that
+cites CPE-1933.
+
+**The pattern, stated once:** a safeguard is not validated by the fact that it *can* fire. All three of
+these fire correctly on the input their author had in mind. What none of them had was a test that the
+safeguard is **wired to the thing it is guarding** — the validator to the code that computes, the
+cross-check to the exit code, the provenance check to code rather than prose.
+
+**The cheap discipline that would have caught all three: sabotage the thing being guarded, not the
+guard.** Breaking the guard proves it can fail. Breaking the *subject* and watching the guard stay
+green is what proves the wire exists — and it is the same "force the predicate to lie" half of
+CPE-1929's pair, applied one level out.
+
+## 2026-08-28 — two PRs in a row: the fix was right, the guard around it overstated
+
+Back to back, two independent reviews landed the same verdict in different subsystems:
+
+- **CPE-1966 / #1087** — *"the engineering is good and most of it holds up under attack. Three things do
+  not, and all three are in the machinery the brief said to weigh hardest."*
+- **CPE-1954 / #1088** — *"the security fix itself is correct, genuinely demonstrated, and I would
+  approve it on the code alone. Two findings are about the guard layer around it overstating what it
+  enforces."*
+
+Neither fix was wrong. In both cases the **claim about the guard** was, and in both cases the claim sat
+next to a green test that read as vouching for it.
+
+**The sharpest instance was a claim about layering.** #1088 protected a parse two ways — the
+constructor made `pub(crate)` (the compiler refuses the old spelling: `error[E0624]`) and a repo-wide
+scanner for the `serde_json::from_str::<CatalogIndex>` back door, since the type is still `pub` +
+`Deserialize`. The comment said *"each covering what the other cannot"* and *"neither alone is the
+invariant."*
+
+Its Reviewer wrote **one line** — `type Idx = sidecar_host::catalog::CatalogIndex;` — and defeated
+**both at once**. It compiles, forms a real escaping path at runtime, and the scanner stays 16/16 green.
+**Neither *together* is the invariant.** Seven more vectors survive all three regexes: `use … as`, a
+generic turbofish, a `#[serde(flatten)]` wrapper, return-position inference, `Self::from_json` inside
+the crate, a `TryFrom` impl, and a `Vec<CatalogIndex>` annotation.
+
+**Two layers is not evidence of depth.** Both of those layers key on the *spelling of a type name*, so a
+rename defeats them together — they are one layer wearing two coats. The test for "defence in depth" is
+not *how many checks* but *whether an attack that defeats one also defeats the other*, and that is a
+question you answer by trying it, not by counting.
+
+**The available structural fix makes the point.** Nothing outside that crate names the type at all, so
+the `Deserialize` derive can go behind a private wire type and **the compiler becomes the invariant** —
+no scanner, no claim, nothing to go stale. A guard you can delete is better than a guard you have to
+describe.
+
+## 2026-08-28 — a third answer to the shadowed-guard rule: neither reorder nor delete, but a seam
+
+CLAUDE.md's CPE-1929 standard says a guard that fails both sabotages — green when disabled, unchanged
+when its predicate lies — is shadowed, and **the fix is reorder or delete; leaving it shadowed is the
+one wrong answer, because it reads as coverage.**
+
+CPE-1961 found `batch_media`'s `links > 1` census failing both sabotages at **2,430 / 0**, and then
+argued a case the standard does not cover:
+
+> the path probe reads the **name** before the open; the census reads the **object** after it — so a
+> link planted **between** them is visible only to the census.
+
+**Reorder was impossible** (the two checks read different things at different times, and the order is
+forced by what each can see) **and delete would have been wrong** (the census is the only thing that
+can see that window). The guard was not redundant — it was **unreachable by the existing tests**,
+because nothing in the suite could plant anything in the interval between the two checks.
+
+The answer was a **`between_containment_and_open` seam** plus a test that uses it. Both sabotages now
+red at **2,430 / 1**.
+
+**So the rule needs a third branch, and the distinction is worth stating precisely.** Two green
+sabotages mean *nothing in the suite can reach this guard*. That has three possible causes, not two:
+
+1. **Redundant** — an earlier check answers the same question, so nothing *can* reach it → **delete**.
+2. **Misordered** — a later check asks the more trustworthy question → **reorder**.
+3. **Unreachable-by-test** — the guard answers a question no other check answers, but the input that
+   would trip it can only arise in a window the tests cannot open → **build the seam.**
+
+Case 3 looks exactly like case 1 from the outside, and the way to tell them apart is the question the
+standard already asks about reordering: *what does each check actually see, and when?* If the shadowing
+check reads a different thing at a different moment, it is not shadowing — it is merely earlier.
+
+Same PR, the other direction: it also declared a *new* guard **untestable by construction** (disable →
+green, lie → 79 failed) and **said so at the site with both numbers**, which is what the standard asks
+for when a backstop genuinely cannot be reached. Both dispositions in one diff, argued separately.

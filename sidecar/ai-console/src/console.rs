@@ -729,8 +729,17 @@ impl ConsoleState {
         let credential = str_opt(&v, "credential").unwrap_or_else(|| DEFAULT_CREDENTIAL.to_string());
         let api_key = resolve_provider_key(&*self.secrets, &provider, None, &credential);
 
-        // A fresh per-mission dir holds the shared memory / mailbox / roster / MCP configs.
-        let mission_dir = std::env::temp_dir().join(format!("cpe-swarm-{}", now_millis()));
+        // A fresh per-mission dir holds the shared memory / mailbox / roster / MCP configs. It is
+        // opened with an exclusive `create_dir` under an unguessable name (CPE-1964): the old
+        // `temp_dir().join(format!("cpe-swarm-{}", now_millis()))` + `create_dir_all` shape wrote
+        // straight through a junction/symlink planted at that guessable path, and never cleaned up
+        // after itself (55 leaked directories measured on one machine). See
+        // `crate::swarm_mission_dir` for the threat model and why "delete the directory" — CPE-1952's
+        // fix shape — is unavailable here: separate `--swarm-mcp` processes coordinate through it.
+        let mission_dir = match crate::swarm_mission_dir::create_mission_dir() {
+            Ok(d) => d,
+            Err(e) => return bad(e),
+        };
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => return bad(format!("locate self: {e}")),
@@ -786,11 +795,12 @@ impl ConsoleState {
     /// OS temp dir only — no separators, no traversal.
     fn handle_swarm_activity(&self, req: &Request) -> Response {
         let mission = req.query("mission").unwrap_or("");
-        let id_ok = mission
-            .strip_prefix("cpe-swarm-")
-            .map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-            .unwrap_or(false);
-        if !id_ok {
+        // `cpe-swarm-` + a non-empty run of ASCII alphanumerics — no separators, no dots, so the
+        // join below cannot leave the temp directory. Alphanumeric rather than digits-only because
+        // CPE-1964 replaced the `<millis>` name with 32 hex characters; the rule is
+        // `swarm_mission_dir::is_mission_name`, shared with the startup sweep so the two cannot
+        // drift apart about what a mission id is.
+        if !crate::swarm_mission_dir::is_mission_name(mission) {
             return bad("invalid mission id");
         }
         let dir = std::env::temp_dir().join(mission);
@@ -1953,9 +1963,18 @@ mod tests {
         assert_eq!(v["memory"][0]["id"], "note-abc");
         assert_eq!(v["memory"][0]["body"], "Hello from builder1.");
 
-        // Security: only a bare cpe-swarm-<digits> id is accepted; anything else is a 400 (no traversal).
+        // Security: only a bare `cpe-swarm-<alnum>` id is accepted; anything else is a 400 (no
+        // traversal). CPE-1964 widened digits→alphanumeric with the name change, so the empty
+        // suffix and the separator cases are re-asserted here rather than assumed to have survived.
         assert_eq!(get(&state(), "/api/swarm/activity?mission=../secrets").status, 400);
         assert_eq!(get(&state(), "/api/swarm/activity?mission=cpe-swarm-x/..").status, 400);
+        assert_eq!(get(&state(), "/api/swarm/activity?mission=cpe-swarm-").status, 400);
+        assert_eq!(get(&state(), "/api/swarm/activity?mission=cpe-swarm-a.b").status, 400);
+        // And a real 32-hex mission id — the shape `create_mission_dir` now mints — is accepted.
+        assert_eq!(
+            get(&state(), "/api/swarm/activity?mission=cpe-swarm-0f1e2d3c4b5a69788796a5b4c3d2e1f0").status,
+            200
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

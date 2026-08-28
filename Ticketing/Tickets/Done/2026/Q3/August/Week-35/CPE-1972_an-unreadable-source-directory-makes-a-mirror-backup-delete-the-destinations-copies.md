@@ -3,7 +3,7 @@ id: CPE-1972
 title: an unreadable source directory makes a **mirror** backup delete the destination's copies of everything inside it — reproduced on `main`, `ok=3 fail=0`
 type: bug
 priority: High
-status: Open
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27

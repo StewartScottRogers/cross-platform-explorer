@@ -44,3 +44,11 @@ hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+
+# CPE-1964: `tests/swarm_mission_dir_containment.rs` plants a real NTFS **junction** at a real
+# `<temp>/cpe-swarm-…` path to demonstrate that the old `create_dir_all` wrote straight through it,
+# then shows the hardened `create_dir` refuses. A junction needs no administrator rights and no
+# Developer Mode, unlike `symlink_dir`; the Unix arm uses `symlink(2)` from std and needs nothing
+# extra. Test-only, Windows-only. (Same primitive and same reason as `sidecar/host`'s, CPE-1952.)
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"

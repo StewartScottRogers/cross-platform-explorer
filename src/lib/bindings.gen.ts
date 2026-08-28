@@ -1653,9 +1653,9 @@ async hashFile(path: string) : Promise<Result<string, string>> {
  * set it. See `cpe_server::backup::apply_backup_plan_walk` for exactly what the flag does and does not
  * defend — it is UI discipline enforced in Rust, not an authorization boundary.
  */
-async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, confirmed: boolean) : Promise<Result<OpResult[], string>> {
+async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], createDirs: string[], verify: boolean, confirmed: boolean) : Promise<Result<OpResult[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, verify, confirmed }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, createDirs, verify, confirmed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1670,9 +1670,9 @@ async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], upda
  * enforce it — same treatment CPE-1611 gave `shred_paths`. An unconfirmed call is `Err` with nothing
  * deleted and **no** batch ever pushed down the channel.
  */
-async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, confirmed: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
+async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], createDirs: string[], verify: boolean, confirmed: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, verify, confirmed, onResult }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, createDirs, verify, confirmed, onResult }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -6427,8 +6427,63 @@ skipped: number }
 /**
  * One node of a scanned tree (CPE-779). Serialized camelCase to match the frontend `CompareNode`
  * (`isDir`).
+ * 
+ * # `children: Some([])` is SEVEN different facts, and CPE-1925 is what happens when they are one
+ * 
+ * Before this ticket a childless directory node meant *any* of: the directory is genuinely empty on
+ * disk; [`std::fs::read_dir`] failed on it so this scan never saw inside; or `max_depth` stopped the
+ * descent at it. A consumer that wants to carry empty directories — `planBackup`, which now does —
+ * cannot act on that: creating an empty directory in a backup destination because the source
+ * directory *looked* childless is a **fabrication** when the real reason was that the scan could not
+ * look. The two flags below carry the reason, so "empty" is a fact rather than an inference.
+ * 
+ * The first round of this ticket enumerated three ways a directory's `children` can come back short.
+ * There are **seven**, and the round-2 review measured three of the four that were missed as
+ * **destructive** — a mirror backup deleting the destination's copies of files the scan never saw:
+ * 
+ * | # | how the listing came up short | flag | verdict |
+ * |---|---|---|---|
+ * | 1 | genuinely empty on disk | none | correct — "empty" is the fact |
+ * | 2 | [`std::fs::read_dir`] itself returned `Err` (`d---------`) | `unreadable` | correct |
+ * | 3 | `depth_left == 0`, so the descent stopped here | `truncated` | correct |
+ * | 4 | `read_dir` was `Ok` but **every** [`std::fs::DirEntry::metadata`] failed (`dr--------`: the read bit lists names, the missing search bit refuses every `stat`) | `unreadable` | **was `none` — destructive** |
+ * | 5 | `read_dir` was `Ok` but the iterator yielded an `Err` mid-enumeration | `unreadable` | **was `none` — destructive, and yields a PARTIAL list** |
+ * | 6 | every child is a symlink / fifo / socket / device | none | correct — a **type filter**, not an access failure; see below |
+ * | 7 | the **root** handed to [`scan_tree`] is itself unreadable | `Err`, not a node | **was a silent `Ok([])` — destructive over the WHOLE destination** |
+ * 
+ * **4, 5 and 6 look alike and are not.** 6 is this scanner deciding a symlink is not a thing a
+ * compare tree carries — a deliberate exclusion, the same one every run makes, and the caller loses
+ * nothing it could have used. 4 and 5 are the operating system refusing to tell us what is there. A
+ * flag that lumped them together would have to be set on 6 too, which would make every ordinary
+ * directory holding a symlink "unknown" and neuter the flag entirely. So the rule is: **an entry
+ * dropped because of an `Err` sets `unreadable`; an entry dropped because of its type does not.**
+ * 
+ * **5 is the nastiest of them,** because it is the only one whose `children` can be non-empty. A
+ * partial listing does not read as suspicious anywhere downstream — the files that *are* listed look
+ * fine, and the ones that were dropped diff as "removed from the source", which in a mirror run means
+ * *delete the backup's only copy*. `unreadable` is therefore **not** "children is empty for want of
+ * access"; it is "**this list is not the whole truth**", and a node carrying it may well have
+ * children.
+ * 
+ * They are `Option<bool>` and skipped when `None` so a file node and an ordinary readable directory
+ * serialize exactly as before — a 100,000-entry listing gains no bytes for the overwhelmingly common
+ * case. `Some(true)` is the only value ever written; there is no `Some(false)`.
  */
-export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null }
+export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null; 
+/**
+ * `Some(true)` when this directory's listing is **not the whole truth** — cases 2, 4 and 5 of the
+ * table above: [`std::fs::read_dir`] failed outright, or it succeeded and one or more entries were
+ * dropped because reading them errored. `children` is therefore short (often empty, sometimes
+ * *partial*) because the scan could not look, not because there is nothing there. An entry
+ * excluded for its **type** — a symlink, fifo, socket or device — never sets this. Never set on a
+ * file.
+ */
+unreadable?: boolean | null; 
+/**
+ * `Some(true)` when `max_depth` stopped the descent at this directory, so `children` is empty for
+ * the same reason: unknown, not absent. Never set on a file.
+ */
+truncated?: boolean | null }
 /**
  * A snapshot of a vault path's lifecycle state for the UI (CPE-1248). Carries no secret value.
  */

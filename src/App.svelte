@@ -653,7 +653,15 @@
       const detail = firstError
         ? " " + $t("notice.autoBackupFirstFailure", { name: fileNameOf(firstError.path), reason: firstError.error })
         : "";
-      showNotice(summary + detail);
+      // CPE-1925: an unattended run is the one nobody is watching, so what the plan deliberately did
+      // NOT carry has to ride on the toast too. `skippedDirs` is the set of source folders the scan
+      // could not see inside (unreadable, or past the depth cap); they are not created in the
+      // destination and nothing under them is mirror-deleted, and saying nothing about that is the
+      // exact failure this ticket exists to end.
+      const skipped = p.skippedDirs.length
+        ? " " + $t("notice.autoBackupSkippedFolders", { count: p.skippedDirs.length, name: p.skippedDirs[0].path })
+        : "";
+      showNotice(summary + detail + skipped);
     } catch (e) {
       showNotice($t("notice.autoBackupFailed", { name: job.name, error: String(e) }), true);
     }
