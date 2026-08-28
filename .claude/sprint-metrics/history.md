@@ -2328,3 +2328,30 @@ the reason they are in the same paragraph is usually the reason they went stale 
 The comment itself says why this matters, and it is worth quoting because it was right and still did
 not save it: *"the count line exists so the next reader can check that claim in one subtraction instead
 of trusting it."* Three readers trusted it.
+
+## 2026-08-28 — a net count concealed two errors pointing opposite ways
+
+CPE-1952's round 2 established a corrected recipe for enumerating `temp_dir()` sites and reported the
+naive rule finding **10** where the corrected one finds **15**. CPE-1964's worker re-derived it and got
+**14**, correcting the ticket: the extra was a doc-comment line. Honest, and I recorded it as a
+one-number correction.
+
+Its round 2 re-derived **both halves** rather than carrying 14 forward, and the difference is not one
+number at all. **−4 is a net of two opposite errors:**
+
+- the naive rule **misses five** real sites — `console.rs:733` and `:796` (**both swarm sites**, the ones
+  the ticket existed for), plus `fsutil.rs:5578`, `src-tauri/src/lib.rs:11904` and `:14416`;
+- and it **adds one spurious** hit, `archive.rs:2088`, a doc-comment line.
+
+**The recipe hid the defect and padded the count back up.** A reader comparing 10 against 14 sees a gap
+of four and reasonably infers four missing sites; the real shape is five missing and one invented,
+and the invented one is what makes the gap look smaller than it is.
+
+**The general point: a difference between two counts is not evidence about either.** Whenever a
+correction is expressed as a delta — "the naive rule finds N fewer" — the errors can be flowing in both
+directions and cancelling, and the cancellation is invisible in exactly the summary a reader will
+quote. Derive **both sides**, and report **what moved in each direction**, not the net.
+
+This is the fourth stale-number finding of the shift and the first where the number was arguably
+*right* while the thing it described was wrong. The earlier three were plain staleness; this one
+survived a correction, because correcting a net to a different net does not test the decomposition.
