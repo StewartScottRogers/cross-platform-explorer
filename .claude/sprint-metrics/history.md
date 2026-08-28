@@ -2247,3 +2247,33 @@ after mount, sliding the centred dialog's rule pills **up ~98 px**, so the click
 — whose ancestor has `on:click|stopPropagation` and swallows it **silently**. Measured driver gaps
 across 69 logs: 27–159 ms; all three failures at 115/116/117 ms. `waitForClickable` is no protection —
 it passed in every failing run.
+
+## 2026-08-27 — the first run of the new stale-checks rule found the exposure real, across the whole queue
+
+CPE-1970 says: before merging, check whether the PR's checks predate a guard that has since landed on
+`main`. The cheap instrument I wrote for it was *"#1074 added a `CI verdict` job when it merged — if a
+PR's rollup lacks that check, its run predates the merge."*
+
+**First application: all nine open PRs lack it.** Every one of them would have merged without ever
+being judged by a gate that landed 45 minutes earlier. The exposure is not hypothetical and it is not
+one PR — it is the default state of a queue that moves slower than `main` does.
+
+**Two things about how that check went are worth keeping.**
+
+**First, my initial query was wrong and said the same thing.** I filtered on `contains("CI verdict")`
+and got zero across the board — which looked like confirmation. It was not: `#1073` *does* carry a
+check with "verdict" in the name, the **GUI smoke** one (CPE-1753), and my filter's case and wording
+happened to miss both it and the real target. I nearly reported a correct conclusion reached through a
+broken measurement, which is the same defect as a wrong conclusion and harder to catch, because the
+answer looks right. Checking *why* the count was zero is what separated them.
+
+**Second, the exposure was dischargeable without waiting.** `ci-verdict`'s only failure mode is a job
+behind `lockfile-preflight` that was **skipped**. So its verdict is **derivable** from a rollup that
+already exists: list the five job families on each PR and confirm none is `SKIPPED`. They are all
+`SUCCESS` or still running. The gate never judged these PRs and its judgement is knowable anyway.
+
+That distinction is the useful one, and it generalises past this gate: **"the guard did not run" is not
+automatically "we must re-run the guard."** Ask first whether the guard's verdict is a function of data
+you already hold. When it is, derive it and say so in the merge record. When it is not — a guard whose
+input is the diff itself, or one that measures something the rollup does not report — a fresh run is
+the only honest answer. The cost difference is an hour of CI per PR, times nine.
