@@ -35,6 +35,30 @@
 // ever touches the FRONTEND (WebDriver commands + test-mode hooks into the Svelte stores) — it has no
 // mechanism to reset backend-resident state like `IndexService` (see `specs/instant-search.smoke.ts`'s
 // own corrected header comment for the concrete, currently-dormant case this creates).
+//
+// CPE-1979 — THE ONE THAT WAS NOT ON THAT LIST, and cost the most. A LAYERED VIEW (the in-app archive
+// browser, a smart folder, a saved structured search) renders a listing other than `currentPath`'s own
+// while leaving `currentPath` itself untouched. `specs/archive-browse.smoke.ts` ends inside a `.tar.gz`
+// and never leaves, so every following spec in shard 2 walked in with the archive still open — and step 4
+// below could not clear it, because `NavToolbar.svelte#commit()` short-circuited on `value ===
+// currentPath` and never dispatched the `navigate` that `loadPath` (the app's single chokepoint for
+// dismissing all three views) hangs off. Measured over the 16h50m window 2026-08-28T00:21Z-17:11Z: of
+// the 81 completed `gui-smoke (ubuntu-latest) shard 2` jobs in it, 77 have a retrievable log AND reached
+// this transition, and 77 of those 77 threw `expected the breadcrumb to show "cpe-gui-smoke-XXXXXX"` out
+// of `navigateTo` here, green jobs included — the trigger for every one of those 77
+// `handleRunnableStart:resetFailedRestartingSession` lines, and (via the session restart's
+// `DELETE /session/<id>`) for 11 of them spending a tauri-driver respawn. The other 4 jobs were all
+// CANCELLED and were never inspected — 3 whose log 404s, 1 killed before the transition — so this says
+// nothing about them, deliberately: the population is those 77, not "the window".
+//
+// The fix is in the APP, not here: `commit()` now takes `pathOverlaidByView` from App.svelte and lets the
+// same-path submit through. That makes step 4 load-bearing on a real product behaviour — say so out loud,
+// because it is a coupling a reader would not guess. A DELIBERATE non-fix, for the same reason: this file
+// did NOT grow an archive-specific escape hatch (a Backspace, a first-crumb click), and
+// `archive-browse.smoke.ts` did NOT grow an `afterEach` that exits the archive, even though this file's
+// list above points at exactly that convention. Either would have made the reset pass while the app stayed
+// broken for every real user who types a path to get out of an archive — and would have destroyed the only
+// detector that found this at all. The harness driving the SAME primitive a user drives is the feature.
 import { $$, browser } from "@wdio/globals";
 import { navigateTo } from "./samplesNav.js";
 

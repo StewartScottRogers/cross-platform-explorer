@@ -54,7 +54,9 @@ all blocked with an explanatory notice ("This is a saved search — a read-only 
 location to change it.") — including Copy, even though copying wouldn't actually change anything.
 Properties, Reveal, and navigating into a listed subfolder all still work. **Select by…** and
 **Save search…** themselves are unavailable while a saved search is open — exit back to a real folder
-first.
+first. To do that: click any crumb in the breadcrumb, or open the address bar (Ctrl+L) and press Enter —
+it opens showing the real folder you came from, and the saved search sits on top of that folder rather
+than replacing it, so Enter on its own takes you back there.
 
 ## Managing saved searches
 

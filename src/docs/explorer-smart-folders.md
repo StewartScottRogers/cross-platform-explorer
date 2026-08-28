@@ -47,7 +47,10 @@ just documenting it. Delete, Cut, Copy, Rename, and Paste are all blocked with a
 even **Copy** is blocked, not just the operations that would actually mutate something. **Properties**,
 **Reveal**, and navigating into a subfolder shown inside the smart folder all still work, since none of
 those change anything. "Select by…" and "Save search…" are unavailable while a smart folder is open (they
-only work in a real, on-disk folder) — exit back to a real folder first.
+only work in a real, on-disk folder) — exit back to a real folder first. To do that: click any crumb in
+the breadcrumb, or open the address bar (Ctrl+L) and press Enter — it opens showing the real folder you
+came from, and the smart folder sits on top of that folder rather than replacing it, so Enter on its own
+takes you back there.
 
 ## Managing saved smart folders
 

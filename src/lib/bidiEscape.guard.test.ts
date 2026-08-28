@@ -368,7 +368,7 @@ const DISCLOSED_GAPS = [
 
 /** App.svelte's markup-level offenders, same exact-equality treatment as REGISTRY. App.svelte is far
  *  too large to add wholesale to COVERED_FILES' original per-file review, so it's split from REGISTRY. */
-const APP_MARKUP_OFFENDERS = ["6553:$t(\"palette.openAgentBoardWindow\")","6565:$t(\"sidebar.repositories\")","6568:$t(\"sidebar.repositories\")","6574:$agentSessions.length === 0 ? $t(\"tb.openConsole\") : $agentSessions.length === 1 ? $t(\"tb.openConsoleOne\") : $t(\"tb.openConsoleMany\", { count: $agentSessions.length })","6582:$t(\"tb.aiConsole\")","6584:$agentSessions.length","6584:$t(\"tb.agentsRunning\", { count: $agentSessions.length })","6591:$t(\"tb.showDetailsPane\")","6596:$t(\"cmd.showHidden\")","6601:$t(\"cmd.folderSizes\")","6606:$t(\"tb.resetSettings\")","6693:$t(\"tb.paneWidth\")","6772:$t(\"tb.resizeNav\")","6773:$t(\"tb.resizeTip\")","6936:$t(\"tb.resizeDetails\")","6937:$t(\"tb.resizeTip\")","6946:$t(\"tb.popoutTip\")","6947:$t(\"tb.popoutAria\")","6952:$t(\"tb.defaultTab\")","6960:$t(\"tb.preview\")","6961:$t(\"view.details\")","6965:$t(\"tb.paneWidth\")","6981:$t(\"tb.previewOrDetails\")","6982:$t(\"tb.dragPopoutTip\")","6993:$t(\"tb.preview\")","6999:$t(\"view.details\")","7235:confirm.title","7250:passwordPrompt.title","7588:runConfirm.title","7606:macroParamPromptFor.macro.name","7872:$t(\"dnd.dropToImport\")"];
+const APP_MARKUP_OFFENDERS = ["6579:$t(\"palette.openAgentBoardWindow\")","6591:$t(\"sidebar.repositories\")","6594:$t(\"sidebar.repositories\")","6600:$agentSessions.length === 0 ? $t(\"tb.openConsole\") : $agentSessions.length === 1 ? $t(\"tb.openConsoleOne\") : $t(\"tb.openConsoleMany\", { count: $agentSessions.length })","6608:$t(\"tb.aiConsole\")","6610:$agentSessions.length","6610:$t(\"tb.agentsRunning\", { count: $agentSessions.length })","6617:$t(\"tb.showDetailsPane\")","6622:$t(\"cmd.showHidden\")","6627:$t(\"cmd.folderSizes\")","6632:$t(\"tb.resetSettings\")","6720:$t(\"tb.paneWidth\")","6799:$t(\"tb.resizeNav\")","6800:$t(\"tb.resizeTip\")","6963:$t(\"tb.resizeDetails\")","6964:$t(\"tb.resizeTip\")","6973:$t(\"tb.popoutTip\")","6974:$t(\"tb.popoutAria\")","6979:$t(\"tb.defaultTab\")","6987:$t(\"tb.preview\")","6988:$t(\"view.details\")","6992:$t(\"tb.paneWidth\")","7008:$t(\"tb.previewOrDetails\")","7009:$t(\"tb.dragPopoutTip\")","7020:$t(\"tb.preview\")","7026:$t(\"view.details\")","7262:confirm.title","7277:passwordPrompt.title","7615:runConfirm.title","7633:macroParamPromptFor.macro.name","7899:$t(\"dnd.dropToImport\")"];
 
 /** App.svelte's two already-disclosed SplitFileDialog/JoinPartsDialog completion notices
  *  (`showNotice($t(..., { name: baseName(path) }))`) are built in `<script>` code, not markup — the one
@@ -377,7 +377,7 @@ const APP_MARKUP_OFFENDERS = ["6553:$t(\"palette.openAgentBoardWindow\")","6565:
  *  site. Checked here with a narrow, targeted scan instead: every `baseName(`/`basename(` call anywhere
  *  in App.svelte's source not immediately wrapped in `displaySafeName(`/`displaySafePath(` must be one
  *  of these two allowlisted lines. */
-const APP_SCRIPT_BASENAME_ALLOWLIST = [2863, 2878];
+const APP_SCRIPT_BASENAME_ALLOWLIST = [2889, 2904];
 
 function findRawBaseNameCallsInScript(src: string): number[] {
   const lines = new Set<number>();

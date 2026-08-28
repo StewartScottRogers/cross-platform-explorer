@@ -33,6 +33,26 @@
 // transport death in one shard, or a respawn that itself fails, still ends the shard having asserted
 // nothing. That still costs the manual re-run CPE-1910 was filed about, and on an unattended run it is a
 // stall.
+//
+// UPDATE, CPE-1979 — THE TRIGGER ABOVE IS FIXED, AND THIS MODULE STAYS ANYWAY. The reset failure the
+// whole chain hangs off was an app bug, not a harness or transport one: `enterArchive` leaves
+// `currentPath` untouched, so `NavToolbar.svelte#commit()`'s `value === currentPath` short-circuit
+// swallowed the address-bar navigation `resetAppState` uses to return to the tmp dir, and the app sat
+// inside `archive-browse.smoke.ts`'s `.tar.gz` until `navigateTo`'s 15 s breadcrumb wait gave up.
+// Re-measured independently for that ticket over a fresh window (2026-08-28T00:21Z-17:11Z, 97 gui-smoke
+// runs, 81 completed shard-2 jobs): 77 of 77 with a retrievable log that reached the transition, the
+// other 4 cancelled. With `pathOverlaidByView` threaded into that guard the expected rate is zero.
+//
+// So the ~15% per-job transport death this module is sized against loses the thing that was causing it,
+// and both containments — CPE-1955's in-process respawn and this job-level retry — stop firing on the
+// path that has been exercising them daily. Neither is deleted: the transport CAN die (that is the class
+// they cover, and the four failures in `lib/driverHealth.ts` are still real), and a mechanism removed
+// because its most common trigger went away is a mechanism that has to be rediscovered the hard way.
+// What changes is that "0 respawns, 1 attempt" becomes the expected reading rather than the lucky one —
+// see `wdio.conf.ts`'s MAX_DRIVER_RESPAWNS block for the coverage this trades away, why a synthetic
+// exercise and a stayed-at-zero alert were both rejected, and what still signals a regression. This
+// module's own decision logic keeps its deterministic coverage either way (`sessionRetry.test.ts`,
+// `runSuite.integration.test.ts`), which is precisely why it is the half that loses nothing.
 // ---------------------------------------------------------------------------------------------------
 import { type LogSignatureResult } from "./logSignature.js";
 
