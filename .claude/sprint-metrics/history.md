@@ -3145,3 +3145,34 @@ tick. On bash 5.3: **`[[ 9223372036854775808 -le 5 ]]` returns 0 — it *wraps* 
 which is strictly worse than `[`'s loud-but-falsy failure, because nothing is printed at all. And
 `v='a[$(touch PWNED)]'; [[ $v -le 1 ]]` returns 0 **and creates the file**, while `[ "$v" -le 1 ]` errors
 and creates nothing. Both halves of the hazard are now measured rather than asserted, at the site.
+
+## 2026-08-28 — fix the fixture before you add the assertion
+
+#1092's blocker was a retry that swept the shard manifest into an archive directory, so the verdict job
+announced that a shard which had run twice and passed had never run at all. The one-line fix was obvious.
+What the round did *first* is the part worth keeping.
+
+The integration test already drove the real scripts through a real retry — genuinely good coverage — and
+it could never have caught this, because its `.results/` only ever held reporter chunks. **The round
+rebuilt the fixture before writing the new assertion**: it now runs sharded 1-of-1 and seeds the
+directory by **executing the real manifest writer, in CI's order**, then asserts the manifest landed.
+Every pre-existing count in the file stayed the same, which is the evidence the change was to the
+*input*, not to the expectations.
+
+**The ordering matters more than it sounds.** Add the assertion first and you get a test that passes
+because you also wrote the setup line it needs — a closed loop where the fixture and the assertion were
+authored together to agree. Fix the fixture first and every *existing* case in the file becomes a fresh
+test against more realistic data; only then does a new assertion mean anything. Here that ordering also
+turned up the need to split the ratchet helper into the shard job's mode and a real verdict-join mode,
+which no assertion would have prompted.
+
+**Second thing from the same round, and it is CLAUDE.md's own rule being taken literally.** The port
+handshake needed the two driver port numbers that `wdio.conf.ts` owns. The default move is to copy them
+with a *"same as wdio.conf.ts"* comment — which this repo has spent the shift learning is an untested
+provenance claim. The round did not derive it either. **It moved the constants to a shared module and
+imported them from both sides.** *Where the duplication is removable, remove it* — deriving a claim is
+the fallback for when you cannot.
+
+And one small thing worth stealing: `waitForPortFree` **returns a boolean** so that *"did not settle"*
+cannot be read as *"settled"*. A timeout that returns nothing is the same fail-open family this shift has
+found ten times; a timeout that returns `false` makes the caller decide in the open.
