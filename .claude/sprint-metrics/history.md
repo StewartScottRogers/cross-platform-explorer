@@ -2431,3 +2431,39 @@ question you answer by trying it, not by counting.
 the `Deserialize` derive can go behind a private wire type and **the compiler becomes the invariant** —
 no scanner, no claim, nothing to go stale. A guard you can delete is better than a guard you have to
 describe.
+
+## 2026-08-28 — a third answer to the shadowed-guard rule: neither reorder nor delete, but a seam
+
+CLAUDE.md's CPE-1929 standard says a guard that fails both sabotages — green when disabled, unchanged
+when its predicate lies — is shadowed, and **the fix is reorder or delete; leaving it shadowed is the
+one wrong answer, because it reads as coverage.**
+
+CPE-1961 found `batch_media`'s `links > 1` census failing both sabotages at **2,430 / 0**, and then
+argued a case the standard does not cover:
+
+> the path probe reads the **name** before the open; the census reads the **object** after it — so a
+> link planted **between** them is visible only to the census.
+
+**Reorder was impossible** (the two checks read different things at different times, and the order is
+forced by what each can see) **and delete would have been wrong** (the census is the only thing that
+can see that window). The guard was not redundant — it was **unreachable by the existing tests**,
+because nothing in the suite could plant anything in the interval between the two checks.
+
+The answer was a **`between_containment_and_open` seam** plus a test that uses it. Both sabotages now
+red at **2,430 / 1**.
+
+**So the rule needs a third branch, and the distinction is worth stating precisely.** Two green
+sabotages mean *nothing in the suite can reach this guard*. That has three possible causes, not two:
+
+1. **Redundant** — an earlier check answers the same question, so nothing *can* reach it → **delete**.
+2. **Misordered** — a later check asks the more trustworthy question → **reorder**.
+3. **Unreachable-by-test** — the guard answers a question no other check answers, but the input that
+   would trip it can only arise in a window the tests cannot open → **build the seam.**
+
+Case 3 looks exactly like case 1 from the outside, and the way to tell them apart is the question the
+standard already asks about reordering: *what does each check actually see, and when?* If the shadowing
+check reads a different thing at a different moment, it is not shadowing — it is merely earlier.
+
+Same PR, the other direction: it also declared a *new* guard **untestable by construction** (disable →
+green, lie → 79 failed) and **said so at the site with both numbers**, which is what the standard asks
+for when a backstop genuinely cannot be reached. Both dispositions in one diff, argued separately.
