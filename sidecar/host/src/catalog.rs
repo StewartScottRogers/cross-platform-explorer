@@ -365,7 +365,87 @@ pub struct ApplyReport {
     pub rejected: Vec<(String, ApplyOutcome)>,
 }
 
-/// Apply a catalog **bundle** staged at `staging` into the sidecar catalog dir `out`, gating every
+/// Where a fetched bundle's bytes come from (CPE-1952).
+///
+/// The apply engine needs exactly four kinds of blob — `index.json`, `index.json.sig`,
+/// `<id>.json`, `<id>.json.sig` — and until CPE-1952 it could only get them by **reading a
+/// directory**. That forced every caller to first materialise the whole bundle on the filesystem,
+/// which is how `do_fetch_catalog` came to have a staging directory at
+/// `temp_dir()/cpe-catalog-stage-<pid>`: a predictable path in a shared namespace, created with
+/// `create_dir_all`, which walks straight through a pre-planted junction or symlink and hands an
+/// attacker the choice of where the staged bytes land. Measured, on both platforms, before the fix:
+/// the bytes landed in the attacker's directory and the code reported success (the two arms are in
+/// `tests/catalog_staging_containment.rs`).
+///
+/// So the fix is this trait rather than a hardened staging directory. The bundle is *data*, and the
+/// engine now says so; a caller that already holds the bytes (which the HTTP fetch does — every
+/// `catalog_http_get` returns a `Vec<u8>`) hands them over with [`MemBundle`] and never touches the
+/// filesystem at all. **A directory that is never created cannot be redirected**, which is a
+/// stronger property than any amount of care taken while creating one.
+///
+/// A name is looked up whole; there is no path joining and no directory traversal in the
+/// [`MemBundle`] arm, so an id that somehow escaped [`is_valid_entry_id`] still cannot address
+/// anything but a key of the map.
+pub trait BundleSource {
+    /// The bytes stored under `name`, or `None` if the bundle has no such member. `None` is an
+    /// ordinary answer, not an error: a missing `<id>.json` is [`ApplyOutcome::MissingManifest`].
+    fn read(&self, name: &str) -> Option<Vec<u8>>;
+}
+
+/// A bundle held **entirely in memory** — the shape `do_fetch_catalog` uses since CPE-1952.
+///
+/// Nothing here touches the filesystem, so there is no path to guess, no directory to create, no
+/// entry to plant in front of, and nothing to clean up on a refusal path. Unverified bytes straight
+/// off the wire also stop being written to a world-listable directory before the trust gate decides
+/// about them, which is a second, independent improvement.
+#[derive(Debug, Default, Clone)]
+pub struct MemBundle(BTreeMap<String, Vec<u8>>);
+
+impl MemBundle {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    /// Store `bytes` under `name`. Overwrites a previous entry of the same name, matching what a
+    /// second `fs::write` to the same staged filename would have done.
+    pub fn insert(&mut self, name: impl Into<String>, bytes: Vec<u8>) {
+        self.0.insert(name.into(), bytes);
+    }
+
+    /// How many members the bundle holds — used by callers that want to report what they fetched.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl BundleSource for MemBundle {
+    fn read(&self, name: &str) -> Option<Vec<u8>> {
+        self.0.get(name).cloned()
+    }
+}
+
+/// A bundle staged as files in a directory — the pre-CPE-1952 shape, kept because
+/// [`apply_bundle_at`] is a published entry point and its `&Path` signature is what
+/// `tests/catalog_republish_downgrade.rs` and the release-side round-trips drive.
+///
+/// **This arm carries the containment obligation the memory arm does not have.** Reading is by
+/// path, so whoever creates `staging` owns the guarantee that it is a directory they exclusively
+/// created — `create_dir` (create-new-or-fail), never `create_dir_all`. No production fetch uses
+/// this arm any more; it is reached only from tests, which build their staging with
+/// `tempfile::tempdir()`.
+struct DirBundle<'a>(&'a Path);
+
+impl BundleSource for DirBundle<'_> {
+    fn read(&self, name: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.0.join(name)).ok()
+    }
+}
+
+/// Apply a catalog **bundle** read from `src` into the sidecar catalog dir `out`, gating every
 /// entry against its signed index (CPE-308 part 2). A bundle is `index.json` + `index.json.sig` +
 /// per-entry `<id>.json` + `<id>.json.sig`, all signed by a trusted key.
 ///
@@ -375,7 +455,7 @@ pub struct ApplyReport {
 ///   (`gate_manifest`) and whose `version` strictly upgrades `installed` (anti-rollback); otherwise
 ///   it's rejected and its previously-applied copy is left untouched.
 /// - Accepted manifests + their `.sig` are written to `out` and `installed` is bumped. Offline by
-///   construction (reads local staging); the remote fetch that fills `staging` is a separate wrapper.
+///   construction (reads only `src`); the remote fetch that fills `src` is a separate wrapper.
 ///
 /// Also supports an audited per-agent **downgrade override** (CPE-383): ids listed in
 /// `allow_downgrade` may be applied even when the bundle's `version` is not newer than the installed
@@ -392,7 +472,7 @@ pub struct ApplyReport {
 /// baseline, making every entry look like a first install. Callers outside `catalog.rs` go through
 /// [`apply_bundle_at`], which reads the baseline itself and can only read it fail-closed.
 pub(crate) fn apply_bundle_with(
-    staging: &Path,
+    src: &dyn BundleSource,
     out: &Path,
     trusted_keys: &[String],
     installed: &mut VersionMap,
@@ -403,8 +483,10 @@ pub(crate) fn apply_bundle_with(
 
     // 1. Verify the index (governs the whole set). Any failure ⇒ touch nothing. `VerifiedIndex`
     //    checks the signature before it parses, so no entry field exists to be used too early.
-    let Ok(index_bytes) = std::fs::read(staging.join("index.json")) else { return report };
-    let Ok(index_sig) = std::fs::read_to_string(staging.join("index.json.sig")) else { return report };
+    let Some(index_bytes) = src.read("index.json") else { return report };
+    let Some(index_sig) = src.read("index.json.sig").and_then(|b| String::from_utf8(b).ok()) else {
+        return report;
+    };
     let Some(verified) = VerifiedIndex::open(&index_bytes, index_sig.trim(), trusted_keys) else {
         return report;
     };
@@ -418,11 +500,13 @@ pub(crate) fn apply_bundle_with(
             report.rejected.push((entry.id.clone(), ApplyOutcome::Pinned));
             continue;
         }
-        let Ok(bytes) = std::fs::read(staging.join(format!("{}.json", entry.id))) else {
+        let Some(bytes) = src.read(&format!("{}.json", entry.id)) else {
             report.rejected.push((entry.id.clone(), ApplyOutcome::MissingManifest));
             continue;
         };
-        let Ok(sig) = std::fs::read_to_string(staging.join(format!("{}.json.sig", entry.id))) else {
+        let Some(sig) =
+            src.read(&format!("{}.json.sig", entry.id)).and_then(|b| String::from_utf8(b).ok())
+        else {
             report.rejected.push((entry.id.clone(), ApplyOutcome::MissingSignature));
             continue;
         };
@@ -476,9 +560,27 @@ pub fn apply_bundle_at(
     pinned: &[String],
     allow_downgrade: &[String],
 ) -> Result<ApplyReport, VersionMapError> {
+    apply_bundle_source_at(&DirBundle(staging), out, trusted_keys, versions_path, pinned, allow_downgrade)
+}
+
+/// [`apply_bundle_at`] against a bundle that is **not** a directory (CPE-1952).
+///
+/// Same fail-closed baseline handling, same single enforcement point, same persistence rule — the
+/// only difference is where the four blob kinds are read from. This is the entry point
+/// `do_fetch_catalog` uses with a [`MemBundle`], which is what lets the whole staging directory
+/// disappear rather than be hardened: there is no `create_dir_all`, no predictable path in a shared
+/// namespace, and no `remove_dir_all` on the refusal path, because there is no directory.
+pub fn apply_bundle_source_at(
+    src: &dyn BundleSource,
+    out: &Path,
+    trusted_keys: &[String],
+    versions_path: &Path,
+    pinned: &[String],
+    allow_downgrade: &[String],
+) -> Result<ApplyReport, VersionMapError> {
     // Fail closed: no trustworthy baseline ⇒ refuse before anything is gated or written.
     let mut installed = load_versions(versions_path)?;
-    let report = apply_bundle_with(staging, out, trusted_keys, &mut installed, pinned, allow_downgrade);
+    let report = apply_bundle_with(src, out, trusted_keys, &mut installed, pinned, allow_downgrade);
     // Persist only on a run that actually got to gate entries. A save failure leaves the map behind
     // the on-disk catalog, which merely re-offers the same bundle next time — never a rollback.
     let _ = save_versions(versions_path, &installed);
@@ -567,7 +669,7 @@ mod tests {
         installed: &mut VersionMap,
         pinned: &[String],
     ) -> ApplyReport {
-        apply_bundle_with(staging, out, trusted_keys, installed, pinned, &[])
+        apply_bundle_with(&DirBundle(staging), out, trusted_keys, installed, pinned, &[])
     }
     fn index_json(id: &str, sha: &str, version: u64) -> String {
         format!(
@@ -910,7 +1012,7 @@ mod tests {
 
         // Only claude is opted into the downgrade.
         let report = apply_bundle_with(
-            stage.path(),
+            &DirBundle(stage.path()),
             out.path(),
             &[pk],
             &mut installed,
@@ -937,7 +1039,7 @@ mod tests {
         let mut installed = VersionMap::from([("claude".to_string(), 7u64)]);
         // Pinned AND asked to downgrade → the pin freezes it (safety), so nothing is applied.
         let report = apply_bundle_with(
-            stage.path(),
+            &DirBundle(stage.path()),
             out.path(),
             &[pk],
             &mut installed,

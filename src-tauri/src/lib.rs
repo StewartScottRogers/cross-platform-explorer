@@ -10310,31 +10310,47 @@ fn do_fetch_catalog(
         None => catalog_url(),
     };
     let dir = catalog_dir(app);
-    let staging = std::env::temp_dir().join(format!("cpe-catalog-stage-{}", std::process::id()));
-    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    // CPE-1952: the fetched bundle is assembled **in memory**. It used to be staged in
+    // `temp_dir()/cpe-catalog-stage-<pid>` — a path a local process can compute exactly (a shared
+    // namespace plus a pid) — and materialised with `create_dir_all`, which follows a junction or
+    // symlink like any other directory and creates whatever components are missing. Those three
+    // properties together mean an attacker who plants a link at that path first *chooses where this
+    // function writes*: measured on Windows (junction) and Linux (symlink, real ext4), the staged
+    // `index.json` landed inside the attacker's directory and every call here returned `Ok`.
+    //
+    // The fix is not a hardened staging directory, it is **no staging directory**. Every
+    // `catalog_http_get` already returns a `Vec<u8>`; the only reason the bytes ever hit the disk was
+    // that `apply_bundle_at` could not read a bundle from anywhere else. It can now
+    // (`catalog::BundleSource` / `MemBundle`), so the whole class goes away rather than being
+    // narrowed: there is no path to guess, no directory to create, no entry to plant in front of, and
+    // no `remove_dir_all` on the refusal path. Unverified bytes off the wire also stop being written
+    // to a world-listable directory before the trust gate has decided about them.
+    //
+    // What this does NOT claim: `dir` (the *destination*, `catalog_dir(app)`) is still resolved and
+    // created by path — that is the same question `open_beneath` explicitly declines to answer about
+    // its own root, and it is a separate site with its own verdict in CPE-1952's enumeration.
+    let mut bundle = sidecar_host::catalog::MemBundle::new();
 
     // Index + its detached signature.
     let index_bytes = catalog_http_get(&format!("{base}catalog-index.json"))?;
     let index_sig = catalog_http_get(&format!("{base}catalog-index.json.sig"))?;
-    std::fs::write(staging.join("index.json"), &index_bytes).map_err(|e| e.to_string())?;
-    std::fs::write(staging.join("index.json.sig"), &index_sig).map_err(|e| e.to_string())?;
 
     // CPE-1940 (F-B): verify the index BEFORE any of its fields is used. Until the detached
     // signature checks out against a trusted key, every field here — `id` above all, which is
-    // interpolated into both a fetch URL and a staging path below — is attacker-controlled input
-    // off the wire. `VerifiedIndex::open` verifies first and parses second, so an unverified index
-    // yields no entries at all; there is no id to escape the release path or traverse out of
-    // staging. This is a *reordering*, not a sanitiser: it fixes the class, so the next field
-    // someone reads off the index is behind the same gate for free.
+    // interpolated into a fetch URL below — is attacker-controlled input off the wire.
+    // `VerifiedIndex::open` verifies first and parses second, so an unverified index yields no
+    // entries at all; there is no id to escape the release path or to name a bundle member. This is
+    // a *reordering*, not a sanitiser: it fixes the class, so the next field someone reads off the
+    // index is behind the same gate for free.
     //
     // Not a second trust decision — `apply_bundle_with` re-verifies below and remains the
-    // enforcement point. This one governs only what may be fetched and written into staging.
+    // enforcement point. This one governs only what may be fetched into the bundle.
     let Some(verified) = sidecar_host::catalog::VerifiedIndex::open(
         &index_bytes,
         String::from_utf8_lossy(&index_sig).trim(),
         &keys,
     ) else {
-        let _ = std::fs::remove_dir_all(&staging);
+        // Nothing to clean up: the bundle is a `MemBundle` and is dropped with this scope (CPE-1952).
         // Same shape as the `index_ok == false` report `apply_bundle_with` would have produced —
         // nothing fetched, nothing written, last-known-good stands.
         return Ok(json!({
@@ -10347,30 +10363,37 @@ fn do_fetch_catalog(
         }));
     };
 
+    // The index verified, so it can now go into the bundle the apply engine re-verifies it from.
+    bundle.insert("index.json", index_bytes);
+    bundle.insert("index.json.sig", index_sig);
+
     // Each listed manifest + its signature. Every `entry.id` below is now verified content.
     for entry in verified.entries() {
         let m = catalog_http_get(&format!("{base}{}.json", entry.id))?;
         let s = catalog_http_get(&format!("{base}{}.json.sig", entry.id))?;
-        std::fs::write(staging.join(format!("{}.json", entry.id)), &m).map_err(|e| e.to_string())?;
-        std::fs::write(staging.join(format!("{}.json.sig", entry.id)), &s).map_err(|e| e.to_string())?;
+        // A member name, never a path: `MemBundle` is a map lookup, so there is no `join` here for a
+        // `..` or an absolute id to escape through even if one ever got past `is_valid_entry_id`.
+        bundle.insert(format!("{}.json", entry.id), m);
+        bundle.insert(format!("{}.json.sig", entry.id), s);
     }
 
     // Apply with anti-rollback against the persisted version map (last-known-good on failure).
-    // CPE-1940 (F-A): `apply_bundle_at` owns the load/apply/save cycle so the baseline can only be
-    // read fail-closed. A `versions.json` that is present but corrupt means the anti-rollback
+    // CPE-1940 (F-A): `apply_bundle_source_at` owns the load/apply/save cycle so the baseline can
+    // only be read fail-closed (CPE-1952 renamed the entry point; it is the same cycle, differing
+    // only in that the bundle arrives as bytes rather than as a directory). A `versions.json` that
+    // is present but corrupt means the anti-rollback
     // baseline is *unknown*, not empty — it refuses the whole apply and leaves the map on disk
     // untouched, rather than presenting an empty map that makes every entry look like a first
     // install (which re-applied ancient bundles). Absent is still a legitimate first run.
     let vpath = dir.join("versions.json");
-    let report = sidecar_host::catalog::apply_bundle_at(
-        &staging,
+    let report = sidecar_host::catalog::apply_bundle_source_at(
+        &bundle,
         &dir,
         &keys,
         &vpath,
         pinned,
         allow_downgrade,
     );
-    let _ = std::fs::remove_dir_all(&staging);
     // A damaged local baseline is reported as its OWN state, not as a generic fetch error. The two
     // need different words: a dead pipeline is "nothing to do, try again later", whereas this one
     // is on the user's machine and will keep failing every check until they reset the catalog. The
