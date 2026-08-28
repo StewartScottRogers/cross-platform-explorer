@@ -3,7 +3,7 @@ id: CPE-1952
 title: the catalog staging dir is a predictable path outside the project, and `create_dir_all` succeeds straight onto a pre-existing junction
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -353,3 +353,60 @@ default). `cargo test --locked` green for `sidecar/host` (119 lib + all integrat
 vitest **349/349 files, 4995 passed, 2 skipped, 0 failed** (on this branch rebased onto `origin/main` 8a778dc7); `npm run check` 0 errors, 0 warnings.
 Every planted junction cleaned up, including the one the sabotage leaked: `%TEMP%` is back to the 9
 pre-existing stale staging directories and no links.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1075, after two rounds.
+
+**It deleted the vulnerable seam rather than defending it.** The catalog staging directory was a
+predictable path outside the project that `create_dir_all` follows a junction into; reproduced with
+on-disk evidence on **both** platforms (junction on Windows, symlink on real ext4) —
+`"STAGED-CATALOG-INDEX"` written into the attacker's directory with the code returning `Ok`. The fix
+assembles the bundle **in memory**: no path formed, no directory created, no cleanup to follow a link
+out, and — the property worth the most — **unverified bytes off the wire never reach the disk at all.**
+Its Reviewer traced the whole path and confirmed the ordering in both directions: index bytes enter the
+bundle only after `VerifiedIndex::open` succeeds, and each manifest reaches `write_entry` only on
+`EntryVerdict::Accept`.
+
+**It disproved two of the ticket's own assumptions.** `remove_dir_all` on a planted link removes **the
+link**, not the target's contents (2 entries before, 2 after, verified independently with a standalone
+probe) — so the cleanup leg was never the destroyer the ticket feared. And **`open_beneath` cannot fix
+this**: its own doc says it does not defend the root itself, and if the root was already a link every
+write goes there and the module agrees. **Here the root is what is under attack** — disqualified by its
+own contract, not by visibility.
+
+**It rejected a design that measured clean.** Unguessable-name plus create-new-or-fail scored 183/17
+with **zero escapes**. It chose the more invasive fix anyway, because leaf writes would still resolve by
+path in a `readdir`-watchable directory — the opposite of the usual failure mode. Its Reviewer judged
+that lead argument the weakest of the three and the other two decisive; the reordering is in the record.
+
+**Field evidence nobody was looking for:** **9** leaked `cpe-catalog-stage-<pid>` directories in the real
+`%TEMP%`, one dated **the same evening** with a live 155-byte `index.json` — the shipped app still
+leaking while the fix was under review. Closed in the strongest available way, since nothing is written
+at all. The sweep also found **55** leaked `cpe-swarm-<millis>` directories — the residual this ticket
+deferred is leaking **six times harder** than the site it fixed, while the two fallbacks it discussed at
+length have never been reached on this machine. Filed as **CPE-1964**.
+
+**An existing repo guard out-graded a careful reviewer.** That Reviewer raised the `eprintln!` skip
+notice as **"latent, not active"**; `fsutil::tests::skip_notices_never_use_a_captured_print_macro`
+**failed the Windows and macOS legs** on exactly it. The test is the **sensitivity control** for a
+security fix — one that returns green because it could not set itself up proves nothing, *invisibly*.
+
+**Round 2 refused the obvious fix for a good reason.** It could not call `require_staged`: that helper
+lives in `cpe-server`, and **a sidecar may not depend on `cpe-server` (ADR 0001)**. So it took the policy
+without the call — the planting helper returns a `Result` naming the failing step, the scene **panics**,
+and no skip path remains. Stricter than `require_staged` deliberately: a junction in one's own `%TEMP%`
+needs no privileges, so there is no environment to be lenient toward.
+
+**And its own red-proof found a new defect:** sabotaging the planting **leaked a live junction in
+`%TEMP%`**, because the panic fires before the scene exists and therefore before its `Drop` is armed. In
+the file whose entire subject is stray junctions in the shared temp directory. *"Found by running the
+sabotage, not by reading — it would have shipped."*
+
+**It corrected the enumeration recipe twice**: column-0 **and** comments-stripped, because three
+`temp_dir()` mentions in this tree live in doc comments explaining the defect — including the fix's own.
+As written the rule finds **10** sites; corrected, **15**. The five it drops are exactly the residual
+that became CPE-1964.
+
+**Merged past two verified reds** — shard 2 (CPE-1960) and its verdict job — after proving by
+`git cat-file` that this branch predates that fix.

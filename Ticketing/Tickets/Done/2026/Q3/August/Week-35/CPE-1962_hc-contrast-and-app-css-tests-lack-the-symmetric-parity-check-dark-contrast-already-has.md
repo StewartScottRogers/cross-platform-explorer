@@ -3,7 +3,7 @@ id: CPE-1962
 title: `hc-contrast.test.ts` and `app.css.test.ts` lack the symmetric parity check `dark-contrast.test.ts` already has — a new token can be added to light and silently missed by three theme blocks
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -291,3 +291,44 @@ each, which is its own change.
   `hex-files: 85` and `hex-occurrences: 277` both unchanged. (That ratchet walks `.svelte` files
   only, so comment edits in `app.css` cannot reach it either way.)
 - Every deletion made for measurement was reverted; `git status` clean before committing.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1077, after two rounds.
+
+**The new guard found a real, ship-blocking defect on its first run.** `--log-warn` was declared in bare
+`:root`, `light` and `dark` but in **neither** high-contrast block, so both hc themes inherited light's
+`#8a5a00` through the fallback. Measured against each theme's own surfaces, `hc-dark` gives
+**3.54 / 3.28 / 2.94** — the log viewer's WARN badge at **10.5px** body text, **below AA's 4.5:1 floor on
+every surface, in the high-contrast theme**. The row's `border-left-color` at 2.94 also misses 1.4.11's
+3:1. An independent from-spec WCAG implementation reproduced **every digit**.
+
+**It was fixed, not excepted**, by aliasing `--log-warn: var(--warn)` in both hc blocks — so the new
+checks ship with **no exception list at all**. `--warn` is the right alias in hc and wrong in `dark`,
+where the two roles genuinely conflict: dark's `--warn` `#c38800` carries white at **3.07:1**, zero
+headroom over the 3:1 floor, so it cannot brighten, while `--log-warn` `#ffb84d` reads ~9.5:1 as text
+and only **1.72:1** as a fill. Two tokens because one colour cannot serve both.
+
+**The ticket existed because coverage claims went unmeasured twice — and this PR shipped a third.** Its
+guard header said an `hc-dark` deletion is now caught by *"the first two"* files. Its Reviewer ran that
+deletion against the second: **22/22, fully green**. Only `hc-contrast.test.ts` changed behaviour. Plus a
+fourth of the same family in the same diff — a red-proof tally written `(1 failed, 23 passed)` in a
+23-test file where 22 pass, **while the same PR records 22 correctly elsewhere**.
+
+**Round 2 found a fifth and handled it right.** Re-running the deletion turned up that
+`warn-token.test.ts` also reds on it — and reds identically on `main`. Rather than quietly narrowing the
+sentence, it **measured that on `main`** and recorded it, because leaving "warn-token stayed GREEN"
+unqualified would have been the same defect again.
+
+**Why it keeps happening, named in the record:** every author measured what they *changed*, and none
+measured the sentence *about other files* they wrote while doing it — because that sentence feels like
+description rather than a claim. It is a claim, and it is cheap to check. **The countermeasure that
+caught all five: every coverage sentence names the deletion that proves it.**
+
+**Honest limits now stated rather than implied:** the hc and dark checks are **one-directional**
+(light to X only), and `dark-contrast.test.ts`'s own `lightOnly` still reads raw `.keys()`, so `dark`
+retains the empty-value hole the other three blocks no longer have. Its `YES` is marginally weaker than
+the rest, and the file says so.
+
+**Merged past two verified reds** — shard 2 (CPE-1960) and its verdict job — after proving by
+`git cat-file` that this branch predates that fix.
