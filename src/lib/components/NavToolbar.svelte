@@ -34,8 +34,10 @@
    *  dispatch, so `onCrumbNavigate`'s `exitArchive()` and `loadPath`'s `archive = null` (the single
    *  chokepoint that dismisses all three views) were both unreachable from here.
    *
-   *  Measured, not theorised: this is the whole of CPE-1979. In 77 of 77 `gui-smoke` shard-2 job logs
-   *  over a 16h50m window (2026-08-28T00:21Z–17:11Z) the harness's between-spec `resetAppState` failed
+   *  Measured, not theorised: this is the whole of CPE-1979. Of the 81 completed `gui-smoke` shard-2
+   *  jobs in the 16h50m window 2026-08-28T00:21Z–17:11Z, 77 have a retrievable log and reached this
+   *  transition (the other 4 were cancelled and were never inspected); in **77 of those 77** the
+   *  harness's between-spec `resetAppState` failed
    *  on exactly this — `expected the breadcrumb to show "cpe-gui-smoke-XXXXXX"` — because
    *  `archive-browse.smoke.ts` leaves the app inside a `.tar.gz` and the reset's address-bar navigation
    *  back to the same tmp dir was a no-op for 15s while `[aria-current="page"]` kept reading

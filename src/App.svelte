@@ -2160,11 +2160,28 @@
    *  disk cleared on entering an archive and git did not.) Passing this one value into both keeps the
    *  dependency list and the guard body impossible to drift apart: remove it from a call and the guard
    *  stops compiling rather than silently stopping firing. */
-  /** CPE-1979 — the three views that render a LISTING other than `currentPath`'s own, hoisted out of
-   *  `pathReadoutsSuppressed` above so there is exactly one declaration of the condition and the two
-   *  consumers cannot drift. (Home is the fourth case for the readouts and deliberately NOT here: at
-   *  Home `currentPath` IS `HOME`, so it honestly describes the view — it qualifies above only because
-   *  a git branch / disk figure derived from the HOME sentinel describes nothing.)
+  /** CPE-1979 — the three views that `loadPath` dismisses, hoisted out of `pathReadoutsSuppressed`
+   *  above so there is one declaration of this boolean and the two consumers below cannot drift.
+   *
+   *  "That `loadPath` dismisses" is the load-bearing half, and it is deliberately NOT the wider
+   *  "renders a listing other than `currentPath`'s own" — which would be FALSE as written, because
+   *  Replay mode's `replayOverlayEntries` does that too (see `blockedInArchive`'s comment above, and
+   *  the enumeration further down that lists it alongside these three). Replay is excluded because
+   *  `loadPath` does not clear it: dispatching `navigate` would not get you out, so widening this
+   *  boolean would buy a redundant re-list and no exit. What the guard downstream actually needs to
+   *  know is "would re-navigating to this same path change what is on screen", and `loadPath`'s own
+   *  reset list is the exact answer.
+   *
+   *  Home is the fourth case for the READOUTS and deliberately not here: at Home `currentPath` IS
+   *  `HOME`, so it honestly describes the view — it qualifies above only because a git branch / disk
+   *  figure derived from the HOME sentinel describes nothing.
+   *
+   *  Scope note, so the next reader stops looking: this hoists the two READOUT consumers onto one
+   *  declaration, not every spelling of the condition in this file. Four inline copies of
+   *  `archive || smartFolder || structuredSearch` remain (`folderContexts`, `dropStackDestBlocked`,
+   *  and the two `<StatusBar>` props) — all pre-date this ticket, all are untouched by it, and the
+   *  StatusBar pair's shape is pinned on purpose by `App.statusBarCountStaleness.test.ts`. Folding
+   *  them in is a separate change with its own blast radius.
    *
    *  Passed to `NavToolbar` as `pathOverlaidByView` — read that prop's comment for the bug it fixes and
    *  the 77-of-77 CI measurement behind it. */

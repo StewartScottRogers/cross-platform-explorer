@@ -86,7 +86,9 @@ structured-search views) were both unreachable. The app stayed inside the archiv
 breadcrumb wait, which threw, which is `resetFailedRestartingSession`.
 
 Read from the logs, not inferred: throughout the failing wait `[aria-current="page"]` returns
-`CPE-1181-archive.tar.gz` (150 consecutive polls in job 98786417910; same in 98928416795).
+`CPE-1181-archive.tar.gz` (**151** consecutive polls in job 98786417910, spanning 07:42:43.653Z–
+07:42:58.984Z = 15.33 s; 151 in 98928416795 too. An earlier draft of this log said 150 — corrected on
+the Reviewer's own re-count, which is the number to trust).
 `specs/archive-browse.smoke.ts` is shard 2's *first* spec and ends inside the `.tar.gz` by design — it
 asserts the breadcrumb ends on the archive name — and never leaves. This is the same
 `commit()` no-op that `resetAppState.ts`'s `SCROLL_CONTAINER_SELECTOR` comment already documented as
@@ -148,10 +150,12 @@ including the address-bar one that did not work.
 
 ### 2026-08-28 — after rate, measured on the branch
 
-Sample size and window, not an adjective. **0 of 2** consecutive completed `gui-smoke (ubuntu-latest)
-shard 2` jobs on this branch, window 2026-08-28T19:02:32Z–19:15:06Z: job 98953638286 (run 33200926262,
-head `b4d42738`) and job 98956199641 (run 33202369526, head `a62f5535`). Raw job logs pulled the same
-way as the before sample. Identical readings in both:
+Sample size and window, not an adjective. **0 of 3** consecutive completed `gui-smoke (ubuntu-latest)
+shard 2` jobs on this branch, window 2026-08-28T19:02:32Z–19:25:18Z: job 98953638286 (run 33200926262,
+head `b4d42738`), job 98956199641 (run 33202369526, head `a62f5535`) and job 98958843376 (run
+33203108701, head `ed9ee3fa`). Raw job logs pulled the same way as the before sample; the third was
+re-pulled independently by the Reviewer, which is how this figure stopped understating itself at 2.
+Identical readings in all three:
 
 - `handleRunnableStart:resetFailedRestartingSession` — **0** (before: 77 of 77)
 - `expected the breadcrumb to show` — **0** (before: 77 of 77)
@@ -161,8 +165,8 @@ way as the before sample. Identical readings in both:
   file(s) reported; ... 0 in-process driver respawn(s)`.
 - Rest of the first run: shards 2, 3 and 4 green, layout guard green, launcher contrast green.
 
-**What n=2 does and does not establish.** The before rate was 77 of 77 = **100 %**, so the mechanism was
-deterministic; two consecutive clean jobs falsify "always", which is the claim being fixed. It cannot
+**What n=3 does and does not establish.** The before rate was 77 of 77 = **100 %**, so the mechanism was
+deterministic; three consecutive clean jobs falsify "always", which is the claim being fixed. It cannot
 bound a residual low-rate flake — that needs a post-merge window on `main`, and the reading to take is
 CPE-1910's `$GITHUB_STEP_SUMMARY` respawn count, whose expected value is now 0.
 

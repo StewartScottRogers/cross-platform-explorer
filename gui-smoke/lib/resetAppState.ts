@@ -42,11 +42,14 @@
 // and never leaves, so every following spec in shard 2 walked in with the archive still open — and step 4
 // below could not clear it, because `NavToolbar.svelte#commit()` short-circuited on `value ===
 // currentPath` and never dispatched the `navigate` that `loadPath` (the app's single chokepoint for
-// dismissing all three views) hangs off. Measured: 77 of 77 completed `gui-smoke (ubuntu-latest) shard 2`
-// job logs in the 16h50m window 2026-08-28T00:21Z-17:11Z threw `expected the breadcrumb to show
-// "cpe-gui-smoke-XXXXXX"` out of `navigateTo` here, on that transition, green jobs included — the trigger
-// for EVERY `handleRunnableStart:resetFailedRestartingSession` in the window, and (via the session
-// restart's `DELETE /session/<id>`) for 11 of the 77 tauri-driver respawns.
+// dismissing all three views) hangs off. Measured over the 16h50m window 2026-08-28T00:21Z-17:11Z: of
+// the 81 completed `gui-smoke (ubuntu-latest) shard 2` jobs in it, 77 have a retrievable log AND reached
+// this transition, and 77 of those 77 threw `expected the breadcrumb to show "cpe-gui-smoke-XXXXXX"` out
+// of `navigateTo` here, green jobs included — the trigger for every one of those 77
+// `handleRunnableStart:resetFailedRestartingSession` lines, and (via the session restart's
+// `DELETE /session/<id>`) for 11 of them spending a tauri-driver respawn. The other 4 jobs were all
+// CANCELLED and were never inspected — 3 whose log 404s, 1 killed before the transition — so this says
+// nothing about them, deliberately: the population is those 77, not "the window".
 //
 // The fix is in the APP, not here: `commit()` now takes `pathOverlaidByView` from App.svelte and lets the
 // same-path submit through. That makes step 4 load-bearing on a real product behaviour — say so out loud,
