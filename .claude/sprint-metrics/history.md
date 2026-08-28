@@ -1963,3 +1963,41 @@ but it is the **second** occurrence of [[janitor-never-rmrf-active-worktrees]], 
 clobbered a live worker and dirtied `main`. A reviewer's worktree looks idle exactly when it is
 thinking, so "no recent writes" is not a liveness signal. The janitor's skip rule needs to key off
 **the agent registry**, not filesystem mtime.
+
+## 2026-08-27 — claim-then-rename closes a TOCTOU race and silently rewrites the file's access control
+
+PR #1070 fixed CPE-1958's hard-link race the right way: stop writing through a handle whose object an
+attacker can substitute, and instead stage bytes into a `create_new` sibling and commit with a rename.
+It measured 0/2,000 on Windows and 0/10,000 on Linux, with the controls red — and its Security Auditor
+re-raced it independently and confirmed every number, including the subtle part: in the planted shape
+the *fixed* arm faced **more** hard-linked trials than the pre-fix body (Win 1,016 vs 889, Linux 9,480
+vs 7,913), so the improvement is not the attacker having got weaker.
+
+Then it found what the fix cost, which nobody had thought to measure. **A rename does not carry the
+destination's security descriptor.** After the change, a Windows file with inheritance broken and one
+owner-only ACE came out `AreAccessRulesProtected=False` with **four inherited ACEs including
+`Authenticated Users: Modify`** — and its `Zone.Identifier` stream gone, which is Mark-of-the-Web, so
+a downloaded file put through a confirmed Convert loses SmartScreen and Protected View. `main`'s
+in-place write in the same folder preserved all of it.
+
+Three things make this worth writing down:
+
+1. **The downgrade is the exact one a sibling ticket already forbids.** CPE-1739 *fails the save* on
+   Unix rather than leave the user a file more readable than the one they saved. This path now performs
+   that downgrade on Windows — because `carry_protections`'s Windows arm is a deliberate no-op that
+   delegated the job to `ReplaceFileW`, and the new commit path never calls `ReplaceFileW`. The
+   guard did not fail; it was **routed around** by a change in a different file.
+2. **The PR recorded it as a "preservation cost."** That framing is what let it through: it reads as a
+   fidelity nicety rather than an access-control change. When a fix changes *which syscall creates the
+   final object*, the question is not "did we preserve the metadata" but "who can read this now".
+3. **The invariant was true and still not enough.** *"Nothing planted at the destination can redirect
+   the commit"* is correct — and silent about the **source**. The staging file is an enumerable
+   `*.cpe-tmp` in the same attacker-writable directory; unlink it, hard-link an outside file into its
+   name, and the rename commits that inode. Measured **2,805 / 3,000 on Linux**: `Ok(())` returned,
+   the user's bytes never written, the destination now a second name for a file outside the scope root.
+
+**The general shape: a containment fix that changes the object's provenance inherits a whole second
+set of properties nobody audited** — ACLs, streams, inode identity, mode bits, and the directory
+permissions the new path now requires (F2: operations that worked on `main` with file-write alone now
+need directory-write, and fail). Race-closure and access-control preservation are different
+properties, and closing the first is a good reason to re-measure the second, not evidence about it.
