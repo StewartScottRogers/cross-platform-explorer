@@ -4407,10 +4407,14 @@ fn extract_zip_archive_stream(
             let claimed = crate::fsutil::claim_destination_handle(
                 &out,
                 crate::fsutil::LinkGuardWording::EXTRACT,
-                || crate::open_beneath::create_beneath(&root, rel),
+                crate::fsutil::DestinationSite::Beneath { root: &root, rel },
             );
-            let mut f = match claimed {
-                Ok(c) => c.file,
+            // CPE-1961: the claim is HELD, not unwrapped to its handle. The bytes go into a staging
+            // sibling and `commit()` renames it over `out`; dropping the claim instead — which is what
+            // the `?` below does on an I/O failure — removes the staged file and leaves the entry's
+            // name exactly as the extraction found it.
+            let mut claimed = match claimed {
+                Ok(c) => c,
                 Err(r) if r.policy => {
                     report.skip(&name, &r.why);
                     prog.done_items += 1;
@@ -4450,7 +4454,12 @@ fn extract_zip_archive_stream(
             };
             // CPE-1935: `?` stood here. Same argument as the link branch's `read_to_end` above — the
             // reader is this entry's own, so a failure decompressing or writing it is this entry's.
-            if let Err(e) = std::io::copy(&mut entry, &mut f) {
+            //
+            // **CPE-1961: the bytes go into the CLAIM's staging sibling, never the destination.**
+            // `continue`ing here drops `claimed`, which removes the staged file — and the destination
+            // name too when this call created it — so a decompression failure leaves the entry's name
+            // exactly as the extraction found it rather than truncated.
+            if let Err(e) = std::io::copy(&mut entry, &mut claimed.file) {
                 report.fail(
                     &name,
                     &EntryFailure::from_write_error(
@@ -4462,6 +4471,7 @@ fn extract_zip_archive_stream(
                 emit(&prog);
                 continue;
             }
+            claimed.commit().map_err(|r| r.why)?;
             prog.done_bytes += entry.size();
             // **CPE-1938 F-B — the mode is set through the HANDLE the bytes went into, not by name.**
             //

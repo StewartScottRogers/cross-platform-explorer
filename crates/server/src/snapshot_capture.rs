@@ -539,7 +539,7 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
             &blob,
             &target,
             crate::fsutil::LinkGuardWording::RESTORE,
-            || crate::open_beneath::create_beneath(&root, &joined),
+            crate::fsutil::DestinationSite::Beneath { root: &root, rel: &joined },
         )
         // The blob is named by its already-hex-validated **hash**, never by its absolute path inside
         // the app's private checkpoint store — the rule `copy_file_onto_destination_handle`'s own doc

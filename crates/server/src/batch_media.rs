@@ -1418,7 +1418,11 @@ fn real_facts(facts: FileFacts) -> Probe {
         // wildcard here would silently start swallowing any later addition — which is exactly how this
         // arm earned its comment, since CPE-1958's `HandleUnderReportsLinks` landed on it as a compile
         // error rather than as a silent behaviour change to the by-PATH probe.
-        Some(ProbeInjection::HandleUndescribable | ProbeInjection::HandleUnderReportsLinks) => {}
+        Some(
+            ProbeInjection::HandleUndescribable
+            | ProbeInjection::HandleUnderReportsLinks
+            | ProbeInjection::StagingCreateFails,
+        ) => {}
         None => {}
     }
     Probe::Real(facts)
@@ -1460,6 +1464,21 @@ pub(crate) enum ProbeInjection {
     /// A racing proof of the same property is a coin toss per run; this one is deterministic, which is
     /// why it is the version CI gets.
     HandleUnderReportsLinks,
+    /// Make `fsutil`'s staging opener fail (CPE-1961) — the **only** way left to exercise a failed
+    /// write through [`VerifiedOutput::write_all`].
+    ///
+    /// Before CPE-1961 that test needed no seam at all: `write_all` truncated and wrote through the
+    /// handle it was handed, so passing it a **read-only** handle failed the very first step on every
+    /// platform. Staging removed that, and correctly — the destination handle is now read for its
+    /// metadata and its carry-over and never written through, so a read-only one succeeds, which is
+    /// the fix working rather than a test going stale.
+    ///
+    /// What is left to fail is the exclusive create of the staging sibling, and *that* cannot be staged
+    /// portably: it needs a directory this process may open but not create in, which is one `chmod` on
+    /// Unix and a hand-built denying DACL on Windows. So the outcome is injected instead and the
+    /// assertions stay where they belong — on the filesystem: is the file this call created gone, and
+    /// is the file it did **not** create still holding its own bytes?
+    StagingCreateFails,
 }
 
 #[cfg(test)]
@@ -1478,6 +1497,16 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn set_probe_injection_for_test(v: Option<ProbeInjection>) {
     PROBE_INJECTION.with(|c| c.set(v));
+}
+
+/// The [`ProbeInjection::StagingCreateFails`] seam, read by `fsutil`'s staging openers (CPE-1961).
+///
+/// A function rather than a `pub(crate)` on the thread-local, so the vocabulary has one owner here and
+/// `fsutil` asks a question instead of reaching into this module's state — the same shape
+/// `handle_facts_injected_links` already uses.
+#[cfg(test)]
+pub(crate) fn probe_injection_is_staging_create_failure() -> bool {
+    matches!(PROBE_INJECTION.with(|c| c.get()), Some(ProbeInjection::StagingCreateFails))
 }
 
 /// RAII reset for [`set_probe_injection_for_test`] — an injected probe that outlives its test would
@@ -1922,16 +1951,53 @@ impl VerifiedOutput {
     /// write. `path` is the same string the caller already has: this struct deliberately holds no path of
     /// its own (see the struct doc for why identity is decided on the handle, never a name), so the caller
     /// passes it through exactly as it does for [`Self::abandon`].
-    pub(crate) fn write_all(mut self, bytes: &[u8], path: &str) -> Result<(), String> {
-        use std::io::Write;
-        let result = self
-            .file
-            .set_len(0)
-            .map_err(|e| format!("could not truncate output: {e}"))
-            .and_then(|()| {
-                self.file.write_all(bytes).map_err(|e| format!("could not write output: {e}"))
-            })
-            .and_then(|()| self.file.flush().map_err(|e| format!("could not flush output: {e}")));
+    /// **CPE-1961: this no longer writes through the handle [`open_output_verified`] checked.**
+    ///
+    /// It used to be `set_len(0)` + `write_all` on `self.file`, and that made every guard in
+    /// `open_output_verified` — the `links > 1` census in particular — a check-then-use. `links` is a
+    /// property of the object at the moment it is read: hard-link a file outside the folder to the
+    /// output, let the open land on that object, unlink the second name before `handle_facts` runs, and
+    /// the count reads `1` while these bytes destroy a file the batch was never allowed to touch.
+    /// Measured live, victim bytes read back off disk: **24 / 2,000 (Windows/NTFS)**,
+    /// **2,890 / 10,000 (Linux/ext4)**.
+    ///
+    /// **The Windows figure was never a safety property.** `classify_output_containment` runs before
+    /// the open and refuses a flickering destination outright, so far fewer trials reach the identical
+    /// check-then-use (728 writes reported `Ok` here against `fsutil`'s 1,234 in the same run). That is
+    /// a *path gauntlet* — CPE-1929's shape, where a guard survives because an earlier check happens to
+    /// reject most attempts — and Linux does not have it, which is the whole of the two-order-of-
+    /// magnitude gap between the platforms. It is recorded rather than relied on.
+    ///
+    /// So the bytes now go into an exclusively-created sibling and are committed over the name with a
+    /// rename, through the one implementation `fsutil` already owns
+    /// (`fsutil::stage_bytes_over_checked_handle` → `stage_and_replace_at`). What that costs — a
+    /// changed file id, the destination's ACL and named streams carried explicitly instead of by
+    /// `ReplaceFileW`, write access to the output's *folder*, one `fsync` and one rename — is CPE-1958's
+    /// cost list, reached here for the same reason and documented at the same site.
+    ///
+    /// **One cost is this engine's own and is not on that list: a hard-linked output stops tracking.**
+    /// A batch item whose output is a second name for a file elsewhere *inside the selected folder* is
+    /// allowed (the census says every name is accounted for), and it used to write through the shared
+    /// object, so both names showed the new bytes. Now only the output name does; the sibling keeps the
+    /// old ones. That is arguably the more correct answer for an operation asked to write one output,
+    /// and it is the same trade `fsutil::claim_destination_handle` makes — but it is a behaviour change,
+    /// so it is stated here and it is why
+    /// `batch_execute::tests::cpe_1652_a_census_past_the_cap_refuses_the_write_rather_than_allowing_it`
+    /// has to re-link its fixture between its two phases.
+    ///
+    /// **Red-proofed by sabotage, run rather than argued.** Reverting this body to the pre-CPE-1961
+    /// `set_len(0)` + `write_all` + `flush` through `self.file` makes
+    /// `cpe_1961_a_write_never_lands_in_a_file_outside_the_batchs_folder` fail with the outside file
+    /// holding `ATTACKER PAYLOAD` **and the call returning `Ok(())`** — a successful-looking batch write
+    /// that destroyed a file the batch was never pointed at.
+    pub(crate) fn write_all(self, bytes: &[u8], path: &str) -> Result<(), String> {
+        let result = crate::fsutil::stage_bytes_over_checked_handle(
+            std::path::Path::new(path),
+            bytes,
+            &self.file,
+            self.created,
+        )
+        .map_err(|e| format!("could not write output: {e}"));
         if result.is_err() && self.created {
             drop(self.file);
             let _ = std::fs::remove_file(path);
@@ -1967,6 +2033,57 @@ const O_NOFOLLOW: i32 = 0;
 #[cfg(windows)]
 pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT_U32: u32 = 0x0020_0000;
 
+// **CPE-1961's un-shadowing seam.** What to hard-link over the output between
+// `classify_output_containment` and `open_no_follow`, as `(victim, at)`. (A plain `//` comment:
+// rustdoc does not document a macro invocation and `-D unused-doc-comments` is right to say so.)
+//
+// # Why a seam rather than a fixture
+//
+// The `links > 1` census below was **shadowed** (CPE-1929's exact tell, measured): with
+// `if false && facts.links > 1` the whole suite stayed green at **2,430 passed / 0 failed**, and with
+// the predicate forced to lie (`HandleFacts { links: 1, ..facts }`) it stayed green at **2,430** as
+// well. Two green sabotages on one guard.
+//
+// The shadowing check is [`classify_output_containment`]'s **path**-side link probe, which runs before
+// the open and refuses a multiply-linked output whose other name is outside the folder. Every fixture
+// anyone had planted the link *before* the call, so the path probe always answered first.
+//
+// **Neither "reorder" nor "delete" is the right answer here, and that is not a dodge.** The two guards
+// do not answer the same question at the same moment: the path probe reads the name *before* the open,
+// the census reads the object *after* it, and a hard link planted **in between** is caught by exactly
+// one of them — the census. It cannot be moved earlier (there is no handle before the open) and it is
+// not redundant (it covers a window nothing else does). What it lacked was a fixture that could reach
+// that window, so this seam builds one, and
+// `cpe_1961_a_link_planted_after_the_path_check_is_still_caught_by_the_handle_census` is the coverage.
+// With that test in place the *disable* half of the pair goes red, which is what a reachable guard
+// looks like. Same shape, and the same reason, as `open_beneath::between_descent_and_leaf`.
+#[cfg(test)]
+thread_local! {
+    static LINK_BETWEEN_CONTAINMENT_AND_OPEN: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Arm the seam above for exactly one call. Taken rather than read, so an armed test cannot leak into
+/// the next one on the same thread even if it panics before the call it armed.
+#[cfg(test)]
+pub(crate) fn link_between_containment_and_open_for_test(victim: &str, at: &str) {
+    LINK_BETWEEN_CONTAINMENT_AND_OPEN
+        .with(|c| *c.borrow_mut() = Some((victim.to_string(), at.to_string())));
+}
+
+#[cfg(test)]
+fn between_containment_and_open() {
+    let armed = LINK_BETWEEN_CONTAINMENT_AND_OPEN.with(|c| c.borrow_mut().take());
+    if let Some((victim, at)) = armed {
+        let _ = std::fs::remove_file(&at);
+        let _ = crate::links::create_hard_link(&victim, &at);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn between_containment_and_open() {}
+
 /// Open `output` for writing and verify **on the resulting handle** that writing through it stays inside
 /// `input`'s own folder. See [`VerifiedOutput`] for why this replaced the path-based re-check.
 ///
@@ -1999,6 +2116,9 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
         }
     }
 
+    // The path gauntlet is done and the open has not happened yet. Test-only seam — compiled out of a
+    // shipped binary. See its definition for the shadowed guard it exists to un-shadow (CPE-1961).
+    between_containment_and_open();
     let (file, created) = open_no_follow(std::path::Path::new(output))
         .map_err(|e| format!("could not open output for writing: {e}"))?;
     let verified = VerifiedOutput { file, created };
@@ -2088,6 +2208,25 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
 
     // The only remaining way a write here reaches outside the folder is a hard link: a second name for
     // this very object, living somewhere else. Settled against a census scanned NOW, never a memo.
+    //
+    // **CPE-1961 demoted this from a defence to a POLICY verdict.** `VerifiedOutput::write_all` no
+    // longer writes through the handle these facts came off, so a lying count can no longer destroy
+    // anything; what this refusal still does is tell the user that the output they chose has another
+    // name the batch was never allowed to touch, which is worth saying.
+    //
+    // **It was SHADOWED, and it is not any more (CPE-1929's pair, all four runs recorded).** Before
+    // this ticket: `if false && facts.links > 1` left the suite **2,430 passed / 0 failed**, and
+    // `HandleFacts { links: 1, ..facts }` left it **2,430 / 0** as well — two green sabotages, the
+    // exact tell. The shadowing check is `classify_output_containment`'s path-side link probe above,
+    // which answers first for every fixture that plants its link before the call.
+    //
+    // **Reordering was impossible and deleting would have been wrong**, and the reason is that the two
+    // are not asking the same question at the same time: the path probe reads the NAME before the open,
+    // this reads the OBJECT after it, and a hard link planted **in between** is visible to exactly one
+    // of them — this one. So the missing thing was a fixture that could reach that window, and
+    // `between_containment_and_open` above is it. With
+    // `cpe_1961_a_link_planted_after_the_path_check_is_still_caught_by_the_handle_census` in the suite,
+    // BOTH sabotages now red — **2,430 passed / 1 failed** each — and the failing test is that one.
     if facts.links > 1 {
         let (dir, _, _) = split(input);
         let key = if dir.is_empty() { "." } else { &dir };
@@ -4935,13 +5074,26 @@ mod tests {
         std::fs::OpenOptions::new().write(true).create_new(true).open(&output).unwrap();
         assert!(output.exists(), "sanity: the file exists before the injected failure");
 
-        let readonly = std::fs::OpenOptions::new().read(true).open(&output).unwrap();
-        let verified = VerifiedOutput { file: readonly, created: true };
+        // **CPE-1961 moved this injection, and the move is the fix working.** It used to hand a
+        // second, READ-ONLY handle to the output: `write_all` truncated and wrote through the handle
+        // it was given, so the first step failed on every platform with no OS-specific trick. It no
+        // longer writes through that handle at all — it reads the metadata and the carry-over off it
+        // and stages the bytes into a fresh sibling — so a read-only handle now SUCCEEDS. Keeping the
+        // old injection would have left this test green while asserting nothing.
+        //
+        // What can still fail is the exclusive create of the staging sibling, and that needs a
+        // directory this process may open but not create in — one `chmod` on Unix, a hand-built
+        // denying DACL on Windows. So it is injected, and every assertion below is still about the
+        // FILESYSTEM. See `ProbeInjection::StagingCreateFails`.
+        let writable = std::fs::OpenOptions::new().write(true).open(&output).unwrap();
+        let verified = VerifiedOutput { file: writable, created: true };
 
+        let reset = ProbeReset::arm(ProbeInjection::StagingCreateFails);
         let err = verified
             .write_all(b"whatever bytes would have gone here", &output_s)
-            .expect_err("a handle opened with no write access must fail the very first step (set_len) — \
+            .expect_err("the injected staging-create failure must fail the write — \
                          this test verifies NOTHING if it doesn't");
+        drop(reset);
         println!("CPE-1667 injected write failure: {err}");
 
         assert!(
@@ -4967,12 +5119,16 @@ mod tests {
         std::fs::write(&output, &original_bytes).unwrap();
         let output_s = output.to_string_lossy().to_string();
 
-        let readonly = std::fs::OpenOptions::new().read(true).open(&output).unwrap();
-        let verified = VerifiedOutput { file: readonly, created: false };
+        // CPE-1961: the injection moved from a read-only handle to the staging create — see the
+        // sibling test above for why the old one now succeeds instead of failing.
+        let writable = std::fs::OpenOptions::new().write(true).open(&output).unwrap();
+        let verified = VerifiedOutput { file: writable, created: false };
 
+        let reset = ProbeReset::arm(ProbeInjection::StagingCreateFails);
         let err = verified
             .write_all(b"an attacker or a bug should not be able to blank this out", &output_s)
-            .expect_err("the read-only handle must still fail the write");
+            .expect_err("the injected staging-create failure must still fail the write");
+        drop(reset);
         println!("CPE-1667 injected write failure (pre-existing file): {err}");
 
         assert!(output.exists(), "the pre-existing file must not be deleted just because its write failed");
@@ -4982,6 +5138,149 @@ mod tests {
             "a failed write on a file we did NOT create must leave its original bytes untouched"
         );
 
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **CPE-1961's guard for this engine, and the one CI runs.** The racer in `fsutil` measures the
+    /// hole; this pins the property that closed it, with no race in it at all.
+    ///
+    /// # Two halves, because the Windows figure was a shield and the shield has to be shown
+    ///
+    /// The output really is a second name for a file outside the batch's folder -- a genuine hard
+    /// link, not a mock.
+    ///
+    /// **Half one** goes through the front door and asserts that [`open_output_verified`] **refuses**
+    /// it. That refusal comes from `classify_output_containment`, which runs *before* the open and
+    /// resolves the output by PATH. It is worth pinning in its own right, and it is also the reason
+    /// this site raced so much lower on Windows than `fsutil`'s (24 / 2,000 against 166 / 2,000, while
+    /// both were ~2,800 per 10,000 on Linux): far fewer trials ever reached the check-then-use. **That
+    /// is a path gauntlet, not containment** -- CPE-1929's shape -- and it is stated here rather than
+    /// leaned on.
+    ///
+    /// **Half two** is the containment property itself. It bypasses the gauntlet by building the
+    /// `VerifiedOutput` directly -- exactly the state the engine would be in if the link count had
+    /// lied, which is what the racer produces and what
+    /// [`ProbeInjection::HandleUnderReportsLinks`] injects at the sibling site -- and then asserts on
+    /// the **filesystem**: the file outside the folder still holds its own bytes, and the output holds
+    /// the new ones. Before CPE-1961 `write_all` truncated and wrote through that very handle, so this
+    /// half fails against the old body with the outside file holding the batch's payload.
+    ///
+    /// The injection seam is not used here because it cannot be: it makes `handle_facts` lie, and
+    /// `handle_facts` is not what the path gauntlet asks. Constructing the state directly is the
+    /// honest way to reach the code under test, and it is what the two `cpe_1667_*` tests above
+    /// already do.
+    #[test]
+    fn cpe_1961_a_write_never_lands_in_a_file_outside_the_batchs_folder() {
+        const UNTOUCHED: &[u8] = b"UNTOUCHED";
+        const PAYLOAD: &[u8] = b"ATTACKER PAYLOAD";
+
+        let dir = scratch("cpe1961-batch-containment");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, UNTOUCHED).unwrap();
+        let input = selected.join("input.bin");
+        std::fs::write(&input, b"the batch's input").unwrap();
+
+        let output = selected.join("output.bin");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &output.to_string_lossy()).is_err()
+        {
+            crate::skip_notice!(
+                "SKIPPING cpe_1961_a_write_never_lands_in_a_file_outside_the_batchs_folder: no \
+                 hard-link support here -- this test verified NOTHING"
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+        let (input_s, output_s) =
+            (input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned());
+
+        // Half one: the shield. Recorded, not relied on.
+        let shielded = open_output_verified(&input_s, &output_s);
+        assert!(
+            shielded.is_err(),
+            "the path gauntlet in front of the open must still refuse a multiply-linked output whose \
+             other name is outside the folder"
+        );
+
+        // Half two: the containment, with the gauntlet out of the way.
+        let (file, created) = open_no_follow(&output).expect("the planted link opens no-follow");
+        assert!(!created, "the output was planted before this call, so it cannot report as created");
+        let result = VerifiedOutput { file, created }.write_all(PAYLOAD, &output_s);
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            UNTOUCHED,
+            "a file OUTSIDE the batch's folder was written through the output's name -- the write went \
+             through the handle instead of into a staged sibling (result was: {result:?})"
+        );
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            PAYLOAD,
+            "the batch write must still land at the output the plan named (result was: {result:?})"
+        );
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **CPE-1961: the `links > 1` census was shadowed, and this is what un-shadows it.**
+    ///
+    /// Measured pair before this test existed (CPE-1929's tell, both halves run):
+    /// `if false && facts.links > 1` left the suite at **2,430 passed / 0 failed**, and forcing the
+    /// predicate to lie (`HandleFacts { links: 1, ..facts }`) left it at **2,430** too. The shadowing
+    /// check is [`classify_output_containment`]'s path-side link probe, which runs before the open —
+    /// every fixture planted its link before the call, so the path question always answered first.
+    ///
+    /// The census is not redundant with it: the path probe reads the **name** before the open and the
+    /// census reads the **object** after it, so a link planted *between* them is caught by exactly one
+    /// of the two. This test plants it there, through
+    /// [`link_between_containment_and_open_for_test`], and asserts on the filesystem.
+    ///
+    /// With this test present, `if false && facts.links > 1` reds it. That is the difference between a
+    /// guard that is safe and one that is verified.
+    #[test]
+    fn cpe_1961_a_link_planted_after_the_path_check_is_still_caught_by_the_handle_census() {
+        let dir = scratch("cpe1961-census-window");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("VICTIM.txt");
+        std::fs::write(&victim, b"UNTOUCHED").unwrap();
+        let input = selected.join("input.bin");
+        std::fs::write(&input, b"the batch's input").unwrap();
+        // An ORDINARY file at the output, so the path gauntlet in front of the open says "inside".
+        let output = selected.join("output.bin");
+        std::fs::write(&output, b"an ordinary previous output").unwrap();
+
+        let (input_s, output_s) =
+            (input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned());
+        link_between_containment_and_open_for_test(&victim.to_string_lossy(), &output_s);
+        let verdict = open_output_verified(&input_s, &output_s);
+
+        if std::fs::read(&output).ok().as_deref() == Some(b"an ordinary previous output".as_slice()) {
+            crate::skip_notice!(
+                "SKIPPING cpe_1961_a_link_planted_after_the_path_check_is_still_caught_by_the_handle_\
+                 census: the seam could not create a hard link here -- this test verified NOTHING"
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+
+        let err = verdict.err().expect(
+            "a link planted between the path check and the open leaves the output with a second name \
+             OUTSIDE the folder, and only the handle-side census can see it",
+        );
+        assert!(
+            err.contains("names") && err.contains("selected folder"),
+            "the refusal must be the census's, naming the count and the folder: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"UNTOUCHED",
+            "nothing may have been written through the planted link"
+        );
         let _ = std::fs::remove_dir_all(dir.path());
     }
 

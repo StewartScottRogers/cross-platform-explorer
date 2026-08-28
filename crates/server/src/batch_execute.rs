@@ -1970,6 +1970,16 @@ mod tests {
         let ok = execute_plan(&items, &job);
         assert!(ok.is_ok(), "an uncapped census must still allow a wholly-inside hard link: {ok:?}");
 
+        // **CPE-1961: re-establish the link before the capped run, or the second phase measures
+        // nothing.** The positive control above now REPLACES `shared-2.png` with a staged sibling
+        // instead of truncating the shared inode, so the hard link is gone by the time the capped run
+        // starts — `links` reads 1, the census is never reached, and the write sails through. That is
+        // the containment fix behaving correctly (a batch asked to write one output no longer changes
+        // a second name's bytes), and it is recorded on `VerifiedOutput::write_all`; here it just
+        // means the fixture has to be rebuilt between the two phases.
+        fs::remove_file(&b).unwrap();
+        fs::hard_link(&a, &b).unwrap();
+
         // Capped below the folder's entry count: refuse rather than guess.
         crate::batch_media::set_census_cap_for_test(Some(1));
         let err = execute_plan(&items, &job);

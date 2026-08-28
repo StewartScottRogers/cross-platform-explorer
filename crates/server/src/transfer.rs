@@ -720,7 +720,7 @@ pub fn download_tree(
         let mut claimed = match crate::fsutil::claim_destination_handle(
             &local,
             crate::fsutil::LinkGuardWording::DOWNLOAD,
-            || crate::open_beneath::create_beneath(&root_handle, &rel_local),
+            crate::fsutil::DestinationSite::Beneath { root: &root_handle, rel: &rel_local },
         ) {
             Ok(c) => c,
             Err(r) => {
@@ -730,6 +730,13 @@ pub fn download_tree(
         };
         if let Err(e) = std::io::Write::write_all(&mut claimed.file, &data) {
             hard_err = Some(format!("{}: {e}", local.display()));
+            return;
+        }
+        // CPE-1961: the bytes are in a staging sibling until this line renames it over `local`. A
+        // `return` above drops the claim, which removes the staged file — so a download that fails
+        // mid-write no longer leaves a truncated local file where a complete one used to be.
+        if let Err(r) = claimed.commit() {
+            hard_err = Some(r.why);
             return;
         }
         files += 1;
