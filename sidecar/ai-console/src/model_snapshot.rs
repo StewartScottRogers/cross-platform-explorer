@@ -154,6 +154,15 @@ pub fn verify_snapshot(snapshot: &ModelSnapshot, signature_hex: &str, trusted_ke
 /// unverifiable signature, and not-newer — all return the same bare `false`, and its own only
 /// production caller (`handle_models`) discards even that. There is no surface a reason could reach.
 ///
+/// **That last paragraph is a claim about `console.rs`, and it is the PREMISE of this decision, not
+/// decoration — so read it as unverified (CPE-1933).** It was checked by inspection twice on
+/// 2026-08-28 (CPE-1939, author and reviewer) and is **pinned by no test**: nothing re-reads
+/// `console.rs` to confirm those four `return false` are still bare, or that `handle_models` still
+/// discards the bool. Deriving it would mean parsing another module's control flow for a helper
+/// that has one caller, which is not worth the machinery — but the safety argument above is only as
+/// current as that grep. **Re-run it (`refresh_snapshot` in `sidecar/ai-console/src/console.rs`)
+/// before relying on this comment**, rather than trusting it because the crate's tests are green.
+///
 /// **What would make it a live bug**, i.e. what to watch for: the moment anything downstream turns
 /// this refusal into words for a user — a "model list is up to date" line, a staleness badge, a
 /// diagnostics entry naming why the snapshot was not adopted — the two situations need different
