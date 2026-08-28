@@ -4365,3 +4365,36 @@ is the "read the failure's arithmetic" lesson from two ticks ago, carried out pr
 and mine doesn't"*, it then pointed the planted symlink at **a separate empty directory outside the
 root**, so *"nothing through the link"* means what it says rather than counting the claim's own pre-link
 stub. **Taking a correction and then tightening it is the strongest form of agreement available.**
+
+## 2026-08-29 — the anecdote was a pattern: five of ten sabotage anchors resolve to prose first
+
+Last tick #1093 found that one scripted sabotage had patched its own documentation instead of the code,
+and wrote the hazard up at the site with the correct remedy — *assert the patched file differs in code*.
+
+Its reviewer then **enumerated all ten recipes** rather than accepting the one. **Five of the ten have a
+bare anchor string whose first occurrence in the file is prose**, all of them inside the very red-proof
+list that documents them. Two more are ambiguous for a different reason — the anchor resolves to **two
+code sites**, disambiguated only by operand order — which the diff-in-code remedy catches for the first
+kind and **not** for the second. Only two are safe, and one of those is safe **by luck**: its declaration
+happens to precede the docblock that quotes it.
+
+**So the write-up was accurate and the framing was wrong**, which is the shape this shift has found in
+more costumes than any other. *"Here is the instance"* reads as an incident report; the truth is a
+property of the list, and a reader who checks the one named recipe and moves on has read the document
+correctly and drawn a false conclusion.
+
+**The transferable form is narrow and cheap: when you document a hazard you hit once, enumerate the other
+members of whatever set it came from before you write the sentence.** Ten recipes, ten greps. Here it
+turns a note into a rule and separates two remedies that look like one.
+
+**And a self-referential detail worth keeping.** These anchors collide with prose *because the prose is
+the red-proof list itself* — the document that exists to make the sabotages reproducible is the thing that
+makes them silently unreproducible. **A file that documents its own tooling accumulates decoys**, which
+this shift already learned once on a different PR, where a scanner matched the examples in its own
+docblock. Same mechanism, opposite direction: there the docs were matched by the tool; here the docs are
+matched by the tool's *test*.
+
+Also recorded: the itemisation of a test-count delta has now moved three rounds running and its latest
+form does not reproduce — *"75 runtime tests from 20 literal `it(` blocks"* against a file with **68**.
+The figures that matter were all verified by running. **A number that has been wrong three times is
+cheaper to delete than to correct a fourth time**, and that is the instruction given.
