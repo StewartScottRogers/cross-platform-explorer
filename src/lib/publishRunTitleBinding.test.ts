@@ -35,14 +35,31 @@
 // `displayTitle "Release (sidecar) v1.2.3-sidecar-decoy"` while explaining the decoy attack, and a
 // paragraph outside every fence quotes `"Release (sidecar) <TAG>"` directly.
 //
-// Being honest about which half of that is load-bearing TODAY, because CPE-1929 says an unreachable
-// guard reads as coverage: the FENCE filter is what excludes today's prose. Stripping `#` comments
-// is not reached by any string presently in `run.md` — none of its comments spells the full
-// `$_.displayTitle -ceq "…"` shape — so it would be exactly the "safe and unverifiable at once"
-// pair if it were left asserted-but-untested. It is kept (a comment demonstrating the decoy in the
-// obvious way is one edit away) and given its own coverage below, against a synthetic document, with
-// the un-stripped reading measured alongside so the test is a literal red-then-green rather than an
-// assertion about behaviour nobody checked.
+// Being honest about which half of that is load-bearing TODAY, because CPE-1929 says a guard nothing
+// can reach still reads as coverage — and because round 1 of THIS comment got it wrong, naming the
+// FENCE filter as the half that carries today's prose. Measured 2026-08-27 by running both sabotages
+// against the real `run.md`, each scoped to the production read (`powershellLines`) so the synthetic
+// documents below keep both filters, which is the entire point of them:
+//
+//   * drop the fence filter — scan the whole `.md`, comments still stripped: 6 passed / 6;
+//   * drop the fence filter AND the comment stripping: 6 passed / 6.
+//
+// So NEITHER filter is reached by `run.md` today. `grep -n -- "-ceq" .claude/commands/run.md` says
+// why: only lines 83 and 92 carry the `$_.displayTitle` / `$_.headBranch -ceq "…"` shape, and both
+// are live code. Line 78 is a `#` comment that discusses `-ceq` without spelling the comparison;
+// lines 105 and 119 use a different property (`$_.name`), the latter compared against a variable
+// rather than a literal — so `ceqCandidates` never sees any of them. Nor is the prose this header
+// cites: neither the in-fence comment quoting `displayTitle "Release (sidecar) v1.2.3-sidecar-decoy"`
+// nor the out-of-fence paragraph quoting `"Release (sidecar) <TAG>"` is in the
+// `$_.<property> -ceq "…"` shape the extractor matches.
+//
+// Nothing here is untestable, which is what separates this from CPE-1929's unreachable-guard pair:
+// both filters carry real synthetic coverage below — the comment stripping via the RED/GREEN decoy
+// pair, the fence filter via "prose outside every fence is not scanned at all". Both are KEPT because
+// both are one edit away from mattering (a comment demonstrating the decoy in the obvious way; one
+// sentence of prose quoting the live comparison). The two numbers are recorded here so the next reader
+// knows up front that the real files exercise neither, and does not read this file's green as evidence
+// that they do.
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

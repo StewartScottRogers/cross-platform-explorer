@@ -100,7 +100,9 @@ pub fn strip_shell_comment(line: &str) -> String {
 struct HeredocOpener {
     /// The word a terminator line must equal to close the body.
     delim: String,
-    /// True for the `<<-` form, whose terminator may be indented (bash strips leading TABS from it).
+    /// True for the `<<-` form, whose terminator may be indented. Bash strips leading TABS ONLY —
+    /// measured 2026-08-27, a SPACE-indented `END` stays BODY for `<<-` — whereas this (like the
+    /// reference) accepts ANY indent. Unreachable: no `<<-` exists in any workflow or `.sh` here.
     dashed: bool,
 }
 

@@ -113,7 +113,7 @@
     "expected": ["echo \"a <<NOPE\" && cat <<EOF", "echo after"]
   },
   {
-    "name": "CPE-1936: a backslash-escaped quote leaves the << UNquoted, so it still opens a body (as bash does)",
+    "name": "CPE-1936 KNOWN GAP (partially-quoted-delimiter family): a backslash-escaped quote leaves the << UNquoted, so a body IS opened -- but bash's delimiter is EOF-plus-quote, not bare EOF, so closing on bare EOF resumes scanning a body line as code",
     "input": "echo \\\"<<EOF\\\"\nbody\nEOF\necho after",
     "expected": ["echo \\\"<<EOF\\\"", "echo after"]
   },

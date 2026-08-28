@@ -254,3 +254,105 @@ file's own property tests stay where they were reviewed.
 - `crates/updater-verify`: `cargo clippy --all-targets -- -D warnings` and the same with
   `--all-features` both clean; `cargo test` **147 passed** (from 145: +2 new `workflow_scan` unit
   tests), sources touched first so the run is not a stale-cargo false green.
+
+## Work Log — 2026-08-27 (round 2 — Reviewer corrections, comment-only)
+
+The Reviewer reproduced every substantive claim of round 1: both headline deltas line for line, the
+"no other workflow moved" sweep over all eight workflows *plus* the three
+`.github/workflows/scripts/*.sh`, the "no file LOST a line anywhere" direction, both sabotages
+independently, and the run-time-read proof (it edited one `expected` in the shared oracle and watched
+`cargo test the_port_matches` panic). Three **comment** defects came back. No code changed in this
+round; the diff is four files, comments only.
+
+### 1 (blocker) — the honesty paragraph named the wrong half, and there is no right half
+
+`publishRunTitleBinding.test.ts`'s header said the FENCE filter was what excludes today's prose and
+that the `#`-comment stripping was the unreached half. Re-measured here, each sabotage scoped to the
+production read (`powershellLines`) so the synthetic documents below keep both filters:
+
+| sabotage against the real `run.md` | result |
+|---|---|
+| drop the fence filter (whole `.md` scanned, comments still stripped) | **6 passed / 6** |
+| drop the fence filter **and** the comment stripping | **6 passed / 6** |
+
+**Neither** filter is reached. `grep -n -- "-ceq" .claude/commands/run.md` gives the reason: only
+lines **83** and **92** carry the `$_.displayTitle` / `$_.headBranch -ceq "…"` shape and both are
+live code. Line 78 is a `#` comment that discusses `-ceq` without spelling the comparison; lines 105
+and 119 use a different property (`$_.name`), the latter compared against a variable rather than a
+literal. The prose the header cites is not in that shape either — neither the in-fence comment
+quoting `displayTitle "Release (sidecar) v1.2.3-sidecar-decoy"` nor the out-of-fence paragraph
+quoting `"Release (sidecar) <TAG>"`.
+
+Nothing here is untestable, which is the difference from CPE-1929's unreachable-guard pair: both
+filters carry real synthetic coverage (the RED/GREEN decoy pair; "prose outside every fence is not
+scanned at all"), and both are one edit away from mattering, so both stay. The paragraph now says
+exactly that, with **both measured numbers at the site**.
+
+**This supersedes the "One honesty correction while in there" paragraph in round 1's log above, which
+carried the same wrong claim.**
+
+### 2 — "(as bash does)" is only half true
+
+The shared case named the backslash-escaped opener as agreeing with bash. Bash *does* open a body for
+`echo \"<<EOF\"`, but it takes the delimiter as **`EOF"`**, not `EOF`:
+
+    $ bash -n t1.sh
+    t1.sh: line 4: warning: here-document at line 1 delimited by end-of-file (wanted `EOF"')
+
+and a literal `EOF"` line does close it (verified by *executing* the variant, which printed the body
+line as data and then `after`). This parser closes on bare `EOF` and resumes scanning — the
+**false-POSITIVE** (body-as-code) direction, the same family as the already-documented `<<E"OF"` gap.
+Unreachable in this tree. The case is renamed to a **KNOWN GAP** and folded into that bullet in
+`shellScriptLines.ts`; the Rust port's comment already defers to it.
+
+### 3 — two parser comments were inaccurate (both unreachable, so documented rather than fixed)
+
+- **`closesHeredoc`**: the shape it accepts that bash would not is a terminator indented **≤** an
+  already-indented opener, not "less than" — the equal case is the easy one to misstate. Measured:
+  `cat <<EOF` at column 2 inside `if true; then` with its `EOF` also at column 2 is **body** to bash
+  (`bash -n` → "here-document at line 2 delimited by end-of-file (wanted `EOF')", then
+  "syntax error: unexpected end of file from `if' command on line 1"), while this closes it.
+- **`HeredocOpener.dashed`**: said bash strips leading TABS; the code accepts **any** indent.
+  Measured: for `<<-END`, a **space**-indented `END` stays body, a tab-indented one closes. Corrected
+  in the TS doc and in the Rust twin (`workflow_scan.rs`) in lockstep.
+
+### Unreachability, enumerated rather than recalled (CPE-1932)
+
+`git grep -- '<<' .github/workflows` → nine lines: three real openers (`ci.yml:367`, `ci.yml:386`,
+`release-sidecar.yml:71`, all `<<'EOF'` at column ≥ 10), the three `echo "…<<…_EOF"` N8 shapes in
+`ffmpeg-pin-freshness.yml`, and three `<<<` here-strings. `git grep -- '<<' -- '*.sh'` → **none at
+all**, so the three `.github/workflows/scripts/*.sh` contain no heredoc either. No arithmetic `<<`,
+no two heredocs on one line, no partially quoted delimiter, **no `<<-` anywhere**. Recorded in
+`heredocOpener`'s comment so the next reader gets a measurement rather than a recollection.
+
+Separately, the indentation judgement call from round 1 stands and is necessary:
+`release-sidecar.yml:71`'s opener and its `EOF` both sit at column 10 (`cat -A` confirmed), so a
+column-0 rule would leave that heredoc open for ~294 lines and empty the scan.
+
+### Live impact, stated the stronger way
+
+`releaseHangHardening.test.ts`'s header records that **CPE-1849 folded `ffmpeg-pin-freshness.yml`
+into `GUARDED`** — so before this fix the hardening scan really *was* blind to 24 per-step logical
+lines (31 → 39 and 35 → 51 across the two `check-pins` steps; 142 → 302 whole-file) of a file it
+believed it covered, and no other workflow moved by a line. Nothing answered *wrongly* only because
+that blind window contained no `curl`, no `apt`, no `--expect-channel` and no `--locked` — established
+by **reading** the newly visible lines, not inferred from guards staying green. The module comment
+now says it that way instead of "NOT latent".
+
+### Out of scope, filed as CPE-1969
+
+Two further CPE-1932 gaps the Reviewer found and did not ask for here:
+`lockfileLockedGuard.test.ts`'s `WORKFLOW_FILES` is a hard-coded 5-file list, and no consumer scans
+`.github/workflows/scripts/*.sh` at all.
+
+### Verification (round 2)
+
+- `npm run check` — 0 errors, 0 warnings.
+- `npm test` — **5024 passed / 2 skipped, 350 files**, against a `b5658d93` baseline of **5003 / 2,
+  349** → **+21 tests, +1 file**. Round 1's log quoted absolutes taken before a main merge; the delta
+  was and is exact, which is precisely why the delta is the number that gets reported.
+- `crates/updater-verify`: `cargo clippy --all-targets -- -D warnings` clean with sources touched
+  first; `cargo test` **147 passed** (79 + 31 + 21 + 13 + 2 + 1 + 0 + 0). The crate has **no
+  `[features]` section**, so `--all-features` is identical to the default build and its instant second
+  run is a legitimate cache hit, not a stale green.
+- Every sabotage reverted; the working tree carries only the intended comment diff.

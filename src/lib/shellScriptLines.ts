@@ -132,14 +132,23 @@ export function stripShellComment(line: string): string {
  *
  *  That is the FALSE-NEGATIVE direction — `releaseHangHardening.test.ts`'s "no `apt`/`curl` left
  *  unhardened" scan simply stops seeing the unhardened command. Unlike the `<<<` shape above this one
- *  is NOT latent: `ffmpeg-pin-freshness.yml` writes GitHub multi-line outputs with
- *  `echo "failures<<PINFAIL_EOF" >> "$GITHUB_OUTPUT"`, which is exactly this shape, and the Rust
- *  whole-file consumers scan that workflow.
+ *  was not latent but LIVE: `ffmpeg-pin-freshness.yml` writes GitHub multi-line outputs with
+ *  `echo "failures<<PINFAIL_EOF" >> "$GITHUB_OUTPUT"` in three places, and
+ *  `releaseHangHardening.test.ts`'s header records that CPE-1849 folded that very workflow into
+ *  `GUARDED`. So the hardening scan really was BLIND to 24 per-step logical lines of a file it
+ *  believed it covered (31 -> 39 and 35 -> 51 across the two `check-pins` steps; 142 -> 302
+ *  whole-file), and no other workflow moved by a line. Nothing answered wrongly only because the blind
+ *  window happened to contain no `curl`, no `apt`, no `--expect-channel` and no `--locked` — which is
+ *  established by READING the newly visible lines, not inferred from the guards staying green. A
+ *  `curl` added after one of those `echo` lines would simply have dropped out of the scan.
  */
 interface HeredocOpener {
   /** The word a terminator line must equal to close the body. */
   delim: string;
-  /** True for the `<<-` form, whose terminator may be indented (bash strips leading TABS from it). */
+  /** True for the `<<-` form, whose terminator may be indented. Bash strips leading TABS ONLY —
+   *  measured 2026-08-27, a SPACE-indented `END` stays BODY for `<<-` while a tab-indented one closes
+   *  — whereas this accepts ANY indent, the over-acceptance direction. Unreachable: `git grep -- '<<-'`
+   *  finds no `<<-` in any workflow or `.sh` in the tree, only comments, docs and the shared cases. */
   dashed: boolean;
 }
 
@@ -159,7 +168,19 @@ interface HeredocOpener {
  *   - **Two heredocs on one line**: `cat <<A <<B` opens both bodies in bash; only `A` is tracked
  *     here, so `B`'s body is scanned as live code after `A` closes. Same as the pre-CPE-1936
  *     behaviour, not a regression.
- *   - **A partially quoted delimiter**: bash reads `<<E"OF"` as `EOF`; this reads it as `E`.
+ *   - **A partially quoted delimiter**: bash reads `<<E"OF"` as `EOF`; this reads it as `E`. The
+ *     backslash-escaped shape belongs to the same family, measured 2026-08-27: in `echo \"<<EOF\"`
+ *     the `<<` genuinely IS unquoted and bash does open a body — but it wants the delimiter `EOF"`
+ *     (`bash -n` reports `wanted 'EOF"'`, and a literal `EOF"` line does close it), while this closes
+ *     on bare `EOF` and resumes scanning. That is the false-POSITIVE direction, a body line read as
+ *     code. The shared case file carries it as a KNOWN GAP, NOT as agreement with bash.
+ *
+ *  Enumerated rather than recalled (CPE-1932), so "none exists in the tree" is a measurement:
+ *  `git grep -- '<<' .github/workflows` returns nine lines — three real openers (`ci.yml:367`,
+ *  `ci.yml:386`, `release-sidecar.yml:71`, all `<<'EOF'` at column >= 10), the three
+ *  `echo "…<<…_EOF"` N8 shapes in `ffmpeg-pin-freshness.yml`, and three `<<<` here-strings — and
+ *  `git grep -- '<<' -- '*.sh'` returns none at all. No arithmetic `<<`, no two heredocs on one line,
+ *  no partially quoted delimiter, no `<<-` anywhere.
  *
  *  Ported to `heredoc_delimiter()` in `crates/updater-verify/src/workflow_scan.rs`; both are run
  *  against `shellScriptLines.cases.json`, so a change on one side alone turns the other side red. */
@@ -246,8 +267,12 @@ function heredocOpener(line: string): HeredocOpener | null {
  *  and empty the scan — the worst possible direction. So: the terminator must be the delimiter alone,
  *  indented no more than the line that opened it. For a genuine shell script (opener at column 0) that
  *  IS bash's rule exactly. The one shape it still accepts that bash would not is a terminator indented
- *  less than an already-indented opener (`if …; then` + an indented `cat <<EOF`); closing early there
- *  is the pre-existing behaviour and no such shape exists in the tree. */
+ *  NO MORE THAN an already-indented opener — `<=`, not `<`, and the equal case is the easy one to
+ *  misstate. Measured 2026-08-27: `cat <<EOF` at column 2 inside `if true; then`, with its `EOF` also
+ *  at column 2, is BODY to bash (`bash -n` warns that the here-document is delimited by end-of-file,
+ *  and the `if` then hits an unexpected EOF), while this closes it. Closing early there is the
+ *  pre-existing behaviour and is unreachable in this tree: no workflow and no `.sh` file has a
+ *  non-uniformly indented heredoc (the enumeration is in `heredocOpener`'s comment above). */
 function closesHeredoc(raw: string, h: HeredocOpener & { indent: number }): boolean {
   const body = raw.replace(/\r$/, "");
   const indent = /^[ \t]*/.exec(body)![0];
