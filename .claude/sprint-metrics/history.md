@@ -2207,3 +2207,43 @@ found `--log-warn` missing from **both** high-contrast blocks — the log viewer
 measuring **3.54 / 3.28 / 2.94** in hc-dark, below AA's 4.5:1 floor on every surface, in the
 *high-contrast* theme. An independent from-spec WCAG implementation reproduced every digit. The guard
 is worth having; its header just has to be as measured as its assertions.
+
+## 2026-08-27 — I read a stack trace off the wrong spec, and drew a boundary from two data points
+
+I filed **CPE-1965** off a shard-4 failure, quoting `WebDriverError: element not interactable` as the
+symptom and arguing at length that it was **not** CPE-1960's shape. The worker checked the timestamps:
+that line is at **01:39:01.382**; `organize.smoke.ts` does not start until **01:39:28.210**. It belongs
+to an **earlier spec**, where a `waitForClickable` poll absorbed it and it failed nothing. The actual
+failure was `expected a PNG group for the seeded CPE-1143-photo.png` — a `waitForExist` timeout.
+
+I had grepped the job log for error-shaped lines near the failing spec's name and taken the nearest
+one. In an interleaved 14-spec shard log, "nearby" is not "related."
+
+**The second error is worse, because I had just written the lesson down.** I compared `main` at 01:31Z
+(shard 4 clean) with #1074 at 01:38Z (one extra failure) and concluded #1074 carried something new.
+The worker enumerated **all 103 GUI-smoke runs** in the window, resolved the shard-4 job for each, and
+downloaded **69** completed logs:
+
+| install | wdio | jobs | failures | rate |
+|---|---|---|---|---|
+| `added 479 packages` | 9.30.0 | 51 | 1 | 2.0% |
+| `added 489 packages` | 9.31.4 | 18 | 2 | 11.1% |
+| **total** | | **69** | **3** | **4.3%** |
+
+Fisher p ≈ 0.15 — **not a version effect**. One of the three predates the lockfile bump entirely, so it
+is not a CPE-1960 casualty. And **`main` itself carried the failure at 00:14Z**, forty minutes before
+the run I called clean. *"#1074 has one extra"* was a **sampling artefact** — the identical mistake
+that produced three wrong characterisations of CPE-1960, made by me, in the ticket I filed to stop it
+happening again, hours after writing *"sampling a handful of CI jobs and calling the pattern
+deterministic is a guess with a table around it."*
+
+**Knowing the rule is not the same as applying it, and the tell is cheap:** any claim of the form "this
+branch has something main doesn't" is a **rate comparison**, and a rate needs the denominator. Two runs
+is not a denominator. The enumeration cost the worker one pass of `gh api`.
+
+The diagnosis it reached instead is better than either of mine: a **reflow between the driver computing
+a click point and dispatching it**. `.preview` grows `120px` → `45vh` when the first plan lands ~120 ms
+after mount, sliding the centred dialog's rule pills **up ~98 px**, so the click lands in `.preview`
+— whose ancestor has `on:click|stopPropagation` and swallows it **silently**. Measured driver gaps
+across 69 logs: 27–159 ms; all three failures at 115/116/117 ms. `waitForClickable` is no protection —
+it passed in every failing run.
