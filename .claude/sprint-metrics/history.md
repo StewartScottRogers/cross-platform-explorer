@@ -3076,3 +3076,43 @@ Worth noting the honest arithmetic the reviewer put beside its blocker: the fix 
 **repairs 45 shapes and breaks 4.** It asked for the four, explicitly did not ask for a revert, and said
 so in the same breath as the finding. **A net-positive fix with a real regression in it is still a
 regression, and saying both numbers is what makes the objection actionable rather than discouraging.**
+
+## 2026-08-28 — the recovery path broke the thing it recovers, and the fixture could not have caught it
+
+#1092 adds a retry for a gui-smoke shard whose WebDriver session dies before asserting. On retry it
+archives the previous attempt's artefacts into a subdirectory — `.results/*.json` moved into
+`attempt-1/`.
+
+`.results/` holds two kinds of `.json`: the per-spec reporter chunks the loop is written for, and the
+**shard manifest**, written by an earlier workflow step. The loop moves both. The artifact upload is
+`path: .results/*.json` — flat, non-recursive — so **a retried shard uploads its results but not its
+manifest**, and the downstream verdict job, which requires a manifest from every shard, reports:
+
+> *MISSING SHARD: shard 2 of 4 never reported a manifest. Its spec files did not run.*
+
+**On the exact scenario the feature exists to handle, the shard goes green and the leg reds anyway, with
+a message that is false** — the shard ran twice and passed. Strictly worse than the diagnosable failure
+it replaces.
+
+**Two things make this worth writing down.**
+
+**The hazard was already known one file over.** A sibling module filters manifests out of the same
+directory by prefix, and its test has a case for exactly that co-location. The new code is the third
+reader of `.results/` and the first to forget that the directory holds two populations. *A directory
+with mixed contents needs the discriminator at every reader, and the existing filter is the notice that
+a second population exists — grep for it before writing the third reader.*
+
+**And the fixture could not have caught it.** The integration test drives the real scripts through a
+real retry — genuinely good — but its `.results/` only ever contains reporter chunks. **The test
+exercised the code path perfectly and the data was unrepresentative**, which is the failure mode a
+passing integration test is least likely to advertise. The fix is not another assertion; it is seeding
+the fixture with what production actually puts there. **When a test builds its own input, the question
+is not "does this path run" but "does this input look like production's."**
+
+Closing note on scope, from the reviewer, worth keeping as a template: *"the two halves of this PR are
+not equally justified."* The silent-recovery reporting is an unambiguous win — **8 of 45 jobs had
+recovered in-process with nothing anywhere saying so.** The retry itself is a backstop for an event now
+measured at **0 of 45**, adding ~500 lines to the critical path of every run — **and the blocker above
+is the evidence for that cost**, a break on the rarely-exercised path that survived both authoring and
+review. Still worth landing, but the reviewer said which half earned it and which half is insurance.
+That distinction belongs in the PR body, not just in the review.
