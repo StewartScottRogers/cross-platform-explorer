@@ -3,7 +3,7 @@ id: CPE-1954
 title: `catalog-sign verify` is the one path-forming index read that does not go through `VerifiedIndex` — and it is the one input that never passes `sign_bundle`
 type: bug
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -251,3 +251,28 @@ failed**. `cargo check --locked --features sidecar-platform` on `src-tauri`: cle
 Git Bash on Windows, which *has* `bash` on the PATH, hence the four script-executing files run here.
 (WSL cannot link `tests/keyring_roundtrip.rs` — `undefined symbol: sd_listen_fds`, an environment
 gap, not a code one; the authoritative cargo numbers above are the Windows run.)
+
+## Closing record — merged as PR #1088 (`1d938352`), 2026-08-28
+
+**What the gauntlet actually proved.**
+
+Round 1 routed `catalog_sign`'s `verify` through `VerifiedIndex` and was correct as far as it went. The
+Reviewer's objection was not that the fix was wrong but that it was **the wrong kind of fix**: routing one
+caller through the safe path leaves the unsafe path exported and reachable, so the guarantee lasts exactly
+until the next caller. Round 2 closed it **structurally** instead — the public types no longer derive
+`Deserialize`, they are `#[non_exhaustive]`, and `from_json` is private. There is now no way to construct
+one of these from JSON without going through verification, so the property is enforced by the type system
+rather than by every future author remembering.
+
+That is the distinction worth carrying forward: **a fix that corrects today's caller and a fix that makes
+tomorrow's caller impossible are different fixes**, and for a verification boundary only the second one is
+finished. The review round that insisted on it cost one iteration and removed the whole class.
+
+**What this does not close.** The catalog pipeline still has not actually published an index since
+**v0.57.33 on 2026-07-25** — `/releases/latest/` resolves to a sidecar release whose channel does not run
+the `catalog` job at all, so the live index URL 404s. Issue **#1062** stays open until a real publish
+happens; this ticket hardened how an index is *read*, not whether one gets *written*. **CPE-1951** (the
+monotonic publish-time lower bound) is the ticket working the write side and was dispatched the same
+night.
+
+Gates: full CI green on the merge sha — 25 checks, `GUI smoke (windows-latest)` skipped by design.
