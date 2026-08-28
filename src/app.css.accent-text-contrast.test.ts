@@ -31,32 +31,52 @@
 //       dark, hc-light, hc-dark) in its own block, and resolves there to a concrete hex.
 //       The declaration half was added in review, because the resolution half alone did not do what
 //       this comment originally claimed. A reviewer deleted --accent-text from the hc-dark block:
-//       hc-contrast.test.ts, app.css.test.ts and warn-token.test.ts all stayed GREEN, and so did
+//       hc-contrast.test.ts, app.css.test.ts and warn-token.test.ts all stayed GREEN (that is no
+//       longer true of the first two — CPE-1962 closed it; see the table below), and so did
 //       this test — `tokenHex` falls back to the palette layer, and the bare :root semantic block's
 //       own --accent-text (#0067c0) is in that map, so a hex came back and the assertion passed.
 //       Only the RATIO tests (b)/(c) caught it, because the inherited light blue then measured
 //       3.70/3.43/3.07 in hc-dark. Safe by luck, not by design: had the inherited value happened to
 //       clear the bar, the omission would have shipped silently.
-//       The parity coverage that DOES exist is uneven, and worth stating exactly — an earlier draft
+//       The parity coverage that DOES exist was uneven, and worth stating exactly — an earlier draft
 //       of this note said flatly that there is no general theme-parity guard in this repo, which is
-//       false for the dark block and was corrected in review. Measured, not read:
+//       false for the dark block and was corrected in review. **CPE-1962 then made it even**, by
+//       copying dark's idiom into the other two files; the table below is the state AFTER that
+//       landed. Measured, not read, at both revisions:
 //
 //         block                                     fixture check   symmetric check   new token covered?
-//         bare :root, light  (app.css.test.ts)      yes             no                NO
-//         dark               (dark-contrast.test)   yes             YES               yes
-//         hc-light, hc-dark  (hc-contrast.test)     yes             no                NO
+//         bare :root, light  (app.css.test.ts)      yes             YES (CPE-1962)    yes
+//         dark               (dark-contrast.test)   yes             YES (CPE-1539)    yes
+//         hc-light, hc-dark  (hc-contrast.test)     yes             YES (CPE-1962)    yes
 //
-//       dark-contrast.test.ts carries a second, FIXTURE-INDEPENDENT check beside its
+//       The symmetric check is a second, FIXTURE-INDEPENDENT filter beside each file's
 //       `SEMANTIC_TOKENS.filter(...)` one — `lightOnly`, "keeps the fixture itself honest if a
 //       future ticket adds a new semantic token to light but not dark" — so a brand-new token joins
-//       it automatically with no fixture edit. Deleting --accent-text from the dark block fails
-//       dark-contrast.test.ts with `tokens present in light but missing from dark: --accent-text`,
-//       naming a token that appears in no fixture. The same deletion from hc-dark leaves
-//       hc-contrast.test.ts fully GREEN (23/23): that file has only the two fixture filters and no
-//       symmetric counterpart, and app.css.test.ts's bare-:root/light pair is in the same shape.
-//       CPE-1962 is filed to give both of them the symmetric check dark already has. Until it
-//       lands, parity for a new token in bare :root, light, hc-light or hc-dark holds only where a
-//       test like this one asserts it by name.
+//       it automatically with no fixture edit. dark-contrast.test.ts has had it since CPE-1539.
+//
+//       Deletions, each run on its own (one deletion proves one block, never three):
+//         * --accent-text from dark     -> dark-contrast.test.ts fails, "tokens present in light but
+//           missing from dark: --accent-text" — a name in no fixture. Unchanged by CPE-1962.
+//         * --accent-text from hc-dark  -> BEFORE CPE-1962: hc-contrast.test.ts fully GREEN, 23/23.
+//           AFTER: fails, "tokens present in light but missing from hc-dark: --accent-text"
+//           (1 failed, 22 passed).
+//         * --accent-text from hc-light -> AFTER: fails, "...missing from hc-light: --accent-text"
+//           (1 failed, 22 passed).
+//         * --accent-text from the bare :root semantic block -> AFTER: app.css.test.ts fails,
+//           "tokens declared in :root[data-theme=\"light\"] but missing from the bare :root semantic
+//           block: --accent-text" (1 failed, 21 passed).
+//       So parity for a brand-new token now holds in all five live theme blocks by derivation, not
+//       only where a test like this one names the token by hand. What the symmetric checks still do
+//       NOT cover: a token missing from EVERY block including light (nothing to compare against),
+//       and a value that is present but wrong — which is what the ratio assertions below are for.
+//
+//       One live omission fell out of CPE-1962's sweep, and it was a real defect rather than a
+//       legitimate exception: --log-warn was declared in bare :root, light and dark but in neither
+//       hc block, so both hc themes inherited light's #8a5a00 through the fallback block —
+//       3.54/3.28/2.94:1 on hc-dark's --bg/--surface/--surface-alt, the log viewer's WARN badge
+//       below the AA body-text floor in the theme whose premise is legibility. Fixed in app.css
+//       (both hc blocks now alias their own --warn) rather than added to an exception list; the
+//       symmetric checks ship with NO exception list at all, which is the point.
 //   (b) --accent-text clears the text bar on every painted surface in every theme.
 //   (c) EVERY colour role the JSON preview paints — not just the string value that was reported —
 //       clears the text bar on every painted surface in every theme, with the role list DERIVED by

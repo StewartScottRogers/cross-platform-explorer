@@ -767,7 +767,17 @@
   --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above; hc-light
                                      never had this problem (white on hc-light --danger/--accent
                                      measure 10.01:1/7.79:1, both comfortably clear) */
+  /* CPE-1962: --log-warn was the ONE token the light block declares that neither hc block did, found
+     by the parity check this ticket added (see src/app.css.hc-contrast.test.ts). Both hc themes were
+     therefore inheriting the bare :root value (#8a5a00, an amber calibrated for a WHITE surface)
+     through the fallback block. Measured against hc-light's own surfaces: 5.93:1 / 5.93:1 / 5.29:1
+     (--bg / --surface / --surface-alt) — clears WCAG AA but NOT the >=7:1 AAA-inspired bar this
+     theme holds every other body-text token to. Aliased to --warn, hc-light's already-verified
+     amber, which measures 7.83 / 7.83 / 6.99. Same defect class as CPE-1810/CPE-1821 (a token whose
+     fallback silently won in a theme nobody checked), just reached via the fallback BLOCK rather
+     than a var() fallback argument. */
   --warn: var(--pal-hc-light-amber-900);  /* CPE-1810 — see that palette entry's comment above */
+  --log-warn: var(--warn);  /* CPE-1962 — see the note directly above */
   --warn-fill: var(--warn);
   --text-muted: var(--pal-hc-light-gray-600);  /* CPE-1821 — see the bare :root block's comment
                                                     above; 10.37:1 vs --surface, comfortably clears
@@ -845,7 +855,19 @@
      other theme defines this identically to --danger (zero visual change there); only hc-dark needs
      a different value because only hc-dark's --danger/white-on-fill windows don't overlap. */
   --danger-fill: var(--pal-hc-dark-red-fill);
+  /* CPE-1962: hc-dark is the theme where the inherited --log-warn actually hurt. Before this line it
+     resolved to the bare :root block's #8a5a00 — an amber picked for white — and measured
+     3.54:1 / 3.28:1 / 2.94:1 against hc-dark's --bg / --surface / --surface-alt. That is the log
+     viewer's WARN badge text and row rule, at 10-11px, in the theme whose entire premise is
+     legibility: under WCAG AA's 4.5:1 body-text floor on every surface, and under 1.4.11's 3:1
+     non-text floor on the hover fill. Aliased to --warn (hc-dark's bright amber, #ffcc66, already
+     verified for its own foreground role): 14.08 / 13.03 / 11.67. --warn is the right alias target
+     here and NOT in the dark theme — dark's --warn doubles as --warn-fill under white text so it has
+     to stay dim, which is exactly why dark declares a separate brighter --log-warn; hc-dark already
+     split --warn-fill onto its own primitive (next line), so its --warn is free to be the bright,
+     legible one both roles want. */
   --warn: var(--pal-hc-dark-amber-300);  /* CPE-1810 — see that palette entry's comment above */
+  --log-warn: var(--warn);  /* CPE-1962 — see the note directly above */
   --warn-fill: var(--pal-hc-dark-amber-fill);  /* same negative-window split as --danger-fill above */
   --text-muted: var(--pal-hc-dark-gray-600);  /* CPE-1821 — see the bare :root block's comment
                                                    above; 10.57:1 vs --surface, comfortably clears

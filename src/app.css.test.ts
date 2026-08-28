@@ -124,6 +124,68 @@ describe("app.css theme-token layering (CPE-1534)", () => {
     ).toEqual([]);
   });
 
+  // CPE-1962: the two assertions above are both fixture-scoped — they can only ever see a token
+  // someone remembered to append to SEMANTIC_TOKENS, which was written pre-CPE-1534 and has not been
+  // extended since. Seventeen tokens have been added to these blocks since (--warn, --text-muted,
+  // --mono, the --hljs-* family, --accent-text, --accent-fg, …) and not one of them is checked for
+  // bare/light parity above. src/app.css.dark-contrast.test.ts has carried the fixture-INDEPENDENT
+  // counterpart since CPE-1539 ("keeps the fixture itself honest if a future ticket adds a new
+  // semantic token to light but not dark"); this is that same idiom for this file's pair, and
+  // src/app.css.hc-contrast.test.ts got it for hc-light/hc-dark in the same change. Those three
+  // blocks were the only ones a brand-new token could silently miss.
+  //
+  // BOTH DIRECTIONS, unlike dark's one-way copy, because this pair is symmetric by construction:
+  // bare `:root` is the fallback the explicit `[data-theme="light"]` selector must reproduce exactly,
+  // which is what the value-identity assertion above already asserts for the fixture names. A token
+  // in one and not the other is a bug whichever side it lands on.
+  //
+  // SEMANTIC_TOKENS names are excluded from both filters for the same reason dark excludes them: the
+  // `missing` assertions above already require them present in BOTH blocks, so re-checking them here
+  // would only duplicate an existing failure message.
+  //
+  // Value parity for the non-fixture tokens is deliberately NOT asserted here. Presence is what a
+  // brand-new token silently loses; a value difference between bare and light is a separate
+  // invariant, already covered for the fixture set above, and widening it is a different ticket's
+  // call. Measured today for the record: zero non-fixture value mismatches, so this is a scope
+  // decision rather than a green-washed failure.
+  //
+  // RED-PROOFED INDIVIDUALLY (deleting a token from one block proves nothing about the other two, so
+  // each of CPE-1962's three new checks was run alone). For this one: deleting --accent-text from the
+  // bare :root semantic block fails this test with `tokens declared in :root[data-theme="light"] but
+  // missing from the bare :root semantic block: --accent-text` — a name that appears in no fixture.
+  // The hc pair's two proofs are recorded in src/app.css.hc-contrast.test.ts.
+  //
+  // `declaredNames` rather than `decls.keys()`: `extractDecls`'s regex accepts the degenerate
+  // `--foo: ;` form (after the colon `\s*` takes the space, then backtracks to let `[^;]+` consume
+  // it), so an empty declaration would otherwise satisfy a presence check while resolving to nothing.
+  // CPE-1919's round-3 Reviewer measured that hole and left it documented rather than patched,
+  // because closing it there meant tightening the shared `extractDecls` — used by this file's
+  // palette-resolution and hex-literal paths too, where a tighter value pattern risks a false
+  // positive on the valid multi-line declaration form. Filtered at the call site instead; the shared
+  // helper is untouched.
+  it("bare :root and :root[data-theme=\"light\"] declare the same token set, fixture or not (CPE-1962)", () => {
+    const declaredNames = (block: string): Set<string> =>
+      new Set([...extractDecls(block)].filter(([, value]) => value !== "").map(([name]) => name));
+    const bareDeclared = declaredNames(semanticBareBlock!);
+    const lightDeclared = declaredNames(lightBlocks[0]);
+
+    const lightOnly = [...lightDeclared].filter(
+      (name) => !SEMANTIC_TOKENS.includes(name) && !bareDeclared.has(name),
+    );
+    expect(
+      lightOnly,
+      `tokens declared in :root[data-theme="light"] but missing from the bare :root semantic block: ${lightOnly.join(", ")}`,
+    ).toEqual([]);
+
+    const bareOnly = [...bareDeclared].filter(
+      (name) => !SEMANTIC_TOKENS.includes(name) && !lightDeclared.has(name),
+    );
+    expect(
+      bareOnly,
+      `tokens declared in the bare :root semantic block but missing from :root[data-theme="light"]: ${bareOnly.join(", ")}`,
+    ).toEqual([]);
+  });
+
   it("every --pal-* reference from the semantic layer resolves to a palette var that exists", () => {
     const paletteDecls = extractDecls(paletteBlock!);
     const semanticDecls = extractDecls(semanticBareBlock!);

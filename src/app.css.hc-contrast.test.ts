@@ -3,6 +3,9 @@
 //   (a) each hc semantic layer defines the SAME token set as `:root[data-theme="light"]` (CPE-1534)
 //       — a token silently missing from an hc block would fall back to the light value, which is a
 //       bug (e.g. a low-contrast light-grey border leaking into an otherwise high-contrast theme).
+//       CPE-1962 made that sentence true in both directions: until then it was checked only against
+//       the hand-kept SEMANTIC_TOKENS fixture, so a token added to `light` after the fixture was
+//       written was invisible here. See the note above `describe("app.css hc palette completeness")`.
 //   (b) every WCAG-relevant token pairing in BOTH hc palettes meets a STRICTER, AAA-inspired bar than
 //       the normal light/dark guard (src/app.css.dark-contrast.test.ts, which asserts AA: >=4.5:1
 //       text / >=3:1 non-text UI): here primary text and danger/status text must clear >=7:1 (WCAG
@@ -85,6 +88,25 @@ const hcDarkSemanticDecls = extractDecls(hcDarkBlocks[0]);
 
 if (hcLightPaletteDecls.size === 0) throw new Error("no --pal-hc-light-* primitive declarations found");
 if (hcDarkPaletteDecls.size === 0) throw new Error("no --pal-hc-dark-* primitive declarations found");
+
+/** CPE-1962. The names a block declares WITH A VALUE — the set the parity checks below compare.
+ *
+ *  Why not just `decls.keys()`: `extractDecls`'s regex accepts the degenerate `--foo: ;` form. After
+ *  the colon, `\s*` swallows the space, `[^;]+` then needs at least one character, backtracking hands
+ *  the space back, and the declaration matches with an empty (post-trim) value. CPE-1919's round-3
+ *  Reviewer measured that hole against `app.css.accent-text-contrast.test.ts`'s "declares the token"
+ *  assertion and left it documented rather than patched, because the fix there would have meant
+ *  tightening this same shared `extractDecls` — which the palette-RESOLUTION path in this file also
+ *  uses, and where a tighter value pattern risks a false positive on the valid multi-line declaration
+ *  form. So the filter lives here, at the two call sites that need it, and the shared helper is left
+ *  exactly as it was: a token "declared" as `--foo: ;` reads as MISSING to the parity check, which is
+ *  the honest answer (it resolves to nothing at run time), and nothing else in the file changes. */
+const declaredNames = (decls: Map<string, string>): Set<string> =>
+  new Set([...decls].filter(([, value]) => value !== "").map(([name]) => name));
+
+const lightDeclared = declaredNames(lightSemanticDecls);
+const hcLightDeclared = declaredNames(hcLightSemanticDecls);
+const hcDarkDeclared = declaredNames(hcDarkSemanticDecls);
 
 /** Resolve a semantic token's value to a concrete hex through the given palette + semantic maps.
  *  Tokens that are plain values (e.g. `6px`, `30px`) or reference another semantic token (e.g.
@@ -170,15 +192,60 @@ const SEMANTIC_TOKENS = [
   "--agent-unknown",
 ];
 
+// CPE-1962: the two `it`s below each gained a second, FIXTURE-INDEPENDENT assertion, copied from the
+// one src/app.css.dark-contrast.test.ts has carried since CPE-1539. The `SEMANTIC_TOKENS.filter(...)`
+// half above it can only ever see tokens someone remembered to append to the fixture; the `hcXOnly`
+// half derives its list from what the light block ACTUALLY DECLARES, so a brand-new token is covered
+// the day it lands, with no fixture edit. That is the whole point — the fixture is the thing nobody
+// updates.
+//
+// MEASURED ON MAIN BEFORE THIS LANDED, by deletion rather than by reading (this ticket exists because
+// an unmeasured claim about these exact files reached a code comment twice in one PR):
+//   * delete --accent-text from the dark block   -> dark-contrast.test.ts FAILS,
+//     "tokens present in light but missing from dark: --accent-text" — a token in no fixture.
+//   * delete --accent-text from the hc-dark block -> this file stayed fully GREEN, 23/23.
+// And the three red-proofs of the new checks, each run on its own (one deletion proving one of three
+// is not evidence for the other two):
+//   * delete --accent-text from hc-light -> this file fails, "tokens present in light but missing
+//     from hc-light: --accent-text" (1 failed, 23 passed).
+//   * delete --accent-text from hc-dark  -> this file fails, "tokens present in light but missing
+//     from hc-dark: --accent-text" (1 failed, 23 passed) — the deletion that was green above.
+//   * the bare-:root/light pair's red-proof lives in src/app.css.test.ts; see its own note.
+//
+// NO EXCEPTION LIST, and that is a measured claim too, not an assumption. Sweeping every name the
+// light block declares against both hc blocks found exactly one omission: --log-warn, absent from
+// both, so both hc themes inherited the bare :root value (#8a5a00, an amber calibrated for a white
+// surface) through the fallback block — 3.54/3.28/2.94:1 on hc-dark's --bg/--surface/--surface-alt,
+// i.e. the log viewer's WARN badge under the AA body-text floor in the high-contrast theme. It was
+// not a legitimate omission, so it was FIXED in src/app.css (both blocks now alias --warn) rather
+// than excepted here. If a future theme genuinely must omit a token, name it in an exception list
+// with the reason at this site — do not widen the filter, because a fixture the guard skips is the
+// exact defect this check exists to close.
+//
+// SELECTOR LISTS: like every other app.css guard here, these checks read one brace-balanced block per
+// theme selector, so a token declared via a selector list that merely INCLUDES the block
+// (`:root, [data-theme="hc-dark"] { … }`) reads as missing. Deliberately kept: it is over-strict, but
+// it fails CLOSED, and it enforces the one-block-per-theme convention this file already assumes with
+// its `length !== 1` guards above.
 describe("app.css hc palette completeness (CPE-1543)", () => {
   it(':root[data-theme="hc-light"] resolves the same semantic token set as :root[data-theme="light"]', () => {
     const missing = SEMANTIC_TOKENS.filter((name) => !hcLightSemanticDecls.has(name));
     expect(missing, `tokens missing from :root[data-theme="hc-light"]: ${missing.join(", ")}`).toEqual([]);
+
+    const lightOnly = [...lightDeclared].filter(
+      (name) => !SEMANTIC_TOKENS.includes(name) && !hcLightDeclared.has(name),
+    );
+    expect(lightOnly, `tokens present in light but missing from hc-light: ${lightOnly.join(", ")}`).toEqual([]);
   });
 
   it(':root[data-theme="hc-dark"] resolves the same semantic token set as :root[data-theme="light"]', () => {
     const missing = SEMANTIC_TOKENS.filter((name) => !hcDarkSemanticDecls.has(name));
     expect(missing, `tokens missing from :root[data-theme="hc-dark"]: ${missing.join(", ")}`).toEqual([]);
+
+    const lightOnly = [...lightDeclared].filter(
+      (name) => !SEMANTIC_TOKENS.includes(name) && !hcDarkDeclared.has(name),
+    );
+    expect(lightOnly, `tokens present in light but missing from hc-dark: ${lightOnly.join(", ")}`).toEqual([]);
   });
 
   it("sets color-scheme: light on hc-light and color-scheme: dark on hc-dark", () => {
