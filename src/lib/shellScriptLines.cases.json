@@ -161,5 +161,25 @@
     "name": "KNOWN GAP N9 (CPE-1936, documented not fixed): an unterminated quote leaves a trailing comment unstripped",
     "input": "echo \"oops # not stripped\necho after",
     "expected": ["echo \"oops # not stripped", "echo after"]
+  },
+  {
+    "name": "CPE-1969: a script's #! shebang is a comment line and drops out, like any other",
+    "input": "#!/usr/bin/env bash\nset -euo pipefail\ncargo test --locked",
+    "expected": ["set -euo pipefail", "cargo test --locked"]
+  },
+  {
+    "name": "CPE-1969: a shell FUNCTION body is scanned as ordinary lines — a script has no step boundary",
+    "input": "f() {\n  cargo build\n}\nf",
+    "expected": ["f() {", "cargo build", "}", "f"]
+  },
+  {
+    "name": "CPE-1969: an INDENTED heredoc inside a function closes on its column-0 terminator",
+    "input": "usage() {\n  cat <<'EOF'\ncargo build --release\nEOF\n}\ncargo test --locked",
+    "expected": ["usage() {", "cat <<'EOF'", "}", "cargo test --locked"]
+  },
+  {
+    "name": "CPE-1969: a case pattern's empty '' quote pair opens and closes, leaving the line intact",
+    "input": "    '' | *[!0-9]*)\n      return 2\n      ;;",
+    "expected": ["'' | *[!0-9]*)", "return 2", ";;"]
   }
 ]

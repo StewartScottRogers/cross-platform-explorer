@@ -36,6 +36,19 @@ export const HARDENING_FLAGS =
  * excluding `/`, this filter mistook that path for a sixth unhardened apt-get site and false-failed
  * the regression guard.
  *
+ * CPE-1969 added `/` to the excluded LOOKAHEAD as well, for the mirror-image reason. Widening the
+ * "no apt invocation is left unhardened" scan from three remembered files to every workflow and every
+ * extracted script (see `releaseHangHardening.test.ts`) brought `gui-smoke.yml` into range, and its
+ * apt-lock wait step contains:
+ *
+ *     echo "waiting for background apt/dpkg lock (attempt $i/24)..."
+ *
+ * Here `apt` is a bare path/prose SEGMENT followed by `/`, exactly as `/etc/apt/...` is one preceded
+ * by `/`, and the old lookahead accepted it — so the widened scan would have reported an `echo` as a
+ * fifth unhardened apt site and false-failed on its first run. A real command word is never followed
+ * by `/`: `apt-get update`, `apt install -y foo`, `apt-get -o …` all have whitespace next. Symmetry
+ * with the lookbehind is the point — a slash on either side means this is a path, not a command.
+ *
  * Regexes are stateless here (no `g` flag), so sharing one instance across suites is safe.
  */
-export const APT_COMMAND_WORD = /(?<![\w\-/])apt(?:-get)?(?![\w-])/;
+export const APT_COMMAND_WORD = /(?<![\w\-/])apt(?:-get)?(?![\w\-/])/;

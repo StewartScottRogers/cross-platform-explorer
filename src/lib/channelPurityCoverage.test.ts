@@ -101,6 +101,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
 import { logicalLines } from "./shellScriptLines";
+import { allShellUnits } from "./workflowShellSources";
 
 const ROOT = process.cwd();
 const LIB_RS = join(ROOT, "crates", "updater-verify", "src", "lib.rs");
@@ -383,6 +384,35 @@ describe("every Channel token the guard logic knows about has a real, ACTUALLY-W
     expect(canonicalChannels.length).toBeGreaterThanOrEqual(2);
     expect(canonicalChannels).toContain("plain");
     expect(canonicalChannels).toContain("sidecar");
+  });
+
+  // CPE-1969. `BUILD_JOB_FOR_WORKFLOW` is a DELIBERATE scope, not a remembered list: this ratchet
+  // asks "does every channel have a real, wired guard in the workflow that builds it", and only a
+  // release workflow can carry one. Widening the coverage side to all eight workflows would be
+  // wrong — an `--expect-channel` in, say, `catalog-freshness.yml` is not a release gate and must
+  // never read as coverage.
+  //
+  // What WAS unenforced is the other half: the claim that only these two files invoke the verifier
+  // at all. That claim was prose, and CPE-1969's whole subject is prose file lists (CPE-1933 rule 2:
+  // anchor on code, never on prose). So it is now derived — over every workflow AND the three
+  // extracted `.sh` scripts nothing used to read. Measured 2026-08-27: the three scripts and the six
+  // non-release workflows contain zero `verify-release-artifacts` invocations and zero
+  // `--expect-channel` flags, so this passes today; the point is that a third invocation site would
+  // now surface here instead of sitting outside every guard's scope.
+  it("no workflow or extracted script outside the mapped set invokes verify-release-artifacts", () => {
+    const stray: string[] = [];
+    for (const unit of allShellUnits()) {
+      if (BUILD_JOB_FOR_WORKFLOW[unit.file.split("/").pop() ?? ""] !== undefined) continue;
+      for (const line of logicalLines(unit.run)) {
+        if (isRealInvocationLine(line)) stray.push(`${unit.where}: ${line}`);
+      }
+    }
+    expect(
+      stray,
+      "a real verify-release-artifacts invocation lives outside BUILD_JOB_FOR_WORKFLOW, where this " +
+        "ratchet cannot check that it is wired to a build job or gated on the signing key. Either " +
+        "map it, or move it back into a release workflow.",
+    ).toEqual([]);
   });
 
   it("the build-job config itself names a real job in each workflow (sanity check)", () => {

@@ -14,12 +14,18 @@
 // rather than the key it claimed to check. Reading `step.run`/`step['timeout-minutes']` off the
 // PARSED object means a workflow comment sitting above or beside a step can never be mistaken for
 // the step's real fields.
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
 import { logicalLines } from "./shellScriptLines";
 import { HARDENING_FLAGS, APT_COMMAND_WORD } from "./aptGetHardening";
+import {
+  MIN_EXPECTED_WORKFLOWS,
+  allShellUnits,
+  discoverWorkflowScripts,
+  discoverWorkflows,
+} from "./workflowShellSources";
 
 const WORKFLOWS = join(process.cwd(), ".github", "workflows");
 
@@ -94,6 +100,9 @@ function aptGetLines(run: string | undefined): string[] {
  *  also matching `--retry-delay`/`--retry-all-errors`/`--retry-connrefused`/`--retry-max-time`,
  *  which are different options entirely -- a line carrying only `--retry-delay` is not retrying. */
 const RETRY_FLAG = /(?<![\w-])--retry(?![\w-])/;
+/** `curl` as an isolated command word, hoisted out of `curlLines` (CPE-1969) so the derived
+ *  whole-repo scan below and the per-workflow helper match on exactly one regex rather than two. */
+const CURL_COMMAND_WORD = /(?<![\w-])curl(?![\w-])/;
 const MAX_TIME_FLAG = /(?<![\w-])--max-time(?![\w-])/;
 const RETRY_MAX_TIME_FLAG = /(?<![\w-])--retry-max-time(?![\w-])/;
 
@@ -125,7 +134,7 @@ function curlLines(doc: WorkflowDoc): { where: string; line: string }[] {
   for (const [jobName, job] of Object.entries(doc.jobs)) {
     for (const step of job.steps) {
       for (const line of logicalLines(step.run)) {
-        if (!/(?<![\w-])curl(?![\w-])/.test(line)) continue;
+        if (!CURL_COMMAND_WORD.test(line)) continue;
         found.push({ where: `${jobName} / ${step.name}`, line });
       }
     }
@@ -562,20 +571,52 @@ describe("ci.yml brew/choco/curl (pdfium) sites carry hang hardening (CPE-1824)"
 // narrower than it was: the ffmpeg-pin-freshness.yml sites DO get their arithmetic computed, by the
 // describe block above this one. It still holds for every other file here, ci.yml's pdfium sites
 // included -- see the note in that block about why they were not folded in.
+//
+// **CPE-1969 replaced `GUARDED` with a derived enumeration.** It was a hard-coded four-file list, and
+// this repo has eight workflows plus three extracted `.sh` scripts that no consumer read at all —
+// the same "enumerate, don't recall" defect (CPE-1932) the lockfile guard carried, on the guard whose
+// own comment above boasts it is "a generic scan of every curl line in these workflows rather than a
+// spot check". It was generic within four files someone remembered. It now walks
+// `allShellUnits()` — every `run:` step of every workflow, plus every script as one unit.
+//
+// Measured over the newly-included files before widening (2026-08-27): `catalog-freshness.yml`'s
+// live-catalog fetch and `model-snapshot.yml`'s reseller fetch are the only new curl sites, and
+// neither is an offender (the first carries `--retry-max-time 20`; the second passes no `--retry` at
+// all, so the pairing rule does not apply). The three scripts contain no `curl`. No live defect was
+// folded into this scope fix — but "no offender out there" is now re-measured every run instead of
+// being a file list nobody revisited.
 describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () => {
-  const GUARDED = ["ci.yml", "release.yml", "release-sidecar.yml", "ffmpeg-pin-freshness.yml"] as const;
-
-  for (const fileName of GUARDED) {
-    it(`${fileName}: every curl combining --retry with --max-time also carries --retry-max-time`, () => {
-      const offenders = curlLines(parseWorkflow(fileName))
-        .filter(
-          ({ line }) =>
-            RETRY_FLAG.test(line) && MAX_TIME_FLAG.test(line) && !RETRY_MAX_TIME_FLAG.test(line),
-        )
-        .map(({ where, line }) => `${where}: ${line}`);
+  // One case per FILE, as before — the units within a file are collected into one report so a
+  // failure names every offending site at once rather than one per run.
+  for (const file of [...discoverWorkflows(), ...discoverWorkflowScripts()]) {
+    it(`${file}: every curl combining --retry with --max-time also carries --retry-max-time`, () => {
+      const offenders = allShellUnits()
+        .filter((u) => u.file === file)
+        .flatMap((unit) =>
+          logicalLines(unit.run)
+            .filter((line) => CURL_COMMAND_WORD.test(line))
+            .filter(
+              (line) =>
+                RETRY_FLAG.test(line) &&
+                MAX_TIME_FLAG.test(line) &&
+                !RETRY_MAX_TIME_FLAG.test(line),
+            )
+            .map((line) => `${unit.where}: ${line}`),
+        );
       expect(offenders).toEqual([]);
     });
   }
+
+  it("the widened scan is not vacuous — it reaches every workflow AND all three scripts", () => {
+    // The failure this catches is the enumeration silently shrinking back: a scan of four files that
+    // believes it covers eleven reports clean over seven it never opened, which is precisely the
+    // state this ticket found. `allShellUnits()` already refuses a near-empty result; this asserts
+    // the units really span every file, not just that there were enough of them.
+    const files = new Set(allShellUnits().map((u) => u.file));
+    for (const f of [...discoverWorkflows(), ...discoverWorkflowScripts()]) {
+      expect(files.has(f), `${f} contributed no shell unit to the hang-hardening scan`).toBe(true);
+    }
+  });
 
   it("the scan is not vacuous -- it really does reach ci.yml's three pdfium curl sites", () => {
     // Without this, deleting every --retry (or renaming the steps, or breaking curlLines) would
@@ -602,5 +643,123 @@ describe("no curl retries against a per-attempt-only time bound (CPE-1824)", () 
     for (const { line } of retrying) {
       expect(line).toMatch(flagValue("--retry-max-time", 20));
     }
+  });
+});
+
+// CPE-1969 gap 1, apt half. Before this, the "no apt/apt-get invocation left unhardened" scan existed
+// three times over three REMEMBERED files: ci.yml (ciAptGetHardening.test.ts) and release.yml +
+// release-sidecar.yml (above). `gui-smoke.yml` runs FOUR apt-get invocations across two jobs and was
+// in none of them; `catalog-freshness.yml`, `ffmpeg-pin-freshness.yml`, `model-snapshot.yml`,
+// `release-pipeline-watchdog.yml` and the three extracted scripts were in none of them either.
+//
+// Measured before widening (2026-08-27): gui-smoke.yml's four sites are all correctly hardened, and no
+// other newly-included file invokes apt at all — so this closes a scope gap without a live defect
+// behind it. The per-file describe blocks above and in ciAptGetHardening.test.ts keep their site-
+// specific assertions (timeout-minutes, continue-on-error, exact step names); this is the generic
+// backstop that no longer needs anyone to remember to extend it.
+describe("no apt/apt-get invocation anywhere in CI is left unhardened (CPE-1969)", () => {
+  it("every apt invocation in every workflow and every extracted script carries the hardening flags", () => {
+    const unhardened: string[] = [];
+    for (const unit of allShellUnits()) {
+      for (const line of aptGetLines(unit.run)) {
+        if (!line.includes(HARDENING_FLAGS)) unhardened.push(`${unit.where}: ${line}`);
+      }
+    }
+    expect(unhardened).toEqual([]);
+  });
+
+  it("the scan is not vacuous — it reaches gui-smoke.yml, which no apt guard used to read", () => {
+    // A count, not `> 0`: the pairing above goes green both when every site is hardened AND when
+    // aptGetLines()/the enumeration quietly stopped reaching them.
+    const guiSmoke = allShellUnits().filter((u) => u.file.endsWith("gui-smoke.yml"));
+    const sites = guiSmoke.flatMap((u) => aptGetLines(u.run));
+    expect(sites.length).toBe(4);
+    for (const line of sites) expect(line).toContain(HARDENING_FLAGS);
+  });
+});
+
+// CPE-1969 red-proofs for the widened scope. Each builds a real fixture tree under `.claude/tmp/`,
+// runs the SAME scan predicates over it, and is removed afterwards — so "the widened scan catches a
+// newcomer" is a measurement rather than a claim next to a green test.
+describe("the widened hang-hardening scope really catches a newcomer (CPE-1969)", () => {
+  const scratch: string[] = [];
+  afterEach(() => {
+    while (scratch.length > 0) rmSync(scratch.pop()!, { recursive: true, force: true });
+  });
+
+  function fixtureRoot(files: Record<string, string>): string {
+    const base = join(process.cwd(), ".claude", "tmp");
+    mkdirSync(base, { recursive: true });
+    const root = mkdtempSync(join(base, "cpe1969-hang-"));
+    scratch.push(root);
+    mkdirSync(join(root, ".github/workflows/scripts"), { recursive: true });
+    for (let i = 0; i < MIN_EXPECTED_WORKFLOWS; i += 1) {
+      writeFileSync(
+        join(root, `.github/workflows/pad${i}.yml`),
+        "jobs:\n  j:\n    steps:\n      - name: noop\n        run: echo hi\n",
+        "utf8",
+      );
+    }
+    for (const [rel, body] of Object.entries(files)) writeFileSync(join(root, rel), body, "utf8");
+    return root;
+  }
+
+  it("a curl in a FOURTH script that retries against a per-attempt bound is reported", () => {
+    const root = fixtureRoot({
+      ".github/workflows/scripts/a.sh": "echo hi\n",
+      ".github/workflows/scripts/b.sh": "echo hi\n",
+      ".github/workflows/scripts/c.sh": "echo hi\n",
+      ".github/workflows/scripts/newcomer.sh":
+        '#!/usr/bin/env bash\ncurl --fail --retry 3 \\\n  --max-time 20 "https://example.com/x"\n',
+    });
+    const offenders = allShellUnits(root).flatMap((unit) =>
+      logicalLines(unit.run)
+        .filter((line) => CURL_COMMAND_WORD.test(line))
+        .filter(
+          (line) =>
+            RETRY_FLAG.test(line) && MAX_TIME_FLAG.test(line) && !RETRY_MAX_TIME_FLAG.test(line),
+        )
+        .map((line) => `${unit.where}: ${line}`),
+    );
+    // Also proves the continuation is joined across the fixture's two physical lines: without that,
+    // --max-time would sit on a line with no `curl` and the offender would vanish.
+    expect(offenders).toEqual([
+      ".github/workflows/scripts/newcomer.sh (whole script): " +
+        `curl --fail --retry 3 --max-time 20 "https://example.com/x"`,
+    ]);
+  });
+
+  it("an unhardened apt-get in a SIXTH workflow is reported", () => {
+    const root = fixtureRoot({
+      ".github/workflows/scripts/a.sh": "echo hi\n",
+      ".github/workflows/scripts/b.sh": "echo hi\n",
+      ".github/workflows/scripts/c.sh": "echo hi\n",
+      ".github/workflows/newcomer.yml":
+        "jobs:\n  j:\n    steps:\n      - name: deps\n        run: sudo apt-get install -y foo\n",
+    });
+    const unhardened = allShellUnits(root)
+      .flatMap((unit) => aptGetLines(unit.run).map((line) => ({ where: unit.where, line })))
+      .filter(({ line }) => !line.includes(HARDENING_FLAGS));
+    expect(unhardened.map((u) => u.line)).toEqual(["sudo apt-get install -y foo"]);
+    expect(unhardened[0].where).toContain("newcomer.yml");
+  });
+
+  it("gui-smoke.yml's apt-LOCK wait message is prose, not a fifth unhardened site (CPE-1969)", () => {
+    // The false positive the widening exposed, and the reason APT_COMMAND_WORD gained `/` in its
+    // LOOKAHEAD. Before that fix this exact line read as an unhardened apt invocation and the
+    // widened scan false-failed on its first run. Red-proof: revert the lookahead to `(?![\w-])`
+    // and this case fails while the real invocations below keep passing.
+    expect(APT_COMMAND_WORD.test('echo "waiting for background apt/dpkg lock (attempt $i/24)..."')).toBe(
+      false,
+    );
+    expect(APT_COMMAND_WORD.test("sudo apt-get update")).toBe(true);
+    expect(APT_COMMAND_WORD.test("sudo apt install -y foo")).toBe(true);
+    expect(APT_COMMAND_WORD.test("sudo rm -f /etc/apt/sources.list.d/x.list")).toBe(false);
+  });
+
+  it("the scan REFUSES rather than reporting clean when the enumeration comes back empty", () => {
+    const root = mkdtempSync(join(process.cwd(), ".claude", "tmp", "cpe1969-empty-"));
+    scratch.push(root);
+    expect(() => allShellUnits(root)).toThrow(/near-empty/);
   });
 });

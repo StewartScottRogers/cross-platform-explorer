@@ -40,25 +40,42 @@
 // Parity was measured before and after, so the rewrite cannot have quietly narrowed the scan: both the
 // old line scanner and the new structural one find exactly **79** cargo invocations across the five
 // workflows (66 / 3 / 7 / 2 / 1), with no line found by the old one and missed by the new.
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+//
+// **CPE-1969 widened WHAT it reads, and that was the second half of the same defect.** Until then
+// `WORKFLOW_FILES` was a hard-coded five-entry list under a comment claiming the other workflows
+// "deliberately" ran no cargo. There are EIGHT workflow files, so a sixth workflow that built Tauri
+// without `--locked` was never looked at — and the claim was untestable prose, exactly what CPE-1933
+// says not to write. Worse, `.github/workflows/scripts/*.sh` — three files, 109 logical lines,
+// invoked BY the workflows — was read by no consumer in the repo at all, so shell moved out of a
+// `run:` block into a script silently left every guard's scope. Both lists are now derived at run
+// time by `src/lib/workflowShellSources.ts`, which refuses a near-empty enumeration rather than
+// scanning nothing and reporting clean. Measured before the widening (2026-08-27): the three
+// newly-included workflows and all three scripts contain ZERO cargo invocations and zero Tauri build
+// anchors, so this is a pure scope fix with no live defect folded into it — but "zero today" is now
+// a measurement the scan re-takes on every run, not a sentence someone wrote once.
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
 import { logicalLines } from "./shellScriptLines";
+import {
+  MIN_EXPECTED_WORKFLOWS,
+  discoverWorkflowScripts,
+  discoverWorkflows,
+  parseWorkflowFile,
+  scriptUnit,
+  workflowStepUnits,
+  type ShellUnit,
+} from "./workflowShellSources";
 
 const ROOT = process.cwd();
 
-/** Every workflow that runs a real Rust build for this repo's own crates. `ffmpeg-pin-freshness.yml`
- *  and `release-pipeline-watchdog.yml` are deliberately excluded — neither runs `cargo` at all. */
-const WORKFLOW_FILES = [
-  ".github/workflows/ci.yml",
-  ".github/workflows/release.yml",
-  ".github/workflows/release-sidecar.yml",
-  ".github/workflows/gui-smoke.yml",
-  ".github/workflows/model-snapshot.yml",
-];
-
-/** The per-file invocation counts, pinned as **floors** (CPE-1929 review). `> 0` alone would not
+/** The per-file invocation counts, pinned as **floors** (CPE-1929 review), for the files that carry
+ *  cargo today. A workflow or script absent from this record is still SCANNED — CPE-1969: the scan
+ *  walks the derived enumeration, and this record only says which files have a floor worth pinning.
+ *  A file here that no longer exists is reported (see the staleness check below) rather than skipped.
+ *
+ *  `> 0` alone would not
  *  catch a PARTIAL narrowing: if `parseYaml` ever silently dropped a job or a step, ci.yml could
  *  fall from 66 real invocations to 3 and still read as "the detector works". These are the
  *  numbers the old raw-text line scanner and the new structural one BOTH produced when the rewrite
@@ -99,9 +116,18 @@ interface WorkflowDoc {
  *  that pushes a workflow past what this parser understands surfaces here as a clear parse failure,
  *  never as a silently-empty (and therefore vacuously green) result. */
 function parseWorkflow(file: string): WorkflowDoc {
-  const result = parseYaml(readFileSync(join(ROOT, file), "utf8"));
-  if (!result.ok) throw new Error(`${file} did not parse as YAML: ${result.error}`);
-  return result.value as WorkflowDoc;
+  return parseWorkflowFile(file) as WorkflowDoc;
+}
+
+/** Every real, live cargo invocation in ONE unit of shell — a workflow step's `run:` script, or a
+ *  whole extracted `.sh` file (CPE-1969; see `workflowShellSources.ts` for why a script is exactly
+ *  one unit). Identical matching either side: `logicalLines` strips comments, joins continuations
+ *  and skips heredoc bodies before the regex is tried, so a script gets the same treatment a `run:`
+ *  block always got. */
+function cargoInvocationsIn(unit: ShellUnit): { where: string; line: string }[] {
+  return logicalLines(unit.run)
+    .filter((line) => CARGO_INVOCATION.test(line))
+    .map((line) => ({ where: unit.where, line }));
 }
 
 interface Invocation {
@@ -144,34 +170,62 @@ function isLockedPreflight(step: WorkflowStep): boolean {
 }
 
 describe("every real cargo build/test/check/clippy/run in CI + release is --locked (CPE-1865)", () => {
-  for (const file of WORKFLOW_FILES) {
+  // CPE-1969: the file list is DERIVED here, not typed out. `discoverWorkflows()` walks
+  // `.github/workflows/` and refuses a near-empty result, so a sixth workflow is scanned the day it
+  // lands and a broken enumeration reds instead of reporting clean over nothing.
+  for (const file of discoverWorkflows()) {
     it(`${file}: every real cargo invocation carries --locked`, () => {
-      const invocations = cargoInvocations(parseWorkflow(file));
+      const invocations = workflowStepUnits(file).flatMap(cargoInvocationsIn);
 
       // Sanity check on the detector itself. A detector that stopped matching anything would pass
       // this whole suite vacuously — the exact "green over zero coverage" shape this repo's other
       // guards call out — and one that stopped matching MOST things would too, which is why this
-      // is a per-file floor rather than `> 0`. See `MIN_CARGO_INVOCATIONS`.
+      // is a per-file floor rather than `> 0`. See `MIN_CARGO_INVOCATIONS`. A file with no pinned
+      // floor (one of the three CPE-1969 folded in, none of which runs cargo today) has floor 0:
+      // it is scanned, but there is no count to protect yet.
+      const floor = MIN_CARGO_INVOCATIONS[file] ?? 0;
       expect(
         invocations.length,
         `${file}: found ${invocations.length} real cargo invocations, below the pinned floor of ` +
-          `${MIN_CARGO_INVOCATIONS[file]}. Either a workflow genuinely lost a cargo step (lower the ` +
+          `${floor}. Either a workflow genuinely lost a cargo step (lower the ` +
           `floor in MIN_CARGO_INVOCATIONS and say why), or the detector has silently narrowed and ` +
           `is no longer seeing steps it used to — which is the failure this floor exists to catch.`,
-      ).toBeGreaterThanOrEqual(MIN_CARGO_INVOCATIONS[file]);
+      ).toBeGreaterThanOrEqual(floor);
 
       const missing = invocations.filter(({ line }) => !line.includes("--locked"));
       expect(
-        missing.map(({ job, step, line }) => `${file} [${job} / ${step}]: ${line}`),
+        missing.map(({ where, line }) => `${where}: ${line}`),
         "these cargo invocations are missing --locked",
       ).toEqual([]);
     });
   }
 
+  // CPE-1969 gap 2. Shell moved OUT of a `run:` block into `.github/workflows/scripts/*.sh` used to
+  // leave every guard's scope — normal refactoring, silent loss of coverage. A script that runs
+  // `cargo build` is exactly as capable of rewriting a `Cargo.lock` as a `run:` block is.
+  for (const file of discoverWorkflowScripts()) {
+    it(`${file}: every real cargo invocation carries --locked`, () => {
+      const missing = cargoInvocationsIn(scriptUnit(file)).filter(
+        ({ line }) => !line.includes("--locked"),
+      );
+      expect(
+        missing.map(({ where, line }) => `${where}: ${line}`),
+        "these cargo invocations are missing --locked",
+      ).toEqual([]);
+    });
+  }
+
+  it("MIN_CARGO_INVOCATIONS names no file that no longer exists", () => {
+    // The floors are the one hand-maintained thing left here. A renamed or deleted workflow would
+    // otherwise leave a floor sitting there protecting nothing, which reads as coverage.
+    const known = new Set([...discoverWorkflows(), ...discoverWorkflowScripts()]);
+    expect(Object.keys(MIN_CARGO_INVOCATIONS).filter((f) => !known.has(f))).toEqual([]);
+  });
+
   it("every tauri-action / npm run tauri build step is immediately preceded by a cargo check --locked preflight", () => {
     const problems: string[] = [];
     let anchorsSeen = 0;
-    for (const file of WORKFLOW_FILES) {
+    for (const file of discoverWorkflows()) {
       const doc = parseWorkflow(file);
       for (const [job, jobDoc] of Object.entries(doc.jobs ?? {})) {
         const steps = jobDoc.steps ?? [];
@@ -196,6 +250,25 @@ describe("every real cargo build/test/check/clippy/run in CI + release is --lock
     // Vacuity: if the anchor matcher stopped recognising `tauri-action` / `npm run tauri build`, the
     // loop above would find nothing to check and pass in silence.
     expect(anchorsSeen, "no Tauri build anchor was found at all — the anchor matcher may be broken").toBe(4);
+  });
+
+  it("no extracted script drives a Tauri build, where the preflight rule cannot be expressed", () => {
+    // CPE-1969 gap 2, and the one place where "a script is one step" has a consequence worth
+    // stating: the preflight rule is about the step IMMEDIATELY BEFORE the anchor, and a `.sh` file
+    // has no preceding step to inspect — its caller's step does. So a Tauri build inside a script is
+    // not something this guard can check the preflight of; it is something the guard has to refuse.
+    // None exists today (measured 2026-08-27), and this keeps it that way rather than letting one
+    // land in the one place the rule goes quiet.
+    const anchored = discoverWorkflowScripts()
+      .map((f) => scriptUnit(f))
+      .filter((u) => logicalLines(u.run).some((l) => /\bnpm run tauri build\b/.test(l)))
+      .map((u) => u.where);
+    expect(
+      anchored,
+      "a Tauri build inside an extracted script has no preceding step to carry the " +
+        "`cargo check --locked` preflight — keep it in a workflow step, or teach this guard how to " +
+        "find the script's caller",
+    ).toEqual([]);
   });
 });
 
@@ -268,5 +341,103 @@ describe("the detector is not fooled by the shapes that defeated the raw-text sc
       ),
     );
     expect(found).toEqual([]);
+  });
+});
+
+// CPE-1969's own red-proofs: the widened scope must actually CATCH the thing it was widened for.
+// A derived list that finds the new files and then does nothing with them is the same blindness with
+// a longer file listing. Each fixture is a real directory on disk, built under `.claude/tmp/` and
+// removed afterwards, so these are measurements rather than claims about what the code would do.
+describe("the widened scope really catches what the five-file list could not (CPE-1969)", () => {
+  const scratch: string[] = [];
+  afterEach(() => {
+    while (scratch.length > 0) rmSync(scratch.pop()!, { recursive: true, force: true });
+  });
+
+  function fixtureRoot(files: Record<string, string>): string {
+    const base = join(ROOT, ".claude", "tmp");
+    mkdirSync(base, { recursive: true });
+    const root = mkdtempSync(join(base, "cpe1969-lock-"));
+    scratch.push(root);
+    mkdirSync(join(root, ".github/workflows/scripts"), { recursive: true });
+    for (const [rel, body] of Object.entries(files)) writeFileSync(join(root, rel), body, "utf8");
+    return root;
+  }
+
+  function padWorkflows(files: Record<string, string>, n: number): Record<string, string> {
+    for (let i = 0; i < n; i += 1) {
+      files[`.github/workflows/pad${i}.yml`] =
+        "jobs:\n  j:\n    steps:\n      - name: noop\n        run: echo hi\n";
+    }
+    return files;
+  }
+
+  it("a SIXTH workflow building without --locked is reported — the exact case the old list missed", () => {
+    const root = fixtureRoot(
+      padWorkflows(
+        {
+          ".github/workflows/newcomer.yml":
+            "jobs:\n  build:\n    steps:\n      - name: build it\n        run: cargo build --release\n",
+          ".github/workflows/scripts/a.sh": "echo hi\n",
+          ".github/workflows/scripts/b.sh": "echo hi\n",
+          ".github/workflows/scripts/c.sh": "echo hi\n",
+        },
+        MIN_EXPECTED_WORKFLOWS - 1,
+      ),
+    );
+    const unlocked = discoverWorkflows(root)
+      .flatMap((f) => workflowStepUnits(f, root))
+      .flatMap(cargoInvocationsIn)
+      .filter(({ line }) => !line.includes("--locked"));
+    expect(unlocked.map((u) => u.line)).toEqual(["cargo build --release"]);
+    expect(unlocked[0].where).toContain("newcomer.yml");
+  });
+
+  it("a FOURTH script building without --locked is reported — gap 2's exact case", () => {
+    const root = fixtureRoot(
+      padWorkflows(
+        {
+          ".github/workflows/scripts/a.sh": "echo hi\n",
+          ".github/workflows/scripts/b.sh": "echo hi\n",
+          ".github/workflows/scripts/c.sh": "echo hi\n",
+          ".github/workflows/scripts/newcomer.sh":
+            "#!/usr/bin/env bash\n# cargo test --locked   <- a comment must not count\nset -euo pipefail\ncargo \\\n  clippy --all-targets\n",
+        },
+        MIN_EXPECTED_WORKFLOWS,
+      ),
+    );
+    const unlocked = discoverWorkflowScripts(root)
+      .map((f) => scriptUnit(f, root))
+      .flatMap(cargoInvocationsIn)
+      .filter(({ line }) => !line.includes("--locked"));
+    // The continuation is joined and the comment is stripped, exactly as in a `run:` block — the
+    // two shapes CPE-1929 measured defeating the old raw-text scanner, now proven over a `.sh`.
+    expect(unlocked.map((u) => u.line)).toEqual(["cargo clippy --all-targets"]);
+    expect(unlocked[0].where).toBe(".github/workflows/scripts/newcomer.sh (whole script)");
+  });
+
+  it("a script's heredoc body is still inert data, not an unlocked invocation", () => {
+    const root = fixtureRoot(
+      padWorkflows(
+        {
+          ".github/workflows/scripts/a.sh": "echo hi\n",
+          ".github/workflows/scripts/b.sh": "echo hi\n",
+          ".github/workflows/scripts/heredoc.sh":
+            "#!/usr/bin/env bash\ncat <<'EOF' > notes.txt\ncargo build --release\nEOF\ncargo test --locked\n",
+        },
+        MIN_EXPECTED_WORKFLOWS,
+      ),
+    );
+    const found = discoverWorkflowScripts(root)
+      .map((f) => scriptUnit(f, root))
+      .flatMap(cargoInvocationsIn)
+      .map((u) => u.line);
+    expect(found).toEqual(["cargo test --locked"]);
+  });
+
+  it("the scan REFUSES rather than reporting clean when the enumeration comes back empty", () => {
+    const root = fixtureRoot({});
+    expect(() => discoverWorkflows(root)).toThrow(/near-empty/);
+    expect(() => discoverWorkflowScripts(root)).toThrow(/near-empty/);
   });
 });
