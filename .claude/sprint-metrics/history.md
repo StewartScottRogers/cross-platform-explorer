@@ -4571,3 +4571,49 @@ exclusion and it reports `unclassified`; rename a row and it reports **both** `u
 **That is the difference between a lesson and a mechanism.** I have written *"enumerate the siblings"*
 three times this shift in three different phrasings. This is the first version that will still be true
 next month without anyone remembering it.
+
+## The same trade, three rounds running — and the third happened in the round that wrote the rule against it
+
+2026-08-28 12:0x, PR #1091 round 8 (CPE-1951).
+
+Round 8's own headline rule was the right one, stated in the worker's own words:
+
+> *"when you replace a matcher, run the PREVIOUS matcher's cases through the new one and say what
+> moved, in both directions."*
+
+The round then ran round 6's and round 7's **enumerated rows** through the new matcher — and shipped the
+identical fail-open trade for the **third consecutive round**. Ten shapes that round 7's whole-word regex
+bound, round 8's `shellTokens` loses: any unquoted `${…}`, `$((…))` or backslash-escaped metacharacter
+appearing *anywhere in the command before the target* truncates the operand walk, and `filledTargets`
+returns the `REPLY`/`MAPFILE` fallback instead of the name. `${…}` in an option argument is a more
+ordinary shell shape than any of the five the round recovered.
+
+**The rule was obeyed and the defect survived, because the rule's object was wrong.** "Run the previous
+matcher's cases" means the cases *someone wrote down*. The trade does not live there — it lives in the
+shapes nobody thought to write down, which is the same place it lived the previous two times. A rule
+quantified over an enumeration inherits the enumeration's blind spot **and the confidence of having run
+it**.
+
+The fix that ends the class, rather than the instance: **score the two matchers over a generated corpus**
+— every option that takes an argument × bare / quoted / `${…}` / `$((…))` / escaped × each metacharacter
+context — **and commit the generator**. That is this repo's standing preference for negatives over a
+generated space, and it is what "both directions" has to mean if the phrase is to carry any weight.
+
+Second finding, same round, same family one level up: three of the five rows the round added **claim bash
+binds a name it does not bind**. The RHS of a pipeline and an explicit `( … )` both run in a subshell
+(`lastpipe` off), so `printf … | read -r leaked` and `(read -r x < <(…))` bind nothing in the enclosing
+shell. Measured with `declare -p`, not read off the man page — which is what the docblock said it had
+done. The guard is unharmed and the rows still pass; what is wrong is the sentence around them, and the
+headline number: the widening buys **two** genuine catches, not five, and adds **three** fail-closed
+over-reports.
+
+**The tell that it was reachable:** the same docblock, a few lines away, already reasons *correctly* about
+identical scoping — *"`v=$(read -r x)` binds x only inside the substitution's own subshell"*. The pipe and
+the parens simply did not get the treatment their own neighbour had. **A correct sibling three lines up is
+the cheapest available check, and it is the one nobody runs.**
+
+Third, minor, same shape a third time in one round: `NOT_SHELL_TEXT`'s prose says *"each with the reason it
+owes no row"*, and the test reads only `Object.keys`. A reviewer added `reviewerProbeScanner: ""` next to a
+new function and the membership test went **green**. One `expect` over `Object.values` makes the sentence
+true. **A structure whose *shape* is asserted and whose *content* is not will be filled with an empty
+string the first time someone is in a hurry.**
