@@ -2699,3 +2699,86 @@ never existed in any commit. In fixing that, it **planted a fresh phantom citati
 canonical rule block, pointing at the very test the PR had just renamed away. Along with seven other
 sites still asserting the rule the PR inverted. A comment that names a test is derivable in one `git
 grep`; the ones that rot are the ones nobody thinks to grep because they read as background.
+
+## 2026-08-28 — a "pending" check whose job had already finished
+
+`ci-poll` reported #1088's oldest pending check as `Server crates (macos-latest)`, running 38 minutes,
+and helpfully suggested comparing it against a sibling to tell slow from hung. Both readings were wrong.
+Pulling the job's **steps** showed all 49 completed — including `Complete job` — every one `success`, at
+08:54:34Z. **The job was finished; only the check-run status was stale.**
+
+The genuinely outstanding work was the *other* pending check, Windows, sitting at step 21 of 24 with
+three crates left. So the poll's "oldest pending" pointed at the one thing that needed no waiting at all.
+
+**The technique, and it costs one API call:** when a check looks slow, do not compare its elapsed time
+against a sibling — **read its steps.** `gh api repos/:owner/:repo/actions/jobs/<id> --jq '.steps[]'`
+answers three questions the check-level view cannot: whether it is progressing, *which* step it is on,
+and whether it has in fact already finished. Elapsed time alone cannot distinguish a slow job from a
+finished one from a wedged one; the step list distinguishes all three immediately.
+
+Worth remembering that "compare against a sibling" was advice this crew wrote into the tool earlier this
+same shift, after a different misread. It is decent advice and it is strictly weaker than just looking.
+
+## 2026-08-28 — the documented "known gap" was the blocker, wearing a label
+
+PR #1087's round-2 blocker was a comment stripper that deleted source: a regex literal after a keyword
+whose character class contained `/*` made the scanner invent a comment and eat to the next `*/`. Round 3
+fixed it properly — root-caused to tracking the previous *character* instead of the previous *token* —
+and shipped 29 tests plus a written list of three **KNOWN GAPS**, each declared to *"fail toward KEEPING
+source rather than deleting it"*, each pinned by a passing test.
+
+**Gap 1 was the same defect, reached through a different prefix.** A regex after `)` or `]` is read as
+division — and when its class contains `//` or `/*`, the emitted `/` walks straight into the comment
+branches that sit *earlier* in the scanner than the regex branch. Parseable JavaScript in, unparseable
+out, **144 characters deleted.** The narrow re-review built the input and measured it.
+
+**Three separate things made it invisible, and they are the transferable part:**
+
+1. **The gap list was written from the *cause* rather than measured.** "A regex after `)` is read as
+   division" is true, and "division emits verbatim" is true, and the conclusion is still wrong, because
+   the emitted text re-enters the scanner. Nobody ran a deleting input through it.
+2. **The pinning test used the benign form of the case.** The table's gap-1 entry is `/re/`, which really
+   does keep. So the case was pinned, the oracle ran, everything was green — and the shape that fails was
+   simply not in the table. **A case table proves what is in it; it says nothing about what is missing,
+   and a green table reads like coverage of the whole class.**
+3. **The comment promised the oracle would catch a regression** — *"if any of these ever flips to
+   deleting, the `parses()` oracle below reds it"* — but the oracle only iterates the table.
+
+**The rule: a declared limitation is a claim, and claims get measured.** Writing "this fails safe" next
+to a green test is the CPE-1933 shape exactly — the test vouches for the sentence without testing it.
+Either construct an input for each declared gap and record which way it actually errs, or do not
+characterise the direction.
+
+Worth noting the pattern across this shift: **the narrow re-review — scoped to only what changed since
+the last round — has now found a blocker on this PR three times running**, each one invisible to the
+full review that preceded it, because each was created by the previous round's fix.
+
+## 2026-08-28 — the fix that made the promise true instead of narrowing it
+
+#1087's round-4 blocker offered two ways out. **(1)** Correct the false "known gap" text and pin the
+deleting shapes as cases. **(2)** Change the scanner so the deleting case cannot happen. The worker took
+(2), and the shape of it is worth keeping.
+
+The bug: a regex literal after `)` was read as division, and when its character class contained `//` or
+`/*` the emitted text walked into the comment branches. The instinct is to special-case the class
+contents. **The actual fix was to stop asking the wrong question.** A `)` is now decided by **what its
+`(` opened** — a per-frame paren stack plus a small set of control keywords — never by the `)` itself.
+That is what real tokenizers do, and it is the same correction round 3 made one level down: *decide on
+the previous **token**, not the previous character.* The same mistake, one scope up.
+
+**What made it verifiable, and this is the part round 3 lacked.** Emptying the keyword set now reds
+**6 of 48** tests — the four named cases, an explicit `−144 → 0` measurement, **and the parse oracle
+itself**, because four cases become genuinely unparseable. In round 3 the oracle iterated a table whose
+`)` entry was the benign form, so it could not fire. **An oracle only proves something when the table
+contains a case that can break it.**
+
+And the surviving gaps are now **derived rather than declared**: the remaining deleting shapes sit in
+their own group with `expect(out.length).toBeLessThan(input.length)` — deletion *asserted*, not inferred
+— and a separate test filters that group by "does this parse?" and requires the result empty. So the
+safety property ("everything that still deletes was already broken input") is a test rather than a
+sentence, and a parseable shape landing there reds on the day it lands.
+
+**Prefer the fix that makes the claim true over the fix that narrows the claim to fit the code** —
+where it is affordable. Here it cost a small state machine and removed a class instead of documenting
+one. The tell that (2) was available: the false claim was false for a *reason*, and the reason was a
+question being asked at the wrong scope.

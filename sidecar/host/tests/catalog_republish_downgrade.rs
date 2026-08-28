@@ -40,7 +40,7 @@ use std::path::Path;
 
 use sidecar_host::catalog::{
     apply_bundle_at, load_versions, save_versions, sign_bundle, ApplyOutcome, ApplyReport,
-    CatalogIndex, VersionMap,
+    VerifiedIndex, VersionMap,
 };
 
 /// The ed25519 seed the "release pipeline" signs with in these tests. Fixed, so every bundle below
@@ -344,14 +344,19 @@ fn the_index_sha256_identifies_content_but_cannot_order_it() {
     let new = sign_bundle(&[(AGENT.to_string(), manifest_at_tag("v2"))], &hex::encode(SEED), 20)
         .expect("sign new");
 
+    // Read the index the way every consumer now must (CPE-1954): `CatalogIndex::from_json` is
+    // private and `CatalogIndex` derives no `Deserialize`, so `VerifiedIndex::open` is not merely the
+    // preferred door from here — it is the only one that compiles. That is not a concession to a
+    // guard: the bundle is genuinely signed by `SEED`, so opening it properly is also more faithful
+    // to what a client does.
     let sha_of = |files: &[(String, Vec<u8>)]| -> String {
-        let bytes = files
-            .iter()
-            .find(|(n, _)| n == "catalog-index.json")
-            .map(|(_, b)| b.clone())
-            .expect("index present");
-        let index = CatalogIndex::from_json(&String::from_utf8(bytes).unwrap()).expect("parse");
-        index.get(AGENT).expect("entry").sha256.clone()
+        let pick = |name: &str| {
+            files.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()).expect("bundle member")
+        };
+        let bytes = pick("catalog-index.json");
+        let sig = String::from_utf8(pick("catalog-index.json.sig")).expect("sig is hex text");
+        let index = VerifiedIndex::open(&bytes, sig.trim(), &[trusted_key()]).expect("index opens");
+        index.index().get(AGENT).expect("entry").sha256.clone()
     };
 
     let (old_sha, new_sha) = (sha_of(&old), sha_of(&new));

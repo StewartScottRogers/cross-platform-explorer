@@ -44,8 +44,42 @@ fn keygen(args: &[String]) {
 }
 
 /// `catalog-sign verify <dir> <pubkey-hex>` — check a produced/published bundle: the index
-/// signature, each entry's content hash, and each per-manifest signature, all under `pubkey`.
-/// Exits non-zero on any failure. A diagnostic for confirming activation / a published catalog.
+/// signature, its schema, its entry ids, each entry's content hash, and each per-manifest
+/// signature, all under `pubkey`. Exits non-zero on any failure. A diagnostic for confirming
+/// activation / a published catalog.
+///
+/// # The index goes through `VerifiedIndex`, like every other path-forming reader (CPE-1954)
+///
+/// This used to parse with `CatalogIndex::from_json` and then `dir.join(format!("{}.json",
+/// entry.id))`. It was the last path-forming read of a catalog index outside the verifying
+/// constructor, and it was the one that mattered most: `sign_bundle` refuses a hostile id at
+/// **publish** time, so nothing this repo ships can carry one — but this subcommand exists to
+/// appraise a bundle someone **else** built, under a key the operator names on the command line.
+/// That input never passes `sign_bundle` at all.
+///
+/// Measured on the pre-fix binary (`tests/catalog_sign_verify_gate.rs`): a third-party bundle whose
+/// single entry id was `../outside/evil` printed `OK: index + 1 manifest(s) verify under the key`
+/// and exited 0, while the directory named on the command line contained no manifest whatsoever —
+/// every byte it appraised came from one level up. The operator asked about a directory and was
+/// answered about a different one.
+///
+/// "The operator supplied the bundle" does not license that. They chose the *directory*; the
+/// filenames come out of a document they are asking this tool to judge, and reading one is a
+/// path-formation step, not a request.
+///
+/// No second guard is added at the `join` below, deliberately. `VerifiedIndex::open_reported`
+/// already refuses the whole index on a bad id, so a check here could never be reached and would
+/// read as coverage while being unreachable — the CPE-1929 shape. One door, checked once. The
+/// door's own reachability was measured rather than argued: see the CPE-1929 pair recorded at the
+/// `is_valid_entry_id` refusal in `catalog.rs` (5 red disabled, 7 red with the predicate lying).
+///
+/// **rustc, not a test, is what keeps this routing.** `CatalogIndex::from_json` is private to
+/// `catalog.rs`, so the old spelling here is `error[E0624]: associated function `from_json` is
+/// private`; and `CatalogIndex` no longer derives `Deserialize` (the derive lives on a private wire
+/// type), so every way of spelling the parse from this binary — an alias, a turbofish, a
+/// `#[serde(flatten)]` wrapper, return-position inference — is `error[E0277]: the trait bound
+/// `CatalogIndex: Deserialize<'de>` is not satisfied`. Both measured 2026-08-28; the `WireIndex` doc
+/// in `catalog.rs` records why round 1's scanner-based version of this claim was not true.
 fn verify(args: &[String]) {
     if args.len() != 4 {
         eprintln!("usage: {} verify <dir> <pubkey-hex>", args[0]);
@@ -60,17 +94,24 @@ fn verify(args: &[String]) {
         })
     };
     let index_bytes = read("catalog-index.json");
+    // A `.sig` that is not UTF-8 becomes the empty string and therefore verifies against nothing —
+    // fail-closed, never "could not read it, carry on".
     let index_sig = String::from_utf8(read("catalog-index.json.sig")).unwrap_or_default();
-    if !sidecar_host::catalog::verify_index(&index_bytes, index_sig.trim(), &keys) {
-        eprintln!("FAIL: index signature does not verify under the key");
+    // Signature, encoding, parse, schema, and entry-id charset — one gate, in that order, and the
+    // reason comes back with the refusal so the operator of a genuinely-newer catalog is told their
+    // tool is old rather than that their bundle is broken. That distinction is the only reason this
+    // fix was deferred out of PR #1063; `IndexRefusal::UnsupportedSchema` is it.
+    let verified = sidecar_host::catalog::VerifiedIndex::open_reported(
+        &index_bytes,
+        index_sig.trim(),
+        &keys,
+    )
+    .unwrap_or_else(|refusal| {
+        eprintln!("FAIL: {refusal}");
         std::process::exit(1);
-    }
-    let index = sidecar_host::catalog::CatalogIndex::from_json(&String::from_utf8_lossy(&index_bytes))
-        .unwrap_or_else(|e| {
-            eprintln!("index parse: {e}");
-            std::process::exit(1);
-        });
-    for entry in &index.entries {
+    });
+    // Every id below is now a single safe path component, so the `join`s are joins of a filename.
+    for entry in verified.entries() {
         let m = read(&format!("{}.json", entry.id));
         if !entry.matches(&m) {
             eprintln!("FAIL: {} content does not match the index hash", entry.id);
@@ -82,7 +123,7 @@ fn verify(args: &[String]) {
             std::process::exit(1);
         }
     }
-    println!("OK: index + {} manifest(s) verify under the key", index.entries.len());
+    println!("OK: index + {} manifest(s) verify under the key", verified.entries().len());
 }
 
 fn main() {

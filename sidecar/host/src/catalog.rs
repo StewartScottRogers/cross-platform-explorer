@@ -22,7 +22,12 @@ pub const CATALOG_SCHEMA_VERSION: u16 = 1;
 
 /// One agent manifest named by the index. `sha256` binds the entry to exact manifest content;
 /// `version` is a monotonic counter used for anti-rollback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **No `Deserialize`, and `#[non_exhaustive]`, on purpose (CPE-1954).** See [`WireIndex`] for the
+/// whole argument: between them, no code outside this module can conjure one of these from
+/// attacker-supplied bytes, nor build one field-by-field from a shape it parsed itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct CatalogEntry {
     pub id: String,
     /// The manifest's own agent-schema version (CPE-278/300), carried for migration decisions.
@@ -44,16 +49,100 @@ pub struct CatalogEntry {
 }
 
 /// A signed list of catalog entries. Verified as a whole via a detached signature over its bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// **No `Deserialize`, and `#[non_exhaustive]`, on purpose (CPE-1954)** — see [`WireIndex`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[non_exhaustive]
 pub struct CatalogIndex {
     pub schema_version: u16,
-    #[serde(default)]
     pub entries: Vec<CatalogEntry>,
 }
 
+/// The on-the-wire shape of an index, and **the only `Deserialize` in this module**.
+///
+/// # Why the public types cannot be deserialised (CPE-1954, round 2)
+///
+/// [`CatalogIndex`]'s invariant is *"nobody holds one of these until the detached signature
+/// verified"*, because every field in it — `id` above all, which consumers interpolate into
+/// filesystem paths and fetch URLs — is attacker-controlled until then. [`VerifiedIndex::open`]
+/// is the only place that check happens.
+///
+/// Round 1 of this ticket made `from_json` non-public and had a **scanner**
+/// (`src/lib/catalogIndexOneDoor.test.ts`) sweep tracked `.rs` files for
+/// `serde_json::from_str::<CatalogIndex>`, on the theory that visibility closed the front door and
+/// text-matching closed the back one. It did not: while `CatalogIndex` was `pub` **and** derived
+/// `Deserialize`, at least eight spellings produced the identical unchecked document while matching
+/// none of the regexes — a local `type` alias, a `use … as` alias, a generic helper's turbofish
+/// (`parse_it::<CatalogIndex>`), a `#[serde(flatten)]` wrapper, return-position inference,
+/// `Self::from_json` from another module in this crate, a `TryFrom` impl, and a
+/// `Vec<CatalogIndex>` annotation. A guard whose bypass list is open-ended is not the invariant, and
+/// saying it was is the CPE-1933 shape: a claim a green test appears to vouch for.
+///
+/// So the derive moved here instead, to a **private** type, and the conversion into the public one
+/// runs only inside [`CatalogIndex::from_json`] — which is itself private and reachable only via
+/// [`VerifiedIndex::open_reported`], after the signature. Every one of those eight vectors is now a
+/// compile error outside this module (`the trait bound `CatalogIndex: Deserialize<'_>` is not
+/// satisfied`), and so is the ninth nobody has thought of yet. `#[non_exhaustive]` on both public
+/// types closes the remaining construction route: another crate cannot assemble one field-by-field
+/// out of a shape it parsed itself.
+///
+/// The one thing still possible, said plainly rather than left to be discovered: a caller may of
+/// course declare their **own** struct, deserialise catalog bytes into it, and interpolate its `id`
+/// into a path. That is not a back door onto this type — it is a reimplementation of the subsystem,
+/// which no visibility rule and no scanner could ever detect, and it is out of scope for this
+/// invariant.
+///
+/// The wire types are `#[serde(rename = …)]` to the public names so serde's own error text (which
+/// reaches an operator through `catalog-sign verify`) still names the document they wrote.
+#[derive(Deserialize)]
+#[serde(rename = "CatalogIndex")]
+struct WireIndex {
+    schema_version: u16,
+    #[serde(default)]
+    entries: Vec<WireEntry>,
+}
+
+/// The on-the-wire shape of one entry. Private for the reason given on [`WireIndex`]; field-for-field
+/// identical to [`CatalogEntry`], so what serde accepts is unchanged by the split.
+#[derive(Deserialize)]
+#[serde(rename = "CatalogEntry")]
+struct WireEntry {
+    id: String,
+    schema_version: u16,
+    sha256: String,
+    version: u64,
+}
+
+impl From<WireIndex> for CatalogIndex {
+    fn from(w: WireIndex) -> Self {
+        Self {
+            schema_version: w.schema_version,
+            entries: w.entries.into_iter().map(CatalogEntry::from).collect(),
+        }
+    }
+}
+
+impl From<WireEntry> for CatalogEntry {
+    fn from(w: WireEntry) -> Self {
+        Self { id: w.id, schema_version: w.schema_version, sha256: w.sha256, version: w.version }
+    }
+}
+
 impl CatalogIndex {
-    pub fn from_json(s: &str) -> Result<Self, String> {
-        serde_json::from_str(s).map_err(|e| e.to_string())
+    /// Parse an index **without checking anything about it**.
+    ///
+    /// Private on purpose (CPE-1954), and the *only* route from bytes to a [`CatalogIndex`] that
+    /// exists anywhere. Every field of the result is attacker-controlled, so this is the wrong door
+    /// for everyone — including the rest of this crate. [`VerifiedIndex::open`] is the right one,
+    /// and it is implemented in terms of this. Round 1 left this `pub(crate)`, which still let
+    /// another module in this crate write `Self::from_json`; there is no caller outside this module
+    /// and there should never be one, so the visibility now says so.
+    ///
+    /// The enforcement is the compiler, at both ends: this function is private, and [`WireIndex`]
+    /// holds the only `Deserialize`. Neither is a comment, which is the shape this ticket exists to
+    /// stop.
+    fn from_json(s: &str) -> Result<Self, String> {
+        serde_json::from_str::<WireIndex>(s).map(Self::from).map_err(|e| e.to_string())
     }
     pub fn get(&self, id: &str) -> Option<&CatalogEntry> {
         self.entries.iter().find(|e| e.id == id)
@@ -176,19 +265,94 @@ pub fn is_valid_entry_id(id: &str) -> bool {
 /// **no entries at all**.
 pub struct VerifiedIndex(CatalogIndex);
 
+/// Why [`VerifiedIndex::open_reported`] refused an index.
+///
+/// **Reporting only — never a trust decision.** Every variant is a refusal; there is no variant that
+/// means "accepted with a caveat", and no caller may branch on one to proceed. It exists because one
+/// consumer — the `catalog-sign verify` diagnostic — is run by a human who has to act on the answer,
+/// and "no index" is a different instruction from "your bundle is fine, this tool is too old to
+/// appraise it" (CPE-1954). Folding the schema check into the same gate without this distinction is
+/// exactly why the fix was deferred out of PR #1063.
+///
+/// The order of the variants is the order the checks run in, and that order is load-bearing:
+/// [`Self::Signature`] is first because nothing below it may look at a parsed field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexRefusal {
+    /// No supplied key signed these exact bytes. Checked first, and alone, before any parse.
+    Signature,
+    /// The bytes are not UTF-8, so there is no text to parse. Refused rather than lossily
+    /// reinterpreted: `from_utf8_lossy` turns an invalid byte into U+FFFD, which can leave a
+    /// *different* document that still parses.
+    NotUtf8,
+    /// Signed and UTF-8, but not a catalog index. Carries serde's own message.
+    Unparseable(String),
+    /// A schema this build does not understand — `0`, or newer than [`CATALOG_SCHEMA_VERSION`].
+    /// The one refusal that may mean *nothing is wrong with the bundle*.
+    UnsupportedSchema { found: u16, newest_supported: u16 },
+    /// An entry id that is not a single safe path component ([`is_valid_entry_id`], CPE-1949).
+    /// The whole index is refused, not the entry — see [`VerifiedIndex::open`]'s note on why.
+    EntryId(String),
+}
+
+impl std::fmt::Display for IndexRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signature => {
+                write!(f, "index signature does not verify under the key")
+            }
+            Self::NotUtf8 => write!(f, "index bytes are not valid UTF-8"),
+            Self::Unparseable(e) => write!(f, "index does not parse as a catalog index: {e}"),
+            Self::UnsupportedSchema { found, newest_supported } => write!(
+                f,
+                "index schema_version is {found}, which this build does not understand (newest \
+                 supported: {newest_supported}). The bundle may be perfectly valid — this tool is \
+                 too old to appraise it. Rebuild catalog-sign from a revision that knows schema \
+                 {found}."
+            ),
+            Self::EntryId(id) => write!(
+                f,
+                "entry id {id:?} is not a valid catalog entry id (1-{MAX_ENTRY_ID_LEN} chars of \
+                 [A-Za-z0-9._-], and not `.` or `..`). A signed index may still name a hostile id: \
+                 the signature says who published the document, not that the id is a filename."
+            ),
+        }
+    }
+}
+
 impl VerifiedIndex {
     /// Verify `index_bytes` against `trusted_keys`, then parse. `None` — and so no usable entry
     /// field — unless the bytes are signed by a trusted key and name a supported schema.
+    ///
+    /// The `Option` form for the gating callers, who have nothing to say about *why*: on the fetch
+    /// and apply paths a refusal is a refusal, and reporting a reason there would only invite a
+    /// caller to branch on it. Derived from [`Self::open_reported`] rather than duplicating the
+    /// sequence, so the two can never drift about what is accepted.
     pub fn open(index_bytes: &[u8], signature_hex: &str, trusted_keys: &[String]) -> Option<Self> {
+        Self::open_reported(index_bytes, signature_hex, trusted_keys).ok()
+    }
+
+    /// [`Self::open`], with the reason on the refusal path (CPE-1954).
+    ///
+    /// Same checks, same order, same verdict — this **is** the implementation, and `open` is
+    /// `.ok()` over it. For the human-facing `catalog-sign verify` diagnostic, which has to tell an
+    /// operator whether their bundle is hostile, corrupt, or merely newer than the tool.
+    pub fn open_reported(
+        index_bytes: &[u8],
+        signature_hex: &str,
+        trusted_keys: &[String],
+    ) -> Result<Self, IndexRefusal> {
         // Verify BEFORE parse. Nothing below this line may move above it.
         if !verify_index(index_bytes, signature_hex, trusted_keys) {
-            return None;
+            return Err(IndexRefusal::Signature);
         }
-        let text = std::str::from_utf8(index_bytes).ok()?;
-        let index = CatalogIndex::from_json(text).ok()?;
+        let text = std::str::from_utf8(index_bytes).map_err(|_| IndexRefusal::NotUtf8)?;
+        let index = CatalogIndex::from_json(text).map_err(IndexRefusal::Unparseable)?;
         // Unknown-future schema is refused, as elsewhere in the subsystem.
         if !index.is_supported() {
-            return None;
+            return Err(IndexRefusal::UnsupportedSchema {
+                found: index.schema_version,
+                newest_supported: CATALOG_SCHEMA_VERSION,
+            });
         }
         // CPE-1949, defence-in-depth *after* the signature, never before it. A verified signature
         // says "the holder of the catalog key published this"; it does not say the id is a filename.
@@ -203,10 +367,25 @@ impl VerifiedIndex {
         // invariant is "these are the bytes that verified" — filtering entries out of `self.0` would
         // make `index()` return a document nobody signed, and `gate_manifest` reads that document to
         // decide what is *listed*. A partial index is not a verified index.
-        if !index.entries.iter().all(|e| is_valid_entry_id(&e.id)) {
-            return None;
+        //
+        // **CPE-1929 pair, measured on this refusal 2026-08-28** (baseline: 122 lib + 26 integration
+        // tests all green, `Compiling sidecar-host` observed on every run — a cached "Finished in
+        // 0.5s" would have proved nothing). Disabled (`find(|e| false && !is_valid_entry_id(…))`):
+        // **5 red** — 3 lib (`one_escaping_id_refuses_the_whole_signed_index…`,
+        // `a_signed_index_with_an_escaping_entry_id_writes_nothing…`, `open_reported_names_each…`)
+        // and 2 in `tests/catalog_sign_verify_gate.rs`. Predicate forced to lie
+        // (`is_valid_entry_id` returning `true` unconditionally): **7 red**, the same five plus
+        // `entry_id_charset_admits_only_a_single_plain_path_component` and
+        // `sign_bundle_refuses_an_id_its_own_clients_would_reject`. Both sabotages change
+        // behaviour, so nothing shadows this: the signature check above it asks a different
+        // question, and no caller re-checks the id afterwards.
+        //
+        // The schema check above it was measured the same way — disabled: **3 red** (2 lib +
+        // `a_future_schema_bundle_says_the_schema_is_unsupported`).
+        if let Some(bad) = index.entries.iter().find(|e| !is_valid_entry_id(&e.id)) {
+            return Err(IndexRefusal::EntryId(bad.id.clone()));
         }
-        Some(Self(index))
+        Ok(Self(index))
     }
     /// The verified index.
     pub fn index(&self) -> &CatalogIndex {
@@ -1481,5 +1660,134 @@ mod tests {
         let future = r#"{"schema_version":99,"entries":[{"id":"claude","schema_version":1,"sha256":"00","version":1}]}"#;
         let sig = sign(&k, future.as_bytes());
         assert!(VerifiedIndex::open(future.as_bytes(), &sig, &[pk]).is_none());
+    }
+
+    // --- CPE-1954: `open_reported` names the reason, and names it for exactly the same inputs ----
+
+    /// Every refusal variant, reached through the real gate. The signature arm is deliberately
+    /// first, because the ordering claim ("verify before parse") is the one that must not rot: an
+    /// index that is *also* unparseable, *also* a bad schema, and *also* carries a hostile id must
+    /// still report `Signature`, because nothing below the signature check ran.
+    #[test]
+    fn open_reported_names_each_refusal_and_reports_the_signature_first() {
+        let (k, pk) = keypair(1);
+        let keys = std::slice::from_ref(&pk);
+        let sign_it = |b: &[u8]| sign(&k, b);
+
+        // Unsigned, and bad in every other way too.
+        let junk = b"not even json, id ../../pwned";
+        assert_eq!(
+            VerifiedIndex::open_reported(junk, "00", keys).err(),
+            Some(IndexRefusal::Signature),
+            "the signature is checked first and alone — no later reason may pre-empt it",
+        );
+
+        // Signed, but not UTF-8. `from_utf8_lossy` would turn this into a document that parses.
+        let mut bad_utf8 = index_json("claude", "00", 1).into_bytes();
+        bad_utf8.insert(2, 0xff);
+        assert_eq!(
+            VerifiedIndex::open_reported(&bad_utf8, &sign_it(&bad_utf8), keys).err(),
+            Some(IndexRefusal::NotUtf8),
+        );
+
+        // Signed and UTF-8, but not an index.
+        let not_index = b"{\"schema_version\":\"one\"}";
+        assert!(matches!(
+            VerifiedIndex::open_reported(not_index, &sign_it(not_index), keys),
+            Err(IndexRefusal::Unparseable(_)),
+        ));
+
+        // Signed, parseable — schema this build does not understand. Both directions: 0 and future.
+        let future = br#"{"schema_version":99,"entries":[]}"#;
+        assert_eq!(
+            VerifiedIndex::open_reported(future, &sign_it(future), keys).err(),
+            Some(IndexRefusal::UnsupportedSchema {
+                found: 99,
+                newest_supported: CATALOG_SCHEMA_VERSION
+            }),
+        );
+        let zero = br#"{"schema_version":0,"entries":[]}"#;
+        assert_eq!(
+            VerifiedIndex::open_reported(zero, &sign_it(zero), keys).err(),
+            Some(IndexRefusal::UnsupportedSchema {
+                found: 0,
+                newest_supported: CATALOG_SCHEMA_VERSION
+            }),
+        );
+
+        // Signed, parseable, supported schema — hostile id. Names the offending id, so a publisher
+        // with a hundred entries is told which one.
+        let evil = index_json("../../pwned", "00", 1);
+        assert_eq!(
+            VerifiedIndex::open_reported(evil.as_bytes(), &sign_it(evil.as_bytes()), keys).err(),
+            Some(IndexRefusal::EntryId("../../pwned".to_string())),
+        );
+
+        // And the accepting case still accepts.
+        let good = index_json("claude", "00", 1);
+        assert!(VerifiedIndex::open_reported(good.as_bytes(), &sign_it(good.as_bytes()), keys).is_ok());
+    }
+
+    /// `open` is `open_reported().ok()` — pinned behaviourally rather than by reading the source, so
+    /// a future edit that gives either one an extra check (or drops one) reds here. This is the
+    /// invariant that lets the gating callers keep the `Option` form without a second gate existing.
+    ///
+    /// **One case per [`IndexRefusal`] variant, plus the accepting one.** Round 1 of CPE-1954 left
+    /// out `NotUtf8` and `Unparseable`, and `NotUtf8` was the arm that mattered: reimplementing
+    /// `open` with `from_utf8_lossy` (keeping the schema and id checks) makes it accept a signed
+    /// non-UTF-8 index that `open_reported` refuses — a divergence on the security property this
+    /// ticket added — and the whole lib suite stayed green (122 passed, 0 failed). `open` is the
+    /// constructor `do_fetch_catalog` and `apply_bundle_*` gate on, so a divergence there is the
+    /// expensive one. Sabotage re-run after adding the two arms: **1 red**, this test, naming
+    /// `signed + not UTF-8`.
+    #[test]
+    fn open_and_open_reported_accept_exactly_the_same_inputs() {
+        let (k, pk) = keypair(1);
+        let keys = std::slice::from_ref(&pk);
+        let good = index_json("claude", "00", 1);
+        let evil = index_json("../../pwned", "00", 1);
+        let future = r#"{"schema_version":99,"entries":[]}"#.to_string();
+        // A lone 0xFF inside a field serde ignores: `from_utf8_lossy` turns it into U+FFFD and
+        // leaves a document that still parses, so "it happens not to parse anyway" is not a
+        // defence — the refusal has to be the encoding check itself.
+        let mut not_utf8 = br#"{"schema_version":1,"note":"#.to_vec();
+        not_utf8.extend_from_slice(b"\"\xff\",\"entries\":[]}");
+        let unparseable = b"{\"schema_version\":1,\"entries\":".to_vec();
+        let cases: Vec<(&str, Vec<u8>, String)> = vec![
+            ("signed + valid", good.clone().into_bytes(), sign(&k, good.as_bytes())),
+            ("signed + hostile id", evil.clone().into_bytes(), sign(&k, evil.as_bytes())),
+            ("signed + future schema", future.clone().into_bytes(), sign(&k, future.as_bytes())),
+            ("signed + not UTF-8", not_utf8.clone(), sign(&k, &not_utf8)),
+            ("signed + unparseable", unparseable.clone(), sign(&k, &unparseable)),
+            ("unsigned", good.clone().into_bytes(), "00".to_string()),
+            ("wrong key", good.clone().into_bytes(), sign(&keypair(9).0, good.as_bytes())),
+            ("garbage", b"nope".to_vec(), "not hex".to_string()),
+        ];
+        for (what, bytes, sig) in cases {
+            assert_eq!(
+                VerifiedIndex::open(&bytes, &sig, keys).is_some(),
+                VerifiedIndex::open_reported(&bytes, &sig, keys).is_ok(),
+                "{what}: the two constructors disagreed about what is acceptable",
+            );
+        }
+    }
+
+    /// The refusal messages are what an operator acts on, so each has to say enough to act. The
+    /// schema one in particular must not read as "your bundle is broken" — that regression is the
+    /// only reason CPE-1954's fix was deferred out of PR #1063.
+    #[test]
+    fn the_schema_refusal_tells_the_operator_their_tool_is_old_not_their_bundle_broken() {
+        let msg = IndexRefusal::UnsupportedSchema { found: 7, newest_supported: 1 }.to_string();
+        assert!(msg.contains("schema_version is 7"), "{msg}");
+        assert!(msg.contains("newest supported: 1"), "{msg}");
+        assert!(msg.contains("may be perfectly valid"), "{msg}");
+        // And it is not confusable with the "there is no index" answer the deferral worried about.
+        assert!(!msg.contains("no index"), "{msg}");
+
+        let id = IndexRefusal::EntryId("../../pwned".into()).to_string();
+        assert!(id.contains("../../pwned"), "the offending id must be named: {id}");
+        assert!(id.contains("entry id"), "{id}");
+        assert!(IndexRefusal::Signature.to_string().contains("signature"), "signature message");
+        assert!(IndexRefusal::NotUtf8.to_string().contains("UTF-8"), "utf8 message");
     }
 }
