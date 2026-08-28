@@ -4434,3 +4434,41 @@ answers a question about it"*, applied by grep, with the excused ones named and 
 by the next reader. **"Three rows" is a claim about how many I thought of**, and I wrote the brief that
 way. Last tick I recorded that the enumeration found a gap on its first outing; it did, and it was also
 missing two rows, and both facts belong in the record.
+
+## 2026-08-29 — writing the documentation of the trap set the trap
+
+#1093's round 5 hit a scripted sabotage that patched its own documentation instead of the code. Round 6
+was asked to generalise the note: **five of the ten recipes** have an anchor whose first occurrence in
+the file is prose.
+
+It wrote that paragraph, **then measured the file again.** Writing it **broke one of the two clean
+anchors**: nine of ten are now prose-first, because the new paragraph quotes them. Only one survives, and
+only because its declaration sits above the docblock.
+
+**And it recorded that as the point rather than hiding it.** *There is no version of this header that
+documents the trap without setting it* — so *"keep the list short"* is not a remedy, and the
+diff-in-code assertion is the only thing that works. A document that describes a hazard in a file it
+lives in **becomes an instance of the hazard**, and the honest response is to say so and lean harder on
+the mechanical check.
+
+**Three more findings from the same round, all the same discipline.**
+
+The disputed figure I told it to derive or delete **never existed in the repo** — it was the previous
+round's *report prose*, not a comment. But two related in-file errors did, and it derived the real ones:
+**76 tests from 68 literal `it(`**, the gap being two loops that expand to 3 and 7, each measured by
+filtering on its title.
+
+**And `-t "fails CLOSED"` is not "the describe".** It is a substring filter over the whole test name, and
+the thirteenth match lives in an unrelated describe. **Three rounds of prose called that filter a
+describe** — a name for a thing that was never that thing, repeated because nobody ran it.
+
+**It re-ran the CPE-1929 pair rather than adjusting the carried-forward number, and the arithmetic answer
+would have been wrong.** Carry-forward says 12 failed / 64 passed; measured it is **3 / 73** and
+**13 / 63**, because round 5's new test lands in the *failed* set, not the passed column. **A count that
+moves because the suite grew can be adjusted; a count that moves because a test changed sides cannot.**
+The only way to tell the two apart is to re-run.
+
+**And it declined to rebase, with a reason.** The rebase was clean and it ran it — then reset, because
+rebasing rewrites the exact revision the new comment cites as its measurement baseline, and force-pushing
+would orphan it. Pushed fast-forward instead. **The sha-rot lesson from another PR arriving as a decision
+rather than a correction.**
