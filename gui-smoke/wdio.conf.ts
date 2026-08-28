@@ -1039,6 +1039,32 @@ let shuttingDown = false;
 // `recoverSession` below for how the budget is spent. Worker-local like `tauriDriver` above: each worker
 // is its own process with its own fresh import of this file, so one shard can never lend or borrow
 // another's budget.
+//
+// CPE-1979 — READ THIS BEFORE CONCLUDING THIS CODE IS DEAD, AND DO NOT DELETE IT. Until 2026-08-28 this
+// containment fired on essentially every shard-2 job: `resetAppState` failed on the transition into
+// `checkpoint-restore.smoke.ts` in 77 of 77 completed shard-2 job logs over a 16h50m window
+// (2026-08-28T00:21Z-17:11Z, 97 gui-smoke runs; the other 4 shard-2 jobs in the window were cancelled —
+// 3 with no retrievable log, 1 cancelled before the transition), and the session restart that followed
+// killed the driver in 11 of those 77 (14.3%), spending the budget below. CPE-1979 removed that trigger
+// at its source — an app bug in `NavToolbar.svelte#commit()`, not a transport problem — so the expected
+// steady state is now ZERO respawns per run.
+//
+// That is the whole point AND the cost: a recovery path that never runs is a recovery path nobody
+// notices breaking. What we chose instead of a synthetic exercise (which would have to kill a live
+// driver on every run — ~35s, a new flake source in the gate, and it would peg the respawn counter at
+// >=1 forever, destroying the one signal below) and instead of a "respawn count has been 0 for N runs"
+// alert (which fires on HEALTH, so it gets muted, and cannot tell a healthy-and-unneeded mechanism from
+// a broken one):
+//   - The DECISION logic of CPE-1910's job-level retry is pure and stays deterministically exercised on
+//     every push by `lib/sessionRetry.test.ts` + `lib/runSuite.integration.test.ts` (which drives the
+//     real `scripts/run-suite.ts` against a stub suite). That half loses nothing.
+//   - The in-process half below — `recoverSession`/`respawnTauriDriver`, which need a live driver and a
+//     real socket — is the part that genuinely goes uncovered. It is accepted, named here, and NOT
+//     papered over with a test that would only assert the mock.
+//   - The standing signal is the direction nobody has to remember to look at: CPE-1910's summary block
+//     prints every respawn to `$GITHUB_STEP_SUMMARY`, so a respawn count going back ABOVE zero is now a
+//     visible regression rather than the background noise it has been all month. Zero is the new
+//     baseline; treat a non-zero one as a report, not as weather.
 
 /** How many times ONE worker may respawn tauri-driver mid-shard. One. This is a bounded in-job retry,
  *  never an exemption: when it is spent, `respawnTauriDriver` throws an error carrying

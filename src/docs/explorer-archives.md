@@ -42,6 +42,11 @@ A `.zip`/`.tar`/`.tar.gz`/`.tgz`/`.gz`/`.7z`/`.iso`/`.rar` file gets two read-on
   entries as regular-looking rows; double-click a folder-like entry to go deeper, and the breadcrumb/back
   button work the same as real navigation. This is a genuinely read-only view: every mutating action
   (rename, delete, paste, new folder, …) is refused with *"This is a read-only view inside an archive."*
+- **Getting back out.** Any of these leaves the archive and returns you to a real folder: the Back
+  button, Backspace / Alt+Up, clicking one of the real-folder crumbs to the left of the archive's name,
+  or the address bar (Ctrl+L, then Enter). The address bar is worth calling out because it opens showing
+  the archive's *containing* folder — the archive view sits on top of that folder rather than replacing
+  it — so pressing Enter without typing anything is a valid "take me back out", and does exactly that.
 - **Opening a file** from inside an archive extracts just that one entry to a temporary file and opens
   the temp copy — the archive itself is never touched by opening something inside it.
 - **Those temp copies clean themselves up.** Everything extracted this way goes into one folder for the

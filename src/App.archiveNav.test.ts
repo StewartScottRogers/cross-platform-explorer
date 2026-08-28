@@ -102,3 +102,55 @@ describe("App — leaving an archive browse-view on Back (CPE-1366)", () => {
     expect(screen.queryByText("bundle.zip")).toBeNull();
   });
 });
+
+/**
+ * CPE-1979 — the address bar must also get you out, and re-entering the SAME path is the case that was
+ * broken. `enterArchive` never moves `currentPath` (it sets `archive` and leaves history alone), so the
+ * address bar goes on displaying the CONTAINING folder while the listing shows the archive's inner
+ * entries. Opening the bar and pressing Enter therefore submits a value equal to `currentPath`, and
+ * `NavToolbar#commit`'s "nothing would change" short-circuit (`value === currentPath`) swallowed it:
+ * no `navigate` dispatch, so `onCrumbNavigate`'s `exitArchive()` and `loadPath`'s `archive = null` were
+ * both unreachable and the user stayed inside the archive with no feedback at all.
+ *
+ * Measured cost of that in CI, which is why this has a ticket of its own: `gui-smoke`'s between-spec
+ * `resetAppState` navigates back to the run's tmp dir through this exact primitive, and
+ * `archive-browse.smoke.ts` leaves the app inside a `.tar.gz`. 77 of 77 completed shard-2 job logs over
+ * 2026-08-28T00:21Z-17:11Z failed that reset with `expected the breadcrumb to show
+ * "cpe-gui-smoke-XXXXXX"`, then recovered by restarting the whole WebDriver session — which in 11 of
+ * those 77 also killed the driver and spent CPE-1955's respawn budget.
+ *
+ * Red-proof (run before commit): with `pathOverlaidByView` removed from `commit`'s condition this test
+ * fails on the first `waitFor` — `inside.txt` is still rendered — while the CPE-1366 test above stays
+ * green, i.e. the two cover different exits and neither shadows the other.
+ */
+describe("App — leaving an archive browse-view via the address bar (CPE-1979)", () => {
+  it("re-entering the archive's own containing folder in the address bar exits the archive", async () => {
+    const { container } = render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("photos")).toBeTruthy());
+
+    await fireEvent.dblClick(screen.getByText("photos"));
+    await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
+
+    // Inside the archive: the inner entry renders, and `currentPath` is still C:\d\photos.
+    await fireEvent.dblClick(screen.getByText("bundle.zip"));
+    await waitFor(() => expect(screen.getByText("inside.txt")).toBeTruthy());
+
+    // Open the address bar the way clicking its empty area does (NavToolbar's `.address` click handler
+    // fires only when the event target IS the nav itself, which is what dispatching on it produces).
+    // `startEdit` then seeds the input with `currentPath` — so pressing Enter with nothing typed submits
+    // exactly the value the old short-circuit rejected. Nothing is typed here ON PURPOSE: retyping the
+    // path by hand would test the same code path less honestly.
+    const address = container.querySelector("nav.address");
+    expect(address).not.toBeNull();
+    await fireEvent.click(address!);
+    const input = (await screen.findByLabelText("Address")) as HTMLInputElement;
+    expect(input.value).toBe("C:\\d\\photos");
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    // The archive is gone and the real folder's listing is back.
+    await waitFor(() => expect(screen.queryByText("inside.txt")).toBeNull());
+    await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
+  });
+});

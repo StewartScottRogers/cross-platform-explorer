@@ -20,6 +20,27 @@
   export let currentPath = "";
   /** Bound from the parent so Ctrl+L can switch us into edit mode. */
   export let editingPath = false;
+  /** CPE-1979 — true when a VIEW is layered over `currentPath`'s own listing (the in-app archive
+   *  browser, a smart folder, a saved structured search). App.svelte derives it as `pathOverlaidByView`
+   *  and that is the single declaration; it is passed in rather than recomputed here because this
+   *  component cannot see any of the three.
+   *
+   *  {@link commit} needs it. Its "nothing would change, don't re-navigate" short-circuit compares the
+   *  typed value against `currentPath`, and `currentPath` stops being the thing on screen the moment one
+   *  of those views opens: entering an archive never moves `currentPath` (App.svelte's `enterArchive`
+   *  sets `archive` and leaves history alone), so the address bar goes on displaying the CONTAINING
+   *  folder while the listing shows the archive's inner entries. Re-entering that same folder path is
+   *  then the user's most natural "get me back out", and the equality test swallowed it — no `navigate`
+   *  dispatch, so `onCrumbNavigate`'s `exitArchive()` and `loadPath`'s `archive = null` (the single
+   *  chokepoint that dismisses all three views) were both unreachable from here.
+   *
+   *  Measured, not theorised: this is the whole of CPE-1979. In 77 of 77 `gui-smoke` shard-2 job logs
+   *  over a 16h50m window (2026-08-28T00:21Z–17:11Z) the harness's between-spec `resetAppState` failed
+   *  on exactly this — `expected the breadcrumb to show "cpe-gui-smoke-XXXXXX"` — because
+   *  `archive-browse.smoke.ts` leaves the app inside a `.tar.gz` and the reset's address-bar navigation
+   *  back to the same tmp dir was a no-op for 15s while `[aria-current="page"]` kept reading
+   *  `CPE-1181-archive.tar.gz`. */
+  export let pathOverlaidByView = false;
   /** Recent folder paths, offered as address-bar autocomplete (CPE-361). */
   export let recentPaths: string[] = [];
 
@@ -65,7 +86,10 @@
   function commit() {
     const value = draft.trim();
     editingPath = false;
-    if (!value || value === currentPath) return;
+    // CPE-1979: the equality short-circuit only holds while `currentPath` IS what is on screen — see
+    // {@link pathOverlaidByView}. With a view layered over it, re-entering the same path is the one
+    // gesture that dismisses that view, so it must reach the parent.
+    if (!value || (value === currentPath && !pathOverlaidByView)) return;
     dispatch("navigate", value);
   }
 

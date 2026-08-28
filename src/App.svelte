@@ -2160,7 +2160,16 @@
    *  disk cleared on entering an archive and git did not.) Passing this one value into both keeps the
    *  dependency list and the guard body impossible to drift apart: remove it from a call and the guard
    *  stops compiling rather than silently stopping firing. */
-  $: pathReadoutsSuppressed = isHome || !!archive || !!smartFolder || !!structuredSearch;
+  /** CPE-1979 — the three views that render a LISTING other than `currentPath`'s own, hoisted out of
+   *  `pathReadoutsSuppressed` above so there is exactly one declaration of the condition and the two
+   *  consumers cannot drift. (Home is the fourth case for the readouts and deliberately NOT here: at
+   *  Home `currentPath` IS `HOME`, so it honestly describes the view — it qualifies above only because
+   *  a git branch / disk figure derived from the HOME sentinel describes nothing.)
+   *
+   *  Passed to `NavToolbar` as `pathOverlaidByView` — read that prop's comment for the bug it fixes and
+   *  the 77-of-77 CI measurement behind it. */
+  $: pathOverlaidByView = !!archive || !!smartFolder || !!structuredSearch;
+  $: pathReadoutsSuppressed = isHome || pathOverlaidByView;
 
   // ---- Smart-folder live-refresh on filesystem change (CPE-1230, epic CPE-978) ----
   // `smartPaths`/`loadStructuredSearchEntries` (declared above) already recompute reactively when the
@@ -6633,6 +6642,7 @@
   bind:editingPath
   {crumbs}
   {currentPath}
+  {pathOverlaidByView}
   {density}
   recentPaths={recentFolders.map((r) => r.path)}
   canBack={canGoBack(activeTab.history)}
