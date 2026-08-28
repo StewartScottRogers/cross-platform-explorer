@@ -3,7 +3,7 @@ id: CPE-1973
 title: the ZIP symlink branch is redirected by a **planted** inside-pointing link, **deletes a file the archive never named**, and reports `Ok`
 type: bug
 priority: High
-status: Open
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27

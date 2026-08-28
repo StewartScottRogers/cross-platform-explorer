@@ -3,7 +3,7 @@ id: CPE-1938
 title: tar/7z extraction is blind to an inside-pointing junction, and the `#[cfg(unix)]` permission pass follows links — an archive can chmod (setuid included) outside the root
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -299,3 +299,73 @@ Docs: `src/docs/explorer-archives.md` gained the shortcut-on-the-way-to-a-link b
 language, including that the old behaviour **deleted** a same-named file of the user's.
 
 Rebased onto `origin/main` (was 10 behind); no file in that delta overlaps this change.
+
+## Closed 2026-08-28 — what the gauntlet actually proved
+
+Merged as PR #1084, **fully green (25/25)**, after two rounds, one Reviewer and one Security Auditor.
+The run **included CPE-1956's `CI verdict` gate**, so no stale-checks caveat applies.
+
+**It corrected its own ticket twice, and both corrections mattered.**
+
+- **7z is demonstrated, not inferred — and it was the worst of the four legs.**
+  `Ok(ArchiveReport { done: 2, failed: 0, skipped: 0, errors: [] })` with the payload written to
+  `dest/other/leaf.txt`. **A clean success report over a redirected payload.** The tar legs at least
+  returned `Err`. Its Reviewer wrote its **own** 7z fixture from scratch — its own `SevenZWriter`, its
+  own junction, with a liveness probe proving the link redirects — and reproduced it verbatim.
+- **The ticket's `[tar junction→outside]` case did NOT reproduce.** All four legs already refuse that
+  direction via `confined_to`. **The live hole was exactly the inside-pointing one the title names.**
+
+**The property, and why the inside-pointing case is the hard one:** every directory component of an
+entry's destination must be a **real directory, opened by name relative to the handle of the component
+above it** — never resolved as a path. *Containment asks where does this path end up, and an
+inside-pointing junction answers honestly: **inside**. `open_beneath` refuses a link at a component
+**without asking where it goes**, so the link's direction is irrelevant to it.* Direction-blindness is
+**structural, not asserted**, and the Auditor proved it mechanically: grepping every added non-comment
+line for path-forming APIs yields **exactly one** hit outside `mod tests`, and that one is
+`open_root`'s stated precondition.
+
+**It stated its own limit rather than implying containment.** This is **not** a handle gate for tar/7z —
+the unpackers still receive a path and own the write, so a **planted** link is refused and a **raced**
+component is not. Written at the site in a dedicated *"What it is NOT"* section.
+
+**The Security Auditor found a HIGH the PR affirmatively claimed was covered — CPE-1973.** A **planted**
+inside-pointing symlink (no race) made the **ZIP symlink branch** canonicalise *through* it, answer
+"inside", then hit `AlreadyExists` and `fs::remove_file(out)` re-resolve through the link and **delete a
+file the archive never named** — reporting `Ok(done: 1, errors: [])`. **Two of the PR's own statements
+asserted that path was safe and both were wrong:** the table called the ZIP rows *"already
+handle-gated"* when those calls live only in the dir and file branches, and the residual note's *"a
+planted link is refused"* is **false for an inside-pointing one** — the note re-committed the exact
+error it was written to bound. **That is why a sweep specifically looking for this missed it.** Fixed in
+round 2 with no new primitive, and red-proofed.
+
+**And the audit upgraded the PR at the same time.** It hand-built a STORED zip with external attributes
+`0o104755` (the `& 0o777` mask is the `zip` *writer's*, not the format's) and **measured** what the PR
+had honestly flagged as inferred: the bit reaches disk as `0o4755`, and end-to-end with `main`'s
+deferred drain restored, **`trials=20 swaps=20 MODES_CHANGED_OUTSIDE=20 SETUID_OUTSIDE=20`** — **a real
+privilege-escalation primitive on `main`**, closed by this PR at 0/20. Honest scope: `chmod(2)` succeeds
+only for the file's owner, so it is fatal when an archive is extracted as root or a service account and
+a same-user integrity problem otherwise.
+
+**Three more findings, all closed:** a Windows **one-component** chain rested entirely on a fail-open
+default whose *"NT catches it one component later"* justification holds for the sibling caller but **not**
+for a verification-only pass — forcing that arm **silently restored the defect**, and the PR's fixture
+always had two components so it never exercised it (now fails closed, and the opposite-defaults split
+between the two callers is gone). The raced residual was **understated** — `renameat2(RENAME_EXCHANGE)`
+puts bytes **outside** the folder at 8/40 and 5/40 trials — now marked on the rows that advertise
+containment. And the new `Abort` arm's **CPE-1929 pair came back GREEN**, so the arm escalating a
+transient `ENOENT` to total denial was uncovered; now covered by a deterministic `EACCES` test.
+
+**A hypothesis that turned out not to exist**, handled the right way: the Auditor supposed a
+duplicate-name hazard. `zip::ZipArchive` **collapses duplicate names** in its central directory, so it
+cannot arise — measured, identical on `main`, and the sentence was **replaced with the measurement**
+rather than narrowed into vagueness.
+
+**Third stale number of the family.** The Reviewer correctly derived `create_dir_all` = **6** (not 8) and
+in the same breath vouched for `File::create` = 12. It is **11** — and **both wrong numbers are exactly
+the two CPE-1913 changed**, one line apart. Having derived the first, the adjacent one *felt* checked.
+The Foreman then relayed that vouching in a brief. **Rule: derive one number out of a group a single
+change touched, derive all of them.**
+
+**A Reviewer limitation that was itself wrong:** it reported its WSL could not build the crate. A
+no-sudo toolchain was already staged at `~/lintools/bin`; `cpe-server` builds in ~37s, and round 2 ran
+all five legs on Linux.
