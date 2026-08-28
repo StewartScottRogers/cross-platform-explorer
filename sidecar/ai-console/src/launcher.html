@@ -16,11 +16,37 @@
      Pinned by src/lib/aiConsoleLauncher.contrast.test.ts, which re-reads THIS block. */
   :root {
     color-scheme: light dark; --line: rgba(128,128,128,0.26);
-    /* --accent is a FILL role: it backs `button.primary`'s background under literal white text
-       (4.55:1) and the focus-ring border. It is NOT safe as a foreground on Canvas in dark
-       (4.12:1 for the 11px bold help headings), so the text role gets its own token rather than
-       being pinned at the fill role's looser bar — the CPE-1919 multi-role trap. */
+    /* --accent is a NON-TEXT role token. Every role it backs, measured (headless Chrome,
+       getComputedStyle for the engine-resolved system colours, WCAG 2.1 ratios):
+
+         role                                        light   dark    bar    pinned by a test?
+         button.primary fill, under literal #fff     4.55    4.55    4.5    no — SITES is text-only
+         button.primary fill vs the page behind it   4.55    4.12    3.0    no —      "
+         .tab.active accent bar vs the page          4.55    4.12    3.0    no —      "
+         focus-ring border vs the page               4.55    4.12    3.0    no —      "
+         focus-ring border vs the FIELD INTERIOR     4.55    2.46    3.0    no — AND IT FAILS
+
+       Only the TEXT role below is pinned by a test; the rest are documented here and nothing
+       enforces them, because the guard derives its checked set from `color: var(--token)` rules
+       and a fill or a border is not a `color:`. Do not read this comment as coverage.
+
+       THE FOCUS-RING ROLE FAILS AND IS NOT FIXED HERE. `select:focus, input:focus,
+       textarea:focus` set `outline: none` and `border-color: var(--accent)`, so that border is
+       the ONLY focus indicator in this page; against the field interior it encloses — `Field`,
+       which the engine resolves to rgb(59,59,59) in dark — it is 2.46:1, under WCAG 2.1 SC
+       1.4.11's 3:1. Pre-existing, and a keyboard-navigation defect rather than a cosmetic one.
+       Tracked as CPE-1966, which owns it deliberately: the fix wants its own token (the same
+       split done below one role over) plus a guard that can see non-text roles at all, and doing
+       it here would ship an unpinned colour change inside a contrast ticket.
+
+       It is NOT safe as a foreground either (4.12:1 on Canvas in dark, for the 11px bold help
+       headings), so the text role gets its own token rather than being pinned at the fill role's
+       looser bar — the CPE-1919 multi-role trap. */
     --accent: #2f6fed;
+    /* NAME NOTE: `src/app.css` also declares an `--accent-text`, with DIFFERENT values (light
+       #0067c0, dark #3aa0f0). Not a collision — this page never loads app.css, and app.css never
+       loads here — but a real hazard for readers: one grep returns both, and each file's guard
+       reads only its own. If you change one, you have not changed the other. */
     --accent-text: #2f6fed;   /* on white: 4.55:1 */
     --msg-ok: #1a7f37;        /* on white: 5.08:1 */
     --msg-warn: #8a5a00;      /* on white: 5.93:1 */
@@ -28,8 +54,10 @@
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      /* --accent deliberately keeps its light value: it is a fill, and white-on-#2f6fed is the
-         same 4.55:1 in either scheme. Only the foreground roles move. */
+      /* --accent deliberately keeps its light value: white-on-#2f6fed is the same 4.55:1 in
+         either scheme, so its fill role does not need one. Its focus-ring role DOES need one and
+         does not get it here — see the 2.46:1 note in the bare :root block, and CPE-1966. Only
+         the foreground roles move below. */
       --accent-text: #4f86ff; /* on rgb(18,18,18): 5.52:1 */
       --msg-ok: #4fb862;      /* on rgb(18,18,18): 7.46:1 */
       --msg-warn: #d0982f;    /* on rgb(18,18,18): 7.33:1 */
@@ -90,6 +118,10 @@
                   border-radius: 6px; }
   textarea { font: inherit; width: 100%; padding: 6px 9px; background: Field; color: FieldText;
              border: 1px solid var(--line); border-radius: 6px; resize: vertical; min-height: 30px; }
+  /* KNOWN DEFECT, not fixed by CPE-1921 — see the --accent note in :root. `outline: none` makes
+     this border the only focus indicator in the page, and against the `Field` interior it
+     encloses (engine-resolved rgb(59,59,59) in dark) it measures 2.46:1, under WCAG 2.1 SC
+     1.4.11's 3:1. Pre-existing; owned by CPE-1966. No test asserts this pairing today. */
   select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent); }
   /* Swarm tasks pane resize (CPE-935): the textarea uses a full-width drag handle instead of the tiny
      native corner grip, so you can grab the whole bottom edge and drag it down into the console. */

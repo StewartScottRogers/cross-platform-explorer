@@ -111,8 +111,10 @@ against the ground it lands on):
   under literal white text (4.55:1, fine, and identical in both schemes). Pinning both roles at the
   fill's value is precisely CPE-1919's trap, so the foreground role was split out as `--accent-text`
   (light `#2f6fed` 4.55:1; dark `#4f86ff` **5.52:1**) and `--accent` keeps its fill value untouched.
-- Everything else the sweep found clears its bar in both schemes. Post-fix the sweep reports **zero**
-  failures.
+- Everything else the sweep found clears its bar in both schemes. **Post-fix the sweep reports zero
+  failures over the states it can reach — the page's default state in both schemes — and it cannot
+  reach the states where four pre-existing failures live.** See the round-2 correction below for
+  the re-derived numbers; the unqualified "zero" was wrong, and the qualifier is the whole point.
 
 **Deliberately left:** the launcher has no `hc-light` / `hc-dark`. Those are the main app's
 `data-theme` values, and nothing themes this page (no `data-theme` in the file, no theme injection
@@ -149,7 +151,90 @@ so a launcher change is only visible in a real app once the **host is rebuilt wi
 and installed — a launcher swap is not a host swap. Nothing here touches Rust, so that rebuild is
 mechanical; the headless measurement above is against the same bytes `console.rs` `include_str!`s.
 
-**Housekeeping.** `npm run check` clean. `npm test` 346 files / 4,942 passing.
+**Housekeeping.** `npm run check` clean.
 `node scripts/ratchet-baselines.mjs compare origin/main` raises no baseline — the hard-coded-hex
 ratchet walks `.svelte` files under `src/` only, so `launcher.html` sits outside it either way, and
 this diff removes five inline hexes from that file regardless.
+
+### 2026-08-27 — round 2: three claims corrected, none of the code
+
+PR #1076's Reviewer built its own harness — a from-scratch PNG decoder, its own WCAG 2.1
+implementation, two independent paths (engine `getComputedStyle` and sampled pixels) agreeing
+within 1/255 — and reproduced all twelve ratio cells above exactly. The code stands. Three of the
+claims around it did not.
+
+**1. "Post-fix the sweep reports zero failures" was false, and the reason is the correction.**
+The sweep loaded the page in its **default state**, where `#view-bar` is `display: none` and a
+`position: fixed; inset: 0; z-index: 9999` boot overlay covers the rest — and it modelled no
+`:hover` / `:focus` state and no animated opacity. Re-derived on the same bytes, headless Chrome
+`--dump-dom`, the real `<style>` blocks and real `<body>` markup, WCAG 2.1 from the engine's own
+resolved colours, with the **correct opacity model** (an element with `opacity` composites its own
+background *with* its text, so a dimmed button's ratio is not its undimmed one — getting that wrong
+is what produced the harness's first, wrong, 3.81):
+
+| configuration | elements swept | failures |
+|---|---|---|
+| default state, light | 19 | 1 — `.boot-label` **3.35** |
+| default state, dark | 19 | 1 — `#swarm-help` **4.24** |
+| every `[hidden]` panel + `#view-bar` forced visible, light | 132 | 0 |
+| …dark | 132 | 2 — `#swarm-help` **4.24**, `#grid-help` **4.28** |
+| + every `:hover`/`:focus` rule forced on, light | 133 | 1 — `.close-all-btn:hover` **3.65** |
+| …dark | 133 | 1 — `.close-all-btn:hover` **4.13** |
+
+**Four distinct failing sites, all pre-existing and untouched by this diff**, plus the non-text
+focus ring below that no text sweep can see. `#swarm-help` is a permanently visible toolbar button
+and is **this ticket's own defect class** — a blanket opacity dimming a foreground. All are owned by
+**CPE-1966**. Two refinements to that ticket's table, measured here: `.close-all-btn:hover` fails in
+**dark too** (4.13), not only light; and its light figure is **3.65**, not 4.08, because it sits on
+`#tabs`'s `rgba(128,128,128,0.10)` fill rather than on bare Canvas.
+
+**2. The `--accent` comment vouched for a role that fails.** It claimed `--accent` backs
+`button.primary`'s fill *"and the focus-ring border"* as if both were safe. Verified independently
+here (Chrome resolves `Field` to `rgb(59,59,59)` in dark; `#2f6fed` against it): **2.46:1**, under
+SC 1.4.11's 3:1 — and since `select:focus, input:focus, textarea:focus` set `outline: none`, that
+border is the **only** focus indicator in the page. Pre-existing, but the diff newly asserted it was
+fine, in a comment, beside a green test — the CPE-1933 pattern exactly. **Not fixed here** (CPE-1966
+owns it, and its AC says fix it separately with its own token and a guard that can see non-text
+roles); the comment now states the measured failure, at the `:root` block *and* at the `:focus`
+rule. The honest role table, replacing "each role pinned at its own bar":
+
+| `--accent` role | light | dark | bar | | pinned by a test? |
+|---|---|---|---|---|---|
+| `button.primary` fill under `#fff` | 4.55 | 4.55 | 4.5 | ok | no |
+| fill vs the page behind it | 4.55 | 4.12 | 3.0 | ok | no |
+| `.tab.active` accent bar vs the page | 4.55 | 4.12 | 3.0 | ok | no |
+| focus border vs the page | 4.55 | 4.12 | 3.0 | ok | no |
+| **focus border vs the field interior** | 4.55 | **2.46** | 3.0 | **fail** | no |
+| `#help-body h3` → `--accent-text` | 4.55 | **5.52** | 4.5 | fixed | **yes** |
+
+Only the **text** role is pinned. The rest are documented in comments and enforced by nothing,
+because `SITES` derives from `color: var(--token)` and a fill or a border is not a `color:`.
+
+**3. The test counts did not reproduce, so they are now recorded as a delta.** Absolutes drift
+under you — that is exactly what happened: 346/4,942 as first written, 348/4,980 when the Reviewer
+re-ran it, 349/4,995 + 2 skipped here after a rebase onto current `main`, all on a clean `npm ci`
+from the same lockfile. The **delta** is the stable, load-bearing number and it has reproduced three
+times: with `aiConsoleLauncher.contrast.test.ts` set aside and `launcher.html` +
+`ai-console-launcher.test.ts` restored to their pre-fix state (`opacity: .85` and the inline hex
+confirmed present by grep), the suite ran **348 files / 4,985 passing + 2 skipped, all green** —
+**−1 file, −10 tests**, and the new guard has exactly 10. The negative claim it exists to support is
+unchanged: **no app-side guard covered `launcher.html`.**
+
+**Red-proof #5 fails two tests, not one.** Re-run: `setMsg` back to `el.style.color = "#d08a1a"`
+fails *"setMsg/keysMsg pick a class, never an inline hex colour"* **and** *"every state class those
+two can assign is backed by a token-coloured rule"* — 2 failed / 8 passed in this file, plus ten
+more in the sibling `ai-console-launcher.test.ts` (12 across the pair). Both contrast tests were
+among the 8 that stayed green, so the CPE-1929 point stands unchanged. Sabotages 1–4 each fail
+exactly one test; all four re-run and confirmed.
+
+**`--accent-text` is a name hazard, not a collision.** This branch was cut from `7ce65e05`, before
+CPE-1919 merged; post-merge the repo carries **two** `--accent-text` tokens with different values —
+`src/app.css` (light `#0067c0`, dark `#3aa0f0`) and `launcher.html` (light `#2f6fed`, dark
+`#4f86ff`) — in genuinely separate stylesheets that never load together. No CSS hazard. A real
+**reader** hazard: one grep returns both, and each file's guard reads only its own. Said so at the
+launcher site. Rebased onto current `origin/main`; the rebase was clean.
+
+**For the Visual Critic, on the next sidecar-host build:** light `warn` moves from bright amber
+`#d08a1a` to dark olive-brown `#8a5a00`. That is an **appearance** change, not only a contrast one —
+the warn state will read as brown rather than amber in light theme. Deliberate (the amber could not
+clear 4.5:1 on white at any usable saturation), but it should be looked at rather than assumed.

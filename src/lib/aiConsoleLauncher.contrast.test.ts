@@ -34,9 +34,32 @@
  * exactly what the browser does, so "missing from the dark block" surfaces as a contrast failure
  * naming the token instead of passing silently.
  *
+ * ── What is NOT checked, and cannot be by this shape of guard ─────────────────────────────────
+ * `SITES` derives from `color: var(--token)` rules, so four whole categories walk straight
+ * through it. Each is a real, MEASURED, pre-existing defect on this page today — listed so that
+ * a green run here is not mistaken for a clean page (CPE-1966 owns all four):
+ *
+ *   - NON-TEXT roles. `border-color` / `background` / `box-shadow` are not a `color:`. The
+ *     `:focus` border is the page's only focus indicator and measures 2.46:1 against the `Field`
+ *     interior in dark, under SC 1.4.11's 3:1. See the note at that rule in launcher.html.
+ *   - Elements that DO NOT RENDER on the page as loaded: `#view-bar` is `display: none` until a
+ *     second session exists, and a `position: fixed; inset: 0; z-index: 9999` boot overlay covers
+ *     the rest. `#swarm-help` / `#grid-help` (`.area-help`, a flat `opacity: .75` over a
+ *     `ButtonFace` fill) are 4.24 / 4.28 in dark — this ticket's own defect class, a blanket
+ *     opacity dimming a foreground.
+ *   - STATES: `:hover`, `:focus`, `:active`. `.close-all-btn:hover { color: #d05656 }` is 3.65:1
+ *     in light (it sits on `#tabs`'s `rgba(128,128,128,0.10)` fill, not on bare Canvas) and
+ *     4.13:1 in dark.
+ *   - ANIMATED opacity, which has no single value to sample: `boot-pulse` swings `.boot-label`
+ *     between .45 and .85, dipping to 3.35:1 in light at the trough.
+ *
+ * Literal hexes are the one gap that IS covered, and only for the two status-line functions, by
+ * the inline-hex tripwire below. Everywhere else a literal hex is invisible here too.
+ *
  * ── Red-proof, run by hand, RESULTS AT THE SITE (CPE-1933 rule 3) ─────────────────────────────
- * Five sabotages of launcher.html, each run against this file; each failed exactly one test and
- * named the culprit, so none of these checks is decorative:
+ * Five sabotages of launcher.html, each run against this file (10 tests); each named the culprit,
+ * so none of these checks is decorative. Sabotages 1-4 failed exactly one test each; 5 failed
+ * two, plus ten more in the sibling `ai-console-launcher.test.ts`:
  *   1. `--msg-ok` -> `#3a9d4a` (the old value): "light: on the measured ground #ffffff" failed with
  *      "#msg.ok, #keys-msg.ok { color: var(--msg-ok) } -> #3a9d4a on #ffffff = 3.44:1, below the
  *      4.5:1 bar (font-size 12px / weight 400)".
@@ -45,10 +68,14 @@
  *   3. re-add `#msg { opacity: .85 }`: the opacity tripwire failed ("expected '.85' to be
  *      undefined").
  *   4. `body { background: Field }`: the ground test failed ("expected 'Field' to be 'Canvas'").
- *   5. `setMsg` back to `el.style.color = "#d08a1a"`: the inline-hex tripwire failed AND both
- *      contrast tests stayed GREEN. That pair is the point (CPE-1929): the tripwire is NOT
- *      shadowed by the measurement, because an inline colour is structurally invisible to a
- *      stylesheet sweep. Deleting it would leave that regression uncovered, not merely unguarded.
+ *   5. `setMsg` back to `el.style.color = "#d08a1a"`: TWO tests failed here — the inline-hex
+ *      tripwire ("setMsg/keysMsg pick a class, never an inline hex colour") and the class-backing
+ *      test ("every state class those two can assign is backed by a token-coloured rule"), which
+ *      finds no `className` assignment left to check. 2 failed / 8 passed in this file, and both
+ *      contrast tests were among the 8 that stayed GREEN. That is the point (CPE-1929): the
+ *      tripwire is NOT shadowed by the measurement, because an inline colour is structurally
+ *      invisible to a stylesheet sweep. Deleting it would leave that regression uncovered, not
+ *      merely unguarded.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
