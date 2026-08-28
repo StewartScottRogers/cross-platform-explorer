@@ -3988,3 +3988,36 @@ shadowed pair — that is both green. B reddening proves control reaches the for
 narrower true thing: one side of the fork is structurally uncovered because its only input needs a race
 inside a copy loop. **Reporting which of the two sabotages fired is what separates "unreachable" from
 "untested".**
+
+## 2026-08-28 — it re-ran the old number instead of quoting it, and named where the boundary went
+
+#1091's round 6 closed the moved mutant by extracting `scanLogSites` — the selection, the flag loop and
+the bookkeeping — so both the real scan and the synthetic driver run the same code. Three details in how
+it did that are worth more than the fix.
+
+**It re-measured the number it was told.** The brief quoted round 5's head as *23 passed / 0 failed / 60
+skipped* for the surviving sabotage. Rather than repeating that figure as context, it re-ran the sabotage
+at that head and confirmed it, then showed the new one reddening. **Two rounds ago this same PR carried
+an assertion message that had been summarised from memory and had invented its expected side.** The
+correction is not "be careful with quotes" — it is that **a number handed to you in a brief is someone
+else's measurement**, and the cost of re-taking it is one command.
+
+**It named where the boundary went rather than claiming the class closed.** The docblock states the
+general shape — extracting a shared helper closes the mutant at the helper and opens one at the new
+boundary — **and then says which boundary this still leaves open**: `guardLogicalLines()` and `RAW_OK` are
+caller-supplied, so only the real source answers for those. After nine rounds on a sibling PR spent
+learning that a limitations list certifies everything it omits, this is that lesson written the right way
+round on the first attempt.
+
+**And it distinguished a genuine exception from a convenient one.** Widening the target regex, it left
+`printf -v` single-capture **because that builtin genuinely takes one target** — not because widening it
+was awkward. A carve-out with a reason in the grammar is a different object from a carve-out with a
+reason in the schedule, and the two are indistinguishable in a diff unless someone writes down which it
+is.
+
+Worth noting the shape of the whole PR now: **six worker rounds, five reviews, and the code was right
+from round 3.** Everything since has been the sentences around it — a `grep` removal whose equivalence
+was measured against a shim, a synthetic test that re-implemented the rule it guarded, a blind-spot list,
+three transcribed measurements, and a mutant that relocated when it was fixed. **The same distribution as
+#1087's nine rounds.** Two independent PRs, two different authors, the same ratio of claim-defects to
+code-defects — which is evidence about how this crew writes, not about either author.
