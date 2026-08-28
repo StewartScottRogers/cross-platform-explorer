@@ -1004,7 +1004,12 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
       }
 
       let pixels = null;
-      if (verifyPixels) pixels = await verifyAgainstPixels(client, all.filter((s) => s.scheme === scheme && s.state === "base" && s.role === "text"));
+      let pixelUnsamplable = [];
+      if (verifyPixels) {
+        const probe = await verifyAgainstPixels(client, all.filter((s) => s.scheme === scheme && s.state === "base" && s.role === "text"));
+        pixels = probe.rows;
+        pixelUnsamplable = probe.unsamplable;
+      }
 
       schemes[scheme] = {
         canvas: base.canvas, field: base.field, buttonFace: base.buttonFace, canvasText: base.canvasText,
@@ -1018,6 +1023,7 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
         composite: engineResolvedComposite(base),
         systemColours: { Canvas: base.canvas, CanvasText: base.canvasText, Field: base.field, ButtonFace: base.buttonFace },
         sites: all, matched: setup.matched, mounted: setup.mounted, forced, animations: animMeta.count, pixels,
+        pixelUnsamplable,
         // ── WORK DONE, per leg, per scheme (round-3 blocker 1) ─────────────────────────────────
         // `run.mjs` checks SIX of these per scheme — five floors and one ceiling (`stateSkips`, which
         // reds when it is ABOVE zero). Three — `baseReadings`, `stateReadings`,
@@ -1120,11 +1126,21 @@ export function pseudoRulesFromCss() {
  * ROUND 5 added a third fatal condition, and the reason is worth reading before touching the sampler:
  * **a reading that is not well-determined is not a reading.** The mode over 45 interior samples was
  * being compared to the prediction with no check that the mode meant anything, and with glyphs painted
- * it frequently did not — see the glyph-suppression note in the body. `run.mjs` now reds unless every
- * ground samples a SINGLE colour across all 45 points. That is the strongest form of the condition
- * rather than a tuned one: measured 118/118 grounds unanimous, both schemes, so there is no margin
- * being spent. If a future site is genuinely not flat, the model's one-ground-colour premise does not
- * hold for it and the right answer is to fix the model, not to widen this.
+ * it frequently did not — see the glyph-suppression note in the body.
+ *
+ * ROUND 6 kept that condition and split it in two, because one number was doing two jobs:
+ *   * the MODEL check — the predicted ground must be MOST of the element's interior, counted within
+ *     the same 1/255 the verdict uses. This replaces "the mode equals the prediction", which could be
+ *     satisfied by a plurality of 13 out of 45.
+ *   * the DETERMINACY check — the interior must sample as ONE flat colour, with the exceptions
+ *     declared by selector in `run.mjs`'s `NOT_FLAT_BY_DESIGN` (today: native `<select>`, whose UA
+ *     dropdown arrow is foreground content no inset can exclude).
+ * Round 5 asserted flatness with no exemptions and called it "the strongest form of the condition".
+ * It was strong, and it was also measuring the PAGE rather than the model: it reddened CI on
+ * `.tab-close` at 35/45 while all 120 grounds agreed with the prediction inside 1/255. Two things were
+ * wrong underneath it — a fixed 4px inset that reached past an element overflowing its parent, and a
+ * 1px antialiasing allowance on fractional edges. Both are fixed above; measured after: 114 of 118
+ * grounds flat, weakest agreement 98%, and the 4 that are not flat are the two `<select>`s.
  *
  * The residual 1/255 that `delta > 1` tolerates is now identifiable rather than folklore: with the
  * sample unanimous, ten light and sixteen dark grounds differ from the prediction by exactly one, all
@@ -1133,17 +1149,46 @@ export function pseudoRulesFromCss() {
  * this file's alpha compositing and Chrome's, systematic and platform-independent — which is exactly
  * what CPE-1921's Reviewer set the 1/255 window for.
  *
- * RED-PROOFED both ways (CPE-1933 rule 3), results recorded here rather than only in the PR:
- *   A. The leg still catches a WRONG MODEL. Perturbing the predicted ground by +9 in the red channel
- *      (`ground: hx([g.inside[0] + 9, ...])`) gives **exit 1, 47 of 59 grounds disagreeing**, each
- *      logged `[mode 45/45, 1 distinct]` — which is the point of the change: a disagreement is now
- *      unambiguously the model, where before it could have been the sampler.
- *   B. The flatness condition really fires. Replacing the injected stylesheet with an inert comment —
- *      i.e. reinstating the pre-round-5 behaviour — gives **exit 1, 112 of 118 grounds flagged**, the
- *      weakest mode at **24%** of its samples. That is what CI was silently deciding a verdict from.
+ * RED-PROOFED three ways (CPE-1933 rule 3), results recorded here rather than only in the PR, and
+ * re-measured at round 6 against the code as it now stands:
+ *   A. The leg still catches a WRONG MODEL. Perturbing the predicted ground with
+ *      `ground: hx([Math.min(255, g.inside[0] + 9), g.inside[1], g.inside[2], 1])` gives **exit 1,
+ *      47 light + 59 dark = 106 grounds** where the prediction is no longer most of the interior,
+ *      weakest agreement **0%**. The light/dark gap is real and worth reading: 12 light grounds are
+ *      already `#ffffff`, so the CLAMP leaves them unchanged and they correctly still agree. Round 5
+ *      quoted 47 beside an expression with no clamp in it — that expression actually gives 59/59,
+ *      because `hx()` does not clamp and renders 264 as `#108ffff`. The number and the expression
+ *      now match.
+ *   B1. The glyph suppressor is load-bearing. Replacing the injected stylesheet with an inert comment
+ *      gives **exit 1, 110 of 118 grounds non-flat**, only 2 of 59 per scheme still flat, and the
+ *      weakest agreement drops from 98% to **51%** — a single point above the majority bar. Note what
+ *      that says: the majority check ALONE would have let this through. The flatness condition is what
+ *      catches it, which is why it is fatal rather than advisory.
+ *   B2. The exemption list is load-bearing too, not decoration. Changing `NOT_FLAT_BY_DESIGN`'s one
+ *      pattern so it matches nothing gives **exit 1, 4 grounds flagged**, naming both `<select>`s in
+ *      both schemes at 44/45. So the list is what those sites are passing on, and removing an entry
+ *      reds rather than quietly widening.
  */
 /** The screenshot-only glyph suppressor's element id, so the same string inserts and removes it. */
 const GLYPHS_OFF_ID = "__cpe1966-pixel-probe-glyphs-off";
+
+/**
+ * Smallest safe box, per side, that a ground can still be read out of. Three pixels rather than one
+ * because the 9x5 grid should land on more than a single pixel repeated 45 times — a "unanimous"
+ * reading of one pixel is unanimous by construction and proves nothing.
+ */
+const MIN_SAMPLE_BOX = 3;
+
+/**
+ * Pixels of antialiasing to keep clear of every painted edge, on both axes.
+ *
+ * TWO, not one, and derived rather than tried: layout positions on this page are fractional
+ * (`.tab-close` sits at y=285.50, `.tab` at x=1169.4), and an edge that falls mid-pixel is blended
+ * across the pixel on EITHER side of the boundary. One pixel clears an edge that happens to land on
+ * an integer; two clears one that does not. Measured on this page: at AA=1, 29 of 59 light grounds
+ * came back non-flat purely from edge blending; at AA=2, 0 do.
+ */
+const PIXEL_AA = 2;
 
 async function verifyAgainstPixels(client, textSites) {
   // The boot overlay is `position: fixed; inset: 0; z-index: 9999; background: Canvas` and covers the
@@ -1167,6 +1212,9 @@ async function verifyAgainstPixels(client, textSites) {
   // leaving `currentColor` — and therefore every border, outline and shadow that resolves to it —
   // exactly where it was, so no BACKGROUND anywhere on the page moves. Nothing this leg measures is
   // hidden by it; the thing being measured becomes readable for the first time.
+  // Both page mutations are undone in the `finally` below rather than after the last read: a throw in
+  // between would otherwise leave the page with its boot overlay hidden and its glyphs suppressed, and
+  // the COMPUTED-STYLE pass for the other scheme runs against that same page.
   await client.evaluate(`(function(){
     var b=document.getElementById("boot-overlay"); if(b) b.style.display="none";
     var st=document.createElement("style"); st.id=${JSON.stringify(GLYPHS_OFF_ID)};
@@ -1174,34 +1222,131 @@ async function verifyAgainstPixels(client, textSites) {
       "text-decoration-color:transparent!important;text-shadow:none!important;caret-color:transparent!important}";
     document.head.appendChild(st);
   })()`);
+  try {
   const shot = await client.send("Page.captureScreenshot", { format: "png" });
   const png = decodePng(Buffer.from(shot.data, "base64"));
+  // The SAMPLE BOX, derived per element from its own and its ancestors' computed geometry rather than
+  // from a fixed pixel inset. See `verifyAgainstPixels`'s header for round 6's measurement; the short
+  // version is that a fixed inset asks the screenshot about pixels the model never predicted.
+  //
+  // What the model claims is: "the composited ANCESTOR CHAIN inside this element is colour X". Two
+  // things can make that false somewhere inside the element's own border box —
+  //   * antialiased GEOMETRY: a border, a border-radius arc, or an `inset` box-shadow ring, on the
+  //     element or on any ancestor showing through it;
+  //   * OVERFLOW: the element sticking out past an ancestor, where the pixels are painted by that
+  //     ancestor's parent instead. Measured on this page: `.tab` is pinned at its `min-width: 120px`
+  //     with its flex children over-subscribing it, so `.tab-close` hangs 0.63px past the tab's right
+  //     edge locally and further on a platform with wider fonts.
+  // So the region that is safe to sample is the element's border box intersected with EVERY ancestor's
+  // border box, each shrunk by that element's own worst-case painted geometry. Nothing here is tuned:
+  // each inset is read out of the element it belongs to.
+  //
+  // ── PAD GEOMETRY, and why the two axes differ ──────────────────────────────────────────────────
+  // A corner radius costs only HORIZONTALLY. For a rounded rect with corner radii r, every x in
+  // [left + r, right - r] spans the FULL height of the box: the arcs live in the two end regions and
+  // the band between them is a plain rectangle. So a radius is an x-inset and contributes nothing to
+  // y. Collapsing the two axes into one number was a real bug and not a small one — the pill idiom
+  // `border-radius: 999px` (2 uses on this page) then demanded a 999px inset on an 18px-tall badge,
+  // produced a NEGATIVE safe box, and marked 12 perfectly readable grounds unreadable.
+  //
+  // CSS scales radii down so they fit, so the effective radius is at most half the shorter side, and
+  // `min(declared, w/2, h/2)` is an upper bound on it — hence a safe inset without reimplementing the
+  // spec's scaling.
+  //
+  // Borders and INSET shadows cost on BOTH axes; an outset shadow paints outside the border box and
+  // cannot dirty the interior, so it is ignored. One extra pixel covers the antialiased edge itself.
   const rects = JSON.parse(await client.evaluate(`
-    JSON.stringify(Array.prototype.map.call(document.querySelectorAll("[data-cid]"), function (e) {
-      var r = e.getBoundingClientRect();
-      return { cid: e.getAttribute("data-cid"), x: r.x, y: r.y, w: r.width, h: r.height };
-    }))`));
+    JSON.stringify((function () {
+      var AA = ${PIXEL_AA};
+      function nums(s) { return (String(s).match(/-?[0-9.]+(?=px)/g) || []).map(parseFloat); }
+      /* See the PAD GEOMETRY note above this template literal. */
+      function pad(cs, w, h) {
+        var declared = ["borderTopLeftRadius","borderTopRightRadius","borderBottomRightRadius","borderBottomLeftRadius"]
+          .reduce(function (m, k) { return nums(cs[k]).reduce(function (a, b) { return Math.max(a, b); }, m); }, 0);
+        var radius = Math.min(declared, w / 2, h / 2);
+        var border = ["borderTopWidth","borderRightWidth","borderBottomWidth","borderLeftWidth"]
+          .reduce(function (m, k) { return Math.max(m, parseFloat(cs[k]) || 0); }, 0);
+        var shadow = 0;
+        if (cs.boxShadow && cs.boxShadow !== "none") {
+          /* Split on commas that are not inside rgb(...)/rgba(...). */
+          String(cs.boxShadow).split(/,(?![^(]*\\))/).forEach(function (part) {
+            if (part.indexOf("inset") === -1) return;
+            var n = nums(part);                       /* dx, dy, blur, spread */
+            var reach = Math.abs(n[0] || 0) + Math.abs(n[1] || 0) + Math.abs(n[2] || 0) + Math.abs(n[3] || 0);
+            shadow = Math.max(shadow, reach);
+          });
+        }
+        var both = Math.max(border, shadow) + AA;
+        return { x: Math.ceil(Math.max(radius, both)), y: Math.ceil(both) };
+      }
+      function shrink(r, p) {
+        return { l: r.left + p.x, t: r.top + p.y, rt: r.right - p.x, b: r.bottom - p.y };
+      }
+      return Array.prototype.map.call(document.querySelectorAll("[data-cid]"), function (e) {
+        var r = e.getBoundingClientRect();
+        var box = shrink(r, pad(getComputedStyle(e), r.width, r.height));
+        for (var a = e.parentElement; a; a = a.parentElement) {
+          var ar = a.getBoundingClientRect();
+          var ab = shrink(ar, pad(getComputedStyle(a), ar.width, ar.height));
+          box.l = Math.max(box.l, ab.l); box.t = Math.max(box.t, ab.t);
+          box.rt = Math.min(box.rt, ab.rt); box.b = Math.min(box.b, ab.b);
+        }
+        /* Whether the element is wholly inside the captured viewport. A screenshot cannot show what
+           is off-screen, so a ground that fails to sample for THAT reason is a limit of the method,
+           not a disagreement — the two are reported separately and only one is fatal. */
+        var onscreen = r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+        return { cid: e.getAttribute("data-cid"), x: r.x, y: r.y, w: r.width, h: r.height,
+          sx: box.l, sy: box.t, sw: box.rt - box.l, sh: box.b - box.t, onscreen: onscreen };
+      });
+    })())`));
   const byCid = new Map(rects.map((r) => [r.cid, r]));
   const rows = [];
+  const unsamplable = [];
   for (const s of textSites) {
     const r = byCid.get(s.cid);
-    if (!r || r.w < 10 || r.h < 10) continue;
-    // The MODE of a grid of interior samples, not one corner pixel. A corner lands on the border, on
-    // a border-radius arc, or outside a pill entirely - measured: sampling (x+2, y+2) reported a
-    // badge's #3a9d4a fill as #d2e5d5, which is the antialiased edge, not the ground. The ground is
-    // the half of the ratio that moves when an ancestor changes, so it is the half worth verifying.
+    if (!r || r.w < 10 || r.h < 10) continue;                      // not rendered, or a zero-size box
+    // A site whose SAFE BOX has collapsed is reported, never silently dropped. Round 5's lesson was
+    // that a mode taken over a bad sample reads exactly like a good reading; a site quietly removed
+    // from the denominator reads exactly like a site that passed, which is the same defect.
+    if (!(r.sw >= MIN_SAMPLE_BOX && r.sh >= MIN_SAMPLE_BOX)) {
+      unsamplable.push({
+        path: s.path,
+        // An element hanging off the edge of the window is a LIMIT of screenshotting a viewport, and
+        // saying so is not the same as excusing a failure: it is reported every run, counted, and
+        // named, but it is not evidence that the compositing model is wrong. An element that is
+        // wholly on screen and STILL cannot be sampled is the model being wrong, and that is fatal.
+        offscreen: !r.onscreen,
+        reason: r.onscreen
+          ? `border box ${r.w.toFixed(1)}x${r.h.toFixed(1)} shrinks to a safe box of ` +
+            `${r.sw.toFixed(1)}x${r.sh.toFixed(1)} once its own and its ancestors' painted geometry is ` +
+            `excluded — under the ${MIN_SAMPLE_BOX}px minimum, so no ground can be read here`
+          : `lies partly outside the ${png.width}x${png.height} captured viewport (border box spans ` +
+            `x ${r.x.toFixed(0)}..${(r.x + r.w).toFixed(0)}, y ${r.y.toFixed(0)}..${(r.y + r.h).toFixed(0)}) ` +
+            `— a screenshot cannot show it, so this ground is UNVERIFIED rather than disagreeing`,
+      });
+      continue;
+    }
+    // The MODE of a grid of samples taken inside the SAFE BOX, not one corner pixel. A corner lands on
+    // the border, on a border-radius arc, or outside a pill entirely - measured: sampling (x+2, y+2)
+    // reported a badge's #3a9d4a fill as #d2e5d5, which is the antialiased edge, not the ground. The
+    // ground is the half of the ratio that moves when an ancestor changes, so it is the half worth
+    // verifying.
     //
     // This used to say "glyphs are a minority of an element's interior pixels, so the most common
     // interior colour IS the painted background". Round 5 measured that and it was FALSE for small
     // text - the sentence was the defect, not the sampling. With glyph fill suppressed for the
     // screenshot (see above) it is true by construction instead of by hope, and `run.mjs` reds if any
     // ground fails to come back unanimous rather than trusting a mode that won a plurality.
+    //
+    // Round 6 replaced the remaining fixed `inset = 4` with the derived safe box above. Four pixels
+    // was a guess, and on this page it was the wrong one by a fraction of a pixel: `.tab-close` hangs
+    // past its tab's right edge, so the outermost sample column read the strip behind the tab instead
+    // of the tab. See the header.
     const counts = new Map();
-    const inset = 4;
     for (let gx = 0; gx < 9; gx++) {
       for (let gy = 0; gy < 5; gy++) {
-        const x = Math.round(r.x + inset + ((r.w - 2 * inset) * gx) / 8);
-        const y = Math.round(r.y + inset + ((r.h - 2 * inset) * gy) / 4);
+        const x = Math.round(r.sx + (r.sw * gx) / 8);
+        const y = Math.round(r.sy + (r.sh * gy) / 4);
         if (x < 0 || y < 0 || x >= png.width || y >= png.height) continue;
         const k = hex(pixelAt(png, x, y));
         counts.set(k, (counts.get(k) ?? 0) + 1);
@@ -1212,21 +1357,29 @@ async function verifyAgainstPixels(client, textSites) {
     const got = ranked[0][0];
     const total = [...counts.values()].reduce((a, b) => a + b, 0);
     const want = s.ground;
-    const delta = Math.max(...[0, 1, 2].map((i) => Math.abs(parseInt(got.slice(1 + i * 2, 3 + i * 2), 16) - parseInt(want.slice(1 + i * 2, 3 + i * 2), 16))));
+    const off = (a, b) => Math.max(...[0, 1, 2].map((i) =>
+      Math.abs(parseInt(a.slice(1 + i * 2, 3 + i * 2), 16) - parseInt(b.slice(1 + i * 2, 3 + i * 2), 16))));
+    const delta = off(got, want);
+    // How much of the interior the MODEL got right, which is the question this leg exists to ask.
+    // Counted within the same 1/255 the verdict uses, so the systematic rounding difference between
+    // this file's compositing and Chrome's does not read as disagreement.
+    let agreeing = 0;
+    for (const [colour, n] of counts) if (off(colour, want) <= 1) agreeing += n;
     rows.push({
       path: s.path, predicted: want, painted: got, delta,
-      // How WELL-DETERMINED the mode is, carried so a disagreement can be diagnosed instead of
-      // guessed at. `share` is the modal colour's count out of `total` sampled points, and
-      // `predictedShare` is how many of those points were the predicted colour — a disagreement at
-      // share 3/45 with the prediction at 2/45 is a coin-flip between antialiased glyph pixels, not
-      // a compositing error, and the two read completely differently in a CI log.
-      share: ranked[0][1], total, predictedShare: counts.get(want) ?? 0, distinct: counts.size,
-      rect: { w: Math.round(r.w), h: Math.round(r.h) },
+      // `agreeing` is the verdict; the rest is diagnosis. `share` is the modal colour's count and
+      // `distinct` the number of colours seen, both carried so a failure can be read without a
+      // second run — a disagreement at share 3/45 across 28 colours is a different animal from one
+      // at 45/45, and the two used to print identically.
+      agreeing, share: ranked[0][1], total, predictedShare: counts.get(want) ?? 0, distinct: counts.size,
+      rect: { w: Math.round(r.w), h: Math.round(r.h), sw: Math.round(r.sw), sh: Math.round(r.sh) },
     });
   }
-  await client.evaluate(`(function(){
-    var b=document.getElementById("boot-overlay"); if(b) b.style.display="";
-    var st=document.getElementById(${JSON.stringify(GLYPHS_OFF_ID)}); if(st) st.remove();
-  })()`);
-  return rows;
+  return { rows, unsamplable };
+  } finally {
+    await client.evaluate(`(function(){
+      var b=document.getElementById("boot-overlay"); if(b) b.style.display="";
+      var st=document.getElementById(${JSON.stringify(GLYPHS_OFF_ID)}); if(st) st.remove();
+    })()`);
+  }
 }

@@ -198,6 +198,31 @@ const FALSE_STRIP_EATEN_PAREN: Case[] = [
     input: "function f(x){return x} if ({} / f(1) / 2) /[//]/.test('a');",
     want: "function f(x){return x} if ({} / f(1) / 2) /[//]/.test('a');",
   },
+  // Round 6. Balance alone is not enough: the swallowed text can contain a `)` AND a `(` belonging
+  // to DIFFERENT statements, and then the KIND of the swallowed `(` decides the next `/`. Round 5
+  // pushed `false` for every swallowed `(` and regressed four shapes round 4 had got right — by
+  // leaving the stack alone, round 4 happened to still hold the `true`. `controlWordBefore` reads
+  // the kind off the word in front of the `(`, the same rule the main loop applies.
+  {
+    name: "a swallowed `)` AND a swallowed `(` belonging to different statements — round 5 broke this",
+    input: "if ({} / a) if (b / c) /[//]/.test(s);",
+    want: "if ({} / a) if (b / c) /[//]/.test(s);",
+  },
+  {
+    name: "the same with `while` as the inner statement",
+    input: "if ({} / a) while (b / c) /[//]/.test(s);",
+    want: "if ({} / a) while (b / c) /[//]/.test(s);",
+  },
+  {
+    name: "the same with `for`",
+    input: "if ({} / a) for (;b / c;) /[//]/.test(s);",
+    want: "if ({} / a) for (;b / c;) /[//]/.test(s);",
+  },
+  {
+    name: "BLAST RADIUS: a swallowed `(` after a CALL is still a value, not a condition",
+    input: "function f(x){return x} if (f({} / a) / 2) /[//]/.test('b');",
+    want: "function f(x){return x} if (f({} / a) / 2) /[//]/.test('b');",
+  },
 ];
 
 /**
@@ -338,6 +363,40 @@ const DELETING_GAPS: Case[] = [
   },
 ];
 
+/**
+ * DELETES **VALID JAVASCRIPT** — the honest third category, and strictly worse than `DELETING_GAPS`.
+ *
+ * Kept apart from that table on purpose. `DELETING_GAPS` earns the word "gap" from a property the
+ * test below derives: none of its inputs parses, so nothing a real program contains reaches them.
+ * These do parse. Putting them in the same list would have quietly falsified that property — the
+ * filter reds the moment you try, which is how this table came to exist.
+ *
+ * Found by a reviewer's independent generator, immediately after round 5 reported "no third family"
+ * over a sweep of 38,765 samples that could not express a 27-character input. It is PRE-EXISTING —
+ * broken identically in rounds 3, 4 and 5 — and it is not reachable by the paren accounting that
+ * fixed the other mis-read shapes, because the scan never gets as far as consulting a paren.
+ *
+ * MECHANISM. `}` is a punctuator, so `{} / a) …` opens a regex-shaped scan. That scan runs past the
+ * `)` and terminates on the OPENING `/` of the FOLLOWING regex literal, consuming `/ a) /`. What is
+ * left is a bare `[` and then `//` — and the comment branch sits at the top of the scanner loop, so
+ * it fires before any paren state is consulted.
+ *
+ * WHY IT IS DECLARED RATHER THAN FIXED, and what that costs. The `/` after a `}` is a regex when the
+ * `}` closed a BLOCK and a division when it closed an OBJECT LITERAL. Telling those apart is parsing
+ * — it needs the context every `{` was opened in — and this module is a scanner by design (see its
+ * header on why a sixth hand-rolled stripper is not the answer either). The cost is real and is
+ * measured below: 12 characters of valid JavaScript deleted, silently, by the bare stripper. What
+ * makes it survivable is not a comment, it is `stripScriptBodiesChecked` — the entry point compiles
+ * the result and throws. That is asserted here, not asserted-about.
+ */
+const DELETING_ON_VALID_JS: Case[] = [
+  {
+    name: "an object literal in a condition, whose mis-read scan ends on the NEXT regex's `/`",
+    input: "if ({} / a) /[//]/.test(s);\nconst survivor = 1;",
+    want: "if ({} / a) /[ \nconst survivor = 1;",
+  },
+];
+
 describe("stripJsComments — the four shapes that used to DELETE code (CPE-1966 round 3)", () => {
   for (const c of FALSE_STRIP) {
     it(c.name, () => {
@@ -424,11 +483,46 @@ describe("stripJsComments — the declared gaps that DELETE, and why they stay d
   });
 });
 
+describe("stripJsComments — the shapes that delete VALID JavaScript, and what stops them mattering", () => {
+  for (const c of DELETING_ON_VALID_JS) {
+    it(`${c.name} — pinned, and it really is valid JavaScript`, () => {
+      expect(stripJsComments(c.input)).toBe(c.want);
+      // Every half of the claim is measured. "Valid JavaScript in" is the part that makes this worse
+      // than a gap, so it is asserted rather than described.
+      expect(parses(c.input), "the input does not parse — then this belongs in DELETING_GAPS").toBe(true);
+      expect(stripJsComments(c.input).length).toBeLessThan(c.input.length);
+      expect(parses(stripJsComments(c.input)), "the output parses — then nothing was deleted").toBe(false);
+    });
+
+    it(`${c.name} — the ENTRY POINT throws rather than returning it`, () => {
+      // The whole mitigation, and the reason this is survivable in-tree rather than a shipped defect.
+      // `stripScriptBodiesChecked` is what every production caller uses; a desync that deletes code
+      // leaves something unparseable behind, and it refuses to hand that back.
+      expect(() => stripScriptBodiesChecked([c.input])).toThrow(/COMMENT STRIPPER DESYNC/);
+    });
+  }
+});
+
 describe("stripJsComments — the oracle that does not depend on anyone writing the case", () => {
   const all = [
     ...FALSE_STRIP, ...FALSE_STRIP_PAREN, ...FALSE_STRIP_AWAIT, ...FALSE_STRIP_EATEN_PAREN,
     ...FALSE_KEEP, ...ALREADY_RIGHT, ...KNOWN_GAPS, ...DELETING_GAPS,
   ];
+
+  it("the only table held back from this oracle is DELETING_ON_VALID_JS, and that is why", () => {
+    // An exclusion nobody can see is how a known family goes missing from a green run. `all` is the
+    // enumeration this file's two oracles sweep, so the one table deliberately outside it is named
+    // here and its size asserted — adding a second excluded table without saying so reds.
+    const tables = { FALSE_STRIP, FALSE_STRIP_PAREN, FALSE_STRIP_AWAIT, FALSE_STRIP_EATEN_PAREN,
+      FALSE_KEEP, ALREADY_RIGHT, KNOWN_GAPS, DELETING_GAPS, DELETING_ON_VALID_JS };
+    const swept = Object.entries(tables).filter(([, t]) => t.every((c) => all.includes(c)));
+    const held = Object.entries(tables).filter(([, t]) => t.every((c) => !all.includes(c)));
+    expect(held.map(([n]) => n)).toEqual(["DELETING_ON_VALID_JS"]);
+    expect(swept.length, "a table is neither swept nor declared held back").toBe(
+      Object.keys(tables).length - 1,
+    );
+    expect(all.length).toBe(Object.values(tables).reduce((n, t) => n + t.length, 0) - DELETING_ON_VALID_JS.length);
+  });
 
   it("every case that parses before stripping still parses after", () => {
     // A case table only contains what someone imagined. This leg is the one that catches the rest:

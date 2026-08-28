@@ -89,23 +89,51 @@ const REGEX_AFTER = new Set([
  * `for await (const x of y) /[//]/…` deleted 14 characters of valid JavaScript. Membership in this set
  * only matters if the state it sets survives to the `(`.
  *
- * RED-PROOFS (CPE-1933 rule 3), all three re-run at round 5 and recorded here rather than only in the
- * PR. Each isolates ONE mechanism, because a single sabotage that reds everything cannot tell you
- * which part was load-bearing:
- *   - Emptying this set to `new Set([])` reds **14** of `jsSource.test.ts`'s 58 — the four
- *     `FALSE_STRIP_PAREN` cases, the `-144 -> 0` measurement, the four `FALSE_STRIP_AWAIT` cases
- *     (which reach their `(` through `for`), the four `FALSE_STRIP_EATEN_PAREN` cases, and,
- *     decisively, the `vm.Script` oracle itself. The oracle catching it is the part that was missing
- *     before: round 3's gap entry for `)` was the benign `/re/` form, so the oracle iterated a shape
- *     that could not fail.
- *   - Disabling only the `await` clause in the word branch (`false && …`) reds **5** — the four
- *     `for await` cases and the oracle. That is the round-5 `for await` bug, on its own.
- *   - Disabling only the eaten-paren accounting in the regex branch (`for (const p of [])`) reds
- *     **3** — the two mis-read-regex cases and the oracle. That is the stack desync, on its own.
+ * RED-PROOFS (CPE-1933 rule 3), re-measured at round 6 against `jsSource.test.ts`'s **65** tests and
+ * recorded here rather than only in the PR. Each isolates ONE mechanism, because a single sabotage
+ * that reds everything cannot tell you which part was load-bearing:
+ *   - Emptying this set to `new Set([])` reds **18** — the `FALSE_STRIP_PAREN` cases, the
+ *     `-144 -> 0` measurement, the `FALSE_STRIP_AWAIT` cases that reach their `(` through `for`, the
+ *     `FALSE_STRIP_EATEN_PAREN` cases, and, decisively, the `vm.Script` oracle itself. The oracle
+ *     catching it is the part that was missing before: round 3's gap entry for `)` was the benign
+ *     `/re/` form, so the oracle iterated a shape that could not fail.
+ *   - Disabling only the `await` clause in the word branch (`false && …`) reds **5** — four of the
+ *     six `FALSE_STRIP_AWAIT` cases plus the oracle. Six, not four: two of that table are blast-radius
+ *     cases that are *supposed* to survive the sabotage, which is what makes them blast radius.
+ *   - Forcing `controlWordBefore` to `false` — i.e. reinstating round 5's "push `false` for every
+ *     swallowed `(`" — reds **4**, the three different-statement cases and the oracle. Those four are
+ *     shapes round 4 handled correctly and round 5 broke; see `controlWordBefore`.
  */
 const CONTROL_PAREN = new Set(["if", "for", "while", "with"]);
 
 const WORD = /[A-Za-z0-9_$]/;
+
+/**
+ * Does the `(` at `at` open a CONTROL-STATEMENT CONDITION, judged by the word immediately in front
+ * of it?
+ *
+ * The same question the main loop answers with `prevKind`, asked about a `(` the main loop never saw
+ * because a mis-read regex literal swallowed it. Kept to the same two rules the word branch uses: the
+ * word must be in `CONTROL_PAREN`, and it must not be a property name (`obj.if(…)`).
+ *
+ * `for await (…)` is deliberately NOT handled here. The main loop tracks it through `prevKind`, and
+ * reproducing that inside a swallowed region would mean re-scanning arbitrarily far back through text
+ * this function cannot see the start of. A swallowed `for await (` is therefore read as a plain
+ * `for (`, which is the right answer anyway — both are conditions.
+ *
+ * @param {string} src
+ * @param {number} at index of the `(`
+ * @returns {boolean}
+ */
+function controlWordBefore(src, at) {
+  let k = at - 1;
+  while (k >= 0 && /\s/.test(src[k])) k--;
+  const end = k + 1;
+  while (k >= 0 && WORD.test(src[k])) k--;
+  if (!CONTROL_PAREN.has(src.slice(k + 1, end))) return false;
+  while (k >= 0 && /\s/.test(src[k])) k--;
+  return src[k] !== ".";
+}
 
 /**
  * Comments and their contents removed from JavaScript source, quote-, template- and regex-aware.
@@ -293,9 +321,10 @@ export function stripJsComments(src) {
       let inClass = false;
       let terminated = false;
       /**
-       * Unescaped, out-of-class parens this literal SWALLOWS, applied to the frame only if it really
-       * turns out to be a literal. See the accounting note below for why they cannot just be ignored.
-       * @type {string[]}
+       * Unescaped, out-of-class parens this literal SWALLOWS — as `[character, index]`, because the
+       * index is what lets the KIND of a swallowed `(` be recovered below. Applied to the frame only
+       * if this really turns out to be a literal.
+       * @type {[string, number][]}
        */
       const eaten = [];
       while (j < src.length) {
@@ -304,7 +333,7 @@ export function stripJsComments(src) {
         if (src[j] === "[") inClass = true;
         else if (src[j] === "]") inClass = false;
         else if (src[j] === "/" && !inClass) { terminated = true; break; }
-        else if (!inClass && (src[j] === "(" || src[j] === ")")) eaten.push(src[j]);
+        else if (!inClass && (src[j] === "(" || src[j] === ")")) eaten.push([src[j], j]);
         j++;
       }
       if (terminated) {
@@ -315,11 +344,19 @@ export function stripJsComments(src) {
         // swallowed `(` that never reached the stack leaves the matching `)` popping the frame beneath
         // it. Measured: `if ({} / f(1 / 2)) /[//]/…` scanned `/ f(1 /` as a regex, the condition's `)`
         // popped nothing, the outer `)` took the `true` meant for it, and 14 characters were deleted.
-        // This restores balance; it does NOT recover the KINDS inside the swallowed text (every eaten
-        // `(` is recorded as a value-opening one), which only matters on input that already failed to
-        // parse — see the gap list.
-        for (const p of eaten) {
-          if (p === "(") top.parens.push(false);
+        // The KIND of each swallowed `(` is recovered the same way a `(` outside a literal gets its
+        // kind: by looking at the word in front of it. Round 5 pushed `false` for every one and said
+        // in this comment that the kinds "only matter on input that already failed to parse". That was
+        // false, and a 38-character input refutes it:
+        //
+        //     if ({} / a) if (b / c) /[//]/.test(s);
+        //
+        // parses, and the mis-read literal `/ a) if (b /` swallows the outer `)` AND the inner `if`'s
+        // `(`. Popping the `true` and pushing `false` left the inner `)` resolving to a value and
+        // deleted 12 characters — a shape round 4 got right by leaving the stack alone. Recovering the
+        // kind fixes it without giving up what the accounting buys, and `while`/`for` behave the same.
+        for (const [ch, at] of eaten) {
+          if (ch === "(") top.parens.push(controlWordBefore(src, at));
           else top.parens.pop();
         }
         out += src.slice(i, j + 1);
@@ -407,8 +444,17 @@ export function htmlScriptBodies(html) {
  *
  * Only a body that parsed BEFORE stripping is checked after it, so a `<script type="application/json">`
  * or a minified bundle that was never JavaScript cannot red a caller. Say the cost of that out loud:
- * it is also the blind spot. Both surviving deleting gaps live on input that never parsed, so this
- * oracle cannot see them — which is why they are pinned as explicit cases instead.
+ * it is also the blind spot: this oracle can only ever speak about input that parsed.
+ *
+ * Round 4 wrote here that "both surviving deleting gaps live on input that never parsed". Round 6
+ * deleted that sentence rather than renumbering it, and the reason is the whole lesson of rounds 3-6:
+ * it was a claim about ALL such gaps, made over the two that had been written down, and it was
+ * already false — `if ({} / a) /[//]/.test(s);` parses, deletes 12 characters, and had done so since
+ * round 3. What is true and checkable is narrower: **every entry in `jsSource.test.ts`'s
+ * `DELETING_GAPS` table is asserted, with `vm.Script`, not to parse** — a fact about that table. A
+ * deleting shape nobody has added to it is not covered by anything except this compile.
+ *
+ * Which is exactly why this compile is the entry point and the bare stripper is not.
  *
  * The stripper is a parameter so the backstop itself can be RED-PROOFED (CPE-1933 rule 3) — see
  * `jsSource.test.ts`, which hands it one that really does delete. A backstop nobody has watched fail

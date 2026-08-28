@@ -224,7 +224,10 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      parens (`{} / f(1 / 2)` scans as `/ f(1 /`), and a swallowed `(` that never reached the stack
      leaves the matching `)` popping the frame beneath it, another 14 characters (a real regex balances
      its parens, so pushing/popping the ones the literal eats is a no-op for the honest case and a fix
-     for the dishonest one); and **point a JS scanner at JS only** — `sessionChipColours` tokenized a
+     for the dishonest one) — but **restoring the COUNT is only half of it: recover the KIND too**,
+     because a swallowed region can hold a `)` and a `(` from different statements, and round 5's
+     "push `false` for every swallowed `(`" broke four shapes round 4 got right; and **point a JS
+     scanner at JS only** — `sessionChipColours` tokenized a
      whole HTML document, where one apostrophe in prose shifted the strip by 11,872 characters (a
      round-2 figure, **no longer reproducible**: round 3 made an unterminated string stop at the
      newline, so the same injection now shifts the strip by 0 — the rule stands on the mechanism, not
@@ -240,6 +243,23 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      assertion at the scope it was measured at.** `jsSource.test.ts` now says "no entry in this table
      parses before stripping", not "no valid JavaScript reaches this". The only leg that speaks for the
      shapes nobody enumerated is compiling the RESULT (`stripScriptBodiesChecked`).
+     **And the same correction applies to a SWEEP, which is where round 6 caught it again.** Round 5
+     reported "1,904 structured + 36,861 fuzzed inputs, 0 desyncs, no third family" and did not commit
+     the generator; a reviewer wrote their own and found a third family in minutes. Two rules fell out.
+     *(a) A negative over a generated space is a statement about the GENERATOR, never about the
+     language* — say "no input this generator produces", and remember 38,765 samples missed a
+     27-character input. *(b) If you cannot commit the generator, you have not measured anything a
+     reviewer can check* — `scripts/dev-harness/js-strip-sweep.mjs` is now in the tree, with
+     `--compare <ref>` so a change is scored as "N fixed, M regressed" instead of asserted to be an
+     improvement. That comparison is what proved round 5's paren fix was 45-for-4 rather than free.
+     Round 5's fuzz number was also inflated: its LCG lost precision in JS doubles and its 36,861
+     "inputs" deduped to about 120 distinct programs.
+     **A gap table earns its safety property; do not smuggle in an entry that breaks it.** When round
+     6's third family was dropped into `DELETING_GAPS`, the `parses()` filter went red immediately —
+     correctly, because that family DOES delete valid JavaScript. It got its own table
+     (`DELETING_ON_VALID_JS`) asserting the worse fact out loud, plus that `stripScriptBodiesChecked`
+     throws on it. A test file with more than one case table should also assert **which tables its
+     oracles sweep**, so a family held back from the enumeration is visible rather than merely absent.
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
      never actually re-reads its source is the same defect with extra steps. Write the red-proof's
      **result at the site**, not only in the PR body — a code comment that merely asserts, next to a
