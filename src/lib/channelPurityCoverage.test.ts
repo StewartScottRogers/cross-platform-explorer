@@ -281,6 +281,40 @@ function isRealInvocationLine(line: string): boolean {
   return true;
 }
 
+/** True if `line` could PLAUSIBLY run `verify-release-artifacts` — the same question as
+ *  `isRealInvocationLine()`, asked in the opposite direction (CPE-1969 round 2, Reviewer N3).
+ *
+ *  ## Why this is a second matcher and not a reuse
+ *
+ *  `isRealInvocationLine()`'s strictness has a SIGN, and the sign depends on the role:
+ *
+ *    * In its original COVERAGE role — "this channel has a real, exit-code-honoured guard" — every
+ *      refusal is fail-SAFE. Rejecting `^echo cargo run …`, or a line carrying `|`/`;`, can only
+ *      ever under-credit coverage, which reds the ratchet. Being strict is the whole point.
+ *    * In CPE-1969's new "nothing outside the mapped set invokes the verifier" role, the identical
+ *      refusals are fail-OPEN: every line it declines to call an invocation is a line it declines to
+ *      REPORT. `exec cargo run --bin verify-release-artifacts …`, `sudo cargo run …` and
+ *      `cargo run … | tee log` are all real invocations that the coverage predicate rejects — by
+ *      name, those three — so an unmapped third site written any of those ways would sit outside
+ *      every guard while the stray check passed.
+ *
+ *  So the stray check gets its own predicate, widened in exactly the two ways the coverage one is
+ *  narrow: `cargo run` need only be a COMMAND WORD rather than start the line (which admits any
+ *  prefix — `exec`, `sudo`, `env`, `timeout 60`, a `&&` chain — without enumerating prefix words,
+ *  the recall-list trap), and `|`/`;` are not disqualifying (exit-code laundering is a coverage
+ *  question; a laundered invocation is still an invocation, and still needs mapping).
+ *
+ *  ## What it deliberately over-reports
+ *
+ *  `echo cargo run --bin verify-release-artifacts …` — the round-3 decoy — matches this, and does
+ *  NOT match `isRealInvocationLine()`. That divergence is intended, and pinned as a test below. In
+ *  the stray role a false positive is a red test naming the file and line, fixed by one reviewed
+ *  exclusion; a false negative is an unguarded release verifier nobody knows about. Same trade, same
+ *  direction, as CPE-1969's `APT_COMMAND_WORD` path-tail decision — see `aptGetHardening.ts`. */
+function mentionsVerifierInvocation(line: string): boolean {
+  return /(?<![\w\-/])cargo\s+run\b.*--bin\s+verify-release-artifacts\b/.test(line);
+}
+
 /** Every `--expect-channel` value a single step's `run:` text genuinely declares — one entry per
  *  logical line that `isRealInvocationLine()` confirms actually invokes the binary AND carries the
  *  flag. Factored out of `guardInvocations()` so it can be exercised directly against synthetic
@@ -399,12 +433,17 @@ describe("every Channel token the guard logic knows about has a real, ACTUALLY-W
   // non-release workflows contain zero `verify-release-artifacts` invocations and zero
   // `--expect-channel` flags, so this passes today; the point is that a third invocation site would
   // now surface here instead of sitting outside every guard's scope.
+  //
+  // Round 2, N3: this uses `mentionsVerifierInvocation()`, NOT the coverage predicate. The coverage
+  // predicate's refusals are fail-safe when crediting coverage and fail-OPEN when hunting for
+  // strays; see that function's comment for the three invocation shapes (`exec …`, `sudo …`,
+  // `… | tee`) it would have let past here.
   it("no workflow or extracted script outside the mapped set invokes verify-release-artifacts", () => {
     const stray: string[] = [];
     for (const unit of allShellUnits()) {
       if (BUILD_JOB_FOR_WORKFLOW[unit.file.split("/").pop() ?? ""] !== undefined) continue;
       for (const line of logicalLines(unit.run)) {
-        if (isRealInvocationLine(line)) stray.push(`${unit.where}: ${line}`);
+        if (mentionsVerifierInvocation(line)) stray.push(`${unit.where}: ${line}`);
       }
     }
     expect(
@@ -548,6 +587,50 @@ describe("CPE-1908 round 3, R2-1: guardInvocations() only credits a channel to t
     expect(decoyRun.includes("--expect-channel sidecar")).toBe(true);
     expect(isRealInvocationLine(decoyRun)).toBe(false);
     expect(channelsDeclaredByStepRun(decoyRun)).toEqual([]);
+  });
+});
+
+// CPE-1969 round 2, Reviewer N3. `isRealInvocationLine()` was reused verbatim for the new
+// "nothing outside the mapped set invokes the verifier" check, where its strictness flips sign:
+// safe when crediting coverage, fail-OPEN when hunting for unmapped sites. These pin the split.
+describe("the STRAY predicate is wider than the COVERAGE predicate, on purpose (CPE-1969 N3)", () => {
+  const base = "cargo run --bin verify-release-artifacts -- --expect-channel sidecar";
+
+  // The three named shapes: real invocations the coverage predicate rejects. Under the round-1 code
+  // an unmapped site written any of these ways went unreported. Red-proof: point the stray check at
+  // `isRealInvocationLine` again and all three of these fail.
+  it.each([
+    ["exec prefix", `exec ${base}`],
+    ["sudo prefix", `sudo ${base}`],
+    ["env prefix", `env RUST_LOG=info ${base}`],
+    ["timeout prefix", `timeout 60 ${base}`],
+    ["piped into tee", `${base} | tee verify.log`],
+    ["semicolon-chained", `${base} ; echo done`],
+    ["&&-chained after another command", `cd repo && ${base}`],
+  ])("a real invocation the coverage predicate rejects is still reported as a stray: %s", (_label, line) => {
+    expect(isRealInvocationLine(line)).toBe(false); // fail-open in the stray role — the defect
+    expect(mentionsVerifierInvocation(line)).toBe(true); // …closed by the wider predicate
+  });
+
+  it("a genuine invocation matches BOTH — widening did not break the ordinary case", () => {
+    expect(isRealInvocationLine(base)).toBe(true);
+    expect(mentionsVerifierInvocation(base)).toBe(true);
+  });
+
+  it("the ECHO decoy diverges: not coverage, but IS reported as a stray — the intended trade", () => {
+    // The one shape the wider predicate over-reports, stated rather than left to be discovered. A
+    // false stray is a red test naming the exact line and costs one reviewed exclusion; a missed
+    // one is an unguarded release verifier. Same direction as APT_COMMAND_WORD's path-tail call.
+    const decoy = `echo ${base}`;
+    expect(isRealInvocationLine(decoy)).toBe(false);
+    expect(mentionsVerifierInvocation(decoy)).toBe(true);
+  });
+
+  it("a line that merely NAMES the binary, with no cargo run, is not a stray either", () => {
+    expect(mentionsVerifierInvocation("echo see verify-release-artifacts for details")).toBe(false);
+    expect(mentionsVerifierInvocation("cargo build --bin verify-release-artifacts --locked")).toBe(false);
+    // `cargo` inside a longer word or a path segment is not the command word.
+    expect(mentionsVerifierInvocation("./notcargo run --bin verify-release-artifacts --")).toBe(false);
   });
 });
 

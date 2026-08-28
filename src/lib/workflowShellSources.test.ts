@@ -8,8 +8,8 @@
 // Every fixture is built under `.claude/tmp/` (this project's standing rule: scratch lives inside the
 // working tree, never the system temp dir) and removed afterwards.
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   MIN_EXPECTED_WORKFLOWS,
   MIN_EXPECTED_WORKFLOW_SCRIPTS,
@@ -36,7 +36,12 @@ function fixtureRoot(files: Record<string, string>): string {
   const root = mkdtempSync(join(base, "cpe1969-"));
   scratch.push(root);
   mkdirSync(join(root, WORKFLOW_SCRIPTS_DIR), { recursive: true });
-  for (const [rel, body] of Object.entries(files)) writeFileSync(join(root, rel), body, "utf8");
+  for (const [rel, body] of Object.entries(files)) {
+    // A fixture path may name a SUBdirectory (`scripts/helpers/foo.sh`) — the N1 red-proof needs a
+    // real one on disk, not a simulated entry.
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), body, "utf8");
+  }
   return root;
 }
 
@@ -165,6 +170,90 @@ describe("a file nobody classified is a file nobody scans — so it fails loudly
     for (const n of ["a", "b", "c"]) files[`${WORKFLOW_SCRIPTS_DIR}/${n}.sh`] = "echo hi\n";
     files[`${WORKFLOW_SCRIPTS_DIR}/bare`] = "#!/usr/bin/env bash\necho hi\n";
     expect(discoverWorkflowScripts(fixtureRoot(files))).toContain(`${WORKFLOW_SCRIPTS_DIR}/bare`);
+  });
+});
+
+// CPE-1969 round 2, Reviewer N1: gap 2 one level down, inside the fix for gap 2.
+//
+// Round 1's walk filtered `statSync(...).isFile()` on a flat `readdirSync`. An unclassified FILE was
+// a loud failure — the whole point — but a SUBDIRECTORY fell out of the filter with no error, no
+// report and no entry: `scripts/helpers/foo.sh` would simply not exist as far as every guard was
+// concerned. None exists today, so it was latent, exactly as the original gap was.
+//
+// The fix is a refusal, not recursion; `refuseSubdirectories` in workflowShellSources.ts carries the
+// argument (short version: the header's "one .sh = one unit" mapping rests on a standalone script
+// being ONE executed process, and a sourced `helpers/` fragment is the case where that premise is
+// false, so recursion would apply the conclusion where its reason does not hold — and would silently
+// pick one policy for `helpers/`, `fixtures/` and a vendored tree, which want three different ones).
+//
+// These are red-proofs against a REAL subdirectory on disk holding a REAL offending script, not a
+// simulated entry: delete either `refuseSubdirectories` call and the first two cases go green while
+// the third keeps proving the content was invisible.
+describe("a SUBDIRECTORY is refused, not silently skipped (CPE-1969 round 2, N1)", () => {
+  /** Three scripts to clear the floor, plus a real `helpers/` holding shell no guard would read. */
+  function withHelperSubdir(): Record<string, string> {
+    const files: Record<string, string> = {};
+    for (const n of ["a", "b", "c"]) files[`${WORKFLOW_SCRIPTS_DIR}/${n}.sh`] = "echo hi\n";
+    // The offending content: an UNLOCKED cargo build and an UNHARDENED apt-get, i.e. two live
+    // defects the lockfile and hang-hardening guards exist to catch, sitting one directory down.
+    files[`${WORKFLOW_SCRIPTS_DIR}/helpers/foo.sh`] = [
+      "#!/usr/bin/env bash",
+      "cargo build --release",
+      "sudo /usr/bin/apt-get update",
+      "",
+    ].join("\n");
+    return files;
+  }
+
+  it("a subdirectory under scripts/ throws, naming it", () => {
+    const root = fixtureRoot(withHelperSubdir());
+    expect(() => discoverWorkflowScripts(root)).toThrow(/helpers/);
+  });
+
+  it("allShellUnits() refuses too, so no consumer can scan the tree while it hides shell", () => {
+    const files = withHelperSubdir();
+    // A full complement of workflows, so the refusal under test is reached rather than the workflow
+    // floor short-circuiting ahead of it — allShellUnits() enumerates workflows first.
+    for (let i = 0; i < MIN_EXPECTED_WORKFLOWS; i++) files[`${WORKFLOWS_DIR}/w${i}.yml`] = workflow("echo hi");
+    expect(() => allShellUnits(fixtureRoot(files))).toThrow(/helpers/);
+  });
+
+  it("the refusal is what stops the hidden script being invisible — without it, it is", () => {
+    // The defect itself, stated as a measurement: a flat file-only read of scripts/ returns the
+    // three top-level scripts and nothing about `helpers/foo.sh` — no entry, and (before the
+    // refusal) no error either. Its `cargo build --release` and `sudo /usr/bin/apt-get update`
+    // reach no guard.
+    const root = fixtureRoot(withHelperSubdir());
+    const flat = readdirSync(join(root, WORKFLOW_SCRIPTS_DIR)).filter((n) =>
+      statSync(join(root, WORKFLOW_SCRIPTS_DIR, n)).isFile(),
+    );
+    expect(flat.sort()).toEqual(["a.sh", "b.sh", "c.sh"]);
+    expect(flat.join(" ")).not.toContain("foo.sh");
+    // …and the content really is offending, so the invisibility costs something real.
+    const hidden = readFileSync(join(root, WORKFLOW_SCRIPTS_DIR, "helpers", "foo.sh"), "utf8");
+    expect(hidden).toContain("cargo build --release");
+    expect(hidden).not.toContain("--locked");
+  });
+
+  it("an unexpected subdirectory under .github/workflows/ itself is refused as well", () => {
+    // The same hole in the OTHER walk: GitHub reads workflow YAML only from the top level, so a
+    // `.yml` in a subdirectory is a file that does not run — it must not be enumerated as one, and
+    // must not vanish without comment either.
+    const files: Record<string, string> = {};
+    for (let i = 0; i < MIN_EXPECTED_WORKFLOWS; i++) files[`${WORKFLOWS_DIR}/w${i}.yml`] = workflow("echo hi");
+    for (const n of ["a", "b", "c"]) files[`${WORKFLOW_SCRIPTS_DIR}/${n}.sh`] = "echo hi\n";
+    files[`${WORKFLOWS_DIR}/archive/old.yml`] = workflow("cargo build");
+    expect(() => discoverWorkflows(fixtureRoot(files))).toThrow(/archive/);
+  });
+
+  it("scripts/ itself is still allowed — the exclusion is derived from WORKFLOW_SCRIPTS_DIR", () => {
+    // The one tolerated subdirectory, and it is not a second hard-coded name: it is sliced off
+    // WORKFLOW_SCRIPTS_DIR, so renaming that constant moves this exclusion with it.
+    expect(WORKFLOW_SCRIPTS_DIR.startsWith(`${WORKFLOWS_DIR}/`)).toBe(true);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < MIN_EXPECTED_WORKFLOWS; i++) files[`${WORKFLOWS_DIR}/w${i}.yml`] = workflow("echo hi");
+    for (const n of ["a", "b", "c"]) files[`${WORKFLOW_SCRIPTS_DIR}/${n}.sh`] = "echo hi\n";
+    expect(discoverWorkflows(fixtureRoot(files))).toHaveLength(MIN_EXPECTED_WORKFLOWS);
   });
 });
 

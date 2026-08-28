@@ -745,7 +745,7 @@ describe("the widened hang-hardening scope really catches a newcomer (CPE-1969)"
   });
 
   it("gui-smoke.yml's apt-LOCK wait message is prose, not a fifth unhardened site (CPE-1969)", () => {
-    // The false positive the widening exposed, and the reason APT_COMMAND_WORD gained `/` in its
+    // The false positive the widening exposed, and the reason APT_COMMAND_WORD excludes `/` in its
     // LOOKAHEAD. Before that fix this exact line read as an unhardened apt invocation and the
     // widened scan false-failed on its first run. Red-proof: revert the lookahead to `(?![\w-])`
     // and this case fails while the real invocations below keep passing.
@@ -755,6 +755,29 @@ describe("the widened hang-hardening scope really catches a newcomer (CPE-1969)"
     expect(APT_COMMAND_WORD.test("sudo apt-get update")).toBe(true);
     expect(APT_COMMAND_WORD.test("sudo apt install -y foo")).toBe(true);
     expect(APT_COMMAND_WORD.test("sudo rm -f /etc/apt/sources.list.d/x.list")).toBe(false);
+  });
+
+  it("an ABSOLUTE-PATH apt invocation is seen — the lookbehind used to swallow it (CPE-1969 N4)", () => {
+    // The mirror image of the case above, and the dangerous direction: from CPE-1916 until now the
+    // lookbehind excluded `/`, so `sudo /usr/bin/apt-get update` matched NEITHER the pre-CPE-1969
+    // regex NOR round 1's — a real, entirely unhardened apt invocation that every guard reported as
+    // absent. Silent, unlike the `echo` false positive, which is why it is folded in here rather
+    // than filed. Red-proof: put `/` back in the lookbehind (`(?<![\w\-/])`) and all five of these
+    // fail while every case in the test above keeps passing.
+    expect(APT_COMMAND_WORD.test("sudo /usr/bin/apt-get update")).toBe(true);
+    expect(APT_COMMAND_WORD.test("/usr/bin/apt install -y foo")).toBe(true);
+    expect(APT_COMMAND_WORD.test("exec /usr/bin/apt-get -o Acquire::Retries=3 update")).toBe(true);
+    expect(APT_COMMAND_WORD.test("  /usr/bin/apt-get update")).toBe(true); // path-prefixed, inside a script
+    expect(
+      APT_COMMAND_WORD.test("bash .github/workflows/scripts/x.sh && /usr/local/bin/apt-get -y clean"),
+    ).toBe(true);
+
+    // …and dropping the lookbehind exclusion must not re-open the path-SEGMENT direction. `.` joined
+    // `/` in the lookahead for these two: they are the only cells the 26-shape old/current/new sweep
+    // moved that were not intended. Red-proof: drop `.` from the lookahead and both fail.
+    expect(APT_COMMAND_WORD.test("cat /etc/apt/apt.conf.d/99custom")).toBe(false);
+    expect(APT_COMMAND_WORD.test("cat /etc/apt.conf")).toBe(false);
+    expect(APT_COMMAND_WORD.test("sudo rm -f /etc/apt/preferences.d/nosnap.pref")).toBe(false);
   });
 
   it("the scan REFUSES rather than reporting clean when the enumeration comes back empty", () => {

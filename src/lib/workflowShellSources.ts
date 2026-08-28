@@ -106,20 +106,86 @@ const DOC_EXT = /\.(md|txt)$/i;
 /** Recognised as shell by SHEBANG, for an extensionless script. */
 const SHELL_SHEBANG = /^#!.*\b(?:ba)?sh\b/;
 
-function fileNames(dir: string): string[] {
+/**
+ * Directory name of the scripts directory relative to the workflows directory, derived from the two
+ * constants above rather than typed again, so renaming `WORKFLOW_SCRIPTS_DIR` moves the one
+ * subdirectory `discoverWorkflows` is allowed to skip along with it.
+ */
+const SCRIPTS_SUBDIR = WORKFLOW_SCRIPTS_DIR.slice(WORKFLOWS_DIR.length + 1);
+
+/**
+ * The entries of one directory, split into files and SUBDIRECTORIES — the split matters, because a
+ * subdirectory that is neither enumerated nor refused is invisible, which is gap 2 all over again
+ * (see `refuseSubdirectories`). A flat read, deliberately: nothing here recurses.
+ */
+function dirEntries(dir: string): { files: string[]; dirs: string[] } {
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
-    return []; // a missing directory is a near-empty enumeration, reported by the caller's floor
+    // a missing directory is a near-empty enumeration, reported by the caller's floor
+    return { files: [], dirs: [] };
   }
-  return entries.filter((name) => {
+  const files: string[] = [];
+  const dirs: string[] = [];
+  for (const name of entries) {
+    let stat;
     try {
-      return statSync(join(dir, name)).isFile();
+      stat = statSync(join(dir, name));
     } catch {
-      return false;
+      continue;
     }
-  });
+    if (stat.isDirectory()) dirs.push(name);
+    else if (stat.isFile()) files.push(name);
+  }
+  return { files, dirs };
+}
+
+/**
+ * Refuses an unexpected SUBDIRECTORY, the way `discoverWorkflowScripts` refuses an unclassified file.
+ *
+ * ## Why this exists (CPE-1969 round 2, Reviewer N1)
+ *
+ * Round 1 closed gap 2 — *shell nothing reads* — with a flat `readdirSync` filtered to
+ * `statSync(...).isFile()`. An unclassified FILE became a loud failure, which was the whole point.
+ * But a subdirectory simply fell out of the filter: `.github/workflows/scripts/helpers/foo.sh` would
+ * have produced no error, no report and no entry. That is gap 2 exactly, one directory deeper,
+ * recreated inside the fix for it. No subdirectory exists today, so it was latent — which is how the
+ * original gap sat undetected too.
+ *
+ * ## Refuse, rather than recurse
+ *
+ * Recursing looks like the obvious fix and is the wrong one here, because of this module's own unit
+ * mapping. The header argues at length that **one `.sh` file is exactly one unit** on a specific
+ * premise: a standalone script is `bash`-ed as ONE process, inherits ONE cap, and has ONE path to
+ * report against, so the three things a YAML step delimits all coincide with the file. A file in a
+ * `helpers/` directory is the case where that premise is FALSE — it is `source`d INTO another script,
+ * not separately executed. Emitting it as its own `ShellUnit` would apply the mapping's conclusion
+ * while its stated reason does not hold, and the per-step arithmetic the header already carves out
+ * would be attributed to a "step" that is not one.
+ *
+ * There are other shapes a subdirectory could be, and they want different answers, not one default:
+ * a `fixtures/` of intentionally-broken shell must NOT be scanned; a vendored tool tree must not
+ * either; a `helpers/` of sourced fragments should be scanned but attributed to its sourcing script.
+ * Recursion silently picks "scan it as a standalone unit" for all three. Silently picking a policy is
+ * the failure mode this ticket is about, so the refusal makes whoever adds the first subdirectory
+ * state its unit mapping instead of inheriting a guess.
+ *
+ * It is also the cheap direction to be wrong in: a refusal is a red test naming the directory, and
+ * whoever hits it either recurses deliberately or excludes it deliberately. Round 1's silence was the
+ * expensive direction.
+ */
+function refuseSubdirectories(dir: string, dirs: string[], allowed: readonly string[]): void {
+  const unexpected = dirs.filter((name) => !allowed.includes(name));
+  if (unexpected.length === 0) return;
+  throw new Error(
+    `${dir} holds ${unexpected.length} unexpected subdirectory/-ies: ${unexpected.join(", ")}. ` +
+      `Nothing here recurses, so any shell inside them is scanned by NO guard — the CPE-1969 gap 2 ` +
+      `shape, one level down. Decide explicitly in src/lib/workflowShellSources.ts: descend into it ` +
+      `(and say what ONE ShellUnit means for a sourced fragment, which is not the whole-file mapping ` +
+      `this module's header argues for), or add it to the allowed list with the reason it is not ` +
+      `shell CI executes. Do not leave it silently skipped.`,
+  );
 }
 
 function refuseNearEmpty(kind: string, dir: string, found: string[], floor: number): void {
@@ -138,11 +204,16 @@ function refuseNearEmpty(kind: string, dir: string, found: string[], floor: numb
  * directory at run time, never a list someone remembered. Throws when the result is near-empty.
  *
  * `.github/workflows/scripts/` is a SUBdirectory and is not descended into: its contents are shell,
- * not workflows, and are enumerated by `discoverWorkflowScripts` instead.
+ * not workflows, and are enumerated by `discoverWorkflowScripts` instead. It is the ONLY subdirectory
+ * tolerated here — any other is refused rather than skipped, because GitHub reads workflow YAML only
+ * from the top level, so a `.yml` in a new subdirectory is a file that does not run and must not be
+ * mistaken for one that does. See `refuseSubdirectories`.
  */
 export function discoverWorkflows(root: string = process.cwd()): string[] {
   const dir = join(root, WORKFLOWS_DIR);
-  const found = fileNames(dir)
+  const { files, dirs } = dirEntries(dir);
+  refuseSubdirectories(dir, dirs, [SCRIPTS_SUBDIR]);
+  const found = files
     .filter((name) => WORKFLOW_EXT.test(name))
     .sort()
     .map((name) => `${WORKFLOWS_DIR}/${name}`);
@@ -158,12 +229,17 @@ export function discoverWorkflows(root: string = process.cwd()): string[] {
  * rather than a silent skip. That is the whole lesson of gap 2: a file nobody classified is a file
  * nobody scans, and it took a directory sweep rather than a code review to notice. A future
  * `helper.py` here must force a decision about how it is guarded, not disappear.
+ *
+ * A SUBdirectory is refused on the same principle and for the same reason — see
+ * `refuseSubdirectories` for why refusing beats recursing here (CPE-1969 round 2, N1).
  */
 export function discoverWorkflowScripts(root: string = process.cwd()): string[] {
   const dir = join(root, WORKFLOW_SCRIPTS_DIR);
+  const { files, dirs } = dirEntries(dir);
+  refuseSubdirectories(dir, dirs, []);
   const found: string[] = [];
   const unclassified: string[] = [];
-  for (const name of fileNames(dir).sort()) {
+  for (const name of files.sort()) {
     if (DOC_EXT.test(name)) continue;
     const first = readFileSync(join(dir, name), "utf8").split("\n", 1)[0] ?? "";
     if (SHELL_EXT.test(name) || SHELL_SHEBANG.test(first)) {

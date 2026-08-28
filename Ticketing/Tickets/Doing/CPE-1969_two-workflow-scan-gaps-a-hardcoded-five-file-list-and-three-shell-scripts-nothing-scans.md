@@ -155,3 +155,146 @@ enumeration — **all three throw** rather than reporting clean. The `apt/dpkg` 
 **Gates.** `npm run check`: 0 errors / 0 warnings. `npm test`: 354 files, 5157 passed, 2 skipped.
 `crates/updater-verify`: `cargo clippy --locked --all-targets -- -D warnings` clean,
 `cargo test --locked` 147 passed (that crate declares no `[features]`, so one mode is all there is).
+
+---
+
+### Round 2 — Reviewer APPROVE with five notes; four fixed, one informational
+
+Rebased onto `origin/main` @ `e275808e` (#1070 merged since the branch point); rebase clean, no
+conflicts. The Reviewer's verification was exhaustive and independently reproduced every round-1
+measurement, so none of it was re-run — only the four notes were worked.
+
+**N1 — gap 2, one level down, inside the fix for gap 2. Decision: REFUSE, not recurse.**
+
+Round 1's `fileNames()` filtered `statSync(...).isFile()` on a flat `readdirSync`. An unclassified
+*file* was a loud failure — the whole point — but `.github/workflows/scripts/helpers/foo.sh` would
+have produced no error, no report and no entry. Latent (no subdirectory exists today), which is
+exactly how the original gap sat undetected.
+
+Refusing beats recursing here for a reason this module already argues at length. The header's
+**"one `.sh` file is exactly one unit"** mapping rests on a specific premise: a standalone script is
+ONE executed process, with ONE inherited cap and ONE path to report against, so the three things a
+YAML step delimits all coincide with the file. A `helpers/` fragment is precisely the case where that
+premise is **false** — it is `source`d *into* another script, not separately executed. Recursing
+would apply the mapping's conclusion where its stated reason does not hold, and would emit a "step"
+that the per-step arithmetic carve-out cannot be posed against.
+
+It is also not one decision but three wearing one coat: a `helpers/` of sourced fragments should be
+scanned but attributed to its caller; a `fixtures/` of deliberately-broken shell must **not** be
+scanned; a vendored tool tree must not either. Recursion silently picks "scan it as a standalone
+unit" for all three, and silently picking a policy is the failure mode this ticket is about. The
+refusal makes whoever adds the first subdirectory state its unit mapping instead of inheriting a
+guess — and it is the cheap direction to be wrong in, since a refusal names the directory in a red
+test while round 1's silence named nothing.
+
+Closed in **both** walks, not just the one the note raised. `discoverWorkflows` now refuses any
+subdirectory other than `scripts/` — and that exclusion is **derived**, sliced off
+`WORKFLOW_SCRIPTS_DIR` rather than typed a second time, so renaming the constant moves it. GitHub
+reads workflow YAML only from the top level, so a `.yml` in a new subdirectory is a file that does
+not run and must not be mistaken for one that does.
+
+*Red-proof (real subdirectory on disk, real offending script — `helpers/foo.sh` carrying
+`cargo build --release` and `sudo /usr/bin/apt-get update`, i.e. one live defect for each of the two
+guards that would have missed it):* `if (false) refuseSubdirectories(...)` → **2 red**
+(`discoverWorkflowScripts` throws naming `helpers`; `allShellUnits` throws too). A third case pins
+the defect itself as a measurement — a flat file-only read returns `a.sh b.sh c.sh` and nothing about
+`foo.sh` — so the test states what the refusal is buying, not just that it fires. Restored: 22/22
+green. (One self-inflicted correction: the `allShellUnits` case first failed on the *workflow* floor,
+because `allShellUnits` enumerates workflows before scripts; the fixture now carries a full
+complement of workflows so the refusal under test is the one actually reached.)
+
+**N4 — a live hole in the apt guard, folded in on the Foreman's call.**
+
+The Reviewer suggested a separate ticket; the Foreman overrode that, and the override is recorded
+here as asked. The reasons: it is **the same regex in the same file** this PR is already editing, the
+context is already loaded, and leaving a known hole in a hardening scan when the fix is one lookbehind
+is worse than a slightly wider PR. The hole is also the exact mirror of the false positive round 1
+fixed — pattern-wise they are one finding, and splitting them across two tickets would have left the
+next reader with half the story at each site.
+
+`sudo /usr/bin/apt-get update` matched **neither** the old regex nor round 1's, because CPE-1916's
+lookbehind exclusion of `/` swallows any absolute-path invocation. Real, completely unhardened, and
+invisible since CPE-1916. The left exclusion is gone; distinguishing a path from a command now rests
+entirely on what **follows** — a path segment is followed by `/` or `.`, a command word by whitespace
+or end of line.
+
+*Sweep, old / current / new, 26 shapes* (the Reviewer's 22 plus four added for the path-prefixed and
+`apt.conf` forms). Disagreements with intent: **OLD 7, CURRENT 5, NEW 0.** Cells that move, and only
+these:
+
+| shape | old | cur | new |
+|---|---|---|---|
+| `sudo /usr/bin/apt-get update` | . | . | **Y** |
+| `/usr/bin/apt install -y foo` | . | . | **Y** |
+| `exec /usr/bin/apt-get -o Acquire::Retries=3 update` | . | . | **Y** |
+| `  /usr/bin/apt-get update` (path-prefixed, inside a script) | . | . | **Y** |
+| `bash .github/workflows/scripts/x.sh && /usr/local/bin/apt-get -y clean` | . | . | **Y** |
+| `echo "waiting for background apt/dpkg lock…"` | Y | . | . |
+| `echo "apt/dpkg" && ls` | Y | . | . |
+| `ls /etc/apt` *(ambiguous — see below)* | . | . | **Y** |
+| `sudo rm -rf /var/cache/apt` *(ambiguous)* | . | . | **Y** |
+
+Every real-invocation shape (13 of them) matches in all three. The five newly-matching cells are the
+intended fix; the two `echo` cells are round 1's fix, unmoved.
+
+**The first draft over-corrected and the sweep caught it**, which is the reason for running it: with
+only the lookbehind dropped, `cat /etc/apt/apt.conf.d/99custom` matched on `apt.conf` — one
+unintended cell. `.` joined `/` in the lookahead, and that cell went back to `.`. Both halves are
+pinned as tests.
+
+*Repo cross-check* (the direction a shape table cannot cover): all 29 `.yml`/`.sh`/`.mjs`/`.ps1`
+files in the tree, line by line — **52 lines match under CURRENT, 52 under NEW, 0 lines match NEW but
+not CURRENT.** No live behaviour change today; the fix is entirely about what a *future* line can
+hide.
+
+*The residue, stated at the site rather than papered over.* A path **tail** is genuinely undecidable
+from the token alone: `/usr/bin/apt` (a command) and `/etc/apt` (a directory) are the same string
+shape. The regex resolves that towards **matching**, deliberately — a false positive is a red test
+naming the exact line and costs one reviewed exclusion, while a false negative is a six-hour IPv6 apt
+hang with every guard green, which is what actually shipped between CPE-1916 and now. No line in the
+repo hits the ambiguous shape today. The comment says explicitly: exclude at the **call site** if one
+ever does, and do **not** put `/` back in the lookbehind — that is the widening that created this
+hole, and it would take all five path-form invocations down with it.
+
+*Red-proof, both directions:* restore `/` to the lookbehind → **1 red** (5 assertions). Drop `.` from
+the lookahead → **1 red**. Restored: 47/47 green across both apt suites.
+
+**N2 — one declaration, not two.** `/\bnpm run tauri build\b/` was written twice; the inline copy in
+the script refusal is gone, replaced by `isTauriBuildAnchor({ run: unit.run })`. A script has no
+`uses:`, so only the `run` branch can fire — but the point is that widening the anchor later now
+follows into the refusal instead of silently not doing so. *Red-proof:* widen the one remaining
+declaration to `npx tauri build` → the workflow-side anchor test reds (`anchorsSeen` 4 → 0), and
+`grep` confirms exactly **one** occurrence of the pattern in the file.
+
+**N3 — a matcher whose strictness flips sign in its new role.** `isRealInvocationLine`'s refusals are
+fail-**safe** when crediting coverage (rejecting a decoy can only under-credit) and fail-**open** in
+the new "nothing outside the map" role (every line it declines to call an invocation is a line it
+declines to *report*). Two roles, two predicates: the stray check now uses
+`mentionsVerifierInvocation`, widened in exactly the two ways the coverage predicate is narrow —
+`cargo run` need only be a **command word** rather than start the line (which admits any prefix
+without enumerating prefix words, the recall-list trap), and `|`/`;` are not disqualifying, since
+exit-code laundering is a coverage question and a laundered invocation still needs mapping.
+
+Named at the site, with the shapes spelled out: `exec …`, `sudo …`, `env … `, `timeout 60 …`,
+`… | tee`, `… ; echo done`, `cd repo && …` — all seven are real invocations the coverage predicate
+rejects, all seven now reported. The one deliberate over-report (`echo cargo run --bin …`, the
+round-3 decoy) is pinned as a divergence test rather than left to be discovered: same fail-closed
+trade as the apt path tail, and the comment cross-references it so the two decisions read as one
+principle instead of two ad-hoc calls. *Red-proof:* point the stray check back at
+`isRealInvocationLine` → **8 red**.
+
+**N5 — informational, no action taken.** Scripts get no `MIN_CARGO_INVOCATIONS` floor. Correct today:
+the true count is 0, so a floor would be vacuous, and the staleness check covers the other direction.
+
+**Gates (round 2), and the delta.** `npm run check`: **0 errors / 0 warnings** (unchanged).
+`npm test`: **356 files, 5205 passed, 2 skipped** — the merged baseline was 356 / 5189, so **+16
+tests, +0 files, 0 failures**. `crates/updater-verify`: `cargo clippy --locked --all-targets -D
+warnings` clean; `cargo test --locked` **147 passed** (79 + 31 + 21 + 13 + 2 + 1, unchanged — no Rust
+file was touched this round, and no Rust copy of the apt vocabulary exists: the only `apt` mention in
+that crate is one word inside a doc comment). `node scripts/ratchet-baselines.mjs compare
+origin/main`: **exit 0**, all 12 baselines unchanged. `git diff --numstat` shows line-level diffs on
+all six files (no whole-file CRLF rewrite).
+
+**Tooling notes heeded.** Every repo-file write went through the `Edit` tool — no `sed -i`, no
+PowerShell — and `--numstat` was checked afterwards to confirm no whole-file re-encode. The worktree's
+`node_modules` is a **junction**, left in place rather than `rm -rf`'d.

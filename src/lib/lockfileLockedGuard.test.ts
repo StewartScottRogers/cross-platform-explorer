@@ -259,9 +259,15 @@ describe("every real cargo build/test/check/clippy/run in CI + release is --lock
     // not something this guard can check the preflight of; it is something the guard has to refuse.
     // None exists today (measured 2026-08-27), and this keeps it that way rather than letting one
     // land in the one place the rule goes quiet.
+    //
+    // The anchor test is `isTauriBuildAnchor` itself, not a second copy of its `run:` half (round 2,
+    // Reviewer N2). A script has no `uses:`, so only the `run` branch can fire — but writing that
+    // branch out again here would mean widening the anchor later (`npx tauri build`, a different CLI
+    // entry point) silently failed to follow into this refusal, leaving exactly the shape the rule
+    // is meant to stop. One declaration, two callers.
     const anchored = discoverWorkflowScripts()
       .map((f) => scriptUnit(f))
-      .filter((u) => logicalLines(u.run).some((l) => /\bnpm run tauri build\b/.test(l)))
+      .filter((u) => isTauriBuildAnchor({ run: u.run }))
       .map((u) => u.where);
     expect(
       anchored,
