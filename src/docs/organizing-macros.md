@@ -152,10 +152,24 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   a temporary file alongside the destination and then swapped in, so a confirmed Convert can never write
   into a file that merely *shares* its content with the one you ticked — a second name for the same
   file, living somewhere outside the macro's folder, is not reachable this way. The cost is that the
-  file at that name is a new file afterwards: on Windows it takes the folder's permissions rather than
-  keeping the old file's own, and anything holding it open keeps seeing the old contents. A destination
-  that is genuinely shared under two names is still refused outright before any of this, with the count
-  in the message.
+  file at that name is a **new file** afterwards, and three consequences follow from that:
+    - Anything holding the old file open keeps seeing the old contents, and the file's identity (its
+      inode / file ID) changes. A backup tool that tracks files by identity will treat it as new.
+    - Its permissions and — on Windows — its **alternate data streams** are copied across deliberately,
+      including the `Zone.Identifier` stream that marks a file as downloaded and keeps SmartScreen and
+      Protected View switched on for it. If any of that cannot be read, the Convert **stops and writes
+      nothing** rather than handing you back a file that more people can open, or that Windows has
+      quietly stopped treating as downloaded.
+    - The Convert now needs permission to **create a file in the destination's folder**, not just to
+      write the file itself. Where it doesn't have that, it stops with an error and leaves the original
+      exactly as it was.
+- **On Windows, another program holding the file open can now block a confirmed Convert.** Photo
+  viewers, media players and Explorer's preview pane hold files in a mode that allows reading and
+  writing but not renaming, and the swap described above is a rename. When that happens you get
+  "Access is denied" naming the file, **your original is untouched**, and closing the other program and
+  re-running works. This is the same limitation the Metadata Studio's save has always had.
+  A destination that is genuinely shared under two names is still refused outright before any of this,
+  with the count in the message.
 - **No pickers.** The Move destination and any `{ask:label}` answer are plain text fields — there's no
   Browse dialog for either.
 - **The run-flow Undo is separate from Ctrl+Z.** It only exists in the confirm dialog right after a run;

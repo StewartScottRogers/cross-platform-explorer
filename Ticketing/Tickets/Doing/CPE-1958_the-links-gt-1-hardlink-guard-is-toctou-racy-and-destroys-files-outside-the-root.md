@@ -266,3 +266,153 @@ was safe was the right instruction; the premise it rested on was not.**
 
 `claim_destination_handle` (`fsutil.rs:1734`) is live too — **45 / 2,000** Windows, **90 / 1,000**
 Linux. Both are now owned by **CPE-1961**.
+
+
+## Work Log — round 2 (2026-08-27)
+
+Both gates confirmed the core fix and both returned findings. Nobody asked for the write mechanism to
+change, and it did not. What changed is a rebase, one measured security regression, and a set of
+recorded claims that did not survive measurement.
+
+### 0. Rebased onto `main`, and EVERY number re-taken
+
+PR #1066 (CPE-1929) landed and touched both files, moving the `links > 1` guard **ahead** of the path
+check — i.e. changing the very window this closes. The two conflicts were resolved by keeping #1066's
+ordering (handle checks first, `symlink_metadata` demoted to the documented second net) and this
+ticket's staging tail. **Round 1's race figures were taken against pre-#1066 `fsutil` and do not carry
+over; every table in the code has been replaced with a merged-state measurement.**
+
+**Windows 11 / NTFS, 2,000 trials per arm:**
+
+| arm | attacker owns both halves | harness plants each trial |
+|---|---|---|
+| A unguarded (control) | 97 | **812** (978 planted) |
+| B pre-CPE-1958 body, replicated | 51 | **356** (838 planted) |
+| C `overwrite_confirmed_no_follow`, fixed | **0** | **0** (617 planted) |
+| D `batch_media::open_output_verified` | 0 | 1 (715 planted) |
+| E `fsutil::copy_file_onto_no_follow` | 21 | **149** (710 planted) |
+
+**Linux / ext4, 10,000 trials per arm** (`TMPDIR` on the ext4 root, *not* `/mnt/z`):
+
+| arm | attacker owns both halves | harness plants each trial |
+|---|---|---|
+| A unguarded (control) | 1,580 | 2,902 (3,076 planted) |
+| B pre-CPE-1958 body, replicated | 507 | 188 (7,613 planted) |
+| C `overwrite_confirmed_no_follow`, fixed | **0 / 10,000** | **0 / 10,000** (9,267 planted) |
+| D `batch_media::open_output_verified` | 630 | 97 (8,529 planted) |
+| E `fsutil::copy_file_onto_no_follow` | 799 | 107 (9,658 planted) |
+
+C is 0 everywhere, controls red everywhere. Rates move a lot run to run (three Linux runs put the
+planted-shape control at 1,159 / 1,669 / 2,902 per 10,000); **C measured 0 in every run, both
+platforms, both shapes.** **One round-1 claim did not survive the rebase**: on Linux the fixed arm faced
+9,267 hard-linked trials against the pre-fix body's 7,613, but on **Windows** it faced 617 against 838 —
+about a quarter *fewer*. "The fixed arm always got the harder attacker" is false on that platform and is
+stated as such at the site.
+
+### 1. HIGH — the rename commit was stripping the destination's ACL and alternate data streams
+
+The Auditor's measurement, reproduced: a destination with inheritance broken and one owner-only ACE plus
+a real `Zone.Identifier` came back `AreAccessRulesProtected=False`, four inherited ACEs including
+`Authenticated Users: Modify`, and no `Zone.Identifier`. That is not a "preservation cost" — it is
+**CPE-1739's downgrade** ("a file that is more readable than the one you saved") arriving via a change in
+a *different* function, plus a stripped **Mark-of-the-Web**.
+
+**Fixed, not reworded.** New `HandleCarryover` reads the DACL (with its `SE_DACL_PROTECTED` control), the
+named streams and the attribute word **off the destination HANDLE** — `GetKernelObjectSecurity`, and
+`ReOpenFile` + `BackupRead` for the streams. `ReOpenFile` takes a *handle*, so no path is re-resolved and
+CPE-1958's own property is untouched. `ReplaceFileW` was rejected for exactly the reason
+`Commit::ReplacingTheName` exists: it resolves the destination path at commit time.
+
+**Red-proofed by sabotage, run rather than argued**
+(`cpe_1958_a_confirmed_overwrite_keeps_the_destinations_acl_and_alternate_data_streams`):
+
+| sabotage | result |
+|---|---|
+| `HandleCarryover::apply` → `Ok(())` (what round 1 shipped) | **FAILED** on the protected-DACL assertion |
+| `SetKernelObjectSecurity` alone disabled | **FAILED**, same assertion |
+| `BackupWrite` stream replay alone disabled | **FAILED** on the `Zone.Identifier` assertion |
+| `PROTECTED_DACL_SECURITY_INFORMATION` forced off | **GREEN** — recorded at the site: the descriptor's own control word already drives auto-inherit, so that argument is belt-and-braces, not the mechanism |
+
+A fourth thing came out of it: `ReOpenFile` does **not** inherit the original open's flags, so without
+`FILE_FLAG_OPEN_REPARSE_POINT` it *resolves* the reparse point and fails `ERROR_CANT_ACCESS_FILE` on a
+GUID reparse point with no filter driver — reddening
+`cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point`, i.e. taking
+every dehydrated cloud file back to "failed operation". Caught by the suite, fixed, recorded at the site.
+
+**Policy**: a volume with no ACLs (`ERROR_NOT_SUPPORTED`/`INVALID_FUNCTION`/`CALL_NOT_IMPLEMENTED`) has
+nothing to downgrade and the save proceeds; a destination that HAS them and cannot be read **fails the
+save**, temp removed, original untouched — CPE-1739's posture.
+
+### 2. MEDIUM — the foreign `SHARE_READ|WRITE` handle
+
+Confirmed and now **documented at the site, in `src/docs/organizing-macros.md`, and pinned** by
+`cpe_1958_a_foreign_share_read_write_handle_blocks_the_confirmed_overwrite_without_damage`, which also
+asserts the clean half: original byte-for-byte intact, no `.cpe-tmp` left. `commit_replacement` documents
+and pins the identical gap for the editor's save; this path now matches.
+
+### 3. MEDIUM — the directory-write requirement, and the wrong justification
+
+The behaviour is right (fails closed). The **justification was wrong**: "the unconfirmed sibling path
+already needed it, so this only narrows the confirmed path to match" does not hold, because on `main` the
+confirmed path needed only *file*-write. Corrected to say it is a real narrowing, with both platforms'
+refusals named. The message no longer leads with the pid-nanos `.cpe-tmp` name — it leads with
+`target.display()` and mentions the staging name second.
+
+### 4. Recorded claims that did not survive measurement — all corrected
+
+1. **"the same residue, and the same collector, as every editor save"** — the collector half was false;
+   `sweep_stale_temp_siblings` had one call site, in `stage_and_replace`. **Moved the sweep** into
+   `stage_and_replace_at` instead of editing the sentence, so both staging callers now collect. The
+   CPE-1738 doc says where it is called from and why it moved.
+2. **"the attacker thread only unlinks"** — false; there is no `harness_plants` branch in the attacker
+   body. Corrected in the harness doc, in this Work Log, and in **CPE-1961**, which had inherited it.
+3. **"that caller never asks the destination path a second question"** — false on Unix:
+   `carry_xattrs` did `xattr::list(target)`/`xattr::get(target, …)`, path-based and symlink-following,
+   after the handle checks. **Closed rather than documented**: the Unix `HandleCarryover` reads the
+   attributes off the descriptor and `carry_protections`' path copy is switched off when it is present.
+4. **`file.metadata().ok()`** silently dropped CPE-1739's refusal policy. It refuses now.
+5. **Docs** — `src/docs/organizing-macros.md` now covers the ADS/Mark-of-the-Web behaviour, the
+   folder-permission requirement, and the foreign-handle block. No new `sectionDocs.ts` slug (verified).
+6. **Harness F4** — `measured` was pushed only in the planted shape, so the control *and*
+   `assert_eq!(arm C, 0)` covered one shape. **Both shapes are asserted now**, and the doc names the
+   filesystem the racer needs (a WSL `drvfs` mount is not one).
+7. **Doc drift** — `src-tauri/src/lib.rs:7163`/`:7222` no longer say "truncated and overwritten in
+   place". The CPE-1755 comment no longer claims the `existing == None` branch is test-only: it is
+   reached whenever `created == true`.
+
+### 5. FILED, not fixed: the rename's SOURCE is unprotected — **CPE-1963**
+
+Re-measured on the merged state with a new `#[ignore]`d racer, `cpe_1958_rename_source_report`:
+
+| shape | aliased | `Ok` without writing the user's bytes | victim CONTENT changed |
+|---|---|---|---|
+| relink an outside victim — Linux ext4 | **2,834 / 3,000** | 2,834 / 3,000 | **0** |
+| relink an outside victim — Windows NTFS | **6 / 3,000** | 6 / 3,000 | **0** |
+| delete-only (CONTROL), both platforms | 0 / 3,000 | 0 / 3,000 | 0 |
+
+The victim's content never changed in 24,000 trials, so this is not CPE-1958's destruction bug. It is a
+successful-looking confirmed overwrite that did not write the user's bytes and left the destination
+aliased outside the root. Pre-existing in `stage_and_replace`; newly on the confirmed path. Needs a
+handle-relative `renameat` in `open_beneath` — the same primitive CPE-1961 names and `copilot::apply_op`
+waits on. `Commit::ReplacingTheName`'s invariant now says what it actually covers.
+
+**The trade, with numbers rather than a claim of an unqualified win:** the confirmed path swaps a
+*destruction* race (bytes lost outside the root — 356/2,000 Windows, 188/10,000 Linux against the
+pre-fix body) for an *aliasing* race (bytes not written, destination aliased). Better position, not a
+clean sweep.
+
+### 6. The Reviewer's F6 was wrong, and the reason matters
+
+It reported that `CPE-1957` appears nowhere in `Ticketing/` and that no ticket owns
+`claim_destination_handle` / `open_output_verified`. Both exist on `main`
+(`Ticketing/Tickets/Backlog/CPE-1957_*.md`, `CPE-1961_*.md`); its worktree branched off this PR's base,
+which predates them. Verified after the rebase; the pointers stay. What **does** survive is its
+independent re-measurement of arm E at 51/1,000 (Windows) and 55/1,000 (Linux) — added to CPE-1961 as
+corroboration, where it now sits beside two other runs that agree.
+
+### Verification (round 2)
+
+- `crates/server --lib`: Windows **2,428 passed / 0 failed / 13 ignored**; Linux (WSL, sources touched
+  first) **2,411 / 0 / 13**. Round 2 adds two tests and one `#[ignore]`d measurement harness.
+- `src-tauri cargo test --lib`, frontend `npm test`, and `cargo clippy --all-targets -- -D warnings` in
+  both feature modes on both crates — figures in the PR body.

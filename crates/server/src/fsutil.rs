@@ -2672,17 +2672,50 @@ fn create_staging_file(path: &Path) -> std::io::Result<std::fs::File> {
     create_exclusive_with_mode(path, Some(STAGING_MODE))
 }
 
+/// [`create_exclusive_with_access`] without the Windows access knob — every caller but the
+/// confirmed-overwrite staging path, which is the only one that needs `WRITE_DAC`.
+fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    create_exclusive_with_access(path, unix_mode, false)
+}
+
+/// [`create_staging_file`]'s variant for the confirmed-overwrite path, differing in exactly one thing:
+/// on Windows it also asks for `WRITE_DAC`, which is what [`HandleCarryover::apply`] needs in order to
+/// put the destination's own DACL onto the staged file *before* the commit. Windows grants an object's
+/// owner `READ_CONTROL` and `WRITE_DAC` implicitly and this call is the object's creator, so asking is
+/// free here — but it is not free on the editor's save path, where an access right nothing goes on to
+/// use is one more thing a network redirector can refuse, so the two openers are kept apart rather
+/// than merged. On Unix the two are the same function.
+fn create_staging_file_for_carryover(path: &Path) -> std::io::Result<std::fs::File> {
+    create_exclusive_with_access(path, Some(STAGING_MODE), true)
+}
+
 /// The single `create_new(true)` open in this crate. `unix_mode` is the mode the file is **created**
 /// with, not one applied afterwards — see [`STAGING_MODE`] for why that distinction is the whole point.
 /// Ignored on Windows, which has no mode; see [`carry_protections`]'s Windows arm for what that costs.
-fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::Result<std::fs::File> {
+///
+/// `windows_write_dac` is the CPE-1958 round-2 addition and is ignored on Unix: it adds `WRITE_DAC` to
+/// the requested access so [`HandleCarryover::apply`] can re-apply the destination's DACL to the file
+/// this creates. It is a parameter rather than a second `create_new(true)` elsewhere so that the
+/// sentence above this one stays true — one exclusive open in the crate, one place to reason about it.
+fn create_exclusive_with_access(
+    path: &Path,
+    unix_mode: Option<u32>,
+    windows_write_dac: bool,
+) -> std::io::Result<std::fs::File> {
     let _ = unix_mode; // read on Unix only
+    let _ = windows_write_dac; // read on Windows only
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     if let Some(mode) = unix_mode {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(mode);
+    }
+    #[cfg(windows)]
+    if windows_write_dac {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, READ_CONTROL, WRITE_DAC};
+        opts.access_mode(FILE_GENERIC_WRITE.0 | READ_CONTROL.0 | WRITE_DAC.0);
     }
     opts.open(path)
 }
@@ -2707,11 +2740,12 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 /// write.
 ///
 /// **The hard-link hole (CPE-1891 PR #1044 review round 2), closed the same way
-/// [`copy_file_onto_no_follow_with_wording`] closes it.** The `symlink_metadata` re-check above answers
-/// a PATH question and this function is the "claiming/writing" sibling of that one — CPE-1896's whole
+/// [`copy_file_onto_no_follow_with_wording`] closes it.** The `symlink_metadata` re-check answers a
+/// PATH question — it sits BELOW the handle checks since PR #1066's reorder, as a backstop rather than
+/// the decider — and this function is the "claiming/writing" sibling of that one. CPE-1896's whole
 /// point was that a path re-check is never the last word once a handle is open, because a hard link is
 /// not a reparse point at all: `symlink_metadata` reports it as an utterly ordinary file, so the
-/// no-follow open above succeeds, the path check above passes, and without this the write would land at
+/// no-follow open succeeds, the path check passes, and without this the write would land at
 /// EVERY name the object has — including one outside the macro's scope root, which `within_root` cannot
 /// see because a hard link resolves to itself. Demonstrated on this ticket: a hard link from inside the
 /// macro root to a name outside it made a confirmed Convert write the new bytes at the outside name too,
@@ -2732,12 +2766,26 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 /// open lands on the victim's object, the second name is unlinked before `handle_facts` runs, the count
 /// reads 1, the guard passes, and `set_len(0) + write_all` lands in a file the user never named.
 ///
-/// **Measured on this machine** (Windows 11 / NTFS, one run, five arms racing the same attacker thread —
-/// `cpe_1958_race_report`, and every figure is the OUTSIDE file's bytes read back off disk, never a
-/// verdict): unguarded control **846 / 2,000**; this function's pre-fix body, replicated and raced in
-/// the same run, **354 / 2,000**; this function after the change **0 / 2,000** — at 784 trials that
-/// began with the destination genuinely hard-linked against the pre-fix body's 857, so the comparison
-/// is not the fixed arm getting an easier attacker. Re-take them rather than trust them.
+/// **Measured on the MERGED state** — these numbers were all re-taken after PR #1066 landed, because
+/// #1066 moved the `links > 1` guard ahead of the path check and so changed the very window this
+/// closes; round 1's figures were taken against the older `fsutil` and do not carry over. Five arms
+/// race the same attacker thread in one run (`cpe_1958_race_report`), and every figure is the OUTSIDE
+/// file's bytes read back off disk, never a verdict. Windows 11 / NTFS, 2,000 trials, harness-plants
+/// shape: unguarded control **812 / 2,000**; this function's pre-fix body, replicated and raced in the
+/// same run, **356 / 2,000**; this function after the change **0 / 2,000**. Linux / ext4, 10,000
+/// trials: control **2,902**, pre-fix body **188**, this function **0 / 10,000** — and there the fixed
+/// arm faced **9,267** genuinely hard-linked trials against the pre-fix body's **7,613**, i.e. a
+/// *harder* attacker, not an easier one.
+///
+/// **On Windows that last comparison runs the other way and is stated rather than quietly dropped:**
+/// the fixed arm began 617 trials hard-linked against the pre-fix body's 838 — about a quarter fewer.
+/// Round 1's doc claimed the fixed arm always faced more; on the merged state, on this platform, it
+/// does not. What carries the Windows result instead is the shape where the harness plants nothing at
+/// all and the attacker owns both halves (**97 / 2,000** control, **51 / 2,000** pre-fix, **0 / 2,000**
+/// here), plus the structural argument below — which does not depend on any trial count. Re-take all
+/// of them rather than trusting them; `cpe_1958_race_report` is in this file, and the rates move
+/// substantially run to run (three runs of the Linux control across this work: 1,159, 1,669, 2,902).
+/// Arm C measured **0** in every one of them.
 ///
 /// **Re-checking harder cannot fix it** (PR #1066's Security Auditor, and it is the load-bearing part):
 /// any number of reads of the same racy fact can each be true and stale. So the fix is not another
@@ -2762,14 +2810,59 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 ///
 /// - **The destination is replaced, not truncated in place.** Its inode/file-id changes. Anything
 ///   holding an open handle to the old object keeps seeing the old bytes.
-/// - **Windows loses the destination's ACL, attribute word and alternate data streams**, because the
-///   commit is a rename rather than `ReplaceFileW` — see [`Commit::ReplacingTheName`] for why that arm
-///   is the safe one here. The Unix side still carries mode and xattrs, off the handle's own metadata.
-/// - **Write access to the destination's *folder* is now required**, not just to the file. The
-///   unconfirmed sibling path already needed it (`create_exclusive` creates the name there), so this
-///   only narrows the confirmed path to match.
+/// - **A foreign `SHARE_READ|WRITE` handle now blocks a save that used to work, on Windows.** This is
+///   the one cost an ordinary, non-adversarial user meets: a photo viewer, a media player or Explorer's
+///   preview pane holds the destination in exactly that sharing mode (notably *not* what Rust's own
+///   `File::open` takes, which adds `FILE_SHARE_DELETE`), the in-place write went through the handle it
+///   already had, and `MoveFileEx` needs the destination deletable. Measured: pre-fix `Ok(())` and the
+///   file reads `"new bytes"`; here `Err("…held.jpg: Access is denied. (os error 5)")` and the file
+///   still reads `"old bytes"`. **The original is intact and no `.cpe-tmp` is left behind**, so it is a
+///   cost rather than a bug — the identical gap [`commit_replacement`] records for the editor's save
+///   path, now recorded and pinned here too
+///   (`cpe_1958_a_foreign_share_read_write_handle_blocks_the_confirmed_overwrite_without_damage`).
+///   Round 1 landed this gap with neither a note nor a test, which is what this bullet exists to fix.
+/// - **Windows' ACL, attribute word and alternate data streams are carried explicitly now**, because
+///   the round-2 Auditor measured what "the rename does not preserve them" actually costs and it is not
+///   fidelity: a protected, owner-only DACL came back with four inherited ACEs including
+///   `Authenticated Users: Modify`, and `Zone.Identifier` — Mark-of-the-Web — was gone. See
+///   [`HandleCarryover`], which reads all three off THIS handle rather than off the path, and
+///   `cpe_1958_a_confirmed_overwrite_keeps_the_destinations_acl_and_alternate_data_streams`, which
+///   pins it. The residual cost that remains is the refusal policy: a destination whose ACLs or streams
+///   exist but cannot be read fails the save rather than silently downgrading it.
+/// - **Write access to the destination's *folder* is now required**, not just to the file — and this
+///   IS a narrowing, not a formality. Round 1 justified it with *"the unconfirmed sibling path already
+///   needed it, so this only narrows the confirmed path to match"*; that does not hold, because on
+///   `main` the confirmed path needed only **file**-write. Measured both ways: a Windows folder with
+///   `CreateFiles` denied and the file itself fully writable now refuses, and so does a Linux directory
+///   at `0555` holding a `0666` file. It **fails closed** — nothing is written, the original is
+///   untouched — which is why it is a cost rather than a defect, but it is a real capability this
+///   function did not previously need.
 /// - One `fsync` and one rename per confirmed overwrite, and a `.cpe-tmp` sibling left behind if the
-///   process is killed mid-write — the same residue, and the same collector, as every editor save.
+///   process is killed mid-write — the same residue as every editor save, and, since round 2 moved
+///   [`sweep_stale_temp_siblings`] down into [`stage_and_replace_at`], the same collector too. Round 1
+///   claimed the collector part while the sweep still had exactly one call site, in
+///   [`stage_and_replace`]; it was false then and is true now.
+///
+/// ## What this does NOT close: the commit's SOURCE (CPE-1963)
+///
+/// The invariant above is about the DESTINATION. The commit is `rename(tmp, target)`, and `tmp` is a
+/// **path** — an enumerable `*.cpe-tmp` entry in the same attacker-writable folder. An attacker that
+/// `readdir`s for it, unlinks it and hard-links an outside file into its place makes the rename commit
+/// **that file's inode** over the confirmed name. Measured with `cpe_1958_rename_source_report`:
+/// **2,834 / 3,000 on Linux ext4** and **6 / 3,000 on Windows**, each leaving the destination aliased to
+/// the outside object with `Ok(())` returned and the slot still holding its **old** bytes. A
+/// delete-only attacker produces **0** in 3,000 on either platform, so this is the re-link, not
+/// flakiness.
+///
+/// **The victim's content was unchanged in all 24,000 trials across both platforms**, so this is not
+/// CPE-1958's destruction bug and the property above holds. What it is instead is a successful-looking
+/// confirmed overwrite that did not write the user's bytes and left the destination as a second name
+/// for a file outside the scope root. It is **pre-existing in [`stage_and_replace`]** — and this change
+/// newly routes the confirmed path through it, so the confirmed path did not have this exposure before.
+/// The honest summary of the trade: the confirmed path swaps a *destruction* race (bytes lost outside
+/// the root) for an *aliasing* race (bytes not written, destination aliased). Closing it needs a
+/// handle-relative rename (`renameat`), which `std` does not expose — the same gap that keeps
+/// `copilot::apply_op` deferred and that CPE-1961 names. Owned by **CPE-1963**.
 ///
 /// ## The reparse-point doctrine split is NOT settled here, and one input to it moved
 ///
@@ -2876,7 +2969,29 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
     // a second `fs::metadata(target)`, which would be one more path question in the window this function
     // spent CPE-1958 removing. `None` when this call created the name, because then there was nothing
     // there to carry anything from.
-    let existing = if created { None } else { file.metadata().ok() };
+    //
+    // **CPE-1958 round 2, review finding 4.** This was `file.metadata().ok()`, and the `.ok()` silently
+    // dropped a recorded policy: `stage_and_replace`'s [`classify_carryover`] REFUSES a save whose
+    // target it cannot describe — *"not provably safe ⇒ do not write"*, because staging anyway hands
+    // back a file with whatever permissions the process happens to produce. Swallowing it here staged
+    // at `0600` instead, which is a narrowing rather than a widening and so was not a hole — but it was
+    // CPE-1739's policy silently not applied on a new path, with nothing at the site saying so. It goes
+    // through the same refusal now, so there is one policy in this file rather than two.
+    let (existing, carried) = if created {
+        (None, None)
+    } else {
+        let meta = file.metadata().map_err(|e| {
+            format!(
+                "{}: could not read what is at the destination, so nothing was written rather than \
+                 replacing it with a file whose permissions this app had to guess: {e}",
+                target.display()
+            )
+        })?;
+        // And the Windows-only half a rename drops that the metadata does not describe: the DACL, the
+        // named streams, the attribute word. Read off THIS handle — see [`HandleCarryover`].
+        let carried = HandleCarryover::capture(&file, target)?;
+        (Some(meta), Some(carried))
+    };
     // The handle is dropped WITHOUT being written through, and that is the change (CPE-1958). Everything
     // above was a verdict about what is sitting at the name; nothing above is what keeps the bytes out
     // of a file outside the root. That job belongs to `stage_and_replace_at`, whose only write target is
@@ -2884,7 +2999,8 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
     // worst outcome is that the rename below replaces a name they planted, never that a pre-existing
     // file's contents change.
     drop(file);
-    let staged = stage_and_replace_at(target, bytes, existing.as_ref(), Commit::ReplacingTheName);
+    let staged =
+        stage_and_replace_at(target, bytes, existing.as_ref(), carried.as_ref(), Commit::ReplacingTheName);
     if staged.is_err() && created {
         // Same rule as every refusal above: a call that created the name and then did not write it must
         // not leave an empty file behind for the user to puzzle over.
@@ -2903,13 +3019,10 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // [`classify_carryover`].
     let source = std::fs::metadata(&target);
     let existing = if classify_carryover(source.as_ref().err(), &target)? { source.as_ref().ok() } else { None };
-    stage_and_replace_at(&target, bytes, existing, Commit::CarryingTheDestination)?;
-    // CPE-1738: the save just succeeded, so THIS save's own temp is already gone — it became `target` via
-    // the rename above. Sweep for a STALE sibling a DIFFERENT, earlier save of this same file left behind
-    // by being killed between its own `create_new` and `rename`. Runs only here, after success, so a
-    // failed save (which already removed its own temp above) never pays for it and the sweep is never on
-    // the path a slow save is already blocking on.
-    sweep_stale_temp_siblings(&target);
+    // `None` for the carryover: this caller holds no handle to the destination (it is a path-resolving
+    // save), and it commits with `ReplaceFileW`, which carries the ACL, attributes and named streams
+    // across at the swap itself — more than anything copyable onto the staged file could.
+    stage_and_replace_at(&target, bytes, existing, None, Commit::CarryingTheDestination)?;
     Ok(())
 }
 
@@ -2927,14 +3040,25 @@ enum Commit {
     /// is why the editor's save uses this arm.
     CarryingTheDestination,
     /// A rename on every platform, always. The commit replaces the **name**: `MoveFileEx`/`rename` swap
-    /// the directory entry and do not follow a link sitting at it, so nothing planted at the destination
-    /// after the caller's checks ran can redirect the commit into another file.
+    /// the directory entry and do not follow a link sitting at it, so nothing planted **at the
+    /// destination** after the caller's checks ran can redirect the commit into another file.
+    ///
+    /// **That sentence is scoped to the destination on purpose, and round 1's version was not.** It
+    /// said "nothing planted after the caller's checks ran", full stop, which reads as covering both
+    /// operands and does not: the *source* of the rename is `tmp`, an enumerable `*.cpe-tmp` path in
+    /// the same attacker-writable folder, and an attacker that unlinks it and hard-links an outside
+    /// file into its place makes this commit alias that file over the confirmed name — measured at
+    /// **2,834 / 3,000 on Linux ext4**, **6 / 3,000 on Windows**, with the victim's own content
+    /// unchanged in every trial. Pre-existing in [`stage_and_replace`], newly on the confirmed path,
+    /// owned by **CPE-1963**, and closable only with a handle-relative rename `std` does not expose.
+    /// See [`overwrite_confirmed_no_follow`]'s "What this does NOT close".
     ///
     /// **CPE-1958's arm**, and the trade is stated rather than implied: on Windows this gives up
-    /// `ReplaceFileW`'s carry-over — the replaced file's ACL, attributes and alternate data streams are
-    /// not preserved, and the new file inherits the destination folder's ACL instead. That is a real
-    /// cost, taken deliberately, because the alternative is a commit that asks the destination *path* a
-    /// question inside the exact window this ticket exists to close.
+    /// `ReplaceFileW`'s carry-over, so the replaced file's ACL, attribute word and alternate data
+    /// streams have to be carried explicitly instead — see [`HandleCarryover`], which does it off the
+    /// destination HANDLE rather than its path. `ReplaceFileW` itself is not an option here for exactly
+    /// the reason this variant exists: it resolves the destination *path* at commit time, which is the
+    /// window this ticket closed.
     ReplacingTheName,
 }
 
@@ -2945,7 +3069,17 @@ enum Commit {
 /// `existing` is the destination's metadata when there is one to carry protections from, and `None` when
 /// there is nothing at the name (or nothing worth carrying). It is a parameter rather than a stat taken
 /// here on purpose: [`overwrite_confirmed_no_follow`] reads it off the **open handle** it has already
-/// checked, so that caller never asks the destination path a second question.
+/// checked. `carried` is the rest of what that handle knows and a rename would drop — the extended
+/// attributes on Unix, the DACL, named streams and attribute word on Windows (see [`HandleCarryover`]).
+///
+/// **Round 1 said "so that caller never asks the destination path a second question", and it was not
+/// true.** [`carry_protections`] went on to call [`carry_xattrs`], whose source side is
+/// `xattr::list(target)` + `xattr::get(target, …)` — path-based and symlink-following, run after every
+/// handle check. Not a containment break (the bytes still land in the staged file), but an attacker who
+/// won the swap in that window got an outside file's extended attributes copied onto the file the user
+/// keeps. It is closed rather than merely documented: `carried` now holds attributes read off the
+/// descriptor, and `carry_protections`' path-based copy is switched off whenever it is present. The
+/// sentence is true for this caller now.
 ///
 /// # The invariant, and it is the whole reason this function exists
 ///
@@ -2959,6 +3093,7 @@ fn stage_and_replace_at(
     target: &Path,
     bytes: &[u8],
     existing: Option<&std::fs::Metadata>,
+    carried: Option<&HandleCarryover>,
     commit: Commit,
 ) -> Result<(), String> {
     // A per-write pid+nanosecond stamp so two concurrent saves — or a stale temp left by an earlier crash
@@ -2983,7 +3118,26 @@ fn stage_and_replace_at(
         // CPE-1739: the file is CREATED at 0600 (see `STAGING_MODE`), not created wide and narrowed
         // afterwards — POSIX checks permission at `open`, so narrowing afterwards leaves a window in
         // which another local process can take a descriptor it keeps.
-        let mut f = create_staging_file(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
+        // Which opener depends on whether there is a DACL to put back: see
+        // [`create_staging_file_for_carryover`] for why the editor's save does not ask for `WRITE_DAC`.
+        //
+        // **CPE-1958 round 2, Auditor F2 — the message names the file the user asked about.** It used
+        // to lead with the pid-nanos `.cpe-tmp` name, which is the one refusal in this family that
+        // named an internal artefact instead of a file the user has ever seen: a folder the user lacks
+        // `CreateFiles` on produces `"…8f3c.1234-1756…cpe-tmp: Access is denied"`, and nothing in that
+        // string connects it to the folder.
+        let mut f = if carried.is_some() {
+            create_staging_file_for_carryover(&tmp)
+        } else {
+            create_staging_file(&tmp)
+        }
+        .map_err(|e| {
+            format!(
+                "{}: could not create the staging file this write goes through ({}): {e}",
+                display_path(target),
+                display_path(&tmp)
+            )
+        })?;
         // Then widen/adjust to whatever the user's own file actually carries, while the staged file is
         // still EMPTY — before the user's bytes ever reach it. On Windows this is a deliberate no-op:
         // `commit_replacement`'s `ReplaceFileW` carries the attributes, ACL and named streams across at
@@ -2991,7 +3145,19 @@ fn stage_and_replace_at(
         // could — but it does mean the Windows staging file carries the *directory's* inherited ACL for
         // the whole write, which `carry_protections`' Windows arm records.
         if let Some(src) = existing {
-            if let Err(e) = carry_protections(target, src, &f, &tmp) {
+            if let Err(e) = carry_protections(target, src, &f, &tmp, carried.is_none()) {
+                drop(f);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+        // CPE-1958 round 2: on Windows, the DACL, the named streams and the attribute word that a
+        // RENAME commit drops and `ReplaceFileW` would have carried — read off the destination HANDLE
+        // rather than its path, and applied here while the staged file is still EMPTY, for exactly the
+        // reason the mode is. See [`HandleCarryover`], which is where the measurement lives. A no-op
+        // on Unix, where `carry_protections` above has already carried everything a rename loses.
+        if let Some(carried) = carried {
+            if let Err(e) = carried.apply(&f, &tmp) {
                 drop(f);
                 let _ = std::fs::remove_file(&tmp);
                 return Err(e);
@@ -3013,9 +3179,16 @@ fn stage_and_replace_at(
         //     this path does not even reach today.
         //   - Low-stakes to get "wrong": `metadata_write_impl` always reads the target before writing, so
         //     the target exists and this branch cannot run from there, and `write_file_text`'s Save-As does
-        //     not call this function at all. The free-name path is only reachable from tests today
+        //     not call this function at all.
+        //   - **CPE-1958 round 2 correction: "only reachable from tests today" is no longer true.**
+        //     `overwrite_confirmed_no_follow` passes `existing = None` whenever its `open_no_follow`
+        //     CREATED the name — a confirmed overwrite of a name that vanished between the caller's
+        //     preflight and the open — so this branch now lands a freshly-created file at `0600` on Unix
+        //     in production. That is the same answer the two tests below pin
         //     (`cpe_1739_a_save_to_a_free_name_still_creates_the_file`,
-        //     `cpe_1755_a_brand_new_name_lands_at_the_0600_staging_birth_mode_not_the_platform_default`).
+        //     `cpe_1755_a_brand_new_name_lands_at_the_0600_staging_birth_mode_not_the_platform_default`),
+        //     and it is still the deliberate one — but a reader must not go on believing production
+        //     never reaches it.
         // If a future caller wants a brand-new file at the platform default instead of `0600`, that is
         // what [`create_exclusive`] is for — this function's contract is now that a save through it never
         // hands back a file wider than `0600` unless something existed at the name to widen it from.
@@ -3040,7 +3213,22 @@ fn stage_and_replace_at(
     let carrying = matches!(commit, Commit::CarryingTheDestination) && existing.is_some();
     commit_replacement(&tmp, target, carrying).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed commit
-    })
+    })?;
+    // **CPE-1738's sweep, moved down one level by CPE-1958 round 2 — and the reason is a claim that did
+    // not survive being checked.** Round 1's cost list said a `.cpe-tmp` left by a killed process was
+    // *"the same residue, and the same collector, as every editor save"*. The residue half was true; the
+    // collector half was not. [`sweep_stale_temp_siblings`] had exactly one production call site, in
+    // [`stage_and_replace`], so a confirmed overwrite staged temps that nothing ever collected — in the
+    // user's own curated folders, which is precisely the accumulation CPE-1738 exists to prevent. Moving
+    // the call here rather than editing the sentence is the fix that makes the sentence true: both
+    // callers now stage the same way AND collect the same way.
+    //
+    // Everything CPE-1738 argued about *where* it runs still holds, because the position relative to the
+    // commit is unchanged: after the rename has already succeeded, so a failed save (which removed its
+    // own temp on the line above) never pays for it, and the scan is never on the path a slow save is
+    // blocking on.
+    sweep_stale_temp_siblings(target);
+    Ok(())
 }
 
 /// **CPE-1739, the pure decision**: the target's own metadata could not be read — does the save go ahead
@@ -3133,6 +3321,7 @@ fn carry_protections(
     source: &std::fs::Metadata,
     staged: &std::fs::File,
     staged_path: &Path,
+    xattrs_from_path: bool,
 ) -> Result<(), String> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     let staged_uid = staged
@@ -3148,7 +3337,13 @@ fn carry_protections(
             display_path(source_path)
         )
     })?;
-    carry_xattrs(source_path, staged);
+    // `false` only on the confirmed-overwrite path, which has already captured the attributes off the
+    // destination's own descriptor — see [`HandleCarryover`]'s Unix arm. This is the parameter rather
+    // than a second copy of the function because the mode half is identical on both paths and only the
+    // xattr *source* differs.
+    if xattrs_from_path {
+        carry_xattrs(source_path, staged);
+    }
     Ok(())
 }
 
@@ -3161,8 +3356,574 @@ fn carry_protections(
     _source: &std::fs::Metadata,
     _staged: &std::fs::File,
     _staged_path: &Path,
+    _xattrs_from_path: bool,
 ) -> Result<(), String> {
     Ok(())
+}
+
+/// **CPE-1958 round 2 — what a RENAME commit drops on Windows, captured off the HANDLE so it can be
+/// put back.**
+///
+/// Round 1 moved the confirmed overwrite's commit to [`Commit::ReplacingTheName`] and recorded the
+/// Windows consequence as a *preservation* cost. The round-2 Security Auditor measured what that
+/// actually is, and "preservation" is the wrong word for it. A destination with inheritance broken and
+/// exactly one owner-only ACE, carrying a real `Zone.Identifier` stream, came back out of
+/// `overwrite_confirmed_no_follow` with `AreAccessRulesProtected=False`, **four inherited ACEs
+/// including `NT AUTHORITY\Authenticated Users: Modify` and `BUILTIN\Users: ReadAndExecute`**, and no
+/// `Zone.Identifier` at all. `main`'s in-place write in the same folder kept all three. Two
+/// consequences, neither of which the words "preservation cost" name:
+///
+/// 1. It is **precisely the downgrade CPE-1739 fails the save to prevent** on Unix — *"rather than
+///    leaving you a file that is more readable than the one you saved"*. It happened because
+///    [`carry_protections`]'s Windows arm is a deliberate no-op that **delegated the job to
+///    `ReplaceFileW`**, and this commit arm never calls `ReplaceFileW`. The guard did not fail; a
+///    change in a different function routed around it.
+/// 2. A lost `Zone.Identifier` strips **Mark-of-the-Web**, so a downloaded file put through a
+///    confirmed Convert loses its SmartScreen / Protected-View gating.
+///
+/// So the carry-over is done explicitly — and, this being the ticket it is, **entirely off the
+/// destination HANDLE the caller has already interrogated, never off its path**.
+/// `GetKernelObjectSecurity` reads the DACL from that handle; `ReOpenFile` reopens the same **object**
+/// (not the same name — it takes a handle, not a path) so `BackupRead` can enumerate its named
+/// streams. Neither call re-resolves `target`, so nothing planted at the name after the checks ran can
+/// be what gets read. `ReplaceFileW` was the other option offered and is refused for exactly the
+/// reason [`Commit::ReplacingTheName`] exists: it resolves the destination *path* at commit time,
+/// which is the window this ticket closed.
+///
+/// # The policy, which is CPE-1739's and is not "best effort"
+///
+/// **A filesystem that has no ACLs or no named streams has nothing to downgrade** — `FAT`/`exFAT`
+/// answer `ERROR_NOT_SUPPORTED`/`ERROR_INVALID_FUNCTION` and the save proceeds carrying nothing, which
+/// is the honest answer rather than a refusal on a USB stick. **A destination that HAS them and cannot
+/// be read fails the save**, temp removed and original untouched, exactly as `carry_protections`'
+/// `fchmod` arm does — because the alternative is handing the user back a file that more people can
+/// read than the one they replaced, silently. The xattr exception in [`carry_xattrs`] does not apply
+/// here: that one is swallowed because the kernel re-derives `security.*` itself, and there is no
+/// equivalent on the Windows side.
+///
+/// # Residual, stated rather than hidden
+///
+/// The carried DACL lands on the staging file **before** the commit, so a destination whose DACL
+/// grants the current user write but **not** `DELETE` will fail at the rename (`MoveFileEx` needs
+/// `DELETE` on the source) and leave the `.cpe-tmp` behind. Loud, non-destructive — the original is
+/// untouched — and strictly narrower than the alternative of applying the DACL after the rename, which
+/// would leave the user's own file sitting at the folder's inherited ACL for the width of a syscall.
+/// Not observed in practice: a DACL that admits `FILE_GENERIC_WRITE` without `DELETE` is not one any
+/// ordinary tool produces.
+///
+/// `FILE_ATTRIBUTE_READONLY` is not in [`carried_attribute_mask`] because it is unreachable here:
+/// `open_no_follow` opens for writing, which a read-only destination refuses before this runs.
+struct HandleCarryover {
+    /// The destination's extended attributes, read off the **descriptor** rather than its path — see
+    /// the Unix `impl` below for why that distinction is the whole reason this field exists.
+    #[cfg(unix)]
+    xattrs: Vec<(std::ffi::OsString, Vec<u8>)>,
+    /// The destination's self-relative security descriptor, DACL only. `None` when the filesystem has
+    /// no security to give (see the policy above) — never "we gave up".
+    #[cfg(windows)]
+    security: Option<Vec<u8>>,
+    /// Whether the destination's DACL was **protected** (`SE_DACL_PROTECTED` — "inheritance broken").
+    /// Carried separately because it lives in the descriptor's control word, and re-applying a DACL
+    /// without it is exactly the measured regression: four inherited ACEs reappear.
+    #[cfg(windows)]
+    dacl_protected: bool,
+    /// `BackupRead`'s serialised form of the destination's `BACKUP_ALTERNATE_DATA` records — the named
+    /// streams, `Zone.Identifier` among them — and nothing else. The main `$DATA` stream is seeked
+    /// past rather than read: it is the thing being replaced, and it can be a whole media file.
+    #[cfg(windows)]
+    streams: Vec<u8>,
+    /// The `FILE_ATTRIBUTE_*` bits worth carrying, masked by [`carried_attribute_mask`].
+    #[cfg(windows)]
+    attributes: u32,
+}
+
+/// The Unix arm carries the **extended attributes**, and it exists because of what
+/// [`stage_and_replace_at`]'s doc used to claim: *"that caller never asks the destination path a
+/// second question"*. That was false, and CPE-1958 round 2's review measured where.
+/// [`carry_protections`] carries the mode off the metadata (fine — read from the handle) and then
+/// calls [`carry_xattrs`], whose **source** side is `xattr::list(path)` + `xattr::get(path, …)`:
+/// path-based, symlink-following, and run AFTER every handle check. Not a containment break — the
+/// bytes still go into the staged file, so nothing outside the root can be *written* — but an attacker
+/// who wins the swap in that window gets an outside file's extended attributes copied onto the file
+/// the user keeps, `com.apple.quarantine` among them.
+///
+/// So on this path the attributes are read off the **descriptor** instead
+/// (`xattr::FileExt::list_xattr`/`get_xattr`), captured before the handle is dropped, and
+/// [`carry_protections`] is told to skip its own path-based copy. The claim in
+/// [`stage_and_replace_at`]'s doc is now true rather than corrected-in-the-comment-only.
+///
+/// The **failure policy is [`carry_xattrs`]'s, unchanged and deliberately so**: per attribute, best
+/// effort, never fails the save — an unprivileged owner frequently cannot set `security.selinux` even
+/// though nothing is wrong. Moving the read to a descriptor does not change which attributes the
+/// kernel will let this process write.
+#[cfg(unix)]
+impl HandleCarryover {
+    fn capture(file: &std::fs::File, target: &Path) -> Result<Self, String> {
+        use xattr::FileExt as _;
+        let _ = target;
+        let mut xattrs = Vec::new();
+        // `Err` here is `ENOTSUP` on a filesystem with no xattr support at all, which is "nothing to
+        // carry", not "could not tell" — same early return `carry_xattrs` makes.
+        if let Ok(names) = file.list_xattr() {
+            for name in names {
+                if let Ok(Some(value)) = file.get_xattr(&name) {
+                    xattrs.push((name, value));
+                }
+            }
+        }
+        Ok(Self { xattrs })
+    }
+
+    fn apply(&self, staged: &std::fs::File, staged_path: &Path) -> Result<(), String> {
+        use xattr::FileExt as _;
+        let _ = staged_path;
+        for (name, value) in &self.xattrs {
+            let _ = staged.set_xattr(name, value);
+        }
+        Ok(())
+    }
+}
+
+/// The `FILE_ATTRIBUTE_*` bits a rename drops and this carries back. `READONLY` is deliberately absent
+/// — see [`HandleCarryover`].
+#[cfg(windows)]
+fn carried_attribute_mask() -> u32 {
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+        FILE_ATTRIBUTE_SYSTEM,
+    };
+    FILE_ATTRIBUTE_HIDDEN.0
+        | FILE_ATTRIBUTE_SYSTEM.0
+        | FILE_ATTRIBUTE_ARCHIVE.0
+        | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0
+}
+
+/// The Win32 status code out of a `windows::core::Error`, which reports it as an `HRESULT` with the
+/// `0x8007` facility applied. Written once rather than at each comparison site: getting it wrong makes
+/// every arm below take the "refuse" branch, which would turn "this volume has no ACLs" into a failed
+/// save on every FAT stick.
+#[cfg(windows)]
+fn win32_status(e: &windows::core::Error) -> u32 {
+    let hr = e.code().0 as u32;
+    if hr & 0xFFFF_0000 == 0x8007_0000 {
+        hr & 0xFFFF
+    } else {
+        hr
+    }
+}
+
+/// A `CloseHandle`-on-drop wrapper for the one raw handle this module opens itself (`ReOpenFile`'s).
+/// Everything else here borrows a live `std::fs::File`.
+#[cfg(windows)]
+struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from a successful `ReOpenFile` and is closed exactly once, here.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl HandleCarryover {
+    fn capture(file: &std::fs::File, target: &Path) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{
+            ERROR_CALL_NOT_IMPLEMENTED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_FUNCTION,
+            ERROR_NOT_SUPPORTED, HANDLE,
+        };
+        use windows::Win32::Security::{
+            GetKernelObjectSecurity, GetSecurityDescriptorControl, DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, ReOpenFile, BY_HANDLE_FILE_INFORMATION,
+            FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+
+        let handle = HANDLE(file.as_raw_handle() as isize);
+        let unreadable = |what: &str, e: &windows::core::Error| {
+            format!(
+                "{}: could not read the destination's {what}, so nothing was written rather than \
+                 replacing it with a file more people can read than the one you overwrote: {e}",
+                display_path(target)
+            )
+        };
+
+        // ---- the DACL, off the handle. Sized first (nLength 0 → ERROR_INSUFFICIENT_BUFFER + needed).
+        let mut needed = 0u32;
+        // SAFETY: a null descriptor with `nlength` 0 is the documented sizing call; `needed` is a live
+        // out-parameter and `handle` is borrowed from a `File` that outlives the call.
+        let sized = unsafe {
+            GetKernelObjectSecurity(
+                handle,
+                DACL_SECURITY_INFORMATION.0,
+                PSECURITY_DESCRIPTOR(std::ptr::null_mut()),
+                0,
+                &mut needed,
+            )
+        };
+        let mut security: Option<Vec<u8>> = None;
+        if let Err(e) = sized {
+            let code = win32_status(&e);
+            if code == ERROR_INSUFFICIENT_BUFFER.0 {
+                let mut buf = vec![0u8; needed as usize];
+                let len = needed;
+                // SAFETY: `buf` is `len` bytes long and stays alive across the call.
+                unsafe {
+                    GetKernelObjectSecurity(
+                        handle,
+                        DACL_SECURITY_INFORMATION.0,
+                        PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast()),
+                        len,
+                        &mut needed,
+                    )
+                }
+                .map_err(|e| unreadable("permissions", &e))?;
+                security = Some(buf);
+            } else if code != ERROR_NOT_SUPPORTED.0
+                && code != ERROR_INVALID_FUNCTION.0
+                && code != ERROR_CALL_NOT_IMPLEMENTED.0
+            {
+                return Err(unreadable("permissions", &e));
+            }
+            // …and the three codes above fall through with `security = None`: the volume has no ACLs
+            // at all (FAT/exFAT), so there is nothing to carry and nothing to downgrade.
+        }
+        let dacl_protected = match &security {
+            None => false,
+            Some(buf) => {
+                let (mut control, mut revision) = (0u16, 0u32);
+                // SAFETY: `buf` holds a valid self-relative descriptor written by the call above.
+                unsafe {
+                    GetSecurityDescriptorControl(
+                        PSECURITY_DESCRIPTOR(buf.as_ptr() as *mut _),
+                        &mut control,
+                        &mut revision,
+                    )
+                }
+                .map_err(|e| unreadable("permissions", &e))?;
+                control & SE_DACL_PROTECTED.0 != 0
+            }
+        };
+
+        // ---- the attribute word, off the same handle.
+        // SAFETY: read-only query into a correctly-sized out-parameter.
+        let attributes = unsafe {
+            let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+            GetFileInformationByHandle(handle, &mut info)
+                .map_err(|e| unreadable("attributes", &e))?;
+            info.dwFileAttributes & carried_attribute_mask()
+        };
+
+        // ---- the named streams. `ReOpenFile` takes the HANDLE, so this is the same object the checks
+        // above interrogated — not a second lookup of `target`, which is the whole point.
+        //
+        // **`FILE_FLAG_OPEN_REPARSE_POINT` is load-bearing and was measured, not reasoned.** `ReOpenFile`
+        // does NOT inherit the original open's flags, so without it the re-open *resolves* the reparse
+        // point it is handed. On a GUID reparse point with no filter driver installed — CPE-1896's
+        // dehydrated-placeholder shape, which this function is required to write rather than refuse —
+        // that fails with `ERROR_CANT_ACCESS_FILE (0x80070780)` and reddened
+        // `cpe_1929_overwrite_confirmed_refuses_a_surrogate_but_writes_a_non_surrogate_reparse_point`:
+        // a whole class of cloud files back to "failed operation", from a carry-over that was supposed
+        // to be invisible. It also keeps a real OneDrive placeholder from being *recalled* (downloaded)
+        // by a read this function only wants stream headers from.
+        //
+        // SAFETY: `handle` is live; the returned handle is owned by `OwnedHandle` and closed once.
+        let reader = unsafe {
+            ReOpenFile(
+                handle,
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAGS_AND_ATTRIBUTES(crate::batch_media::FILE_FLAG_OPEN_REPARSE_POINT_U32),
+            )
+        }
+        .map(OwnedHandle)
+        .map_err(|e| unreadable("alternate data streams (Mark-of-the-Web lives in one)", &e))?;
+        let streams = read_alternate_data_streams(reader.0, target)?;
+
+        Ok(Self { security, dacl_protected, streams, attributes })
+    }
+
+    fn apply(&self, staged: &std::fs::File, staged_path: &Path) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{BOOL, HANDLE};
+        use windows::Win32::Security::{
+            SetKernelObjectSecurity, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            BackupWrite, GetFileInformationByHandle, SetFileInformationByHandle,
+            BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo,
+        };
+
+        let handle = HANDLE(staged.as_raw_handle() as isize);
+        let failed = |what: &str, e: &dyn std::fmt::Display| {
+            format!(
+                "could not give the replacement for \"{}\" the {what} the original had, so nothing was \
+                 written rather than leaving you a file that is more readable — or less trusted by \
+                 SmartScreen — than the one you overwrote: {e}",
+                display_path(staged_path)
+            )
+        };
+
+        // ---- the DACL, and its protected-ness with it. Applying the ACEs WITHOUT
+        // `PROTECTED_DACL_SECURITY_INFORMATION` is exactly the measured regression: the folder's
+        // inherited ACEs come straight back.
+        if let Some(sd) = &self.security {
+            let info = OBJECT_SECURITY_INFORMATION(
+                DACL_SECURITY_INFORMATION.0
+                    | if self.dacl_protected {
+                        PROTECTED_DACL_SECURITY_INFORMATION.0
+                    } else {
+                        UNPROTECTED_DACL_SECURITY_INFORMATION.0
+                    },
+            );
+            // **Measured, because this ticket's rule is that an argument is not a measurement.**
+            // Forcing this flag off (`if false && self.dacl_protected`) leaves
+            // `cpe_1958_a_confirmed_overwrite_keeps_the_destinations_acl_and_alternate_data_streams`
+            // GREEN: the self-relative descriptor `capture` read already carries `SE_DACL_PROTECTED`
+            // in its own control word, and that is what Windows' auto-inherit computation reads. So
+            // this argument is belt-and-braces rather than the mechanism — kept because it states the
+            // intent in both directions and costs nothing, recorded because a reader who sabotages it
+            // and sees green deserves to know that is expected (CPE-1929's rule for a check no test
+            // can red).
+            //
+            // SAFETY: `sd` is the self-relative descriptor `capture` read, still alive here; the
+            // staging handle was opened with `WRITE_DAC` (see `create_staging_file_for_carryover`).
+            unsafe {
+                SetKernelObjectSecurity(
+                    handle,
+                    info,
+                    PSECURITY_DESCRIPTOR(sd.as_ptr() as *mut _),
+                )
+            }
+            .map_err(|e| failed("permissions", &e))?;
+        }
+
+        // ---- the named streams, replayed into the staging file. Done while it is still EMPTY, for
+        // the same reason `carry_protections` adjusts the mode before the bytes land.
+        if !self.streams.is_empty() {
+            let mut ctx: *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut written_total = 0usize;
+            let mut err: Option<String> = None;
+            while written_total < self.streams.len() {
+                let mut n = 0u32;
+                // SAFETY: the slice is live for the call; `ctx` is this loop's own context and is
+                // released by the abort call below on every path.
+                let r = unsafe {
+                    BackupWrite(
+                        handle,
+                        &self.streams[written_total..],
+                        &mut n,
+                        BOOL(0),
+                        BOOL(0),
+                        &mut ctx,
+                    )
+                };
+                if let Err(e) = r {
+                    err = Some(failed("alternate data streams", &e));
+                    break;
+                }
+                if n == 0 {
+                    err = Some(failed(
+                        "alternate data streams",
+                        &"BackupWrite stopped before the whole record was written",
+                    ));
+                    break;
+                }
+                written_total += n as usize;
+            }
+            let nothing: [u8; 0] = [];
+            let mut n = 0u32;
+            // SAFETY: the documented context-release call — abort true, empty buffer.
+            let _ = unsafe { BackupWrite(handle, &nothing, &mut n, BOOL(1), BOOL(0), &mut ctx) };
+            if let Some(e) = err {
+                return Err(e);
+            }
+            // `BackupWrite` leaves the file pointer wherever the replay ended. The caller writes the
+            // user's bytes through this same handle next, so put it back at the start of `$DATA`
+            // rather than assuming — a wrong assumption here would prepend zero bytes to every
+            // confirmed overwrite of a file that happened to carry a stream.
+            let mut seekable = staged;
+            std::io::Seek::seek(&mut seekable, std::io::SeekFrom::Start(0))
+                .map_err(|e| failed("alternate data streams", &e))?;
+        }
+
+        // ---- the attribute word.
+        if self.attributes != 0 {
+            // SAFETY: read-only query into a correctly-sized out-parameter.
+            let current = unsafe {
+                let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+                GetFileInformationByHandle(handle, &mut info)
+                    .map_err(|e| failed("attributes", &e))?;
+                info.dwFileAttributes
+            };
+            let basic = FILE_BASIC_INFO {
+                // 0 means "leave this timestamp alone" — the documented sentinel.
+                CreationTime: 0,
+                LastAccessTime: 0,
+                LastWriteTime: 0,
+                ChangeTime: 0,
+                FileAttributes: current | self.attributes,
+            };
+            // SAFETY: `basic` is a live, correctly-sized `FILE_BASIC_INFO` for `FileBasicInfo`.
+            unsafe {
+                SetFileInformationByHandle(
+                    handle,
+                    FileBasicInfo,
+                    std::ptr::addr_of!(basic).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+            }
+            .map_err(|e| failed("attributes", &e))?;
+        }
+        Ok(())
+    }
+}
+
+/// `BackupRead` the destination's `BACKUP_ALTERNATE_DATA` records — and **only** those — into the
+/// serialised form `BackupWrite` replays.
+///
+/// The main `$DATA` stream is seeked past rather than read: it is the very thing being replaced, and
+/// on this function's caller it can be a whole media file, so reading it would turn a save into a copy.
+/// `BACKUP_SECURITY_DATA` is skipped too — the DACL is carried by `SetKernelObjectSecurity` instead,
+/// because replaying a security record through `BackupWrite` needs `WRITE_OWNER` on the staging
+/// handle, and `WRITE_OWNER` is **not** among the accesses Windows grants an object's owner
+/// implicitly, so asking for it at `create_new` time could fail on an ordinary save.
+/// `BACKUP_LINK`, `BACKUP_OBJECT_ID` and `BACKUP_REPARSE_DATA` are skipped by the same rule that keeps
+/// the commit a rename: none of them is a thing the user's *content* carries, and replaying a reparse
+/// record would put a link back where the user asked for a file.
+#[cfg(windows)]
+fn read_alternate_data_streams(
+    reader: windows::Win32::Foundation::HANDLE,
+    target: &Path,
+) -> Result<Vec<u8>, String> {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Storage::FileSystem::{BackupRead, BackupSeek, BACKUP_ALTERNATE_DATA};
+
+    /// `WIN32_STREAM_ID`'s fixed prefix: `dwStreamId`, `dwStreamAttributes`, `Size`,
+    /// `dwStreamNameSize` — 4 + 4 + 8 + 4. The variable-length name follows it.
+    const HEADER: usize = 20;
+    /// A ceiling on what is carried across, so a pathological file cannot turn one save into an
+    /// unbounded allocation. Named streams are ordinarily tens of bytes (`Zone.Identifier` is ~50).
+    const CARRY_CAP: u64 = 8 * 1024 * 1024;
+
+    let mut ctx: *mut core::ffi::c_void = std::ptr::null_mut();
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Option<String> = None;
+    let unreadable = |e: &dyn std::fmt::Display| {
+        format!(
+            "{}: could not read the destination's alternate data streams (Mark-of-the-Web lives in \
+             one), so nothing was written rather than silently handing back a file Windows no longer \
+             treats as downloaded: {e}",
+            display_path(target)
+        )
+    };
+
+    loop {
+        let mut header = [0u8; HEADER];
+        let mut got = 0u32;
+        // SAFETY: `header` is live and exactly `HEADER` bytes; `ctx` is this loop's own context and is
+        // released by the abort call below on every exit path.
+        if let Err(e) = unsafe { BackupRead(reader, &mut header, &mut got, BOOL(0), BOOL(0), &mut ctx) }
+        {
+            err = Some(unreadable(&e));
+            break;
+        }
+        if got == 0 {
+            break; // end of the backup stream
+        }
+        if (got as usize) < HEADER {
+            err = Some(unreadable(&"a truncated WIN32_STREAM_ID header"));
+            break;
+        }
+        let id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        let size = i64::from_le_bytes(header[8..16].try_into().unwrap()).max(0) as u64;
+        let name_len = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
+
+        let mut name = vec![0u8; name_len];
+        if name_len > 0 {
+            let mut n = 0u32;
+            // SAFETY: as above.
+            if unsafe { BackupRead(reader, &mut name, &mut n, BOOL(0), BOOL(0), &mut ctx) }.is_err()
+                || n as usize != name_len
+            {
+                err = Some(unreadable(&"a truncated stream name"));
+                break;
+            }
+        }
+
+        if id == BACKUP_ALTERNATE_DATA.0 {
+            if out.len() as u64 + size + (HEADER + name_len) as u64 > CARRY_CAP {
+                err = Some(format!(
+                    "{}: its alternate data streams are larger than {CARRY_CAP} bytes, which this \
+                     confirmed overwrite will not copy across — nothing was written, and the original \
+                     is untouched",
+                    display_path(target)
+                ));
+                break;
+            }
+            let mut data = vec![0u8; size as usize];
+            let mut filled = 0usize;
+            while filled < data.len() {
+                let mut n = 0u32;
+                // SAFETY: as above.
+                if unsafe { BackupRead(reader, &mut data[filled..], &mut n, BOOL(0), BOOL(0), &mut ctx) }
+                    .is_err()
+                {
+                    err = Some(unreadable(&"a stream body that stopped short"));
+                    break;
+                }
+                if n == 0 {
+                    break;
+                }
+                filled += n as usize;
+            }
+            if err.is_some() {
+                break;
+            }
+            if filled != data.len() {
+                err = Some(unreadable(&"a stream body that stopped short"));
+                break;
+            }
+            out.extend_from_slice(&header);
+            out.extend_from_slice(&name);
+            out.extend_from_slice(&data);
+        } else if size > 0 {
+            let (mut lo, mut hi) = (0u32, 0u32);
+            // SAFETY: as above. `BackupSeek` reports how far it actually moved, which is how the
+            // end-of-stream case is told apart from a real failure.
+            let r = unsafe {
+                BackupSeek(
+                    reader,
+                    (size & 0xFFFF_FFFF) as u32,
+                    (size >> 32) as u32,
+                    &mut lo,
+                    &mut hi,
+                    &mut ctx,
+                )
+            };
+            if r.is_err() && ((u64::from(hi) << 32) | u64::from(lo)) != size {
+                err = Some(unreadable(&"a stream this save could not skip past"));
+                break;
+            }
+        }
+    }
+
+    let mut nothing: [u8; 0] = [];
+    let mut n = 0u32;
+    // SAFETY: the documented context-release call — abort true, empty buffer.
+    let _ = unsafe { BackupRead(reader, &mut nothing, &mut n, BOOL(1), BOOL(0), &mut ctx) };
+    match err {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// **CPE-1739, the pure decision**: which permission bits of `source_mode` the replacement file gets.
@@ -3338,8 +4099,11 @@ fn commit_replacement(tmp: &Path, target: &Path, target_exists: bool) -> Result<
 }
 
 /// **CPE-1738**: best-effort collection of a `.cpe-tmp` sibling stranded by an EARLIER, DIFFERENT save of
-/// `target` that was killed between [`stage_and_replace`]'s `create_new` and its `rename` — never a save
-/// still in flight. Called once, from [`stage_and_replace`], after its own rename has already succeeded.
+/// `target` that was killed between [`stage_and_replace_at`]'s `create_new` and its `rename` — never a
+/// save still in flight. Called once, from [`stage_and_replace_at`], after its own commit has already
+/// succeeded — so it covers **both** staging callers, the editor's save and the macro engine's confirmed
+/// overwrite. (It used to hang off [`stage_and_replace`] alone, which meant the confirmed path CPE-1958
+/// routed through staging produced residue nothing collected; see that call site.)
 ///
 /// ## The decision, recorded here because CPE-1738 asked the question outright
 ///
@@ -6072,6 +6836,235 @@ mod tests {
             .expect("this machine must be able to set FILE_ATTRIBUTE_HIDDEN");
     }
 
+    /// `(is the DACL protected, how many ACEs it has)` for `p`, read the same way production reads it —
+    /// off a HANDLE, with `GetKernelObjectSecurity` — so the assertion and the carry-over cannot drift
+    /// into agreeing about a descriptor neither of them describes correctly.
+    ///
+    /// "Protected" is `SE_DACL_PROTECTED`: inheritance broken, which is what `icacls /inheritance:r`
+    /// sets and what the round-2 Auditor watched the rename commit clear.
+    #[cfg(windows)]
+    fn dacl_shape(p: &Path) -> (bool, u32) {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{BOOL, HANDLE};
+        use windows::Win32::Security::{
+            AclSizeInformation, GetAclInformation, GetKernelObjectSecurity,
+            GetSecurityDescriptorControl, GetSecurityDescriptorDacl, ACL, ACL_SIZE_INFORMATION,
+            DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        };
+        let f = std::fs::File::open(p).expect("the fixture must be openable for reading");
+        let h = HANDLE(f.as_raw_handle() as isize);
+        let mut needed = 0u32;
+        unsafe {
+            let _ = GetKernelObjectSecurity(
+                h,
+                DACL_SECURITY_INFORMATION.0,
+                PSECURITY_DESCRIPTOR(std::ptr::null_mut()),
+                0,
+                &mut needed,
+            );
+            let mut buf = vec![0u8; needed as usize];
+            let len = needed;
+            GetKernelObjectSecurity(
+                h,
+                DACL_SECURITY_INFORMATION.0,
+                PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast()),
+                len,
+                &mut needed,
+            )
+            .expect("this machine must be able to read a file's DACL off its handle");
+            let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+            let (mut control, mut revision) = (0u16, 0u32);
+            GetSecurityDescriptorControl(sd, &mut control, &mut revision).unwrap();
+            let (mut present, mut defaulted) = (BOOL(0), BOOL(0));
+            let mut acl: *mut ACL = std::ptr::null_mut();
+            GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted).unwrap();
+            let mut info: ACL_SIZE_INFORMATION = std::mem::zeroed();
+            let aces = if present.as_bool() && !acl.is_null() {
+                GetAclInformation(
+                    acl,
+                    std::ptr::addr_of_mut!(info).cast(),
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+                .unwrap();
+                info.AceCount
+            } else {
+                0
+            };
+            (control & SE_DACL_PROTECTED.0 != 0, aces)
+        }
+    }
+
+    /// Run `icacls` with no console window (this repo's automation must never flash one) and return
+    /// whether it succeeded.
+    #[cfg(windows)]
+    fn icacls(args: &[&std::ffi::OsStr]) -> bool {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("icacls")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// **CPE-1958 round 2's measured security regression, pinned.**
+    ///
+    /// Round 1 moved the confirmed overwrite's commit from a write through the destination handle to a
+    /// rename, and recorded the Windows consequence as a "preservation cost". The round-2 Security
+    /// Auditor measured it: a destination with inheritance broken and one owner-only ACE, carrying a
+    /// real `Zone.Identifier`, came back with `AreAccessRulesProtected=False`, **four inherited ACEs
+    /// including `NT AUTHORITY\Authenticated Users: Modify`**, and no `Zone.Identifier`. That is not
+    /// fidelity — it is the CPE-1739 downgrade (*"a file that is more readable than the one you
+    /// saved"*) arriving on a path where `carry_protections`' Windows no-op had delegated the job to a
+    /// `ReplaceFileW` this commit arm never calls, plus a stripped Mark-of-the-Web.
+    ///
+    /// **Red-proofed by sabotage rather than argued, and the numbers are from running it, not from
+    /// reasoning about it.** Three sabotages, three separate runs:
+    ///
+    /// - [`HandleCarryover::apply`]'s whole body replaced by `Ok(())` — i.e. exactly what round 1
+    ///   shipped: **FAILED** on the protected-DACL assertion. That is the Auditor's measurement,
+    ///   reproduced as a guard.
+    /// - the `SetKernelObjectSecurity` call alone disabled (`if false`), stream replay left in:
+    ///   **FAILED**, same assertion. So the DACL half is load-bearing on its own.
+    /// - the `BackupWrite` stream replay alone disabled: **FAILED** on the `Zone.Identifier`
+    ///   assertion, and only that one. So the streams half is load-bearing on its own too.
+    ///
+    /// A fourth sabotage did **not** red, and saying so is the point of this list rather than an
+    /// embarrassment to leave out: forcing `PROTECTED_DACL_SECURITY_INFORMATION` off
+    /// (`if false && self.dacl_protected`) left the test **green**. See the note at that call site —
+    /// the self-relative descriptor's own `SE_DACL_PROTECTED` control bit already drives Windows'
+    /// auto-inherit computation, so the explicit flag is belt-and-braces, not the mechanism. An
+    /// earlier draft of this comment claimed it failed on the ACE count; it does not.
+    ///
+    /// Every assertion reads the filesystem back, never a `Result`.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1958_a_confirmed_overwrite_keeps_the_destinations_acl_and_alternate_data_streams() {
+        let d = scratch("cpe1958-carryover");
+        let f = d.join("downloaded.bin");
+        std::fs::write(&f, b"old bytes").unwrap();
+
+        // Inheritance broken, one owner-only ACE — the shape the Auditor staged.
+        let me = std::env::var("USERNAME").unwrap_or_default();
+        let grant = format!("{me}:(F)");
+        let staged_acl = !me.is_empty()
+            && icacls(&[f.as_os_str(), "/inheritance:r".as_ref()])
+            && icacls(&[f.as_os_str(), "/grant:r".as_ref(), grant.as_ref()]);
+        // A real Mark-of-the-Web, written through NTFS's own `path:stream` syntax.
+        let zone = f.with_file_name(format!("{}:Zone.Identifier", f.file_name().unwrap().to_string_lossy()));
+        const MOTW: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        let staged_ads = std::fs::write(&zone, MOTW).is_ok();
+
+        if !staged_acl || !staged_ads {
+            crate::skip_notice!(
+                "SKIPPING cpe_1958_a_confirmed_overwrite_keeps_the_destinations_acl_and_alternate_data_streams: \
+                 this volume would not take a protected DACL or a named stream, so NOTHING on this run \
+                 covered the confirmed overwrite's Windows carry-over."
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        let (protected_before, aces_before) = dacl_shape(&f);
+        assert!(
+            protected_before && aces_before == 1,
+            "fixture is inert: the destination must start with inheritance broken and exactly one ACE, \
+             got protected={protected_before} aces={aces_before} — without that the assertions below \
+             would pass against an unchanged, already-inherited DACL"
+        );
+
+        overwrite_confirmed_no_follow(&f, b"new bytes").expect("a plain confirmed overwrite must work");
+
+        assert_eq!(std::fs::read(&f).unwrap(), b"new bytes", "the user's bytes must actually land");
+        let (protected_after, aces_after) = dacl_shape(&f);
+        assert!(
+            protected_after,
+            "the replacement inherited the FOLDER's ACL: a confirmed overwrite must not quietly widen \
+             who can read the file it replaced (CPE-1739's rule, arriving on CPE-1958's new commit path)"
+        );
+        assert_eq!(
+            aces_after, aces_before,
+            "the replacement gained ACEs the original did not have — the measured regression was four \
+             inherited ones, `Authenticated Users: Modify` among them"
+        );
+        assert_eq!(
+            std::fs::read(&zone).ok().as_deref(),
+            Some(MOTW),
+            "Zone.Identifier is gone, so Windows no longer treats this file as downloaded — a confirmed \
+             Convert must not strip Mark-of-the-Web"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1958 round 2, review finding B — the one cost an ordinary, non-adversarial user meets.**
+    ///
+    /// A foreign handle in the sharing mode an ordinary Windows application takes (a photo viewer, a
+    /// media player, Explorer's preview pane — `FILE_SHARE_READ|FILE_SHARE_WRITE`, notably *not* what
+    /// Rust's own `File::open` takes, which adds `FILE_SHARE_DELETE`) now blocks a confirmed overwrite
+    /// that used to succeed: the pre-fix write went through a handle that was already open, while the
+    /// commit is a rename and `MoveFileEx` needs the destination to be deletable.
+    ///
+    /// This is the identical gap [`commit_replacement`] documents for the editor's save path in three
+    /// places and pins with `cpe_1739_windows_a_foreign_share_read_write_handle_still_blocks_the_save`.
+    /// Round 1 landed the same gap here with **neither**, which is why this exists: the family's rule is
+    /// that a known gap is recorded and pinned, not that it is small enough to leave implicit.
+    ///
+    /// The half that IS clean is asserted too, and it is the half that matters: the original is
+    /// byte-for-byte intact and no `.cpe-tmp` is left behind.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1958_a_foreign_share_read_write_handle_blocks_the_confirmed_overwrite_without_damage() {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+        let d = scratch("cpe1958-shared-handle");
+        let f = d.join("held.jpg");
+        std::fs::write(&f, b"old bytes").unwrap();
+
+        let w = wide(&f);
+        // SAFETY: `w` is NUL-terminated and outlives the call; the handle is closed below.
+        let h = unsafe {
+            CreateFileW(
+                PCWSTR(w.as_ptr()),
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        }
+        .expect("this machine must be able to open a file the way an ordinary Windows app does");
+
+        let e = overwrite_confirmed_no_follow(&f, b"new bytes")
+            .expect_err("a foreign SHARE_READ|WRITE handle blocks the rename commit — see this test's doc");
+        assert!(
+            e.contains("held.jpg"),
+            "the refusal must name the file the user asked about, not an internal staging name: {e}"
+        );
+        assert_eq!(
+            std::fs::read(&f).unwrap(),
+            b"old bytes",
+            "the ORIGINAL must be byte-for-byte intact after the refused save — this is the half that \
+             makes the gap a cost rather than a bug"
+        );
+        assert!(
+            !std::fs::read_dir(&d).unwrap().flatten().any(|e| {
+                e.file_name().to_string_lossy().ends_with(".cpe-tmp")
+            }),
+            "a refused commit must leave no `.cpe-tmp` sibling behind"
+        );
+        // SAFETY: `h` came from the successful `CreateFileW` above and is closed exactly once.
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The guarantee, tested as a guarantee: driven with real resolved paths rather than through any
     /// list of spellings, because enumerating spellings is exactly the approach the PR #855 audit
     /// showed cannot work.
@@ -6982,20 +7975,26 @@ mod tests {
     /// `victim` lives OUTSIDE `slot`'s folder, so any byte of it that changes is a byte written outside
     /// the destination the caller named.
     ///
-    /// # Why the harness plants the link and the attacker only removes it
+    /// # Why the harness plants the link as well, and what `harness_plants` actually changes
     ///
-    /// The first version had the attacker do both halves — `hard_link` then `remove_file`, in a tight
-    /// loop — which is the attack as described, and it reproduced the hole. But it made the **arms
-    /// incomparable**, and only the numbers showed it: after the fix the same loop landed 2,825 hard
-    /// links instead of ~250, because a staged write leaves a fresh single-linked file at the slot where
-    /// an in-place write left the attacker's own link sitting there. More attacker activity and less
-    /// destruction is the right *direction*, but "the attacker got a different number of chances" is
-    /// exactly the confound that lets a narrowed window read as a closed one.
+    /// **Read the code below before believing any sentence here** — round 1's version of this paragraph
+    /// said "the attacker thread only unlinks", and the attacker body has no `harness_plants` branch in
+    /// it at all: it does `create_hard_link` then `remove_file` in **both** shapes. What that sentence
+    /// described was never implemented, and the arms' own numbers say so out loud — arm A saw **203**
+    /// attacker swaps in shape 1 against **1,600** in shape 2 on the same machine. The claim is
+    /// corrected here rather than deleted because the reason the second shape exists is still sound.
     ///
-    /// So the trial start is now fixed rather than raced: the harness itself plants the hard link before
-    /// every trial, and the attacker thread only unlinks. Every arm therefore faces the same starting
-    /// condition — a destination that genuinely *is* a second name for a file outside the folder — and
-    /// `planted` (how many trials actually began that way) is the count that makes two rates comparable.
+    /// The first version had only the attacker's loop deciding what each trial started against, and that
+    /// made the **arms incomparable**: after the fix the same loop landed far more hard links, because a
+    /// staged write leaves a fresh single-linked file at the slot where an in-place write left the
+    /// attacker's own link sitting there. More attacker activity and less destruction is the right
+    /// *direction*, but "the attacker got a different number of chances" is exactly the confound that
+    /// lets a narrowed window read as a closed one.
+    ///
+    /// So `harness_plants == true` adds a **second** planter that runs on the main thread immediately
+    /// before each trial, and — this is the part that matters — **counts** whether the link was actually
+    /// in place when the trial began. `planted` is that count, and it is what makes two arms' rates
+    /// comparable. The attacker thread keeps cycling underneath in both shapes; it is not switched off.
     ///
     /// Returns `(destroyed, planted, oks)`: trials that left the victim holding something other than its
     /// own bytes — **read back off the filesystem, never off the `Result`** — trials that began with the
@@ -7088,6 +8087,142 @@ mod tests {
         Some((destroyed, planted, oks))
     }
 
+    /// **CPE-1958 round 2, Auditor F3 — the racer for the commit's SOURCE, which is unprotected.**
+    ///
+    /// [`Commit::ReplacingTheName`]'s invariant is about the DESTINATION: nothing planted at `target`
+    /// after the caller's checks ran can redirect the commit. It is silent about the other operand.
+    /// The commit is `rename(tmp, target)`, and `tmp` is a **path** — an enumerable `*.cpe-tmp` entry
+    /// in the same attacker-writable folder. An attacker that `readdir`s for it, unlinks it, and hard-
+    /// links an outside victim into its place makes the rename commit **the victim's inode** over the
+    /// confirmed name.
+    ///
+    /// This measures that, and it measures the three things that tell it apart from CPE-1958's own bug:
+    /// how often the destination ends up **aliased** to the outside object, how often the writer
+    /// returned **`Ok` while the destination does not hold the new bytes** (a successful-looking
+    /// overwrite that did not overwrite), and — the control that matters most — whether the victim's
+    /// **content** ever changes. It must not: this is an aliasing race, not a destruction one.
+    ///
+    /// `delete_only` is the second control: an attacker that only unlinks the temp, never re-links,
+    /// must produce no lying `Ok` at all. Without it, "the rename failed sometimes" would read as the
+    /// same finding.
+    ///
+    /// Returns `(aliased, lying_oks, victim_changed)`, all read off the filesystem.
+    fn cpe_1958_rename_source_race(trials: u64, delete_only: bool) -> Option<(u64, u64, u64)> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        const OLD: &[u8] = b"OLD BYTES AT THE CONFIRMED NAME";
+        const NEW: &[u8] = b"WHAT THE USER CONFIRMED WRITING";
+        let d = scratch("cpe1958-rename-source");
+        let root = d.join("root");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, CPE_1958_UNTOUCHED).unwrap();
+        let slot = root.join("slot.bin");
+        // Liveness: a machine with no hard links measures nothing, and must say so rather than
+        // returning a clean sheet.
+        let (v, probe) = (
+            victim.to_string_lossy().into_owned(),
+            root.join("probe").to_string_lossy().into_owned(),
+        );
+        if crate::links::create_hard_link(&v, &probe).is_err() {
+            return None;
+        }
+        std::fs::remove_file(root.join("probe")).ok()?;
+
+        let identity = |p: &Path| {
+            crate::batch_media::open_existing_no_follow_read(p)
+                .ok()
+                .and_then(|f| crate::batch_media::handle_facts(&f))
+                .map(|facts| facts.id)
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let attacker = {
+            let (root, v, stop) = (root.clone(), v.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok(entries) = std::fs::read_dir(&root) else { continue };
+                    for e in entries.flatten() {
+                        let name = e.file_name();
+                        if !name.to_string_lossy().ends_with(".cpe-tmp") {
+                            continue;
+                        }
+                        let path = e.path();
+                        if std::fs::remove_file(&path).is_err() {
+                            continue;
+                        }
+                        if !delete_only {
+                            let _ = crate::links::create_hard_link(&v, &path.to_string_lossy());
+                        }
+                    }
+                }
+            })
+        };
+
+        let (mut aliased, mut lying, mut changed) = (0u64, 0u64, 0u64);
+        for _ in 0..trials {
+            let _ = std::fs::remove_file(&slot);
+            std::fs::write(&slot, OLD).unwrap();
+            let r = overwrite_confirmed_no_follow(&slot, NEW);
+            let landed = std::fs::read(&slot).ok();
+            if r.is_ok() && landed.as_deref() != Some(NEW) {
+                lying += 1;
+            }
+            if let (Some(a), Some(b)) = (identity(&slot), identity(&victim)) {
+                if a == b {
+                    aliased += 1;
+                }
+            }
+            if std::fs::read(&victim).ok().as_deref() != Some(CPE_1958_UNTOUCHED) {
+                changed += 1;
+            }
+            // Reset both sides: an aliased slot means removing it would unlink the victim's second
+            // name, which is exactly what we want before the next trial.
+            let _ = std::fs::remove_file(&slot);
+            let _ = std::fs::write(&victim, CPE_1958_UNTOUCHED);
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = attacker.join();
+        Some((aliased, lying, changed))
+    }
+
+    /// **The F3 measurement, reported rather than asserted** — it is a live, pre-existing exposure that
+    /// this PR does not fix (it is **CPE-1963**), so a guard here would just be a red build. What it
+    /// exists for is that the next worker can re-take the numbers instead of quoting these.
+    ///
+    /// ```text
+    /// cargo test -p cpe-server cpe_1958_rename_source_report -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "CPE-1963 measurement harness (filed from CPE-1958 round 2, Auditor F3). Run by hand with --ignored --nocapture."]
+    fn cpe_1958_rename_source_report() {
+        let trials: u64 =
+            std::env::var("CPE_1958_TRIALS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+        for delete_only in [false, true] {
+            let shape = if delete_only { "delete-only (CONTROL)" } else { "relink an outside victim" };
+            match cpe_1958_rename_source_race(trials, delete_only) {
+                None => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[CPE-1963] {shape}: SKIPPED — this machine cannot create a hard link, so \
+                         NOTHING was measured on this run."
+                    );
+                    return;
+                }
+                Some((aliased, lying, changed)) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[CPE-1963] {shape}: {aliased} destinations aliased to the outside file / \
+                         {trials} trials; {lying} returned Ok WITHOUT writing the user's bytes; \
+                         {changed} trials changed the VICTIM's content"
+                    );
+                }
+            }
+        }
+    }
+
     /// **CPE-1958's measurement harness.** `#[ignore]`d because it is a measurement, not a guard: it
     /// spends seconds, its rates move with the machine, and a race that happens not to be won proves
     /// nothing on its own. The guard CI actually runs is
@@ -7099,30 +8234,54 @@ mod tests {
     /// CPE_1958_TRIALS=2000 cargo test -p cpe-server cpe_1958_race_report -- --ignored --nocapture
     /// ```
     ///
-    /// **Measured on Windows 11 / NTFS, 2,000 trials per arm, both shapes in one run.** `planted` is
-    /// how many of those trials began with the destination genuinely hard-linked to the outside file,
-    /// which is what makes two arms comparable; every "destroyed" is the outside file's bytes read back
-    /// off disk. Arm B is the pre-fix body raced beside the fixed one, so before/after is a within-run
-    /// comparison rather than two runs on two machines.
+    /// # The filesystem this needs, because a green run on the wrong one proves nothing
+    ///
+    /// **A real local filesystem with real hard links: NTFS on Windows, ext4 on Linux.** A WSL `drvfs`
+    /// mount (`/mnt/z` and friends, mounted without the `metadata` option) is **not** valid — the
+    /// control there measured 1–2 destroyed per 1,000 in the unplanted shape, which is indistinguishable
+    /// from noise, and the arms' zeros mean nothing beside it. The racer reads its scratch root from
+    /// `TMPDIR`/`%TEMP%`, so point that at a real path before running under WSL. The control assertion
+    /// below is what actually catches this; the note is so the answer is at hand when it fires.
+    ///
+    /// **Measured on the MERGED state** — every figure below was re-taken after PR #1066 landed, since
+    /// that PR moved the `links > 1` guard ahead of the path check and changed this very window.
+    /// `planted` is how many trials began with the destination genuinely hard-linked to the outside
+    /// file; every "destroyed" is the outside file's bytes read back off disk. Arm B is the pre-fix body
+    /// raced beside the fixed one, so before/after is a within-run comparison rather than two machines.
+    ///
+    /// **Windows 11 / NTFS, 2,000 trials per arm, both shapes in one run:**
     ///
     /// | arm | attacker owns both halves | harness plants each trial |
     /// |---|---|---|
-    /// | A unguarded (control) | 200 / 2,000 | **846 / 2,000** (1,032 planted) |
-    /// | B pre-CPE-1958 body, replicated | **76 / 2,000** | **354 / 2,000** (857 planted) |
-    /// | C `overwrite_confirmed_no_follow`, fixed | **0 / 2,000** | **0 / 2,000** (784 planted) |
-    /// | D `batch_media::open_output_verified` | **3 / 2,000** | **2 / 2,000** (668 planted) |
-    /// | E `fsutil::copy_file_onto_no_follow` | 45 / 2,000 | **167 / 2,000** (686 planted) |
+    /// | A unguarded (control) | 97 / 2,000 | **812 / 2,000** (978 planted) |
+    /// | B pre-CPE-1958 body, replicated | **51 / 2,000** | **356 / 2,000** (838 planted) |
+    /// | C `overwrite_confirmed_no_follow`, fixed | **0 / 2,000** | **0 / 2,000** (617 planted) |
+    /// | D `batch_media::open_output_verified` | 0 / 2,000 | 1 / 2,000 (715 planted) |
+    /// | E `fsutil::copy_file_onto_no_follow` | 21 / 2,000 | **149 / 2,000** (710 planted) |
     ///
-    /// **And the same run on Linux** (WSL, ext4 `/tmp`, 1,000 trials per arm), which is where D stops
-    /// being ambiguous:
+    /// **Linux / ext4 (WSL, `TMPDIR` on the ext4 root, NOT `/mnt/z`), 10,000 trials per arm** — which is
+    /// where D stops being ambiguous and where C's zero is worth the most:
     ///
     /// | arm | attacker owns both halves | harness plants each trial |
     /// |---|---|---|
-    /// | A unguarded (control) | 131 / 1,000 | 140 / 1,000 (548 planted) |
-    /// | B pre-CPE-1958 body, replicated | 29 / 1,000 | 8 / 1,000 (322 planted) |
-    /// | C `overwrite_confirmed_no_follow`, fixed | **0 / 1,000** | **0 / 1,000** (621 planted) |
-    /// | D `batch_media::open_output_verified` | **29 / 1,000** | **32 / 1,000** (501 planted) |
-    /// | E `fsutil::copy_file_onto_no_follow` | 90 / 1,000 | 54 / 1,000 (537 planted) |
+    /// | A unguarded (control) | 1,580 / 10,000 | 2,902 / 10,000 (3,076 planted) |
+    /// | B pre-CPE-1958 body, replicated | 507 / 10,000 | 188 / 10,000 (7,613 planted) |
+    /// | C `overwrite_confirmed_no_follow`, fixed | **0 / 10,000** | **0 / 10,000** (9,267 planted) |
+    /// | D `batch_media::open_output_verified` | 630 / 10,000 | 97 / 10,000 (8,529 planted) |
+    /// | E `fsutil::copy_file_onto_no_follow` | 799 / 10,000 | 107 / 10,000 (9,658 planted) |
+    ///
+    /// **The `planted` columns do not both point the same way, and that is stated rather than smoothed
+    /// over.** On Linux the fixed arm faced 9,267 hard-linked trials against the pre-fix body's 7,613 —
+    /// a harder attacker for a zero. On Windows it faced 617 against 838, about a quarter *fewer*, so on
+    /// that platform the planted count does not carry the argument and round 1's claim that the fixed
+    /// arm always got the harder attacker is simply wrong on the merged state. What carries it there is
+    /// the unplanted shape (where nothing but the attacker decides) plus the structural property in
+    /// [`stage_and_replace_at`]'s doc, which depends on no trial count at all.
+    ///
+    /// **These are one run each, and the rates move a lot between runs** — three Linux runs during this
+    /// work put the planted-shape control at 1,159, 1,669 and 2,902 per 10,000, and the pre-fix body at
+    /// 188, 525 and 649. What did not move is arm C: **0 in every run, on both platforms, in both
+    /// shapes.** Treat any single figure here as an order of magnitude, and re-take rather than quote.
     ///
     /// **D and E are untouched by this ticket and both are live** — see the ticket's Work Log. D's
     /// `0 / 2,000` in PR #1066 was luck, not a property, and this is the measurement that settles it
@@ -7149,7 +8308,13 @@ mod tests {
             ("D batch_media::open_output_verified (live)", Box::new(cpe_1958_batch_media_write)),
             ("E fsutil::copy_file_onto_no_follow (live)", Box::new(cpe_1958_claim_destination_write)),
         ];
-        let mut measured: Vec<(&str, u64, u64)> = Vec::new();
+        // **CPE-1958 round 2, Auditor F4.** This used to be pushed only when `harness_plants` was
+        // true, so the sensitivity control AND the `assert_eq!(arm C, 0)` covered shape 2 only — shape
+        // 1 could measure nothing at all and the test still passed. Measured on a WSL drvfs mount
+        // (`/mnt/z`, no `metadata` option): shape 1's control ran 1–2 destroyed per 1,000 and sailed
+        // straight through unasserted. Both shapes are recorded and both are asserted now; a green run
+        // is not evidence the path ran unless every arm that ran was checked.
+        let mut measured: Vec<(bool, &str, u64, u64)> = Vec::new();
         for harness_plants in [false, true] {
             let shape = if harness_plants { "harness plants each trial" } else { "attacker owns both halves" };
             let _ = writeln!(std::io::stderr(), "[CPE-1958] ==== racer shape: {shape} ====");
@@ -7169,24 +8334,35 @@ mod tests {
                             "[CPE-1958] {name}: {destroyed} destroyed / {trials} trials ({planted} \
                              trials started hard-linked, {oks} writes reported Ok)"
                         );
-                        if harness_plants {
-                            measured.push((name, destroyed, planted));
-                        }
+                        measured.push((harness_plants, name, destroyed, planted));
                     }
                 }
             }
         }
-        let control = measured[0].1;
-        assert!(
-            control > 0,
-            "SENSITIVITY CONTROL FAILED: the unguarded writer destroyed nothing in {trials} trials, so \
-             every other arm's zero is worthless. Raise CPE_1958_TRIALS or fix the racer — do not read \
-             this run as evidence of safety."
-        );
-        assert_eq!(
-            measured[2].1, 0,
-            "overwrite_confirmed_no_follow wrote into a file outside the destination's folder"
-        );
+        for plants in [false, true] {
+            let shape = if plants { "harness plants each trial" } else { "attacker owns both halves" };
+            let rows: Vec<&(bool, &str, u64, u64)> =
+                measured.iter().filter(|r| r.0 == plants).collect();
+            assert_eq!(
+                rows.len(),
+                arms.len(),
+                "shape \"{shape}\" did not run every arm, so neither its control nor its zero means \
+                 anything"
+            );
+            assert!(
+                rows[0].2 > 0,
+                "SENSITIVITY CONTROL FAILED for shape \"{shape}\": the unguarded writer destroyed \
+                 nothing in {trials} trials, so every other arm's zero in this shape is worthless. \
+                 Raise CPE_1958_TRIALS, or move to a real local filesystem — a WSL drvfs mount \
+                 (`/mnt/z` and friends, no `metadata` option) measured 1–2 per 1,000 here and is not a \
+                 valid target for this racer. Do not read this run as evidence of safety."
+            );
+            assert_eq!(
+                rows[2].2, 0,
+                "overwrite_confirmed_no_follow wrote into a file outside the destination's folder, in \
+                 racer shape \"{shape}\""
+            );
+        }
     }
 
     /// **The leg where CPE-1716's loss was measured**: a *live* symlink to a real file. Pre-fix the rename

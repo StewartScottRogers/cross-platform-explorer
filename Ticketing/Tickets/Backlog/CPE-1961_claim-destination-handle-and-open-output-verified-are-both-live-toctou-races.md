@@ -53,9 +53,12 @@ never had another name.* That does not transfer directly here:
       **both** platforms. Report destroyed/trials and swap counts.
 - [ ] **Keep the sensitivity control**, and heed #1070's harness lesson: **when the fix changes the
       timing, re-validate the harness before trusting the number.** Its fix made the original attacker
-      land 2,825 hard links where it landed ~250, which would have let a *narrowed* window read as a
-      *closed* one. It solved that with a **planted** shape where the harness plants the link and the
-      attacker only unlinks — use it.
+      land far more hard links than before, which would have let a *narrowed* window read as a *closed*
+      one. It solved that with a **planted** shape — the harness plants the link on the main thread
+      immediately before each trial and *counts* whether it was in place — use it. **Note the
+      correction #1070 round 2 made to its own description:** the attacker thread does NOT stop
+      re-linking in the planted shape. It cycles `hard_link`/`remove_file` in both shapes; there is no
+      `harness_plants` branch in its body. What `harness_plants` adds is the second, counted planter.
 - [ ] Decide the containment shape for `claim_destination_handle`. If it needs `renameat` /
       handle-relative rename in `open_beneath`, **that is the ticket**, and it also unblocks
       `copilot::apply_op` — say so, and check what `backup::landed_inside` needs from the identity.
@@ -79,3 +82,33 @@ Family: **CPE-1958** (the fixed site, PR #1070 — and the ticket this corrects)
 **CPE-1913** / **CPE-1937** (the containment work), **CPE-1929** (shadowed guards — the shape
 `batch_media`'s Windows shield belongs to), **CPE-1957** (`vault_manager`, same guard family),
 **CPE-1959** (the reparse-point doctrine split).
+
+
+## Independent corroboration of the `copy_file_onto_no_follow` figures (2026-08-27, PR #1070 round 2)
+
+Arm **E** (`fsutil::copy_file_onto_no_follow` → `claim_destination_handle`) has now been measured by
+**three** separate runs on the *fixed* CPE-1958 branch, by three people who were not sharing a harness
+run. Recorded here because a single racer's number is the weakest kind of evidence this family accepts,
+and these agree:
+
+| source | Windows (planted shape) | Linux (planted shape) |
+|---|---|---|
+| PR #1070 round-1 worker | 167 / 2,000 | 54 / 1,000 |
+| PR #1070 round-2 **Reviewer**, independent run | **51 / 1,000** | **55 / 1,000** |
+| PR #1070 round-2 worker, re-taken on the MERGED state | **149 / 2,000** (710 planted) | **107 / 10,000** (9,658 planted) |
+
+So `claim_destination_handle` is live on both platforms in every run anyone has taken. The *rate* moves a
+lot with how the harness's timing falls — roughly 1 to 8 destroyed per 100 trials — so **do not read the
+spread as instability in the defect**; read it as the reason to re-take rather than quote. Arm D
+(`batch_media::open_output_verified`) re-measured at 1/2,000 Windows and 97/10,000 Linux in the same
+runs, so **E is still the higher-rate of the two and the one to fix first**.
+
+## Related: the OTHER half of the rename, now filed as CPE-1963
+
+While re-measuring, #1070 round 2 found and filed **CPE-1963**: `stage_and_replace_at`'s commit names
+its *source* by path (`*.cpe-tmp`, enumerable, in an attacker-writable folder), so the commit itself can
+be aliased onto a file outside the root — 2,834/3,000 on Linux ext4, 6/3,000 on Windows, with the
+victim's content never changed. **It needs the same missing primitive this ticket names**: one
+handle-relative `renameat` in `open_beneath` would unblock CPE-1963, this ticket's
+`claim_destination_handle` arm, and `copilot::apply_op`. Whoever picks up either should read the other
+first and consider doing the primitive once.

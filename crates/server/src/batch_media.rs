@@ -1965,7 +1965,7 @@ const O_NOFOLLOW: i32 = 0;
 /// `FILE_FLAG_OPEN_REPARSE_POINT` — the same flag [`probe_no_follow`] passes, so the writer and the probe
 /// address objects the same way.
 #[cfg(windows)]
-const FILE_FLAG_OPEN_REPARSE_POINT_U32: u32 = 0x0020_0000;
+pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT_U32: u32 = 0x0020_0000;
 
 /// Open `output` for writing and verify **on the resulting handle** that writing through it stays inside
 /// `input`'s own folder. See [`VerifiedOutput`] for why this replaced the path-based re-check.
