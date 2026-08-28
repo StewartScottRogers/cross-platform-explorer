@@ -875,6 +875,100 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.className).toBe(AMBER);
     });
 
+    // CPE-1939: the two MIXED-SUCCESS publishes — one genuine upgrade landing alongside a
+    // rejection. Until this ticket the chain led with `applied > 0`, so both of these rendered a
+    // green "Updated 1 agent." and the rejection was never mentioned at all: the CPE-1924 defect
+    // displaced from the ==/< split into the success branch. The rule the launcher now follows
+    // (recorded at the site, above `refreshCatalog`) is CPE-1924's — the worse news wins the
+    // branch — with the success count carried inside that same sentence so it isn't erased either.
+    //
+    // Red-proof, run on Windows 11 (`npx vitest run src/lib/ai-console-launcher.test.ts`, 87 tests
+    // in this file): collapsing the branch order — moving the `applied > 0` branch back to the head
+    // of the chain — leaves 85 passing and reds exactly these two. Both fail on the FIRST assertion
+    // (the rejection wording), i.e. on the masking itself, not on an incidental count. The other
+    // two sabotages and their counts are recorded at the site, above `refreshCatalog` in
+    // sidecar/ai-console/src/launcher.html.
+    it("a mixed publish — one agent updated, one entry regressed — still reports the regression, and says what did update", async () => {
+      const { w, fetchMock } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: true,
+              applied: 1,
+              agents: 1,
+              alreadyCurrent: 3,
+              regressedRejected: 1,
+              integrityRejected: 0,
+            }
+          : {},
+      );
+      const before = fetchMock.mock.calls.filter((c: any[]) => c[0] === "/api/catalog").length;
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      // The whole point: the success count must not swallow the regression.
+      expect(msg.textContent).toMatch(/gone backwards/i);
+      expect(msg.textContent).not.toBe("Updated 1 agent.");
+      // …and the regression must not swallow the success: the user's agent list really did change.
+      expect(msg.textContent).toMatch(/1 other agent was updated normally/i);
+      // The denominator counts every entry the index carried — 1 applied + 3 current + 1 regressed.
+      expect(msg.textContent).toMatch(/1 of the 5 published agent entries is older than the version you already have/i);
+      expect(msg.textContent).not.toMatch(/1 of the 4 /); // the pre-CPE-1939 sum, missing `applied`
+      expect(msg.textContent).not.toMatch(/agents are unchanged/i); // false here — one of them changed
+      expect(msg.textContent).toMatch(/nothing to do on your end/i);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(GREEN);
+      // Re-rendering the agent list is a fact about `applied`, not about which message won, so the
+      // catalog is re-fetched even though the amber branch is the one that rendered.
+      const after = fetchMock.mock.calls.filter((c: any[]) => c[0] === "/api/catalog").length;
+      expect(after).toBe(before + 1);
+    });
+
+    it("a mixed publish — agents updated, one entry mis-signed — still reports the integrity rejection", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: true,
+              applied: 2,
+              agents: 2,
+              alreadyCurrent: 0,
+              regressedRejected: 0,
+              integrityRejected: 1,
+            }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      // A rejected signature is the one outcome that must never hide behind a success count.
+      expect(msg.textContent).toMatch(/corrupted or mis-signed/i);
+      expect(msg.textContent).not.toBe("Updated 2 agents.");
+      expect(msg.textContent).toMatch(/1 of the published agent entries is corrupted or mis-signed/i);
+      expect(msg.textContent).toMatch(/2 other agents were updated normally/i);
+      // "nothing was installed" is the applied:0 wording and would be false here.
+      expect(msg.textContent).not.toMatch(/nothing was installed/i);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(GREEN);
+    });
+
+    // The unmixed success is unchanged by CPE-1939 and still reads as a plain green success — the
+    // reorder must not have made every apply sound like a problem.
+    it("a clean publish with nothing rejected still reports a plain success, in green", async () => {
+      const { w } = await mountLauncher((path) =>
+        path === "/api/catalog/refresh"
+          ? {
+              indexOk: true,
+              applied: 2,
+              agents: 2,
+              alreadyCurrent: 1,
+              regressedRejected: 0,
+              integrityRejected: 0,
+            }
+          : {},
+      );
+      await w.refreshCatalog();
+      const msg = w.document.getElementById("msg");
+      expect(msg.textContent).toBe("Updated 2 agents.");
+      expect(msg.className).toBe(GREEN);
+    });
+
     // CPE-1911 review round 2 (F1): the index can verify fine while every LISTED entry fails its
     // own integrity check (bad/missing signature, content mismatch) — a corrupt/mis-signed publish,
     // not an anti-rollback rejection. Pre-fix this fell through every branch straight to "up to

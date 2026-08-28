@@ -179,6 +179,15 @@ impl VersionStanding {
     /// empirically — its sabotage C left every behavioural probe green). [`Self::refusal`] is the
     /// rule that is actually enforced; this is a derived predicate, kept in step with it by
     /// `refusal_and_is_upgrade_agree_on_what_is_applyable`.
+    ///
+    /// **DO NOT DELETE THIS AS DEAD CODE (CPE-1939).** It has zero production callers — trust flows
+    /// entirely through [`Self::refusal`] — so a dead-code sweep will read it as removable, and its
+    /// only caller is that test plus [`CatalogEntry::is_upgrade_over`], which is in the same
+    /// position. That test is not incidental coverage: it is the invariant protecting the whole
+    /// design, asserting that `refusal().is_none()` and `is_upgrade()` name the SAME single
+    /// applyable variant. Deleting either function deletes the invariant, and what it guards against
+    /// is a future edit that widens one side (say, letting `Same` apply) without the other — the
+    /// exact split CPE-1924 introduced the risk of. Keep both.
     pub fn is_upgrade(self) -> bool {
         matches!(self, VersionStanding::Newer)
     }
@@ -217,6 +226,10 @@ impl CatalogEntry {
     /// [`VersionStanding::is_upgrade`] it is a **derived predicate, not the enforcement point** —
     /// the gating path goes through [`VersionStanding::refusal`]. Derived from
     /// [`Self::version_standing`] — never a second, independent comparison.
+    ///
+    /// **DO NOT DELETE THIS AS DEAD CODE (CPE-1939)** — zero production callers, kept alive by
+    /// `refusal_and_is_upgrade_agree_on_what_is_applyable`. See [`VersionStanding::is_upgrade`] for
+    /// why that test is the invariant and not incidental coverage.
     pub fn is_upgrade_over(&self, installed: Option<u64>) -> bool {
         self.version_standing(installed).is_upgrade()
     }
@@ -922,6 +935,11 @@ mod tests {
     /// The security-critical invariant of the split: the *reason* map and the *trust* rule are two
     /// views of one comparison and can never disagree. `refusal()` returns `None` exactly for the
     /// standings `is_upgrade()` calls applyable — i.e. only `Newer`.
+    ///
+    /// CPE-1939: this test is also the ONLY thing keeping `VersionStanding::is_upgrade` and
+    /// `CatalogEntry::is_upgrade_over` alive — both have zero production callers. It is not
+    /// incidental coverage of a leftover helper; deleting either function to satisfy a dead-code
+    /// sweep deletes the invariant with it. See the note on `VersionStanding::is_upgrade`.
     #[test]
     fn refusal_and_is_upgrade_agree_on_what_is_applyable() {
         for standing in [VersionStanding::Newer, VersionStanding::Same, VersionStanding::Older] {

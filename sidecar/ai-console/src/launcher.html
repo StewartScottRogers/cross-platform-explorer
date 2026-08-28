@@ -1954,15 +1954,64 @@ async function relaunch(s) {
 // below are real "heads up" moments — their existing agents are untouched and safe to use, but
 // something about the *pipeline* needs a look — so they render in the neutral "warn" colour, not
 // the same red as an actionable error (review round 2).
+//
+// BRANCH ORDER — the worse news wins, and the decision is recorded here rather than only in a PR
+// body (CPE-1939). One publish can produce several outcomes at once: `applied`, `alreadyCurrent`,
+// `regressedRejected` and `integrityRejected` are independent per-entry counts off the same
+// response, and only one message is rendered. Until CPE-1939 the chain led with `applied > 0`, so
+// a publish carrying one genuine upgrade plus one regressed (or mis-signed) entry reported
+// "Updated 1 agent." and never mentioned the rejection — the exact defect CPE-1924 was filed to
+// fix, displaced from the ==/< split into the success branch.
+//
+// Two options were weighed. (1) "One line that mentions both", chosen for the *rejection* branches
+// only. (2) "The worse news wins" — which is what CPE-1924 already chose when it put
+// `regressedRejected` ahead of `alreadyCurrent`, and staying consistent with a decision already
+// taken one branch over is worth more than a marginally different sentence. So: the two rejection
+// branches are checked BEFORE `applied > 0` (a rejected signature is the one outcome that must
+// never be swallowed behind a success count), and because a success count must not be erased
+// either — the agent list really did change under the user — each of those two branches names how
+// many agents did update when `applied > 0`. The alarming half leads; the reassuring half is
+// carried in the same sentence rather than winning the branch.
+//
+// `load()` is hoisted out of the success branch for the same reason: whether the agent list is
+// re-rendered is a fact about `applied`, not about which message won.
+//
+// Moving `applied > 0` off the head also puts it below `versionMapUnreadable` / `error` /
+// `offline`. That is not observable today and is not the point of the change: every producer of
+// those three reports `applied` as 0 (the Tauri command returns `"applied": []` from both early
+// exits; the console reports the host's count, which is 0 when the fetch never produced a usable
+// catalog). It is stated rather than relied on — if a partial-apply-plus-error shape is ever
+// added, this chain will report the error, which is the same worse-news-wins rule.
+//
+// CPE-1929 sabotages, run by hand on Windows 11 with
+// `npx vitest run src/lib/ai-console-launcher.test.ts` — 87 tests in that file, all green as
+// shipped. Three runs, three different answers, which is the point of running them:
+//
+//   A. DISABLE the reorder — put `applied > 0` back at the head of the chain: 85 passed, 2 failed,
+//      and the two are exactly the mixed-publish cases added by this ticket, each failing on its
+//      FIRST assertion (`expected 'Updated 1 agent.' to match /gone backwards/i`, and
+//      `expected 'Updated 2 agents.' to match /corrupted or mis-signed/i`) — i.e. on the masking
+//      itself, not on an incidental count. The reorder is reachable and pinned.
+//   B. FORCE the moved predicate to lie — `r.indexOk && (true || r.integrityRejected > 0)`:
+//      81 passed, 6 failed. Every case that should have reached a later branch now takes the
+//      integrity message. Loud, so nothing downstream of it is dead.
+//   C. DROP the `r.indexOk &&` conjunct from BOTH rejection branches — `(true || r.indexOk) && …`:
+//      87 passed, 0 failed. That conjunct is SHADOWED, and is kept anyway, deliberately. Nothing
+//      shadows it inside this chain; the producer does. No response can carry a nonzero rejection
+//      count with `indexOk:false` — the Tauri command's `VerifiedIndex::open` early return and its
+//      `versionMapUnreadable` exit both hard-code all three counts to 0, and the host only counts
+//      rejections off entries an opened index named. So the conjunct is a statement of the
+//      precondition those counts are meaningful under, not coverage. A green sabotage on it is
+//      expected; do not read C as evidence that A and B are green too.
 async function refreshCatalog() {
   closeManageMenu();
   setMsg("Checking for agent updates…", true);
   try {
     const r = await api("/api/catalog/refresh", { method: "POST" });
-    if (r.applied > 0) {
-      await load(); // re-render the agent list with the newly-applied manifests
-      setMsg("Updated " + r.applied + " agent" + (r.applied === 1 ? "" : "s") + ".", true);
-    } else if (r.versionMapUnreadable) {
+    // Re-render the agent list with the newly-applied manifests whenever anything actually landed,
+    // independently of which message wins below.
+    if (r.applied > 0) await load();
+    if (r.versionMapUnreadable) {
       // CPE-1940: the LOCAL record of installed versions is damaged, so anti-rollback had no
       // baseline and the host refused the whole apply (fail-closed — an empty baseline would make
       // every entry look like a first install and happily reinstall ancient agents). Checked before
@@ -1981,29 +2030,56 @@ async function refreshCatalog() {
     } else if (r.offline) {
       setMsg("You're offline, so agent updates weren't checked. Nothing changed.", "warn");
     } else if (r.indexOk && r.integrityRejected > 0) {
-      // The index verified fine, but every listed entry failed its OWN integrity check (bad/missing
-      // manifest signature, or content that doesn't match the index) — a corrupt or mis-signed
-      // publish, not "nothing to apply".
-      setMsg("The published catalog looks corrupted or mis-signed, so nothing was installed. Your existing agents are untouched and safe to use — no action needed on your end.", "warn");
+      // The index verified fine, but at least one listed entry failed its OWN integrity check
+      // (bad/missing manifest signature, or content that doesn't match the index) — a corrupt or
+      // mis-signed publish, not "nothing to apply".
+      //
+      // CPE-1939 moved this ahead of the `applied > 0` success branch: a rejected signature is the
+      // one outcome that must always be visible, and it used to be masked whenever the same publish
+      // also carried a single good upgrade. Which means "nothing was installed" is no longer
+      // unconditionally true here, so the mixed case gets its own sentence rather than a lie in the
+      // other direction.
+      const badI = r.integrityRejected;
+      const okI = r.applied || 0;
+      if (okI === 0) {
+        setMsg("The published catalog looks corrupted or mis-signed, so nothing was installed. Your existing agents are untouched and safe to use — no action needed on your end.", "warn");
+      } else {
+        setMsg("Heads up: " + badI + " of the published agent " + (badI === 1 ? "entries is" : "entries are") + " corrupted or mis-signed, so " + (badI === 1 ? "it wasn't" : "they weren't") + " installed — " + okI + " other agent" + (okI === 1 ? " was" : "s were") + " updated normally. Your agents are safe to use and there's nothing to do on your end; the publishing side is what needs a look.", "warn");
+      }
     } else if (r.indexOk && r.regressedRejected > 0) {
       // CPE-1924: the published catalog names an entry OLDER than the one already installed — the
-      // index has gone backwards. Anti-rollback refused it (nothing was installed, existing agents
-      // untouched), and unlike the "==" branch below this really does mean something upstream
-      // regressed, so it's the one version-rejection worth a heads-up. Checked BEFORE the
-      // already-current branch: if a mixed publish produces both, the regression is what matters.
+      // index has gone backwards. Anti-rollback refused those entries, and unlike the "==" branch
+      // below this really does mean something upstream regressed, so it's the one version-rejection
+      // worth a heads-up. Checked BEFORE the already-current branch: if a mixed publish produces
+      // both, the regression is what matters — and, since CPE-1939, before the `applied > 0`
+      // success branch for the same reason.
       //
       // UAT: leading with the regression is right, but it must be SCOPED — with 1 regressed entry
       // out of 4, an unqualified "the catalog has gone backwards" over-claims a wholesale
-      // regression. The counts are already in the payload, so say how many. `applied` is 0 in this
-      // branch (a nonzero one returns above), so the entries we know the index carried are the
-      // rejection buckets. `integrityRejected` is 0 whenever we reach here (its branch is checked
-      // first) — it's in the sum so the count stays right if that ordering ever changes.
+      // regression. The counts are already in the payload, so say how many.
+      //
+      // CPE-1939: `applied` is no longer 0 here (this branch now wins over the success branch), so
+      // it joins the denominator — otherwise a publish of 1 applied + 3 current + 1 regressed would
+      // claim "1 of the 4" and quietly lose an entry — and the sentence says how many agents did
+      // update, so leading with the bad news doesn't erase the good. `integrityRejected` is 0
+      // whenever we reach here (its branch is checked first); it's in the sum so the count stays
+      // right if that ordering ever changes.
       const bad = r.regressedRejected;
-      const seen = (r.alreadyCurrent || 0) + bad + (r.integrityRejected || 0);
+      const ok = r.applied || 0;
+      const seen = ok + (r.alreadyCurrent || 0) + bad + (r.integrityRejected || 0);
       const scope = bad === 1
         ? "1 of the " + seen + " published agent entries is older than the version you already have, so it wasn't installed"
         : bad + " of the " + seen + " published agent entries are older than the versions you already have, so they weren't installed";
-      setMsg("Heads up: the published agent catalog has gone backwards — " + scope + ". Your agents are unchanged and safe to use, and there's nothing to do on your end; the publishing side is what needs a look, and this clears itself once a newer catalog is published.", "warn");
+      const rest = ok === 0
+        ? " Your agents are unchanged and safe to use, and there's nothing to do on your end;"
+        : " " + ok + " other agent" + (ok === 1 ? " was" : "s were") + " updated normally, so your agents are safe to use and there's nothing to do on your end;";
+      setMsg("Heads up: the published agent catalog has gone backwards — " + scope + "." + rest + " the publishing side is what needs a look, and this clears itself once a newer catalog is published.", "warn");
+    } else if (r.applied > 0) {
+      // The plain, happy outcome: something newer landed and nothing was rejected. CPE-1939 moved
+      // this DOWN from the head of the chain (see the branch-order note above this function) — it
+      // is reached only once the two rejection branches have declined, so "Updated N agents." is
+      // now the whole truth whenever it renders. `load()` already ran above.
+      setMsg("Updated " + r.applied + " agent" + (r.applied === 1 ? "" : "s") + ".", true);
     } else if (r.indexOk && r.alreadyCurrent > 0) {
       // CPE-1924: every listed entry names EXACTLY the version already installed. This is the
       // routine, healthy outcome of checking again between releases — under the release pipeline's
