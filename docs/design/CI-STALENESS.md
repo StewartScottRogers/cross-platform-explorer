@@ -205,8 +205,10 @@ round 3 the classifier compared the key to `"pull_request"` exactly and a `pull_
 workflow dropped out of the required set with no trace at all — a bare `coverage=ok`. There is no such
 workflow in this repo today, and that too is asserted by the same test rather than written down here.
 
-The event list is a literal pair, so it is also the classifier's one standing blind spot: a *third*
-PR-scoped event classifies as "not PR-triggered" and drops its workflow out of the required set.
+The event list is a literal pair, so it is one of the classifier's standing blind spots — **not "the
+one"**, which is what this line said through rounds 3 and 4 while each of rounds 3, 4 and 5 added a
+shape to the list in `readOnBlock`'s header. A *third* PR-scoped event classifies as "not
+PR-triggered" and drops its workflow out of the required set.
 **Round 4 corrected what that blind spot costs.** The earlier text here said "only that `toEqual`
 would notice" — it would not. `prTriggered` is a *filter*, so a workflow classified `other` is
 **removed** from the array and `toEqual(["ci.yml","gui-smoke.yml"])` still holds; it can only red on
@@ -223,6 +225,30 @@ entirely (`merge_group`), and any workflow whose `on:` block reads `unknown`, wh
 events to check. `pull_request_review` and `pull_request_review_comment` are excluded from
 `PR_EVENTS` **by decision, not omission** — they fire on a review, not on `opened`/`synchronize`, so
 requiring their checks would refuse every PR nobody has reviewed yet.
+
+**Round 5: that "still uncovered" pair was a closed list, and there was a third member — the
+fail-open kind.** A YAML flow collection may span lines, and the scanner captures only the remainder
+of the `on:` *line*, so on the legal `on: [push,` / `  pull_request]` the continuation was invisible
+to both the classifier and the parsed `events`. It answered a confident `false`, and end to end — a
+board carrying every real `ci.yml` check and a `security.yml` spelled that way — it returned
+`{"state":"ok", …, "detail":"every job \`main\` requires from ci.yml produced a check here"}`: round
+3's `pull_request_target` defect character for character, detail string included. `readOnBlock` now
+refuses an unbalanced `[`/`{` on the `on:` line and answers `unknown`, which `coverageOf` blocks on
+by name. **Read the list above as "at least these", the way `readOnBlock`'s header says and this
+paragraph's predecessor did not** — a sub-list under an "at least these" heading does not inherit the
+hedge, and this one was read as complete for a round.
+
+**And it is the honest answer to "why not just grep for `pull_request`".** A raw grep sees the whole
+file, so it reads a continuation line and would have caught round 5's finding the day round 4 landed;
+what it cannot do is tell a trigger from a comment, and `ci.yml`'s `on:` block carries ~60 lines of
+commentary. All five comment positions naming a PR-ish event inside `on:` (column 0, indented,
+trailing on a block key, trailing on the `on:` line, trailing after a flow seq) red a grep and are
+correctly ignored by the parse; the continuation line is the reverse. **Neither instrument dominates
+— they have complementary holes**, and the round-4 write-up framed the parse as simply the better
+choice without saying what it gave up, which is this ticket's own shape: an instrument narrower than
+the confidence placed in it. When you replace one mechanism with another, say what the old one caught
+that the new one does not. Both directions are asserted in `ciPollFailClosed.test.ts` →
+*"a multi-line flow `on:` was a confident `false`…"* rather than argued here.
 
 **What is actually true and worth knowing before you click:**
 

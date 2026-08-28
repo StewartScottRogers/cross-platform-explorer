@@ -669,7 +669,10 @@ export function readWorkflowSources(dir) {
 
 /**
  * The PR-scoped GitHub event names, as a named literal rather than a condition buried in a loop —
- * because this list is the one standing blind spot of the classifier and the header points at it.
+ * because this list is a standing blind spot of the classifier and the header points at it. NOT "the
+ * one": rounds 3, 4 and 5 each added a shape to that header list, so a count here would have been
+ * wrong three times, and a count in a file whose own list says "AT LEAST THESE" reads as a closing
+ * inventory of something explicitly left open.
  *
  * BOTH of these run on a pull request and BOTH land their check runs on the PR's rollup, which is the
  * only property `coverageOf` cares about. `pull_request_target` differs from `pull_request` in what it
@@ -747,10 +750,17 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  *     So the guard is now the name-shaped one it always claimed to be: `readOnBlock` returns the
  *     `events` it parsed, and `ciPollFailClosed.test.ts` reds on any parsed `on:` event matching
  *     `/^pull_request[_a-z0-9]*$/` that is NOT in `PR_EVENTS` — so `pull_request_v2` reds on the day
- *     it lands, by shape rather than by anyone having heard of it. What still gets through: a
- *     PR-scoped event GitHub names something else entirely (`merge_group` is the live example — it
- *     runs on a merge queue, not a PR, and is deliberately not in `PR_EVENTS`), and any workflow
- *     whose `on:` block answers `unknown`, since an unread block yields no `events` to check.
+ *     it lands, by shape rather than by anyone having heard of it. What still gets through — AT LEAST
+ *     THESE, inheriting the list header above rather than reading as a closed pair, which is exactly
+ *     how round 4 wrote it and exactly what round 5 then found a third member of: a PR-scoped event
+ *     GitHub names something else entirely (`merge_group` is the live example — it runs on a merge
+ *     queue, not a PR, and is deliberately not in `PR_EVENTS`); any workflow whose `on:` block answers
+ *     `unknown`, since an unread block yields no `events` to check; and — ROUND 5 — an event on the
+ *     CONTINUATION LINE of a multi-line flow collection, which was invisible to `events` because the
+ *     scanner only ever read the `on:` line itself. That third one was the FAIL-OPEN kind while the
+ *     other two are fail-closed, and the refusal above now moves it into the second category rather
+ *     than leaving it as a silent `false`. The lesson is the list's, not the item's: a sub-list under
+ *     an "at least these" heading does not inherit the hedge, and this one was read as complete.
  *   • FLOW MAPPING. `on: {pull_request: {paths: ['src/**']}}` is legal and DOES carry a path filter;
  *     the inline branch reports `prPathFiltered: false` for it (measured). That over-blocks — such a
  *     workflow's silence is called unjudged rather than excused — so there is no exposure, but see the
@@ -760,22 +770,53 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  *     still not understanding — a workflow written that way stops the poll rather than being read.
  *     GitHub Actions itself rejects anchors, so this is effectively unreachable.
  *   • BLOCK SCALARS. `on: >` is not understood; `unknown`.
+ *   • MULTI-LINE FLOW COLLECTIONS (ROUND 5). `on: [push,\n  pull_request]` is legal, and only the
+ *     `on:` LINE is captured, so the continuation is not read. Until round 5 that was a confident
+ *     `false` — `trigger=other`, `events=["push"]`, the `pull_request` never seen — and end to end it
+ *     reproduced round 3's `pull_request_target` defect exactly, `detail` string included. It now
+ *     answers `unknown`, which is fail-closed but again not understanding: the workflow stops the poll
+ *     rather than being read. A real flow parser would read it; that is the fix if one ever lands here.
  * Every example named above was RUN, not reasoned about, and the answers are the ones written next to
  * them — round 2's list claimed two shapes landed in `unknown` and one of them landed in `false`.
  *
+ * WHY NOT JUST GREP THE SOURCE FOR `pull_request`, WHICH IS WHAT THE BRIEF ASKED FOR — and what the
+ * parse gave up to answer it. A raw grep sees the whole file, so it reads a continuation line, and it
+ * would have caught round 5's finding on the day round 4 landed. What it cannot do is tell a trigger
+ * from a comment: `ci.yml`'s `on:` block carries ~60 lines of commentary, and all five comment
+ * positions naming `pull_request_review` inside `on:` (column 0, indented, trailing on a block key,
+ * trailing on the `on:` line, trailing after a flow seq) red a grep and are correctly ignored here.
+ * NEITHER INSTRUMENT DOMINATES; they have complementary holes, and swapping one for the other traded
+ * a false-positive class for a false-negative class rather than strictly improving. Round 4's
+ * write-up framed the parse as simply the better choice and did not say what it gave up — which is
+ * the shape this whole ticket is about, an instrument narrower than the confidence placed in it. So:
+ * WHEN YOU REPLACE ONE MECHANISM WITH ANOTHER, STATE WHAT THE OLD ONE CAUGHT THAT THE NEW ONE DOES
+ * NOT. The refusal above is the parse buying that case back by refusing to answer, not by reading it.
+ *
  * RED-PROOFED (CLAUDE.md rule 3), result written here rather than only in the PR body: dropping
  * `isComment` from the block-body loop below reds `a column-0 comment inside \`on:\` no longer deletes
- * the workflow from the required set` AND `every real workflow in this repo still classifies …` —
- * **2 failed / 10 passed / 63 skipped** under `-t "fails CLOSED"`. RE-MEASURED IN ROUND 3, because
- * round 2 wrote `1 failed / 5 passed / 64 skipped` here and the describe has since grown from 70 tests
- * to 75: a red-proof's counts go stale the moment tests are added beside it, so re-run rather than
- * copy one forward.
+ * the workflow from the required set`, `every real workflow in this repo still classifies …` AND (new
+ * in round 5) `a multi-line flow \`on:\` was a confident \`false\` …`, whose five comment positions
+ * include a column-0 one — **3 failed / 10 passed / 63 skipped** under `-t "fails CLOSED"`.
+ * RE-MEASURED IN ROUNDS 3, 4 AND 5: round 2 wrote `1 failed / 5 passed / 64 skipped` here, round 3
+ * `2 failed / 10 passed`, and the describe has grown 70 → 75 → 76. A red-proof's counts go stale the
+ * moment tests are added beside it, so re-run rather than copy one forward.
  *
- * ROUND 3'S OWN RED-PROOFS, all five run against `-t "fails CLOSED"` (75 tests, 63 skipped by the
- * filter), each number measured rather than predicted. RE-RUN IN ROUND 4 on this revision, because
- * round 4 edited test bodies inside that describe and a red-proof measured on a different revision is
- * exactly the stale-count trap the paragraph above warns about — all five numbers came back the same:
- *   • `PR_EVENTS` back to `["pull_request"]` → **4 failed / 8 passed**: `classifies
+ * ROUND 3'S OWN RED-PROOFS, all five run against `-t "fails CLOSED"`, each number measured rather
+ * than predicted. RE-RUN IN ROUND 4, and AGAIN IN ROUND 5 — round 5 added one `it` to this describe,
+ * so the filter now selects **13 of 76** (63 skipped) and every `passed` below moved by one even
+ * where nothing about the sabotage changed. That is the stale-count trap the paragraph above warns
+ * about, arriving on schedule for the third round running. THE FAILED SETS ARE THE CLAIM; the passed
+ * counts are bookkeeping.
+ *
+ * AND ONE OF THE FIVE CAME BACK GREEN THE FIRST TIME ROUND 5 RAN IT — 13 passed, 0 failed — which
+ * looked like a lost red-proof and was a broken harness: a scripted `replace` of the bare string
+ * `prAts.every(filtered)` hits ITS OWN ENTRY IN THIS LIST, four lines below, before it reaches the
+ * code. CLAUDE.md rule 2 ("anchor on code, never on prose") applies to the SABOTAGE as much as to the
+ * scanner, and the failure is silent in the safe-looking direction: a green run reads as "the test
+ * does not cover this" when the truth is "the test was never given anything to notice". Anchored on
+ * `prPathFiltered: prAts.every(filtered)` it reds as it always did. If you automate these, assert the
+ * patched file DIFFERS FROM THE ORIGINAL IN CODE, not merely that the string was found.
+ *   • `PR_EVENTS` back to `["pull_request"]` → **4 failed / 9 passed**: `classifies
  *     \`pull_request_target\` …`, `the PR-event list is a literal pair …`, `\`prPathFiltered\` needs
  *     EVERY PR trigger filtered …`, `a \`#\` inside a quoted scalar …`. Note `every real workflow in
  *     this repo still classifies …` stays GREEN — this repo has no `pull_request_target` workflow, so
@@ -783,27 +824,46 @@ export const PR_EVENTS = ["pull_request", "pull_request_target"];
  *     round 4 and still green, which is the SAME fact as round 4's finding above: an enumeration built
  *     on a filtered list cannot red on an event the filter decided to ignore. Round 3 wrote that fact
  *     correctly here and its opposite two lines up in the blind-spot bullet.
- *   • `splitInlineComment` back to `s.replace(/(^|\s)#.*$/, "$1")` → **2 failed / 10 passed**:
- *     `a \`#\` inside a quoted scalar …` and `an unclassifiable \`on:\` is \`null\` …`.
- *   • the block-body key read off the raw line instead of `split.rest` → **1 failed / 11 passed**:
+ *   • `splitInlineComment` back to `s.replace(/(^|\s)#.*$/, "$1")` → **3 failed / 10 passed** (2 in
+ *     round 4): `a \`#\` inside a quoted scalar …`, `an unclassifiable \`on:\` is \`null\` …`, and now
+ *     `a multi-line flow \`on:\` was a confident \`false\` …`. The THIRD is not a new property of that
+ *     regex — this sabotage replaces the whole function, and round 5 moved the bracket-depth count
+ *     INTO its loop, so it now disables two mechanisms at once. Said here rather than left to read as
+ *     the comment stripper having grown reach it does not have.
+ *   • the block-body key read off the raw line instead of `split.rest` → **1 failed / 12 passed**:
  *     `reads the legal spellings that used to answer \`false\` …`.
- *   • `prAts.every(filtered)` back to `filtered(prAts[0])` → **1 failed / 11 passed**:
- *     `\`prPathFiltered\` needs EVERY PR trigger filtered …`.
- *   • the anchor refusal disabled (`if (false && …)`) → **1 failed / 11 passed**:
+ *   • `prAts.every(filtered)` back to `filtered(prAts[0])` → **1 failed / 12 passed**:
+ *     `\`prPathFiltered\` needs EVERY PR trigger filtered …`. (This is the one whose scripted form
+ *     patched a comment; see above.)
+ *   • the anchor refusal disabled (`if (false && …)`) → **1 failed / 12 passed**:
  *     `an unclassifiable \`on:\` is \`null\` …`.
  *
  * ROUND 4'S OWN RED-PROOFS, same filter, same 63 skipped — both target the new `events` field, and
  * both land on `every real workflow in this repo still classifies …`, the test round 3 correctly said
  * `PR_EVENTS` alone could not red:
- *   • `events.push(key[2])` suppressed (`if (false) events.push(…)`) → **1 failed / 11 passed**. This
+ *   • `events.push(key[2])` suppressed (`if (false) events.push(…)`) → **1 failed / 12 passed**. This
  *     is the one that matters: an `events` that silently came back `[]` would leave the
  *     unknown-PR-event assertion green forever, so the test carries an inline POSITIVE CONTROL over
  *     the real files plus a hypothetical `pull_request_v2` workflow rather than trusting an empty
  *     `toEqual([])`.
  *   • the shape check narrowed back to round 3's literal (`/^pull_request_target$/`) →
- *     **1 failed / 11 passed**, `expected [] to deeply equal [ 'future.yml: pull_request_v2' ]`. The
+ *     **1 failed / 12 passed**, `expected [] to deeply equal [ 'future.yml: pull_request_v2' ]`. The
  *     generalisation is load-bearing, not decoration: revert it and the case the blind-spot bullet is
  *     about goes silent again.
+ *
+ * ROUND 5'S OWN RED-PROOFS, same filter, same 63 skipped — and this is also the CPE-1929 SABOTAGE PAIR
+ * for the new refusal, run rather than reasoned about. Disabling it is NOT green, so it is reachable
+ * and not shadowed by the block-scalar or anchor checks in front of it:
+ *   • the flow-depth refusal disabled (`if (false && inlineDepth !== 0)`) → **2 failed / 11 passed**:
+ *     `a multi-line flow \`on:\` was a confident \`false\` …` and `an unclassifiable \`on:\` is
+ *     \`null\` …`.
+ *   • the predicate made to lie in the specific way that looks equivalent — depth counted naively over
+ *     the RETURNED string (`inlineRest.match(/[[{]/g).length !== inlineRest.match(/[\]}]/g).length`)
+ *     instead of in `splitInlineComment`'s quote-aware loop → **1 failed / 12 passed**,
+ *     `a multi-line flow \`on:\` …`, on `on: ["a[b", pull_request]`. `rest` still carries its quotes,
+ *     so the naive count answers 1 and refuses a line the classifier reads correctly today — a fix
+ *     that buys a new false positive. Behaviour changes, so the guard is not shadowed on that leg
+ *     either.
  *
  * Same no-dependency line-scan discipline as `scanWorkflowJobs`; `scripts/` has no `node_modules`.
  *
@@ -830,11 +890,18 @@ export function readOnBlock(source) {
    * cut inside `["a #b", pull_request]`, deleting the trigger after it. Single quotes escape by
    * doubling (`''`), which this loop handles as close-then-reopen — the parity is what matters here.
    *
+   * ROUND 5 — it also returns `depth`, the net `[`/`{` nesting of `rest`, counted in THIS loop rather
+   * than by a second scan of the returned string, because `rest` still carries its quotes: on
+   * `["a[b", pull_request]` a naive count answers 1 and would refuse a line the classifier reads
+   * correctly today (measured — `pull-request` both before and after this change). Only the flow
+   * branch looks at it; a balanced line is `0`, which is every shape that already worked.
+   *
    * @param {string} s
-   * @returns {{rest: string, unterminated: boolean}}
+   * @returns {{rest: string, unterminated: boolean, depth: number}}
    */
   const splitInlineComment = (s) => {
     /** @type {string} */ let quote = "";
+    let depth = 0;
     for (let i = 0; i < s.length; i += 1) {
       const c = s[i];
       if (quote === '"' && c === "\\") {
@@ -849,13 +916,17 @@ export function readOnBlock(source) {
         quote = c;
         continue;
       }
-      if (c === "#" && (i === 0 || /\s/.test(s[i - 1]))) return { rest: s.slice(0, i).trim(), unterminated: false };
+      if (c === "[" || c === "{") depth += 1;
+      else if (c === "]" || c === "}") depth -= 1;
+      else if (c === "#" && (i === 0 || /\s/.test(s[i - 1])))
+        return { rest: s.slice(0, i).trim(), unterminated: false, depth };
     }
-    return { rest: s.trim(), unterminated: quote !== "" };
+    return { rest: s.trim(), unterminated: quote !== "", depth };
   };
 
   let onAt = -1;
   /** @type {string} */ let inlineRest = "";
+  let inlineDepth = 0;
   for (let i = 0; i < lines.length; i += 1) {
     if (isComment(lines[i]) || isBlank(lines[i])) continue;
     const m = /^(?:on|"on"|'on')\s*:(.*)$/.exec(lines[i]);
@@ -864,6 +935,7 @@ export function readOnBlock(source) {
       if (split.unterminated) return unknown("unterminated quote on the `on:` line");
       onAt = i;
       inlineRest = split.rest;
+      inlineDepth = split.depth;
       break;
     }
   }
@@ -883,11 +955,35 @@ export function readOnBlock(source) {
     // this is unreachable in practice; round 2 nevertheless answered a confident `other` for it, which
     // silently dropped the whole workflow. Fail closed instead.
     if (/^[&*]/.test(inlineRest)) return unknown("`on:` uses a YAML anchor or alias, which is not resolved");
+    // ROUND 5 BLOCKER — A FLOW COLLECTION MAY SPAN LINES, AND THIS BRANCH ONLY EVER SEES THE FIRST ONE.
+    // The `on:` scanner above captures the remainder of the `on:` LINE, so on the entirely legal
+    //     on: [push,
+    //       pull_request]
+    // `inlineRest` was `[push,` — and BOTH `trigger` and `events` were computed from that alone.
+    // Measured before this refusal: `trigger=other`, `triggersPR=false`, `events=["push"]`, i.e. a
+    // confident `false` with the `pull_request` never seen. End to end with such a `security.yml`:
+    // `{"state":"ok", "unjudged":[], "judgedWorkflows":["ci.yml"], "silentWorkflows":[], "detail":
+    // "every job `main` requires from ci.yml produced a check here"}` — round 3's `pull_request_target`
+    // defect character for character, detail string included, with that workflow's whole guard set
+    // gone. `pull_request_v2` on the continuation line was equally invisible, so the `events` guard
+    // added in round 4 could not have caught it either.
+    // Refusing an unbalanced `inlineRest` turns the confident `false` into `unknown`, which
+    // `coverageOf` blocks on by name. All 8 real workflows here take the BLOCK branch and are
+    // untouched; every balanced one-line flow is `depth === 0` and reads exactly as before.
+    if (inlineDepth !== 0) return unknown("`on:` uses a flow collection that does not close on its own line");
     // `events` here is a TOKEN SWEEP, not a parse: `on: ['a #b', pull_request]` yields `a`, `b`,
-    // `pull_request`, because this branch never separates a flow scalar from a key. Stated rather
-    // than hidden, and it is the safe direction for the only consumer — the unknown-PR-event guard
-    // in `ciPollFailClosed.test.ts` asks whether any name here looks PR-scoped and is not in
-    // `PR_EVENTS`, so over-reporting reds a workflow that is fine rather than passing one that is not.
+    // `pull_request`, because this branch never separates a flow scalar from a key — and
+    // `on: {push: {paths: ['pull_request_v2/**']}}` yields `paths` and `pull_request_v2`, a token
+    // swept out of a path glob rather than any event. Stated rather than hidden, and it is the safe
+    // direction for the only consumer — the unknown-PR-event guard in `ciPollFailClosed.test.ts` asks
+    // whether any name here looks PR-scoped and is not in `PR_EVENTS`, so an extra token reds a
+    // workflow that is fine rather than passing one that is not.
+    //
+    // THAT IS THE OVER-REPORTING DIRECTION ONLY, AND THE SWEEP IS TWO-SIDED. Until the refusal above
+    // it also UNDER-reported, and under-reporting is the fail-open kind: the continuation line's
+    // `pull_request` simply was not in the string being swept. The refusal removes that input from
+    // this branch rather than making the sweep see it, so the one-sided sentence is now true of what
+    // actually reaches here — not of flow collections in general.
     return {
       trigger: prEventRe.test(inlineRest) ? "pull-request" : "other",
       prPathFiltered: false,

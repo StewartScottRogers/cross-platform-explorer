@@ -781,6 +781,10 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
       "on: &trig\n  pull_request:\n",
       "on: *trig\n",
       'on: ["push\n',
+      // Round 5: a flow collection that does not close on the `on:` line. See the dedicated test below
+      // for why this used to be a confident `false` rather than a `null`.
+      "on: [push,\n  pull_request]\n",
+      "on: {push: null,\n  pull_request: null}\n",
     ]) {
       expect(workflowTriggersPullRequest(src), src).toBeNull();
     }
@@ -799,6 +803,69 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
     const flow = "on: {pull_request: {paths: ['src/**']}}\n";
     expect(workflowTriggersPullRequest(flow)).toBe(true);
     expect(readOnBlock(flow).prPathFiltered, "if this is now true the header's `cannot see` list is stale").toBe(false);
+  });
+
+  it("a multi-line flow `on:` was a confident `false` — the flow sweep UNDER-reports too, not only over", () => {
+    // ROUND 5 BLOCKER. Round 4's comment on the flow branch said the token sweep's error direction was
+    // over-reporting only ("reds a workflow that is fine rather than passing one that is not"). It is
+    // TWO-SIDED. A YAML flow collection may span lines, and the `on:` scanner captures only the
+    // remainder of the `on:` LINE, so the continuation was invisible to BOTH `trigger` and `events`.
+    const multi = "on: [push,\n  pull_request]\njobs:\n  codeql:\n    name: CodeQL\n";
+    // The one-line spelling is the control: same events, same file, one line break apart.
+    const oneLine = "on: [push, pull_request]\njobs:\n  codeql:\n    name: CodeQL\n";
+    expect(readOnBlock(oneLine)).toMatchObject({ trigger: "pull-request", events: ["push", "pull_request"] });
+    // Before the refusal: `{trigger: "other", events: ["push"]}` and a confident `false`. Now `null`.
+    expect(workflowTriggersPullRequest(multi)).toBeNull();
+    expect(readOnBlock(multi).why).toContain("flow collection");
+    // …and the round-4 `events` guard could not have caught it either: a `pull_request_v2` on the
+    // continuation line is equally absent from the swept string.
+    expect(readOnBlock("on: [push,\n  pull_request_v2]\n").events).not.toContain("pull_request_v2");
+    expect(workflowTriggersPullRequest("on: {push: null,\n  pull_request: null}\n")).toBeNull();
+
+    // END TO END, the reviewer's reproduction: a board carrying every real `ci.yml` check and nothing
+    // from a `security.yml` spelled that way. Before the refusal this returned
+    // `{state:"ok", unjudged:[], judgedWorkflows:["ci.yml"], silentWorkflows:[], detail:"every job
+    // `main` requires from ci.yml produced a check here"}` — round 3's `pull_request_target` defect
+    // character for character, detail string included, with CodeQL's guard set silently absent.
+    const base = readBaseWorkflowSources("HEAD") as { files: { file: string; text: string }[] };
+    const ci = base.files.find((f) => f.file === "ci.yml")!;
+    const board = [...scanWorkflowJobs(ci.text)].map(([id, job]) => (job as { name?: string }).name ?? id);
+    const cov = coverageOf(board, [ci, { file: "security.yml", text: multi }]);
+    expect(cov.state, "a multi-line-flow workflow must not be waved through as `ok`").toBe("unknown");
+    expect(cov.detail).toContain("security.yml");
+    // `unknown`, not `unjudged`: round 3 could WIDEN the class because `pull_request_target` is a
+    // well-understood event, but nothing here read the continuation line, so "did not run" is the
+    // honest answer. `coverageOf` blocks on it by name either way.
+
+    // NEITHER INSTRUMENT DOMINATES, asserted rather than argued (CLAUDE.md rule: derive, don't claim).
+    // The brief for round 4 asked for a raw grep; the parse replaced it. Each catches what the other
+    // misses, so the swap traded a false-positive class for a false-negative class.
+    const greps = (s: string) => /pull_request/.test(s);
+    const events = (s: string) => readOnBlock(s).events.join(" ");
+    // (a) THE GREP WINS HERE: the continuation line is in the bytes, and was never in `events`.
+    expect(greps(multi)).toBe(true);
+    expect(events(multi)).toBe("");
+    // (b) THE PARSE WINS HERE: all five comment positions naming a PR-ish event inside `on:` red a
+    // grep and are correctly ignored by the parse. `ci.yml`'s real `on:` block carries ~60 lines of
+    // commentary, so this is not hypothetical.
+    const commented = [
+      "on:\n# pull_request_review\n  push:\n", // column 0
+      "on:\n  # pull_request_review\n  push:\n", // indented
+      "on:\n  push:  # pull_request_review\n", // trailing on a block key
+      "on:  # pull_request_review\n  push:\n", // trailing on the `on:` line
+      "on: [push]  # pull_request_review\n", // trailing after a flow seq
+    ];
+    for (const src of commented) {
+      expect(greps(src), `a raw grep reds on this comment: ${JSON.stringify(src)}`).toBe(true);
+      expect(events(src), `the parse must ignore this comment: ${JSON.stringify(src)}`).not.toContain("pull_request");
+      expect(workflowTriggersPullRequest(src), src).toBe(false);
+    }
+
+    // The refusal counts `[`/`{` in `splitInlineComment`'s QUOTE-AWARE loop, not over the returned
+    // string, which still carries its quotes. A naive count answers 1 for the line below and would
+    // refuse a workflow the classifier reads correctly — a new false positive bought with the fix.
+    expect(readOnBlock('on: ["a[b", pull_request]\n')).toMatchObject({ trigger: "pull-request" });
+    expect(readOnBlock('on: ["a]b", pull_request]\n')).toMatchObject({ trigger: "pull-request" });
   });
 
   it("a PR-triggered workflow whose jobs cannot be read is `unknown`, not an empty requirement", () => {
@@ -851,7 +918,11 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
       .sort();
     expect(
       unknownPrLike,
-      "a PR-shaped event this classifier does not know landed — decide if it belongs in `PR_EVENTS`, then re-read `readOnBlock`'s header",
+      "a PR-SHAPED NAME this classifier does not know is now parsed out of an `on:` block. It may not be " +
+        "an event at all: the flow branch is a token sweep, so `on: {push: {paths: ['pull_request_v2/**']}}` " +
+        "lands its path glob here too (the only over-report the round-5 review could induce). Read the " +
+        "named file's `on:` key, then decide whether it belongs in `PR_EVENTS` or whether the sweep " +
+        "merely swept — and re-read `readOnBlock`'s header either way",
     ).toEqual([]);
     // POSITIVE CONTROL, inline rather than left to whoever remembers to red-proof: the same expression
     // over the same real files plus one hypothetical `pull_request_v2` workflow DOES fire. Without
