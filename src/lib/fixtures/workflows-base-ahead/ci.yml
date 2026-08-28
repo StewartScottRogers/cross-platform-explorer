@@ -1,0 +1,26 @@
+# CPE-1970 test fixture — `main` AFTER the new guard landed. Byte-for-byte `../workflows-base/ci.yml`
+# plus the `ratchet-guard` job, which is exactly the delta that PR #1056 merged without ever being
+# judged by: the guard landed on `main` at 17:42:59Z, #1056's board had been built before that, and it
+# merged at 18:36:20Z with the guard absent from its 22 checks.
+#
+# `ciPollFailClosed.test.ts` asserts this file IS that delta (same jobs, one added) rather than trusting
+# this comment — the pair is only a both-directions proof if the two sides differ in one thing.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    name: Frontend — type-check and test
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"
+  ratchet-guard:
+    name: Ratchet guard — no baseline raised without a declaration
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"

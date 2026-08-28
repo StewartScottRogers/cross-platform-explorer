@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 // CPE-1880 — a CI poll that CANNOT be backgrounded, replacing `gh run watch` in the dispatch contract.
 // CPE-1906 — and that cannot report an error, a hang, or a job that never ran as if CI had answered.
+// CPE-1970 — and that cannot report a board GREEN when a guard `main` already carries never appeared
+//            on it at all. `main` has NO branch protection (`branches/main/protection` → 404,
+//            `rulesets` → []), so nothing stops a merge on checks that predate a guard. Measured by
+//            running `coverageOf()` below over the 186 PRs merged 2026-08-14 → 2026-08-28 against each
+//            PR's own live check rollup: 16 merged with at least one job `main` already required
+//            entirely absent from their board, 168 clean, 2 fail-closed unreadable (#896 and #899,
+//            whose squash commits are no longer reachable from `main`). The absent jobs:
+//            `ratchet-guard` ×5 (PR #1056 among them — the merge that found this ticket),
+//            `ci-verdict` ×5, `lockfile-preflight` ×2, `msrv` ×2, `ffmpeg-pin-guard` ×1,
+//            `gui-smoke-linux` ×1. See docs/design/CI-STALENESS.md for the settings change that would
+//            make it impossible rather than merely visible — it needs the repository owner, which is
+//            why this ships too.
 //
 // WHY THIS EXISTS (the measurement, not a vibe):
 //   The Claude Code Bash tool caps a single call at `timeout: 600000` ms (10 minutes). When a command
@@ -117,6 +129,11 @@
 //      `completed unclear`     finished in a shape this poll has never seen — no failure, but no
 //                              positive evidence of success either. Both are "not red, not green": do
 //                              not merge, find out why.
+//   5  `completed stale-checks`  nothing is red, and that is the problem: a job `main` requires
+//                              produced NO check on this board, so a guard that exists on `main` never
+//                              judged this PR. Rebase onto `main` and let CI re-run. (CPE-1970)
+//      `completed coverage-unknown`  the coverage check itself could not be computed — `main`'s
+//                              workflow files were unreadable. "Did not run", not "found nothing".
 //   64 bad usage
 //
 //   CPE-1906 round 2 — THE PREFIX AND THE EXIT CODE ARE COMPUTED FROM ONE PREDICATE (`verdictClass`),
@@ -340,6 +357,8 @@ export function shouldSleepAgain(nowMs, intervalMs, deadlineMs, tick, ticks) {
  * @property {number} neutralCount    checks that ran and declined to judge
  * @property {number|null} oldestPendingAgeMs  age of the longest-running unfinished check
  * @property {string|null} oldestPendingName   its name — "slow or hung?" made mechanical
+ * @property {string[]} checkNames     EVERY check name on the board, pending ones included — what the
+ *                                     CPE-1970 coverage check compares against `main`'s required jobs
  */
 
 /** @returns {CiRead} */
@@ -351,6 +370,7 @@ function emptyRead() {
     pending: 0,
     mergeable: null,
     sha: null,
+    checkNames: [],
     skippedNames: [],
     failedNames: [],
     ranCount: 0,
@@ -617,6 +637,268 @@ export function readWorkflowSources(dir) {
   }
 }
 
+// ── Guard coverage: did the checks on this board come from the job set `main` requires? (CPE-1970) ────
+
+/**
+ * Does this workflow run on `pull_request` at all?
+ *
+ * Only PR-triggered workflows can contribute checks to a PR's rollup, so a release-only or
+ * schedule-only workflow's jobs must never count as "missing" — that would red every PR on day one,
+ * which is the outcome that gets a gate switched off.
+ *
+ * Same line-scan discipline as `scanWorkflowJobs`, anchored on indentation, for the same reason: no
+ * YAML dependency in `scripts/`. Handles the two spellings this repo uses and the flow spelling
+ * (`on: [push, pull_request]`).
+ *
+ * @param {string} source
+ * @returns {boolean}
+ */
+export function workflowTriggersPullRequest(source) {
+  const lines = String(source ?? "").split(/\r?\n/);
+  let inOn = false;
+  for (const line of lines) {
+    const inlineOn = /^on:\s*(\S.*)$/.exec(line);
+    if (inlineOn) return /\bpull_request\b/.test(inlineOn[1]);
+    if (/^on:\s*$/.test(line)) {
+      inOn = true;
+      continue;
+    }
+    if (!inOn) continue;
+    if (/^\S/.test(line)) return false; // the `on:` block ended without a pull_request trigger
+    if (/^ {2}(-\s*)?pull_request\b/.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Read `.github/workflows/*.yml` out of a GIT REVISION rather than off disk — by default
+ * `origin/main`, the branch the PR is going to be merged into.
+ *
+ * WHY NOT THE WORKING TREE, which `readWorkflowSources()` above already gives us for free. Because the
+ * working tree is exactly the stale copy this whole ticket is about. A Worker polls its own PR from its
+ * own worktree, and that worktree IS the PR branch: on PR #1056 it did not contain `ratchet-guard` at
+ * all, so a coverage check reading it would have computed a required-job set with no `ratchet-guard` in
+ * it, found nothing missing, and printed green — reproducing the defect from inside the guard built to
+ * catch it. The question is "what does **main** require of this PR", and only main can answer it.
+ *
+ * NO FETCH. A poll must not have side effects on the repo, and a `git fetch` inside a bounded-wall-clock
+ * tool is one more thing that can hang. The consequence is stated rather than hidden: a locally STALE
+ * `origin/main` under-reports (it cannot see a guard landed since the last fetch), so the verdict line
+ * prints the ref and its short SHA and the runbook says to `git fetch origin main` before the last poll.
+ * Being stale here fails OPEN, which is why it is printed on every single verdict rather than mentioned
+ * in a comment.
+ *
+ * `CI_POLL_BASE_WORKFLOWS` is a TEST SEAM and nothing else, exactly like `CI_POLL_GH_SCRIPT`: it names a
+ * directory of workflow files to read instead of asking git, so the subprocess tests can drive a base
+ * that is deliberately ahead of the stubbed rollup (the #1056 shape) without depending on this repo's
+ * live history.
+ *
+ * @param {string} [ref] git revision to read the workflows out of
+ * @returns {{ref: string, sha: string|null, files: {file: string, text: string}[]}|null} null = could
+ *          not read; the caller must fail closed on it, never treat it as "nothing to check"
+ */
+export function readBaseWorkflowSources(ref = "origin/main") {
+  const seam = process.env.CI_POLL_BASE_WORKFLOWS;
+  if (seam) {
+    try {
+      const files = readdirSync(seam)
+        .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
+        .map((f) => ({ file: f, text: readFileSync(join(seam, f), "utf8") }));
+      return { ref: `seam:${seam}`, sha: null, files };
+    } catch {
+      return null;
+    }
+  }
+  // Resolve the repo out of this file's own location so the answer does not depend on where the caller
+  // stood — with a `process.cwd()` fallback because a bundler (Vitest/Vite transforms this module when a
+  // unit test imports it) can hand back an `import.meta.url` that is not a `file:` URL, and
+  // `fileURLToPath` throws on those. Measured: without the fallback every in-process call returned null,
+  // i.e. "could not read `main`" — the fail-closed direction, but wrong, and it would have made the
+  // derivation leg of this feature's own test suite unrunnable.
+  const cwd = (() => {
+    try {
+      return fileURLToPath(new URL("..", import.meta.url));
+    } catch {
+      return process.cwd();
+    }
+  })();
+  const git = (/** @type {string[]} */ args) =>
+    execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: GH_MIN_CALL_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  /** @type {string} */ let listing;
+  /** @type {string|null} */ let sha = null;
+  try {
+    listing = git(["ls-tree", "--name-only", `${ref}:.github/workflows`]);
+  } catch {
+    return null;
+  }
+  try {
+    sha = git(["rev-parse", "--short", ref]).trim() || null;
+  } catch {
+    sha = null;
+  }
+  /** @type {{file: string, text: string}[]} */ const files = [];
+  for (const file of listing.split(/\r?\n/).filter((f) => /\.ya?ml$/.test(f))) {
+    try {
+      files.push({ file, text: git(["show", `${ref}:.github/workflows/${file}`]) });
+    } catch {
+      // One unreadable file out of many is still a partial answer; an EMPTY answer is what fails closed.
+    }
+  }
+  return { ref, sha, files };
+}
+
+/**
+ * The check-name matcher for one workflow job, on the same rule `explainableSkipMatchers` settled: a
+ * PREFIX only when the `name:` is templated by a matrix expression (GitHub keeps the literal text before
+ * the first `${{` and appends the matrix values), otherwise an EXACT match.
+ *
+ * @param {string} label
+ * @returns {{text: string, prefix: boolean}}
+ */
+function jobNameMatcher(label) {
+  const templated = String(label).includes("${{");
+  return { text: (templated ? String(label).split("${{")[0] : String(label)).trim(), prefix: templated };
+}
+
+/**
+ * @typedef {object} Coverage
+ * @property {"ok"|"unjudged"|"unknown"|"n/a"} state
+ * @property {{file: string, label: string}[]} unjudged  jobs `main` requires that produced NO check here
+ * @property {string[]} judgedWorkflows  PR-triggered workflow files that contributed at least one check
+ * @property {string[]} silentWorkflows  PR-triggered workflow files that contributed none (path filter,
+ *                                       or a whole workflow that did not trigger) — NOT flagged
+ * @property {string} detail  one human sentence, always printed
+ */
+
+/**
+ * ANSWER THE QUESTION THE MERGE PROCEDURE ACTUALLY ASKS: is there a job `main` requires that never
+ * appeared on this PR's board at all?
+ *
+ * THE PRECISION CHOICE, AND WHY IT IS THIS ONE (CPE-1970). Three candidate rules were on the table.
+ *
+ *   (a) "`main` moved at all since the PR's checks ran." Cheap, and useless here. Measured on this
+ *       repo: 593 commits landed on `main` in the 14 days to 2026-08-28, ~42/day. A PR that sits in
+ *       the queue for an hour almost always sees `main` move, so this rule fires on nearly every merge
+ *       and trains the crew to wave it through — which is a worse outcome than the bug.
+ *   (b) "The PR's newest check run FINISHED before a guard landed." This is the rule the ticket's own
+ *       evidence rules out. PR #1056's run finished at 18:35:13Z and it merged at 18:36:20Z — one
+ *       minute later. A recency check on finish time would have passed it. Worse, it is an inference:
+ *       it says the guard *probably* did not judge the PR.
+ *   (c) "A job `main` requires produced no check on this board." Definite, not inferential — the guard
+ *       is not on the board, so it cannot have judged anything. It needs no clock reasoning, and it is
+ *       the instrument the ticket independently arrived at. This is the one implemented here.
+ *
+ * WHAT IT MISSES, said plainly because a guard whose blind spot is undocumented reads as coverage.
+ *   · **A guard added INSIDE an existing job.** A new `src/lib/anything.test.ts` runs under the same
+ *     `Frontend — type-check and test` check; a new ratchet registered in `ratchet-baselines.mjs` runs
+ *     under the same `Ratchet guard` check; CPE-1936's `shellScriptLines` parser fix changed what every
+ *     workflow scan can see without touching a job name. The check IS on the board, so this verdict is
+ *     silent. That is the larger class by count and NO name-based instrument can see it — only
+ *     re-running the PR's checks against `main`'s head can, which is what branch protection's "require
+ *     branches to be up to date" buys and why `docs/design/CI-STALENESS.md` still asks for it.
+ *   · **A locally stale `origin/main`.** See `readBaseWorkflowSources` — under-reports, so the ref and
+ *     its SHA are printed on every verdict.
+ *   · **A workflow that contributed NOTHING** is not flagged, on purpose: `ci.yml` carries
+ *     `paths-ignore`, so a ticket-only PR legitimately has no `ci.yml` checks at all and a rule without
+ *     this carve-out would red every bookkeeping PR. The cost is that a workflow which vanished
+ *     entirely reads as "not applicable" — so the silent workflows are NAMED on the verdict line rather
+ *     than dropped, and the operator can see the difference.
+ *   · **A job `main` deleted or renamed** looks the same as a job that did not run. Fail-closed
+ *     direction: it blocks, names itself, and is one line to read.
+ *
+ * THE NOISE, MEASURED RATHER THAN HOPED FOR. Swept over the 184 merged PRs (2026-08-14 → 2026-08-28)
+ * this rule could be evaluated on: **168 clean, 16 firings**, and every one of the 16 names a job that
+ * still exists on `main` today — i.e. all 16 are genuinely new guards, 0 are deletion/rename noise.
+ * That is the whole argument for choosing rule (c) over rule (a): (a) would have fired on essentially
+ * all 184. A gate that reds 9% of merges is one people read; a gate that reds 95% is one they alias
+ * away.
+ *
+ * @param {string[]} checkNames every check name on the PR's rollup, verbatim
+ * @param {{file: string, text: string}[]|null} baseFiles workflow sources from `main`; null = could not
+ *        read, which is "did not run", not "found nothing"
+ * @returns {Coverage}
+ */
+export function coverageOf(checkNames, baseFiles) {
+  if (!Array.isArray(baseFiles) || baseFiles.length === 0) {
+    return {
+      state: "unknown",
+      unjudged: [],
+      judgedWorkflows: [],
+      silentWorkflows: [],
+      detail:
+        "could not read `main`'s workflow files, so the set of jobs that must judge this PR is unknown — " +
+        "this is 'did not run', not 'nothing to check'. Run the poll from inside the repo with an " +
+        "`origin/main` ref present (`git fetch origin main`).",
+    };
+  }
+  const names = (checkNames ?? []).map((n) => String(n));
+  /** @type {{file: string, label: string}[]} */ const unjudged = [];
+  /** @type {string[]} */ const judgedWorkflows = [];
+  /** @type {string[]} */ const silentWorkflows = [];
+  for (const { file, text } of baseFiles) {
+    if (!workflowTriggersPullRequest(text)) continue;
+    const jobs = scanWorkflowJobs(text);
+    if (jobs.size === 0) continue;
+    /** @type {{file: string, label: string}[]} */ const absent = [];
+    let present = 0;
+    for (const [id, job] of jobs) {
+      const m = jobNameMatcher(job.name ?? id);
+      if (!m.text) continue;
+      const hit = names.some((n) => (m.prefix ? n.startsWith(m.text) : n === m.text));
+      if (hit) present += 1;
+      else absent.push({ file, label: job.name ?? id });
+    }
+    // A workflow that contributed NO check at all did not run on this PR (a `paths-ignore` match, or a
+    // workflow that is not wired to this event after all). Its jobs are not evidence of a stale board.
+    if (present === 0) silentWorkflows.push(file);
+    else {
+      judgedWorkflows.push(file);
+      unjudged.push(...absent);
+    }
+  }
+  if (unjudged.length > 0) {
+    return {
+      state: "unjudged",
+      unjudged,
+      judgedWorkflows,
+      silentWorkflows,
+      detail:
+        `${unjudged.length} job(s) that \`main\` requires produced NO check on this board: ` +
+        `${unjudged.map((u) => `${u.label} (${u.file})`).join(", ")}. Those guards did not judge this ` +
+        `PR — its checks predate them. Rebase onto \`main\` and let CI re-run before merging.`,
+    };
+  }
+  return {
+    state: "ok",
+    unjudged,
+    judgedWorkflows,
+    silentWorkflows,
+    detail: `every job \`main\` requires from ${judgedWorkflows.join(", ") || "(no workflow)"} produced a check here`,
+  };
+}
+
+/**
+ * The one token the `coverage=` field on the totals line carries. Always printed — including
+ * `n/a`, because "the coverage check did not run" must never look the same as "it ran and found
+ * nothing", which is the house rule this whole file is built around.
+ *
+ * @param {Coverage|null|undefined} coverage
+ * @returns {string}
+ */
+export function formatCoverage(coverage) {
+  const c = coverage ?? { state: "unknown", unjudged: [], detail: "" };
+  if (c.state === "unjudged") return `coverage=${c.unjudged.length}-unjudged`;
+  if (c.state === "unknown") return "coverage=unknown";
+  if (c.state === "n/a") return `coverage=n/a${c.detail ? `(${c.detail})` : ""}`;
+  return "coverage=ok";
+}
+
 // ── Reads ────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -768,6 +1050,7 @@ export function readFromRunJson(json, nowMs = Date.now()) {
     totalCount: jobs.length,
     pending: pendingJobs.length,
     sha: json?.headSha ?? null,
+    checkNames: jobs.map((/** @type {any} */ j) => String(j?.name ?? "(unnamed job)")),
     skippedNames,
     failedNames,
     ranCount: jobs.filter(
@@ -846,6 +1129,7 @@ export function readFromPrJson(json, nowMs = Date.now()) {
     pending: pendingChecks.length,
     mergeable: json?.mergeable ?? null,
     sha: json?.headRefOid ?? null,
+    checkNames: rollup.map(nameOf),
     skippedNames,
     failedNames,
     ranCount: ran.length,
@@ -860,14 +1144,22 @@ export function readFromPrJson(json, nowMs = Date.now()) {
 /**
  * @param {CiRead|null} latest
  * @param {number} [ghFailures] total failed `gh` reads this invocation — appended, never inserted
+ * @param {Coverage|null} [coverage] CPE-1970 guard-coverage state — appended after `gh_failures`
  */
-function totalsOf(latest, ghFailures = 0) {
+function totalsOf(latest, ghFailures = 0, coverage = null) {
   // CPE-1906 round 2: `gh_failures` is APPENDED at the end, after `sha=`. The interface pin asserts the
   // presence and RELATIVE ORDER of the pre-existing keys, so a new key may only ever go on the end.
   // Why it exists: a poll could take one good read, then fail two more (below the bail threshold), hit
   // the deadline and print a plain `pending` verdict that said nothing at all about the failures —
   // "still pending" and "still pending, and I stopped being able to ask" are different situations.
-  const tail = ` gh_failures=${Number.isFinite(ghFailures) ? ghFailures : 0}`;
+  //
+  // CPE-1970 appends `coverage=` after it under the same rule. It is printed on EVERY verdict, including
+  // the ones where the check did not apply, because a coverage check that goes quiet when it could not
+  // run is indistinguishable from one that ran and found nothing — the exact defect family this file
+  // exists to close, and the reason `n/a` carries its own parenthesised reason.
+  const tail =
+    ` gh_failures=${Number.isFinite(ghFailures) ? ghFailures : 0}` +
+    ` ${formatCoverage(coverage ?? { state: "unknown", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "" })}`;
   if (!latest) {
     return (
       "total_count=n/a pending=n/a oldest_pending_min=n/a skipped=n/a neutral=n/a mergeable=n/a sha=unknown" + tail
@@ -915,12 +1207,25 @@ function totalsOf(latest, ghFailures = 0) {
  *   unclear      done, nothing failed, and no positive evidence of success. Not a pass. Exit 4 with a
  *                DIFFERENT prefix, because "I do not recognise this board" is not "a job did not run".
  *
+ * CPE-1970 inserted TWO rungs between `did-not-run` and `success`, and the placement is the argument:
+ *   stale-checks      every check that ran passed, but a job `main` requires produced no check at all,
+ *                     so a guard that exists on `main` never judged this PR. Below `failure` and
+ *                     `did-not-run` because those are more specific facts about the board and the
+ *                     caller's next move for them (read the logs / find out why nothing ran) outranks
+ *                     "rebase and re-run". Above `success` because it is emphatically not a pass.
+ *   coverage-unknown  the coverage check could not be computed. "Did not run" is not "found nothing";
+ *                     fail closed. Same exit code, different prefix, because the caller's move differs
+ *                     (rebase vs. fix your checkout).
+ * Both sit AFTER the `pending` rung on purpose: jobs enter a rollup in waves, so "absent" only means
+ * anything once `decideFromReads` has seen the board hold quiet across two reads.
+ *
  * @param {{done: boolean, reason: string}} decision
  * @param {CiRead|null} latest
  * @param {string[]} [unexplainedSkips]
- * @returns {{kind: "pending"|"failure"|"did-not-run"|"success"|"unclear", code: number, why: string}}
+ * @param {Coverage|null} [coverage]
+ * @returns {{kind: "pending"|"failure"|"did-not-run"|"stale-checks"|"coverage-unknown"|"success"|"unclear", code: number, why: string}}
  */
-export function verdictClass(decision, latest, unexplainedSkips = []) {
+export function verdictClass(decision, latest, unexplainedSkips = [], coverage = null) {
   if (!decision?.done) return { kind: "pending", code: 2, why: "the budget ran out before CI finished" };
   const failed = latest?.failedNames ?? [];
   if (failed.length > 0) return { kind: "failure", code: 1, why: "a check reported a hard failure" };
@@ -935,6 +1240,22 @@ export function verdictClass(decision, latest, unexplainedSkips = []) {
   }
   if (typeof latest?.ranCount === "number" && latest.ranCount === 0) {
     return { kind: "did-not-run", code: 4, why: "every check that finished was SKIPPED — nothing ran" };
+  }
+  // CPE-1929's two green sabotages, run by hand on 2026-08-28 because a new refusal is exactly where a
+  // shadowed guard hides, and the numbers belong here rather than in a PR body. Suite:
+  // `src/lib/ciPollFailClosed.test.ts`, 63 tests.
+  //   · disable the rung (`if (false && …)`)             → 3 failed / 60 passed
+  //   · force the predicate to lie (`coverageOf` always returning `ok`) → 7 failed / 56 passed
+  // Both red, and they red on different tests, so nothing earlier in the ladder answers this question.
+  if (coverage?.state === "unjudged") {
+    return {
+      kind: "stale-checks",
+      code: 5,
+      why: `${coverage.unjudged.length} job(s) \`main\` requires produced no check on this board`,
+    };
+  }
+  if (coverage?.state === "unknown") {
+    return { kind: "coverage-unknown", code: 5, why: "the guard-coverage check could not be computed" };
   }
   if (latest?.conclusion === "success" || latest?.conclusion === "skipped") {
     return { kind: "success", code: 0, why: "every check that ran concluded success" };
@@ -954,17 +1275,19 @@ export function verdictClass(decision, latest, unexplainedSkips = []) {
  * @param {{done: boolean, reason: string}} decision
  * @param {CiRead|null} latest
  * @param {{ticks: number, elapsedMs: number, target: string}} run
- * @param {{unexplainedSkips?: string[], explainedSkips?: string[], ghFailures?: number}} [skips]
+ * @param {{unexplainedSkips?: string[], explainedSkips?: string[], ghFailures?: number, coverage?: Coverage|null, baseRef?: string|null}} [skips]
  * @returns {string}
  */
 export function formatVerdict(decision, latest, run, skips = {}) {
-  const totals = totalsOf(latest, skips.ghFailures ?? 0);
+  const coverage = skips.coverage ?? null;
+  const totals = totalsOf(latest, skips.ghFailures ?? 0, coverage);
   const timing = `after ${run.ticks} tick(s) / ${Math.round(run.elapsedMs / 1000)}s`;
   const unexplained = skips.unexplainedSkips ?? [];
   const explained = skips.explainedSkips ?? [];
   const byDesign = explained.length > 0 ? ` Skipped by design: ${explained.join(", ")}.` : "";
+  const against = skips.baseRef ? ` Guard set read from ${skips.baseRef}.` : "";
   // ONE predicate, shared with main()'s exit code. Never re-derive "is this red" here.
-  const klass = verdictClass(decision, latest, unexplained);
+  const klass = verdictClass(decision, latest, unexplained, coverage);
   if (klass.kind === "failure") {
     const failed = latest?.failedNames ?? [];
     const detail =
@@ -985,6 +1308,20 @@ export function formatVerdict(decision, latest, run, skips = {}) {
       `This is neither red nor green. Do not merge; find out why they did not run.`
     );
   }
+  if (klass.kind === "stale-checks") {
+    return (
+      `CI VERDICT: completed stale-checks — ${totals} ${timing} — ${decision.reason}. ` +
+      `Nothing on this board is red, and that is the problem: ${coverage?.detail ?? klass.why}` +
+      `${against} This PR's checks CANNOT have judged those guards. Do not merge on this board.`
+    );
+  }
+  if (klass.kind === "coverage-unknown") {
+    return (
+      `CI VERDICT: completed coverage-unknown — ${totals} ${timing} — ${decision.reason}. ` +
+      `Nothing failed, but ${coverage?.detail ?? klass.why} — so this poll cannot say whether ` +
+      `\`main\`'s guards judged this PR. That is "did not run", not "nothing to check". Do not merge.`
+    );
+  }
   if (klass.kind === "unclear") {
     return (
       `CI VERDICT: completed unclear — ${totals} ${timing} — ${decision.reason}. ${klass.why} — a shape ` +
@@ -992,7 +1329,7 @@ export function formatVerdict(decision, latest, run, skips = {}) {
     );
   }
   if (klass.kind === "success") {
-    return `CI VERDICT: completed success — ${totals} ${timing} — ${decision.reason}.${byDesign}`;
+    return `CI VERDICT: completed success — ${totals} ${timing} — ${decision.reason}.${byDesign}${against}`;
   }
   const sha = latest?.sha ?? "unknown";
   const age =
@@ -1264,18 +1601,47 @@ async function main() {
   const matchers = sources.length === 0 ? null : explainableSkipMatchers(sources);
   const { explained, unexplained } = classifySkips(latest?.skippedNames ?? [], matchers);
 
+  // CPE-1970 — guard coverage. Three reasons it may not apply, and each one is PRINTED rather than
+  // implied, because a check that goes quiet reads as a check that passed:
+  //   · `--run` mode polls ONE workflow run, whose job list cannot answer "did every job main requires
+  //     across ALL workflows appear". Out of scope, not a pass.
+  //   · a board that is still pending has jobs yet to be scheduled, so "absent" means nothing yet.
+  //   · a `gh` that never answered leaves no check names to compare (handled above by the exit-3 path).
+  /** @type {Coverage} */
+  let coverage;
+  /** @type {string|null} */ let baseRef = null;
+  if (opts.mode !== "pr") {
+    coverage = { state: "n/a", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "run-mode" };
+  } else if (!decision.done) {
+    coverage = { state: "n/a", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "board-pending" };
+  } else {
+    const base = readBaseWorkflowSources();
+    baseRef = base ? `${base.ref}${base.sha ? `@${base.sha}` : ""}` : null;
+    coverage = coverageOf(latest?.checkNames ?? [], base?.files ?? null);
+    if (coverage.silentWorkflows.length > 0) {
+      console.log(
+        stamp(
+          `ci-poll: coverage — ${coverage.silentWorkflows.join(", ")} contributed no check to this ` +
+            `board (path filter, or it did not trigger); not treated as missing`,
+        ),
+      );
+    }
+  }
+
   console.log(
     formatVerdict(decision, latest, run, {
       explainedSkips: explained,
       unexplainedSkips: unexplained,
       ghFailures: totalFailures,
+      coverage,
+      baseRef,
     }),
   );
 
   // ONE predicate for the line above and the code below — see `verdictClass`. There used to be two, and
   // they disagreed: a board of nothing but by-design skips printed `completed skipped` and exited 1
   // ("at least one check FAILED") with zero failures.
-  process.exit(verdictClass(decision, latest, unexplained).code);
+  process.exit(verdictClass(decision, latest, unexplained, coverage).code);
 }
 
 // Only run the poll when this file is the process entry point — importing it (as the unit tests do)

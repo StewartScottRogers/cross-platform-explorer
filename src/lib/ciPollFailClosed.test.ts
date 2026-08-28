@@ -38,20 +38,42 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanWorkflowJobs, explainableSkipMatchers, classifySkips } from "../../scripts/ci-poll.mjs";
+import {
+  scanWorkflowJobs,
+  explainableSkipMatchers,
+  classifySkips,
+  workflowTriggersPullRequest,
+  readBaseWorkflowSources,
+  coverageOf,
+} from "../../scripts/ci-poll.mjs";
 
 const REPO = process.cwd();
 const CI_POLL = join(REPO, "scripts", "ci-poll.mjs");
 const STALL_CHECK = join(REPO, "scripts", "stall-check.mjs");
 const GH_STUB = join(REPO, "src", "lib", "fixtures", "ghStub.mjs");
+/** CPE-1970 — `main`'s workflow set as the poll should see it. See the fixture dirs' own headers. */
+const BASE_WORKFLOWS = join(REPO, "src", "lib", "fixtures", "workflows-base");
+const BASE_WORKFLOWS_AHEAD = join(REPO, "src", "lib", "fixtures", "workflows-base-ahead");
 
-/** Run the REAL script as a child process against a stubbed `gh`, exactly as a caller would. */
-function runPoll(mode: string, args: string[]) {
+/**
+ * Run the REAL script as a child process against a stubbed `gh`, exactly as a caller would.
+ *
+ * CPE-1970 pins the BASE WORKFLOWS too, and that is not incidental. The poll now derives "which jobs
+ * must have judged this PR" from `origin/main`, so without a seam every one of the assertions below
+ * would depend on this repo's live history and would flip the day a job is added to `ci.yml` — a suite
+ * that reds for a reason unrelated to what it tests. `workflows-base` therefore declares exactly the
+ * one job the legacy stub boards carry, which keeps those tests measuring what they were written to
+ * measure. Tests that are ABOUT coverage pass `base` explicitly.
+ */
+function runPoll(mode: string, args: string[], base: string | null = BASE_WORKFLOWS) {
   const startedAt = Date.now();
+  const env: NodeJS.ProcessEnv = { ...process.env, CI_POLL_GH_SCRIPT: GH_STUB, GH_STUB_MODE: mode };
+  if (base === null) delete env.CI_POLL_BASE_WORKFLOWS;
+  else env.CI_POLL_BASE_WORKFLOWS = base;
   const res = spawnSync(process.execPath, [CI_POLL, ...args], {
     cwd: REPO,
     encoding: "utf8",
-    env: { ...process.env, CI_POLL_GH_SCRIPT: GH_STUB, GH_STUB_MODE: mode },
+    env,
     timeout: 120_000,
   });
   const stdout = res.stdout ?? "";
@@ -471,5 +493,190 @@ describe("stall-check: bad input is a usage error, not an ENOENT stack trace (CP
     const res = run(["a.txt", "b.txt"]);
     expect(res.status).toBe(64);
     expect(res.stderr).toContain("unexpected argument b.txt");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// CPE-1970 — a GREEN board that a guard on `main` never appeared on.
+//
+// THE SHAPE, reconstructed from the real merge. PR #1056: 22 checks, zero failures, the newest one
+// finished at 18:35:13Z and the PR merged at 18:36:20Z — sixty-seven seconds later, on a board that had
+// only just gone green. `ratchet-guard` had landed on `main` at 17:42:59Z and is absent from all 22.
+// Every predicate this file already has says that board is fine, because every one of them looks only
+// at what IS on the board.
+//
+// WHY THE TWO DIRECTIONS ARE THE SAME PAYLOAD. `guard-gap` emits one identical rollup for both tests;
+// only the base-workflow fixture changes. A refusal test that used a different board for the green leg
+// would prove the tool can say both words, not that it says them about the same thing for the right
+// reason.
+describe("ci-poll: a guard `main` carries that never reached the board is not green (CPE-1970)", () => {
+  const stale = runPoll("guard-gap", ["--pr", "1056", "--budget", "6", "--interval", "1"], BASE_WORKFLOWS_AHEAD);
+  const fresh = runPoll("guard-gap", ["--pr", "1056", "--budget", "6", "--interval", "1"], BASE_WORKFLOWS);
+
+  it("REFUSES the #1056 board: exit 5, and the prefix is its own, not `success` and not `failure`", () => {
+    expect(stale.status).toBe(5);
+    expect(stale.verdict).toMatch(/^CI VERDICT: completed stale-checks —/);
+    expect(stale.verdict).not.toMatch(/^CI VERDICT: completed success/);
+  });
+
+  it("names the guard that did not judge it, and says what to do", () => {
+    expect(stale.verdict).toContain("Ratchet guard — no baseline raised without a declaration");
+    expect(stale.verdict).toContain("Nothing on this board is red, and that is the problem");
+    expect(stale.verdict).toContain("Rebase onto `main` and let CI re-run before merging");
+    expect(stale.verdict).toContain("Do not merge on this board");
+  });
+
+  it("PASSES the identical board when `main` has not moved: exit 0, coverage=ok", () => {
+    expect(fresh.status).toBe(0);
+    expect(fresh.verdict).toMatch(/^CI VERDICT: completed success —/);
+    expect(fresh.verdict).toContain("coverage=ok");
+    expect(fresh.verdict).not.toContain("stale-checks");
+  });
+
+  it("the two fixtures differ in exactly the one job — derived, so the pair cannot rot into two boards", () => {
+    // CPE-1933: the claim "these are the same `main` plus one guard" is checked against the files
+    // rather than written in a comment. Change either fixture's job list and this reds.
+    const jobsIn = (dir: string) => [...scanWorkflowJobs(readFileSync(join(dir, "ci.yml"), "utf8")).keys()].sort();
+    const before = jobsIn(BASE_WORKFLOWS);
+    const after = jobsIn(BASE_WORKFLOWS_AHEAD);
+    expect(after.filter((j) => !before.includes(j))).toEqual(["ratchet-guard"]);
+    expect(before.filter((j) => !after.includes(j))).toEqual([]);
+  });
+
+  it("counts the gap on the machine-readable totals line", () => {
+    expect(stale.verdict).toContain("coverage=1-unjudged");
+    // The count is derived from the list it printed, not from a separate tally that could drift.
+    const named = (stale.verdict.match(/Ratchet guard — no baseline raised without a declaration/g) ?? []).length;
+    expect(named).toBe(Number(/coverage=(\d+)-unjudged/.exec(stale.verdict)?.[1]));
+  });
+
+  it("appends `coverage=` after `gh_failures=`, leaving the pinned key order untouched", () => {
+    const order = [
+      "total_count=",
+      "pending=",
+      "oldest_pending_min=",
+      "skipped=",
+      "neutral=",
+      "mergeable=",
+      "sha=",
+      "gh_failures=",
+      "coverage=",
+    ];
+    for (const line of [stale.verdict, fresh.verdict]) {
+      let at = -1;
+      for (const key of order) {
+        const next = line.indexOf(key, at + 1);
+        expect(next, `${key} missing from ${line}`).toBeGreaterThan(at);
+        at = next;
+      }
+    }
+  });
+
+  it("says which `main` it read the guard set from, because a stale local ref under-reports", () => {
+    for (const line of [stale.verdict, fresh.verdict]) expect(line).toContain("Guard set read from seam:");
+  });
+});
+
+describe("ci-poll: the coverage check is narrow ON PURPOSE, and its carve-outs are asserted (CPE-1970)", () => {
+  const fresh = runPoll("guard-gap", ["--pr", "1", "--budget", "6", "--interval", "1"], BASE_WORKFLOWS);
+
+  it("a workflow that does not run on pull_request is never counted as missing", () => {
+    // `release.yml` in the fixture has one job, `Publish installers`, and no `pull_request` trigger.
+    // Without this carve-out this repo's four release/schedule workflows would put ~7 permanently
+    // absent jobs on every verdict — a gate that reds every PR is a gate that gets aliased away.
+    expect(fresh.status).toBe(0);
+    expect(fresh.stdout).not.toContain("Publish installers");
+  });
+
+  it("a PR-triggered workflow that contributed NO check is not flagged — but it IS named", () => {
+    // The `paths-ignore` case: a Ticketing-only PR legitimately gets no `ci.yml` checks. Silence here
+    // is a deliberate fail-open, so the operator is shown it rather than left to infer it.
+    expect(fresh.verdict).not.toContain("Nightly sweep A");
+    expect(fresh.stdout).toContain("nightly.yml contributed no check to this board");
+  });
+
+  it("`--run` mode says the check did not apply rather than going quiet about it", () => {
+    // One workflow run's job list cannot answer "did every job main requires across ALL workflows
+    // appear". Out of scope — and out of scope must not read the same as passed.
+    const run = runPoll("run-failure-no-failing-job", ["--run", "1", "--budget", "4", "--interval", "1"]);
+    expect(run.verdict).toContain("coverage=n/a(run-mode)");
+    expect(run.status).toBe(1); // unchanged by CPE-1970: red still outranks everything
+  });
+
+  it("a board still pending reports n/a, because jobs enter a rollup in waves", () => {
+    const run = runPoll("pending", ["--pr", "1", "--budget", "4", "--interval", "1"]);
+    expect(run.status).toBe(2);
+    expect(run.verdict).toContain("coverage=n/a(board-pending)");
+  });
+});
+
+describe("ci-poll: 'could not compute the coverage' is not 'nothing to check' (CPE-1970)", () => {
+  // The eleventh instance of the house rule this file exists to enforce, in the guard added to enforce
+  // it. A coverage check that goes quiet when it cannot read `main` is worse than no coverage check:
+  // the verdict line then carries a `coverage=` field that means nothing and reads like assurance.
+  it("an unreadable base → exit 5 with its own prefix, never exit 0", () => {
+    const run = runPoll("guard-gap", ["--pr", "1", "--budget", "6", "--interval", "1"], join(REPO, "no", "such", "dir"));
+    expect(run.status).toBe(5);
+    expect(run.verdict).toMatch(/^CI VERDICT: completed coverage-unknown —/);
+    expect(run.verdict).toContain("coverage=unknown");
+    expect(run.verdict).toContain("Do not merge");
+  });
+
+  it("an EMPTY base directory is the same answer — zero workflows is not zero requirements", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cpe-1970-empty-"));
+    try {
+      const run = runPoll("guard-gap", ["--pr", "1", "--budget", "6", "--interval", "1"], dir);
+      expect(run.status).toBe(5);
+      expect(run.verdict).toMatch(/^CI VERDICT: completed coverage-unknown —/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a red board is still reported red — coverage never outranks a failure", () => {
+    const run = runPoll("failure-and-skips", ["--pr", "1", "--budget", "6", "--interval", "1"], join(REPO, "nope"));
+    expect(run.status).toBe(1);
+    expect(run.verdict).toMatch(/^CI VERDICT: completed failure —/);
+  });
+});
+
+describe("ci-poll: the required-job set is DERIVED from real workflows, not from the fixtures (CPE-1950)", () => {
+  // A fixture pair proves the two directions agree with each other; it cannot prove either matches the
+  // repo. This leg reads THIS repo's own `.github/workflows` through the shipped functions, so a change
+  // to how jobs or triggers are written reds here rather than passing on a fixture nobody updated.
+  const base = readBaseWorkflowSources("HEAD");
+
+  it("reads the real workflow set out of a git revision", () => {
+    expect(base, "readBaseWorkflowSources('HEAD') could not read .github/workflows").toBeTruthy();
+    expect(base!.files.map((f: { file: string }) => f.file)).toContain("ci.yml");
+  });
+
+  it("classifies this repo's real triggers: ci.yml and gui-smoke.yml are PR-triggered, release.yml is not", () => {
+    const textOf = (name: string) => base!.files.find((f: { file: string }) => f.file === name)?.text ?? "";
+    expect(workflowTriggersPullRequest(textOf("ci.yml"))).toBe(true);
+    expect(workflowTriggersPullRequest(textOf("gui-smoke.yml"))).toBe(true);
+    expect(workflowTriggersPullRequest(textOf("release.yml"))).toBe(false);
+  });
+
+  it("would have caught #1056 against the REAL ci.yml — the guard's own name read out of the file", () => {
+    const ci = base!.files.find((f: { file: string }) => f.file === "ci.yml")!.text;
+    const guardLabel = scanWorkflowJobs(ci).get("ratchet-guard")?.name;
+    expect(guardLabel, "ci.yml no longer has a `ratchet-guard` job — re-derive this test").toBeTruthy();
+    // #1056's board, minus that one job: every OTHER PR-triggered job's label, present and passing.
+    const everyOtherLabel: string[] = [];
+    for (const f of base!.files as { file: string; text: string }[]) {
+      if (!workflowTriggersPullRequest(f.text)) continue;
+      for (const [id, job] of scanWorkflowJobs(f.text)) {
+        const label = job.name ?? id;
+        if (label === guardLabel) continue;
+        everyOtherLabel.push(label.includes("${{") ? `${label.split("${{")[0]}(ubuntu-latest)` : label);
+      }
+    }
+    const gap = coverageOf(everyOtherLabel, base!.files);
+    expect(gap.state).toBe("unjudged");
+    expect(gap.unjudged.map((u: { label: string }) => u.label)).toEqual([guardLabel]);
+    // …and the same board WITH it is clean, so the assertion above is about that job and not about a
+    // scanner that flags everything.
+    expect(coverageOf([...everyOtherLabel, guardLabel!], base!.files).state).toBe("ok");
   });
 });

@@ -1,0 +1,23 @@
+# CPE-1970 test fixture — a PR-triggered workflow that contributes NOTHING to the stubbed board.
+#
+# The real analogue is `ci.yml`'s `paths-ignore`: a Ticketing-only PR legitimately gets no `ci.yml`
+# checks at all. A rule without this carve-out reds every bookkeeping PR. The cost is that a workflow
+# which vanished entirely also reads as "not applicable" — so `ci-poll.mjs` NAMES the silent workflows
+# on stdout instead of dropping them, and the test asserts that line exists.
+name: Nightly sweep
+
+on:
+  pull_request:
+    paths: ["nothing-that-exists/**"]
+
+jobs:
+  sweep-a:
+    name: Nightly sweep A
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"
+  sweep-b:
+    name: Nightly sweep B
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "stand-in"
