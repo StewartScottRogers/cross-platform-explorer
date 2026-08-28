@@ -177,6 +177,24 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+// **The seam that makes `sys::rename`'s FALLBACK reachable from a test** (CPE-1963 round 2).
+//
+// The Windows commit tries `FileRenameInformationEx` with POSIX semantics and falls back to the plain
+// `FileRenameInformation` when the volume or the OS will not take it — pre-Windows-10-1607, FAT32,
+// exFAT, some network redirectors. None of those exists on the machines this repo is developed or
+// CI'd on, so the fallback is **untestable by construction** and would otherwise ship as a branch
+// nothing has ever executed, on the backup path, reading as covered because the function around it is.
+//
+// Arming this makes the `Ex` attempt fail the way an unsupporting volume fails it, so the fallback runs
+// for real. `Cell<bool>` rather than a hook: there is one thing to say and it is said once.
+// `#[cfg(test)]`, so it compiles to nothing in a shipped binary — the same discipline as the seam
+// above, proven the same way on the linked artifact.
+#[cfg(all(test, windows))]
+thread_local! {
+    pub(crate) static FORCE_RENAME_WITHOUT_EX: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Disarms the seam when [`remove_file_beneath`] returns, **however it returns** (CPE-1937 round 2,
 /// finding F-R2-1).
 ///
@@ -547,7 +565,10 @@ pub(crate) fn create_staging_beneath(
 /// caller's write, because the caller may be streaming gigabytes and a held directory handle is a
 /// resource with a lifetime. On a backup that is one additional per-component `openat`/`NtCreateFile`
 /// chain per file, on top of the one [`create_beneath`] already pays. Measured cost is recorded on
-/// `fsutil::ClaimedDestination::commit`, which is the only production caller.
+/// `fsutil::ClaimedDestination::commit`. **That was "the only production caller" until CPE-1963 added
+/// `fsutil::StagedBeneath::commit`**, which is the second and pays the same per-commit descent; the
+/// sentence is corrected here rather than left for a reader to trip over, since a cost note that names
+/// one caller reads as a bound on the whole cost.
 pub(crate) fn rename_beneath(
     root: &RootDir,
     staged: &File,
@@ -1362,12 +1383,39 @@ mod sys {
         }
     }
 
+    /// The info class [`rename`]'s first attempt uses. A function rather than a constant so the
+    /// **fallback** below has a way to be reached on a machine whose volumes all support the `Ex`
+    /// form — see [`super::FORCE_RENAME_WITHOUT_EX`], which is what
+    /// `fsutil::tests::cpe_1963_the_rename_fallback_still_commits_when_the_ex_form_is_refused` arms.
+    ///
+    /// `FileRenameInformationExBypassAccessCheck` is the substitute, and it is chosen rather than
+    /// invented: it is a real info class that the kernel accepts only from kernel mode, so a user-mode
+    /// call fails it the way an unsupporting volume fails the `Ex` class — a refusal from NT, not a
+    /// branch this module took on its own say-so.
+    #[cfg(test)]
+    fn rename_ex_class() -> windows::Wdk::Storage::FileSystem::FILE_INFORMATION_CLASS {
+        use windows::Wdk::Storage::FileSystem::{
+            FileRenameInformationEx, FileRenameInformationExBypassAccessCheck,
+        };
+        if super::FORCE_RENAME_WITHOUT_EX.with(std::cell::Cell::get) {
+            FileRenameInformationExBypassAccessCheck
+        } else {
+            FileRenameInformationEx
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    fn rename_ex_class() -> windows::Wdk::Storage::FileSystem::FILE_INFORMATION_CLASS {
+        windows::Wdk::Storage::FileSystem::FileRenameInformationEx
+    }
+
     /// [`rename_beneath`](super::rename_beneath)'s arm — CPE-1961.
     ///
     /// **The source operand is the `staged` HANDLE, not `from`.** `from` is carried only so the
     /// refusal can name it; nothing here presents it to the filesystem. `FILE_RENAME_INFO`'s
     /// `RootDirectory` field makes `FileName` a single component resolved inside the parent directory
-    /// object, and `ReplaceIfExists` makes it replace whatever name is there.
+    /// object, and the replace flag makes it replace whatever name is there.
     pub(super) fn rename(
         root: &RootDir,
         dirs: &[&OsStr],
@@ -1414,13 +1462,72 @@ mod sys {
         // so this module talks to one API rather than two. If a future reader "simplifies" this back to
         // the Win32 call, every commit on the `Beneath` arm fails; the wrapper is not a superset.
         //
-        // SAFETY: `buf` owns at least `total` bytes at 8-byte alignment and outlives the call below;
-        // `info` is written entirely within it, and `wide` is copied into the `FileName` tail whose
-        // room was reserved above. `parent` and `staged` are borrowed from live `File`s, and `iosb` is
-        // a correctly-typed out-parameter.
-        let status = unsafe {
+        // **`FileRenameInformationEx` with POSIX semantics FIRST, the plain form as a fallback — and
+        // the `Ex` form is not an optimisation, it is what stops this commit from breaking ordinary
+        // saves on Windows** (CPE-1963 round 2, Reviewer MAJOR-1).
+        //
+        // The plain `FileRenameInformation` cannot replace a destination that has **any** handle open
+        // on it, whatever share mode that handle carries. CPE-1963 round 1 met that as *our own*
+        // handle — `stage_bytes_over_checked_handle` was lending the destination handle across the
+        // commit, and 17 tests failed — and closed ours, which fixed the symptom and left the cause.
+        // The same refusal fires for **anyone else's** handle, and on Windows a third-party handle on
+        // a file the user is saving is routine rather than exotic: Defender, the Search indexer,
+        // Explorer's preview and thumbnail handlers, OneDrive, a media player. Measured on an ordinary,
+        // unattacked confirmed overwrite with one extra `std::fs::File::open` on the destination (the
+        // friendliest share mode Windows has, `READ|WRITE|DELETE`):
+        //
+        // ```text
+        // commit                                          result                        bytes at name
+        // std::fs::rename (pre-CPE-1963)                   Ok(())                        the new ones
+        // FileRenameInformation      (round 1)             Err "Access is denied. (5)"   the OLD ones
+        // FileRenameInformationEx + POSIX (this)           Ok(())                        the new ones
+        // ```
+        //
+        // `FILE_RENAME_POSIX_SEMANTICS` is what makes the replaced name detach immediately instead of
+        // requiring the destination to be exclusively closeable. **The security property is untouched
+        // by the switch**: the source operand is still `staged`, the handle, and `RootDirectory` still
+        // makes `FileName` a single component resolved inside the parent directory object. That is the
+        // whole of CPE-1963 on this platform and neither half moves.
+        //
+        // # What the `Ex` form costs, and why the fallback is here rather than deleted
+        //
+        // The `Flags` member of `FILE_RENAME_INFO` — the `Ex` form's discriminator — is documented as
+        // *"Windows 10, version 1607 and later"*, and POSIX-semantics rename is an **NTFS** feature: on
+        // FAT32, exFAT and several network redirectors the call is refused outright rather than
+        // degraded. Both matter here for one reason: `sys::rename` is shared with
+        // `fsutil::ClaimedDestination::commit`'s `Beneath` arm, so it is on the **backup** path, and a
+        // backup destination is exactly where an exFAT USB drive or an SMB share turns up. Making this
+        // `Ex`-only would trade a rare-but-routine third-party-handle failure for **every write
+        // failing** on those volumes.
+        //
+        // So the plain form is kept as a fallback and its residual is stated rather than hidden: on a
+        // volume that refuses the `Ex` form, the third-party-handle refusal above is exactly as it was
+        // in round 1. There is no pre-1607 Windows and no exFAT volume on the machines this repo is
+        // built and CI'd on, so the branch is reached in two ways instead — one shipped test
+        // (`fsutil::tests::cpe_1963_the_rename_fallback_still_commits_when_the_ex_form_is_refused`,
+        // which arms `FORCE_RENAME_WITHOUT_EX` and pins that an ordinary save still commits down it),
+        // and one sabotage whose number is written here rather than in a PR body: forcing **every**
+        // `Ex` attempt to fail leaves the lib suite at **2,459 passed / 1 failed**, against a baseline
+        // of 2,460 / 0. The single failure is the third-party-handle regression test, which this branch
+        // cannot satisfy. That is the fallback working *and* the exact price of taking it, in one
+        // number — nothing else in 2,460 tests depends on the `Ex` form.
+        //
+        // SAFETY (both attempts): `buf` owns at least `total` bytes at 8-byte alignment and outlives
+        // the calls below; `info` is written entirely within it, and `wide` is copied into the
+        // `FileName` tail whose room was reserved above. `parent` and `staged` are borrowed from live
+        // `File`s, and `iosb` is a correctly-typed out-parameter. The union's two members are a
+        // `BOOLEAN` and a `u32` at offset 0; each attempt writes the one its own info class reads.
+        const FILE_RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
+        const FILE_RENAME_POSIX_SEMANTICS: u32 = 0x2;
+        let set = |ex: bool| unsafe {
             let info = ptr.cast::<FILE_RENAME_INFO>();
-            (*info).Anonymous.ReplaceIfExists = BOOLEAN(1);
+            if ex {
+                (*info).Anonymous.Flags =
+                    FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS;
+            } else {
+                (*info).Anonymous = std::mem::zeroed();
+                (*info).Anonymous.ReplaceIfExists = BOOLEAN(1);
+            }
             (*info).RootDirectory = HANDLE(parent.as_raw_handle() as isize);
             (*info).FileNameLength = name_bytes;
             std::ptr::copy_nonoverlapping(
@@ -1435,9 +1542,27 @@ mod sys {
                 &mut iosb,
                 ptr.cast(),
                 u32::try_from(total).unwrap_or(u32::MAX),
-                FileRenameInformation,
+                if ex { rename_ex_class() } else { FileRenameInformation },
             )
         };
+        // **`NtSetInformationFile`, not `SetFileInformationByHandle`, on both attempts, and the
+        // difference is not stylistic — it is measured.** The Win32 wrapper takes the same
+        // `FILE_RENAME_INFO` buffer and refuses it with `ERROR_INVALID_PARAMETER (0x80070057)` the
+        // moment `RootDirectory` is non-null: the entire `transfer` and `archive` suites reddened on
+        // it, every entry, before the call was moved down one layer. The NT form is the one that has
+        // always honoured a directory-relative rename, and it is the same layer `nt_child` above
+        // already opens through, so this module talks to one API rather than two. If a future reader
+        // "simplifies" this back to the Win32 call, every commit on the `Beneath` arm fails; the
+        // wrapper is not a superset.
+        let mut status = set(true);
+        if !status.is_ok() {
+            // Any failure retries the plain form, deliberately rather than only on the two statuses an
+            // unsupported info class produces. Reading the errno to decide would be this module's own
+            // recorded mistake (`link_at`'s comment: classify by asking, never by the code), and the
+            // plain form is strictly *more* restrictive — it refuses everything the `Ex` form refuses
+            // for a real reason, so a retry cannot turn a genuine refusal into a success.
+            status = set(false);
+        }
         if status.is_ok() {
             return Ok(());
         }

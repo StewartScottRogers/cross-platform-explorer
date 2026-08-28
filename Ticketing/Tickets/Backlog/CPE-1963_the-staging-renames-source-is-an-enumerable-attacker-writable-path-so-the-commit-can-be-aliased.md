@@ -3,7 +3,7 @@ id: CPE-1963
 title: The staging rename's SOURCE is an enumerable, attacker-writable path — the commit can be aliased onto a file outside the root
 type: bug
 priority: High
-status: Done
+status: Open
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -120,11 +120,14 @@ check-then-use sites), **CPE-1896** (`open_beneath`, the primitive this would ex
 
 | shape | aliased | lying `Ok` | victim content changed |
 |---|---|---|---|
-| relink an outside victim | **7 / 3,000** | 8 / 3,000 | 0 |
+| relink an outside victim | **8 / 3,000** | 8 / 3,000 | 0 |
 | delete-only (CONTROL) | 0 / 3,000 | 0 / 3,000 | 0 |
 
-That is inside this ticket's own Windows spread (it recorded 5 then 6). A first 200-trial run read
-9 / 200 and was set aside as warm-up noise once the 3,000-trial run landed at 7.
+**Round 2 correction: that single run was quoted as "the" figure and it is a rate.** Four further runs
+of the same binary on the same volume, taken in round 2 against the actual merge base, gave **2, 3, 2, 1
+aliased** (3, 3, 3, 1 lying), and an independent reviewer on another machine got **1, 1, 2, 4**. So the
+Windows rate here is 1–8 per 3,000 and no single run settles it. A first 200-trial run read 9 / 200 and
+was set aside as warm-up noise.
 
 **Linux was NOT re-measured by this worker.** The local WSL distro has no C toolchain (`gcc`, `cc`,
 `ld` all missing) and this crate needs one for `ring`, `zstd-sys`, `lzma-sys`, `bzip2-sys` and
@@ -241,7 +244,135 @@ touched here.
 
 - `cargo test -p cpe-server` — 2,457 lib tests plus every integration target green, 0 failed.
 - `cargo clippy --locked --all-targets -- -D warnings`, plain and `--features index` — clean.
-- `npm test` — 19 failed / 5,316 passed, **identical to the same command on clean `main`** (verified by
-  stashing and re-running); all four failing files are `catalogPublish*` / `releaseVerifyWiringGuard`,
-  none of which this change touches.
+- `npm test` — 19 failed / 5,316 passed. **Round 2 corrected the rationale, not the figure** — see below.
 - In-app docs updated: `src/docs/organizing-macros.md`, `src/docs/explorer-batch-media.md`.
+
+## Work Log — round 2 (2026-08-28), review of PR #1098
+
+`SEC PASS` / `CHANGES REQUESTED`. Seven findings, all addressed. The mechanism was independently
+confirmed; the two majors were a functional regression round 1 shipped and a guard that passed by a
+different mechanism than it documented.
+
+### MAJOR-1 — a third-party handle on the output failed the write
+
+Round 1 moved the commit to `NtSetInformationFile(FileRenameInformation)`, **the non-`Ex` form**, which
+cannot replace a destination that has *any* handle open on it. Round 1 met that as its own handle (the
+17 test failures) and closed ours — fixing the symptom and leaving the cause. On Windows a third-party
+handle on a file being saved is routine: Defender, the Search indexer, Explorer preview and thumbnail
+handlers, OneDrive, media players. It hit both `ReplacingTheName` callers, including **Batch Media**,
+whose outputs are exactly the media files a thumbnailer holds open.
+
+Measured on an ordinary unattacked confirmed overwrite with one extra `std::fs::File::open` — the
+friendliest share mode Windows has:
+
+| build | result | bytes at the name |
+|---|---|---|
+| merge base `dd097e64` | `Ok(())` | the new ones |
+| round-1 head `63dc04a5` | `Err` — Access is denied. (os error 5) | the **old** ones |
+| round 2 | `Ok(())` | the new ones |
+
+Fixed by asking for **`FileRenameInformationEx` with `FILE_RENAME_REPLACE_IF_EXISTS |
+FILE_RENAME_POSIX_SEMANTICS`**. The source operand is still the staged handle, so the security property
+is untouched. Pinned by a new test,
+`cpe_1963_a_third_party_handle_on_the_destination_does_not_fail_an_ordinary_overwrite`, which asserts on
+the bytes at the name.
+
+**It fixes both consumers**, since `ClaimedDestination::commit`'s `Beneath` arm (backup, archive,
+transfer — merged in #1089) shares `sys::rename`. Post-fix racer: **0 aliased / 0 lying `Ok` / 0 victim
+changed per 3,000, three runs**, with the new counter reporting **20,880–24,246 attacks actually landing
+on a staging file** in the relink shape and 2,986–3,000 in the control.
+
+**What the `Ex` form costs, checked rather than assumed.** `FILE_RENAME_INFO`'s `Flags` member is
+documented as Windows 10 **version 1607** and later, and POSIX-semantics rename is an **NTFS** feature —
+FAT32, exFAT and several network redirectors refuse it outright. That matters because `sys::rename` is
+on the **backup** path, and a backup destination is exactly where an exFAT USB drive or an SMB share
+turns up; `Ex`-only would trade a rare third-party-handle failure for *every* write failing there. So
+the plain form is kept as a fallback, its residual is stated at the site, and — because no such volume
+exists on this machine — the branch is reached two ways: a shipped test
+(`cpe_1963_the_rename_fallback_still_commits_when_the_ex_form_is_refused`, arming a new
+`FORCE_RENAME_WITHOUT_EX` seam) and a sabotage forcing **every** `Ex` attempt to fail, which leaves the
+lib suite at **2,459 passed / 1 failed** against a 2,460 / 0 baseline — the one failure being the
+third-party-handle test, which is exactly the price of the fallback and nothing else.
+
+### MAJOR-2 — the flagship guard passed by a different mechanism than it documented
+
+Round 1's doc mapped *prevented → Windows* / *reported → Unix*. On Windows the shipped fixture took
+**reported**, because the attacker's `unlink` sets a delete disposition on the staged object and the
+rename refuses before the operand question is reached. So it proved *"a delete-pending handle cannot be
+renamed"* — CPE-1929's reads-as-coverage shape, in this file's flagship guard.
+
+A second case now covers the handle-source property. **Three spellings were tried and the first two
+collapse into the same delete-disposition path, measured rather than reasoned:** `unlink(tmp)`;
+`rename(aside, tmp)` — which also fails, because `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` sets a
+delete disposition on the file it *replaces*; and `rename(tmp, stolen)` then `link(victim, tmp)`, which
+moves the staged object to a **free** name and marks nothing. Only the third reaches the property:
+
+| attack shape | Windows outcome | why |
+|---|---|---|
+| `UnlinkThenRelink` | reported | staged object delete-pending; the rename refuses |
+| `MoveAsideThenRelink` | **prevented** | nothing marked, so the HANDLE decides — the property |
+
+Both are kept, both red-proof against the by-path commit (`2 passed; 2 failed`, same message), and the
+doc's platform attribution is corrected.
+
+### MINOR-3 — "this mode is NEW" was refuted by my own control
+
+Re-measured on the real merge base: **four runs, delete-only control 0 / 3,000 each (0 / 12,000)** here,
+against the reviewer's **2 / 12,000** on the same pre-fix revision. So the delete-on-close lying `Ok`
+exists before this change at a rate low enough that 12,000 trials can miss it. Corrected to "much rarer
+before, not absent", with both machines' runs written into the table.
+
+### MINOR-4 — the commit-failure message
+
+`.map_err(|r| r.why)` passed `open_beneath`'s refusal through raw — leading with the folder and trailing
+`[staged as "…cpe-tmp"]`, the exact defect CPE-1958 F2 fixed and which the staging-*create* failure
+thirty lines above already honours. Now wrapped with `display_path(target)`. It is reachable without any
+attack, on the `Ex`-refused fallback path.
+
+### MINOR-5 — two cross-references this PR made stale
+
+`open_beneath.rs`'s *"the only production caller"* (`StagedBeneath::commit` is now a second) and
+`fsutil.rs`'s `ByPath` *"same commit `stage_and_replace_at` uses"* (now only its
+`CarryingTheDestination` arm). Both corrected in place.
+
+### MINOR-6 — ticket moved back to `Backlog/`
+
+Not merged is not Done. The Foreman moves tickets at merge.
+
+### NIT-7 — the racer now counts its own landed attacks
+
+`cpe_1958_rename_source_race` reports `{n} attacks actually landed on a staging file` and prints an
+explicit WARNING when that is zero, so a post-fix `0 / 3,000` cannot be read as a fix when it was really
+a run that measured nothing.
+
+### CPE-1929 pair, re-run on WINDOWS at the round-2 baseline
+
+| sabotage | `cargo test -p cpe-server --lib` |
+|---|---|
+| baseline | 2,460 passed / 0 failed |
+| disable the identity check | 2,460 passed / 0 failed |
+| force its predicate to lie | 2,435 passed / **25 failed** |
+
+Unchanged in shape from round 1: one green, not two, so not a shadowed guard. Windows only; the Linux
+half remains a prediction.
+
+### The `npm test` figure — corrected, with the cause
+
+The reviewer measured **0 failed / 5,376 passed / 2 skipped** and could not reproduce mine. Re-measured
+here three consecutive times on the round-2 head: **19 failed / 5,316 passed**, and the same command
+with round 2 stashed gives **exactly the same 19 / 5,316** — so it is not this change. One run under
+heavy load gave 44 failed / 5,325 passed / 9 skipped over the identical four files; the three settled
+runs did not.
+
+**Round 1's rationale was "pre-existing, untouched", which is true but explains nothing. The cause is
+now measured:** the shell scripts under test exit **127** (`expected 127 to be 3`, `to be 4`, …) because
+**`jq` is absent on this machine** — confirmed on both the PowerShell and Git-Bash search paths.
+`catalogPublishLoudFailure.test.ts` self-skips on `!hasJq`; `catalogPublishVersion.test.ts` and
+`catalogPublishFreshnessGuard.test.ts` have no such guard and fail instead. `releaseVerifyWiringGuard`'s
+3 further failures were not characterised. Nothing here is attributable to this change, and the figure
+is a property of this machine's toolchain rather than of the repo.
+
+### Checks (round 2)
+
+- `cargo test -p cpe-server` — **2,460** lib tests plus every integration target, 0 failed.
+- `cargo clippy --locked --all-targets -- -D warnings`, plain and `--features index` — clean.
