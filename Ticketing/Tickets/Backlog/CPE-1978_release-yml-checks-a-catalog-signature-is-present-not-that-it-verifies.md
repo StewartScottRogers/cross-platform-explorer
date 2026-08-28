@@ -67,6 +67,67 @@ in `verify` — anti-rollback lives in `apply_bundle_with`, and `verify` applies
       at run time and executes the real binary with it**, which is this repo's answer to "a comment that
       claims what a workflow does." `release_workflow_wiring.rs` is the worked example.
 
+## Work Log
+
+**2026-08-28 — worked. What was MEASURED, and what was not.**
+
+*The gap, on exit status.* The pre-fix `Verify the signed bundle before uploading it` body was run
+against `catalog-out/catalog-index.json` + a `catalog-index.json.sig` holding the ASCII text
+`not a signature`. It printed `signed catalog bundle carries 1 entr(y|ies); files to upload:` and
+exited **0** — the job would have uploaded it. That is now a permanent executed case in
+`src/lib/catalogPublishLoudFailure.test.ts` §8, asserting `r.status === 0`, not a log string.
+
+*The same bundle through the real binary.* `catalog-sign verify catalog-out <trusted pubkey>` →
+`FAIL: index signature does not verify under the key`, exit **1**.
+
+*The new step, real `cargo`, real `catalog-sign`, body extracted from `release.yml` itself.* Four
+scenarios, run locally against a bundle signed with a throwaway keypair (deleted):
+A. good bundle + its key → exit **0** (`OK: index + 1 manifest(s) verify`, then the control run
+   refused under the decoy).
+B. same bundle, index `.sig` overwritten with `not a signature` → exit **1**.
+C. good bundle, a key that did not sign it (a rotation nobody mirrored) → exit **1**.
+D. `cargo` absent from `PATH` → exit **1** (`cargo: command not found`, then the step's `::error::`).
+
+*The pubkey decision.* The key is a **literal in `release.yml`**, not a repository secret. It is the
+public half; the identical value is already committed as `CATALOG_TRUSTED_KEYS` in
+`src-tauri/src/lib.rs` and ships inside every installed binary, so a secret buys no confidentiality
+and costs two things: a second copy no diff and no guard can see (a rotation could silently diverge
+from what clients trust — the exact failure this check exists to catch), and an unset secret
+expanding to the empty string, i.e. failing **open**. `catalogPublishLoudFailure.test.ts` §8 derives
+both sides and reds on any divergence; red-proofed in both directions (workflow literal changed →
+red; Rust const changed → red; both reverted). No signing key was generated in-repo, committed, or
+touched, and `tauri.conf.json` is unmodified.
+
+*Verifying under the CLIENTS' key, not the signing key,* is deliberate: verifying under the key that
+just signed would only prove the bundle is self-consistent.
+
+*Fail-closed, including "did not run".* `set -euo pipefail` covers a missing cargo, a build failure
+and an unreadable bundle. The case an exit code cannot cover — a verifier that says yes to
+everything — is covered by running the check **twice**, the second time under a key that did not
+sign the bundle, requiring a refusal. Executed: a stub `cargo` that approves everything makes the
+step exit non-zero.
+
+*Enumeration (CPE-1932).* Derived from `allShellUnits()` over every workflow and extracted script,
+not from a remembered pair of filenames. **`release-sidecar.yml` has no catalog job and signs
+nothing** — nothing there to diverge. The sign-family invocations on this revision are
+`release.yml → catalog-sign` (sign, and now verify) and **`model-snapshot.yml → model-snapshot-sign`
+(sign only, no verification before publishing)**.
+
+*Sibling gap found and NOT closed here.* `model-snapshot.yml` signs `models-index.json` with the same
+key and publishes it to the `model-catalog` release with no signature check at all — the identical
+shape. It is not closed in this PR because `model-snapshot-sign` **has no `verify` subcommand**
+(derived, comments stripped: the only `verify` in `model_snapshot_sign.rs` is inside a comment).
+Adding one is its own change to a scheduled workflow and wants its own ticket. The guard records this
+as a derived fact: the day that subcommand appears, the test reds and starts demanding the wiring.
+
+*What remains UNVERIFIED.* No release was cut and no workflow run was triggered, so the shipped step
+has **never executed on a GitHub runner**. What was executed is the step's own `run:` body, extracted
+from `release.yml` at run time, under bash — locally with the real `catalog-sign`, and in CI (vitest)
+with a key-sensitive stub `cargo`. The one link that stays inferred is that the CI runner's
+`CPE_CATALOG_SIGNING_KEY` secret is the private half of `CATALOG_TRUSTED_KEYS`; if it is not, the new
+step fails the next release **loudly** — which is the intended behaviour, but it is a prediction, not
+a measurement.
+
 ## Notes
 
 Filed 2026-08-28 by the sprint Foreman from CPE-1954's worker (PR #1088), which found it while

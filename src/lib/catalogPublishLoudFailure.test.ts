@@ -21,12 +21,19 @@
 // What is deliberately NOT proven here: that a real tagged release publishes a real catalog
 // end to end. That requires cutting a release — an outward-facing publishing action — and was not
 // done. See the PR body for exactly what that leaves open.
+//
+// CPE-1978 extends this file with §8. Same subject (this job's honesty), same harness: the step
+// that says "Verify" now runs the verifier instead of checking a `.sig` is present, and every claim
+// about it below is either executed or derived from the file it names.
 import { describe, it, expect } from "vitest";
 import { readFileSync, writeFileSync, readdirSync, mkdtempSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { parseYaml } from "./preview/yaml";
+import { stripRustComments, rustStrSliceAfter } from "./rustSource";
+import { logicalLines } from "./shellScriptLines";
+import { allShellUnits } from "./workflowShellSources";
 
 const WORKFLOWS = join(process.cwd(), ".github", "workflows");
 
@@ -580,6 +587,9 @@ describe('"Catalog publish outcome" makes a non-publishing run RED (CPE-1953)', 
     HAS_KEY: "true",
     SIGN: "success",
     BUNDLE: "success",
+    // CPE-1978's real signature check. The gate reads it like every other step, so a `skipped` or
+    // `failure` here is a non-publishing run.
+    SIGVERIFY: "success",
     UPLOAD: "success",
     CONFIRM: "success",
     ENTRIES: "3",
@@ -631,6 +641,7 @@ describe('"Catalog publish outcome" makes a non-publishing run RED (CPE-1953)', 
   it.skipIf(!hasBash).each([
     ["SIGN", "build+sign"],
     ["BUNDLE", "verify-bundle"],
+    ["SIGVERIFY", "verify-signatures"],
     ["UPLOAD", "upload"],
     ["CONFIRM", "confirm-on-release"],
   ])("a %s outcome of 'skipped' -> exit 1 naming %s", (key, label) => {
@@ -667,7 +678,7 @@ describe("release.yml's catalog job keeps the structure these red-proofs depend 
 
   it("every step the gate reads an outcome from has the id the gate names", () => {
     const ids = new Set((catalogJob.steps ?? []).map((s) => s.id).filter(Boolean));
-    for (const id of ["k", "sign", "bundle", "up", "confirm"]) {
+    for (const id of ["k", "sign", "bundle", "sigverify", "up", "confirm"]) {
       expect(ids.has(id), `catalog job is missing step id "${id}" that the outcome gate reads`).toBe(true);
     }
   });
@@ -868,5 +879,373 @@ describe("every needs:-chained job across the workflows has a recorded skip verd
           `outside its field of view entirely`,
       ).toContain(jobName);
     }
+  });
+});
+
+// ── 8. CPE-1978: the step named "Verify" runs the verifier ──────────────────────────────────────
+// `release.yml`'s "Verify the signed bundle before uploading it" checked that a `.sig` FILE EXISTS.
+// Its own comment named CPE-1954 as the enabler for the real check and said so honestly; CPE-1954
+// landed (PR #1088), so `Verify the signed bundle's signatures under the trusted key (CPE-1978)`
+// now runs `catalog-sign verify` before the upload.
+//
+// Everything below is executed or derived. The bash legs run the shipped `run:` bodies with a stub
+// `cargo`; the stub is deliberately KEY-SENSITIVE (it accepts one pubkey and refuses every other),
+// because key-sensitivity is the property the step's own control leg depends on. What a stub cannot
+// speak for -- that the REAL binary refuses a bad bundle -- is pinned in
+// `sidecar/host/tests/catalog_sign_verify_gate.rs`
+// (`a_bundle_from_the_real_signer_still_verifies`, and the "signed by a key the operator did not
+// name" / "a signature that is not hex" arms of
+// `every_unusable_index_is_refused_rather_than_waved_through`), and was re-measured by hand against
+// the real binary while writing this -- see the PR body for those four exit statuses.
+
+const VERIFY_STEP = "Verify the signed bundle's signatures under the trusted key (CPE-1978)";
+
+/** The `env:` map the workflow gives a step in the catalog job. */
+function stepEnv(name: string): Record<string, string> {
+  return (step(name).env ?? {}) as Record<string, string>;
+}
+
+/** The public key `release.yml` verifies under, read out of the shipped workflow. */
+function workflowPubkey(): string {
+  const value = stepEnv(VERIFY_STEP).CATALOG_PUBKEY;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `${VERIFY_STEP} has no CATALOG_PUBKEY in its env:. The step cannot verify anything without ` +
+        `a key, and this guard cannot check a key it cannot find -- do not "fix" this by deleting ` +
+        `the assertion.`,
+    );
+  }
+  return value;
+}
+
+/** A stub `cargo` that models the one property that matters: it accepts exactly one pubkey. */
+function keySensitiveCargo(accepts: string): string {
+  return [
+    'echo "CARGO-RAN: $*"',
+    // Everything after the invocation's `--` is the binary's argv; the pubkey is its last token.
+    'for a in "$@"; do last="$a"; done',
+    `if [ "$last" = "${accepts}" ]; then echo "OK: index + 1 manifest(s) verify under the key"; exit 0; fi`,
+    'echo "FAIL: index signature does not verify under the key" >&2',
+    "exit 1",
+  ].join("\n");
+}
+
+const A_BUNDLE = {
+  "catalog-out/catalog-index.json": VALID_INDEX,
+  "catalog-out/catalog-index.json.sig": "not a signature",
+};
+
+describe("the presence check is not a verification, and the workflow no longer relies on it (CPE-1978)", () => {
+  // THE GAP, ASSERTED ON EXIT STATUS. This is the whole ticket in one measurement: hand the
+  // presence-only step a bundle whose detached signature is the ASCII text `not a signature`, and
+  // it exits 0 and the job proceeds to upload. It still does -- that step's scope is unchanged and
+  // deliberately so -- which is exactly why the step below it had to start existing.
+  it.skipIf(!hasBash)("a bundle whose .sig does NOT verify still passes the presence-only step, exit 0", () => {
+    const r = execStep(runBody("Verify the signed bundle before uploading it"), {
+      files: A_BUNDLE,
+      stubs: { jq: "echo 1" },
+    });
+    expect(r.status).toBe(0);
+  });
+
+  it("the presence-only step is followed, in the same job and BEFORE the upload, by the real check", () => {
+    const names = (catalogJob.steps ?? []).map((s) => s.name);
+    const presence = names.indexOf("Verify the signed bundle before uploading it");
+    const real = names.indexOf(VERIFY_STEP);
+    const upload = names.indexOf("Upload catalog assets to the release");
+    expect(presence, "the presence step is gone -- update this guard rather than dropping it").toBeGreaterThanOrEqual(0);
+    expect(real, `the catalog job has no step named "${VERIFY_STEP}"`).toBeGreaterThan(presence);
+    expect(
+      upload,
+      "the real verification must run BEFORE the upload -- a bundle that fails it must never reach " +
+        "the release at all, the same ordering argument CPE-1953 made for the presence check",
+    ).toBeGreaterThan(real);
+  });
+});
+
+describe("the verify step's key is the one clients trust, derived not asserted (CPE-1978)", () => {
+  // CPE-1933: the workflow could carry any 64 hex characters and still look right. The value that
+  // makes the check MEAN something is the key installed clients trust, and that lives in exactly one
+  // place -- `CATALOG_TRUSTED_KEYS` in `src-tauri/src/lib.rs`. Read it from there, comments stripped
+  // (the const's own doc comment names the constant, so an anchored scan over raw source is the
+  // documented trap), and require the workflow's literal to be one of its entries.
+  //
+  // RED-PROOFED BY EXECUTION, and the result belongs here rather than only in the PR body: with the
+  // workflow literal's leading `5b` changed to `5c` and `src-tauri/src/lib.rs` untouched, this test
+  // failed with "release.yml verifies under 5c18... which is not one of CATALOG_TRUSTED_KEYS";
+  // with the workflow left alone and the Rust const's leading `5b` changed to `5c`, it failed the
+  // same way. Both reverted.
+  const TRUSTED_KEYS = rustStrSliceAfter(
+    stripRustComments(readFileSync(join(process.cwd(), "src-tauri", "src", "lib.rs"), "utf8")),
+    "const CATALOG_TRUSTED_KEYS",
+  );
+
+  it("CATALOG_TRUSTED_KEYS is a non-empty list of ed25519 public keys", () => {
+    // A near-empty derivation is not a clean one: an empty list would make the membership check
+    // below vacuous in the direction that matters.
+    expect(TRUSTED_KEYS.length, "no keys derived from CATALOG_TRUSTED_KEYS").toBeGreaterThanOrEqual(1);
+    for (const k of TRUSTED_KEYS) expect(k).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("release.yml verifies under a key CATALOG_TRUSTED_KEYS actually holds", () => {
+    const wf = workflowPubkey();
+    expect(wf, `release.yml's CATALOG_PUBKEY (${wf}) is not 64 lowercase hex characters`).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      TRUSTED_KEYS,
+      `release.yml verifies under ${wf}, which is not one of CATALOG_TRUSTED_KEYS ` +
+        `(${TRUSTED_KEYS.join(", ")}). Either the workflow is checking bundles against a key no ` +
+        `installed client trusts -- so a catalog every client rejects would publish green -- or a ` +
+        `key rotation updated one of the two files and not the other. Both are the failure this ` +
+        `step exists to catch; fix the value, never this assertion.`,
+    ).toContain(wf);
+  });
+
+  it("the key is a plain literal in the workflow, not an expression a secret could fill in", () => {
+    // The costed decision (see the step's own comment): a PUBLIC key gains nothing from being a
+    // secret and loses two things -- reviewability, and the fact that an unset secret expands to
+    // the empty string, i.e. fails OPEN. `${{ ... }}` here would reintroduce both.
+    expect(workflowPubkey()).not.toContain("${{");
+  });
+});
+
+describe("the verify step fails closed on every way the check can fail to RUN (CPE-1978)", () => {
+  const KEY = workflowPubkey();
+  const DECOY = `0${KEY.slice(1)}` === KEY ? `1${KEY.slice(1)}` : `0${KEY.slice(1)}`;
+  const body = () => runBody(VERIFY_STEP);
+  /** The step's SHIPPED `env:`, so these runs see the same CATALOG_PUBKEY the release would. */
+  const shippedEnv = () => stepEnv(VERIFY_STEP);
+  const run = (options: ExecOptions = {}) =>
+    execStep(body(), { ...options, env: { ...shippedEnv(), ...(options.env ?? {}) } });
+
+  it.skipIf(!hasBash)("a bundle that verifies under the trusted key -> exit 0", () => {
+    const r = run({ files: A_BUNDLE, stubs: { cargo: keySensitiveCargo(KEY) } });
+    expect(r.status, r.all).toBe(0);
+  });
+
+  it.skipIf(!hasBash)("it really invokes `catalog-sign verify` against catalog-out, twice, with both keys", () => {
+    const r = run({ files: A_BUNDLE, stubs: { cargo: keySensitiveCargo(KEY) } });
+    // Derived from the step's own argv rather than asserted about it: the two lines the stub echoed
+    // are the two invocations the shipped body made.
+    const ran = r.all.split("\n").filter((l) => l.includes("CARGO-RAN:"));
+    expect(ran.length, `expected two cargo invocations, got:\n${r.all}`).toBe(2);
+    for (const line of ran) {
+      expect(line).toContain("--bin catalog-sign");
+      expect(line).toContain("-- verify catalog-out");
+    }
+    expect(ran[0]).toContain(KEY);
+    expect(ran[1]).toContain(DECOY);
+  });
+
+  it.skipIf(!hasBash)("the verifier says no under the trusted key -> the step FAILS, before any upload", () => {
+    const r = run({
+      files: A_BUNDLE,
+      stubs: { cargo: keySensitiveCargo("f".repeat(64)) },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.all).toContain("::error::");
+    expect(r.all).toContain("did not succeed under CATALOG_TRUSTED_KEYS");
+  });
+
+  // THE "RAN AND FOUND NOTHING" vs "DID NOT RUN" LEG, which an exit code alone cannot cover: a
+  // verifier that says yes to everything passes the positive run. The step therefore runs the check
+  // a second time under a key that provably did not sign the bundle and requires a REFUSAL, so a
+  // stub, a no-op, a short-circuit, or a future edit that drops the `verify` subcommand is caught.
+  it.skipIf(!hasBash)("a verifier that approves EVERYTHING -> the step FAILS on its own control", () => {
+    const r = run({
+      files: A_BUNDLE,
+      stubs: { cargo: 'echo "CARGO-RAN: $*"; echo "OK: everything is fine"; exit 0' },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.all).toContain("The verifier is not verifying");
+  });
+
+  it.skipIf(!hasBash)("cargo absent from PATH entirely -> the step FAILS (127 is not a pass)", () => {
+    // No `cargo` stub at all. On a developer machine a real cargo may sit on PATH, in which case
+    // this exercises a real `cargo run` against a bundle that cannot verify -- which still fails.
+    const r = run({
+      files: A_BUNDLE,
+      stubs: { cargo: 'echo "cargo: command not found" >&2; exit 127' },
+    });
+    expect(r.status).not.toBe(0);
+  });
+
+  it.skipIf(!hasBash).each([
+    ["empty", ""],
+    ["not hex", "zzzz" + "0".repeat(60)],
+    ["uppercase (a different spelling of the same key is still not the literal we pin)", "5B".repeat(32)],
+    ["too short", "abc123"],
+    ["too long", "a".repeat(65)],
+  ])("an unusable CATALOG_PUBKEY (%s) -> refused BEFORE the verifier is ever run", (_label, key) => {
+    const r = run({
+      files: A_BUNDLE,
+      env: { CATALOG_PUBKEY: key as string },
+      stubs: { cargo: 'echo "CARGO-RAN: $*"; exit 0' },
+    });
+    expect(r.status).not.toBe(0);
+    // The distinction CLAUDE.md asks for: this must read as "the check did not run", and it must
+    // not have quietly run under a garbage key and come back with an ordinary-looking "no".
+    expect(r.all).not.toContain("CARGO-RAN");
+  });
+
+  it.skipIf(!hasBash)("no bundle on disk at all -> the step FAILS rather than verifying nothing", () => {
+    const r = run({
+      // The real binary reads catalog-out/catalog-index.json and exits 1 when it cannot; the stub
+      // models that by refusing when the file is absent.
+      stubs: { cargo: 'if [ -s catalog-out/catalog-index.json ]; then exit 0; fi; echo "read: no such file" >&2; exit 1' },
+    });
+    expect(r.status).not.toBe(0);
+  });
+});
+
+// CPE-1932: "does release-sidecar.yml carry the same step?" is a question about a REMEMBERED list of
+// two files. Enumerate instead -- every workflow step and every extracted script CI runs -- and ask
+// the general question: does anything that SIGNS a bundle also VERIFY it before publishing?
+//
+// Measured on this revision: `release-sidecar.yml` has no catalog job and signs nothing, so there is
+// nothing there to diverge; the sign-family invocations are `release.yml`'s `catalog-sign` (sign +,
+// now, verify) and `model-snapshot.yml`'s `model-snapshot-sign` (sign only).
+//
+// RED-PROOFED, and specifically against the trap CPE-1933 rule 2 names. The real verify invocation
+// in `release.yml` was replaced with a `#` COMMENT carrying the identical text (`# cargo run …
+// --bin catalog-sign -- verify catalog-out "$1"`) and a `true` in its place. Six tests went red,
+// including "release.yml signs a catalog bundle and never verifies it" and the floor below -- i.e.
+// the commented-out invocation was counted by nothing. A whole-line-comment filter would have
+// caught that one shape; the trailing-comment shape it would NOT have caught is exactly why this
+// delegates to `logicalLines` instead of filtering here. Reverted.
+describe("every workflow that SIGNS a bundle also verifies it before publishing (CPE-1932/CPE-1978)", () => {
+  interface SignFamilyCall {
+    where: string;
+    file: string;
+    bin: string;
+    manifest?: string;
+    verifying: boolean;
+  }
+
+  /**
+   * Every `cargo run … --bin <something>-sign …` across all the shell CI executes.
+   *
+   * Anchored on code, never on prose: `logicalLines` (the same stripper
+   * `crates/updater-verify/src/workflow_scan.rs` is the Rust port of) removes whole-line AND
+   * trailing comments, joins `\` continuations, and skips heredoc bodies -- so the four prose
+   * comments in `release.yml` that mention `catalog-sign` are invisible here, which is the point.
+   *
+   * What this cannot see, stated rather than left to be discovered: a signer invoked as a built
+   * binary path rather than through `cargo run --bin`, a bin name that does not end in `-sign`, and
+   * a signer run from a composite action rather than a `run:` step. At least those; the list is
+   * open. The near-empty backstop below is what stops any of them turning this into a vacuous pass
+   * silently -- it cannot see them either, but it will not let the population collapse unnoticed.
+   */
+  function signFamilyCalls(): SignFamilyCall[] {
+    const out: SignFamilyCall[] = [];
+    for (const unit of allShellUnits()) {
+      for (const line of logicalLines(unit.run)) {
+        const toks = line.split(/\s+/).map((t) => t.replace(/^["']|["']$/g, ""));
+        const at = toks.indexOf("--bin");
+        if (at < 0) continue;
+        const bin = toks[at + 1];
+        if (!bin || !bin.endsWith("-sign")) continue;
+        const dashdash = toks.indexOf("--", at);
+        const argv = dashdash < 0 ? [] : toks.slice(dashdash + 1);
+        const mp = toks.indexOf("--manifest-path");
+        out.push({
+          where: unit.where,
+          file: unit.file,
+          bin,
+          manifest: mp < 0 ? undefined : toks[mp + 1],
+          verifying: argv[0] === "verify",
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Whether `bin` even HAS a `verify` subcommand, derived from the crate manifest the invocation
+   * itself names and the Rust file that manifest points at (comments stripped first -- the one
+   * `verify` in `model_snapshot_sign.rs` is inside a comment, so a raw-source scan would answer
+   * this question wrong in the direction that hides a gap).
+   *
+   * Blind spot, named: a verify path spelled some other way (`check`, a clap subcommand, a flag)
+   * reads as absent here. That fails toward reporting a gap that is already closed -- loud, not
+   * silent -- which is the safe direction for this particular scan.
+   */
+  function hasVerifySubcommand(manifest: string, bin: string): boolean {
+    const toml = readFileSync(join(process.cwd(), manifest), "utf8");
+    const blocks = toml.split("[[bin]]").slice(1);
+    for (const block of blocks) {
+      const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(block)?.[1];
+      const path = /^\s*path\s*=\s*"([^"]+)"/m.exec(block)?.[1];
+      if (name !== bin || !path) continue;
+      const crateDir = manifest.slice(0, manifest.lastIndexOf("/"));
+      const src = stripRustComments(readFileSync(join(process.cwd(), crateDir, path), "utf8"));
+      return src.includes('"verify"');
+    }
+    throw new Error(`${manifest} declares no [[bin]] named ${bin} -- the invocation and the manifest disagree`);
+  }
+
+  const CALLS = signFamilyCalls();
+
+  it("the enumeration found the signers it is supposed to police", () => {
+    expect(
+      CALLS.length,
+      "no `--bin *-sign` invocation found in any workflow step or script. This scan has stopped " +
+        "seeing its own subject, which would make every assertion below a vacuous pass -- fix the " +
+        "scan, never lower this floor.",
+    ).toBeGreaterThanOrEqual(3);
+    const bins = [...new Set(CALLS.map((c) => c.bin))].sort();
+    expect(bins).toContain("catalog-sign");
+  });
+
+  it("release.yml's catalog-sign signing call is matched by a verify call in the same workflow", () => {
+    const catalogCalls = CALLS.filter((c) => c.bin === "catalog-sign");
+    expect(catalogCalls.some((c) => !c.verifying), "release.yml no longer signs a catalog").toBe(true);
+    expect(
+      catalogCalls.some((c) => c.verifying && c.file.endsWith("/release.yml")),
+      "release.yml signs a catalog bundle and never verifies it -- CPE-1978 reopened",
+    ).toBe(true);
+  });
+
+  it("no signer publishes unverified while its binary CAN verify", () => {
+    const stillUnverified: string[] = [];
+    for (const bin of [...new Set(CALLS.map((c) => c.bin))]) {
+      const calls = CALLS.filter((c) => c.bin === bin);
+      const signing = calls.filter((c) => !c.verifying);
+      if (signing.length === 0) continue;
+      const files = [...new Set(signing.map((c) => c.file))];
+      for (const file of files) {
+        if (calls.some((c) => c.verifying && c.file === file)) continue;
+        const manifest = signing.find((c) => c.file === file)?.manifest;
+        if (!manifest) {
+          throw new Error(`${bin} is invoked in ${file} with no --manifest-path -- cannot derive whether it can verify`);
+        }
+        if (hasVerifySubcommand(manifest, bin)) stillUnverified.push(`${file} -> ${bin}`);
+      }
+    }
+    expect(
+      stillUnverified,
+      `these workflows sign and publish a bundle without verifying it, using a binary that HAS a ` +
+        `verify subcommand: ${stillUnverified.join(", ")}. That is CPE-1978's defect in a sibling ` +
+        `workflow -- wire the verify call in rather than widening this test.`,
+    ).toEqual([]);
+  });
+
+  // The open half, recorded as a derived fact rather than as prose so it cannot go stale silently.
+  // `model-snapshot.yml` signs `models-index.json` with the SAME key and publishes it to the
+  // `model-catalog` release with no signature check at all -- the identical shape this ticket
+  // closes for the agent catalog. It is not closed here because `model-snapshot-sign` has no verify
+  // path to call: closing it means adding one to the binary, which is its own change with its own
+  // blast radius (a scheduled workflow) and belongs in its own ticket. The day someone adds that
+  // subcommand, this test reds and the assertion above starts demanding the wiring.
+  it("model-snapshot-sign still has no verify subcommand -- the reason its workflow is not covered", () => {
+    const snapshot = CALLS.filter((c) => c.bin === "model-snapshot-sign");
+    expect(snapshot.length, "model-snapshot.yml no longer signs a snapshot -- re-derive this note").toBeGreaterThanOrEqual(1);
+    const manifest = snapshot[0].manifest;
+    expect(manifest, "the model-snapshot-sign invocation names no --manifest-path").toBeDefined();
+    expect(
+      hasVerifySubcommand(String(manifest), "model-snapshot-sign"),
+      "model-snapshot-sign has grown a `verify` subcommand. The reason model-snapshot.yml publishes " +
+        "an unverified signed bundle no longer holds -- wire `verify` into that workflow the way " +
+        "CPE-1978 did for release.yml, then delete this test.",
+    ).toBe(false);
   });
 });
