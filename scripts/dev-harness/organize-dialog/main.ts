@@ -51,8 +51,16 @@ const PLANS: Record<string, Proposal[]> = {
 
 const plan = PLANS[planSize] ?? PLANS.two;
 
+// `planResolved` is recorded HERE, at the mock, rather than inferred from the DOM. The obvious
+// inference — "does [data-testid='summary'] exist yet?" — is wrong for an EMPTY plan, which never
+// renders a summary, and it reported `(loading)` on the `empty` screenshot even though the plan had
+// landed. And the other candidate, `empty-state`, renders at MOUNT (CPE-1965: `loading` starts false
+// and `plan` starts `[]`), so it cannot distinguish the two either. The mock is the only place that
+// knows for certain.
+let planResolved = false;
 registerCommand("organizePlan", async () => {
   await new Promise((r) => setTimeout(r, delayMs));
+  planResolved = true;
   return plan;
 });
 
@@ -72,12 +80,12 @@ function rulesTop(): number | null {
 
 function render() {
   const now = rulesTop();
-  const settled = document.querySelector('[data-testid="summary"]') !== null;
+  const settled = planResolved;
   const lines = [
     `CPE-1968  ${legacy ? "BEFORE (min-height:120px/max-height:45vh)" : "AFTER (height: clamp(200px,40vh,340px))"}`,
     `plan=${planSize} (${plan.length} files)  delay=${delayMs}ms  viewport=${window.innerWidth}x${window.innerHeight}`,
     `.rules top @t=100ms : ${firstTop === null ? "…" : `${firstTop.toFixed(1)}px`}`,
-    `.rules top now      : ${now === null ? "n/a" : `${now.toFixed(1)}px`}   ${settled ? "(plan rendered)" : "(loading)"}`,
+    `.rules top now      : ${now === null ? "n/a" : `${now.toFixed(1)}px`}   ${settled ? "(plan landed)" : "(in flight)"}`,
     `pills moved         : ${firstTop === null || now === null ? "…" : `${(firstTop - now).toFixed(1)}px`}`,
   ];
   probe.textContent = lines.join("\n");

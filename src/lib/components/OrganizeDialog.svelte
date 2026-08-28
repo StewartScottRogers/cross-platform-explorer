@@ -211,17 +211,57 @@
    * scroll viewport, and the useful question is only how many rows it shows before scrolling. 40vh
    * is 280px at gui-smoke's 700px window (~14 file rows) and the clamp stops it being absurd at the
    * extremes: 340px caps it on a 1080px screen (45vh there would be 486px of mostly-empty box for a
-   * two-file plan) and 200px floors it on a short window, where it still keeps the whole dialog
-   * (~360px) inside `max-height: 85vh`. (`app.css` sets `* { box-sizing: border-box }` globally, so
-   * that height INCLUDES the 10px padding and the 1px borders — hence the 22px term above.)
+   * two-file plan) and 200px floors it on a short window. (`app.css` sets
+   * `* { box-sizing: border-box }` globally, so that height INCLUDES the 10px padding and the 1px
+   * borders — hence the 22px term above.)
    *
-   * NOT FIXED HERE, stated so it is not mistaken for covered: `.err` renders ABOVE this box, so a
-   * rule whose plan ERRORS still moves the pills relative to one that succeeds. That is a failure
-   * path, not the load path this ticket is about, and reserving permanent empty space for an error
-   * that almost never appears is a worse trade than the jump it would prevent.
+   * NOTE WHICH TERM IS THE KNOB. At 700px, 40vh = 280px, so the 200px FLOOR never binds — it engages
+   * only below a 500px window. Anyone tuning this box is tuning the 40vh, not the clamp bounds, and
+   * 40vh should stay where it is: at 280px a 5-group plan already shows only 2 of its 5 groups, so
+   * shrinking it hurts the common case to flatter the rare one.
+   *
+   * THE ONE PLACE THIS COSTS SOMETHING, quantified rather than waved at. Dialog height is 160 + this
+   * box. At the 200px floor that is 360px, which needs a window of >= ~424px to stay inside
+   * `max-height: 85vh`; the old content-driven box on a two-file plan was ~141px, i.e. a 301px dialog
+   * needing only >= ~354px. So between roughly 354px and 424px of window height the dialog now
+   * scrolls internally where it previously did not. Part of that band IS reachable, so do not read
+   * this as theoretical: `src-tauri/src/lib.rs` sets `.min_inner_size(600.0, 400.0)`, i.e. the window
+   * can legitimately be 400px tall, which puts 400-424px inside the band. Left as is deliberately —
+   * `.dialog`'s own `overflow: auto` degrades it to a scrollbar, the app opens at 700px, and a
+   * scrollbar on a deliberately-shrunk window is a far better outcome than a dialog that moves under
+   * the pointer at every size. But it is a real regression in that band, recorded so the next person
+   * meets it here rather than by surprise.
+   *
+   * NOT FIXED HERE — TWO REMAINING HEIGHT CHANGES, so this list is not mistaken for exhaustive:
+   *
+   *   1. `.err` renders ABOVE this box, so a rule whose plan ERRORS moves the pills relative to one
+   *      that succeeds. Note this IS the load path and IS the same t=120ms moment — the earlier
+   *      draft of this comment wrongly dismissed it as "a failure path". What makes it acceptable is
+   *      MAGNITUDE: `.err` is ~15px of text plus its 8px margin, so the pills move ~11.5px, against
+   *      a pill that is 28px tall. A pointer aimed at a pill's centre has ~14px of slack in each
+   *      direction, so it stays inside the pill it was aiming at. The 195px growth this ticket fixed
+   *      did not.
+   *   2. `{#if outcome}` REPLACES this box with `.outcome` entirely, so the dialog shrinks and
+   *      re-centres when `organizeApply` resolves. Not this ticket's shape — it is user-initiated
+   *      (it follows the user's own Apply click) rather than arriving unbidden after mount, and
+   *      `applying` disables Apply for the duration while the button is removed afterwards, so the
+   *      obvious double-click is inert. Recorded rather than fixed, and honestly: where a stray
+   *      post-Apply click lands has NOT been measured.
    */
   .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; height: clamp(200px, 40vh, 340px); overflow: auto; margin-bottom: 12px; }
-  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
+  /*
+   * CPE-1968: CENTRED, and only because `.preview` is now a fixed 280px. `.empty` is the sole child
+   * of `.preview` in exactly two states — "Loading preview…" and "nothing to organize" — and in both
+   * it is ONE LINE. At the old 120px floor, flush top-left read fine. At 280px a single line pinned
+   * to the corner of a large bordered box is the one thing that reads as unfinished rather than
+   * roomy, so it is centred in the space the fix created.
+   *
+   * This must NOT extend to the plan-rendered case, where top alignment is correct for a list — and
+   * it structurally cannot: that branch renders `.summary` + `.groups` and never mounts `.empty` at
+   * all. `height: 100%` resolves against `.preview`'s definite height, which is the other thing the
+   * fix made possible; before it, there was no definite height for a percentage to resolve against.
+   */
+  .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; display: grid; place-items: center; height: 100%; }
   .summary { font-size: 12.5px; color: var(--text-dim); margin-bottom: 10px; }
   .groups { display: flex; flex-direction: column; gap: 10px; }
   .group-head { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }

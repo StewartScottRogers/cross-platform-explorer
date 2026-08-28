@@ -49,8 +49,13 @@ const HEIGHT = 900;
  *  loading state. 120ms (the component's own debounce) lets the plan land normally. */
 const HELD = 600000;
 
+// Every state in which `.preview` renders something DIFFERENT, so none of them is reviewed only in
+// the abstract. `empty` was missing from an earlier version of this list even though `PLANS.none`
+// existed to feed it — which meant the "nothing to organize" state was the one frame nobody ever
+// looked at, and it shares `.empty` with `loading`, so a change to that class went half-unphotographed.
 const STATES = [
   { name: "loading", plan: "two", delay: HELD, note: "first organize_plan still in flight" },
+  { name: "empty", plan: "none", delay: 120, note: "the plan came back empty — nothing to organize" },
   { name: "plan-two-files", plan: "two", delay: 120, note: "a two-file plan — the roomy-box case" },
   { name: "plan-large", plan: "large", delay: 120, note: "26 files over 5 groups — an ordinary Downloads folder" },
 ];

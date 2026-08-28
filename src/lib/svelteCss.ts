@@ -8,10 +8,29 @@
  * than pin two copies to one oracle. Hence one module, imported by both.
  *
  * CPE-1933 rule 2 — ANCHOR ON CODE, NEVER ON PROSE. `styleBlock` strips CSS comments before it
- * matches, because the fix it guards ships with a long comment that QUOTES the old broken
- * declarations (`min-height: 120px; max-height: 45vh`). A scanner that read raw source could match a
- * commented-out or merely quoted rule and pass while the live rule said something else. It also
- * refuses to guess: a class with zero or two matching blocks throws rather than picking one.
+ * matches. It also refuses to guess: a class with zero or two matching blocks throws rather than
+ * picking one.
+ *
+ * WHAT THE STRIPPER BUYS TODAY: NOTHING, MEASURED (CLAUDE.md — "do not name a backstop without
+ * checking it can fire", and re-measure such a note in the commit that ships it). An earlier draft of
+ * this paragraph said the stripper was needed *because* the fix it guards ships with a long comment
+ * quoting the old broken declarations. That was over-claimed on two counts, both measured on this
+ * commit's own tree:
+ *
+ *   1. With `stripCssComments` returning its input unchanged, `OrganizeDialog.test.ts` and
+ *      `MacrosDialog.test.ts` run 31/31 GREEN. The component's comment does quote
+ *      `min-height: 120px; max-height: 45vh` — but never in a form matching `.preview {`, which is
+ *      what the regex anchors on. Nothing in the tree reaches the stripper today.
+ *   2. The failure mode was stated BACKWARDS. Without the stripper, a commented-out WHOLE rule gives
+ *      two matches and `styleBlock` THROWS. Measured by pasting a CSS-commented copy of the old
+ *      `.preview` rule into the component with the stripper disabled: 3 of 15 red, every one saying
+ *      "expected exactly one `.preview { … }` block in the component's <style>, found 2". That is a
+ *      loud red, not the silent pass the old sentence implied. Restoring the stripper with the same
+ *      decoy still in place: 15/15 green — which is the stripper actually doing its job.
+ *
+ * So it is kept as CORRECT AND DEFENSIVE, not as a load-bearing backstop: a silent wrong answer needs
+ * the live rule DELETED and a commented copy left behind, which no current file does. If a future
+ * component ever comments out a rule it also declares, this is what stops the comment answering.
  *
  * WHAT THE COMMENT STRIPPER DOES NOT HANDLE, stated rather than left to be discovered: a `/*`
  * sequence inside a CSS string (`content: "/*"`). No component in this repo has one, and the
