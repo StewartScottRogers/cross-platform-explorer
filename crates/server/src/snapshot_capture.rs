@@ -545,6 +545,22 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
         // the app's private checkpoint store — the rule `copy_file_onto_destination_handle`'s own doc
         // states and `revert_engine::apply_write` follows. The previous wording here leaked the store
         // path into a user-visible message.
+        //
+        // **This `?` abandons the restore, and CPE-1961 widened what can reach it — stated, not fixed**
+        // (round 4). The ticket adds a failure point every leg it touches did not have: `sync_all`, then
+        // a rename the filesystem can refuse. The archive leg (Blocker 1) and `transfer::download_tree`
+        // both had that routed into a run abort and both were changed to report the one entry and carry
+        // on. **This leg is deliberately not**, and the reason is that it is the one caller whose
+        // all-or-nothing shape is a design decision rather than an accident: pass 1 pre-flights the
+        // whole manifest before a byte is written, precisely so that a refusal is answered before
+        // anything changes. Turning pass 2 into a per-entry reporter is a different product question —
+        // *what is a half-restored snapshot, and what do we tell the user it is* — and it needs its own
+        // ticket, not a line changed in passing here.
+        //
+        // What did change in practice: on `main`, a destination another program held open restored
+        // fine (writing through an already-open handle is not something a sharing mode blocks); here it
+        // stops the restore, with the entries before it already on disk. That is a real behaviour
+        // change on this leg and it is recorded here rather than left for the next reader to measure.
         .map_err(|refused| refusal(rel, &format!("{} (blob {})", refused.why, file.hash)))?;
         if let Ok(at) = fs::canonicalize(&target) {
             written.insert(at);

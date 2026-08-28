@@ -822,3 +822,165 @@ merged rather than picked, because the two tickets want different halves of the 
 - `src-tauri cargo test --lib`: **230 / 0**, unchanged.
 - Frontend: `npm run check` **0 errors / 0 warnings**; `npx vitest run` **358 files, 5,266 passed / 0
   failed / 2 skipped** (up 6 from round 2's 5,260 with the rebase).
+
+## Review round 4 — one measured regression against `main`, and the sweep that should have caught it
+
+### Blocker 1 — `claimed.commit()?` gave a NEW failure point run-abort semantics
+
+`archive.rs`'s `claimed.commit().map_err(|r| r.why)?` was the only bare `?` left in
+`extract_zip_archive_stream`'s per-entry body (the two `EntrySlotAction::Abort` returns are the
+deliberate hostile-swap aborts). CPE-1961 is what *introduced* that failure point — `sync_all`, then a
+rename the filesystem can refuse — and it landed inside the loop whose base commit, CPE-1935 (#1090),
+exists to remove run aborts from it.
+
+Reachable with no race and no privilege: a destination held open by another process with
+`FILE_SHARE_READ|FILE_SHARE_WRITE` and **no** `FILE_SHARE_DELETE`, which is what a program not using
+Rust's `std` opens a file with by default. Same three-entry zip:
+
+| | outcome | before.txt | victim.txt | after.txt |
+|---|---|---|---|---|
+| base `104b0bc5` (main) | `Ok(done: 3)` | BEFORE | REPLACEMENT | AFTER |
+| head `9902e1f5` (round 3) | `Err("… could not be replaced by the staged copy …")` | BEFORE | ORIGINAL | **absent** |
+
+Refusing the *entry* is right and unchanged. Aborting the archive is a regression against `main`, and it
+contradicts `src/docs/explorer-archives.md`, which lists a full disk under **Failed** ("the extraction
+keeps going") and says only the whole destination can stop a run — while cost row 1 predicts `ENOSPC`
+from staging, which under ext4's delayed allocation lands at `sync_all`, i.e. at that `?`.
+
+Now `report.fail(&name, &EntryFailure::retryable(r.why))` + `continue`, the same shape as the two
+statements above it. `retryable` because a `Refusal` carries no `io::Error` to classify and every way
+this line fails — a lock, a sharing violation, a full disk, a share that dropped — is something the user
+can clear and extract again into.
+
+New test `archive::tests::cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run`
+(Windows-only; `rename(2)` over an open file always succeeds on Linux and `sync_all` cannot be made to
+fail unprivileged, so the *fixture* does not exist there — the `?` was reachable on both).
+
+**Red-proof, run** (`?` put back; `Compiling cpe-server` seen):
+
+```text
+cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run ... FAILED
+  THE POINT: the entry AFTER the blocked one must be written too … :
+  Err("… the path component \"victim.txt\" could not be replaced by the staged copy of it
+       (Access is denied. (os error 5)) [staged as \"victim.txt.33412-….cpe-tmp\"] …")
+    left: None   right: Some([65, 70, 84, 69, 82])
+cpe1935_a_blocked_entry_never_takes_the_run_down ... ok
+```
+
+**That second line is the finding behind the finding.** CPE-1935's own test does *not* red on this,
+because nothing in the tree drove a commit failure until the new test existed. A clean interdiff proved
+the rebase resolutions textually correct and could not see that the loop's contract had changed
+underneath them.
+
+### The sweep the reviewer asked for — every new failure point against each loop's contract on `main`
+
+`commit()` is reachable on all five legs. Asked of each caller rather than recalled:
+
+| leg | what a per-entry write failure did | verdict |
+|---|---|---|
+| `archive::extract_zip_archive_stream` | `?` → **run abort** | **fixed** — `report.fail` + `continue` |
+| `transfer::download_tree` | `hard_err` → **run abort**, and it short-circuits every later entry | **fixed** — `record!` → `undelivered` |
+| `backup::apply_backup_plan_walk` | `emit(OpResult::err)`, per entry | already right |
+| `revert_engine::apply_write` | `Refused::transient`, per file | already right |
+| `snapshot_capture::restore` | `?` → run abort | **left, deliberately** — see below |
+
+**A second instance of the same defect, found by the sweep and not by the review: `download_tree`.**
+Rounds 1–3 wrote `hard_err = Some(r.why)` on the commit failure, reasoning from the *bucket* (`write_all`
+above already sets `hard_err`). What changed is the *input*: on `main`, a local file another program held
+open downloaded fine, because writing through an already-open handle is not something a sharing mode
+blocks. On this branch it took the whole tree down at the first such file. Now `record!(r)`, which is
+`undelivered` — the transfer still ends `Err` naming the file, as CPE-1709 F1 requires, but the walk runs
+to completion, which is that ticket's own stated ethos. Pinned by
+`transfer::tests::cpe_1961_a_local_file_held_open_costs_that_file_not_the_rest_of_the_download`; both
+outcomes are `Err`, so the assertion that separates them is on the filesystem (`z_after.txt`).
+
+**Red-proof, run** (`record!(r)` back to `hard_err`):
+
+```text
+cpe_1961_a_local_file_held_open_costs_that_file_not_the_rest_of_the_download ... FAILED
+  THE POINT: the entry AFTER the held-open one must still be delivered … left: None
+```
+
+`snapshot_capture::restore` is left aborting, and that is a decision rather than an omission: it is the
+one caller whose all-or-nothing shape is deliberate (pass 1 pre-flights the whole manifest before a byte
+is written). Turning pass 2 into a per-entry reporter asks *what is a half-restored snapshot* and needs
+its own ticket. The behaviour change it does inherit — a held-open destination now stops the restore
+where on `main` it did not — is recorded at that call site rather than left to be re-measured.
+
+### Blocker 2 — the F3 transcript, and the justification behind it
+
+Both re-taken; the F3 section above now carries the round-4 run and the corrected five-leg table.
+Summary: the ADS red-proof comes back `Ok`/`(2,1,0)`, not `Err`; `after.txt` **is** created; the test
+still reds on the classification assert, which is the assert that should carry it. The
+`claim_destination_handle` comment no longer claims a five-leg denial of service — only two of the five
+ever abandoned a run over one entry, and only one of those because of `policy`.
+
+### Major 3 — a long-but-legal entry name, and the stub its refusal left behind
+
+`staging_sibling_name` appended `.<pid>-<nanos>.cpe-tmp` — about 31 bytes — with **no length cap**, so a
+244-character entry name (`"n"*240 + ".txt"`, under the 255 that `NAME_MAX` and NTFS both enforce)
+stopped extracting. Both platforms; `main` extracts it normally.
+
+Two fixes, because there were two defects:
+
+1. **The cap.** `MAX_COMPONENT_BYTES = 255`, measured against the real suffix rather than an assumed
+   width, backing off to a char boundary. UTF-8 bytes are a conservative proxy for NTFS's UTF-16 units
+   (every scalar costs at least as many bytes as units), and exact on Unix. Truncating the base is safe
+   in the direction that matters: the sweep's parser needs a `.cpe-tmp` suffix, a valid
+   `<digits>-<digits>` stamp and a non-empty base, none of which truncation touches — and a truncated
+   base stops equalling the target's own name, which routes the candidate into
+   `stamp_pid_is_this_process` and gets it **skipped** while our pid is live. Nothing can be deleted that
+   round 3 could not.
+2. **The stub.** `create_staging_beneath`'s `?` fired *before* `ClaimedDestination` was constructed, so
+   `Drop` never ran and the empty destination `create_beneath` had just created survived — under a
+   message ending *"Nothing was written for this entry."* New `fsutil::undo_created_destination` closes
+   the window in front of the claim, and the two pre-existing arms in that window (the symlink refusal,
+   the missing-`file_name` refusal) now go through it too — which also moves the symlink arm's unlink
+   off a bare path and onto the root handle it was already holding.
+
+**Red-proof, both halves, run.** Cap removed, undo kept:
+
+```text
+cpe_1961_a_long_but_legal_entry_name_still_extracts ... FAILED
+  Ok(ArchiveReport { done: 2, failed: 1, skipped: 0, … errors: ["nnn….txt: … the path component
+    \"nnn….txt.35788-….cpe-tmp\" could not be created as a staging file (The filename, directory
+    name, or volume label syntax is incorrect. (os error 123)). Nothing was written for this entry …"] })
+    left: None            right: Some((true, 4))
+```
+
+Cap **and** undo removed — same refusal, same counts, one line different:
+
+```text
+    left: Some((true, 0))  right: Some((true, 4))
+```
+
+That `left` is the stub. With the cap in place that arm is no longer reachable from any input a test can
+construct — what is left for it is a quota, a full disk, or a share that drops between the destination
+create and the staging create in the same directory — so the undo is a live backstop with no standing
+test, said at its site rather than implied by a green suite.
+
+Also new: `fsutil::tests::cpe_1961_a_staging_sibling_name_always_fits_in_one_path_component`, the pure
+half — ten base lengths either side of the boundary, each asserted against the cap **and** re-parsed
+exactly the way the sweep parses it, including that `stamp_pid_is_this_process` still answers "ours".
+
+### Minor 4 — two zip-only refusals were missing from the archives page
+
+`src/docs/explorer-archives.md` enumerated four Refused reasons and said *"Those four are refused in
+**every** format."* Round 2 added two more, zip-only — the destination that cannot be described, and the
+>8 MB alternate-data-stream refusal. `safety-undo.md` mentioned the 8 MB case; the page a user reads
+about extraction did not. Both are now on that page, in the vocabulary of the page (what a rename does
+not carry across, and why the existing file is left alone), and the Failed list gained *"a file another
+program is holding open so it cannot be replaced"* — which is what Blocker 1's fix now surfaces.
+
+### Nits
+
+- *"Legs 1 and 3 stayed green"* on the F2 red-proof: leg 1 did; **leg 3 never ran**, its assertion
+  sitting after leg 2's. Corrected in the ticket and at the test's own doc.
+- Three rows added to `stamp_pid_is_this_process`'s truth table: `9<pid>-1` and `<pid>9-1` (the parse is
+  on the `u32`, so neither is a prefix match) and `<pid>.5-1` (a dot never reaches this function, because
+  the caller splits on the *last* dot — a dotted base name is the caller's job, and a dot arriving anyway
+  reads as "not ours", the keeping direction).
+
+### Verification (round 4 — every figure re-taken after the final edit)
+
+Filled in below.

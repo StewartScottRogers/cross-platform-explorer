@@ -2451,6 +2451,16 @@ pub(crate) fn claim_destination_handle<'a>(
     //                                                                         line changes nothing there
     // ```
     //
+    // **The same table, re-asked for the failure point THIS ticket adds** (round 4). `commit()` —
+    // `sync_all` plus a rename the filesystem can refuse — is reachable on all five, and "which bucket
+    // does `policy` pick" is the wrong question for it, because `commit` only ever returns
+    // `Refusal::failure`. The question is what each leg does with a per-entry failure, and two of them
+    // were answering "abandon the run" for a cause as ordinary as a file another program has open:
+    // `archive` (Reviewer Blocker 1, `?` → `report.fail` + `continue`) and `transfer::download_tree`
+    // (`hard_err` → `record!`, which is `undelivered`). Both are fixed and both are pinned by a
+    // filesystem-asserting test. `backup` and `revert_engine` already reported per entry. `restore`
+    // still aborts, deliberately — see the note at its call site in `snapshot_capture.rs`.
+    //
     // So the honest statement is narrower and still worth the change: `policy: true` is what keeps this
     // refusal a **named per-entry skip with its reason** on the four legs that report per entry, rather
     // than a failure that reads as "we tried and the file is broken". `snapshot_capture::restore`'s
@@ -10946,7 +10956,7 @@ mod tests {
                 "the stamp must still validate after truncation: {name:?}"
             );
             assert!(
-                stamp_pid_is_this_process(head[dot + 1..].as_bytes()),
+                stamp_pid_is_this_process(&head.as_bytes()[dot + 1..]),
                 "a truncated base stops matching the target's own name, so this check is what stands \
                  between our own live staging file and our own next sweep — it must say 'ours': {name:?}"
             );
