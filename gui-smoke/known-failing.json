@@ -4,14 +4,14 @@
     {
       "spec": "network.smoke.ts",
       "test": "clicking the entry point opens the add-connection popover with its expected fields, and Escape closes it",
-      "reason": "Cascades from this spec's other listed case (the section-header one): with the Network section never confirmed rendered, the entry-point click lands on whatever is on top and WebKitGTK returns 'element click intercepted' (run 31602466829). Expected to clear at the same time as the CPE-1595 getText() quirk — retire both entries together.",
-      "ticket": "CPE-1595"
+      "reason": "Cascades from this spec's other listed case (the section-header one): with the Network section never confirmed rendered, the entry-point click lands on whatever is on top and WebKitGTK returns 'element click intercepted' (run 31602466829). Expected to clear at the same time as the getText() quirk — retire both entries together. CPE-1965 audit 2026-08-27: ticket repointed CPE-1595 -> CPE-1507. CPE-1595 was the TRIAGE ticket and is Done ('root-cause fix stays open, cross-referenced to CPE-1507'); CPE-1507 (Deferred, pickable) is the live owner of the WebKitGTK/Xvfb getText() root cause.",
+      "ticket": "CPE-1507"
     },
     {
       "spec": "network.smoke.ts",
       "test": "the permanent Network section renders with its empty-state '+ Add a connection' row on a fresh app process",
-      "reason": "CPE-1595 CONFIRMED (not a theory): the `.fav-title` + getText() selector is correct and the header DOES paint — run-31449236678's failure screenshot (network-fail.png) shows 'Network' rendered, visible, on-screen at the exact moment the 15s wait timed out. getText() nonetheless returned something other than 'Network' for every retry in that window. Same WebKitGTK/Xvfb classic-WebDriver GetElementText quirk as saved-search.smoke.ts (CPE-1507) for this Sidebar.svelte '<span class=\"label fav-title\">' header shape — not a rendering gap, not a selector bug (Sidebar.test.ts's jsdom render passes), not fixable by another selector change. Left listed pending a WebKitGTK-specific investigation.",
-      "ticket": "CPE-1595"
+      "reason": "CPE-1595 CONFIRMED (not a theory): the `.fav-title` + getText() selector is correct and the header DOES paint — run-31449236678's failure screenshot (network-fail.png) shows 'Network' rendered, visible, on-screen at the exact moment the 15s wait timed out. getText() nonetheless returned something other than 'Network' for every retry in that window. Same WebKitGTK/Xvfb classic-WebDriver GetElementText quirk as saved-search.smoke.ts (CPE-1507) for this Sidebar.svelte '<span class=\"label fav-title\">' header shape — not a rendering gap, not a selector bug (Sidebar.test.ts's jsdom render passes), not fixable by another selector change. Left listed pending a WebKitGTK-specific investigation. CPE-1965 audit 2026-08-27: ticket repointed CPE-1595 -> CPE-1507 for the same reason as this spec's other entry — CPE-1595 is Done (it was the triage ticket and says so in its own Work Log), CPE-1507 (Deferred) owns the root cause.",
+      "ticket": "CPE-1507"
     },
     {
       "spec": "samples.smoke.ts",
