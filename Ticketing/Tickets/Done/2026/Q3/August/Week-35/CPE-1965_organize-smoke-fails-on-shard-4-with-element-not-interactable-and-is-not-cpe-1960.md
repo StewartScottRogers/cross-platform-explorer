@@ -3,7 +3,7 @@ id: CPE-1965
 title: `organize.smoke.ts` fails on gui-smoke shard 4 with `element not interactable` — a NEW case, and **not** CPE-1960's shape
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -385,3 +385,70 @@ cause in the message instead of 10 s later pointing at the fixture.
 - root `npm test`: **348 files, 4991 passed, 2 skipped, 0 failed** (4989 + the 2 new cases)
 - `gui-smoke`: `npm run typecheck` clean; `npm run test:unit` **149/149**
 - rebased on `origin/main` after #1072 and #1074 merged
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1079, **fully green (25/25)**, after two rounds. **Both of the Foreman's premises for this
+ticket were wrong**, and disproving them was most of the value.
+
+**Wrong stack trace.** The ticket quoted `WebDriverError: element not interactable` as the symptom. That
+line is at **01:39:01.382**; `organize.smoke.ts` does not start until **01:39:28.210**. It belongs to an
+**earlier spec** (`batch-media`, which passed), where a `waitForClickable` poll absorbed it and it failed
+nothing. The real failure was `expected a PNG group for the seeded CPE-1143-photo.png` — a `waitForExist`
+timeout. Grepping a 14-spec interleaved shard log for error-shaped lines near a spec's name finds
+"nearby", not "related".
+
+**No denominator.** The ticket reasoned from one clean `main` run and one red PR run. The worker
+enumerated **all 103** GUI-smoke runs in the window and downloaded **69** completed shard-4 logs,
+fingerprinting each by what `npm ci` installed:
+
+| install | wdio | jobs | failures | rate |
+|---|---|---|---|---|
+| 479 pkgs | 9.30.0 | 51 | 1 | 2.0% |
+| 489 pkgs | 9.31.4 | 18 | 2 | 11.1% |
+| **total** | | **69** | **3** | **4.3%** |
+
+Fisher **p ≈ 0.16** — **not a version effect**; one failure predates the lockfile bump entirely, so it is
+not a CPE-1960 casualty. And **`main` itself carried the failure at 00:14Z**, forty minutes before the run
+the ticket called clean. *"This branch has something main doesn't"* is a **rate** claim, and a rate needs a
+denominator.
+
+**The diagnosis is better than either premise: a reflow between the driver computing a click point and
+dispatching it.** `.preview` grows `120px → 45vh` when the first plan lands ~120 ms after mount, growing
+the centred dialog ~195 px and sliding the rule pills **up ~98 px**, so the click lands inside `.preview`
+— whose ancestor has `on:click|stopPropagation` and **swallows it silently**. Its Reviewer confirmed the
+arithmetic **to the pixel** against the failure screenshot (dialog y≈113→585 against a predicted 473 px
+tall at top 113.5) and found the smoking gun the PR had not quoted: `elementClick` issued at **28.956** →
+`RESULT null` at **28.985**, with the debounce firing at ≈**28.960**. **The reflow lands inside the click
+command's own 29 ms window.**
+
+**Round 1's fix was inert, and its Reviewer red-proved that.** The settle-wait polled for
+`summary | empty-state | error`, but `OrganizeDialog` initialises `loading = false` / `plan = []`, so
+`empty-state` renders **synchronously at mount** — the wait returned on its first poll and gated nothing.
+It shifted the gap distribution ~10 ms, moving previously-safe runs *into* the hazard band. Round 2 gates
+on **`summary` alone**, which renders only in the `plan.length > 0` branch — a **deterministic state gate**,
+not a stability heuristic — and rejected height-polling with reasons (a heuristic; two equal samples can
+straddle a change; costs ≥100 ms every run).
+
+**The new pin keeps the defect reproducible rather than folklore:** it reads the selector literal back out
+of the spec, drives a real render through the debounce (0 matches at t=0, 0 at t=119 ms, >0 after
+t=180 ms), and asserts the **round-1 selector does match at t=0**. Widening the const back reds 2 of 12 with
+*"already matches at MOUNT … returns on its first poll and gates nothing."*
+
+**Statistics stated at their strongest true form**, not their most dramatic: **zero failures outside a
+113–119 ms band across 59 jobs; 3 of 13 in-band; Fisher p = 0.0048** — with the three in-band **passes**
+explicit, so the argument rests on nothing failing outside the band rather than on exclusivity. Round 2
+also corrected the Reviewer's own arithmetic (consecutive greens 68/71, not 67/70 — it had truncated one
+and ceiling'd a rounded rate).
+
+**An honest limitation, honestly placed:** jsdom has no layout, so the derivation test does **not**
+reproduce the swallowed click, and at 4.3% no single CI run settles it (**68** consecutive greens for 95%
+confidence). Said at the site, not only in the PR body.
+
+**A known-failing audit fell out of it:** both `network.smoke.ts` entries named **CPE-1595**, which is
+**Done** — its own Work Log says the root-cause fix stays open under **CPE-1507**. Repointed, reasons
+preserved, 25 entries before and after.
+
+**The app half is CPE-1968** — a rule-pill click within ~150 ms of the dialog opening is silently
+swallowed — deferred deliberately, because every candidate fix is a visual-design decision across the
+**28** components sharing the centred-backdrop rule.
