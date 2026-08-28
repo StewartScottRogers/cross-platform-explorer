@@ -245,6 +245,17 @@ What changed is that the skip **used to be invisible** — nothing told you it h
 count was silently one lower with no way to tell which file was missing or why. It is now counted and
 named, the same "tell you what happened, don't just fail silently" rule the rest of this page follows.
 
+**A link that appears part-way through the download is treated the same way, and this is the part worth
+knowing.** Each file is written to a temporary neighbour and only renamed into place once it has fully
+arrived, so a folder on the way to it can turn into a shortcut *while the file is still downloading* —
+the one window a check made before the download cannot cover. That is caught at the rename, and the entry
+is skipped, exactly as it is for a link that was already there. Which means: **the download finishes,
+reports success, and that one file is not there.** It is not silent — it is counted and named in the
+skipped list with its reason, next to the delivered count — but the download itself does not report as
+failed, because "we declined to write through a link" is a policy skip and not a delivery failure
+anywhere on this page. If you are downloading into a folder something else may be changing underneath
+you, read the skipped list rather than the overall result.
+
 ### Two things this rewriting does *not* do
 
 *Uploading does not undo it.* If you download `colon:name.txt` (arriving as `colon%3Aname.txt`) and later

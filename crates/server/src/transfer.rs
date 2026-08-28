@@ -747,11 +747,53 @@ pub fn download_tree(
         // and `hard_err` also short-circuits every entry after it (`if hard_err.is_some()` at the top
         // of this closure).
         //
-        // `record!` with a `policy: false` refusal — which is what `commit` returns — is the
-        // per-entry bucket, and it is what CPE-1709's own sentence forty lines below asks for:
-        // *"Everything deliverable IS still delivered first (the walk runs to completion, matching the
-        // skip-on-error ethos); only the final verdict changes, and it names what was lost."* The
-        // transfer still ends `Err`, naming this file; the other files still arrive.
+        // **Which bucket `record!` picks, and the sentence round 4 got wrong (Reviewer Major 1).**
+        // Round 4 wrote *"`record!` with a `policy: false` refusal — which is what `commit` returns"*.
+        // The parenthetical is **false**. It is true of `DestinationSite::ByPath`, which does
+        // `commit_replacement(...).map_err(Refusal::failure)`; it is false of the **`Beneath`** arm
+        // this leg uses, which returns `open_beneath::rename_beneath`'s `Refusal` unchanged — and that
+        // function's `descend(root, Act::Commit, dirs)` calls `refuse_link` on a directory component
+        // that has become a link since the claim, which is `policy: true`. Executed, red-proofed, on a
+        // real planted link: `fsutil::tests::
+        // cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`.
+        //
+        // So `record!` here forks, and both arms are live:
+        //
+        // ```text
+        // commit refuses with…  bucket        the walk   this call returns
+        // policy: false         undelivered   continues  Err, naming this file  (a lock, ENOSPC, a
+        //                                                                        dropped share)
+        // policy: true          skipped       continues  Ok(DownloadReport)     (a component swapped
+        //                                                                        for a link mid-write)
+        // ```
+        //
+        // **The second row has to be said out loud rather than left to be inferred: a link planted on a
+        // directory component between this claim and this commit produces a file the user asked for,
+        // did not get, and that `download_tree` reports as `Ok`.** The reason it is not delivered is
+        // named — it goes into `DownloadReport::skipped` with its wording, and onto stderr — but the
+        // call's verdict is success. That is not something this ticket introduced and not something it
+        // changes: it is CPE-1709/CPE-1881's standing contract for this leg, which classifies a **link
+        // verdict** as neither delivered nor a delivery failure ("not writing is the correct, safe
+        // outcome" — `DownloadReport::skipped`'s own doc), and which has produced exactly this
+        // `skipped` + `Ok` for a link found at *claim* time since long before CPE-1961. Whether that
+        // contract is right is a real question and a separate ticket's; what this round fixes is that
+        // the two moments now answer it the same way, so the outcome no longer depends on which
+        // microsecond the link was planted in.
+        //
+        // **The other leg, and why the two now agree.** `archive::extract_zip_archive_stream` had the
+        // identical refusal going to `report.fail` unconditionally — the opposite bucket from this one,
+        // with *"clear that and extract again"* attached, which cannot work for a planted link. Round 5
+        // gave it the same `policy` fork its own claim site has had since CPE-1935. Both legs now
+        // classify a commit refusal by exactly the rule they already used for a claim refusal. They
+        // still differ in **consequence** — `archive` returns `Ok(report)` with counted skips either
+        // way, this leg returns `Ok` only when nothing reached `undelivered` — and that difference is
+        // the two legs' own pre-existing report shapes, identical for claim-time refusals, not
+        // something either site decides.
+        //
+        // The rest of round 4's reasoning stands and is why `record!` replaced `hard_err` at all: it
+        // is what CPE-1709's own sentence forty lines below asks for — *"Everything deliverable IS
+        // still delivered first (the walk runs to completion, matching the skip-on-error ethos); only
+        // the final verdict changes, and it names what was lost."*
         //
         // `write_all`'s `hard_err` above is left alone deliberately: it predates this ticket, it is a
         // different question (a failure writing into a file nothing else has a name for), and moving

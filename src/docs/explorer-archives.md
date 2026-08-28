@@ -193,6 +193,16 @@ Four independent protections apply automatically — you don't opt into any of t
   sitting at the name, a destination that would land outside your folder, or a shortcut pointing out of
   it. Those four are refused in **every** format, and they are counted as *skipped*.
 
+  **The same answer now applies however late the shortcut appears.** Because an entry is written to a
+  temporary neighbour and only renamed into place at the end, a folder on the way to it can turn into a
+  shortcut *while the entry is still being written* — the one window a check made up front cannot cover.
+  That is caught at the rename, and it is counted as **skipped**, exactly as it is when the shortcut was
+  already there when extraction reached the entry. It used to be counted as *failed*, which came with
+  the advice to close whatever was in the way and extract again — advice that could not work, because
+  nothing was holding the file: the folder is a shortcut, and extracting again refuses again. Your files
+  are untouched either way; only which number the entry lands in, and what the reason tells you to do
+  about it, has changed.
+
   **ZIP adds two more refusals**, both about a file already sitting at the entry's name that this app
   cannot fully describe before replacing it. An entry is written to a temporary neighbour and then
   renamed into place, so that a failure part-way through can never leave you with half a file — and the

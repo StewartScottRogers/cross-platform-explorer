@@ -1011,3 +1011,176 @@ comparable rather than needing to be re-derived. `git diff origin/main...HEAD --
 
 So Windows 2,451 → **2,455** (+4) and Linux 2,441 → **2,443** (+2), and the Windows-minus-Linux gap
 widens 10 → **12** by exactly the two new Windows-only tests. Every figure reconciles.
+
+## Round 5 — Reviewer on PR #1089
+
+The reviewer reproduced Blocker 1, Blocker 2 and Major 3, re-took every round-4 gate figure to the number
+reported, and independently re-derived the `.commit()` enumeration as complete. One Major and four Minors
+carried over.
+
+### Major 1 — `commit()` CAN return `policy: true`, and the round's second fix rested on the claim that it cannot
+
+Two sentences said the opposite of what the callee does:
+
+- `fsutil.rs` — *"'which bucket does `policy` pick' is the wrong question for it, because `commit` only
+  ever returns `Refusal::failure`."*
+- `transfer.rs` — *"`record!` with a `policy: false` refusal — which is what `commit` returns — is the
+  per-entry bucket."*
+
+Both were reasoned from `DestinationSite::ByPath`, whose commit is
+`commit_replacement(...).map_err(Refusal::failure)` and is `policy: false` by construction. The
+**`Beneath`** arm returns `open_beneath::rename_beneath`'s `Refusal` **unchanged**, and that function has
+three `policy: true` exits — two structural, plus `descend(root, Act::Commit, dirs)` → `refuse_link` on a
+directory component that has become a link since the claim. That last one is **this ticket's own threat
+model**: the window is the caller's whole `write_all`.
+
+**Executed, not read off.** New test
+`fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`
+builds a real claim, plants a real link at the interior component in the write window, and commits.
+Red-proofed on Linux/ext4 by inverting the assertion:
+
+```text
+RED-PROOF: `commit` returns `policy: true` here … Refusal { why: "refusing to write inside the download
+folder \"…/root\": the path component \"sub\" is a link (a symlink, junction or other reparse point)…",
+policy: true }        0 passed; 1 failed
+```
+
+Note the verb: `Act::Commit` and `Act::Write` share `"write"`/`"written"`, so the *wording* cannot tell a
+commit-time refusal from a claim-time one. Only the call that produced it can, which is why the fixture
+drives `commit()` directly instead of matching on the sentence.
+
+**A platform split the fixture found rather than assumed.** The swap needs the real directory renamed
+aside with the staging handle open inside it. Unix does that (an fd keeps the inode). **NTFS refuses it,
+`ERROR_ACCESS_DENIED` (os error 5)** — measured, because the fixture's first draft `panic!`ed with the raw
+error rather than skipping. So on Windows the staging handle happens to pin its own ancestor chain for
+exactly the window that matters. That is a **platform accident, not a contract** — nothing in `commit`,
+`rename_beneath` or `descend` arranges or depends on it — so the Windows arm asserts *the block, by its
+error code* (it reds if NTFS ever starts permitting the rename) and the callers are corrected on the Unix
+arm and on `commit`'s signature, never on "Windows makes it unreachable".
+
+**Which bucket, per leg.** The first draft of this table got two rows wrong by assuming `revert_engine`
+and `snapshot_capture` arrive `ByPath`. Read out of the legs instead: **all five are `Beneath`**, and
+`ByPath` has no production caller at all — its only route is `copy_file_onto_no_follow{,_with_wording}`,
+whose two remaining in-tree callers (`backup.rs:2154`, `revert_engine.rs:3574`) are both inside
+`mod tests`. So `policy: true` at commit is live on every row:
+
+| leg | a commit-time `policy: true` lands in… |
+|---|---|
+| `archive::extract_zip_archive_stream` | `report.skip` — the same arm its claim-time refusal takes, **as of this round**. Was `report.fail`, unconditionally. |
+| `transfer::download_tree` | `skipped`, and the call then returns **`Ok`**. Its claim-time link refusal has always done exactly this. |
+| `revert_engine::apply_write` | `Refused::permanent` / `::hard_linked`. Already forks on `refusal.policy`, so it arrives correctly classified with no change. |
+| `backup::apply_backup_plan_walk` | one more `OpResult::err`, per entry. Reads `policy` nowhere — one bucket, nothing to disagree with. |
+| `snapshot_capture::restore` | `?` — aborts, exactly as for any other refusal. |
+
+**The fix, and it is the archive leg.** `transfer` already forked correctly; `archive` was
+`report.fail(&name, &EntryFailure::retryable(r.why))` **unconditionally**, so one planted link produced
+*"clear that and extract again"* — advice that cannot work, since re-extracting refuses again and refuses
+at the **claim**, where the arm ten lines above already calls it a **skip**. One refusal, one folder, two
+buckets and two sentences, decided by which microsecond the link was planted in. That commit site now
+forks on `policy` exactly as its own claim site has since CPE-1935.
+
+**CPE-1929 pair on the new fork** (Windows `--lib`, `Compiling cpe-server` seen each run; baseline
+2,456 / 0 / 14):
+
+```text
+A  disable (`if false && r.policy`)   2456 passed / 0 failed   GREEN
+B  lie     (`if true  || r.policy`)   2455 passed / 1 failed   RED
+   B reds cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run:
+   left: (2, 0, 1)   right: (2, 1, 0)
+```
+
+**A green + B red is not the shadowed signature** — that one is *both* green. B reds, so control reaches
+the fork and the `else` arm is load-bearing: an I/O commit refusal still has to land in `failed`. A's
+green says the narrower, honest thing: the **`policy: true` side specifically** has no in-tree test, and
+that is structural — its only input is a component swapped inside `io::copy`'s window, so a leg-level
+fixture would have to *race* the extraction and could pass by missing it, which is worse than none. Said
+at the site.
+
+**What is NOT changed, and is now said plainly at the call site.** `transfer::download_tree` sends the
+link verdict to `skipped` and returns `Ok` — **a planted junction can leave a requested file undelivered
+with the download reporting success**, named in `DownloadReport::skipped` with its reason but not in the
+`Result`. That is CPE-1709/CPE-1881's standing contract for the leg ("not writing is the correct, safe
+outcome") and it has produced exactly this for a *claim*-time link since long before CPE-1961; changing
+it is a separate ticket. What this round fixes is that both moments now answer by the same rule, so the
+outcome no longer depends on when the link was planted. The two legs still differ in **consequence** —
+`archive` returns `Ok(report)` with counted skips either way — and that is the legs' own pre-existing
+report shapes, identical for claim-time refusals, not something either site decides.
+
+### Minor 2 — two arms still unlinked by path on an arm that has a root handle
+
+`undo_created_destination`'s own doc said *"there is no reason to keep a by-path unlink on an arm that has
+a root handle"* while two sites in the same function went on doing exactly that. Both now call the helper.
+One of them (`handle_facts` cannot describe the handle) **is reachable with `created == true`**, so the
+`Beneath` arm was doing a real by-path unlink inside the function whose subject is not asking the path
+twice; the other is unreachable and is kept, and now says so per CPE-1929. The CPE-1896 paragraph that
+called these *"the only PATH writes left … recorded rather than built"* is corrected: the handle-relative
+unlink N3 described **is built**, and what remains by path is the `ByPath` arm, which holds no root handle
+to be relative to.
+
+### Minor 3 — the symlink arm's note understated the mechanism change
+
+That arm fires only when `symlink_metadata(dst)` says the name is a link, so with `created == true` its
+one reachable input is the race. `remove_file_beneath` does not merely unlink a different way — it
+**classifies the leaf itself** (`refuse_link` for a junction; `FILE_OPEN_REPARSE_POINT` for a file
+symlink). Outcomes are equivalent, so not a defect; recorded because *"same obligation, one
+implementation"* reads as a refactor and on this arm it is a mechanism change whose safety rests on the
+two mechanisms agreeing about links.
+
+### Minor 4 — `snapshot_capture::restore`'s justification named the wrong reason
+
+Round 4 argued the abort is deliberate *because* "pass 1 pre-flights the whole manifest before a byte is
+written". **Pass 1 cannot pre-flight a commit failure** — it creates and opens nothing, so a held-open
+destination is invisible to it by construction. The operative reason is three screens up: pass 2
+**already** aborts mid-loop on three per-entry causes it likewise cannot pre-flight (`safe_segments`,
+`blob_source`, the `written` collision check), two of them worded *"entries written before this one may
+already be on disk"*. So the commit failure is a fourth cause of a shape the loop already has and already
+tells the user about. Leaving it is consistent, not merely convenient. The behaviour-change paragraph
+after it was accurate and is kept.
+
+### Minor 5 — truncation adds a third collision class
+
+`staging_sibling_name`'s doc named two consequences, both about its own residue. A third: truncation makes
+one destination's staging base equal to **another** destination's **full** name — `A` exactly `room` bytes,
+`B` longer and sharing that prefix — so a commit on `A` recognises `B`'s staging file as its own residue
+under `SweepScope::ThisDestinationOnly`, the arm with **no** `stamp_pid_is_this_process` guard. Bounded by
+`STALE_TEMP_FLOOR` (300 s): `B` would have to be mid-write for five minutes. Worst outcome is `B`'s entry
+refused with a reason, never a wrong file at `B`'s name. Documented, not fixed — narrowing it means giving
+`ThisDestinationOnly` the pid guard, which changes `stage_and_replace_at`'s residue collection for a case
+this bound already makes remote.
+
+### In-app docs
+
+- `explorer-archives.md` — the Refused/skipped section now says a shortcut appearing **part-way through**
+  the write is skipped like one already there, and names the wrong advice it used to carry.
+- `31-network.md` — the link-skip section now states the consequence out loud: a link appearing
+  mid-download means **the download finishes, reports success, and that one file is not there** — counted
+  and named in the skipped list, but not in the overall result.
+
+### Verification (round 5 — every figure re-taken after the final edit, rebased on `origin/main` 8c9ddb60)
+
+| gate | Windows | Linux (WSL, `TMPDIR` on ext4) |
+|---|---|---|
+| `crates/server --lib` | **2,456 passed / 0 failed / 14 ignored** | **2,444 passed / 0 failed / 14 ignored** |
+| `crates/server --tests`, 8 integration targets | 21 / 22 / 2 / 1 / 1 / 45 / 16 / 32, all `ok`, 0 failed | 21 / 22 / 2 / 1 / 1 / 45 / 16 / 32, all `ok`, 0 failed |
+| `cargo clippy --all-targets -- -D warnings` (`crates/server`) | clean, `Checking cpe-server` present | clean, `Checking cpe-server` present |
+| `src-tauri cargo test --lib` | **230 passed / 0 failed / 0 ignored** | — |
+| `npm run check` | **0 errors / 0 warnings** | — |
+| `npx vitest run` | **358 files, 5,266 passed / 0 failed / 2 skipped** | — |
+
+**Passed, failed, ignored and skipped stated separately** throughout: no gate above has a non-zero failed
+count; the 14 `--lib` ignored are the pre-existing measurement harnesses; vitest's 2 skipped are unchanged
+from round 4. `npx vitest run` was taken with **Git Bash first on PATH** — the reviewer's local 19 failures
+in four `catalogPublish*` / `releaseVerifyWiringGuard` files are the known bare-`bash` →
+`System32\bash.exe` environment issue and are not this PR's (`git diff --stat origin/main` touches no
+`src/lib/`, `scripts/` or `.github/`).
+
+One real clippy hit on the way there, this round's own: `clippy::disallowed_methods` on the two
+`std::fs::rename` calls in the new fsutil test (`crates/server/clippy.toml` disallows it). Both now carry
+`#[allow]` with a one-line reason at the site, per that file's second form — a test fixture staging the
+attack, where the raw call *is* the measurement, and a teardown of two names the test created itself.
+
+**Delta cross-check.** `+1` test on both platforms — the new `fsutil` test is ungated, so Windows
+2,455 → **2,456** and Linux 2,443 → **2,444**, and the Windows-minus-Linux gap stays **12**. The archive
+`policy` fork adds no test (its `policy: false` half is pinned by the existing round-4 test, per the
+CPE-1929 pair above). Frontend totals are unchanged from round 4 at 5,266 / 2: this round touched two
+user-facing markdown pages that no test parses.

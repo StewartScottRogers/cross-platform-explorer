@@ -4606,8 +4606,53 @@ fn extract_zip_archive_stream(
             // regression test cannot build.
             //
             // **`retryable`, not `from_write_error`:** a `Refusal` carries no `io::Error` to classify,
-            // and every way this line fails — a lock, a sharing violation, a full disk, a share that
+            // and every way this line *fails* — a lock, a sharing violation, a full disk, a share that
             // dropped — is something the user can clear and extract again into.
+            //
+            // **The `policy` fork — CPE-1961 round 5 (Reviewer Major 1). Round 4 wrote `report.fail`
+            // unconditionally here, on a premise that reading `commit`'s callee refutes.** The premise,
+            // written at `fsutil::claim_destination_handle`, was *"`commit` only ever returns
+            // `Refusal::failure`"*. It is true of `DestinationSite::ByPath`, which does
+            // `commit_replacement(...).map_err(Refusal::failure)`; it is false of the **`Beneath`** arm
+            // this loop uses, which returns `open_beneath::rename_beneath`'s `Refusal` unchanged — and
+            // that function's `descend(root, Act::Commit, dirs)` calls `refuse_link` on a directory
+            // component that has become a link since the claim. `policy: true`. Executed, not read off:
+            // `fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`.
+            //
+            // With `report.fail` unconditional, that entry landed in the **failed** bucket carrying
+            // *"clear that and extract again"* — advice that cannot work, because re-extracting into a
+            // folder whose component is a planted link refuses again, and refuses at the *claim* this
+            // time, where the arm above already calls it a **skip**. So one refusal, one folder, two
+            // buckets and two different sentences, decided by nothing but which microsecond the link
+            // was planted in. The fork makes the two moments agree: `policy` — "not writing is the
+            // correct outcome" — is a **skip** whether the guard that reached that verdict fired at the
+            // claim or at the commit, and everything else is still this entry's failure.
+            //
+            // **CPE-1929 pair, run rather than reasoned about** (Windows `--lib`, `Compiling
+            // cpe-server` seen on each run; baseline 2,456 passed / 0 failed / 14 ignored):
+            //
+            // ```text
+            // A  disable (`if false && r.policy`)   2456 passed / 0 failed   GREEN
+            // B  lie     (`if true  || r.policy`)   2455 passed / 1 failed   RED
+            //
+            //   B: cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run
+            //      "two entries written and the blocked one in the FAILED bucket … which is a failure
+            //       and not a policy skip: ArchiveReport { done: 2, failed: 0, skipped: 1, … }"
+            //        left: (2, 0, 1)   right: (2, 1, 0)
+            // ```
+            //
+            // **A green and B red is NOT the shadowed signature** — that one is *both* green, and it
+            // means nothing reaches the guard. B reds, so control does reach this fork and the `else`
+            // arm is load-bearing: an I/O commit refusal still has to land in **failed**, and this
+            // change cannot have quietly moved it. What A's green says is narrower and is the honest
+            // caveat: the **`policy: true` side specifically** has no in-tree test, and that is
+            // structural rather than an omission — its only input is a component swapped inside
+            // `io::copy`'s window, so a leg-level fixture would have to *race* the extraction and could
+            // pass by missing it, which is worse than none. What is pinned instead is the two halves
+            // this arm is built from: that `commit` really does produce a `policy: true` refusal
+            // (`fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`,
+            // red-proofed on Linux against a real planted link) and that `policy: false` still reaches
+            // `failed` (B, above).
             //
             // **Red-proof, run rather than asserted** (Windows `--lib`, `Compiling cpe-server` seen).
             // Putting `claimed.commit().map_err(|r| r.why)?` back:
@@ -4625,7 +4670,13 @@ fn extract_zip_archive_stream(
             // through three rounds — a clean interdiff of the rebase proved the resolutions textually
             // right and could not see that the loop's contract had changed underneath them.
             if let Err(r) = claimed.commit() {
-                report.fail(&name, &EntryFailure::retryable(r.why));
+                // Same two arms, same order and the same meaning as the claim's above — a verdict is a
+                // skip, an I/O refusal is this entry's failure.
+                if r.policy {
+                    report.skip(&name, &r.why);
+                } else {
+                    report.fail(&name, &EntryFailure::retryable(r.why));
+                }
                 prog.done_items += 1;
                 emit(&prog);
                 continue;

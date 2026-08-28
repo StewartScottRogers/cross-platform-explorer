@@ -2011,12 +2011,30 @@ const MAX_COMPONENT_BYTES: usize = 255;
 /// is that our own concurrent writer on a long name cannot lose its live staging file. Nothing here can
 /// delete more than round 3 could.
 ///
-/// Two smaller consequences, stated rather than left to be found. [`SweepScope::ThisDestinationOnly`] —
-/// what [`stage_and_replace_at`] uses — matches on the target's **full** name, so it does not collect
+/// Three smaller consequences, stated rather than left to be found. [`SweepScope::ThisDestinationOnly`]
+/// — what [`stage_and_replace_at`] uses — matches on the target's **full** name, so it does not collect
 /// its own residue for a name long enough to be truncated; `EveryDestination` still does. And two long
 /// destinations in one directory sharing a truncated prefix would stage under the same base, which the
 /// pid and nanosecond stamp already make non-colliding and which the exclusive create refuses rather
 /// than clobbers if it ever did.
+///
+/// **The third is a collision class truncation creates rather than one it inherits, and round 4's doc
+/// named only its own residue** (round 5, Reviewer Minor 5). Truncation makes one destination's staging
+/// base equal to *another* destination's **full** name — destination `A` whose name is exactly `room`
+/// bytes, and destination `B` whose longer name begins with those same `room` bytes, stage under the
+/// same base. `ThisDestinationOnly` matches a candidate by that base against the target's full name, so
+/// a commit on `A` now recognises `B`'s staging file as its own residue — and that arm is the one with
+/// **no** [`stamp_pid_is_this_process`] guard, so the live-pid escape hatch `EveryDestination` gained in
+/// round 3 does not apply to it.
+///
+/// It is bounded and it is not a clobber. [`STALE_TEMP_FLOOR`] is 300 s, so nothing under five minutes
+/// old is touched at all; `B` would have to be mid-write for five minutes on a name that is a prefix
+/// extension of `A`'s, in `A`'s own directory, with `A` committing inside that window. If it did
+/// happen, `B`'s staged file is unlinked and `B`'s commit then fails and **reports its entry** — a
+/// refused entry with a reason, on the legs that report per entry, never a wrong file at `B`'s name.
+/// Recorded because the enumeration in this doc is the thing the next reader will trust, not fixed:
+/// narrowing it means giving `ThisDestinationOnly` the same pid guard, which changes
+/// `stage_and_replace_at`'s residue collection for a case this bound already makes remote.
 fn staging_sibling_name(target_name: &std::ffi::OsStr) -> String {
     let stamp = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2251,9 +2269,19 @@ pub(crate) fn claim_destination_handle<'a>(
         };
         if let Some(why) = why {
             drop(w);
-            if created {
-                let _ = std::fs::remove_file(dst);
-            }
+            // Round 5 (Reviewer Minor 2): was an inline `if created { remove_file(dst) }`, on both
+            // arms, including the one holding a root handle — which is precisely what
+            // `undo_created_destination` exists to stop, and its own doc said so while this site went
+            // on doing it. **`created` is not tested here any more because the helper tests it**, and
+            // duplicating the guard is how the two copies come to disagree.
+            //
+            // Unreachable with `created == true` — a name this call just made with `create_new` is
+            // neither a link nor a directory — and the cleanup is kept anyway, as it was before, for
+            // the reason the helper's doc gives: a refusal ending *"Nothing was written for this
+            // entry"* must not leave a zero-byte file at a name that did not exist. Kept as a
+            // fail-closed backstop, said out loud per CPE-1929 so the next person's green sabotage of
+            // it is expected rather than alarming.
+            undo_created_destination(&site, dst, created);
             // `policy: true` throughout this function's refusals — every one of them is a verdict
             // about what is sitting at the name, not an I/O failure. See `open_beneath::Refusal`.
             return Err(crate::open_beneath::Refusal {
@@ -2340,9 +2368,12 @@ pub(crate) fn claim_destination_handle<'a>(
         // flow rather than a guard, and the alternative is changing a type to encode an invariant that
         // this branch could relax again.
         drop(w);
-        if created {
-            let _ = std::fs::remove_file(dst);
-        }
+        // Round 5 (Reviewer Minor 2): was an inline `if created { remove_file(dst) }` on both arms.
+        // This one IS reachable with `created == true` — `handle_facts` can fail to describe a handle
+        // this call created just as readily as one it found — so the `Beneath` arm was doing a by-path
+        // unlink, in a real scenario, inside the function whose whole subject is not asking the path
+        // twice. See [`undo_created_destination`].
+        undo_created_destination(&site, dst, created);
         return Err(crate::open_beneath::Refusal::failure(format!(
             "{}: could not check how many names this file has, or whether it is a link, so nothing \
              was written for it — refusing to guess rather than risk writing through a second name \
@@ -2386,20 +2417,43 @@ pub(crate) fn claim_destination_handle<'a>(
     // tripwire. Do not delete this line as redundant with the tag check below: the two are
     // independent, and only one of them is a path question.
     //
-    // **The two `remove_file(dst)` cleanups below are the only PATH writes left in this function, and
-    // that is worth naming** (CPE-1896 PR #1043, N3), since the whole thesis of the CPE-1896 caller is
-    // that the destination is addressed by handle and never by path. They are bounded and deliberate:
-    // they run only on `created`, i.e. a name **this call** claimed with an exclusive create moments
-    // ago and is now abandoning, so the worst a racing swap achieves is that the cleanup unlinks
-    // something else — it cannot make this function *write* anywhere, and the entry is refused either
-    // way. Doing it properly needs a handle-relative unlink (`FileDispositionInfo` on Windows,
-    // `unlinkat` on the parent fd on Unix), which means threading the parent handle out of
-    // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
+    // **The `created` cleanups were the only PATH writes left in this function, and CPE-1896 PR #1043
+    // (N3) recorded the handle-relative unlink as "recorded rather than built"** — since the whole
+    // thesis of the CPE-1896 caller is that the destination is addressed by handle and never by path.
+    // **It is built now.** All three of them go through [`undo_created_destination`], whose `Beneath`
+    // arm is `open_beneath::remove_file_beneath` — the handle-relative unlink N3 described, which
+    // CPE-1961 had to write anyway for [`Staged::abandon`]. Round 4 converted one of the three; round 5
+    // (Reviewer Minor 2) converted the two that were left, one of which is reachable with
+    // `created == true`.
+    //
+    // What remains by path is the `ByPath` arm of that helper and of `Staged::abandon`, and that is not
+    // a residual anyone can close here: those callers hold no root handle to be relative to, which is
+    // the whole difference between the two [`DestinationSite`]s. The bound CPE-1896 stated still holds
+    // for them, unchanged — the cleanup runs only on `created`, a name **this call** claimed with an
+    // exclusive create moments ago and is now abandoning, so the worst a racing swap achieves is that
+    // the cleanup unlinks something else; it cannot make this function *write* anywhere, and the entry
+    // is refused either way.
     if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         drop(w);
         // Round 4: was an inline by-path `remove_file` on both arms. Same obligation, one
         // implementation — and the `Beneath` arm now unlinks through the root handle it is already
         // holding. See [`undo_created_destination`].
+        //
+        // **Round 5 (Reviewer Minor 3): "same obligation, one implementation" is true and understates
+        // what changed on THIS arm.** This branch fires only when `symlink_metadata(dst)` says the name
+        // is a link, so with `created == true` its one reachable input is the race — a name this call
+        // created with `create_new`, replaced by a link between that create and this probe. And
+        // `remove_file_beneath` does not merely unlink a different way: it **classifies the leaf
+        // itself**, via `refuse_link` for a directory junction, and opens a file symlink
+        // `FILE_OPEN_REPARSE_POINT` before unlinking it. So the arm's only live input is precisely the
+        // one where the old and the new implementation reach the same outcome by *different
+        // mechanisms* — the by-path form unlinks the name; the handle form decides what the name is
+        // first, and unlinks the link rather than anything it points at.
+        //
+        // Equivalent outcomes, so this is not a defect and there is nothing to red-proof against; it is
+        // recorded because "one implementation" reads as a refactor, and on this arm it is a mechanism
+        // change whose safety rests on the two mechanisms agreeing about links — which is exactly the
+        // thing the rest of this function refuses to assume anywhere else.
         undo_created_destination(&site, dst, created);
         return Err(crate::open_beneath::Refusal {
             why: format!(
@@ -2452,14 +2506,63 @@ pub(crate) fn claim_destination_handle<'a>(
     // ```
     //
     // **The same table, re-asked for the failure point THIS ticket adds** (round 4). `commit()` —
-    // `sync_all` plus a rename the filesystem can refuse — is reachable on all five, and "which bucket
-    // does `policy` pick" is the wrong question for it, because `commit` only ever returns
-    // `Refusal::failure`. The question is what each leg does with a per-entry failure, and two of them
-    // were answering "abandon the run" for a cause as ordinary as a file another program has open:
+    // `sync_all` plus a rename the filesystem can refuse — is reachable on all five, and two legs were
+    // answering "abandon the run" for a cause as ordinary as a file another program has open:
     // `archive` (Reviewer Blocker 1, `?` → `report.fail` + `continue`) and `transfer::download_tree`
-    // (`hard_err` → `record!`, which is `undelivered`). Both are fixed and both are pinned by a
-    // filesystem-asserting test. `backup` and `revert_engine` already reported per entry. `restore`
-    // still aborts, deliberately — see the note at its call site in `snapshot_capture.rs`.
+    // (`hard_err` → `record!`). Both are fixed and both are pinned by a filesystem-asserting test.
+    // `backup` and `revert_engine` already reported per entry. `restore` still aborts, deliberately —
+    // see the note at its call site in `snapshot_capture.rs`.
+    //
+    // **`commit` can return `policy: true`, and round 4 wrote here that it cannot** (round 5, Reviewer
+    // Major 1). The sentence was *"'which bucket does `policy` pick' is the wrong question for it,
+    // because `commit` only ever returns `Refusal::failure`"*, and it is **false**. It holds for
+    // [`DestinationSite::ByPath`], whose commit is `commit_replacement(...).map_err(Refusal::failure)`
+    // — `policy: false` by construction. The [`DestinationSite::Beneath`] arm is
+    // `crate::open_beneath::rename_beneath(root, &self.file, tmp_rel, rel)` and passes its `Refusal`
+    // through **unchanged**; `rename_beneath` has two structural `policy: true` exits of its own and,
+    // the reachable one, `descend(root, Act::Commit, dirs)` → `refuse_link` on a directory component
+    // that has become a link since the claim. That is not an exotic input — it is **this ticket's own
+    // threat model**, a component swapped inside the window the caller's `write_all` holds open.
+    // Executed and red-proofed on a real planted link:
+    // [`tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`],
+    // which also records the platform split (Unix constructs the swap; NTFS refuses to rename a
+    // directory with our staging handle open inside it, `ERROR_ACCESS_DENIED` — an accident of the
+    // handle we happen to hold, never a contract).
+    //
+    // So the bucket question is not the wrong one, it is the one that was answered from a false
+    // premise, and the answer per leg is:
+    //
+    // **All five legs are [`DestinationSite::Beneath`]** — read out of the legs rather than assumed,
+    // and round 5's first draft of this table got two rows wrong by assuming otherwise. `ByPath` is not
+    // an alternative any of them takes: its only route is [`copy_file_onto_no_follow`] /
+    // [`copy_file_onto_no_follow_with_wording`], whose two remaining in-tree callers
+    // (`backup.rs:2154`, `revert_engine.rs:3574`) are both inside `mod tests`. So `policy: true` at
+    // commit is a live input on **every** row below, not only on the two that were reviewed:
+    //
+    // ```text
+    // leg                                   a commit-time policy: true lands in…
+    // archive::extract_zip_archive_stream    report.skip — the SAME arm its claim-time refusal takes,
+    //                                        as of round 5. Was report.fail, unconditionally.
+    // transfer::download_tree                skipped, and the call then returns Ok. Its claim-time
+    //                                        link refusal has always done exactly this.
+    // revert_engine::apply_write             Refused::permanent (or ::hard_linked). This leg already
+    //                                        forks on `refusal.policy`, so a commit-time link verdict
+    //                                        arrives correctly classified with no change — "re-running
+    //                                        cannot fix a planted link" is the right advice for it.
+    // backup::apply_backup_plan_walk         one more OpResult::err, per entry. This leg reads `policy`
+    //                                        nowhere: one bucket, so there is nothing to disagree with.
+    // snapshot_capture::restore              `?` — aborts the restore, exactly as it does for every
+    //                                        other refusal. See the note at its call site.
+    // ```
+    //
+    // **The two legs that fork now fork by the same rule; they still differ in consequence, and that
+    // difference is theirs, not this line's.** `archive` counts a skip and returns `Ok(report)` either
+    // way; `download_tree` returns `Ok` because only `undelivered` changes its verdict — so on that leg
+    // a planted junction can leave a requested file undelivered with the call reporting success, named
+    // in `DownloadReport::skipped` but not in the `Result`. Round 5 states that plainly at the call
+    // site rather than leaving it to be inferred. Whether CPE-1709's "a link verdict is not a delivery
+    // failure" contract is the right one is a separate ticket's question; what changed here is that a
+    // claim-time and a commit-time link refusal no longer land in different buckets on the same leg.
     //
     // So the honest statement is narrower and still worth the change: `policy: true` is what keeps this
     // refusal a **named per-entry skip with its reason** on the four legs that report per entry, rather
@@ -9503,6 +9606,173 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **CPE-1961 round 5 (Reviewer Major 1): `commit()` CAN return `policy: true`, and rounds 3–4
+    /// wrote at two sites that it cannot.**
+    ///
+    /// The sentences were *"`commit` only ever returns `Refusal::failure`"* (`claim_destination_handle`'s
+    /// table) and *"a `policy: false` refusal — which is what `commit` returns"*
+    /// (`transfer::download_tree`'s call site). Both were reasoned from `ByPath`, which does
+    /// `commit_replacement(...).map_err(Refusal::failure)` — every refusal `policy: false` by
+    /// construction. The **`Beneath`** arm returns [`crate::open_beneath::rename_beneath`]'s `Refusal`
+    /// **unchanged**, and that function has three `policy: true` exits: two structural ones of its own,
+    /// plus — the reachable one — `descend(root, Act::Commit, dirs)` hitting `refuse_link` on a
+    /// directory component that has become a link since the claim.
+    ///
+    /// That is not a hypothetical: it is **this ticket's own threat model**. `claim_destination_handle`
+    /// descends the same components with `Act::Write`, so at claim time they were real directories; the
+    /// commit re-descends them after the caller's `write_all`, which is a whole archive entry or a
+    /// whole downloaded file. Swapping a component in that window is exactly the substitution the
+    /// staging design exists to survive, and this is what surviving it *looks like*.
+    ///
+    /// # What this pins, and what it deliberately does not
+    ///
+    /// It pins the **fact** both corrected comments now assert: a link planted at an interior component
+    /// between the claim and the commit makes `commit()` return `policy: true`, with the link wording.
+    /// The refusal is produced by the real `rename_beneath` against a real link on a real filesystem.
+    ///
+    /// It does **not** drive that refusal through `archive::extract_zip_archive_stream` or
+    /// `transfer::download_tree` end to end, and the reason is structural rather than an omission: both
+    /// legs' windows open inside `io::copy`/`write_all` with no seam a test can stop at, so a
+    /// leg-level fixture would have to *race* the extraction — a timing-dependent test that can pass by
+    /// missing the window, which is worse than none. What the legs do with the refusal is pinned
+    /// instead by the two sites classifying it the same way their own claim-time arms already do; see
+    /// `extract_zip_archive_stream`'s commit site, which round 5 changed from an unconditional
+    /// `report.fail` to the same `policy` fork its claim site has used since CPE-1935.
+    ///
+    /// # Constructing the swap, and the platform split it measured
+    ///
+    /// The staging sibling is open **inside** the component being swapped, so the real directory is
+    /// *renamed aside* rather than removed, and a link is put in its place. That is the only swap shape
+    /// that can work with a live handle underneath it — and the two platforms answer it differently:
+    ///
+    /// ```text
+    /// platform  rename("root/sub", "root/../sub-real") with the staging handle open inside
+    /// Unix      succeeds — the fd keeps the inode, not the name; the link goes in and the
+    ///           commit's re-descent refuses it. `policy: true`, asserted below.
+    /// Windows   REFUSED, ERROR_ACCESS_DENIED (os error 5). Measured, not assumed. NTFS will not
+    ///           rename a directory with an open handle anywhere in its subtree, whatever share
+    ///           mode that handle carries — `std`'s `FILE_SHARE_DELETE` does not buy it.
+    /// ```
+    ///
+    /// **The Windows row is a platform accident, not a contract, and this test is written so it cannot
+    /// be read as one.** The staging handle happens to pin its own ancestor chain against rename for
+    /// exactly the window that matters. Nothing in `commit`, `rename_beneath` or `descend` arranges
+    /// that or depends on it; a future arm that closes the handle before the rename, a filesystem with
+    /// different semantics, or the in-place `FSCTL_SET_REPARSE_POINT` route would reopen it. So the
+    /// Windows arm asserts **the block**, by its error code, rather than asserting the refusal — and
+    /// the callers are corrected on the strength of the Unix arm and of `commit`'s signature, never on
+    /// "Windows currently makes it unreachable".
+    ///
+    /// # Red-proof, run rather than asserted
+    ///
+    /// Linux/ext4 (`TMPDIR` off tmpfs, `Compiling cpe-server` seen), `assert!(r.policy)` inverted to
+    /// `assert!(!r.policy)`:
+    ///
+    /// ```text
+    /// RED-PROOF: `commit` returns `policy: true` here … Rounds 3-4 asserted at two sites that this
+    /// cannot happen: Refusal { why: "refusing to write inside the download folder \"…/root\": the
+    /// path component \"sub\" is a link (a symlink, junction or other reparse point), and a link
+    /// inside the download folder redirects the write to wherever it points. Nothing was written for
+    /// this entry …", policy: true }
+    /// test … FAILED.  0 passed; 1 failed
+    /// ```
+    ///
+    /// Note the verb: `Act::Commit` and `Act::Write` share `"write"`/`"written"`, so the *wording*
+    /// cannot tell a commit-time refusal from a claim-time one. Only the call that produced it can,
+    /// which is why this fixture drives `commit()` directly instead of matching on the sentence. The
+    /// Windows block was measured the same way — the fixture's first draft `panic!`ed with the raw
+    /// error (`Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`) rather than
+    /// passing, which is how the platform split was found at all.
+    #[test]
+    fn cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true() {
+        use std::io::Write as _;
+        let d = scratch("cpe1961-commit-policy");
+        let root_dir = d.join("root");
+        let sub = root_dir.join("sub");
+        let elsewhere = d.join("elsewhere");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("marker.txt"), b"OUTSIDE").unwrap();
+
+        let root = crate::open_beneath::open_root(&root_dir, "download folder")
+            .expect("opening the destination root must succeed");
+        let rel = Path::new("sub").join("f.txt");
+        let mut claimed = claim_destination_handle(
+            &sub.join("f.txt"),
+            LinkGuardWording::DOWNLOAD,
+            DestinationSite::Beneath { root: &root, rel: &rel },
+        )
+        .expect("the claim must succeed while `sub` is still a real directory");
+        claimed.file.write_all(b"BODY").expect("writing the body into the staging sibling");
+
+        // The swap, in the window the caller's write holds open.
+        let aside = d.join("sub-real");
+        // A test fixture staging an attack, and the RAW call is the point of it: `aside` is a name this
+        // test created inside its own scratch tree, and what is being measured is whether the platform
+        // permits the rename at all. Routing it through a guarded helper would measure the helper.
+        #[allow(clippy::disallowed_methods)]
+        let moved = std::fs::rename(&sub, &aside);
+
+        #[cfg(windows)]
+        {
+            // Windows does not let the swap happen at all, and the assertion is on the BLOCK — with
+            // its error code, so a future change that quietly starts permitting the rename reds here
+            // rather than silently reopening the window. Not a skip and not a `return` before any
+            // assertion: "the swap did not happen" and "the swap happened and was allowed" have to
+            // look different from the outside.
+            let e = moved.expect_err(
+                "PREMISE CHANGED: NTFS renamed a directory with our staging handle open inside it. \
+                 The Windows unreachability this test records was never a contract — the link swap \
+                 is now constructible here, so the commit-time `policy: true` case needs the Unix \
+                 arm's assertions on this platform too",
+            );
+            assert_eq!(
+                e.raw_os_error(),
+                Some(5),
+                "and it must be ERROR_ACCESS_DENIED — the open-handle-in-subtree block — rather than \
+                 the fixture failing for an unrelated reason and reading as a measurement: {e:?}"
+            );
+            drop(claimed); // disarm the claim; the swap it was staged for never happened
+        }
+
+        #[cfg(unix)]
+        {
+            moved.expect("the fixture must move the real directory aside — an fd keeps the inode");
+            assert!(
+                make_dir_link(&elsewhere, &sub),
+                "the fixture could not put a directory link where the component was — nothing was \
+                 measured"
+            );
+
+            let r = claimed
+                .commit()
+                .expect_err("committing through a component that is now a link must be refused");
+            assert!(
+                r.policy,
+                "THE POINT: `commit` returns `policy: true` here, so every caller that buckets by \
+                 `policy` sends this down its SKIP arm. Rounds 3-4 asserted at two sites that this \
+                 cannot happen: {r:?}"
+            );
+            assert!(
+                r.why.contains("is a link"),
+                "and it is the link verdict, not an I/O failure that happens to be flagged: {r:?}"
+            );
+            assert!(
+                !elsewhere.join("f.txt").exists(),
+                "nothing may be written through the planted link: {r:?}"
+            );
+        }
+
+        // Put the real directory back before the scratch guard runs, so the cleanup is not walking a
+        // link out of the tree it is deleting. Scoped to the two names this test created.
+        let _ = std::fs::remove_dir_all(&sub);
+        // Test-fixture teardown, both operands names this test created inside its own scratch tree, and
+        // the destination has just been removed on the line above.
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::rename(&aside, &sub);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// **CPE-1961 round 2: the same racer, pointed at the NEW `Beneath` commit** — the arm
