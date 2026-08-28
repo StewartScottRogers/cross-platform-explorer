@@ -46,6 +46,7 @@ import {
   readOnBlock,
   readBaseWorkflowSources,
   coverageOf,
+  PR_EVENTS,
 } from "../../scripts/ci-poll.mjs";
 
 const REPO = process.cwd();
@@ -604,7 +605,7 @@ describe("ci-poll: the coverage check is narrow ON PURPOSE, and its carve-outs a
     // machine-readable token says `ok(1-silent)` rather than a bare `ok`.
     expect(fresh.verdict).not.toContain("Nightly sweep A");
     expect(fresh.stdout).toContain("nightly.yml contributed no check to this board");
-    expect(fresh.stdout).toContain("path-filtered on `pull_request`");
+    expect(fresh.stdout).toContain("path-filtered on every PR trigger it declares");
     expect(fresh.verdict).toContain("coverage=ok(1-silent)");
     // …and the excuse really is derived from that key: strip it and the same board reds.
     const filtered = readFileSync(join(BASE_WORKFLOWS, "nightly.yml"), "utf8");
@@ -669,6 +670,11 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
       "on: [push, pull_request]\n",
       "on:\n  - push\n  - pull_request\n",
       "on: # a trailing comment\n  pull_request:\n",
+      // Round 3. A trailing comment in the `on:` BLOCK BODY, which round 2's header claimed to strip
+      // and did not — it answered `unknown` (fail-closed, but `coverage=unknown` on every board until
+      // someone deleted the comment).
+      "on:\n  - push\n  - pull_request  # only PRs\n",
+      "on:\n  push:\n  pull_request:  # only PRs\n",
     ]) {
       expect(workflowTriggersPullRequest(src), src).toBe(true);
     }
@@ -677,13 +683,95 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
     }
   });
 
+  it("classifies `pull_request_target` as a PR trigger — it was a confident `false` with no trace", () => {
+    // ROUND 3 BLOCKER. The block-key loop compared the key to `"pull_request"` exactly, so a
+    // `pull_request_target`-only workflow answered `{trigger:"other"}` and `coverageOf` skipped the
+    // file entirely: no `unjudged` row, no `silentWorkflows` entry, a bare `coverage=ok` at exit 0 with
+    // that workflow's whole guard set absent. Reproduced below end to end.
+    for (const src of [
+      "on:\n  pull_request_target:\n    branches: [main]\n",
+      "on: [pull_request_target]\n",
+      "on: pull_request_target\n",
+      'on:\n  "pull_request_target":\n',
+      "on:\n  - pull_request_target\n",
+    ]) {
+      expect(workflowTriggersPullRequest(src), src).toBe(true);
+    }
+    // `\b` is why this hid: `\bpull_request\b` does NOT match inside `pull_request_target` (`_` is a
+    // word character), so the inline branch missed it too, for a different reason than the block one.
+    expect(/\bpull_request\b/.test("on: [pull_request_target]")).toBe(false);
+    // The end-to-end shape: a board carrying every `ci.yml` check and nothing from `security.yml`.
+    const security = "on:\n  pull_request_target:\n    branches: [main]\njobs:\n  codeql:\n    name: CodeQL\n";
+    const cov = coverageOf(["Frontend — type-check and test"], [{ file: "security.yml", text: security }]);
+    expect(cov.state).toBe("unjudged");
+    expect(cov.unjudged.map((u) => u.label)).toEqual(["CodeQL"]);
+    // …and it takes `paths:` on the same terms, so the silent-workflow carve-out needed no special case.
+    expect(readOnBlock("on:\n  pull_request_target:\n    paths: [src/**]\n").prPathFiltered).toBe(true);
+  });
+
+  it("the PR-event list is a literal pair, named — the standing blind spot the header points at", () => {
+    // Nothing in the code can notice a THIRD PR-scoped event name; only this assertion will, and only
+    // once someone writes a workflow using it. That is exactly the shape `pull_request_target` had.
+    expect([...PR_EVENTS].sort()).toEqual(["pull_request", "pull_request_target"]);
+    expect(workflowTriggersPullRequest("on:\n  pull_request_review:\n"), "a PR-adjacent event we do NOT class as one").toBe(
+      false,
+    );
+  });
+
+  it("`prPathFiltered` needs EVERY PR trigger filtered, not the first one found", () => {
+    // The excuse for silence must not be bought by one of two triggers: a workflow with a path-filtered
+    // `pull_request:` and an unfiltered `pull_request_target:` still runs on every diff. Round 2's loop
+    // broke at the first PR key, so widening the class without this would have opened a new fail-open.
+    const both = (a: string, b: string) => `on:\n  pull_request:\n    ${a}\n  pull_request_target:\n    ${b}\n`;
+    expect(readOnBlock(both("paths: [src/**]", "paths-ignore: [docs/**]")).prPathFiltered).toBe(true);
+    expect(readOnBlock(both("paths: [src/**]", "branches: [main]")).prPathFiltered).toBe(false);
+    expect(readOnBlock(both("branches: [main]", "paths: [src/**]")).prPathFiltered).toBe(false);
+  });
+
+  it("a `#` inside a quoted scalar on the `on:` line is not a comment — round 2 said this and it wasn't", () => {
+    // ROUND 3 BLOCKER 2. The header's tri-state paragraph named `on: ["push#1"]` as landing in
+    // `unknown`; measured, it landed in a confident `false`. The regex it used, `/(^|\s)#.*$/`, is
+    // quote-blind, so the worse spelling below cut at the `#` inside the quoted scalar and ate the
+    // `pull_request` after it. Now parsed correctly rather than merely closed.
+    expect(readOnBlock('on: ["a #b", pull_request]\n')).toMatchObject({ trigger: "pull-request" });
+    expect(readOnBlock('on: ["push#1"]\n')).toMatchObject({ trigger: "other" });
+    expect(readOnBlock("on: ['a #b', pull_request_target]\n")).toMatchObject({ trigger: "pull-request" });
+    expect(/(^|\s)#.*$/.exec(' ["a #b", pull_request]')?.[0], "the regex that could not see the quoting").toBe(
+      ' #b", pull_request]',
+    );
+  });
+
   it("an unclassifiable `on:` is `null`, and `coverageOf` turns that into exit-5 territory", () => {
-    for (const src of ["jobs:\n  a:\n    name: A\n", "on:\nname: X\n", "on: >\n  push\n"]) {
+    // Every shape the header's "cannot see" list says lands in `unknown` is RUN here rather than
+    // asserted in prose — round 2's list named one that landed in `false` instead.
+    for (const src of [
+      "jobs:\n  a:\n    name: A\n",
+      "on:\nname: X\n",
+      "on: >\n  push\n",
+      // Round 3 minor: a YAML anchor/alias is not resolved. Round 2 answered a confident `other` for
+      // the first of these, silently dropping the whole workflow. GitHub rejects anchors, so this is
+      // unreachable in practice — it is fail-closed and named in the header rather than left absent.
+      "on: &trig\n  pull_request:\n",
+      "on: *trig\n",
+      'on: ["push\n',
+    ]) {
       expect(workflowTriggersPullRequest(src), src).toBeNull();
     }
+    expect(readOnBlock("on: &trig\n  pull_request:\n").why).toContain("anchor");
     const cov = coverageOf(["anything"], [{ file: "mystery.yml", text: "on:\nname: X\njobs:\n  a:\n    name: A\n" }]);
     expect(cov.state).toBe("unknown");
     expect(cov.detail).toContain("mystery.yml");
+  });
+
+  it("the flow-mapping path filter is missed — over-blocking, and by OMISSION not by construction", () => {
+    // Round 3 minor 4. Round 2's comment said a trigger written inline "cannot carry a path filter", so
+    // `prPathFiltered: false` was true by construction. It is legal and it does; the classifier just
+    // does not read it. Pinned in the safe direction: `false` refuses the excuse for silence, so such a
+    // workflow's absence is called unjudged rather than waved through. Flip this to `true` on the day
+    // someone teaches the inline branch flow mappings — and delete the header's bullet with it.
+    const flow = "on: {pull_request: {paths: ['src/**']}}\n";
+    expect(workflowTriggersPullRequest(flow)).toBe(true);
+    expect(readOnBlock(flow).prPathFiltered, "if this is now true the header's `cannot see` list is stale").toBe(false);
   });
 
   it("a PR-triggered workflow whose jobs cannot be read is `unknown`, not an empty requirement", () => {
@@ -715,6 +803,14 @@ describe("ci-poll: an `on:` block the scanner cannot read fails CLOSED, never qu
       .map((f) => f.file)
       .sort();
     expect(prTriggered).toEqual(["ci.yml", "gui-smoke.yml"]);
+    // This `toEqual` is also the ONLY thing that can notice a new PR-scoped event arriving in this
+    // repo: `PR_EVENTS` is a literal pair, so a workflow triggered by a third one would classify as
+    // `other` and vanish from the required set. Today there is no `pull_request_target` here at all —
+    // asserted, because the header says so and a header that says so unasserted is how round 3 started.
+    const prtUsers = (base!.files as { file: string; text: string }[])
+      .filter((f) => /(^|[^A-Za-z0-9_-])pull_request_target([^A-Za-z0-9_-]|$)/.test(f.text))
+      .map((f) => f.file);
+    expect(prtUsers, "a `pull_request_target` workflow landed — re-read `readOnBlock`'s header").toEqual([]);
     // §2d of docs/design/CI-STALENESS.md rests on this: NEITHER carries a `pull_request:` path filter,
     // so no PR in this repo can legitimately be missing either workflow's checks.
     for (const f of base!.files as { file: string; text: string }[]) {

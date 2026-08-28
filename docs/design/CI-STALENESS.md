@@ -135,7 +135,7 @@ says nothing about how long the gate takes.
 |---|---|---|
 | merges to `main` | **12.86 / day** | 186 merges ÷ 14.462 days (13.29 over a round 14 days) |
 | other PRs open at the average merge instant | **2.90** (max 10) | interval overlap over the same 186 |
-| successful `ci.yml` run, wall clock | **median 60.9 min, p90 81.8 min** | **417 successful of 790 completed** `ci.yml` runs in the window |
+| successful `ci.yml` run, wall clock | **median 60.9 min, p90 81.8 min** (nearest-rank p90: 82.2; the median is 60.9 either way) | **417 successful of 790 completed** `ci.yml` runs in the window |
 | PR open → merged | median 157.5 min, p90 469.7 min | same 186 (nearest-rank p90: 485.2) |
 | commits landing on `main` | 589 total, ~41 / day | `git rev-list --count origin/main --since=… --until=…` |
 
@@ -198,6 +198,14 @@ Every check in the §2a list reports on every PR. **This claim is now asserted, 
 `.github/workflows/` at run time, pins the PR-triggered set to exactly `ci.yml` + `gui-smoke.yml`, and
 reds naming the file if either ever grows a `pull_request:` path filter — at which point this section
 needs rewriting and the test says so.
+
+**"PR-triggered" means `pull_request` *or* `pull_request_target` (CPE-1970 round 3).** Both run on a
+pull request and both land their check runs on the rollup, so both are required to judge it; until
+round 3 the classifier compared the key to `"pull_request"` exactly and a `pull_request_target`-only
+workflow dropped out of the required set with no trace at all — a bare `coverage=ok`. There is no such
+workflow in this repo today, and that too is asserted by the same test rather than written down here.
+The event list is a literal pair, so it is also the classifier's one standing blind spot: a *third*
+PR-scoped event would classify as "not PR-triggered" and only that `toEqual` would notice.
 
 **What is actually true and worth knowing before you click:**
 

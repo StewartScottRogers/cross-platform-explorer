@@ -325,3 +325,88 @@ PR is about: disabling the rung → **3 failed / 67 passed**; forcing `coverageO
 | the 2 skipped | both in `catalogPublishLoudFailure.test.ts`, gated on `jq`, not installed on this machine — unchanged from round 1 |
 | `src/lib/ciPollFailClosed.test.ts` alone | **70 passed, 0 failed, 0 skipped** (63 after round 1) |
 | Rust | untouched — no crate changed |
+
+## Round 3 — two blockers, both in the paragraph arguing the tri-state was complete
+
+Round 3's two blockers are one defect in two forms: a *"what this cannot see"* list that did not name a
+real gap, and a *"these now land in `unknown`"* sentence naming an example that landed in `false`. Both
+made the surrounding paragraph read as coverage. Every shape below was **run**, not reasoned about.
+
+**1. `pull_request_target` was a confident `false`, with no trace at all — fixed by widening the class.**
+`readOnBlock`'s block-key loop compared the key to the string `"pull_request"` **exactly**, so a
+`pull_request_target`-only workflow answered `{trigger:"other"}` and `coverageOf` `continue`d past the
+file: no `unjudged` row, no `silentWorkflows` entry, nothing. Reproduced end to end on a board carrying
+all 11 real `ci.yml` checks and nothing from a `pull_request_target`-only `security.yml` →
+`verdict: ok | coverage=ok`, exit 0. `pull_request_target` **does** run on pull requests and its check
+runs **do** land on the rollup, so the header's premise was false as written. Classified as
+**PR-triggered**, not `unknown`: `unknown` is also fail-closed but is the wrong answer for a
+well-understood event — the first such workflow to land would print `coverage=unknown` on every board
+forever, and a permanently-unknown gate is one people alias away. It takes `paths:` on identical terms,
+so the silent-workflow carve-out needed no special case. The event list is now a named export,
+`PR_EVENTS`, and it is pinned in `ciPollFailClosed.test.ts` five spellings deep (block, flow seq, flow
+scalar, quoted key, sequence item) **plus the end-to-end `coverageOf` reproduction**. Two side-findings
+while widening it: `\bpull_request\b` does **not** match inside `pull_request_target` (`_` is a word
+character), so the inline branch missed it for a *different* reason than the block branch — asserted;
+and stopping at the first PR key would have let a path-filtered `pull_request:` buy an excuse for an
+unfiltered `pull_request_target:`, so `prPathFiltered` now requires **every** PR trigger to be filtered.
+
+**2. The tri-state paragraph named an example that did not behave as claimed.** It said
+`on: ["push#1"]` landed in `unknown`; measured, it landed in `false`. Worse spelling, same mechanism:
+`on: ["a #b", pull_request]` → **`false`**, because `stripTrailing`'s `/(^|\s)#.*$/` cut at the
+space-preceded `#` **inside the quoted scalar** and ate the `pull_request` after it. Fixed in the
+direction that makes the claim true rather than narrowing it: `splitInlineComment` tracks quote state,
+so `on: ["a #b", pull_request]` now reads **`pull-request`** and `on: ["push#1"]` reads **`other`** —
+both *correctly*, not merely closed. An unterminated quote is `unknown`. Exposure was nil (no legal
+GitHub event name contains `#`); the defect was the sentence.
+
+**3. (minor) `on: &trig` → now `unknown`, and named.** Round 2 answered a confident `other`, dropping
+the whole workflow. GitHub Actions rejects YAML anchors so it is effectively unreachable — it is
+fail-closed **and** in the blind-spot list rather than absent from it.
+
+**4. (minor) "by construction" was wrong.** `on: {pull_request: {paths: ['src/**']}}` is legal and
+**does** carry a path filter; the inline branch reports `false`. That over-blocks (silence is called
+unjudged rather than excused), so there is no exposure — but it is by **omission**, not by
+construction, and the comment now says so. Pinned with a test that reds if anyone teaches the branch
+flow mappings without deleting the header bullet.
+
+**5. (nit) The comment-stripping claim is now true.** Round 2 claimed both positions but applied the
+trailing strip only to the `on:` line's inline rest, so the entirely legal
+`on:\n  - push\n  - pull_request  # only PRs` answered `unknown` (measured). Trailing strip now runs on
+every block-body line too; both spellings pinned.
+
+**6. (nit) `CI-STALENESS.md`'s headline CI row now quotes its nearest-rank p90.** The doc says
+*"nearest-rank is quoted where it differs"* and for that row it does. Re-measured independently from
+the Actions API paged to exhaustion — **793 rows, 790 completed, 417 success**; median **60.9** either
+way, p90 **81.8** linear / **82.2** nearest-rank. Both now in the cell.
+
+**The blind-spot list is rewritten as OPEN** — *"WHAT THIS STILL CANNOT SEE — AT LEAST THESE, and the
+list is open by construction, because every round of review has added one"* — and now names the
+PR-event pair's literal-ness, flow mappings, anchors/aliases and block scalars, with each example's
+**measured** answer beside it.
+
+**Red-proofs, five new ones, each run and each written at its site.** `PR_EVENTS` → `["pull_request"]`:
+**4 failed / 8 passed** — and critically the enumeration test *"every real workflow in this repo still
+classifies…"* stays **GREEN**, because this repo has no `pull_request_target` workflow, which is exactly
+why the four targeted tests exist. Quote-blind `stripTrailing` restored: 2 failed / 10 passed. Block-body
+key read off the raw line: 1 failed / 11 passed. `prAts.every` → `filtered(prAts[0])`: 1 failed /
+11 passed. Anchor refusal disabled: 1 failed / 11 passed.
+
+**Three round-2 red-proof counts were re-measured and corrected, not carried forward.** The describe grew
+70 → 75 tests, which moves every `skipped` figure: the `on:`-comment proof is **2 failed / 10 passed /
+63 skipped** (not `1 failed / 5 passed / 64 skipped` — and it reds a *second* test round 2 did not name),
+the `jobs:`-comment proof **1 failed / 74 skipped**, the carve-out proof **1 failed / 4 passed /
+70 skipped**.
+
+**CPE-1929's two sabotages RE-RUN at 75 tests**, because round 3 changed one of this rung's inputs:
+disabling the rung → **3 failed / 72 passed**; forcing `coverageOf` to always answer `ok` → **12 failed /
+63 passed**. The 3 are a **strict subset** of the 12, so the rung is reached, not shadowed.
+
+**Gate table, re-run after the final round-3 edit.**
+
+| check | result |
+|---|---|
+| `npm run check` (svelte-check + tsc) | 0 errors, 0 warnings |
+| `npx vitest run` (whole root suite) | **358 files — 5295 passed, 2 skipped** (5290 in round 2; +5 new tests) |
+| the 2 skipped | both in `catalogPublishLoudFailure.test.ts`, gated on `jq`, not installed on this machine — unchanged since round 1 |
+| `src/lib/ciPollFailClosed.test.ts` alone | **75 passed, 0 failed, 0 skipped** (70 after round 2, 63 after round 1) |
+| Rust | untouched — no crate changed |

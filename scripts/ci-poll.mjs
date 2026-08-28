@@ -470,7 +470,8 @@ export function scanWorkflowJobs(source) {
     // matcher (a short list over-blocks, which is loud); the coverage check is the first consumer that
     // needs it fail-closed, because a truncated job list silently SHRINKS what `main` requires.
     // Red-proofed: `if (false && …)` here reds exactly `a column-0 comment inside \`jobs:\` no longer
-    // truncates the job list` (1 failed / 69 skipped) and no other test.
+    // truncates the job list` — 1 failed / 74 skipped under `-t "no longer truncates the job list"`,
+    // re-measured in round 3 (round 2 wrote `69 skipped`, taken at 70 tests; the file holds 75 now).
     if (/^[\t ]*#/.test(line)) continue;
     if (/^\S/.test(line)) {
       // A new top-level key ends the jobs block.
@@ -658,19 +659,47 @@ export function readWorkflowSources(dir) {
 /**
  * @typedef {object} OnBlock
  * @property {"pull-request"|"other"|"unknown"} trigger  `unknown` = the `on:` block could not be read
- * @property {boolean} prPathFiltered  the `pull_request:` trigger carries its own `paths:`/`paths-ignore:`
+ * @property {boolean} prPathFiltered  EVERY PR-scoped trigger present carries its own
+ *           `paths:`/`paths-ignore:` — so GitHub was entitled to skip the workflow on some diffs
  * @property {string} why  one clause, for the operator, when `trigger === "unknown"`
  */
 
 /**
- * Read one workflow's `on:` block: does it run on `pull_request`, and if so does that trigger carry a
- * PATH FILTER of its own?
+ * The PR-scoped GitHub event names, as a named literal rather than a condition buried in a loop —
+ * because this list is the one standing blind spot of the classifier and the header points at it.
+ *
+ * BOTH of these run on a pull request and BOTH land their check runs on the PR's rollup, which is the
+ * only property `coverageOf` cares about. `pull_request_target` differs from `pull_request` in what it
+ * checks out and what secrets it gets, not in whether it judges the PR.
+ */
+export const PR_EVENTS = ["pull_request", "pull_request_target"];
+
+/**
+ * Read one workflow's `on:` block: does it run on a PR event (`PR_EVENTS`), and if so does every such
+ * trigger carry a PATH FILTER of its own?
  *
  * Only PR-triggered workflows can contribute checks to a PR's rollup, so a release-only or
  * schedule-only workflow's jobs must never count as "missing" — that would red every PR on day one,
  * which is the outcome that gets a gate switched off. The second fact is what lets `coverageOf` tell a
  * workflow that was ALLOWED to stay silent on this PR from one that simply did not run: see its
  * comment, and §2d of `docs/design/CI-STALENESS.md`.
+ *
+ * CPE-1970 ROUND 3 — `pull_request_target` WAS A CONFIDENT `false`, AND WITH NO TRACE. The block-key
+ * loop compared the key to the string `"pull_request"` exactly, so a `pull_request_target`-only
+ * workflow answered `{trigger:"other"}`, `coverageOf` `continue`d past it, and the board printed a bare
+ * `coverage=ok` at exit 0 with that workflow's entire guard set absent from the required set — no
+ * `unjudged` row, no `silentWorkflows` entry, nothing. Measured end to end on a board carrying all 11
+ * real `ci.yml` checks and nothing from a `pull_request_target`-only `security.yml`:
+ * `verdict: ok | coverage=ok`, `detail: every job \`main\` requires from ci.yml produced a check here`.
+ * `pull_request_target` IS a pull-request trigger — GitHub runs it on PR events and its check runs land
+ * on the rollup — so the fix widens the class rather than narrowing the claim: it is now
+ * `"pull-request"`, not `"unknown"`. `unknown` would also have been fail-closed, but it is the wrong
+ * answer for a well-understood event: the first `pull_request_target` workflow to land would print
+ * `coverage=unknown` on every board forever, and a gate that is permanently unknown is a gate people
+ * alias away. It takes `paths:`/`paths-ignore:` on exactly the same terms, so the silent-workflow
+ * carve-out needed no special case. There is no live instance today
+ * (`grep -rn pull_request_target .github/workflows/` → none), so this was latent, exactly as latent as
+ * round 1's column-0 comment was — and it is pinned in `ciPollFailClosed.test.ts` so it stays fixed.
  *
  * CPE-1970 ROUND 2 — THIS USED TO FAIL OPEN, SILENTLY, ON LEGAL YAML, AND THE SHAPE WAS ONE REFORMAT
  * AWAY. The predecessor walked the block with `if (/^\S/.test(line)) return false;` as its terminator
@@ -685,17 +714,60 @@ export function readWorkflowSources(dir) {
  * legal spellings, three more whole-workflow blind spots.
  *
  * CLAUDE.md rule 2 ("anchor on code, never on prose; a whole-line-comment filter is not enough") is why
- * the rewrite below strips comments in BOTH positions — whole-line at any indent, and trailing after
- * whitespace, which is YAML's own rule for where a `#` starts a comment. WHAT THIS STILL CANNOT SEE,
- * stated rather than left to be discovered: a `#` inside a quoted scalar on the `on:` line itself
- * (`on: ["push#1"]`) is treated as a comment start, and a block scalar (`on: >`) is not understood.
- * Neither shape is legal-and-meaningful for a GitHub `on:` key, and both now land in `unknown` rather
- * than in a quiet `false` — the whole point of the tri-state.
+ * comments are stripped in BOTH positions — whole-line at any indent, and trailing after whitespace —
+ * on the `on:` line AND on every line of its block body. Round 2 claimed both positions but applied the
+ * trailing strip only to the `on:` line's inline rest, so the entirely legal
+ * `on:\n  - push\n  - pull_request  # only PRs` answered `unknown` (measured). Fail-closed, but a
+ * workflow spelled that way would have printed `coverage=unknown` on every board until someone deleted
+ * the comment. And `stripTrailing` was a regex, `/(^|\s)#.*$/`, which cannot see quoting: on
+ * `on: ["a #b", pull_request]` it cut at the `#` INSIDE the quoted scalar and ate the `pull_request`
+ * after it, answering a confident `false` (measured) — in the paragraph whose job was to argue the
+ * tri-state is complete. `splitInlineComment` below tracks quote state instead, so that line now reads
+ * as `pull-request` and `on: ["push#1"]` as `other`, both correctly rather than merely closed.
+ *
+ * WHAT THIS STILL CANNOT SEE — AT LEAST THESE, and the list is open by construction, because every
+ * round of review has added one. Say a shape's name here rather than letting the next reader discover
+ * it; an enumeration that reads as exhaustive is how a gap reads as coverage.
+ *   • THE PR-EVENT LIST IS A LITERAL PAIR (`PR_EVENTS`). A third PR-scoped event name — one GitHub
+ *     adds later, or one nobody here has heard of — lands in `other` and drops its whole workflow out
+ *     of the required set silently. This is the shape `pull_request_target` had until round 3, and
+ *     nothing in the code can notice the next one; only the enumeration test's `toEqual` will, and only
+ *     once someone writes a workflow using it.
+ *   • FLOW MAPPING. `on: {pull_request: {paths: ['src/**']}}` is legal and DOES carry a path filter;
+ *     the inline branch reports `prPathFiltered: false` for it (measured). That over-blocks — such a
+ *     workflow's silence is called unjudged rather than excused — so there is no exposure, but see the
+ *     inline branch's own comment: it is false by OMISSION, not by construction.
+ *   • YAML ANCHORS AND ALIASES. `on: &trig` / `on: *trig` are not resolved. Round 2 answered a
+ *     confident `other` for the first (measured); they now answer `unknown`, which is fail-closed but
+ *     still not understanding — a workflow written that way stops the poll rather than being read.
+ *     GitHub Actions itself rejects anchors, so this is effectively unreachable.
+ *   • BLOCK SCALARS. `on: >` is not understood; `unknown`.
+ * Every example named above was RUN, not reasoned about, and the answers are the ones written next to
+ * them — round 2's list claimed two shapes landed in `unknown` and one of them landed in `false`.
  *
  * RED-PROOFED (CLAUDE.md rule 3), result written here rather than only in the PR body: dropping
- * `isComment` from the block-body loop below reds exactly one test — `an \`on:\` block the scanner
- * cannot read fails CLOSED … > a column-0 comment inside \`on:\` no longer deletes the workflow from
- * the required set` — 1 failed / 5 passed / 64 skipped, and nothing else moves.
+ * `isComment` from the block-body loop below reds `a column-0 comment inside \`on:\` no longer deletes
+ * the workflow from the required set` AND `every real workflow in this repo still classifies …` —
+ * **2 failed / 10 passed / 63 skipped** under `-t "fails CLOSED"`. RE-MEASURED IN ROUND 3, because
+ * round 2 wrote `1 failed / 5 passed / 64 skipped` here and the describe has since grown from 70 tests
+ * to 75: a red-proof's counts go stale the moment tests are added beside it, so re-run rather than
+ * copy one forward.
+ *
+ * ROUND 3'S OWN RED-PROOFS, all five run against `-t "fails CLOSED"` (75 tests, 63 skipped by the
+ * filter), each number measured rather than predicted:
+ *   • `PR_EVENTS` back to `["pull_request"]` → **4 failed / 8 passed**: `classifies
+ *     \`pull_request_target\` …`, `the PR-event list is a literal pair …`, `\`prPathFiltered\` needs
+ *     EVERY PR trigger filtered …`, `a \`#\` inside a quoted scalar …`. Note `every real workflow in
+ *     this repo still classifies …` stays GREEN — this repo has no `pull_request_target` workflow, so
+ *     the enumeration alone could not have caught it. That is why the four above exist.
+ *   • `splitInlineComment` back to `s.replace(/(^|\s)#.*$/, "$1")` → **2 failed / 10 passed**:
+ *     `a \`#\` inside a quoted scalar …` and `an unclassifiable \`on:\` is \`null\` …`.
+ *   • the block-body key read off the raw line instead of `split.rest` → **1 failed / 11 passed**:
+ *     `reads the legal spellings that used to answer \`false\` …`.
+ *   • `prAts.every(filtered)` back to `filtered(prAts[0])` → **1 failed / 11 passed**:
+ *     `\`prPathFiltered\` needs EVERY PR trigger filtered …`.
+ *   • the anchor refusal disabled (`if (false && …)`) → **1 failed / 11 passed**:
+ *     `an unclassifiable \`on:\` is \`null\` …`.
  *
  * Same no-dependency line-scan discipline as `scanWorkflowJobs`; `scripts/` has no `node_modules`.
  *
@@ -707,10 +779,44 @@ export function readOnBlock(source) {
   const isBlank = (/** @type {string} */ l) => /^[\t ]*$/.test(l);
   const isComment = (/** @type {string} */ l) => /^[\t ]*#/.test(l);
   const indentOf = (/** @type {string} */ l) => (/^[\t ]*/.exec(l)?.[0] ?? "").replace(/\t/g, "        ").length;
-  // YAML starts a comment at a `#` that begins the line or follows whitespace — not at every `#`.
-  const stripTrailing = (/** @type {string} */ s) => s.replace(/(^|\s)#.*$/, "$1").trim();
   /** @type {(why: string) => OnBlock} */
   const unknown = (why) => ({ trigger: "unknown", prPathFiltered: false, why });
+  const isPrEvent = (/** @type {string} */ k) => PR_EVENTS.includes(k);
+  // `\b` will not do here: `\bpull_request\b` does NOT match inside `pull_request_target`, because `_`
+  // is a word character — which is half of why the exact-string comparison went unnoticed for a round.
+  const prEventRe = new RegExp(
+    `(^|[^A-Za-z0-9_-])(${[...PR_EVENTS].sort((a, b) => b.length - a.length).join("|")})([^A-Za-z0-9_-]|$)`,
+  );
+
+  /**
+   * Cut a YAML trailing comment off one line: a `#` that starts the line or follows whitespace AND is
+   * not inside a quoted scalar. The regex this replaces (`/(^|\s)#.*$/`) could not see the quoting and
+   * cut inside `["a #b", pull_request]`, deleting the trigger after it. Single quotes escape by
+   * doubling (`''`), which this loop handles as close-then-reopen — the parity is what matters here.
+   *
+   * @param {string} s
+   * @returns {{rest: string, unterminated: boolean}}
+   */
+  const splitInlineComment = (s) => {
+    /** @type {string} */ let quote = "";
+    for (let i = 0; i < s.length; i += 1) {
+      const c = s[i];
+      if (quote === '"' && c === "\\") {
+        i += 1;
+        continue;
+      }
+      if (quote) {
+        if (c === quote) quote = "";
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        continue;
+      }
+      if (c === "#" && (i === 0 || /\s/.test(s[i - 1]))) return { rest: s.slice(0, i).trim(), unterminated: false };
+    }
+    return { rest: s.trim(), unterminated: quote !== "" };
+  };
 
   let onAt = -1;
   /** @type {string} */ let inlineRest = "";
@@ -718,18 +824,30 @@ export function readOnBlock(source) {
     if (isComment(lines[i]) || isBlank(lines[i])) continue;
     const m = /^(?:on|"on"|'on')\s*:(.*)$/.exec(lines[i]);
     if (m) {
+      const split = splitInlineComment(m[1]);
+      if (split.unterminated) return unknown("unterminated quote on the `on:` line");
       onAt = i;
-      inlineRest = stripTrailing(m[1]);
+      inlineRest = split.rest;
       break;
     }
   }
   if (onAt < 0) return unknown("no top-level `on:` key");
 
-  // Flow / scalar form — `on: [push, pull_request]`, `on: push`. A trigger written this way cannot
-  // carry a path filter, so `prPathFiltered` is false by construction rather than by omission.
+  // Flow / scalar form — `on: [push, pull_request]`, `on: push`.
+  //
+  // `prPathFiltered: false` here is by OMISSION, not by construction, and round 2's comment said the
+  // opposite: `on: {pull_request: {paths: ['src/**']}}` is legal YAML and DOES carry a path filter,
+  // and this branch reports `false` for it (measured). The error is in the over-blocking direction —
+  // `false` means "not entitled to be silent", so such a workflow's absence is called unjudged rather
+  // than excused — so it is left as-is rather than given a flow-mapping parser. It is in the header's
+  // "cannot see" list because a safe wrong answer is still a wrong answer.
   if (inlineRest) {
     if (/[>|]\s*[-+]?$/.test(inlineRest)) return unknown("`on:` uses a block scalar");
-    return { trigger: /\bpull_request\b/.test(inlineRest) ? "pull-request" : "other", prPathFiltered: false, why: "" };
+    // An anchor or alias (`on: &trig`, `on: *trig`) is not resolved. GitHub Actions rejects anchors, so
+    // this is unreachable in practice; round 2 nevertheless answered a confident `other` for it, which
+    // silently dropped the whole workflow. Fail closed instead.
+    if (/^[&*]/.test(inlineRest)) return unknown("`on:` uses a YAML anchor or alias, which is not resolved");
+    return { trigger: prEventRe.test(inlineRest) ? "pull-request" : "other", prPathFiltered: false, why: "" };
   }
 
   // Block form. Children are every line indented deeper than `on:` itself, comments and blanks skipped.
@@ -742,25 +860,30 @@ export function readOnBlock(source) {
   if (body.length === 0) return unknown("`on:` has no block content");
   const childIndent = indentOf(lines[body[0]]);
 
-  let prAt = -1;
+  // Every PR-scoped trigger, not just the first. `prPathFiltered` is an EXCUSE for silence, so it may
+  // only be true when EVERY one of them is filtered: a workflow with a path-filtered `pull_request:`
+  // and an unfiltered `pull_request_target:` still runs on every diff, and stopping at the first key
+  // would have excused its silence.
+  /** @type {number[]} */ const prAts = [];
   for (const i of body) {
     if (indentOf(lines[i]) !== childIndent) continue;
-    const key = /^[\t ]*(?:-[\t ]*)?(["']?)([A-Za-z_][A-Za-z0-9_-]*)\1[\t ]*(:.*)?$/.exec(lines[i]);
+    const split = splitInlineComment(lines[i]);
+    if (split.unterminated) return unknown(`unterminated quote in the \`on:\` block: ${lines[i].trim()}`);
+    const key = /^(?:-[\t ]*)?(["']?)([A-Za-z_][A-Za-z0-9_-]*)\1[\t ]*(:.*)?$/.exec(split.rest);
     if (!key) return unknown(`unrecognised line in the \`on:\` block: ${lines[i].trim()}`);
-    if (key[2] === "pull_request") {
-      prAt = i;
-      break;
-    }
+    if (isPrEvent(key[2])) prAts.push(i);
   }
-  if (prAt < 0) return { trigger: "other", prPathFiltered: false, why: "" };
+  if (prAts.length === 0) return { trigger: "other", prPathFiltered: false, why: "" };
 
-  let prPathFiltered = false;
-  for (const i of body) {
-    if (i <= prAt) continue;
-    if (indentOf(lines[i]) <= childIndent) break;
-    if (/^[\t ]*(["']?)paths(-ignore)?\1[\t ]*:/.test(lines[i])) prPathFiltered = true;
-  }
-  return { trigger: "pull-request", prPathFiltered, why: "" };
+  const filtered = (/** @type {number} */ prAt) => {
+    for (const i of body) {
+      if (i <= prAt) continue;
+      if (indentOf(lines[i]) <= childIndent) break;
+      if (/^[\t ]*(["']?)paths(-ignore)?\1[\t ]*:/.test(lines[i])) return true;
+    }
+    return false;
+  };
+  return { trigger: "pull-request", prPathFiltered: prAts.every(filtered), why: "" };
 }
 
 /**
@@ -1005,12 +1128,15 @@ export function coverageOf(checkNames, baseFiles) {
       if (hit) present += 1;
       else absent.push({ file, label: job.name ?? id });
     }
-    // A workflow that contributed NO check at all is excused ONLY if its own `pull_request:` trigger
-    // carries a path filter — then GitHub was entitled not to run it on this diff. Without one there is
-    // no legitimate reason for its absence, so its jobs are exactly as unjudged as any other missing
-    // guard. See this function's header for why the blanket carve-out was wrong and what it measured.
+    // A workflow that contributed NO check at all is excused ONLY if EVERY one of its PR-scoped
+    // triggers (`PR_EVENTS`) carries a path filter — then GitHub was entitled not to run it on this
+    // diff. Without one there is no legitimate reason for its absence, so its jobs are exactly as
+    // unjudged as any other missing guard. See this function's header for why the blanket carve-out was
+    // wrong and what it measured.
     // Red-proofed: restoring the blanket `if (present === 0)` reds exactly `a PR-triggered workflow
-    // with NO path filter that contributed nothing is UNJUDGED, not excused` (1 failed / 69 skipped).
+    // with NO path filter that contributed nothing is UNJUDGED, not excused` — 1 failed / 4 passed /
+    // 70 skipped under `-t "narrow ON PURPOSE"`, re-measured in round 3 (round 2's `69 skipped` was
+    // taken when the file held 70 tests; it holds 75 now).
     if (present === 0 && on.prPathFiltered) silentWorkflows.push(file);
     else {
       if (present > 0) judgedWorkflows.push(file);
@@ -1037,7 +1163,7 @@ export function coverageOf(checkNames, baseFiles) {
     detail:
       `every job \`main\` requires from ${judgedWorkflows.join(", ") || "(no workflow)"} produced a check here` +
       (silentWorkflows.length > 0
-        ? `; ${silentWorkflows.join(", ")} contributed none and is path-filtered on \`pull_request\`, so it was allowed to`
+        ? `; ${silentWorkflows.join(", ")} contributed none and is path-filtered on every PR trigger it declares, so it was allowed to`
         : ""),
   };
 }
@@ -1415,7 +1541,14 @@ export function verdictClass(decision, latest, unexplainedSkips = [], coverage =
   // this PR is about:
   //   · disable the rung                                 → 3 failed / 67 passed
   //   · force `coverageOf` to always answer `ok`         → 11 failed / 59 passed
-  // Both red, and they red on different tests, so nothing earlier in the ladder answers this question.
+  // RE-RUN AGAIN in round 3, at 75 tests, for the same reason — round 3 widened what `coverageOf`
+  // classifies as PR-triggered, which is one of this rung's inputs:
+  //   · disable the rung                                 → 3 failed / 72 passed
+  //   · force `coverageOf` to always answer `ok`         → 12 failed / 63 passed
+  // Both red. The 3 are a STRICT SUBSET of the 12 (`REFUSES the #1056 board`, `names the guard that did
+  // not judge it`, `counts the gap on the machine-readable totals line`), which is the shape that says
+  // the rung is reached rather than shadowed: sabotaging only the rung still reds, so no earlier check
+  // in the ladder is answering this question first.
   if (coverage?.state === "unjudged") {
     return {
       kind: "stale-checks",
@@ -1798,7 +1931,7 @@ async function main() {
       console.log(
         stamp(
           `ci-poll: coverage — ${coverage.silentWorkflows.join(", ")} contributed no check to this ` +
-            `board and is path-filtered on \`pull_request\`, so GitHub was entitled not to run it; ` +
+            `board and is path-filtered on every PR trigger it declares, so GitHub was entitled not to run it; ` +
             `not treated as missing`,
         ),
       );
