@@ -123,8 +123,12 @@ const FALSE_STRIP_PAREN: Case[] = [
  * branch overwrote `"control"` with `"keyword"` and pushed `false`. The `)` then resolved to a value,
  * the `/` after it read as division, and the character class hid a comment opener.
  *
- * Measured against round 4 (`ca25be56`) before the fix: `-14` on the `//` form, `-50` on the `/*` one,
- * parseable in and unparseable out in both. Fixed by letting `"control"` survive `await`.
+ * Measured against this branch's round-4 commit before the fix: `-14` on the `//` form, `-50` on the
+ * `/*` one, parseable in and unparseable out in both. Fixed by letting `"control"` survive `await`.
+ * (Addressed by subject, not by SHA — a rebase onto main rewrites every SHA on this branch, and one
+ * that still resolves in your clone may be a loose object an older worktree left behind. See the
+ * `--compare` note in `scripts/dev-harness/js-strip-sweep.mjs`'s header for the `git log --grep` form
+ * that resolves in a fresh clone.)
  */
 const FALSE_STRIP_AWAIT: Case[] = [
   {
@@ -418,7 +422,8 @@ const DELETING_ON_VALID_JS: Case[] = [
  * That is a measurement of THIS generator at THIS seed, grouped by a human. It is not a statement
  * about JavaScript, and NOT a claim that 40 is all there is: the generator can only produce shapes
  * its context templates and its token list can express, and round 5's sweep of 38,765 samples missed
- * a 27-character input. Re-run the tool to re-take the number.
+ * a 27-character input. Re-run the tool to re-take the number — with `--all`, or you get the total 40
+ * and not the 32 / 8 split (see "TO RE-TAKE THOSE NUMBERS" below).
  *
  * The review that found these split them into two families — `of` before a `/=`, and `yield`/`await`
  * as identifiers. Measured, the `/=` is incidental: `of /re////c` breaks with a plain `/` and no
@@ -441,9 +446,18 @@ const DELETING_ON_VALID_JS: Case[] = [
  *
  * NOT NEWLY BROKEN, measured with the committed tool rather than asserted. `--compare` scores this
  * revision against each earlier round of this branch as fixed / regressed / pre-existing:
- * round 3 → 256 / 0 / 40, round 4 (`ca25be56`) → 56 / 0 / 40, round 5 → 40 / 0 / 40. The
- * pre-existing count is the same 40 desyncs every time, these 8 among them, so nothing about this
- * family is new and no round of this PR made it worse.
+ * round 3 → 256 / 0 / 40, round 4 → 56 / 0 / 40, round 5 → 40 / 0 / 40. The pre-existing count is
+ * the same 40 desyncs every time, these 8 among them, so nothing about this family is new and no
+ * round of this PR made it worse.
+ *
+ * TO RE-TAKE THOSE NUMBERS. Address each round by its commit SUBJECT, not by a SHA — this docblock
+ * used to cite `ca25be56` for round 4 and every SHA on this branch is rewritten by a rebase onto
+ * main, so that leg was unreproducible in a fresh clone (it resolved locally only as a loose object
+ * from an older worktree):
+ *   node scripts/dev-harness/js-strip-sweep.mjs \
+ *     --compare "$(git log -1 --format=%H --grep='CPE-1966 round 4' origin/main..HEAD)"
+ * And re-take the 32 / 8 SPLIT with `--all`: a plain run caps its listing at 20 of the 40, so
+ * without the flag the tool hands back the total and not the grouping this docblock quotes.
  *
  * WHY DECLARED RATHER THAN FIXED. Removing `of`/`yield`/`await` from `REGEX_AFTER` trades this family
  * for the opposite one: `for (const v of /re/)`, `yield /re/` inside a generator and `await /re/`
@@ -593,7 +607,7 @@ describe("stripJsComments — the oracle that does not depend on anyone writing 
   ];
 
   /**
-   * Every `const X: Case[]` DECLARED IN THIS FILE, read out of its own source (CPE-1932).
+   * Every `Case[]` table DECLARED IN THIS FILE, read out of its own source (CPE-1932).
    *
    * Round 6 wrote this list by hand and it failed the half it existed for. Two sabotages, run:
    * declaring a new `const FOURTH_FAMILY: Case[]`, registering it in the literal but NOT in `all`,
@@ -601,14 +615,45 @@ describe("stripJsComments — the oracle that does not depend on anyone writing 
    * hand-written list catches "remembered the table, forgot the sweep" and misses "a family held back
    * from the enumeration", which is precisely the sentence the test is there to make true.
    *
-   * Anchored at column 0 so the regex literal on the line below — indented — cannot match itself. A
-   * decoy inside a comment WOULD be picked up and would red; that is the safe direction (a name in
-   * `tables` that does not exist is a compile error, so the red is loud and immediate), and it is why
-   * this does not need the comment stripper this very file is testing.
+   * **A SCAN'S SCOPE IS ITSELF A CLAIM, and its default failure is that it covers the spelling the
+   * author happened to use (CPE-1966 round 8).** Round 7 replaced the hand list with
+   * `/^const ([A-Z][A-Z0-9_]*): Case\[\] = \[/gm` and called that "closing the class". Measured: it
+   * closes the class for exactly one spelling. Seven other spellings of a real `Case[]` table were
+   * each swept by nothing and declared held back nowhere, all **75/75 green** — `let X`,
+   * **`export const X`** (the spelling `docs.coverage.test.ts` and `invoke.guard.test.ts` both use for
+   * their own guarded tables), `readonly Case[]`, `X:Case[]` with no space, a type annotation broken
+   * across two lines, `= [...] as Case[]`, and `= KNOWN_GAPS.concat([...])`.
+   *
+   * The column-0 anchor bought nothing, which is worth stating because it read as the load-bearing
+   * safeguard: dropping `^`/`m` from round 7's regex returns the **identical 10 names**. The regex
+   * literal below cannot match itself either way — its own source text is `Case\[\]`, not `Case[]`,
+   * and `const|` is not `const `. So the anchor's only measured effect was to hide `export const` and
+   * every indented declaration. It is gone; the pattern below allows leading whitespace, `export`,
+   * `let`, `readonly`, and free spacing around the colon, following the repo's own precedent for this
+   * job (`RATCHET_SHAPED`, `src/lib/ratchetBaselines.test.ts`).
+   *
+   * **What this scan still CANNOT see** — stated rather than left as "closes the class":
+   *   - `const X = [...] as Case[];` — no type annotation to match on.
+   *   - an annotation split across lines (`const X:\n  Case[] = [`) — the pattern is single-line.
+   *   - an alias (`type Cases = Case[]; const X: Cases = [...]`) — the word `Case[]` never appears.
+   * Declare a table in one of those three shapes and it is invisible here. The backstop for that is
+   * not this scan: it is the `vm.Script` oracle below, which speaks for shapes nobody enumerated.
+   *
+   * Round 7's other claim, corrected: "a decoy inside a comment WOULD be picked up" holds only for a
+   * bare `/*` block whose body lines begin at the margin. In this file's two dominant comment styles —
+   * ` * ` JSDoc continuation lines and `//` — a decoy is **not** picked up, then or now. Where a comment
+   * decoy IS picked up it still reds in the safe direction (a name in `tables` that does not exist is a
+   * compile error), which is why this does not need the comment stripper this very file is testing.
+   *
+   * RED-PROOFED (CPE-1933 rule 3), not argued: inserting
+   * `export const FOURTH_FAMILY: Case[] = [ … ];` and mentioning it nowhere gives **75 passed** on
+   * round 7's pattern and **1 failed / 74 passed** on this one, naming FOURTH_FAMILY as declared but
+   * missing from `tables`.
    */
   function declaredCaseTables(): string[] {
     const src = readFileSync(join(process.cwd(), "src/lib/jsSource.test.ts"), "utf8");
-    return [...src.matchAll(/^const ([A-Z][A-Z0-9_]*): Case\[\] = \[/gm)].map((m) => m[1]).sort();
+    const decl = /^[ \t]*(?:export[ \t]+)?(?:const|let)[ \t]+([A-Z][A-Z0-9_]*)[ \t]*:[ \t]*(?:readonly[ \t]+)?Case\[\][ \t]*=/gm;
+    return [...src.matchAll(decl)].map((m) => m[1]).sort();
   }
 
   it("every Case[] table declared in this file is either swept by the oracle or declared held back", () => {
@@ -625,8 +670,10 @@ describe("stripJsComments — the oracle that does not depend on anyone writing 
       toBeGreaterThanOrEqual(9);
     expect(
       Object.keys(tables).sort(),
-      "a `const X: Case[]` is declared in this file but missing from `tables` — every table is either " +
-        "swept by the oracle below or named as held back, and one that is in neither is invisible",
+      "a `Case[]` table is declared in this file but missing from `tables` — every table is either " +
+        "swept by the oracle below or named as held back, and one that is in neither is invisible. " +
+        "(The scan covers `[export] const|let X[: readonly] Case[] =`; see `declaredCaseTables` for " +
+        "the three spellings it cannot see.)",
     ).toEqual(declared);
 
     const swept = Object.entries(tables).filter(([, t]) => t.every((c) => all.includes(c)));

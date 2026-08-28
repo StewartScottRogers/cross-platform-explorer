@@ -13,7 +13,20 @@
 // speaks for shapes nobody enumerated is compiling the RESULT (`stripScriptBodiesChecked`).
 //
 // Run:  node scripts/dev-harness/js-strip-sweep.mjs
-//       node scripts/dev-harness/js-strip-sweep.mjs --compare <git-ref>
+//       node scripts/dev-harness/js-strip-sweep.mjs --all
+//       node scripts/dev-harness/js-strip-sweep.mjs --compare <git-ref> [--all]
+//
+// `--all` lifts the output cap. Without it a plain run prints the first 20 desyncs and a "... and N
+// more" line, so re-running the tool re-takes the TOTAL but not the per-family split that any triage
+// note quotes — you would have had to edit the slice to check it. Use `--all` whenever you are
+// reproducing a split rather than a count.
+//
+// `--compare <git-ref>` needs a ref that resolves in a FRESH CLONE. Do not paste a raw SHA from this
+// branch: every one of them is rewritten by a rebase onto main, and a SHA that still resolves in your
+// working clone may only be a loose object left behind by an older worktree. Address a round by its
+// commit subject instead, which survives rebasing:
+//   node scripts/dev-harness/js-strip-sweep.mjs \
+//     --compare "$(git log -1 --format=%H --grep='CPE-1966 round 4' origin/main..HEAD)"
 //
 // `--compare` extracts the stripper from <git-ref> into a temp module and runs both head to head, so
 // a change can be scored as "N fixed, M regressed" instead of asserted to be an improvement. That
@@ -109,7 +122,9 @@ const AWAIT = [
  *   * it stops INSIDE the parens        -> parens are swallowed, accounting repairs the stack;
  *   * it stops after a `)` and a `(`    -> both are swallowed, and their KINDS matter (round 6);
  *   * it stops on the FOLLOWING regex's opening `/` -> the tail is consumed and the comment branch
- *     is reached before any paren state is read. Declared as a gap; see `DELETING_GAPS`.
+ *     is reached before any paren state is read. This one DELETES VALID JAVASCRIPT — it is not a
+ *     gap, and it is pinned in `DELETING_ON_VALID_JS`, not `DELETING_GAPS`. (Per the header: every
+ *     input here parses, so nothing this tool lists can be a `DELETING_GAPS` entry.)
  */
 const MISREAD = [
   "if ({} / f(1 / 2)) %R%.test(s);", "if (a[0] / f(1 / 2)) %R%.test(s);",
@@ -119,7 +134,8 @@ const MISREAD = [
   "while ({} / a) if (b / c) %R%.test(s);", "if ({} / a) { } if (b / c) %R%.test(s);",
   "if (f({} / a) / 2) if (b / c) %R%.test(s);",
   // The third family: the scan runs off the end of the condition and terminates on the OPENING `/`
-  // of the following regex literal. Nothing to do with parens; see DELETING_GAPS.
+  // of the following regex literal. Nothing to do with parens; these delete VALID JavaScript and are
+  // pinned in DELETING_ON_VALID_JS (jsSource.test.ts), never in DELETING_GAPS.
   "if ({} / a) %R%.test(s);", "while ({} / a) %R%.test(s);", "if ({} / a) %R%.test(s);\nconst z = 1;",
   "for (;{} / a;) %R%.test(s);", "if (({}) / a) %R%.test(s);",
 ];
@@ -222,6 +238,9 @@ async function stripperAt(ref) {
 const compareTo = process.argv.includes("--compare")
   ? process.argv[process.argv.indexOf("--compare") + 1]
   : null;
+// Without `--all` the listing is capped, which re-takes a total but not a split. See the header.
+const CAP = process.argv.includes("--all") ? Infinity : 20;
+const PRE_EXISTING_CAP = process.argv.includes("--all") ? Infinity : 10;
 
 const { stripJsComments } = await import(pathToFileURL(STRIPPER).href);
 const inputs = corpus();
@@ -250,11 +269,13 @@ if (compareTo) {
   console.log(`  REGRESSED (${compareTo} clean, working tree broken):  ${broke.length}`);
   console.log(`  broken in BOTH (pre-existing):                        ${both.length}`);
   for (const s of broke) console.log(`\n  REGRESSION ${JSON.stringify(s)}\n    delta ${now.get(s)}`);
-  for (const s of both.slice(0, 10)) console.log(`\n  PRE-EXISTING ${JSON.stringify(s)}\n    delta ${now.get(s)}`);
-  if (both.length > 10) console.log(`\n  ... and ${both.length - 10} more pre-existing`);
+  for (const s of both.slice(0, PRE_EXISTING_CAP)) console.log(`\n  PRE-EXISTING ${JSON.stringify(s)}\n    delta ${now.get(s)}`);
+  if (both.length > PRE_EXISTING_CAP) {
+    console.log(`\n  ... and ${both.length - PRE_EXISTING_CAP} more pre-existing (re-run with --all to list them)`);
+  }
 } else {
-  for (const [s, d] of [...now].slice(0, 20)) console.log(`\n  DESYNC ${JSON.stringify(s)}\n    delta ${d}`);
-  if (now.size > 20) console.log(`\n  ... and ${now.size - 20} more`);
+  for (const [s, d] of [...now].slice(0, CAP)) console.log(`\n  DESYNC ${JSON.stringify(s)}\n    delta ${d}`);
+  if (now.size > CAP) console.log(`\n  ... and ${now.size - CAP} more (re-run with --all to list them)`);
 }
 
 process.exit(regressions ? 1 : 0);

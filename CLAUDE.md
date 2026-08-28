@@ -264,8 +264,26 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      (CPE-1932 again, one scope in). Round 6 wrote the list by hand; round 7 ran the two sabotages and
      measured that it caught "registered the table, forgot the sweep" (1 red) and **missed** "declared
      a table and mentioned it nowhere" (65/65 green) — which is the exact half the assertion exists
-     for. Scanning the file for `^const X: Case[] =` and requiring each name to appear closes the
-     class; a decoy inside a comment reds, which is the safe direction.
+     for. Scan the file for the declaration and require each name to appear.
+     **But a scan's SCOPE is itself a claim, and its default failure is that it covers the spelling
+     the author happened to use.** Round 7 scanned for `^const X: Case[] =` and wrote "closes the
+     class"; round 8 measured that it closes the class for exactly **one** spelling. Seven other
+     spellings of a real table — `let X`, **`export const X`** (what `docs.coverage.test.ts` and
+     `invoke.guard.test.ts` both use), `readonly Case[]`, `X:Case[]`, a two-line annotation,
+     `as Case[]`, `= KNOWN_GAPS.concat(…)` — were swept by nothing, declared held back nowhere, and
+     all **75/75 green**. The column-0 anchor that was documented as load-bearing bought nothing
+     (dropping it returns the identical 10 names; the regex literal cannot match itself either way,
+     because its own source text is `Case\[\]` and `const|` is not `const `) while being the only
+     reason `export const` was invisible. So: follow `RATCHET_SHAPED`
+     (`src/lib/ratchetBaselines.test.ts`), which already allows leading whitespace, `export`, and a
+     loose annotation — **and write down at the site which shapes the scan CANNOT see**
+     (`as Case[]`, a split-across-lines annotation, and a type alias all still escape any regex), then
+     **red-proof one of them**. This is the second instance in one night — #1091's derived taint set
+     missed transitive assignment and inline substitutions, found the same way, by sabotage. A scan
+     with a stated blind spot is worth more than one advertised as closing the class. Related, and
+     also corrected: "a decoy inside a comment reds, which is the safe direction" is true only for a
+     bare `/*` block whose body starts at the margin — in ` * ` JSDoc and `//` lines a decoy is not
+     picked up at all.
      **Also: a claim about how many families exist is measured over whatever found them.** Round 6
      called `DELETING_ON_VALID_JS` "the honest third category" while the same commit shipped the
      generator that produces two more (`of` before a `/=`, and `yield`/`await` as plain identifiers in

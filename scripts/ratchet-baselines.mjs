@@ -622,6 +622,13 @@ export const NOT_A_RATCHET = [
     reason: "REPLAY_BASELINE_NAME is a test fixture filename for the activity-replay baseline feature.",
   },
   {
+    file: "scripts/dev-harness/js-strip-sweep.mjs",
+    reason:
+      "CAP/PRE_EXISTING_CAP are how many desyncs the listing PRINTS (lifted by `--all`) — a console " +
+      "display limit on an exploration tool, not a stored count of debt. Nothing is excused by being " +
+      "past the cap: the desync total above it is always printed in full (CPE-1966).",
+  },
+  {
     file: "scripts/organize-done.mjs",
     reason: "THRESHOLD is how many Done tickets trigger a reorganise — a workflow trigger, not debt owed.",
   },
