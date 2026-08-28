@@ -720,9 +720,14 @@ cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling .
     left: None
 ```
 
-Legs 1 and 3 stayed green — it reds for the reason it exists, not because the sweep stopped working. The
-assertion was also changed from `fs::read(..).unwrap()` to `.ok().as_deref()` during the red-proof: the
-unwrap panicked with a bare `NotFound` and never printed the sentence saying what was lost.
+It reds on **leg 2**, for the reason it exists, rather than because the sweep stopped working — leg 1 (a
+foreign pid's stale temp is still collected) ran and stayed green in front of it. Round 4 nit: the
+round-3 sentence here said *"legs 1 and 3 stayed green"*, and **leg 3 never ran** — its assertion sits
+after leg 2's, so the panic reaches the harness first. Harmless to the conclusion, and exactly the kind
+of overstatement this ticket has been pulled up on twice, so it is corrected rather than left.
+
+The assertion was also changed from `fs::read(..).unwrap()` to `.ok().as_deref()` during the red-proof:
+the unwrap panicked with a bare `NotFound` and never printed the sentence saying what was lost.
 
 ### F3 — the `policy: true` fix had no test
 
@@ -741,15 +746,43 @@ the poisoned name in the **middle**, and asserts on the filesystem first: victim
 "abandoned the run at the first refusal". `failed: 0` is asserted as hard as `skipped: 1`: a refusal
 reclassified into the failure bucket is still a wrong answer.
 
-**Red-proof, run** (`HandleCarryover::capture`'s refusal back to `policy: false`):
+**Red-proof — RE-TAKEN in round 4, and the round-3 transcript that stood here was wrong** (Reviewer
+Blocker 2). It ended *"The whole extraction comes back `Err` and `after.txt` is never created"*: true
+before the rebase, and CPE-1935 — merged into this branch's base *by* that rebase — had already deleted
+the `return Err` it described. Pre-rebase evidence presented as re-taken. Re-run on the round-4 head
+(`HandleCarryover::capture`'s refusal back to `policy: false`, `Compiling cpe-server` seen):
 
 ```text
 cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest ... FAILED
-  one planted alternate data stream must cost ONE entry. An Err here is round 2's denial of service
-  back: … : "…\out\victim.txt: its alternate data streams are larger than 8388608 bytes, which this
-  app will not copy across onto the replacement — nothing was written, and the original is untouched.
-  Nothing was written for this entry"
+  two entries written, one refused as a policy skip, and NOTHING in the failed bucket … :
+  ArchiveReport { done: 2, failed: 1, skipped: 0, cancelled: false, errors:
+    ["victim.txt: …\out\victim.txt: its alternate data streams are larger than 8388608 bytes, which
+      this app will not copy across onto the replacement — nothing was written, and the original is
+      untouched. Nothing was written for this entry. The rest of the archive was extracted; clear
+      that and extract again to get this entry too."] }
+    left: (2, 1, 0)   right: (2, 0, 1)
 ```
+
+`Ok`, not `Err`; `after.txt` **is** created. The test still reds, on the classification assert, which is
+the assert that should be carrying it — `policy` no longer decides whether the run survives on this leg,
+only which bucket the entry lands in and therefore which sentence the user reads.
+
+The same correction applies to the justification comment in `claim_destination_handle`, which argued the
+fix on the grounds that the archive leg *"turns into `return Err(...)`, aborting the whole archive … an
+attacker-triggerable denial of service on all five legs"*. Rewritten against the callers rather than
+recall: only **two** of the five ever abandoned a run over one entry, and only one of those did so
+because of `policy` —
+
+| leg | `policy: false` does | aborts the run? |
+|---|---|---|
+| `archive::extract_zip_archive_stream` | `report.fail` + `continue` (CPE-1935) | no — did, pre-1935 |
+| `transfer::download_tree` | `undelivered.push`, per entry | no |
+| `backup::apply_backup_plan_walk` | `emit(OpResult::err)`, per entry | no |
+| `revert_engine::apply_write` | `Refused::transient`, per file | no |
+| `snapshot_capture::restore` | `?` on **any** refusal | yes — equally on `policy: true`, so this line changes nothing there |
+
+The change is still right and still worth making; what it buys is a **named per-entry skip with its
+reason** on the four legs that report per entry, not the removal of a five-leg denial of service.
 
 ### F4 — cost row 1 was a derivation wearing no label
 

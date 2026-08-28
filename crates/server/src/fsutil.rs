@@ -1965,6 +1965,16 @@ fn sweep_stale_temp_siblings_once_per_directory(target: &Path) {
     }
 }
 
+/// The longest single path component the filesystems this app runs on accept: `NAME_MAX` is **255
+/// bytes** on ext4, APFS and HFS+, and NTFS caps a component at **255 UTF-16 code units** (CPE-1961
+/// round 4).
+///
+/// [`staging_sibling_name`] measures its output in UTF-8 **bytes** against this, and that is
+/// conservative on Windows rather than approximate: every scalar value costs at least as many UTF-8
+/// bytes as UTF-16 units (1/1 for ASCII, 2/1, 3/1, then 4/2), so a component of ≤255 UTF-8 bytes is
+/// always ≤255 UTF-16 units. It is exact on the Unix side, which counts bytes itself.
+const MAX_COMPONENT_BYTES: usize = 255;
+
 /// The `<name>.<pid>-<nanos>.cpe-tmp` staging name, in ONE place (CPE-1961).
 ///
 /// [`stage_and_replace_at`] built this string inline and [`sweep_stale_temp_siblings`] parses it back
@@ -1972,12 +1982,65 @@ fn sweep_stale_temp_siblings_once_per_directory(target: &Path) {
 /// which is how a collector quietly stops collecting half of what it is named for. The pid and the
 /// nanosecond stamp are what make two concurrent writers — or a stale temp left by a killed process —
 /// unable to collide on one sibling.
+///
+/// # The base name is TRUNCATED to fit, and a long-but-legal destination is why (round 4)
+///
+/// The stamp adds ~31 bytes and round 3 appended it with no cap, so a destination whose own name is
+/// legal but long stopped being writable at all. Measured on this branch's head against `main`, a
+/// 244-character entry name (`"n"*240 + ".txt"`, comfortably under NTFS's 255) in a three-entry zip:
+///
+/// ```text
+/// main                 the entry extracts normally
+/// round 3              "…nnn….txt.28088-1787919176899603600.cpe-tmp" could not be created as a
+///                      staging file (The filename, directory name, or volume label syntax is
+///                      incorrect. (os error 123))
+/// ```
+///
+/// Both platforms — `NAME_MAX` is 255 on ext4 too. That is a **regression against `main`** on ordinary
+/// user data, not a hostile input, so the name has to fit rather than the write having to fail.
+///
+/// **Truncating the base is safe in the direction that matters, and here is the whole argument.** The
+/// only consumer that parses this name back apart is [`sweep_stale_temp_siblings_scoped`], and it needs
+/// three things: a `.cpe-tmp` suffix, a structurally valid `<digits>-<digits>` stamp before it, and a
+/// non-empty base in front of that. Truncation touches none of them. What it does change is the
+/// *comparison* [`SweepScope::EveryDestination`] makes — `&head[..dot] != name_bytes` — which a
+/// truncated base fails, so the candidate reads as "not the target's own". That routes it into
+/// [`stamp_pid_is_this_process`], which **skips** a live-pid sibling. Skipping is the conservative
+/// answer: the cost is that a *killed* process's truncated residue is collected a little later (by any
+/// sweep from a different pid) rather than by the very next commit in that directory, and the benefit
+/// is that our own concurrent writer on a long name cannot lose its live staging file. Nothing here can
+/// delete more than round 3 could.
+///
+/// Two smaller consequences, stated rather than left to be found. [`SweepScope::ThisDestinationOnly`] —
+/// what [`stage_and_replace_at`] uses — matches on the target's **full** name, so it does not collect
+/// its own residue for a name long enough to be truncated; `EveryDestination` still does. And two long
+/// destinations in one directory sharing a truncated prefix would stage under the same base, which the
+/// pid and nanosecond stamp already make non-colliding and which the exclusive create refuses rather
+/// than clobbers if it ever did.
 fn staging_sibling_name(target_name: &std::ffi::OsStr) -> String {
     let stamp = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{}.{}-{stamp}.cpe-tmp", target_name.to_string_lossy(), std::process::id())
+    // Built first so the cap is measured against the real suffix rather than an assumed width: a pid
+    // is 1–10 digits and a nanosecond stamp is 19–20, and hard-coding "about 31" is how a cap goes one
+    // byte wrong on the machine nobody tested on.
+    let suffix = format!(".{}-{stamp}.cpe-tmp", std::process::id());
+    let base = target_name.to_string_lossy();
+    let room = MAX_COMPONENT_BYTES.saturating_sub(suffix.len());
+    let base = if base.len() > room {
+        // Back off to a char boundary — at most three bytes, so with `room` in the low 200s the base
+        // can never be emptied here (an empty base is the one shape the sweep's `dot == 0` check
+        // refuses, and it would make this file uncollectable).
+        let mut cut = room;
+        while cut > 0 && !base.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        &base[..cut]
+    } else {
+        &base[..]
+    };
+    format!("{base}{suffix}")
 }
 
 /// **Claim a destination to write into — the whole handle-side gate, in one place (CPE-1913).**
@@ -2038,6 +2101,37 @@ fn staging_sibling_name(target_name: &std::ffi::OsStr) -> String {
 ///
 /// Every refusal ends "Nothing was written for this entry" and, when this call created the name, the
 /// name is removed again — so a refused entry leaves no empty file behind for the user to puzzle over.
+/// Remove the destination name [`claim_destination_handle`] brought into existence, on a refusal that
+/// fires **after** the create and **before** [`ClaimedDestination`] exists to own the undo (CPE-1961
+/// round 4).
+///
+/// [`Staged::abandon`] is this same obligation once the claim is built; this is the window in front of
+/// it, and until round 4 two arms in that window leaked a zero-byte file at a name that did not exist
+/// before the call — under a refusal ending *"Nothing was written for this entry."*
+///
+/// **`remove_file_beneath` on the `Beneath` arm**, for the reason [`Staged::abandon`] records: the leaf
+/// is unlinked through the held root handle rather than by a path that could have had a directory
+/// component swapped under it. The window here is microseconds rather than a whole byte stream, so this
+/// is smaller than the one that finding was about — but the primitive is already in hand and there is
+/// no reason to keep a by-path unlink on an arm that has a root handle. `ByPath` keeps
+/// `std::fs::remove_file` because those callers hold no root handle; same residual, same owner.
+///
+/// Errors are discarded: this runs on a path that is already failing, and a cleanup that cannot
+/// complete must not replace the caller's real reason with its own.
+fn undo_created_destination(site: &DestinationSite<'_>, dst: &Path, created: bool) {
+    if !created {
+        return;
+    }
+    match site {
+        DestinationSite::ByPath => {
+            let _ = std::fs::remove_file(dst);
+        }
+        DestinationSite::Beneath { root, rel } => {
+            let _ = crate::open_beneath::remove_file_beneath(root, rel);
+        }
+    }
+}
+
 pub(crate) fn claim_destination_handle<'a>(
     dst: &Path,
     wording: LinkGuardWording,
@@ -2303,9 +2397,10 @@ pub(crate) fn claim_destination_handle<'a>(
     // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
     if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         drop(w);
-        if created {
-            let _ = std::fs::remove_file(dst);
-        }
+        // Round 4: was an inline by-path `remove_file` on both arms. Same obligation, one
+        // implementation — and the `Beneath` arm now unlinks through the root handle it is already
+        // holding. See [`undo_created_destination`].
+        undo_created_destination(&site, dst, created);
         return Err(crate::open_beneath::Refusal {
             why: format!(
                 "{}: this name is a link, and {} never writes through one — a link's target can be \
@@ -2330,13 +2425,37 @@ pub(crate) fn claim_destination_handle<'a>(
     // rather than being replaced by a file whose permissions this app had to guess (CPE-1739).
     //
     // **Both refusals below are `policy: true`, and CPE-1961 round 2's Security Auditor is why.**
-    // They were `Refusal::failure` — `policy: false` — which `extract_zip_archive_stream` matches as
-    // "a file the user asked for and did not get" and turns into `return Err(...)`, aborting the whole
-    // archive. That made the carry-over an **attacker-triggerable denial of service on all five legs**:
-    // writing an alternate data stream needs only write access to the file, so one planted 9 MiB stream
-    // on one pre-existing name inside the extraction folder killed the entire extraction (measured).
-    // On `main` these legs never read streams at all — they truncated and wrote — so the denial arrived
-    // *with* the carry-over and has to leave with this line.
+    // They were `Refusal::failure` — `policy: false` — and writing an alternate data stream needs only
+    // write access to a file, while `HandleCarryover::capture` refuses outright past `CARRY_CAP`
+    // (8 MiB). So one planted 9 MiB stream on one pre-existing name inside the extraction folder was
+    // enough to make the archive leg give up (measured). On `main` these legs never read streams at all
+    // — they truncated and wrote — so the exposure arrived *with* the carry-over and leaves with this
+    // line.
+    //
+    // **What round 2 wrote here, and what round 4 measured instead** (Reviewer Blocker 2). It said the
+    // classification made the carry-over *"an attacker-triggerable denial of service on all five
+    // legs"*, on the grounds that `extract_zip_archive_stream` turns a `policy: false` refusal into
+    // `return Err(...)`, aborting the whole archive. **That `return Err` no longer exists** — CPE-1935
+    // deleted it, and it is in this branch's base. And "all five legs" never held: only two of the five
+    // ever abandoned a run over one entry, and only one of those did so *because of* `policy`. Read out
+    // of the callers rather than recalled:
+    //
+    // ```text
+    // leg                              policy: false does                    aborts the run?
+    // archive::extract_zip_archive_stream   report.fail + continue (CPE-1935) no  (did, pre-1935)
+    // transfer::download_tree               undelivered.push, per entry       no
+    // backup::apply_backup_plan_walk        emit(OpResult::err), per entry    no
+    // revert_engine::apply_write            Refused::transient, per file      no
+    // snapshot_capture::restore             `?` on ANY refusal                yes — and equally on
+    //                                                                         policy: true, so this
+    //                                                                         line changes nothing there
+    // ```
+    //
+    // So the honest statement is narrower and still worth the change: `policy: true` is what keeps this
+    // refusal a **named per-entry skip with its reason** on the four legs that report per entry, rather
+    // than a failure that reads as "we tried and the file is broken". `snapshot_capture::restore`'s
+    // unconditional `?` is a separate question and not this ticket's; it is recorded here so the next
+    // reader does not mistake this line for having addressed it.
     //
     // `policy: true` is also the honest classification, not just the convenient one: `policy` means
     // "not writing is the correct outcome", and that is exactly what both of these say — *we cannot
@@ -2374,6 +2493,10 @@ pub(crate) fn claim_destination_handle<'a>(
     drop(w);
 
     let Some(target_name) = dst.file_name() else {
+        // The same undo as every other arm past the create. Unreachable in practice — a path with no
+        // final component cannot have had a leaf created at it — but "unreachable, so it may leak" is
+        // how the arm below leaked, and this one costs a call.
+        undo_created_destination(&site, dst, created);
         return Err(crate::open_beneath::Refusal {
             why: format!(
                 "{}: this name has no final component, so there is nothing here a file's bytes could \
@@ -2404,28 +2527,55 @@ pub(crate) fn claim_destination_handle<'a>(
     // NTFS; it is one more thing an SMB or WebDAV redirector can refuse, and a backup destination is
     // exactly where those live. Unmeasured against a real share — see `create_staging_beneath`'s doc.
     let carrying = carried.is_some();
-    let (staged, beneath) = match &site {
+    // **The staging create is the last thing that can fail before `Drop` is armed, and until round 4
+    // its `?` leaked a zero-byte file at the destination** (Reviewer MAJOR 3). `create_beneath` above
+    // may have *created* `dst` — that is what `created` means — and `ClaimedDestination` is what
+    // removes it again. A `?` here returns before that struct exists, so `Drop` never runs and an empty
+    // file survives at a name that did not exist before the call, under a refusal whose own last
+    // sentence is *"Nothing was written for this entry."* The comment on `written` below anticipated
+    // exactly this hazard for the `.cpe-tmp` side and missed the destination side of it.
+    //
+    // Reached with no race at all: a destination name long enough that `<name>.<stamp>.cpe-tmp` exceeds
+    // `MAX_COMPONENT_BYTES` (see [`staging_sibling_name`], now capped, which is the *other* half of
+    // that finding) — and, more durably, anything that makes the exclusive create fail on a directory
+    // the destination create just succeeded in: a quota, a full disk, a share that dropped between the
+    // two opens.
+    //
+    // So the undo record is built BEFORE the create and [`Staged::abandon`] — the one implementation
+    // `Drop` and the failed commit both already use — runs on the refusal. It unlinks through the root
+    // handle on the `Beneath` arm, for the reason its own doc gives.
+    let staging = match &site {
         // `create_staging_file_for_carryover` only when `carrying`: on Windows it also asks for
         // `WRITE_DAC`, which is what `HandleCarryover::apply` needs below, and asks for nothing extra
         // when there is no carry-over to apply. `create_new` is `O_CREAT|O_EXCL` on both and does not
         // follow a symlink at the final component, so a link pre-placed at the (pid+nanos-stamped)
         // staging name cannot redirect these bytes either way.
-        DestinationSite::ByPath => (
+        DestinationSite::ByPath => {
             (if carrying { create_staging_file_for_carryover } else { create_staging_file })(&tmp)
+                .map(|f| (f, None))
                 .map_err(|e| {
-                crate::open_beneath::Refusal::failure(format!(
-                    "{}: could not create the staging file this write goes through ({}): {e}. Nothing \
-                     was written for this entry",
-                    dst.display(),
-                    tmp.display()
-                ))
-            })?,
-            None,
-        ),
+                    crate::open_beneath::Refusal::failure(format!(
+                        "{}: could not create the staging file this write goes through ({}): {e}. \
+                         Nothing was written for this entry",
+                        dst.display(),
+                        tmp.display()
+                    ))
+                })
+        }
         DestinationSite::Beneath { root, rel } => {
             let tmp_rel = rel.with_file_name(&tmp_name);
-            let opened = crate::open_beneath::create_staging_beneath(root, &tmp_rel, carrying)?;
-            (opened.file, Some((*root, tmp_rel, (*rel).to_path_buf())))
+            crate::open_beneath::create_staging_beneath(root, &tmp_rel, carrying)
+                .map(|opened| (opened.file, Some((*root, tmp_rel, (*rel).to_path_buf()))))
+        }
+    };
+    let (staged, beneath) = match staging {
+        Ok(v) => v,
+        Err(r) => {
+            // Only the destination, never the staging name: the create is what just failed, so this
+            // call does not own whatever is (or is not) sitting at `tmp`, and unlinking a name we did
+            // not create is the one thing a cleanup path must not do.
+            undo_created_destination(&site, dst, created);
+            return Err(r);
         }
     };
     let mut claimed = ClaimedDestination {
@@ -10650,8 +10800,14 @@ mod tests {
     ///     left: None
     /// ```
     ///
-    /// Legs 1 and 3 stayed green, so the test reds for the reason it exists rather than because the
-    /// sweep stopped working.
+    /// It reds on **leg 2**, so the test fails for the reason it exists rather than because the sweep
+    /// stopped working: leg 1 — a foreign pid's stale temp is still collected — ran and stayed green in
+    /// front of it.
+    ///
+    /// **Round 4 nit: this sentence used to say "legs 1 and 3 stayed green", and leg 3 never ran.** Its
+    /// assertion sits after leg 2's, so the panic reaches the harness first and leg 3 is unevaluated. It
+    /// changes nothing about the conclusion, and it is the difference between reporting what was
+    /// observed and reporting what was expected — which is the whole subject of this ticket's round 4.
     #[test]
     fn cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling() {
         let d = scratch("sweep-pid-ownership");
@@ -10721,6 +10877,16 @@ mod tests {
             (format!("{ours}-1000000000000"), true, "our pid, ordinary stamp"),
             (format!("{foreign}-1000000000000"), false, "someone else's pid"),
             (format!("0{ours}-1"), true, "leading zeros parse to the same number — errs toward keeping"),
+            // Round 4, Reviewer nit: the two digit-adjacency rows. A digit *prepended* is a different
+            // (larger) number and a digit *appended* is too — neither is a prefix match, because the
+            // comparison is on the parsed `u32` and not on the text.
+            (format!("9{ours}-1"), false, "a digit in front makes it a different pid, not a prefix"),
+            (format!("{ours}9-1"), false, "a digit behind makes it a different pid, not a prefix"),
+            // The caller splits on the LAST dot (`rposition`), so a dotted base name — `archive.tar.gz`
+            // — never puts a dot in the half that reaches here. A dot arriving anyway is not a number
+            // and reads as "not ours", which is the keeping direction.
+            (format!("{ours}.5-1"), false, "a dot in the pid half is not a number; the caller's \
+                                            rposition split is what keeps a dotted base name out"),
             (format!("{ours}"), false, "no '-' at all, so there is no pid half to read"),
             (format!("x{ours}-1"), false, "not digits, so not a stamp this app ever wrote"),
             ("99999999999999-1".to_string(), false, "wider than a u32, so it cannot be a live pid"),
@@ -10737,6 +10903,62 @@ mod tests {
             "invalid UTF-8 is not a stamp this app wrote, so it reads as 'not ours' and the downstream \
              is_valid_temp_stamp gate refuses it"
         );
+    }
+
+    /// **CPE-1961 round 4 (Reviewer MAJOR 3): the staging name always fits in one path component, and a
+    /// truncated one is still the exact shape the sweep parses back apart.**
+    ///
+    /// The pure half of the long-name regression — `archive::tests::
+    /// cpe_1961_a_long_but_legal_entry_name_still_extracts` is the filesystem half. Both matter: the cap
+    /// is only useful if the truncated output still satisfies every condition
+    /// [`sweep_stale_temp_siblings_scoped`] imposes, since a name this app can create but never collect
+    /// is residue by construction.
+    ///
+    /// The `stamp_pid_is_this_process` assertion is the one that is easy to leave out and is the point
+    /// of the cap being *safe*: a truncated base no longer equals the target's own name, so
+    /// `EveryDestination` routes the candidate through that check — and it has to answer "ours" for a
+    /// name this process just produced, or our own live staging file becomes collectable by our own
+    /// next commit.
+    #[test]
+    fn cpe_1961_a_staging_sibling_name_always_fits_in_one_path_component() {
+        use std::ffi::OsStr;
+        // Around and well past the boundary: 221 is roughly where a 34-byte stamp starts to bite on
+        // this machine, and the two ends prove the untruncated case is untouched.
+        for base_len in [1usize, 8, 200, 215, 221, 222, 254, 255, 300, 4096] {
+            let base = "n".repeat(base_len);
+            let name = staging_sibling_name(OsStr::new(&base));
+            assert!(
+                name.len() <= MAX_COMPONENT_BYTES,
+                "a {base_len}-byte destination staged as a {}-byte component, which no filesystem this \
+                 app runs on accepts: {name:?}",
+                name.len()
+            );
+            // Exactly the sweep's own parse, in the sweep's own order.
+            let head = name
+                .strip_suffix(".cpe-tmp")
+                .unwrap_or_else(|| panic!("the suffix must survive truncation: {name:?}"));
+            let dot = head
+                .rfind('.')
+                .unwrap_or_else(|| panic!("the stamp separator must survive truncation: {name:?}"));
+            assert!(dot > 0, "a NON-EMPTY base must survive: `dot == 0` is refused by the sweep: {name:?}");
+            assert!(
+                is_valid_temp_stamp(&head[dot + 1..]),
+                "the stamp must still validate after truncation: {name:?}"
+            );
+            assert!(
+                stamp_pid_is_this_process(head[dot + 1..].as_bytes()),
+                "a truncated base stops matching the target's own name, so this check is what stands \
+                 between our own live staging file and our own next sweep — it must say 'ours': {name:?}"
+            );
+        }
+        // A short name is passed through byte-for-byte: the cap is a cap, not a reformat.
+        let short = staging_sibling_name(OsStr::new("a.txt"));
+        assert!(short.starts_with("a.txt."), "an ordinary name keeps its base exactly: {short:?}");
+        // Multi-byte: the cut backs off to a char boundary, so the result is still valid UTF-8 (this
+        // would panic on a byte slice) and still inside the cap.
+        let wide = staging_sibling_name(OsStr::new(&"é".repeat(300)));
+        assert!(wide.len() <= MAX_COMPONENT_BYTES, "{} bytes: {wide:?}", wide.len());
+        assert!(wide.starts_with('é'), "the base must not have been mangled: {wide:?}");
     }
 
     /// The IO wrapper actually skips a name that matches the staging pattern but is a symlink — wired
