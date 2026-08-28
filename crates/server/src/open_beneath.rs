@@ -520,10 +520,18 @@ pub(crate) fn create_staging_beneath(
 ///   and they are resolved inside a directory object that cannot be substituted. **The residual is
 ///   CPE-1963's and it is not closed here on Unix**: an attacker who unlinks the staging name and
 ///   hard-links an outside file into its place makes this commit that object's name. It is an
-///   *aliasing* race, never a destruction one — the outside file's bytes are not changed — and
-///   `fsutil::ClaimedDestination::commit` turns it into a loud refusal by comparing the identity at
-///   the destination against the identity it wrote. Say "unblocks CPE-1963" only with that split
-///   stated; a claim that this closes it on both platforms would be false.
+///   *aliasing* race, never a destruction one — the outside file's bytes are not changed. Say
+///   "unblocks CPE-1963" only with that split stated; a claim that this closes it on both platforms
+///   would be false.
+///
+///   **CPE-1963 corrected this paragraph.** It used to end *"and `fsutil::ClaimedDestination::commit`
+///   turns it into a loud refusal by comparing the identity at the destination against the identity it
+///   wrote"*. `commit` does no such comparison — it syncs, renames, sweeps and returns `Ok`. The
+///   identity it captures is a public field (`ClaimedDestination::written`) whose own doc says, in the
+///   same PR, that exactly one of the five legs reads it. The comparison that *does* exist is
+///   `fsutil::StagedBeneath::landed_object_is_the_one_we_wrote`, which CPE-1963 added, and it is on
+///   `stage_and_replace_at`'s arm — **not** on `ClaimedDestination::commit`, which still returns `Ok`
+///   for an aliased Unix commit and is the residual CPE-1963 did not take.
 ///
 /// # Precondition: one parent
 ///
