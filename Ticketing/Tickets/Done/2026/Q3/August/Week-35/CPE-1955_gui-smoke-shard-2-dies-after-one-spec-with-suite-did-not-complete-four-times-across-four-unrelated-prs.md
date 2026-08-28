@@ -3,7 +3,7 @@ id: CPE-1955
 title: `gui-smoke` shard 2 dies after one spec with "SUITE DID NOT COMPLETE" — four times today, on four unrelated PRs
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -227,3 +227,30 @@ it is the fix working, not the fix breaking.
 **Deliberately not done here:** `macro-param-prompt` is **not** added to `known-failing.json` and the GUI
 bug is not chased — this PR stays the harness fix, and exempting a real regression to land the tool that
 surfaced it would be self-defeating. Handed to the Foreman to file separately.
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1068. The fix is right, and the record of *why* is worth more than the diff.
+
+**Two independent defects were masking each other**, which is why shard 2 had been illegible for a
+day. A transport death killed the shard at spec #2 and reported *"0 new failing cases"* — and
+separately, `currentSpecFile` advanced only on the soft reset's **success** path, so **13 specs ran,
+failed, and were never written to disk**. Confirmed against artifact `9662047176`. Runs that died
+reported nothing actionable and were re-run; runs that survived reported a real failure and were
+re-run too. The re-run reflex was discarding **a legible, named regression the ratchet had correctly
+reported**, not only evidence that had never been written.
+
+**The attribution fix proved itself on its first CI run** by surfacing exactly that regression —
+`macro-param-prompt.smoke.ts`, `14/14 reported`, `incomplete=false`. It was deliberately **not**
+added to `known-failing.json` to let this PR go green: never exempt the thing your tool just found in
+order to land the tool. It became **CPE-1960** and was root-caused separately (PR #1072).
+
+**Assumption disproved along the way.** The Foreman hypothesised this failure had been hidden inside
+the thirteen swallowed specs. It had not — `grep -c 'ctx .flyout .row'` on job `98646323315` is **0**.
+The two defects are adjacent, not nested. The PR's worker established that rather than accepting the
+hypothesis it was handed.
+
+**Merged past a known red.** Shard 2 and its downstream verdict job were failing on CPE-1960, verified
+by reading job `98712738743` directly rather than trusting the job name.
+
+**Harness limitation recorded, not worked around:** `this.timeout()` inside an `it()` is **not
+honoured** by this runner (documented at `gui-smoke/wdio.conf.ts:1358-1372`).
