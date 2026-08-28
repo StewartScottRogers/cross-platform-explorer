@@ -79,6 +79,30 @@ const PRODUCT_NAME: &str = "Cross-Platform Explorer";
 
 /// The plain release workflow, and (CPE-1933) the sidecar one. Both are read by name so every
 /// assertion below is derived from the file it names rather than asserted about it in prose.
+///
+/// **CPE-1969 asked whether this two-file scope is deliberate or another remembered list, and the
+/// answer is deliberate — with one half that had to be moved from prose into code.**
+///
+/// Deliberate, because this file is not a "scan all the X in the repo" guard at all. It asks a
+/// question about ONE named invocation: it reads `release.yml`'s and `release-sidecar.yml`'s own
+/// argv out of the workflow text and then *executes the real binary with it* against a scaffolded
+/// tree. There is nothing to enumerate — "every workflow" is not the subject, "the release gate" is,
+/// and a release gate exists in exactly the workflow that publishes a channel. Deriving the file
+/// list here would only find files with no argv to read, and each would have to be skipped, which is
+/// the same two names written backwards.
+///
+/// The half that WAS a remembered list is the implicit claim that no OTHER workflow — or extracted
+/// `.sh` script — invokes `verify-release-artifacts` where none of this scrutiny reaches it. That
+/// claim is now derived rather than assumed, in `src/lib/channelPurityCoverage.test.ts` ("no
+/// workflow or extracted script outside the mapped set invokes verify-release-artifacts"), which
+/// walks `workflowShellSources.allShellUnits()` — every workflow step plus all three scripts. It
+/// lives on the TypeScript side because that is where the workflow enumeration and the YAML parser
+/// already are; duplicating it here would be a second implementation of exactly the enumeration
+/// CPE-1969 exists to stop having two of.
+///
+/// The same verdict applies to `src/artifact_binding.rs`'s workflow derivation, which reads
+/// `release-sidecar.yml`'s verify step to recover the real `(channel, --conf productName)` pair: it
+/// derives one specific fact from the one file that states it, not a sweep over a file class.
 const RELEASE_YML: &str = "release.yml";
 const RELEASE_SIDECAR_YML: &str = "release-sidecar.yml";
 
