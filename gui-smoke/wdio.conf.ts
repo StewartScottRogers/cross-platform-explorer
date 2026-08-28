@@ -26,6 +26,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { TRANSPORT_DEAD_SENTINEL, formatShardAbort, isTransportDead } from "./lib/driverHealth.js";
+import { NATIVE_DRIVER_PORT, TAURI_DRIVER_PORT } from "./lib/driverPorts.js";
 import { resetAppState } from "./lib/resetAppState.js";
 import { assignShardSpecs, parseShardId, shardResultFilePrefix } from "./lib/shard.js";
 import { listSpecFiles, specRunPath } from "./lib/specFiles.js";
@@ -99,25 +100,13 @@ const TAURI_DRIVER_BIN = path.resolve(
   process.platform === "win32" ? "tauri-driver.exe" : "tauri-driver",
 );
 
-// CPE-1832: tauri-driver is a two-port intermediary, not a single listener, and both ports are named
-// here explicitly (passed to `spawn` below as `--port`/`--native-port`) rather than left to its
-// internal defaults — see `beforeSession`'s comment for why that distinction is the actual fix.
-// TAURI_DRIVER_PORT is tauri-driver's OWN front door (matches `config.port` below, and tauri-driver
-// 2.0.6's own `--port` default — `cli.rs`). NATIVE_DRIVER_PORT is the port tauri-driver spawns the
-// REAL platform WebDriver (WebKitWebDriver on Linux, msedgedriver on Windows) on and proxies every
-// request to (`cli.rs`'s `--native-port` default, also 4445 — verified by reading the vendored
-// tauri-driver-2.0.6 source in the local cargo registry cache, `src/{main,cli,server}.rs`).
-//
-// CPE-1843: because these two constants and the `--port`/`--native-port` flags below are a contract with
-// a binary CI installs from crates.io, `gui-smoke.yml` now pins `cargo install tauri-driver --version
-// 2.0.6` at BOTH of its install sites rather than taking whatever is newest. Note WHICH parts of that
-// contract can rot quietly: `--port`/`--native-port` are passed explicitly below, so their upstream
-// defaults are overridden and only the flag NAMES matter — and a rename fails loudly, since tauri-driver
-// rejects unknown args. The silent one is `--native-host`, which we do NOT pass: the waits below poll
-// "127.0.0.1" purely because that is its default, so a future re-default would send the native driver
-// somewhere nothing ever looks. Re-verify `src/cli.rs` when bumping that pin.
-const TAURI_DRIVER_PORT = 4444;
-const NATIVE_DRIVER_PORT = 4445;
+// CPE-1832/CPE-1843: tauri-driver is a two-port intermediary, not a single listener, and both ports are
+// named explicitly (passed to `spawn` below as `--port`/`--native-port`) rather than left to its internal
+// defaults — see `beforeSession`'s comment for why that distinction is the actual fix, and
+// `lib/driverPorts.ts` for the two constants themselves plus the crates.io version-pin contract they are
+// half of. CPE-1910 moved them there because `scripts/run-suite.ts` must wait for these same two ports to
+// be RELEASED between job-level suite attempts, and a second copy of the numbers is the duplication this
+// repo keeps paying for.
 
 // The temp dir + marker file (read by specs/open-dir.smoke.ts) are seeded once, in the main
 // process, before any worker/session starts — and handed off via a small state file rather than
