@@ -267,6 +267,16 @@ jobs:
     # `needs:` on the matrix jobs below makes that saving real — a repo-wide stale-lockfile problem
     # is caught here before the expensive 3-OS builds even start, instead of alongside or after them.
     #
+    # CPE-1956 — IS THAT `needs:` A DATA DEPENDENCY OR JUST ORDERING? Just ordering. This job writes
+    # no outputs, uploads no artifact and leaves nothing on disk that `backend`/`crates`/`net-e2e`/
+    # `sidecar`/`msrv` read; every one of them checks out and resolves independently. The edge exists
+    # purely to buy the fail-fast saving described above. That matters because it settles what to do
+    # about the skip: the edge is NOT load-bearing for correctness, so it could be deleted — but
+    # deleting it also deletes the saving, and reinstates exactly the "one stale lockfile discovered
+    # per hour-long matrix run" that CPE-1932 was about. So the edge STAYS and the skip is made
+    # loud instead, by the terminal `ci-verdict` job at the bottom of this file. See its comment for
+    # the full argument and for what a PR reviewer sees in each case.
+    #
     # Lockfiles are enumerated with `git ls-files '*Cargo.lock'` — NEVER a hardcoded list. CPE-1932's
     # own root cause was an enumeration failure, not a forgotten rule: a dependency bump regenerated
     # the two lockfiles everyone remembered (`crates/server`, `src-tauri`) and both reviewers verified
@@ -1976,3 +1986,68 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+
+  # CPE-1956 — THE CI GATE. The one job in this file that asks "did every Rust job RUN?" rather than
+  # "were the jobs that ran happy?". Mirrors `gui-smoke.yml`'s `gui-smoke-linux-verdict` (CPE-1753),
+  # which exists for the identical reason one workflow over.
+  #
+  # THE DEFECT. `backend`, `crates`, `net-e2e`, `sidecar` and `msrv` all carry
+  # `needs: lockfile-preflight` and, until this job landed, no `if:`. When the preflight fails GitHub
+  # does not fail them — it SKIPS them, and a skipped job is not a failed job:
+  #   - it is GREY in the PR checks list, visually indistinguishable from a job that had nothing to
+  #     do this run (a path filter, a matrix exclusion);
+  #   - GitHub counts a skipped REQUIRED status check as SATISFIED, so if any of the five is ever
+  #     made required, a preflight failure lets a PR read as mergeable with its Rust suite unrun;
+  #   - it is neither `pending` nor `failure`, so it is invisible to `scripts/ci-poll.mjs`, which is
+  #     the merge gate this crew actually reads.
+  # Measured 2026-08-27: `GET /repos/:owner/:repo/branches/main/protection` -> 404 "Branch not
+  # protected" and `/rulesets` -> `[]`. Nothing is required today, so the required-check half of the
+  # hazard is LATENT — which is the argument for fixing it now, cheaply, rather than inheriting a
+  # silent hole the day someone turns protection on.
+  #
+  # WHY NOT JUST DROP THE `needs:` AND LET THE FIVE RUN ANYWAY? That was the other defensible answer,
+  # and it was rejected on what a reviewer ends up seeing. Decoupled, a stale lockfile costs a full
+  # ~1h 3-OS matrix to re-derive a fact the preflight already established in seconds, and it reports
+  # it the worst possible way: one job at a time, spread across a wall of unrelated red, which is
+  # literally the failure mode CPE-1932 filed the preflight to end (seven unregenerated lockfiles
+  # found one per run). It also would not fix the real problem — a job can still be skipped by a
+  # cancellation, and the next `needs:` edge anyone adds would reopen the hole. The skip is not the
+  # defect; the skip being SILENT is. So: keep the ordering edge, keep the saving, and make the skip
+  # loud and terminal here.
+  #
+  # WHAT A PR VIEWER SEES, before and after, on a preflight failure:
+  #   BEFORE — `Lockfile pre-flight` red; the five grey/skipped; no check anywhere says the Rust
+  #            suite did not run. Reading the list top to bottom, "1 failed" understates it by five.
+  #   AFTER  — the same red preflight, the same five grey, PLUS `CI verdict` RED, naming each of the
+  #            five and the word SKIPPED, and saying in as many words that a skipped job is not a
+  #            pass. `always()` means this check is present and definite on EVERY run, so it can be
+  #            made a required check and cannot be satisfied by a skip.
+  # On an all-green run it is a normal fast green check (a checkout and a few ms of node).
+  #
+  # The `needs:` list below is not maintained by memory: `src/lib/ciVerdict.test.ts` derives every
+  # job in this file that carries `needs: lockfile-preflight` and reds if this list is not exactly
+  # that set (CPE-1932 — enumerate, don't recall), so a sixth job added behind the preflight cannot
+  # be quietly left uncovered. That test also executes THIS job's real `run:` body against synthetic
+  # `needs` payloads, so the behaviour described above is demonstrated rather than asserted
+  # (CPE-1933).
+  ci-verdict:
+    name: CI verdict — every job behind the lockfile pre-flight actually ran (CPE-1956)
+    runs-on: ubuntu-latest
+    needs: [backend, crates, net-e2e, sidecar, msrv]
+    # The whole point. Without `always()` this job would itself be skipped by the very failure it
+    # exists to report, and a skipped gate is a green PR.
+    if: always()
+    # Plain `node` on the runner, no `npm ci`, no toolchain — same shape as `ratchet-guard` above.
+    # Seconds of work; 10 is the "something is genuinely wedged" backstop.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Judge every needed job's result
+        shell: bash
+        env:
+          # `toJSON(needs)` is the job's own dependency list with each one's `result`. Passed through
+          # the environment rather than interpolated into the script body so a job name can never be
+          # read as shell.
+          CI_VERDICT_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-verdict.mjs
