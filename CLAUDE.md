@@ -159,6 +159,13 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
   **Adding a new ratchet needs no wiring** — `src/lib/ratchetBaselines.test.ts` fails CI if a
   ratchet-shaped declaration appears in a file that is neither registered nor explicitly excluded with a
   reason. Full standard + the enumeration: [docs/design/RATCHETS.md](docs/design/RATCHETS.md).
+  **That document's `today` column is asserted, not hand-kept (CPE-1948)** — it was a second,
+  unguarded copy of every baseline, inside the page explaining why unguarded copies rot, and two of
+  its twelve rows went stale within a day. `src/lib/ratchetsDoc.test.ts` parses the table
+  *structurally* (header-anchored, whole-cell values, so no number can hide in a parenthetical or in
+  surrounding prose) and asserts every row against the live measurer, plus the id list against
+  `REGISTRY` in order — so a registered-but-undocumented baseline reds too. Update the table when a
+  baseline legitimately moves; the test names the row and both values.
 - **Enumerate, don't recall (CPE-1932).** Any guard over "all the X in this repo" derives its list at
   run time (`git ls-files`, a tree walk) and fails loudly when the list comes back near-empty — a
   hard-coded list of the instances someone remembered is how seventeen Cargo.lock files became two.

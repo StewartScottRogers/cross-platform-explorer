@@ -666,6 +666,120 @@ export function parseLedger(md) {
 }
 
 /**
+ * A row of the ENUMERATION table in `docs/design/RATCHETS.md` — the human-readable list of every
+ * ratchet and where it stands today. Distinct from a `LedgerRow`, which authorises a raise.
+ * @typedef {object} DocRow
+ * @property {string} id
+ * @property {string} file
+ * @property {number} value
+ * @property {boolean} gated  false when the row declares itself "enumerated, not gated"
+ * @property {number} line    1-based line in the document, so a failure can point at it
+ */
+
+/**
+ * The exact header cells the enumeration table must carry. Anchoring on the HEADER, and matching the
+ * whole cell, is what stops a number quoted in a surrounding paragraph — or a row of the raise ledger
+ * further down this same file — from ever satisfying the check (CPE-1933 rule 2: anchor on structure,
+ * never on prose).
+ */
+const ENUMERATION_HEADER = ["id", "file", "what the number counts", "today"];
+
+/** @param {string} s */
+const isTableRow = (s) => s.trim().startsWith("|") && s.trim().endsWith("|") && s.trim().length > 1;
+
+/**
+ * @param {string} s
+ * @returns {string[]}
+ */
+const tableCells = (s) =>
+  s
+    .trim()
+    .slice(1, -1)
+    .split("|")
+    .map((c) => c.trim());
+
+/**
+ * Parse the enumeration table out of `docs/design/RATCHETS.md` (CPE-1948).
+ *
+ * That table used to be hand-kept: twelve baselines with their current values written out as literals
+ * that nothing checked, inside the one document explaining why an unchecked literal is a defect. It
+ * went stale within an hour of landing, and a second row (`bidi-render-registry`, 1552 → 1553 via
+ * PR #1056) was already stale when CPE-1948 was picked up. `src/lib/ratchetsDoc.test.ts` asserts what
+ * this returns against `measureWorkingTree()`, so the table is derived rather than remembered.
+ *
+ * Every refusal below is deliberate rather than lenient, for the reason the rest of this file exists:
+ * a parser that GUESSES turns a stale table into a green test, which is strictly worse than a stale
+ * table nobody claimed was checked.
+ *
+ * @param {string} md the document's full text
+ * @returns {DocRow[]}
+ */
+export function parseEnumerationTable(md) {
+  const lines = md.split(/\r?\n/);
+  /** @type {number[]} */
+  const headers = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!isTableRow(lines[i])) continue;
+    const c = tableCells(lines[i]);
+    if (c.length === ENUMERATION_HEADER.length && c.every((v, k) => v.toLowerCase() === ENUMERATION_HEADER[k])) {
+      headers.push(i);
+    }
+  }
+  if (headers.length !== 1) {
+    throw new Error(
+      `expected exactly ONE enumeration table in ${LEDGER_PATH} headed \`| ${ENUMERATION_HEADER.join(" | ")} |\`, ` +
+        `found ${headers.length}. Two would make "which one is live" a question — the same defect this file ` +
+        `refuses for a doubly-declared constant.`,
+    );
+  }
+  const start = headers[0];
+  const sep = lines[start + 1] ?? "";
+  if (!isTableRow(sep) || !tableCells(sep).every((c) => /^:?-{2,}:?$/.test(c))) {
+    throw new Error(`${LEDGER_PATH}:${start + 2}: the enumeration table header is not followed by a separator row`);
+  }
+  // The row scan takes every consecutive table-shaped line and stops at the first that is not one.
+  // Two shapes slip past it, and neither is caught HERE: a blank line mid-table silently TRUNCATES
+  // the row list, and a second four-column table butted straight against this one (no blank line)
+  // has its rows ABSORBED into this one. Both are caught downstream instead, by the ORDERED id
+  // comparison against REGISTRY in `src/lib/ratchetsDoc.test.ts`. Measured, not assumed: a blank
+  // line injected before the `mojibake-allowlist` row cut this parse from 12 rows to 6 and reddened
+  // that comparison, with the not-gated non-vacuity check firing as a second net. The `today`
+  // assertion did NOT fire, because the six surviving rows were each still correct. So this parser
+  // is not airtight on its own, and the id comparison is not scaffolding around a check that
+  // already works — it IS the check doing the work here; do not delete it as redundant.
+  // (Absorption needs an intruder whose cells are themselves row-shaped: the raise ledger header,
+  // with its bare `baseline` cell, throws rather than being swallowed.)
+  /** @type {DocRow[]} */
+  const rows = [];
+  for (let i = start + 2; i < lines.length && isTableRow(lines[i]); i++) {
+    const c = tableCells(lines[i]);
+    const where = `${LEDGER_PATH}:${i + 1}`;
+    if (c.length !== ENUMERATION_HEADER.length) {
+      throw new Error(`${where}: enumeration row has ${c.length} cells, expected ${ENUMERATION_HEADER.length}`);
+    }
+    const id = /^`([a-z0-9-]+)`$/.exec(c[0]);
+    if (!id) throw new Error(`${where}: id cell is ${JSON.stringify(c[0])}, expected exactly one backticked id`);
+    const file = /^`([^`]+)`$/.exec(c[1]);
+    if (!file) throw new Error(`${where}: file cell is ${JSON.stringify(c[1])}, expected exactly one backticked path`);
+    // The value cell is matched WHOLE, never "the first number in the cell". A cell trailing a
+    // parenthetical history — `14 (13 -> 14 on 2026-08-27)`, which is what this row actually said —
+    // would otherwise be read as its leading digits with the rest unasserted, which is exactly how a
+    // scanner ends up agreeing with a sentence instead of with a measurement. The one permitted
+    // suffix is the not-gated marker, and that marker is itself asserted against `unenforced`.
+    const value = /^(\d+)( — \*\*enumerated, not gated\*\*)?$/.exec(c[3]);
+    if (!value) {
+      throw new Error(
+        `${where}: the \`today\` cell is ${JSON.stringify(c[3])}. It must be exactly a number, optionally ` +
+          `followed by " — **enumerated, not gated**" — nothing else, so no digit here can go unasserted.`,
+      );
+    }
+    rows.push({ id: id[1], file: file[1], value: Number(value[1]), gated: value[2] === undefined, line: i + 1 });
+  }
+  if (rows.length === 0) throw new Error(`the enumeration table in ${LEDGER_PATH} has no rows`);
+  return rows;
+}
+
+/**
  * Every row in `rows` authorising exactly this movement. Returned as a LIST, not a first match: the
  * same from -> to move can legitimately happen more than once over a repo's life (burn a baseline
  * down, then re-raise it later), so what matters is whether THIS diff adds one MORE row than the base
