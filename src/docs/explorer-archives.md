@@ -110,6 +110,15 @@ Four independent protections apply automatically — you don't opt into any of t
   folder entries get the same treatment, so an extraction can't create directories out there either.
   Extracting into a **new, empty folder** (what the plain **Extract** action always does) has no shortcuts
   to run into in the first place.
+- **A folder shortcut that leads somewhere else *inside* the folder you picked is refused too.** The check
+  above asks "does this end up outside the folder?", and a shortcut pointing at a sibling folder inside it
+  honestly answers "no" — so the entry was written, just not where the archive said. `sub/report.txt`
+  landed in `other/report.txt`, and every format reported plain success. Extraction now asks a different
+  question of each folder on the way to an entry — *is this a real folder, or a shortcut standing in for
+  one?* — so a shortcut is skipped whichever way it points, the note in the operations panel names the
+  folder that was a shortcut, and the rest of the archive still extracts. This applies to ZIP, TAR
+  (`.tar`, `.tar.gz`, `.tgz`) and 7-Zip alike; before this, ZIP refused it and TAR and 7-Zip did not —
+  7-Zip silently, TAR after already having written the file.
 - **Every format now answers a refused entry the same way: skip that entry, extract the rest.** This used
   to differ by format and by which action you used, which meant this page could only ever describe one of
   the behaviours honestly:
