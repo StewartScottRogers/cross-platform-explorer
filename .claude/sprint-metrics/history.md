@@ -4500,3 +4500,40 @@ reason.
 landed. **Telling a resumed agent what the world looks like now is cheaper than letting it re-derive
 that**, and it removes the one failure mode a resume has that a fresh dispatch does not: acting on a
 memory of a state that has since changed.
+
+## 2026-08-29 — I told it to replace a wrong sha with a right one, on a branch that rebases hourly
+
+#1089 carried a sentence calling a revision *"this branch's merge base"* when it was an ancestor of one,
+fifteen commits earlier. The substantive claim survived — the file is byte-identical at both — but it is
+the provenance shape, so I asked for the fix and named the correct sha.
+
+**The mandated rebase falsified my correction minutes later.** Naming a merge base by sha on a branch that
+rebases every round is **the same defect wearing a fresher number**, and I had spent the night writing
+that lesson down for other people.
+
+The worker's answer is the right one: **name what the revision *is*** — an ancestor of the merge base,
+addressed by commit subject — **and derive the rest from a command** (`git diff <rev> $(git merge-base
+origin/main HEAD) -- <path>`, which is empty and stays empty). The stale sha now appears nowhere.
+
+**And the same round's other correction was vindicated within the hour.** Its discriminator table had
+cited a pre-rebase sha; addressing both columns by commit subject instead meant that when its own rebase
+moved round 5 from one sha to another, **the table needed no edit at all.**
+
+**So the rule generalises past shas: when a fact will be re-derived by whoever reads it, write the
+derivation, not the answer.** A sha is a cached lookup with no invalidation. A subject is stable across
+rebase. A command is stable across everything and tells the reader what to run when they doubt it.
+
+**Separately, the temp-directory measurement changed its own ticket.** Re-taken on this machine:
+**297,338 leftover `cpe-*` directories — 91% of the user's entire temp folder**, 287 distinct prefixes,
+spanning 2026-07-11 to yesterday. But enumerating **by shape** (which that ticket's own first acceptance
+criterion demanded) shows **four truncation-sweep prefixes account for 238,412 of them — 80.2%** — and
+that is a **different defect** from the one the ticket was filed for: a per-iteration scratch dir never
+freed, not a fixture that planted a link and died before cleanup. Different cause, different fix.
+
+The archive family, which this PR touches, is **114 — unchanged since filing, with 0 newer than six
+hours.** And a top-level attribute scan finds **0 reparse points**, so the original 2,127 are *nested* and
+the title's own figure cannot be reproduced by the scan someone would reach for first.
+
+**Every one of those commands runs in under three seconds over 328,000 entries.** Counting was never the
+expensive part — which is the argument for running it at the start of each sprint rather than discovering
+it at 91%.
