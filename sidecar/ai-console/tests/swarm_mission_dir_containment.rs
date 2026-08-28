@@ -368,3 +368,83 @@ fn the_sweep_never_follows_or_removes_a_planted_link() {
     assert!(!bait.exists(), "the planted link is cleaned up");
     assert!(victim.join(MISSION_MARKER).exists(), "and removing the link did not follow it");
 }
+
+/// The case where the sweep's delete **actually runs**: a link nested *inside* a genuine mission
+/// directory of ours.
+///
+/// The test above stops at the top of the tree — all five conditions refuse, so `remove_dir_all` is
+/// never reached. Here every condition passes on the parent, the removal runs for real, and the
+/// question is whether it walks a link on the way down. Two positions are covered because CPE-1964
+/// round 2 made them two different code paths:
+///
+/// * a link **directly inside** the mission directory now goes through the module's own
+///   `remove_link` (roster-last removal deletes each child itself), which must unlink the link — and
+///   on Windows a junction needs `RemoveDirectory`, not `DeleteFile`, so this is the leg that would
+///   catch getting that backwards;
+/// * a link **one level deeper** is inside a real subdirectory, which is handed whole to
+///   `std::fs::remove_dir_all`, so this leg is the derivation of the module header's claim that std
+///   refuses to recurse through a reparse point (Rust >= 1.77) rather than a restatement of it.
+///
+/// Both targets hold a `secret.txt`. If either survives the sweep only because the sweep did nothing,
+/// the final assertion that the mission directory is gone goes red.
+#[test]
+fn the_sweep_does_not_walk_a_link_nested_inside_a_real_mission_directory() {
+    let root = tempfile::tempdir().expect("scratch root");
+
+    // Two attacker directories, outside the mission, each holding something worth keeping.
+    let secret_top = root.path().join("secret-top");
+    let secret_deep = root.path().join("secret-deep");
+    for d in [&secret_top, &secret_deep] {
+        std::fs::create_dir_all(d).expect("attacker directory");
+        std::fs::write(d.join("secret.txt"), b"KEEP-ME").expect("secret");
+    }
+
+    // A genuine, stale mission of ours: real name, our roster, ordinary files, a real subdirectory.
+    let mission = root.path().join(format!("{MISSION_PREFIX}00ff11ee22dd33cc"));
+    assert!(is_mission_name(&mission.file_name().unwrap().to_string_lossy()), "a real mission name");
+    std::fs::create_dir(&mission).expect("mission");
+    std::fs::write(mission.join(MISSION_MARKER), b"[]").expect("roster");
+    std::fs::write(mission.join("mailbox.jsonl"), b"{}").expect("mailbox");
+    let memory = mission.join("memory");
+    std::fs::create_dir(&memory).expect("memory");
+    std::fs::write(memory.join("note-abc.md"), b"note").expect("note");
+
+    let link_top = mission.join("escape-top");
+    let link_deep = memory.join("escape-deep");
+    for (target, link) in [(&secret_top, &link_top), (&secret_deep, &link_deep)] {
+        if let Err(step) = stage_dir_link(target, link) {
+            let _ = std::fs::remove_dir_all(link);
+            panic!(
+                "[CPE-1964] the nested directory link could not be planted, so this leg verified \
+                 NOTHING — going red rather than passing quietly.\n  failed step: {step}\n  \
+                 link: {}\n  target: {}\nA junction (Windows) and `symlink(2)` (Unix) need no \
+                 elevated privilege; a failure here means the runner changed. Do not soften this \
+                 into a skip.",
+                link.display(),
+                target.display()
+            );
+        }
+    }
+
+    let far_future = std::time::SystemTime::now() + std::time::Duration::from_secs(400 * 24 * 3600);
+    let report = sweep_stale_mission_dirs(root.path(), SWEEP_RETENTION, far_future);
+
+    // The delete really ran — without this the two survivals below would prove nothing.
+    assert_eq!(report.removed, vec![mission.clone()], "the mission itself is removed");
+    assert_eq!(report.failed, 0, "and cleanly");
+    assert!(!mission.exists(), "the whole mission directory is gone");
+
+    // And it took the links, not what they pointed at.
+    for (label, target) in [("top-level", &secret_top), ("nested", &secret_deep)] {
+        assert!(
+            target.join("secret.txt").exists(),
+            "the sweep followed the {label} link and deleted through it into {}",
+            target.display()
+        );
+        assert_eq!(
+            std::fs::read(target.join("secret.txt")).expect("secret readable"),
+            b"KEEP-ME",
+            "the {label} link's target must be untouched, not merely present"
+        );
+    }
+}

@@ -8,10 +8,15 @@
 // `#[cfg(test)]` — is right in spirit and wrong as written: "the first `#[cfg(test)]`" also matches
 // the **indented** attribute on an in-function test module and the token as it appears inside a doc
 // comment, so run literally it amputates production code and finds **10** sites where the corrected
-// recipe finds **15**. The five it dropped included both swarm sites — which is to say, the recipe as
-// written hid the very defect CPE-1964 is about. That is CPE-1932's point precisely: an enumeration
-// nobody else can re-run is halfway back to recall, and one that silently under-counts is worse than
-// recall, because it reads as a measurement.
+// recipe finds **14** (measured at `origin/main` = e275808e; CPE-1964 round 2 re-derived both halves
+// rather than restating them). The −4 is a net of two different errors, and both matter: the naive
+// rule **misses five** real sites — `sidecar/ai-console/src/console.rs:733` and `:796`, i.e. **both
+// swarm sites**, plus `crates/server/src/fsutil.rs:5578`, `src-tauri/src/lib.rs:11904` and `:14416` —
+// and **adds one spurious** hit, `crates/server/src/archive.rs:2088`, which is a `///` doc-comment
+// line. So the recipe as written hid the very defect CPE-1964 is about *and* padded the count back
+// up while doing it. That is CPE-1932's point precisely: an enumeration nobody else can re-run is
+// halfway back to recall, and one that silently under-counts is worse than recall, because it reads
+// as a measurement.
 //
 // So the corrected recipe lives here as code:
 //   1. `git ls-files '*.rs'` — the tree decides what exists, not a list someone typed;

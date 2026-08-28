@@ -160,15 +160,110 @@ never as a directory. Both numbers are recorded at the site.
 
 `src/lib/tempDirSites.test.ts` carries the corrected recipe as code: `git ls-files '*.rs'`, minus a
 `tests/` path segment, comments stripped with the shared `stripRustComments`, then cut at the first
-**column-0** `#[cfg(test)]`. Measured at `origin/main`: **naive 10, corrected 14**, and the sites the
-naive rule drops include **both swarm sites** (`console.rs:733`, `console.rs:796`). The ticket's figure
-was 15; the extra is `crates/server/src/archive.rs:2088`, which is a **comment**, so the corrected
-recipe is right to drop it.
+**column-0** `#[cfg(test)]`. Measured at `origin/main` (e275808e): **naive 10, corrected 14**. The −4 is
+a net of two errors: the naive rule **misses five** real sites — `console.rs:733` and `:796`, i.e.
+**both swarm sites**, plus `crates/server/src/fsutil.rs:5578`, `src-tauri/src/lib.rs:11904` and
+`:14416` — and **adds one spurious** hit, `crates/server/src/archive.rs:2088`, a `///` doc-comment
+line. The ticket's figure was 15; 14 is the honest number, and the file's header carried a stale 15
+into round 1 (fixed in round 2, re-derived rather than copied).
 
-A new finding worth its own ticket: `session_diag.rs:33`, `session_supervisor.rs:151` and
-`sidecar/host/src/reaper.rs:61` all build the **fixed** path `<temp>/cpe-ai-console/...` and create it
-with `create_dir_all` — the same shape as this ticket, and it holds the session-daemon **port file**.
+A new finding worth its own ticket (**CPE-1975**): `session_diag.rs:33`, `session_supervisor.rs:151`
+and `sidecar/host/src/reaper.rs:61` all build the **fixed** path `<temp>/cpe-ai-console/...`, and it
+holds the session-daemon **port file** — a control channel, not just data. Two of the three create it
+with `create_dir_all` (`session_diag.rs:52`, `session_supervisor.rs:144`); `reaper.rs` does **not** —
+it only reads (`port_file.exists()`) and deletes (`remove_file`, `:79`). Corrected in round 2, in this
+log and in CPE-1975 itself.
 
 CPE-1952's two fallbacks re-checked and unchanged: `catalog_dir`'s `cpe-ai-console-catalog`
 (`src-tauri/src/lib.rs:10155`) and `cpe-sidecar-storage` (`:11899`), both reached only when
 `app_data_dir()` fails, both still zero on disk.
+
+## Work Log — 2026-08-27, round 2 (review APPROVE, four fixes)
+
+The reviewer approved and returned four small corrections. Two were numbers that had gone stale, two
+were real defects in the sweep. All four are in; nothing from round 1's verification needed redoing.
+
+### The two numbers
+
+* **`tempDirSites.test.ts`'s header said "corrected recipe finds 15"** — in the one file that exists
+  because a miscounted enumeration shipped. Re-derived here rather than copied from the PR body: both
+  recipes were re-run against `origin/main` (e275808e) via `git ls-tree` + `git show`, giving **naive
+  10, corrected 14**, and the header now states the −4 as what it actually is (five real sites missed,
+  one doc-comment hit added) instead of "the four it dropped".
+* **The residual `create_dir_all` enumeration was short by one.** It named `write_members`
+  (`swarm_mcp_server.rs:195`), `seed_kickoff` (`:207`) and `write_mcp_config` (`swarm_plan.rs:139`);
+  **`seed_memory` (`swarm_mcp_server.rs:237`) is a fourth**, called one line after `seed_kickoff` in
+  `handle_swarm_run`. The **bound is unchanged** and was correctly stated: all four run *after* the
+  hardened create, `write_members` is the first of them, so the residual race is still only
+  create → `write_members`. The list now lives in the module header (round 1 had it only in the PR
+  body, where it would have evaporated) with the `rg` that produces it and an explicit note that it is
+  a point-in-time enumeration nothing tests — the bound is the load-bearing half.
+
+### F3 — the sweep is a detached thread, so a torn delete could be permanent
+
+The reviewer's find, and the sharper of the two: the sweep is `std::thread::spawn`ed and never joined,
+so a console exiting mid-`remove_dir_all` leaves a **half-deleted** mission directory that may have
+lost `members.json` — which condition 3 then refuses **forever**. The cleanup would have been
+manufacturing more of exactly the litter it exists to remove (the one directory it already cannot
+reclaim is rosterless).
+
+**Decision: delete the marker last, not join on shutdown.** Joining narrows the window; ordering
+closes it. Joining also loses to `taskkill /f` / `SIGKILL` / power loss, and it would put an unbounded
+walk of `%TEMP%` (2,127 reparse points on this machine — CPE-1974) into the console's exit path. So
+`remove_mission_dir` removes every other entry first, then the roster, then the now-empty directory;
+any torn state still carries the ownership evidence and the next startup sweep finishes it.
+
+Removing children individually meant handling nested links directly rather than delegating the whole
+tree to std, so: a real subdirectory still goes to `remove_dir_all`, and a link goes to `remove_link`,
+which on Windows picks `remove_dir` for a directory reparse point off the link's **own** attributes
+(`symlink_metadata`, never following).
+
+**CPE-1929 pair on the new ordering**, `cargo test --locked --lib`, `Compiling ai-console` confirmed in
+both runs (a `/mnt/z` touch does not reliably force a rebuild — the reviewer's first WSL sabotage came
+back falsely green for exactly that reason):
+
+| sabotage | result |
+|---|---|
+| refusal disabled (`if false && …` on the marker skip — one-pass delete) | **RED**, 388 passed / **3 failed** |
+| predicate made to lie (skip compares against `"mailbox.jsonl"`) | **RED**, 388 passed / **3 failed** |
+
+### F4 — a count that read as something it was not
+
+`SweepReport.skipped` counted **every** `%TEMP%` entry of any kind, so `"left {skipped}"` would have
+printed thousands and read as thousands of mission directories. Narrowed: `skipped` now counts only
+entries whose **name** matched `cpe-swarm-<alnum>` and which a later condition then refused; a
+non-matching name is not a mission directory the sweep considered, so it is not counted. The log line
+is reworded to `removed N, kept M cpe-swarm-* (in retention or not ours), could not remove K`, which
+cannot be misread either way. `sweep_refuses_every_name_that_is_not_exactly_ours` now asserts
+`skipped == 0` and gains a genuine mission alongside the five bogus names, so "removed nothing" still
+cannot pass by the loop never running.
+
+### A claim turned into a test
+
+The module header claimed std would not recurse through a reparse point nested *inside* a genuine
+mission directory. The reviewer verified that by hand on NTFS and ext4; round 2 **commits it** rather
+than citing a review nobody can re-run (CLAUDE.md: derive provenance, don't claim it).
+`the_sweep_does_not_walk_a_link_nested_inside_a_real_mission_directory` plants two links inside a real
+stale mission — one directly inside (which exercises the new `remove_link`), one a level deeper inside
+a real subdirectory (which exercises std's `remove_dir_all`) — each pointing at an attacker directory
+holding `secret.txt`, runs the real sweep, and asserts the mission is removed while both secrets
+survive byte-for-byte. Sensitivity control: a `canonicalize()` inserted before the delete, i.e. the
+removal made to follow, → **RED**. This is the case round 1 never covered, because every earlier test
+stops at the top of the tree where condition 2 refuses and the delete never runs.
+
+### Not taken in this PR
+
+* **F2 → CPE-1976** (filed): the **read** side is unhardened — `handle_swarm_activity` does
+  `temp_dir().join(mission)` with no `symlink_metadata` check. Pre-existing; this PR widened the id
+  space digits→alnum. Deliberately not widened into here.
+* **F9 → CPE-1974**: the 9 pre-CPE-1952 `cpe-catalog-stage-*` directories, and the 2,127 reparse
+  points, still on disk with nothing sweeping them.
+* **F6**: `random_suffix()` uses `RandomState`, caveated at the site as not a CSPRNG. `getrandom` is
+  already in the lock tree via `ed25519-dalek` if the name is ever asked to be load-bearing; it is not
+  — the exclusive create is.
+
+### Gates (round 2, Windows)
+
+`cargo test --locked` (ai-console) **413 passed / 0 failed / 2 ignored** (round 1: 412 — +1 unit test
+for the torn delete); containment suite **5 passed** (round 1: 4 — +1 nested-link test);
+`cargo clippy --all-targets --locked -D warnings` clean.
