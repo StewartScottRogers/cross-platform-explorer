@@ -2993,3 +2993,40 @@ outlines and shadows are untouched — and every ground comes back **45/45, one 
 unanimous**. The guard then got *tighter*: flatness is now a fatal condition, which is the strongest form
 available and spends no margin at all. A tuned epsilon would have made the same red go away and left the
 sampler still measuring the wrong thing.
+
+## 2026-08-28 — the evidence was in the string, and the parser threw it away
+
+#1089's staging files are named `<name>.<pid>-<nanos>.cpe-tmp`. A cleanup sweep decides what it may
+delete using a stamp validator and a 300-second age floor, and the round widened that sweep from "this
+destination's own siblings" to "any `.cpe-tmp` in the directory".
+
+The defence written at the site was that the validator and the age floor bound the widening. The
+reviewer's objection is exact: **they establish "shaped like ours **and** stale". They do not establish
+"ours" — and the ownership evidence is right there in the string being parsed.** `is_valid_temp_stamp`
+reads the `<pid>` half solely to prove it is digits, then discards it.
+
+**The worst case it constructed is ours, not an attacker's.** A bulk write puts N files in one folder;
+one stalls on a hung socket and its staging file's mtime freezes. The sweep memo is a **one-slot**
+`Option<PathBuf>`, so a depth-first walk that alternates `A/f1`, `A/sub/g1`, `A/f2` re-enters `A` and
+re-sweeps every time. Past 300 seconds the next commit unlinks the **live** sibling — and because
+staging handles are opened with `FILE_SHARE_DELETE`, this succeeds on **Windows too**. The writer keeps
+filling a nameless object and the commit fails. Under the old narrow scope it was impossible: you needed
+two saves of the *same* destination.
+
+**The fix is three lines and loses nothing**: skip a candidate whose pid is this process's, unless it is
+the target's own. Residue from a killed process — the only thing the widening exists to collect — never
+carries our pid.
+
+**The transferable part: when a guard's own naming scheme already encodes the fact it needs, check
+whether the validator is reading it or merely stepping over it.** Here the answer was in the filename
+that the code itself had written, parsed, and dropped on the floor. And the doc's word choice hid it —
+*"bounded by the stamp validator and the age floor"* is true and sounds like ownership, which is why
+nobody looked at what the stamp actually contained.
+
+**And the blocking finding in the same round was the round's own theme.** #1089 round 2 existed to fix
+comments that outran their evidence. It widened this deletion and left the **call-site** comment saying
+*"scoped to this destination's own siblings, on the same terms `stage_and_replace_at` calls it"* —
+both clauses now false, while the function's own doc, the next paragraph, and the new enum's doc all say
+the opposite. The call site is what a reader hits first, and it is the one that states how much gets
+deleted. **A widened scope has to be corrected everywhere it is described, and the description nearest
+the call is the one that matters most.**
