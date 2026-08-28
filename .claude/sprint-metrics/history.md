@@ -2277,3 +2277,28 @@ automatically "we must re-run the guard."** Ask first whether the guard's verdic
 you already hold. When it is, derive it and say so in the merge record. When it is not — a guard whose
 input is the diff itself, or one that measures something the rollup does not report — a fresh run is
 the only honest answer. The cost difference is an hour of CI per PR, times nine.
+
+## 2026-08-27 — I read an empty board as a green one, hours after merging the fix for that
+
+Checking the queue with my own `jq` one-liner, #1081 came back `pend=0 fail=0` — which is what a fully
+green PR looks like. It was not green. Its head had just been force-pushed and **no checks had
+registered yet**: `statusCheckRollup | length` was **0**. Zero pending and zero failed, because there
+was nothing there at all.
+
+`scripts/ci-poll.mjs` has carried the correct verdict for this for hours — *"pending … an empty board
+is NOT a green one"* — and #1078's Reviewer had listed it in its matrix that same evening. I did not
+use ci-poll for that check; I wrote a quick `jq` filter, and the quick filter had the defect the real
+tool exists to prevent.
+
+**The pattern is now three-for-three in this session and it is always the same shape:** an ad-hoc query
+returns a number that agrees with what I expected, and the number is an artefact of the query rather
+than a fact about the world. Earlier tonight a case-sensitive `contains("CI verdict")` returned zero
+across nine PRs and read as confirmation of a real problem; before that, two data points read as a
+boundary that a 69-job enumeration disproved. Every time, the tell was available in one extra call —
+`| length`, a case-insensitive grep, a denominator.
+
+**The rule I actually need is narrower than "be careful":** *when a hand-rolled query agrees with the
+conclusion I already had, spend one more call establishing that the query can produce a different
+answer at all.* An empty result and a negative result are different facts, and only one of them is
+evidence. Where a real tool already answers the question — and here one did, with the right verdict
+already written into it — use the tool.
