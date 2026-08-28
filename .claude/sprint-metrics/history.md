@@ -4056,3 +4056,37 @@ One more piece of data in the failure itself: **the author measured this suite g
 on a GitHub runner.** Same code, different scheduler. A marginal timing control does not have a truth
 value independent of where it runs — which is an argument for reporting *where* a race number was taken,
 every time, not only its value.
+
+## 2026-08-28 — the true sentence and the false one, two lines apart, in the same diff
+
+#1093 round 3 added a blind-spot bullet saying that if GitHub invents a third PR-scoped event,
+*"nothing in the code can notice the next one; **only the enumeration test's `toEqual` will**."*
+
+It will not. `prTriggered` is a **filter** — a workflow the classifier calls `other` is *removed* from the
+array, so `toEqual(["ci.yml","gui-smoke.yml"])` still holds. That assertion can only red on
+**over**-inclusion. The reviewer measured it with two hypothetical workflows: both classified `other`,
+both left `toEqual` green. The one event that *is* caught is caught by a **text grep for a literal event
+name**, not by the enumeration at all.
+
+**And the same round wrote the true version two lines away**: *"the enumeration alone could not have
+caught it."* Both sentences are in one diff, about one guard, and they contradict each other.
+
+**That is not ignorance, and calling it carelessness misses the mechanism.** The two sentences were
+written at different moments — one while measuring a sabotage, one while summarising for a reader — and
+nothing forced them into contact. A diff has no step at which its own prose is read as a whole; each
+comment is reviewed beside the code it annotates, never beside the other comment about the same thing.
+
+**So the check is cheap and specific: before committing a claim about what a guard detects, grep your own
+diff for the other sentences about that guard and confirm they agree.** Not "re-read the diff" — grep for
+the guard's name. Here that would have surfaced both lines in one screen.
+
+**And the preferred fix is better than either sentence**: generalise the literal-name grep to any `on:`
+key matching `/^pull_request[_a-z]*$/` that is not in the known set. Two lines, and the claim becomes true
+rather than accurate-about-being-limited. **When a claim is false, check whether making it true is cheaper
+than qualifying it** — on this shift that has been the better answer roughly half the time.
+
+Worth recording alongside: the reviewer also found a comment attributing a past bug to a case that never
+had it (the second of two listed spellings was already correct in the round being blamed), and a
+deliberate exclusion with no stated reason sitting in a list next to genuine gaps — **so a decision and an
+oversight read identically.** Both are the same family: prose that describes the code less precisely than
+the code describes itself.
