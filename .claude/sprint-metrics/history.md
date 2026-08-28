@@ -3620,3 +3620,33 @@ its own first draft: **7 of 13 "commands" were `${out}`, `${sep}` and `$((i+1))`
 **And it reported its gates honestly under a constraint.** `jq` is absent here, so it ran the structural
 half only and **said so, rather than quoting the 79-test total as a pass count** — the exact failure this
 shift logged two days ago on this same file.
+
+## 2026-08-28 — the enumeration found a second instance in a leg nobody had looked at
+
+#1089's rebase reintroduced a run-abort into the zip extraction loop, and the brief asked for a specific
+follow-up: **enumerate every early return you introduce inside a per-entry loop and check each against
+that loop's contract as it exists on `main` today.** One line, one loop — I expected the enumeration to
+confirm the single fix and cost nothing.
+
+It found a second instance in a different leg. **`transfer::download_tree` set `hard_err` on a commit
+failure, ending the transfer and short-circuiting every later entry.** On `main`, a held-open local file
+downloaded fine. Nobody had reported it, no test covered it, and it was not in the diff under review —
+it was reachable because CPE-1961 gave `commit()` a new way to fail and `download_tree` had been written
+against the old set.
+
+**The transferable part is the scope of the sweep, not the sweep itself.** I asked for the loop that was
+broken. The right question was *every caller of the thing I changed, against its own contract* — five
+legs, of which two were wrong, two were already right, and one aborts deliberately (recorded as a design
+decision, with the behaviour change it inherits written at its call site rather than left to be
+re-measured). **A new failure mode in a shared helper is a change to every caller's contract, whether or
+not the caller's file appears in the diff.**
+
+Worth keeping alongside it: the red-proof confirmed the thing the finding turned on. With the bad `?`
+restored, **`cpe1935_a_blocked_entry_never_takes_the_run_down` passes.** The guard for exactly this
+defect exists, is correct, and could not see it — because nothing in the tree drives a commit failure.
+**"There is a test for that" is a claim about the assertion, not about the inputs.**
+
+And one more instance of a habit that has served well tonight: the fix for the long-name stub leak
+widened an existing helper to cover two pre-existing arms, and the write-up says the newly-capped arm is
+**"unreachable from any constructible input"** — *at the site, not implied by a green run.* On this PR,
+which has spent four rounds on over-reaching claims, that is the sentence written the right way round.
