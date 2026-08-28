@@ -42,8 +42,15 @@ The delete-only control is what tells this apart from "the rename fails sometime
 unlinks the temp produces **zero** lying `Ok`s in 3,000 trials on either platform. The aliasing needs the
 re-link.
 
-**The victim's content was unchanged in all 24,000 trials across both platforms** (two independent
-runs per platform: Linux 2,783 then 2,834 aliased; Windows 5 then 6). So this is *not*
+**Reproduced independently (2026-08-27, PR #1070 round-3 Security re-audit).** A third party re-ran
+`cpe_1958_rename_source_report` at 3,000 trials on its own ext4 root and got **2,685 aliased / 2,685
+lying `Ok` / 0 victim-content changes**, with the delete-only control at **0**. That lands inside this
+ticket's own Linux spread (2,783 / 2,834), from a harness run nobody here set up — so the defect, its
+rate, *and* the "content never changes, the `Ok` lies" shape are all corroborated rather than
+self-reported.
+
+**The victim's content was unchanged in all 27,000 trials across both platforms** (Linux 2,783 / 2,834 /
+**2,685** aliased across three runs; Windows 5 then 6). So this is *not*
 CPE-1958's destruction bug, and CPE-1958's headline property — bytes can no longer reach a pre-existing
 object — holds. What lands on disk instead is:
 

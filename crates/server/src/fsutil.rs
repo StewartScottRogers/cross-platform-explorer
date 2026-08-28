@@ -3392,14 +3392,61 @@ fn carry_protections(
 ///
 /// # The policy, which is CPE-1739's and is not "best effort"
 ///
-/// **A filesystem that has no ACLs or no named streams has nothing to downgrade** — `FAT`/`exFAT`
-/// answer `ERROR_NOT_SUPPORTED`/`ERROR_INVALID_FUNCTION` and the save proceeds carrying nothing, which
-/// is the honest answer rather than a refusal on a USB stick. **A destination that HAS them and cannot
-/// be read fails the save**, temp removed and original untouched, exactly as `carry_protections`'
-/// `fchmod` arm does — because the alternative is handing the user back a file that more people can
-/// read than the one they replaced, silently. The xattr exception in [`carry_xattrs`] does not apply
-/// here: that one is swallowed because the kernel re-derives `security.*` itself, and there is no
-/// equivalent on the Windows side.
+/// **A destination that HAS something to carry and cannot be read fails the save**, temp removed and
+/// original untouched, exactly as `carry_protections`' `fchmod` arm does — because the alternative is
+/// handing the user back a file that more people can read than the one they replaced, silently. The
+/// xattr exception in [`carry_xattrs`] does not apply here: that one is swallowed because the kernel
+/// re-derives `security.*` itself, and there is no equivalent on the Windows side.
+///
+/// **The two branches are not symmetric, and this is deliberate.** An earlier draft of this paragraph
+/// said a volume with "no ACLs *or no named streams*" carries nothing and proceeds. That was true of
+/// only half the code and is corrected here:
+///
+/// - **DACL branch — three codes fall through.** `ERROR_NOT_SUPPORTED` / `ERROR_INVALID_FUNCTION` /
+///   `ERROR_CALL_NOT_IMPLEMENTED` from `GetKernelObjectSecurity` leave `security = None` and the save
+///   proceeds. `FAT`/`exFAT` have no security *to* lose, so carrying nothing downgrades nothing, and
+///   refusing to save on a USB stick would be the wrong answer.
+/// - **Streams branch — no allowlist at all: it fails closed on *every* error.** Any `ReOpenFile` or
+///   `BackupRead` failure, whatever the code, goes to `unreadable(...)` and **fails the save**. There
+///   is no `ERROR_NOT_SUPPORTED` escape hatch here.
+///
+/// The asymmetry is on purpose. "This volume has no ACLs" is a claim a filesystem can make truthfully;
+/// **"this volume has no named streams" is not distinguishable, from an error code, from "this
+/// redirector will not tell you about them"** — and swallowing the second silently drops a
+/// `Zone.Identifier` that may well exist, which is the exact Mark-of-the-Web downgrade this whole type
+/// was added to stop. Failing closed costs a save; failing open costs SmartScreen gating on a
+/// downloaded file, with no message. So the streams side refuses.
+///
+/// **The cost, stated: a redirector that refuses `ReOpenFile` turns every confirmed overwrite on it
+/// into a hard failure.** Measured working: NTFS, `FAT`/`exFAT` (which answer `BackupRead` fine —
+/// they simply have no `BACKUP_ALTERNATE_DATA` records), and the **Windows SMB redirector** over
+/// `\\localhost\C$\…`, where `ReOpenFile` + `BackupRead` go through `mrxsmb` and a 26-byte
+/// `Zone.Identifier` survives intact. **Unmeasured: the QNAP/Samba target on this LAN**, and
+/// non-Microsoft redirectors generally. If one of those is ever measured refusing `ReOpenFile`, the
+/// fix is a **measured** allowlist of the specific codes that box returns — mirroring the DACL branch
+/// — and not a blanket swallow, for the reason in the paragraph above.
+///
+/// # What is NOT carried — a stated gap, because this codebase states them
+///
+/// The capture asks for `DACL_SECURITY_INFORMATION` and nothing else. **Owner, group, and the SACL —
+/// including the mandatory integrity label — are dropped**, and the staged file gets its own. This is
+/// listed here because the fields above enumerate what *is* carried, and an enumeration that omits its
+/// own holes reads as completeness.
+///
+/// It is **unfixable rather than unfixed**, and all three gaps point the safe way:
+///
+/// - **Owner** becomes the saving user, exactly as it does for any rename-based save (including
+///   `main`'s, and every editor that writes via a temp file). Setting it back needs `WRITE_OWNER` on
+///   the staging handle, which — see [`read_alternate_data_streams`]'s doc — is *not* implicitly
+///   granted to an object's owner, so asking for it at `create_new` time could fail an ordinary save
+///   in order to fix a cosmetic field.
+/// - **Group** is vestigial on Windows outside POSIX-subsystem volumes.
+/// - **SACL**, integrity label included, cannot be *read* without `SE_SECURITY_NAME`
+///   (`SeSecurityPrivilege`), which an ordinary interactive user does not hold. Asking for it and
+///   failing would fail the save; asking for it and succeeding only for elevated users would make the
+///   behaviour depend on the token. A Low-integrity destination therefore comes back at the saver's
+///   own (typically Medium) IL — which **narrows** who may write it, not widens: the direction CPE-1739
+///   cares about is unaffected.
 ///
 /// # Residual, stated rather than hidden
 ///
@@ -3568,6 +3615,16 @@ impl HandleCarryover {
             )
         };
         let mut security: Option<Vec<u8>> = None;
+        // NOTE for whoever edits this next — the ONE fail-**open** arm in this function. The `if let
+        // Err` below means a sizing call that returned `Ok` falls out with `security = None` and the
+        // save proceeds carrying nothing, silently. Every other arm here fails closed. It is
+        // unreachable today: a null buffer of length 0 cannot hold a real self-relative descriptor
+        // (always >= 20 bytes: revision, control, and four offsets), so `GetKernelObjectSecurity`
+        // always returns `ERROR_INSUFFICIENT_BUFFER` here. Do not turn this into a path where `Ok`
+        // is reachable — e.g. by passing a small stack buffer instead of null, or by reusing this
+        // shape for a query that CAN legitimately succeed at size 0 — without giving the `Ok` arm an
+        // explicit refusal. Left as-is rather than given a defensive `else { return Err(...) }`
+        // because that branch would be untestable through this seam and would read as coverage.
         if let Err(e) = sized {
             let code = win32_status(&e);
             if code == ERROR_INSUFFICIENT_BUFFER.0 {
@@ -3810,8 +3867,25 @@ fn read_alternate_data_streams(
     /// `WIN32_STREAM_ID`'s fixed prefix: `dwStreamId`, `dwStreamAttributes`, `Size`,
     /// `dwStreamNameSize` — 4 + 4 + 8 + 4. The variable-length name follows it.
     const HEADER: usize = 20;
-    /// A ceiling on what is carried across, so a pathological file cannot turn one save into an
-    /// unbounded allocation. Named streams are ordinarily tens of bytes (`Zone.Identifier` is ~50).
+    /// A ceiling on the **accumulated carried bytes** — every `BACKUP_ALTERNATE_DATA` body plus its
+    /// header and name, summed. Named streams are ordinarily tens of bytes (`Zone.Identifier` is ~50),
+    /// so a destination over the cap is already unusual; over it, the save is refused outright with the
+    /// message below rather than committing a file that lost streams.
+    ///
+    /// **What this does NOT bound, stated because the earlier wording — "a pathological file cannot
+    /// turn one save into an unbounded allocation" — claimed more than the code does:** it bounds
+    /// *bodies*, not *names*. The `vec![0u8; name_len]` below is allocated from the raw `u32`
+    /// `dwStreamNameSize` of **every** record, skipped ones included, **before** any `CARRY_CAP`
+    /// arithmetic runs — so a single header claiming a 4 GiB name is a 4 GiB allocation, and an
+    /// allocation failure in Rust aborts the process rather than returning an error.
+    ///
+    /// Reaching it takes a **hostile filesystem driver**: NTFS caps a stream name at 255 characters,
+    /// and every record here comes from `BackupRead` on a handle the kernel itself filled in, so on any
+    /// real volume this is ~512 bytes. It is left unbounded on purpose — a sanity cap here could not be
+    /// reached through any seam this crate can build a test against (there is no injection point
+    /// between `BackupRead` and this loop), so it would be an untestable refusal sitting in the read
+    /// path, which by CPE-1929's rule reads as coverage without being it. Anyone who later introduces a
+    /// seam that lets a *caller* supply these bytes must add the cap in the same change.
     const CARRY_CAP: u64 = 8 * 1024 * 1024;
 
     let mut ctx: *mut core::ffi::c_void = std::ptr::null_mut();

@@ -136,6 +136,10 @@ open rather than inside the window, and even the unguarded control falls to **2 
 | E `copy_file_onto_no_follow` | 45 / 2,000 | 167 / 2,000 (686 planted) |
 
 **784 planted against B's 857** — the fixed arm did not get an easier attacker.
+**(superseded — see round 2.)** These are pre-#1066 figures and the claim is **false on Windows** at the
+merged state: re-measured, arm C faced **617** planted against arm B's **838**, about a quarter *fewer*.
+Arm C's zero is carried by the controls being hot in the same run, not by it facing the harder attacker.
+The round-2 tables below (and `fsutil.rs:8272-8280`) are the live numbers; this whole section is history.
 
 #### And on Linux (WSL, ext4 `/tmp`, 1,000 trials per arm)
 
@@ -416,3 +420,133 @@ corroboration, where it now sits beside two other runs that agree.
   first) **2,411 / 0 / 13**. Round 2 adds two tests and one `#[ignore]`d measurement harness.
 - `src-tauri cargo test --lib`, frontend `npm test`, and `cargo clippy --all-targets -- -D warnings` in
   both feature modes on both crates — figures in the PR body.
+
+## Work Log — round 3 (2026-08-27)
+
+An independent Security re-audit returned **SEC FINDINGS, no blocker**, and round 3 is **documentation
+only**: five fixes, no behaviour change, no new test. What the re-audit added is worth recording
+separately from the fixes, because it verified the PR's central property *mechanically* rather than by
+reading — an `awk`+`grep` over the whole `HandleCarryover` region for `std::fs::` / `OpenOptions` /
+`CreateFile` / `::open(` / `canonicalize` / `metadata(` / `PCWSTR` / `wide(` returns **five hits, all of
+them `&std::fs::File` type annotations in signatures**. Every syscall in the carry-over is handle-based.
+It also probed the *common* case the shipped test does not (ordinary inherited ACL, HIDDEN set, two named
+streams, one of them 3 MiB): no ACE duplication, no widening, attributes carried, both streams intact,
+main `$DATA` correct — and the same over the **Windows SMB redirector** (`\\localhost\C$\…`), where
+`ReOpenFile` + `BackupRead` work through `mrxsmb` and a 26-byte `Zone.Identifier` survives. All four
+round-2 sabotages reproduced exactly, **including the one that stays GREEN**
+(`PROTECTED_DACL_SECURITY_INFORMATION` forced off — the descriptor's own `SE_DACL_PROTECTED` control bit
+carries it, so the flag is redundant; recording that rather than claiming a red was the right call).
+`ReOpenFile` has **exactly one call site repo-wide**, so no sibling shares the flag-omission hazard.
+
+### F5 — a retraction that was complete in the code and standing in two other places
+
+This is the failure mode the re-audit was told to hunt, and it found it. Round 2's retraction of *"the
+fixed arm always got the harder attacker"* is complete at `fsutil.rs` (which names the Windows 617-vs-838
+inversion and says what carries arm C's zero instead). It was **not** complete in:
+
+1. **This ticket, at the round-1 table** — the sentence *"784 planted against B's 857 — the fixed arm did
+   not get an easier attacker"* stood unmarked, with its correction 170 lines further down. It now
+   carries `(superseded — see round 2)` **at that line**, with the replacement figures inline.
+2. **The PR description** — the same sentence, in the round-1 half, unmarked. It now carries the same
+   marker, and the round-1 measurement section carries a blockquote marking that whole half as history.
+
+And round 2's own sentence in the PR body — *"every table **in this PR** and in the code has been
+replaced"* — was **the overclaim**: true of the code, false of the description, whose round-1 tables were
+still sitting there. (The ticket's copy of that sentence was already correctly scoped to *"every table in
+the code"*.) The PR body now says the code's tables were replaced, the description's were **not**, and
+they are kept as marked history instead. A retraction complete in one file and standing in two is how a
+corrected claim gets re-quoted.
+
+### F1 — the doc contradicted the code; **the sentence was corrected, not the code**
+
+The policy paragraph said a filesystem with no ACLs *"or no named streams"* has nothing to downgrade and
+the save proceeds carrying nothing. The three-code fall-through (`NOT_SUPPORTED` / `INVALID_FUNCTION` /
+`CALL_NOT_IMPLEMENTED`) exists **only on the DACL branch**; on the streams side *any* `ReOpenFile` or
+`BackupRead` error goes to `unreadable(...)` and fails the save.
+
+**Decision: correct the sentence, do not mirror the allowlist.** The two branches are asymmetric on
+purpose and the doc now says so, at length. *"This volume has no ACLs"* is a claim a filesystem can make
+truthfully — FAT has no security to lose, so carrying nothing downgrades nothing. *"This volume has no
+named streams"* is **not distinguishable, from an error code, from** *"this redirector will not tell you
+about them"*, and swallowing the second silently drops a `Zone.Identifier` that may well exist — the exact
+Mark-of-the-Web downgrade this type was added to stop. Widening a refusal into a swallow, on the one axis
+the PR exists to defend, on an **unmeasured** guess, is the wrong direction; the redirector that *was*
+measured (Microsoft's, over `mrxsmb`) works.
+
+The cost is stated plainly at the site rather than left implicit: **a redirector that refuses
+`ReOpenFile` turns every confirmed overwrite on it into a hard failure.** Measured working: NTFS,
+FAT/exFAT, and the Windows SMB redirector. **Unmeasured: the QNAP/Samba box on this LAN**, and
+non-Microsoft redirectors generally. If one is ever measured refusing, the site says the fix is a
+**measured** allowlist of the codes that box actually returns, mirroring the DACL branch — never a
+blanket swallow.
+
+### F3 — the fourth user-visible consequence, now documented
+
+A destination carrying **>8 MiB of alternate data streams now fails the confirmed overwrite outright**
+(*"its alternate data streams are larger than 8388608 bytes…"*, original intact, no temp left); on `main`
+it saved fine. `src/docs/organizing-macros.md` had been updated for the other three consequences of the
+swap and not this one. Added as a fourth bullet (and the "three consequences" count corrected to four),
+naming the two real-world shapes that reach it — **Mac resource forks over SMB** (`AFP_Resource`) and
+large thumbnail/AV streams — saying the original is untouched and no temp is left, giving the workaround
+(convert from a plain local folder), and saying explicitly that this is **new** behaviour.
+
+### F4 — the gap stated at the site
+
+Only `DACL_SECURITY_INFORMATION` is captured; **owner, group and the SACL — mandatory integrity label
+included — are dropped**, and the struct enumerated what *is* carried without saying what is not. Now
+stated, with the reason it is **unfixable rather than unfixed**: owner becomes the saver as it does for
+any rename-based save, and setting it back needs `WRITE_OWNER` (not implicitly granted to an object's
+owner, so asking at `create_new` time could fail an ordinary save); group is vestigial on Windows; and
+reading a SACL needs `SE_SECURITY_NAME`, which an ordinary user lacks — asking and failing would fail the
+save, asking and succeeding only when elevated would make behaviour depend on the token. All three point
+the **safe** way; a Low-IL file returning at Medium *narrows* who may write it.
+
+### F2 — the `CARRY_CAP` comment narrowed to what it guarantees
+
+`read_alternate_data_streams` allocates `vec![0u8; name_len]` from the raw `u32` `dwStreamNameSize` of
+**every** record, skipped ones included, **before** any `CARRY_CAP` arithmetic — 4 GiB worst case, and a
+Rust allocation failure aborts. `CARRY_CAP`'s comment claimed *"a pathological file cannot turn one save
+into an unbounded allocation"*: **true of bodies, false of names.**
+
+**Decision: narrow the comment, do not add the cap.** Reaching it takes a **hostile filesystem driver** —
+NTFS caps stream names at 255 characters and every record here is filled in by the kernel on a handle, so
+this is ~512 bytes on any real volume. There is no injection point between `BackupRead` and the loop, so
+a sanity cap could not be red-proofed through any seam this crate can build, which by **CPE-1929's own
+rule** is an untestable refusal sitting in the read path that *reads as coverage without being it* — the
+one shape this codebase explicitly says not to leave behind. The comment now states exactly what is
+bounded (accumulated bodies + headers + names) and what is not (the per-record name pre-allocation),
+names the reachability requirement, and instructs anyone who later adds a seam letting a **caller**
+supply these bytes to add the cap in that same change.
+
+### Recorded, not fixed — the one fail-open arm
+
+If `GetKernelObjectSecurity`'s null-buffer sizing call ever returned `Ok`, the `if let Err(e) = sized`
+falls straight out with `security = None` and the save proceeds carrying nothing, silently — the only
+fail-**open** arm in a function where every other arm fails closed. It is unreachable: a real
+self-relative descriptor is always ≥20 bytes (revision, control, four offsets), so a null buffer of
+length 0 always returns `ERROR_INSUFFICIENT_BUFFER`. A defensive `else { return Err(…) }` would be
+untestable through this seam for the same reason as F2, so instead there is a **NOTE at the site**
+telling the next editor not to create a path where `Ok` is reachable — e.g. by passing a small stack
+buffer instead of null, or by reusing this shape for a query that *can* legitimately succeed at size 0 —
+without giving the `Ok` arm an explicit refusal.
+
+### The re-audit's own race numbers, added to CPE-1961
+
+Its 10,000-trial × 2-shape × 5-arm run on real ext4 put **D at 1,921 / 2,574** and **E at 2,706 / 2,122**
+per 10,000, against round 2's **630 / 97** and **799 / 107** — a **3× to 26× run-to-run spread on the
+same code**. Both are real measurements of the same defect; CPE-1961 now carries both, with an explicit
+*"do not quote this ticket at the low figures"* section and a range (**~1 in 100 to ~1 in 4**) rather
+than a point estimate, plus the note that on round-3's numbers D's second shape leads E's — so the two
+arms should not be ordered by rate, they should both be fixed.
+
+**This strengthens arm C rather than weakening it.** Arm C measured **0 / 10,000 in both shapes** in the
+very run where D and E were at their highest, facing **4,877 planted against arm B's 2,885** — the harder
+attacker, for a zero, with controls hot in both shapes. A zero taken against hot controls is worth more
+than a zero taken against sleepy ones. The re-audit also re-ran `cpe_1958_rename_source_report` at 3,000
+trials — **2,685 aliased / 2,685 lying `Ok` / 0 victim-content changes**, delete-only control **0** —
+which lands inside CPE-1963's own Linux spread, from a harness nobody here set up; recorded there.
+
+### Verification (round 3)
+
+Documentation-only, so the gates are re-run as a regression check rather than as evidence of new
+behaviour. Figures in the PR body.

@@ -96,12 +96,38 @@ and these agree:
 | PR #1070 round-1 worker | 167 / 2,000 | 54 / 1,000 |
 | PR #1070 round-2 **Reviewer**, independent run | **51 / 1,000** | **55 / 1,000** |
 | PR #1070 round-2 worker, re-taken on the MERGED state | **149 / 2,000** (710 planted) | **107 / 10,000** (9,658 planted) |
+| PR #1070 round-3 **Security re-audit**, independent run, ext4 | — (Linux only) | **2,706 / 10,000** and **2,122 / 10,000** (the two shapes) |
 
 So `claim_destination_handle` is live on both platforms in every run anyone has taken. The *rate* moves a
-lot with how the harness's timing falls — roughly 1 to 8 destroyed per 100 trials — so **do not read the
-spread as instability in the defect**; read it as the reason to re-take rather than quote. Arm D
-(`batch_media::open_output_verified`) re-measured at 1/2,000 Windows and 97/10,000 Linux in the same
-runs, so **E is still the higher-rate of the two and the one to fix first**.
+lot with how the harness's timing falls — so **do not read the spread as instability in the defect**;
+read it as the reason to re-take rather than quote.
+
+### Do NOT quote this ticket at the low Linux figures
+
+The round-2 worker's Linux numbers (**E 799 / 107**, **D 630 / 97** per 10,000) are the *lowest* anyone
+has measured, and the round-3 Security re-audit — 10,000 trials × 2 shapes × 5 arms, its own harness, on
+a real ext4 root — came back **much** higher on the same two arms:
+
+| arm | round-2 worker (per 10,000) | round-3 Security re-audit (per 10,000) |
+|---|---|---|
+| D `batch_media::open_output_verified` | 630 / 97 | **1,921 / 2,574** |
+| E `fsutil::copy_file_onto_no_follow` | 799 / 107 | **2,706 / 2,122** |
+
+That is a **3× to 26× spread run to run on the same code**, which is what a timing-sensitive racer does
+and is exactly why this section exists. Two consequences for whoever picks this up:
+
+1. **Quote a range, or re-take.** Roughly **1 in 100 to 1 in 4** confirmed operations destroyed,
+   depending on load. Citing "97 / 10,000" as *the* rate understates the defect by more than an order of
+   magnitude; citing 2,574 as *the* rate overstates the floor. Both are real measurements of the same
+   bug.
+2. **It strengthens CPE-1958's arm C rather than weakening it.** Arm C measured **0 / 10,000 in both
+   shapes** in the very run where D and E were at their *highest* — 4,877 planted against arm B's 2,885,
+   i.e. facing the harder attacker for that zero. A zero taken against hot controls is worth more than a
+   zero taken against sleepy ones.
+
+Arm D (`batch_media::open_output_verified`) is live in every run too, so **both arms in this ticket's
+title are confirmed by two independent harnesses**; on the round-2 numbers E led D, on the round-3
+numbers D's second shape led E's — so **do not order the fixes by rate**, fix both.
 
 ## Related: the OTHER half of the rename, now filed as CPE-1963
 

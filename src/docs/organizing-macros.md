@@ -152,7 +152,7 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   a temporary file alongside the destination and then swapped in, so a confirmed Convert can never write
   into a file that merely *shares* its content with the one you ticked — a second name for the same
   file, living somewhere outside the macro's folder, is not reachable this way. The cost is that the
-  file at that name is a **new file** afterwards, and three consequences follow from that:
+  file at that name is a **new file** afterwards, and four consequences follow from that:
     - Anything holding the old file open keeps seeing the old contents, and the file's identity (its
       inode / file ID) changes. A backup tool that tracks files by identity will treat it as new.
     - Its permissions and — on Windows — its **alternate data streams** are copied across deliberately,
@@ -163,6 +163,16 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
     - The Convert now needs permission to **create a file in the destination's folder**, not just to
       write the file itself. Where it doesn't have that, it stops with an error and leaves the original
       exactly as it was.
+    - **On Windows, a destination carrying more than 8 MB of alternate data streams is refused.** Those
+      streams have to be copied across for the swap to be lossless, and above that ceiling the Convert
+      stops with *"its alternate data streams are larger than 8388608 bytes"* rather than committing a
+      file that quietly lost them. **Your original is untouched and no temporary file is left behind.**
+      Ordinary streams are tiny — `Zone.Identifier` is about 50 bytes — so almost nothing hits this; the
+      cases that do are **Mac resource forks on a shared drive** (`AFP_Resource`, written by macOS over
+      SMB) and the occasional large thumbnail or antivirus stream. If you hit it, copy the file to a
+      plain local folder and convert it there. Note this is **new**: before this behaviour existed such
+      a file converted successfully — by writing into it in place, which is the unsafe thing the swap
+      replaced.
 - **On Windows, another program holding the file open can now block a confirmed Convert.** Photo
   viewers, media players and Explorer's preview pane hold files in a mode that allows reading and
   writing but not renaming, and the swap described above is a rename. When that happens you get
