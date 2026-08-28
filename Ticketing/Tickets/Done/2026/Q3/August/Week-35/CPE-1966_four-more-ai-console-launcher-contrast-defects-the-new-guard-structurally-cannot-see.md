@@ -3,7 +3,7 @@ id: CPE-1966
 title: four more AI Console launcher contrast defects — including the **only focus indicator** at 2.46:1 — that CPE-1921's new guard structurally cannot see
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -501,3 +501,52 @@ the first time and surfaces 40 implicit-anys in CDP payloads, none of them a def
   grounds screenshot-verified per scheme, 0 disagreeing.
 - Round 2's three verified fixes untouched and re-checked: `ratio()` x 1.6 still exits **2 in 0.19 s
   before Chrome**, all six anchors named.
+
+## Closing record — merged as PR #1087 (`574dcf8a`), 2026-08-28
+
+**Nine worker rounds, eight independent narrow re-reviews. Every review found a blocker. Not one was a
+code defect.** The final reviewer states it plainly: *"the code in this round is sound… the findings are
+claim-scope, all in the same shape the round exists to eliminate."*
+
+**What shipped.** A contrast sweep that reaches forced pseudo-states, hidden panels, animation frames and
+non-text roles; three legs that could print PASS on zero readings now floored out of `all`, the single
+array the report is built from; a `--json` verdict exiting on the same `analyse()` as the report; and a
+pixel cross-check that was **reporting 59/59 grounds disagreeing and exiting 0** made fatal — which then
+caught a real cross-platform discrepancy on its first outing.
+
+**The pixel work is the strongest engineering in it.** The sampler read a ground as the mode of 45
+interior samples, on a written premise that *"glyphs are a minority of an element's interior pixels."*
+Measured, that is false: one 25×14 span sampled **28 distinct colours in 45 points**, mode winning with
+13, and **six grounds never sampled their predicted colour at all** — passing only because whichever
+antialiased blend won landed within 1/255. Fixed **in the model, not the threshold**: glyph fill
+suppressed for the screenshot, the sample box intersected with every ancestor's and inset by each
+element's own radius/border/shadow **on two axes** (collapsing them demanded a 999px inset on an 18px
+badge), and flatness made a new fatal condition. **The author volunteered that its own new majority check
+would not have caught the original glyph bug** — 51%, one sample above the bar — and used that to argue
+for keeping the stricter check.
+
+**The eight claim-scope findings, because they are the actual artefact.** A gap list saying *all* with a
+member that didn't; a red-proof naming a mutation the code cannot express; a quantifier over JavaScript
+backed by a three-row table; a limit sentence refuted by 38 characters; **a fuzz sweep whose 36,861
+inputs deduped to ~120 distinct programs** because its generator lost precision in doubles; a committed
+tool whose triage guidance pointed at a table it provably cannot intersect; a *"which tables the oracle
+sweeps"* assertion that was itself **recalled rather than derived**; and finally a blind-spot list
+presented as closed while three more spellings walked past it.
+
+**What finally moved it was an instruction about the shape of sentences, not about a defect.** Round 9
+was briefed only *"do not write another closed list."* It withdrew the false backstop rather than
+repairing it, split its remaining gaps into *genuinely beyond one regex pass* versus *merely not covered
+today*, removed every count, and **declared the one shape still invisible** instead of widening until the
+list looked complete. It also found its own hazard: the new multi-line pattern reached back through the
+docblock's own example and reported a phantom table. **Nine rounds of precise corrections to precise
+claims; the correction was never the fix.**
+
+**Non-blocking note for whoever touches this file next.** `jsSource.test.ts` says the tempered gap
+*"cannot* run past one table and pin the assertion on an earlier name". The tempering is against a
+**line-start** head, so *"cannot"* is one qualifier too broad — three measured counter-examples exist
+(two declarations on one line; `stripJsComments` not preserving a newline; a template literal containing
+`const NOT_A_TABLE = 1;`). **All three produce failing assertions, none is a silent hole, and none is
+reachable today** because all ten real tables carry `: Case[]` annotations and never enter that leg.
+**Drop the "cannot" if the file is touched again.**
+
+Gates on the merge sha: 26 checks green, `GUI smoke (windows-latest)` skipped by design.
