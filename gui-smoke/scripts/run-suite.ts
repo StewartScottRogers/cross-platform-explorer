@@ -34,6 +34,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { DRIVER_PORTS } from "../lib/driverPorts.js";
 import { classifyLog } from "../lib/logSignature.js";
 import { reduceResultChunks } from "../lib/ratchet.js";
 import { readResultChunks } from "../lib/resultsDir.js";
@@ -45,8 +46,9 @@ import {
   MAX_SUITE_ATTEMPTS,
   type RetryDecision,
 } from "../lib/sessionRetry.js";
-import { assignShardSpecs, parseShardId } from "../lib/shard.js";
+import { assignShardSpecs, parseShardId, SHARD_MANIFEST_PREFIX } from "../lib/shard.js";
 import { listSpecFiles } from "../lib/specFiles.js";
+import { waitForPortFree } from "../lib/waitForPort.js";
 
 const RESULTS_DIR = process.env.GUI_SMOKE_RESULTS_DIR ?? path.resolve(process.cwd(), ".results");
 const SPECS_DIR = process.env.GUI_SMOKE_SPECS_DIR ?? path.resolve(process.cwd(), "specs");
@@ -127,18 +129,75 @@ function runSuiteOnce(): Promise<number> {
  *  double-counted by the ratchet nor corrupt the verdict job's cross-shard join with a duplicate spec.
  *  The captured LOG goes to `.results/suite-output.attempt-<n>.log`, which the suite-log artifact's
  *  widened `suite-output*.log` glob DOES pick up — that log is the evidence every occurrence of this
- *  failure was actually diagnosed from, so it is the one thing that must survive to the artifact. */
+ *  failure was actually diagnosed from, so it is the one thing that must survive to the artifact.
+ *
+ *  THE SHARD MANIFEST IS NOT AN ATTEMPT'S EVIDENCE AND MUST NOT MOVE. `.results/` holds two kinds of
+ *  `*.json`: the per-spec reporter chunks this loop is for, and `shard-manifest-<n>-of-<t>.json`, which
+ *  `npm run shard-manifest` writes ONCE, BEFORE the suite step, to declare what this shard owes. It
+ *  belongs to the JOB, not to an attempt. Archiving it into `attempt-<n>/` took it out of the flat
+ *  `path: gui-smoke/.results/*.json` upload, so a retried shard uploaded its results but not its
+ *  manifest — and the verdict job's join then reported `MISSING SHARD: shard N never reported a
+ *  manifest. Its spec files did not run`, which is false twice over (it ran, twice, and it passed).
+ *  A green shard turning the gui-smoke leg red with a wrong message, on the exact scenario this script
+ *  exists to handle, is worse than the `SUITE DID NOT COMPLETE` it replaces.
+ *
+ *  Excluded by NAME through the same `SHARD_MANIFEST_PREFIX` `lib/resultsDir.ts:54` filters on, not by
+ *  shape and not by a second literal — that module had this identical hazard and this identical answer
+ *  one file over, and `resultsDir.test.ts` already carries a case for the co-location. */
 function archiveAttempt(attempt: number): void {
   const dir = path.join(RESULTS_DIR, `attempt-${attempt}`);
   fs.mkdirSync(dir, { recursive: true });
   for (const file of fs.readdirSync(RESULTS_DIR)) {
-    if (!file.endsWith(".json")) continue;
+    if (!file.endsWith(".json") || file.startsWith(SHARD_MANIFEST_PREFIX)) continue;
     fs.renameSync(path.join(RESULTS_DIR, file), path.join(dir, file));
   }
   if (fs.existsSync(SUITE_LOG)) {
     fs.copyFileSync(SUITE_LOG, path.join(RESULTS_DIR, `suite-output.attempt-${attempt}.log`));
   }
   log(`[gui-smoke session-retry] archived attempt ${attempt}'s results to ${dir} and its log alongside it.`);
+}
+
+/** How long to wait for the previous attempt's driver to release each fixed port. Generous because it is
+ *  only ever paid when a listener really is still up — the common path is one refused connect, in
+ *  single-digit milliseconds. */
+const PORT_RELEASE_BUDGET_MS = 15_000;
+
+/**
+ * Between two attempts, wait until tauri-driver's two fixed ports are actually free again.
+ *
+ * `wdio.conf.ts`'s teardown is `killTauriDriver` → a bare, non-waiting `tauriDriver?.kill()`, and the
+ * native WebDriver behind it is a grandchild nothing signals at all. So attempt 1's listeners can still
+ * be up when this process's `close` fires, and attempt 2's `startTauriDriver` binds the SAME two ports.
+ * Its readiness wait would then succeed against the dying listener while the real bind failed, and
+ * `startTauriDriver`'s `exit` handler would take the worker down with `process.exit(1)` — the retry
+ * failing for a reason that has nothing to do with what it was retrying.
+ *
+ * This is the cross-process twin of what `wdio.conf.ts#respawnTauriDriver` already does in-process with
+ * `killAndWaitForExit`, and its comment names this exact race: *"racing that would have the readiness
+ * wait below succeed against the DYING listener"*. A job-level retry cannot reach that child handle, so
+ * it waits on the observable fact instead.
+ *
+ * Never fatal. A port that never frees is reported LOUDLY and the attempt proceeds, because the attempt's
+ * own bind is the authoritative evidence and a bounded settle guessing wrong must not be the thing that
+ * ends the run. `waitForPortFree` returns a boolean precisely so "did not settle" cannot be mistaken for
+ * "settled".
+ */
+async function settleDriverPorts(): Promise<void> {
+  for (const { port, label } of DRIVER_PORTS) {
+    const started = Date.now();
+    const free = await waitForPortFree("127.0.0.1", port, PORT_RELEASE_BUDGET_MS);
+    const took = Date.now() - started;
+    if (free) {
+      log(`[gui-smoke session-retry] port ${port} (${label}) is free after ${took} ms — safe to respawn.`);
+    } else {
+      log(
+        `[gui-smoke session-retry] WARNING: port ${port} (${label}) was STILL accepting connections after ` +
+          `${took} ms. Starting the next attempt anyway: its own readiness wait and bind are the ` +
+          "authoritative evidence, and if it does fail, THIS line is the reason — a leftover listener from " +
+          "the previous attempt, not a new fault.",
+      );
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -197,6 +256,7 @@ async function main(): Promise<void> {
 
     if (!decision.retry) break;
     archiveAttempt(attempt);
+    await settleDriverPorts();
   }
 
   // LOUD, and only when something actually recovered. `attempt > 1` covers a job-level retry;
@@ -204,7 +264,16 @@ async function main(): Promise<void> {
   // outside ~14,000 lines of raw log even though 6 of 40 sampled shard-2 jobs used one. Reporting the
   // second is the larger half of "silent retries hide a worsening rate" (CPE-1893).
   if (attempt > 1 || driverRespawns > 0) {
-    const summary = { shardIndex, attempts: attempt, driverRespawns, finalDecision: decision, attemptNotes };
+    // `maxAttempts: budget` — the budget this run really used, NOT `MAX_SUITE_ATTEMPTS`. With
+    // `GUI_SMOKE_MAX_ATTEMPTS=3` the constant would render "3 of 2 allowed".
+    const summary = {
+      shardIndex,
+      attempts: attempt,
+      driverRespawns,
+      finalDecision: decision,
+      attemptNotes,
+      maxAttempts: budget,
+    };
     for (const line of formatRetryLogLines(summary)) log(line);
     const summaryPath = process.env.GITHUB_STEP_SUMMARY;
     if (summaryPath) {

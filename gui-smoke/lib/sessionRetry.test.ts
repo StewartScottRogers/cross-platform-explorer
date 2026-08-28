@@ -193,6 +193,7 @@ describe("the loud block", () => {
     driverRespawns: 1,
     finalDecision: decision({ signature: classifyLog("clean"), reportedSpecFiles: 14, expectedSpecFiles: 14 }),
     attemptNotes: ["attempt one died", "attempt two completed"],
+    maxAttempts: MAX_SUITE_ATTEMPTS,
   };
 
   it("names both counts in the markdown, so neither recovery can go quiet", () => {
@@ -207,5 +208,19 @@ describe("the loud block", () => {
     const text = formatRetryLogLines(summary).join("\n");
     assert.match(text, /job-level suite retries used \.+ 1/);
     assert.match(text, /in-process driver respawns \.+ 1/);
+  });
+
+  // ROUND 2. Both formatters printed the MAX_SUITE_ATTEMPTS constant while `run-suite.ts`'s loop ran on
+  // `maxAttempts()` — which honours `GUI_SMOKE_MAX_ATTEMPTS`. With the override set to 3, a run that used
+  // all three attempts rendered "3 of 2 allowed": a summary contradicting the run it summarises. The
+  // budget is now passed through, and this pins it at a value the constant CANNOT produce, so a revert to
+  // `MAX_SUITE_ATTEMPTS` reds instead of coincidentally matching.
+  it("reports the budget the run ACTUALLY used, not the default constant", () => {
+    const overridden = { ...summary, attempts: 3, maxAttempts: MAX_SUITE_ATTEMPTS + 1 };
+    const md = formatRetrySummaryMarkdown(overridden).join("\n");
+    const text = formatRetryLogLines(overridden).join("\n");
+    assert.match(md, new RegExp(`suite attempts run \\| \\*\\*3\\*\\* of ${MAX_SUITE_ATTEMPTS + 1} allowed`));
+    assert.match(text, new RegExp(`suite attempts run \\.+ 3 of ${MAX_SUITE_ATTEMPTS + 1}`));
+    assert.doesNotMatch(md, new RegExp(`of ${MAX_SUITE_ATTEMPTS} allowed`));
   });
 });

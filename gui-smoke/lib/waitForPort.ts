@@ -53,3 +53,54 @@ export function waitForPort(
     attempt();
   });
 }
+
+/**
+ * The MIRROR of `waitForPort`: polls until NOTHING is accepting connections on `host:port`, i.e. the
+ * previous listener has actually released it.
+ *
+ * CPE-1910 round 2. `scripts/run-suite.ts` spawns attempt 2 the instant attempt 1's process tree closes,
+ * and attempt 2's `startTauriDriver` binds the same two FIXED ports (4444/4445) that attempt 1 was using.
+ * `wdio.conf.ts`'s own teardown (`killTauriDriver`) is a bare non-waiting `tauriDriver?.kill()`, which
+ * returns the moment SIGTERM is queued — not when the process is gone. `wdio.conf.ts`'s in-process
+ * respawn already refuses to race exactly this, in its own words: *"a `.kill()` returns the instant
+ * SIGTERM is queued, not when the process is gone, and racing that would have the readiness wait below
+ * succeed against the DYING listener"*, and it solves it with `killAndWaitForExit`. A job-level retry
+ * crosses a process boundary, so it cannot reuse that handle — this is the same guarantee from outside.
+ *
+ * The consequence of skipping it is not a slow start, it is a WRONG SUCCESS: attempt 2's `waitForPort`
+ * connects to attempt 1's dying listener, calls the driver ready, and the real tauri-driver's bind then
+ * fails — whereupon `startTauriDriver`'s own `exit` handler calls `process.exit(1)`. Port 4445 is the
+ * worse of the two: the native WebKitWebDriver is a GRANDCHILD, never signalled directly, and it is
+ * precisely the process already in a bad state on the path being retried.
+ *
+ * Resolves `true` when the port is free, `false` on timeout — a boolean rather than a rejection because
+ * the caller (a retry driver) must be able to say loudly that the settle did not happen and still let the
+ * attempt proceed to produce the authoritative error. `false` is never silently equivalent to `true`.
+ *
+ * NOT a fixed sleep, for `waitForPort`'s reasons above: on the overwhelmingly common path the port is
+ * already free and the first probe returns in single-digit milliseconds, so a retry pays nothing.
+ */
+export function waitForPortFree(
+  host: string,
+  port: number,
+  budgetMs: number,
+  intervalMs = 200,
+): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  return new Promise((resolve) => {
+    const attempt = (): void => {
+      const socket = net.connect({ host, port }, () => {
+        // Someone is still accepting. Close our probe and try again until the deadline.
+        socket.end();
+        if (Date.now() >= deadline) resolve(false);
+        else setTimeout(attempt, intervalMs);
+      });
+      socket.on("error", () => {
+        // Connect refused/failed — nothing is listening, which is what "free" means here.
+        socket.destroy();
+        resolve(true);
+      });
+    };
+    attempt();
+  });
+}

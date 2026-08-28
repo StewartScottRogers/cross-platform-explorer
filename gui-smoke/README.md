@@ -613,12 +613,31 @@ raw log said so. A recovery nobody is told about is indistinguishable from a run
 problem, which is how a worsening rate hides (CPE-1893). **A rising count in that table is a regression
 in the runner even while every job stays green.**
 
-**Evidence survives a retry.** The superseded attempt's captured log is kept as
-`.results/suite-output.attempt-1.log` and ships in the `gui-smoke-suite-log-ubuntu-shard-N` artifact
-(whose glob is `suite-output*.log` for exactly this reason) — that log is what every occurrence of this
-failure has actually been diagnosed from. Its per-spec JSON moves to `.results/attempt-1/`, deliberately
-out of both the flat `*.json` upload and the verdict job's join, where a duplicate spec entry would
-corrupt the cross-shard verdict.
+**Most of the evidence survives a retry — the log and the JSON do, the screenshots do not.** The
+superseded attempt's captured log is kept as `.results/suite-output.attempt-1.log` and ships in the
+`gui-smoke-suite-log-ubuntu-shard-N` artifact (whose glob is `suite-output*.log` for exactly this reason)
+— that log is what every occurrence of this failure has actually been diagnosed from. Its per-spec JSON
+moves to `.results/attempt-1/`, deliberately out of both the flat `*.json` upload and the verdict job's
+join, where a duplicate spec entry would corrupt the cross-shard verdict. **`.screenshots/` is not
+attempt-scoped**, so attempt 2 overwrites attempt 1's images at the same file names: on a retried run the
+screenshot artifact shows the attempt that succeeded, never the one that died. That is survivable
+precisely because a session that died before asserting has nothing worth photographing — but do not go
+looking in the screenshots for the failure; the `attempt-1` log is where it is.
+
+**The shard manifest is NOT archived.** `.results/` holds two kinds of `*.json` — the per-spec reporter
+chunks, and `shard-manifest-<n>-of-<t>.json`, written once by `npm run shard-manifest` *before* the suite
+step. The manifest belongs to the JOB, not to an attempt, and `archiveAttempt` skips it by name (the same
+`SHARD_MANIFEST_PREFIX` filter `lib/resultsDir.ts` uses). Moving it would take it out of the flat
+`path: gui-smoke/.results/*.json` upload, and the verdict job's join would then red the whole gui-smoke
+leg with `MISSING SHARD … never reported a manifest` about a shard that ran twice and passed —
+`lib/runSuite.integration.test.ts` pins this end to end, through the real verdict-mode ratchet.
+
+**Between attempts, the driver's two fixed ports are waited free.** wdio's teardown kills tauri-driver
+without waiting, and the native WebDriver behind it is a grandchild nothing signals at all, so attempt 2
+could otherwise bind-race attempt 1's dying listeners on 4444/4445 — its readiness wait would succeed
+against the corpse while the real bind failed. `settleDriverPorts` is the cross-process twin of
+`wdio.conf.ts#respawnTauriDriver`'s `killAndWaitForExit`. It is a poll, not a sleep: the usual cost is one
+refused connect, and a port that never frees is logged loudly rather than made fatal.
 
 **It fails closed.** A log it cannot read is *not* "no problem found": it refuses to retry and says the
 classifier did not run. If the retry driver itself cannot work — the suite command will not spawn, a

@@ -23,15 +23,29 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 
+import { shardManifestFileName } from "./shard.js";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GUI_SMOKE = path.resolve(HERE, "..");
 const RUN_SUITE = path.join(GUI_SMOKE, "scripts", "run-suite.ts");
 const RUN_RATCHET = path.join(GUI_SMOKE, "scripts", "run-ratchet.ts");
+const WRITE_MANIFEST = path.join(GUI_SMOKE, "scripts", "write-shard-manifest.ts");
 /** RESOLVED, not hard-coded to `node_modules/tsx/dist/cli.mjs`: that path is tsx's private build layout
  *  and has moved between majors, and a wrong path here would fail every case below for a reason that
  *  looks like the feature being broken. `tsx/cli` is the package's own declared entry. */
 const TSX_CLI = createRequire(import.meta.url).resolve("tsx/cli");
 const SPEC_NAMES = ["alpha.smoke.ts", "beta.smoke.ts", "gamma.smoke.ts"];
+
+/** The Linux leg is ALWAYS sharded, so the fixture is too. One shard of one keeps every existing
+ *  expectation (all three spec files are owed) while putting the run through the same code path CI takes:
+ *  `parseShardId` succeeds, a manifest exists in `.results/` before the suite starts, and the ratchet
+ *  scopes to a shard. The original fixture ran unsharded, which is why the manifest hazard below was
+ *  invisible to it — the file it destroys was never there to destroy. */
+const SHARD_ENV = { GUI_SMOKE_SHARD_INDEX: "1", GUI_SMOKE_SHARD_TOTAL: "1" };
+/** DERIVED, not spelled out (CPE-1933): the file name comes from the same production helper
+ *  `scripts/write-shard-manifest.ts` names its output with, so renaming the manifest moves both together
+ *  instead of leaving a stale literal here that quietly stops matching anything. */
+const MANIFEST_NAME = shardManifestFileName({ shardIndex: 1, shardTotal: 1 });
 
 const made: string[] = [];
 after(() => {
@@ -45,13 +59,21 @@ interface Fixture {
 }
 
 /**
- * A throwaway gui-smoke world: three spec files, an empty known-failing list, and a stub suite whose
- * behaviour per attempt is read from `script.json`.
+ * A throwaway gui-smoke world: three spec files, an empty known-failing list, a SHARD MANIFEST, and a
+ * stub suite whose behaviour per attempt is read from `script.json`.
  *
  * Each entry is one attempt: `report` names the spec files that manage to report, `pass` whether their
  * single case passes, and `log` the captured output that attempt prints. The stub appends to a counter so
  * attempt 2 can differ from attempt 1 — which is the only way to prove a retry actually re-ran anything
  * rather than re-reading the first attempt's leftovers.
+ *
+ * **The manifest is seeded by running the REAL `scripts/write-shard-manifest.ts`, in the same order CI
+ * runs it (`gui-smoke.yml:775`, before the suite step), and this is a round-2 fix rather than decoration.**
+ * Round 1's fixture was unsharded and so had no manifest anywhere in `.results/` — which is exactly why
+ * `archiveAttempt` moving every `*.json` out of the flat directory passed six green integration cases
+ * while, in CI, it would have taken the manifest with it and made the verdict job report the shard as
+ * never having run. A fixture that omits a file CI always has cannot catch a bug about that file, so the
+ * fixture is corrected first and the assertion added second.
  */
 function fixture(script: { report: string[]; pass: boolean; log: string }[]): Fixture {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cpe-1910-e2e-"));
@@ -88,6 +110,19 @@ function fixture(script: { report: string[]; pass: boolean; log: string }[]): Fi
     ].join("\n"),
   );
 
+  // The manifest, written by production code into the real `.results/`, before any attempt runs.
+  const manifest = spawnSync(process.execPath, [TSX_CLI, WRITE_MANIFEST], {
+    cwd: GUI_SMOKE,
+    encoding: "utf8",
+    env: { ...process.env, ...SHARD_ENV, GUI_SMOKE_RESULTS_DIR: results, GUI_SMOKE_SPECS_DIR: specs },
+  });
+  assert.equal(manifest.status, 0, `${manifest.stdout}${manifest.stderr}`);
+  assert.ok(
+    fs.existsSync(path.join(results, MANIFEST_NAME)),
+    `the fixture must start with a shard manifest in .results/, as every sharded CI job does; ` +
+      `write-shard-manifest.ts left ${JSON.stringify(fs.readdirSync(results))}`,
+  );
+
   return { root, results, summary: path.join(root, "step-summary.md") };
 }
 
@@ -101,16 +136,29 @@ function runSuite(f: Fixture): { status: number; out: string; attempts: number }
       GUI_SMOKE_SPECS_DIR: path.join(f.root, "specs"),
       GUI_SMOKE_SUITE_CMD: `"${process.execPath}" "${path.join(f.root, "stub-suite.mjs")}"`,
       GITHUB_STEP_SUMMARY: f.summary,
-      // Unsharded: the expectation is the whole three-file tree.
-      GUI_SMOKE_SHARD_INDEX: "",
-      GUI_SMOKE_SHARD_TOTAL: "",
+      // Shard 1 of 1: sharded like CI, and the one shard owes the whole three-file tree, so every
+      // count below is the same number an unsharded run would have produced.
+      ...SHARD_ENV,
     },
   });
   const attempts = fs.readFileSync(path.join(f.root, "attempts.txt"), "utf8").split("\n").filter(Boolean).length;
   return { status: r.status ?? -1, out: `${r.stdout}${r.stderr}`, attempts };
 }
 
+/** The SHARD job's ratchet step (`gui-smoke.yml:891`): sharded, no `GUI_SMOKE_EXPECT_SHARDS`. */
 function runRatchet(f: Fixture): { status: number; out: string } {
+  return ratchet(f, { ...SHARD_ENV, GUI_SMOKE_EXPECT_SHARDS: "" });
+}
+
+/** The VERDICT job's ratchet step (`gui-smoke.yml:1048`): unsharded, `GUI_SMOKE_EXPECT_SHARDS` set, run
+ *  over the merged download of every shard's flat `gui-smoke/.results/*.json` upload. This is the mode in
+ *  which a missing manifest becomes `MISSING SHARD … never reported a manifest`, so it is the only mode
+ *  that can speak to the archiving hazard. */
+function runVerdictRatchet(f: Fixture): { status: number; out: string } {
+  return ratchet(f, { GUI_SMOKE_SHARD_INDEX: "", GUI_SMOKE_SHARD_TOTAL: "", GUI_SMOKE_EXPECT_SHARDS: "1" });
+}
+
+function ratchet(f: Fixture, shardEnv: Record<string, string>): { status: number; out: string } {
   const r = spawnSync(
     process.execPath,
     [TSX_CLI, RUN_RATCHET],
@@ -122,9 +170,7 @@ function runRatchet(f: Fixture): { status: number; out: string } {
         GUI_SMOKE_RESULTS_DIR: f.results,
         GUI_SMOKE_SPECS_DIR: path.join(f.root, "specs"),
         GUI_SMOKE_KNOWN_FAILING: path.join(f.root, "known-failing.json"),
-        GUI_SMOKE_SHARD_INDEX: "",
-        GUI_SMOKE_SHARD_TOTAL: "",
-        GUI_SMOKE_EXPECT_SHARDS: "",
+        ...shardEnv,
       },
     },
   );
@@ -179,6 +225,59 @@ describe("run-suite.ts — a session that dies before asserting", () => {
     assert.equal(suite.attempts, 1);
     assert.match(suite.out, /nothing to report/);
     assert.equal(fs.existsSync(f.summary), false);
+  });
+
+  it("leaves the shard manifest in the FLAT results dir, so the verdict job still sees this shard", () => {
+    // ROUND-2 REGRESSION TEST. `archiveAttempt` moved every `*.json` out of `.results/`, manifest
+    // included. The workflow's results upload is `path: gui-smoke/.results/*.json` — flat, NOT recursive
+    // — so a retried shard uploaded its per-spec chunks but not its manifest, and the verdict job's join
+    // (clause 9) then failed the whole gui-smoke leg with `MISSING SHARD: shard N of 4 never reported a
+    // manifest. Its spec files did not run` about a shard that ran twice and passed. On the ONE scenario
+    // this script exists for, a green shard produced a red, false verdict.
+    //
+    // RED-PROOFED BY HAND, result at the site rather than only in the PR body: reverting
+    // `archiveAttempt`'s filter to the original `if (!file.endsWith(".json")) continue;` fails exactly
+    // these 2 of the 9 cases in this file — this one on `existsSync` (`.results/` came back as
+    // `["attempt-1","suite-output.attempt-1.log","suite-output.log","wdio-alpha…","wdio-beta…",
+    // "wdio-gamma…"]`, manifest gone), and the verdict-join case below on `MISSING SHARD`. Restoring the
+    // filter returns 9/9. Two cases, not one, deliberately: the file location and the verdict it produces
+    // are separate facts, and a reader who only ever sees the first would not know what it costs.
+    const f = fixture([
+      { report: ["alpha.smoke.ts"], pass: true, log: SOCKET_DEATH },
+      { report: SPEC_NAMES, pass: true, log: "all specs ran" },
+    ]);
+    const suite = runSuite(f);
+    assert.equal(suite.attempts, 2, suite.out);
+
+    assert.ok(
+      fs.existsSync(path.join(f.results, MANIFEST_NAME)),
+      `${MANIFEST_NAME} must stay in the flat .results/ — it belongs to the JOB, not to an attempt, and ` +
+        `the workflow's upload glob does not descend into attempt-<n>/. Found ` +
+        `${JSON.stringify(fs.readdirSync(f.results))}`,
+    );
+    assert.equal(
+      fs.existsSync(path.join(f.results, "attempt-1", MANIFEST_NAME)),
+      false,
+      "the manifest must not be archived either — one copy, in the flat directory",
+    );
+  });
+
+  it("and the verdict job's join therefore passes, instead of reporting the shard as never run", () => {
+    // The consequence of the case above, end to end through the REAL ratchet in the REAL verdict-job
+    // mode. Without the filter this printed `MISSING SHARD: shard 1 of 1 never reported a manifest. Its
+    // spec files did not run` and exited 1 — about a shard that ran twice and passed. A shard job green,
+    // the gui-smoke leg red, and the message false: strictly worse than the diagnosable
+    // `SUITE DID NOT COMPLETE` this whole script replaces.
+    const f = fixture([
+      { report: ["alpha.smoke.ts"], pass: true, log: SOCKET_DEATH },
+      { report: SPEC_NAMES, pass: true, log: "all specs ran" },
+    ]);
+    assert.equal(runSuite(f).attempts, 2);
+
+    const verdict = runVerdictRatchet(f);
+    assert.equal(verdict.status, 0, verdict.out);
+    assert.match(verdict.out, /JOIN MODE — .*manifests received from shard\(s\): 1\./s);
+    assert.doesNotMatch(verdict.out, /MISSING SHARD/);
   });
 
   it("stops after one retry and leaves the shard RED when the transport dies twice", () => {
@@ -246,8 +345,7 @@ describe("run-suite.ts — fails closed", () => {
           GUI_SMOKE_SPECS_DIR: path.join(f.root, "specs"),
           GUI_SMOKE_MAX_ATTEMPTS: "not-a-number",
           GUI_SMOKE_SUITE_CMD: `"${process.execPath}" "${path.join(f.root, "stub-suite.mjs")}"`,
-          GUI_SMOKE_SHARD_INDEX: "",
-          GUI_SMOKE_SHARD_TOTAL: "",
+          ...SHARD_ENV,
         },
       },
     );

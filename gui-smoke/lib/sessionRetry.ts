@@ -39,11 +39,18 @@ import { type LogSignatureResult } from "./logSignature.js";
 /** One extra attempt. Two attempts total.
  *
  *  Not tunable upward without re-reading the measurement above: the population this catches is a SECOND
- *  transport death inside one shard, i.e. the tail of a ~15% per-job event, and each attempt costs a
- *  full shard (6-14 min). A budget of 2+ would spend half an hour of runner time chasing something that
- *  by then is a reportable defect rather than a blip — and, worse, would start hiding a genuinely
- *  worsening rate behind green runs, which is the CPE-1893 failure this ticket's own acceptance criteria
- *  forbid. */
+ *  transport death inside one shard, i.e. the tail of a ~15% per-job event.
+ *
+ *  WHAT AN ATTEMPT COSTS, MEASURED (round 2, over all 71 completed shard-2 jobs in the window above; an
+ *  earlier draft of this comment asserted "6-14 min" from nobody's stopwatch): the `Run smoke suite` step
+ *  is **1-2 min** and the whole shard job **2-3 min** — job `98661503323`'s suite step took **119 s**. So
+ *  a retry is genuinely cheap and lands nowhere near the 30-minute `timeout-minutes` on the shard job
+ *  (`gui-smoke.yml:628`); the budget of 2 is NOT sized by runtime.
+ *
+ *  It is sized by what a third attempt would MEAN. A transport that dies twice inside one job is a
+ *  reportable defect rather than a blip, and re-running it again would start hiding a genuinely worsening
+ *  rate behind green runs — the CPE-1893 failure this ticket's own acceptance criteria forbid. That is
+ *  the whole argument, and it does not move if the runtime does. */
 export const MAX_SUITE_ATTEMPTS = 2;
 
 /** The literal substring `wdio.conf.ts#respawnTauriDriver` prints on each CPE-1955 in-process respawn.
@@ -225,6 +232,13 @@ export interface RetrySummaryInput {
   finalDecision: RetryDecision;
   /** Per-attempt one-liners, in order. */
   attemptNotes: string[];
+  /** The budget this run ACTUALLY ran on — `run-suite.ts`'s `maxAttempts()`, which is
+   *  `GUI_SMOKE_MAX_ATTEMPTS` when set and `MAX_SUITE_ATTEMPTS` otherwise.
+   *
+   *  Round 2: these two formatters used to print `MAX_SUITE_ATTEMPTS` directly while the loop ran on the
+   *  override, so `GUI_SMOKE_MAX_ATTEMPTS=3` rendered the impossible "3 of 2 allowed". A summary that
+   *  contradicts the run it is summarising is worse than one that omits the number. */
+  maxAttempts: number;
 }
 
 /** Markdown for `$GITHUB_STEP_SUMMARY`. Emitted whenever ANYTHING recovered — a job-level retry OR a
@@ -233,14 +247,14 @@ export interface RetrySummaryInput {
  *  (a heading, a warning glyph, explicit counts) and deliberately NOT a gate: it never changes an exit
  *  code, so it can be read as evidence without being argued with. */
 export function formatRetrySummaryMarkdown(input: RetrySummaryInput): string[] {
-  const { shardIndex, attempts, driverRespawns, finalDecision, attemptNotes } = input;
+  const { shardIndex, attempts, driverRespawns, finalDecision, attemptNotes, maxAttempts } = input;
   const who = shardIndex === undefined ? "GUI smoke suite" : `GUI smoke shard ${shardIndex}`;
   const lines: string[] = [
     `### ⚠️ ${who} — WebDriver session recovery happened on this run (CPE-1910)`,
     "",
     `| what | count |`,
     `| --- | --- |`,
-    `| suite attempts run | **${attempts}** of ${MAX_SUITE_ATTEMPTS} allowed |`,
+    `| suite attempts run | **${attempts}** of ${maxAttempts} allowed |`,
     `| job-level suite retries used | **${attempts - 1}** |`,
     `| in-process tauri-driver respawns (CPE-1955) | **${driverRespawns}** |`,
     "",
@@ -262,12 +276,12 @@ export function formatRetrySummaryMarkdown(input: RetrySummaryInput): string[] {
 
 /** The same facts for the plain job log, where most readers actually look first. */
 export function formatRetryLogLines(input: RetrySummaryInput): string[] {
-  const { shardIndex, attempts, driverRespawns, finalDecision } = input;
+  const { shardIndex, attempts, driverRespawns, finalDecision, maxAttempts } = input;
   const who = shardIndex === undefined ? "suite" : `shard ${shardIndex}`;
   return [
     "==================================================================================",
     `[gui-smoke session-retry] ${who.toUpperCase()} RECOVERED FROM A WEBDRIVER SESSION DEATH (CPE-1910)`,
-    `[gui-smoke session-retry]   suite attempts run ................ ${attempts} of ${MAX_SUITE_ATTEMPTS}`,
+    `[gui-smoke session-retry]   suite attempts run ................ ${attempts} of ${maxAttempts}`,
     `[gui-smoke session-retry]   job-level suite retries used ...... ${attempts - 1}`,
     `[gui-smoke session-retry]   in-process driver respawns ........ ${driverRespawns} (CPE-1955)`,
     `[gui-smoke session-retry]   final decision .................... ${finalDecision.code}`,

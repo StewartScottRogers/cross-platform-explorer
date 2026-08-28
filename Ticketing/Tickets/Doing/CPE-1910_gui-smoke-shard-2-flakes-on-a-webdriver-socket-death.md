@@ -164,3 +164,65 @@ npm project.
 **Follow-up worth filing:** make `checkpoint-restore.smoke.ts`'s `resetAppState` succeed. It is the single
 upstream cause — it takes the session-restart path from 71-of-71 to near zero, and would make both
 CPE-1955's respawn and this retry near-dead code rather than load-bearing.
+**FILED as CPE-1979** in round 2, at the reviewer's instruction, so it is a queue item rather than a
+paragraph at the bottom of a closed ticket.
+
+---
+
+## Round 2 (2026-08-28)
+
+The reviewer reproduced every measurement above and strengthened several of them (the crux is **24 of
+26**, not 24 of 27; the pre/post-CPE-1955 split is **2 fatal of 26** → **0 fatal of 45, 8 respawned**;
+the disjointness of the two sabotage sets was re-run and `comm -12` on them is **empty**). One blocker,
+one should-fix, three nits.
+
+**BLOCKER — `archiveAttempt` archived the shard manifest, and the verdict job then said the shard never
+ran.** `.results/` holds two kinds of `*.json`: the per-spec reporter chunks the loop is for, and
+`shard-manifest-<n>-of-<t>.json`, written by `npm run shard-manifest` at `gui-smoke.yml:775` **before**
+the suite step. The loop moved both. The results upload at `gui-smoke.yml:906` is
+`path: gui-smoke/.results/*.json` — **flat, non-recursive** — so a retried shard uploaded its results but
+not its manifest, and the verdict job's join (`lib/ratchet.ts:670`, `missingShards.length === 0`) then
+failed the whole gui-smoke leg with, verbatim:
+
+> `MISSING SHARD: shard 1 of 1 never reported a manifest. Its spec files did not run — …`
+
+about a shard that ran **twice** and **passed**. On the one scenario this script exists to handle, a
+green shard produced a red, false verdict — strictly worse than the diagnosable `SUITE DID NOT COMPLETE`
+it replaces. **The hazard was already known one file over**: `lib/resultsDir.ts:54` filters manifests by
+`SHARD_MANIFEST_PREFIX` and `resultsDir.test.ts` has a case for exactly that co-location.
+
+*Fix:* one line in `archiveAttempt`, the same filter, same constant.
+
+*The finding behind the finding:* **round 1's fixture was unsharded, so no manifest ever existed in its
+`.results/`** — a fixture that omits a file CI always has cannot catch a bug about that file. The fixture
+is now sharded 1-of-1 and seeds its manifest by running the **real** `scripts/write-shard-manifest.ts`,
+in CI's order. Two new cases: the manifest stays in the flat dir, and the **real** ratchet in the **real**
+verdict-job mode exits 0. **Red-proofed by hand: reverting the filter fails exactly 2 of the 9 cases in
+that file; restoring it returns 9/9.**
+
+**SHOULD FIX — no port-release handshake between attempts.** `run-suite.ts` spawned attempt 2 the instant
+attempt 1's `close` fired. wdio's teardown (`killTauriDriver`) is a bare non-waiting `tauriDriver?.kill()`,
+and attempt 2 binds the same two **fixed** ports. `wdio.conf.ts:1292-1295` names this exact race in its
+own words — *"racing that would have the readiness wait below succeed against the DYING listener"* — and
+solves it in-process with `killAndWaitForExit`; a job-level retry cannot reach that handle. 4445 is the
+worse case: the native WebKitWebDriver is a **grandchild**, never signalled, and it is precisely the
+process already in a bad state on the path being retried. Added `waitForPortFree` (the mirror of
+`waitForPort`, poll not sleep) + `settleDriverPorts`, and moved the two port constants into
+`lib/driverPorts.ts` so `wdio.conf.ts` and `run-suite.ts` share **one** declaration rather than a copied
+literal wearing a provenance claim.
+
+**Nits, all three taken.** (1) The summary formatters printed `MAX_SUITE_ATTEMPTS` while the loop ran on
+`maxAttempts()`, so `GUI_SMOKE_MAX_ATTEMPTS=3` rendered *"3 of 2 allowed"* — the budget is passed through
+now, pinned by a case at a value the constant cannot produce. (2) `sessionRetry.ts:40`'s *"each attempt
+costs a full shard (6-14 min)"* was **nobody's measurement**; over all 71 shard-2 jobs the suite step is
+**1-2 min** and the whole job **2-3 min** (job `98661503323`: **119 s**). Replaced with the measurement,
+and the budget's justification restated as what it actually is — about what a third attempt would *mean*,
+not what it would cost. (3) `.screenshots/` is not attempt-scoped; the README now says the log and JSON
+survive a retry and the screenshots do not.
+
+**Scope, stated honestly** (the reviewer's judgement, carried into the PR body): the **loud block earns
+its keep unambiguously** — 8 of 45 shard-2 jobs recovered silently, the CPE-1893 shape live in the suite
+today. The **job-level retry is a backstop for a 0-of-45 event**, and the blocker above is the evidence
+for its cost: a break on the rarely-exercised retry path survived authoring and review. It still lands —
+a shard is 2 minutes, the policy is well-guarded, and CPE-1955's budget of 1 leaves a real hole — but
+CPE-1979 is the fix, and this is containment.
