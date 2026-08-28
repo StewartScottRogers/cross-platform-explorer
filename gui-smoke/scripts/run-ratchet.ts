@@ -56,9 +56,9 @@ import {
   reduceResultChunks,
   type CaseResult,
   type KnownFailingFile,
-  type RawResultChunk,
   type ShardCoverageInput,
 } from "../lib/ratchet.js";
+import { readResultChunks } from "../lib/resultsDir.js";
 import {
   assignShardSpecs,
   isShardManifest,
@@ -93,7 +93,12 @@ const SPECS_DIR = process.env.GUI_SMOKE_SPECS_DIR ?? path.resolve(process.cwd(),
  *  `gui-smoke.yml`'s CPE-1728 comments and `lib/ratchet.ts`'s clause 4. Never silently treated as "zero
  *  results, fine, green" — `evaluate()`'s `incomplete` flag still fires and still reds the job. */
 function loadCaseResults(resultsDir: string): CaseResult[] {
-  if (!fs.existsSync(resultsDir)) {
+  // CPE-1910: the readdir/manifest-filter/JSON.parse half now lives in `lib/resultsDir.ts`, shared with
+  // `scripts/run-suite.ts`'s retry decision — which has to answer this script's own "how many spec files
+  // reported?" question BEFORE this script runs. One implementation, two callers, and (because it is now
+  // under `lib/`) unit-tested by `test:unit` for the first time.
+  const { chunks } = readResultChunks(resultsDir);
+  if (chunks === undefined) {
     // eslint-disable-next-line no-console
     console.log(
       `[gui-smoke ratchet] no results directory at ${resultsDir} — the suite step likely never started or ` +
@@ -102,25 +107,6 @@ function loadCaseResults(resultsDir: string): CaseResult[] {
         "this script throwing a raw error).",
     );
     return [];
-  }
-
-  // CPE-1753: shard manifests share this directory (and the `.json` suffix) with the reporter's output.
-  // Excluded by name rather than by shape: a manifest happens to have a `specs` array and no `suites`, so
-  // `reduceResultChunks` would contribute nothing from it — harmless, but by accident rather than by
-  // intent, and "harmless by accident" is what stops being true the next time either shape changes.
-  const files = fs
-    .readdirSync(resultsDir)
-    .filter((f) => f.endsWith(".json") && !f.startsWith(SHARD_MANIFEST_PREFIX));
-  const chunks: RawResultChunk[] = [];
-  for (const file of files) {
-    const raw = fs.readFileSync(path.join(resultsDir, file), "utf-8");
-    try {
-      chunks.push(JSON.parse(raw) as RawResultChunk);
-    } catch (err) {
-      throw new Error(
-        `[gui-smoke ratchet] failed to parse ${file} as JSON: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 
   return reduceResultChunks(chunks);

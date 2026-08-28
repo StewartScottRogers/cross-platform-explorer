@@ -809,11 +809,22 @@ jobs:
       # succeeds); kept anyway as cheap insurance against a future `defaults.run.shell` change
       # reintroducing `pipefail` and silently reviving the "known-failing-only run fails this step" bug
       # this line originally guarded against.
-      - name: Run GUI smoke suite (xvfb-run)
+      # CPE-1910: the `tee` and the `|| true` moved INTO `scripts/run-suite.ts`, which now owns this step.
+      # It runs the same `npm test`, captures the same `.results/suite-output.log` the classify-log step
+      # and the artifact below both read, and swallows wdio's exit code for the same CPE-1594 reason — and
+      # then, if THIS shard's WebDriver session died before any assertion ran, runs the suite once more.
+      # It decides that from the CPE-1728 log-signature verdict AND the ratchet's own "did every assigned
+      # spec file report?" fact, never from a classifier of its own; a run that asserted anything, or that
+      # completed, is never retried. See `gui-smoke/lib/sessionRetry.ts` for the measurement (71 shard-2
+      # jobs, 2026-08-28), the layer the socket death happens in, and why this is a backstop to CPE-1955's
+      # in-process respawn rather than a replacement for it.
+      # No `|| true` here, deliberately: unlike the old inline pipeline, a non-zero exit from this step now
+      # means the retry DRIVER failed (could not spawn the suite, could not parse a results file), which
+      # must be loud rather than read as a clean run. The Ratchet step below keeps its `if: always()`, so
+      # the shard's real verdict is still reported either way.
+      - name: Run GUI smoke suite (xvfb-run, auto-retry a session that died before asserting — CPE-1910)
         working-directory: gui-smoke
-        run: |
-          mkdir -p .results
-          (xvfb-run --auto-servernum npm test 2>&1 | tee .results/suite-output.log) || true
+        run: xvfb-run --auto-servernum npm run suite
 
       # CPE-1728: advisory-only, deliberately BETWEEN the suite and the Ratchet gate — reads the log the
       # suite step above just captured and prints whether this run's failures (if any) carry a real
@@ -950,12 +961,19 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
 
+      # CPE-1910: `suite-output*.log`, not just `suite-output.log`. On a retried run the bare name holds
+      # the FINAL attempt (what classify-log printed and what the ratchet judged) and
+      # `suite-output.attempt-1.log` holds the attempt that died — which is the evidence every occurrence
+      # of this failure has actually been diagnosed from, so losing it to a retry would trade the tax for
+      # the forensics. The per-spec JSON of a superseded attempt deliberately does NOT ship: it lives in
+      # `.results/attempt-<n>/`, out of this artifact's flat glob and out of the verdict job's join, where
+      # a duplicate spec entry would corrupt the cross-shard verdict.
       - name: Upload gui-smoke suite log (this shard)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gui-smoke-suite-log-ubuntu-shard-${{ matrix.shard }}
-          path: gui-smoke/.results/suite-output.log
+          path: gui-smoke/.results/suite-output*.log
           retention-days: 14
           if-no-files-found: warn
           include-hidden-files: true

@@ -561,6 +561,70 @@ regressions**, so nobody files N `known-failing.json` entries for them.
 **The ratchet was never the problem and was not touched.** `incomplete=true ⇒ RED` (CPE-1753) is correct
 and stays. This is containment plus legibility, never an exemption; nothing here can turn a red run green.
 
+### One automatic re-run when the session died before asserting — `npm run suite` (CPE-1910)
+
+CPE-1955 above stops a transport death **losing the evidence**. It does not stop it **costing a re-run**:
+its respawn budget is one per worker, so a second death in a shard — or a respawn that itself fails —
+still ends the job having asserted nothing, and someone has to type `gh run rerun --failed`. On an
+unattended run that is a stall. `scripts/run-suite.ts` is the backstop, and it now owns the suite step.
+
+**Why shard 2, and it is not the split.** CPE-1858 already rebalanced the partition, and this is not a
+leftover of that. The transport only dies while the harness is *restarting a session*, and the restart
+path is only entered when `resetAppState` fails. In all **71** completed shard-2 jobs sampled on
+2026-08-28 — every single one, green ones included — that happens in exactly one place:
+`handleRunnableStart:resetFailedRestartingSession` on the transition into **`checkpoint-restore.smoke.ts`**,
+whose reset cannot get the breadcrumb back to the temp folder. Shard 2 is simply the shard that owns that
+spec file. So the exposure is one spec's reset, not one shard's weight, and moving the file would move the
+problem rather than fix it. **The real fix upstream of all of this is to make `checkpoint-restore`'s reset
+succeed** — that would take the restart path from 71-of-71 to near zero and make both CPE-1955's respawn
+and this retry near-dead code. Filed as a follow-up in CPE-1910's Work Log.
+
+**What it decides on.** Two facts that already existed, ANDed. Neither is a new classifier:
+
+1. `lib/logSignature.ts`'s CPE-1728 verdict for the attempt — must be `environment-signature-only`.
+2. The same "how many of my assigned spec files reported?" count the ratchet's `incomplete` clause uses,
+   read through the shared `lib/resultsDir.ts` — must be **short**.
+
+**Both are load-bearing, and the reason is worth reading before you simplify it.** On 2026-08-28, **24 of
+the 27** `shard 2` failures sampled carried the verdict `ENVIRONMENT SIGNATURE ONLY` *while reporting a
+healthy 14/14 spec files and failing one real case*. An `expect-webdriverio` wait throws a plain `Error`,
+not chai's `AssertionError`, so a genuine, reproducible regression classifies as environmental. Retrying
+on the printed verdict alone — which the log lines invite — would re-run real regressions, CPE-1960's
+`scrollIntoView` defect among them. The spec-file count is what separates them.
+
+**It cannot turn a red run green.** The retried attempt is ratcheted exactly like a first attempt, against
+the same `known-failing.json`. A genuine assertion failure is never retried at any spec-file count, and a
+second session death exhausts the budget and stays red. `lib/runSuite.integration.test.ts` red-proofs all
+of that by running the real `run-suite.ts` and the real `run-ratchet.ts` end to end.
+
+**It is loud.** Whenever *anything* was recovered — a job-level retry **or** a CPE-1955 in-process
+respawn — the step prints a banner and appends a counted block to the GitHub **job summary**:
+
+```
+### ⚠️ GUI smoke shard 2 — WebDriver session recovery happened on this run (CPE-1910)
+| suite attempts run                          | 2 of 2 allowed |
+| job-level suite retries used                | 1              |
+| in-process tauri-driver respawns (CPE-1955) | 1              |
+```
+
+Reporting the *respawn* count is the larger half. Those respawns were already happening — **6 of the 40**
+post-CPE-1955 shard-2 jobs sampled used one, every one recovered — and nothing outside ~14,000 lines of
+raw log said so. A recovery nobody is told about is indistinguishable from a run that never had a
+problem, which is how a worsening rate hides (CPE-1893). **A rising count in that table is a regression
+in the runner even while every job stays green.**
+
+**Evidence survives a retry.** The superseded attempt's captured log is kept as
+`.results/suite-output.attempt-1.log` and ships in the `gui-smoke-suite-log-ubuntu-shard-N` artifact
+(whose glob is `suite-output*.log` for exactly this reason) — that log is what every occurrence of this
+failure has actually been diagnosed from. Its per-spec JSON moves to `.results/attempt-1/`, deliberately
+out of both the flat `*.json` upload and the verdict job's join, where a duplicate spec entry would
+corrupt the cross-shard verdict.
+
+**It fails closed.** A log it cannot read is *not* "no problem found": it refuses to retry and says the
+classifier did not run. If the retry driver itself cannot work — the suite command will not spawn, a
+results file will not parse — the step exits non-zero rather than reporting a clean run. The Ratchet
+step's `if: always()` means the shard's real verdict is still reported either way.
+
 ### The stress-harness "session death" is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702)
 
 CPE-1679's

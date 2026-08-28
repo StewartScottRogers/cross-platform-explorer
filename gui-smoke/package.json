@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "wdio run ./wdio.conf.ts",
+    "suite": "tsx scripts/run-suite.ts",
     "test:unit": "tsx --test lib/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "ratchet": "tsx scripts/run-ratchet.ts",
