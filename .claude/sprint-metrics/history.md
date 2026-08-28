@@ -3539,3 +3539,48 @@ limitation — the column-0 anchor, defended as preventing the regex from matchi
 **dropping the anchor returns the identical names**, so it prevents nothing and is precisely what hides
 `export const`. **A stated limitation that is not the load-bearing one reads as diligence and buys
 nothing.**
+
+## 2026-08-28 — the instrument was narrower than the claim, three times, in the PR about exactly that
+
+CPE-1970 exists because a guard's question was narrower than the confidence placed in its verdict. Its
+reviewer re-derived the central measurement with **its own instrument** — GraphQL paging to exhaustion,
+a real YAML parser instead of the shipped scanner — and confirmed the denominator, the clean/flagged
+split, the two fail-closed unreadables, the per-guard breakdown PR-for-PR, and both sabotage counts. The
+design is sound and the subtlest call in it (read the required set from `origin/main`, because a
+Worker's worktree *is* the PR branch) is right.
+
+**And three of its four findings are numbers the PR presents as measured, each wrong the same way.**
+
+**The count is 15, not 16.** One flagged PR *is* the ticket that renamed the job it is flagged for — the
+job id is unchanged at its head, all four shards ran green, nothing went unjudged. The write-up's own
+noise argument says *"all 16 name a job that still exists on `main` today, i.e. zero rename noise"* —
+**tested by job id, while the matcher keys on the label, and the label is what changed.** The right test
+of the wrong field, producing a confident zero.
+
+**The timing figures came from a `--limit`-capped list.** Claimed median 65.9 / p90 108.2 over a 14-day
+window; paged to exhaustion it is **60.9 / 81.8**, and the claimed numbers reproduce only from the newest
+200 runs — the last **27 hours** of a fourteen-day window, which happens to be the crew's busiest and
+slowest stretch. That is *enumerate, don't recall; fail loudly on a truncated enumeration* — **missed
+inside the document that cites the rule.** It carried the argument: at the real p90 the ceiling is ~17.6
+merges/day against 12.9 actual, so the rhetorical peak *"at p90 it is the entire current throughput"* is
+not supported. The recommendation survives; the number selling it does not.
+
+**And the trap the document is built around does not exist.** It warns that a path filter would leave a
+required check pending forever on ticket-only PRs. The filter is on the `push:` trigger; the
+`pull_request:` trigger has none — **and the workflow says so in its own words, eleven lines above.**
+
+**One sentence covers all three: the instrument was narrower than the claim.** A truncated run list, an
+existence test on the wrong field, a trap read off the wrong trigger. None is carelessness; each is an
+instrument that answered *a* question correctly while the sentence reported a bigger one.
+
+**So the practice, and it is cheap: when you report a figure, say what produced it.** *"Median over all
+793 in-window runs"* is a different claim from *"median over the newest 200"*, and writing the first
+forces you to notice you only have the second. This shift has now found the same shape in a gap list, a
+red-proof, a quantifier, a fuzzer's draw count, two derivation scopes, and now three measurements — the
+constant is never the care taken, it is that **the sentence is written from the conclusion rather than
+from the method.**
+
+Also worth keeping: the reviewer found a **silent fail-open inside the fail-closed guard** — a column-0
+comment in a workflow's `on:` block removes the entire workflow from the required set with no signal and
+`coverage=ok`. `ci.yml`'s `on:` block already carries a fifteen-line comment, indented today. One
+re-wrap and the guard stops guarding, permanently and quietly.
