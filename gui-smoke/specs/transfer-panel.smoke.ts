@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
 import { rightClick, doubleClick, type Point } from "../lib/mouse.js";
+import { scrollIntoViewCentered } from "../lib/scrollIntoView.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -209,7 +210,7 @@ describe("CPE-1226 — headless GUI smoke: TransferPanel archive row + CPE-1212 
     // The root now carries every other spec's fixtures (folders-first, then files, alphabetically) —
     // the broken-link row sits well below the fold, so scroll it into view BEFORE snapping, or the
     // screenshot would show an empty pane with no badge for the Visual Critic to judge.
-    await brokenRow!.scrollIntoView({ block: "center" });
+    await scrollIntoViewCentered(brokenRow!);
 
     const badge = await brokenRow!.$('[data-testid="link-badge"]');
     // `LinkBadge.svelte` fetches `link_status` LAZILY — via an IntersectionObserver OR a `mouseenter`

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
 import { rightClick, hover, type Point } from "../lib/mouse.js";
+import { scrollIntoViewCentered } from "../lib/scrollIntoView.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -59,8 +60,7 @@ async function pointOfRowNamed(name: string): Promise<Point | null> {
   const rows = $$(".rows .row");
   for await (const row of rows) {
     if ((await row.getHTML({ includeSelectorTag: false })).includes(name)) {
-      await row.scrollIntoView({ block: "center" });
-      await browser.pause(150);
+      await scrollIntoViewCentered(row);
       return row.execute((el) => {
         const r = (el as HTMLElement).getBoundingClientRect();
         return { x: Math.round(r.left + Math.min(60, r.width / 2)), y: Math.round(r.top + r.height / 2) };
@@ -72,13 +72,16 @@ async function pointOfRowNamed(name: string): Promise<Point | null> {
 
 /** Viewport-space centre of the FIRST element matching `selector` whose HTML includes `text`. Same
  *  CPE-1481 rationale as {@link pointOfRowNamed} above: scroll-then-`getBoundingClientRect`, matching
- *  the rest of the suite instead of `getLocation()`/`getSize()`. */
+ *  the rest of the suite instead of `getLocation()`/`getSize()`.
+ *  CPE-1960: called on POPUP-MENU rows (`.ctx .parent`), which are `position: fixed` and already clamped
+ *  on screen — so the scroll MUST be `scrollIntoViewCentered` (the DOM API), never WebdriverIO's
+ *  `scrollIntoView` command, which since 9.31.4 injects a wheel at viewport (0,0) and closes the very
+ *  menu these points are for. See lib/scrollIntoView.ts. */
 async function pointByText(selector: string, text: string): Promise<Point | null> {
   const els = $$(selector);
   for await (const el of els) {
     if ((await el.getHTML({ includeSelectorTag: false })).includes(text)) {
-      await el.scrollIntoView({ block: "center" });
-      await browser.pause(150);
+      await scrollIntoViewCentered(el);
       return el.execute((node) => {
         const r = (node as HTMLElement).getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
 import { rightClick, hover, click, type Point } from "../lib/mouse.js";
+import { scrollIntoViewCentered } from "../lib/scrollIntoView.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -55,8 +56,7 @@ async function pointOfRowNamed(name: string): Promise<Point | null> {
   const rows = $$(".rows .row");
   for await (const row of rows) {
     if ((await row.getHTML({ includeSelectorTag: false })).includes(name)) {
-      await row.scrollIntoView({ block: "center" });
-      await browser.pause(150);
+      await scrollIntoViewCentered(row);
       return row.execute((el) => {
         const r = (el as HTMLElement).getBoundingClientRect();
         return { x: Math.round(r.left + Math.min(60, r.width / 2)), y: Math.round(r.top + r.height / 2) };
@@ -66,12 +66,24 @@ async function pointOfRowNamed(name: string): Promise<Point | null> {
   return null;
 }
 
+// CPE-1960: this is called on POPUP-MENU rows (`.ctx .parent`, `.ctx .flyout .row`) — `position: fixed`
+// boxes the app already clamps fully on screen, which can never need scrolling. It must therefore go
+// through `scrollIntoViewCentered` (the DOM API) and never WebdriverIO's `scrollIntoView` command: since
+// webdriverio 9.31.4 that command injects a wheel at viewport (0,0), which relocated the webview's hover
+// target on WebKitGTK, closed the Run-macro flyout via `Submenu.svelte`'s `on:mouseleave`, and turned the
+// test below into `element (".ctx .flyout .row") still not existing after 5000ms`.
+//
+// The trigger was the LOCKFILE, not any merge: onset was 2026-08-27T20:33Z on the CPE-1945 branch (job
+// `98661503323`, `c33a9609`), two hours before `48aa8697` reached main. And it was RACY, not
+// deterministic — 10 of 11 complete shard-2 runs on 9.31.4 failed, 0 of 13 on 9.30.0 did, and job
+// `98681871872` passed 14/14 ON 9.31.4 with a byte-identical rect probe and the same wheel dispatched.
+// So a single green run of this spec does not prove the fix; see lib/scrollIntoViewUsage.test.ts for the
+// full derivation. See lib/scrollIntoView.ts for the replacement.
 async function pointByText(selector: string, text: string): Promise<Point | null> {
   const els = $$(selector);
   for await (const el of els) {
     if ((await el.getHTML({ includeSelectorTag: false })).includes(text)) {
-      await el.scrollIntoView({ block: "center" });
-      await browser.pause(150);
+      await scrollIntoViewCentered(el);
       return el.execute((node) => {
         const r = (node as HTMLElement).getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
