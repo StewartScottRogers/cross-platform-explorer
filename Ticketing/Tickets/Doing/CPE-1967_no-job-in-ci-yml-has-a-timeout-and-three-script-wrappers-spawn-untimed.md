@@ -184,11 +184,25 @@ standing licence to add an uncapped job. `MIN_EXPECTED_JOBS = 20` is an enumerat
 ratchet — it can only cause a failure, never excuse one. The full suite (360 files / 5,385 tests) stays
 green, `ratchetBaselines.test.ts` and `ratchetsDoc.test.ts` included, so nothing ratchet-shaped landed.
 
-**Red-proofed, four sabotages, results recorded in the test file itself:** deleting `crates`' cap →
+**Red-proofed, six sabotages, results recorded in the test file itself:** deleting `crates`' cap →
 the presence test reds naming `.github/workflows/ci.yml [crates]`; `timeout-minutes: 400` → the
 above-the-default test reds naming the job, 400 and 360; `timeout-minutes: "30"` → the type test reds
 naming the string; inserting a twelfth job → two of the three derived-count legs red, one naming the
-full job list and `expected 12 to be 11`.
+full job list and `expected 12 to be 11`; **removing `frontend`'s cap → 3 failed / 3 passed with the
+PARSED half still passing at 11 while the TEXT half fails `expected 10 to be 11`**, which is the one
+that proves the two measurements are independent rather than a number compared against itself; adding
+one ordinary step-level cap → 1 failed / 5 passed, the equality leg printing the message that tells
+the reader to reword the prose rather than delete the step's cap. `ci.yml` restored after every one,
+`git diff --numstat` clean each time.
+
+**The gap this guard does NOT close, now declared on its own list rather than left to be discovered:**
+it never checks a cap's VALUE against the sample quoted above it. Re-run here rather than taken from
+the review that asked for it — editing `crates` from 105 to **47**, which contradicts its own
+`max 68.2 min` line three rows up and would kill the job on an ordinary slow run, leaves the file
+**6/6 green**. Inherent: only GitHub's run history could judge a cap, and a unit test cannot query it
+without becoming flaky by construction. What guards the values instead is the rule and its arithmetic
+being written out per job in `ci.yml`, where a reviewer checks `1.5 x max` against the sample in the
+same three lines. A declared gap beats an undeclared one.
 
 ### 2026-08-28 — the untimed spawns
 

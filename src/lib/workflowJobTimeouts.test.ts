@@ -44,7 +44,7 @@
 // The drift is "someone adds a job and forgets the cap", which is invisible in review precisely
 // because the job works. CLAUDE.md's pattern is that an enumerated invariant gets a test.
 //
-// ## Two things this guard deliberately does NOT do
+// ## Three things this guard deliberately does NOT do
 //
 //   1. **No allowlist, no stored count of offenders.** There is nothing to burn down: every job in
 //      the repo is capped as of CPE-1967, so the invariant is total. A ratchet here would be a
@@ -60,6 +60,18 @@
 //      `#   timeout-minutes: 6` inside a worked example that a naive line filter reads as a key.
 //      A text scan has to get all three distinctions right. Reading `job["timeout-minutes"]` off the
 //      parsed object cannot be satisfied by a comment and cannot mistake a step's cap for a job's.
+//   3. **It does not check a cap's VALUE against the measurement quoted above it.** Only that a cap
+//      exists, is a positive integer, and is below 360. So editing `crates` from 105 to 47 — which
+//      contradicts the `max 68.2 min` sample on the comment line directly above it, and would kill
+//      that job on an ordinary slow run — leaves this file **6/6 green**. Measured, not assumed, and
+//      re-run here on 2026-08-28 rather than quoted from the review that asked for it: `105` → `47`
+//      in `ci.yml`, 6 passed; restored, `git diff --numstat` clean.
+//      Inherent, and worth saying why rather than leaving it to be discovered: the only thing that
+//      could judge a cap is GitHub's run history, and a unit test cannot query it (no network, no
+//      credentials, and a suite whose result depended on a live API would be flaky by construction).
+//      What guards the values instead is the rule and its arithmetic being written out per job in
+//      `ci.yml`, where a reviewer can check `1.5 x max` against the sample in the same three lines.
+//      A declared gap beats an undeclared one: this is the half a green run here does NOT vouch for.
 //
 // ## Red-proof (CPE-1933 rule 3), run by hand and recorded here rather than only in the PR body
 //
@@ -194,6 +206,19 @@ describe("every workflow job is bounded by its own timeout-minutes (CPE-1967)", 
 // of these three — the parsed-count leg naming the full job list and `expected 12 to be 11`, and the
 // step-vs-job leg at `expected 11 to be 12`. Removed, green again at 6/6. So the count really is
 // re-read from the file on every run; it is not a literal agreeing with another literal.
+//
+// Two more, run 2026-08-28, because that first one alone does not separate the two MEASUREMENTS —
+// both legs move together when a whole job appears, so it cannot show they are independent:
+//   · REMOVE `frontend`'s cap → 3 failed / 3 passed, and the split is the informative part. Inside
+//     the "ELEVEN jobs" test the PARSED assertion still passes at 11 (the job is still a job) while
+//     the TEXT assertion right after it fails `expected 10 to be 11`. One number is genuinely read
+//     from the parser and the other from the file; neither is being compared against itself. (The
+//     third red is the main presence guard, correctly — the cap really is gone.)
+//   · ADD one ordinary step-level `timeout-minutes:` → 1 failed / 5 passed, the equality leg at
+//     `expected 12 to be 11`, printing the message that tells the reader to reword section 2 rather
+//     than delete the step's cap. This is the FALSE-ALARM case the message exists for: the change
+//     itself is perfectly correct.
+// `ci.yml` restored after each; `git diff --numstat` clean every time.
 describe("the counts this file's rationale quotes are DERIVED from ci.yml, not recalled", () => {
   const CI = join(process.cwd(), ".github", "workflows", "ci.yml");
   const text = readFileSync(CI, "utf8");
@@ -222,9 +247,29 @@ describe("the counts this file's rationale quotes are DERIVED from ci.yml, not r
 
   it("step-level caps exist in the same file and are NOT job caps — the distinction the prose claims", () => {
     // The sentence in section 2 says there is "an equal number of STEP-level keys". Asserted, so it
-    // cannot quietly stop being true.
-    expect(stepLevelKeys.length).toBe(jobLevelKeys.length);
-    expect(anyKey.length).toBe(jobLevelKeys.length + stepLevelKeys.length);
+    // cannot quietly stop being true — but the equality is a fact about TODAY's file, not an
+    // invariant anyone should preserve, so the message has to say that. Adding one ordinary
+    // step-level cap to `ci.yml` is a correct, unrelated change and it reds here; the fix is to
+    // reword the prose, never to leave the step uncapped.
+    expect(
+      stepLevelKeys.length,
+      `\`ci.yml\` has ${jobLevelKeys.length} job-level and ${stepLevelKeys.length} step-level ` +
+        `\`timeout-minutes:\` keys. That is fine — this is not an invariant. What reds is the ` +
+        `SENTENCE: section 2 of this file's docblock says step-level keys are "an equal number". ` +
+        `Update that phrase to match the file (it is the only place the claim is made), then this ` +
+        `passes again. Do NOT "fix" it by removing a step cap.`,
+    ).toBe(jobLevelKeys.length);
+    // The partition check, and the leg that earns its keep: it catches a `timeout-minutes:` at an
+    // orphan indentation — neither 4 spaces nor 8+ — which is the one shape that slips past both
+    // filters above and would otherwise be counted by neither.
+    expect(
+      anyKey.length,
+      `the ${anyKey.length} \`timeout-minutes:\` key line(s) in \`ci.yml\` do not partition cleanly ` +
+        `into ${jobLevelKeys.length} job-level (4-space) + ${stepLevelKeys.length} step-level ` +
+        `(8+-space). At least one sits at an indentation neither filter matches, so it is being ` +
+        `counted by neither — which is exactly the blind window a text scan opens and the parsed ` +
+        `guard above does not have.`,
+    ).toBe(jobLevelKeys.length + stepLevelKeys.length);
   });
 
   it("`timeout-minutes` also appears in COMMENT prose, which is what defeats a naive text scan", () => {

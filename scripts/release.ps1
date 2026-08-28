@@ -502,8 +502,12 @@ $ErrorActionPreference = "Continue"
 # one place it found a real UNTIMED spawn that it deliberately did NOT cap. Recorded here rather than
 # only in a PR body, so the next reader knows it was looked at and decided, not missed:
 #
-#   · Four of the five calls below (`add`, `commit`, `tag`, and the `git` reads earlier in this file)
-#     are local and cannot stall on anything but a wedged filesystem.
+#   · Three of the four `git` calls in this file (`add`, `commit`, `tag`) are local and cannot stall
+#     on anything but a wedged filesystem. All four go through `Invoke-Git` below, whose single
+#     `& git @Args` is the ONLY place this file executes git at all — there are no git reads earlier,
+#     which an earlier draft of this very bullet claimed. (It said "four of the five calls", and it
+#     contradicted the derivation two bullets down. Miscounted in the block rewritten to stop
+#     miscounting — the same shape as this ticket's F1-F4, which is why it is corrected out loud.)
 #   · `push` is network-bound and genuinely can hang — the same stalled-transport shape the rest of
 #     CPE-1967 is about.
 #   · What makes it different: this script is ATTENDED BY CONSTRUCTION. That was the load-bearing
