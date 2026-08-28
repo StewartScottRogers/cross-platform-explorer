@@ -4537,3 +4537,37 @@ the title's own figure cannot be reproduced by the scan someone would reach for 
 **Every one of those commands runs in under three seconds over 328,000 entries.** Counting was never the
 expensive part — which is the argument for running it at the start of each sprint rather than discovering
 it at 91%.
+
+## 2026-08-29 — neither anchor had both properties, and the fix was to stop choosing
+
+#1091's round 6 anchored its builtin matcher on shell metacharacters; round 7 replaced that with a word
+walk that kept double-quoted spans whole. **Each fixed what the other missed and broke what the other
+kept** — round 7 gained `-p "Enter: "` as one option argument and lost six shapes where the builtin sits
+against a `|`, `;`, `(` or `{`.
+
+Round 8's answer is not a better regex. It is a **tokenizer that carries both properties at once**:
+metacharacters emitted as their own tokens, double-quoted spans kept whole, feeding the same grammar
+walk unchanged. **Both directions scored in one harness run** — reverting to round 7 reds exactly six
+rows, and all eleven earlier rows stay green under the new walk.
+
+**The two-round oscillation is the thing to notice.** Rounds 6 and 7 were each a correct fix to a real
+defect, and together they were a loop, because both were framed as *which anchor is right*. Nobody asked
+whether the two properties were separable until the third attempt. **When a fix trades one class of
+failure for another, the question is not which class is worse — it is whether the two constraints can be
+satisfied at once**, and the answer is often a different layer rather than a better predicate.
+
+**And it corrected its own draft by running it.** The red-proof note claimed the minimal sabotage would
+red **five** rows. It reds **three** — the `;` and `{` rows survive, because without the token the operand
+is still taken whole and the identifier is lifted off the front, so the walk carries on. **It was round
+7's `cut`, not its word regex, that lost those two.** A predicted count would have been plausible, wrong,
+and unfalsifiable by a reader; the measured one comes with a mechanism.
+
+**The membership rule is now enforced rather than stated.** Two ticks ago I wrote that a table needs a
+membership test, not a count. Round 8 makes it a **predicate applied by grep and checked by a test that
+derives the row list out of the table's own text**, so the table and the file cannot drift apart: 28
+declarations, **9 rows, 2 excused, 17 excluded each with a reason**. Red-proofed both ways — remove an
+exclusion and it reports `unclassified`; rename a row and it reports **both** `unclassified` and `stale`.
+
+**That is the difference between a lesson and a mechanism.** I have written *"enumerate the siblings"*
+three times this shift in three different phrasings. This is the first version that will still be true
+next month without anyone remembering it.
