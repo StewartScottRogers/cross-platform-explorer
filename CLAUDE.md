@@ -58,11 +58,33 @@ When releasing, bump the version in ALL of:
 
 Then tag `vX.Y.Z` and push — CI does the rest.
 
-**4 and 5 are the ones that get missed**, because nothing fails when they drift: neither build passes
-`--locked`, so both lockfiles are silently rewritten at build time and the stale version never surfaces as
-an error. It surfaces instead as a **dirty working tree** the moment anyone runs `npm install` or a local
-`cargo build` — which reads as unrelated noise and gets committed by accident or discarded along with real
-work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`0.57.64` vs `0.57.67`).
+**4 and 5 are the ones that get missed**, and for most of this repo's life nothing failed when they
+drifted: neither build passed `--locked`, so both lockfiles were silently rewritten at build time and the
+stale version never surfaced as an error. It surfaced instead as a **dirty working tree** the moment
+anyone ran `npm install` or a local `cargo build` — which reads as unrelated noise and gets committed by
+accident or discarded along with real work. Observed 2026-08-20: `package-lock.json` had been three
+releases behind (`0.57.64` vs `0.57.67`).
+
+**Both halves now have a backstop, and they are different mechanisms because npm offers no `--locked`.**
+
+- **Item 5** — CPE-1865 put `--locked` on every Rust build and CPE-1932's `lockfile-preflight` runs
+  `cargo metadata --locked` over all 17 `Cargo.lock`s. A drifted `cross-platform-explorer` entry is
+  **exit 101** with cargo's own message.
+- **Item 4 has no equivalent, measured rather than assumed (CPE-1904).** `npm ci` *is* npm's `--locked`
+  and it is already what CI runs — with `package-lock.json`'s two version fields three and five releases
+  behind, `npm ci`, `npm test` and `npm run check` all exit **0**, and `npm install` then **silently
+  repairs both fields** and exits 0, destroying the evidence. npm treats those fields as metadata to
+  rewrite, not as a constraint. So the backstop is `src/lib/appVersionSync.test.ts`: it enumerates every
+  place in the tree carrying the app's version — keyed on the package **identity**, not a path list, so
+  `gui-smoke/`'s project and the other 16 lockfiles are excluded by what they say about themselves — and
+  reds naming the file, the field, both values and the command to run. It covers all six places
+  (including item 5, which is cheaper and friendlier to hear about here than an hour into the matrix),
+  refuses to render a verdict on a near-empty enumeration, and **throws rather than skipping** any file
+  it cannot read or parse.
+
+So a version drift is now a **failing test on every push, PR and local `npm test`** — not a dirty working
+tree that reads as noise. If you add a sixth place, that test reds until this list and
+`scripts/release.ps1`'s bump plan are updated too.
 
 ## Guardrails
 

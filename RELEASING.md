@@ -50,12 +50,22 @@ any is written, so a `Cargo.lock` that fails the check leaves the other four unt
 already bumped (CPE-1852). If the script does abort, the tree is clean and there is nothing to revert —
 the failure message says so, and it is true of the whole run.
 
-**Why the script has to do this rather than a build check catching it.** Neither build passes
-`--locked`, so a stale lockfile version is silently rewritten at build time and never fails anything;
-`npm ci` does not check the `version` field either (it checks the dependency graph), which is how
-`package-lock.json` sat three releases behind — `0.57.64` against `0.57.67` — through many green CI
-runs. Adding `--locked` to the Rust builds would make that drift fail loudly on its own; see
-CPE-1853's Work Log for the measured recommendation.
+**Why the script does this, and what now backs it up between releases.** A stale lockfile version used
+to fail nothing: neither build passed `--locked`, so it was silently rewritten at build time, and
+`npm ci` does not check the `version` field either (it checks the dependency graph). That is how
+`package-lock.json` sat three releases behind — `0.57.64` against `0.57.67` — through many green CI runs.
+
+Both gaps are closed now, by two different mechanisms:
+
+- The Rust lockfiles get `--locked` (CPE-1865) plus the `lockfile-preflight` CI job (CPE-1932) — a stale
+  `src-tauri/Cargo.lock` is exit 101.
+- npm has **no** `--locked` for these fields — `npm ci` exits 0 on a three-release drift and `npm install`
+  silently repairs it, both measured — so `src/lib/appVersionSync.test.ts` (CPE-1904) compares all six
+  places on every push, PR and local `npm test`, and names the file, the field, both values and the fix.
+
+The script's own all-five check still matters: it is what makes the *bump* all-or-nothing, and it runs
+before anything is committed or tagged. The test is what catches drift introduced **between** releases,
+which is where the recorded incident actually came from.
 
 What happens next, automatically:
 
