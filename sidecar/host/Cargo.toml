@@ -50,3 +50,10 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# CPE-1952: `tests/catalog_staging_containment.rs` plants a real NTFS **junction** at the pre-fix
+# staging path to demonstrate the write-through, then shows the fixed path never creates it. A
+# junction needs no administrator rights and no Developer Mode, unlike `symlink_dir`; the Unix arm
+# uses `symlink(2)` from std and needs nothing extra. Test-only, Windows-only.
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"
