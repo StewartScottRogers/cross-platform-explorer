@@ -44,11 +44,24 @@ pending. Nothing touches disk until you click **Save**:
 - **If the app is killed mid-save, your file is still safe, and the leftover cleans itself up.** The
   original is untouched either way. An app that is force-quit or crashes during a save can leave a stray
   file next to yours whose name ends in `.cpe-tmp` — it's the half-written copy, and nothing else will
-  ever read it. You don't need to delete it by hand: the next time that same file is saved, the app
-  notices it's stale and removes it automatically. (It lingers if that particular file is never saved
-  again. It can also linger in a folder holding a very large number of files — the app only checks part
-  of such a folder on each save, so it may never look at that leftover. It is harmless either way, and
-  safe to delete by hand.)
+  ever read it. You don't need to delete it by hand. Two things collect it: saving that same file again,
+  and — since CPE-1961 — any **backup, restore, download or archive extraction** that writes a file into
+  that folder, whichever file it happens to be. The second one is why a leftover from a crash usually
+  disappears on its own now rather than waiting for you to re-save the exact file it belonged to.
+  (It still lingers if nothing ever writes into that folder again. It can also linger in a folder holding
+  a very large number of files — the app only checks part of such a folder on each write, so it may never
+  look at that leftover. It is harmless either way, and safe to delete by hand.)
+
+  Two details, because "any file in that folder" is broader than it sounds and the app would rather say
+  so than have you find out:
+
+  - **A leftover is only ever removed when it is at least five minutes old**, measured against the file
+    that was just written, and only when its name carries the full `.<numbers>-<numbers>.cpe-tmp` stamp
+    the app itself writes. A save that is merely slow is never mistaken for one that was killed.
+  - **The app never removes a leftover stamped by the copy of it that is running now**, unless it belongs
+    to the very file being written — so a long-running download or backup in the same folder can't have
+    its own in-progress work collected out from under it. A leftover from a *previous* run, which is the
+    only kind that matters, is not stamped that way and is still collected.
 - **What that safety costs, so you can judge it.** Writing a new file and moving it into place means the
   saved file is technically a *new* file. Almost everything attached to the old one is now carried across
   with it — but not quite everything, and the exceptions are listed rather than glossed over.

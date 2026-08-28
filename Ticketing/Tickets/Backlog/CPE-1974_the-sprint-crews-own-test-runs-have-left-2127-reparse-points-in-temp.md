@@ -62,6 +62,73 @@ two orders of magnitude larger.
       swept as one unit — without losing the real-path realism that makes them falsifiable in the first
       place. That tension is the actual design question here.
 
+## Re-measured 2026-08-28 (PR #1089 round 7) — **297,338 directories**, two orders of magnitude past the filing
+
+Noticed incidentally by PR #1089's round-6 Reviewer and re-taken independently by its round-7 worker on
+the same machine's real `%TEMP%` (`C:\Users\Stewart Rogers\AppData\Local\Temp`), which reproduced the
+Reviewer's total **exactly**. Recorded here rather than as a new ticket: this ticket already owns the
+defect, and a duplicate would split the count from the policy question.
+
+- **297,338** top-level `cpe-*` directories (of **327,965** top-level directories in `%TEMP%` overall —
+  the crew's fixtures are **91%** of everything in the user's temp directory)
+- **287** distinct fixture prefixes
+- Creation timestamps span **2026-07-11 20:40** → **2026-08-28 09:59**, so this is seven weeks of
+  accumulation, not one bad shift
+
+**Enumerated by shape**, per this ticket's first acceptance criterion — and the shape is the finding.
+Four prefixes are **238,412 of the 297,338 (80.2%)**:
+
+| prefix | count |
+|---|---:|
+| `cpe-binprev-pe-trunc-*` | 90,632 |
+| `cpe-dotnetmeta-trunc-*` | 67,640 |
+| `cpe-binprev-elf-trunc-*` | 60,530 |
+| `cpe-binprev-macho-trunc-*` | 19,610 |
+| `cpe-dispatch-base-*` | 5,742 |
+| `cpe-copilot-cpe-*` | 3,187 |
+| `cpe-webdav-*` | 2,837 |
+| `cpe-dotnetmeta-fuzz-*` | 2,682 |
+| `cpe-ftp-srv-*` | 2,195 |
+| `cpe-snapprune-restore-m-*` | 1,847 |
+| *(277 more prefixes)* | *(40,436 total)* |
+
+**Read the shape before hunting fixtures.** The top four are all **truncation sweeps** — a test that
+loops over every truncation length of a binary and makes a scratch directory *per iteration*. That is a
+different defect from "a test planted a link and died before its cleanup": these are not crashed runs,
+they are a per-iteration allocation that was never per-iteration-freed, and one such loop can out-produce
+every panicking fixture in the suite combined. The remedy differs accordingly — hoist one directory
+outside the loop, or `Drop` it inside it — so the AC "find the leaking fixtures" should be **split**:
+per-iteration allocators first (80% of the volume, four call sites), panicking fixtures second.
+
+**No reparse points at the top level, so the original 2,127 are nested.** A top-level attribute scan of
+all 327,965 entries finds **0** `FILE_ATTRIBUTE_REPARSE_POINT`, which is consistent with the planting
+fixtures putting their links *inside* their scratch directory rather than at `%TEMP%` root. Confirming
+the 2,127 therefore needs a **recursive** walk of ~300k directories; that was not run here, and the
+figure in this ticket's title should be treated as the recursive count it was, not as something a
+top-level scan can reproduce.
+
+**Not the archive family, and not this PR.** `cpe-archive-*` totals **114** — *unchanged* from this
+ticket's filing, i.e. PR #1089's whole six-round run added none — and `cpe-archive-*` directories newer
+than 6 hours: **0**. The new `#[cfg(unix)]` fixture from that PR cleans up after itself.
+
+Commands used, for whoever picks this up:
+
+```powershell
+$di = New-Object System.IO.DirectoryInfo $env:TEMP
+# total
+@($di.EnumerateDirectories('cpe-*')).Count
+# histogram by prefix (strip the trailing numeric suffix)
+$h=@{}; foreach($d in $di.EnumerateDirectories('cpe-*')){
+  $p=[regex]::Replace($d.Name,'[0-9].*$','').TrimEnd('-'); $h[$p]=1+$h[$p] }
+$h.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 25
+# reparse points, top level only
+@($di.EnumerateDirectories('*') | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count
+```
+
+Each of those completes in **under 3 seconds** over 328k entries, which is worth saying: *counting was
+never the expensive part*. Nobody was counting because nobody looked, not because looking was costly —
+and that is an argument for the sweep being cheap enough to run at the **start** of every sprint.
+
 ## Notes
 
 Filed 2026-08-27 by the sprint Foreman from PR #1084's round-2 worker, which counted the debris while

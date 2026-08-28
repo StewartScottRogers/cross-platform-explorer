@@ -4407,10 +4407,21 @@ fn extract_zip_archive_stream(
             let claimed = crate::fsutil::claim_destination_handle(
                 &out,
                 crate::fsutil::LinkGuardWording::EXTRACT,
-                || crate::open_beneath::create_beneath(&root, rel),
+                crate::fsutil::DestinationSite::Beneath { root: &root, rel },
             );
-            let mut f = match claimed {
-                Ok(c) => c.file,
+            // CPE-1961: the claim is HELD, not unwrapped to its handle. The bytes go into a staging
+            // sibling and `commit()` renames it over `out`; dropping the claim instead — which is what
+            // every `continue` below does — removes the staged file, and the destination name too when
+            // this call created it, leaving the entry's name exactly as the extraction found it.
+            //
+            // **`continue`, and never `?` — round 4 (Reviewer Blocker 1).** Round 3's version of this
+            // sentence said *"which is what the `?` below does"*, and the `?` it meant was the one on
+            // `commit()`. That is a run abort, and this loop's contract stopped permitting one when
+            // CPE-1935 landed in this branch's base. **Every early exit in this per-entry body records
+            // the entry and continues**; the only exceptions are the two `EntrySlotAction::Abort`
+            // returns, which are the deliberate hostile-swap aborts and say so at their own sites.
+            let mut claimed = match claimed {
+                Ok(c) => c,
                 Err(r) if r.policy => {
                     report.skip(&name, &r.why);
                     prog.done_items += 1;
@@ -4450,7 +4461,12 @@ fn extract_zip_archive_stream(
             };
             // CPE-1935: `?` stood here. Same argument as the link branch's `read_to_end` above — the
             // reader is this entry's own, so a failure decompressing or writing it is this entry's.
-            if let Err(e) = std::io::copy(&mut entry, &mut f) {
+            //
+            // **CPE-1961: the bytes go into the CLAIM's staging sibling, never the destination.**
+            // `continue`ing here drops `claimed`, which removes the staged file — and the destination
+            // name too when this call created it — so a decompression failure now leaves the entry's
+            // name exactly as the extraction found it instead of truncated-then-abandoned.
+            if let Err(e) = std::io::copy(&mut entry, &mut claimed.file) {
                 report.fail(
                     &name,
                     &EntryFailure::from_write_error(
@@ -4524,18 +4540,40 @@ fn extract_zip_archive_stream(
             // failed identically before, because the deferred drain still left the file 0o444 at the
             // end of the first run. Same on `main`, measured, so nothing here made it worse.
             //
-            // **CPE-1935 — recorded, not fatal, and NOT counted as done.** `map_err(..)?` stood here.
-            // The bytes are on disk by this point, so the message says so and the entry is a `fail`
-            // rather than a `done`: the file the archive described had a mode this filesystem would not
-            // apply, and calling that success is the silent-partial shape one layer down.
+            // **CPE-1961 round 2 — this block sits ABOVE the commit, and that position is required
+            // twice over.** Mechanically: `ClaimedDestination::commit(mut self)` *consumes* the claim,
+            // so `claimed.file` does not exist after it — round 1 left the block below the commit
+            // still referring to the pre-rename local `f` and `crates/server` stopped compiling on
+            // Linux and macOS (`E0425: cannot find value `f``), which no Windows job could catch
+            // because the whole block is `#[cfg(unix)]`.
+            // Semantically it is the only position in which the paragraph above stays TRUE: the handle
+            // the bytes went into is the *staging sibling*, and applying the mode here puts it on that
+            // object while it is still nameless, so the file takes the destination name already
+            // wearing its final mode. There is no instant at which `out` exists with the wrong bits —
+            // the same "mode onto the staged file before it takes the name" ordering
+            // `fsutil::HandleCarryover::apply` uses, and the reason `create_staging_beneath` creates
+            // at `0600` rather than `0666 & ~umask`. Covered by
+            // `cpe1961_a_zip_entrys_unix_mode_lands_on_the_committed_file`.
+            //
+            // **CPE-1935's per-entry handling, kept — with the one word staging changes.** `map_err(..)?`
+            // stood here before CPE-1935 and a `?` would still take the whole run down for one entry, so
+            // the `fail`-and-`continue` is unchanged. What did change is the *sentence*: CPE-1935 said
+            // *"its contents were written, but its permissions could not be set"* because the bytes were
+            // already at the destination by this point. They are not any more — they are in a staging
+            // sibling that the `continue` below drops and unlinks — so the message now says nothing was
+            // written, which is what the filesystem will show. Still a `fail` rather than a `done`: the
+            // file the archive described had a mode this filesystem would not apply, and calling that
+            // success is the silent-partial shape one layer down.
             #[cfg(unix)]
             if let Some(mode) = entry.unix_mode() {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = f.set_permissions(fs::Permissions::from_mode(mode)) {
+                if let Err(e) = claimed.file.set_permissions(fs::Permissions::from_mode(mode)) {
                     report.fail(
                         &name,
                         &EntryFailure::from_write_error(
-                            format!("its contents were written, but its permissions could not be set: {e}"),
+                            format!(
+                                "its permissions could not be set, so nothing was written for it: {e}"
+                            ),
                             &e,
                         ),
                     );
@@ -4543,6 +4581,117 @@ fn extract_zip_archive_stream(
                     emit(&prog);
                     continue;
                 }
+            }
+            // **CPE-1961 round 4 (Reviewer Blocker 1): a failed commit is THIS ENTRY's failure.**
+            //
+            // Round 3 wrote `claimed.commit().map_err(|r| r.why)?` here — the only bare `?` left in
+            // this per-entry body — and that is a **run abort**. CPE-1961 introduces a failure point
+            // this loop did not have (`sync_all`, then a rename the filesystem can refuse) and round 3
+            // gave it the exact semantics CPE-1935, merged one commit before this branch's base, was
+            // filed to remove from this loop. Measured, same three-entry zip, `victim.txt` held open by
+            // another process with `FILE_SHARE_READ|FILE_SHARE_WRITE` and no `FILE_SHARE_DELETE`:
+            //
+            // ```text
+            //                          outcome                        before  victim       after
+            // base 104b0bc5 (main)     Ok(done: 3)                    BEFORE  REPLACEMENT  AFTER
+            // head 9902e1f5 (round 3)  Err("…could not be replaced…")  BEFORE  ORIGINAL     ABSENT
+            // ```
+            //
+            // Refusing the entry is right and unchanged — the user's file is intact and the reason
+            // names it. Aborting the archive over it is a regression against `main`, and it also
+            // contradicts `src/docs/explorer-archives.md`, which lists a full disk under **Failed**
+            // ("the extraction keeps going") and says only the whole destination can stop a run.
+            // Cost row 1 predicts `ENOSPC` from staging, and under ext4's delayed allocation that
+            // lands at `sync_all` — i.e. exactly here, on the platform whose fixture this loop's
+            // regression test cannot build.
+            //
+            // **`retryable`, not `from_write_error`:** a `Refusal` carries no `io::Error` to classify,
+            // and every way this line *fails* — a lock, a sharing violation, a full disk, a share that
+            // dropped — is something the user can clear and extract again into.
+            //
+            // **The `policy` fork — CPE-1961 round 5 (Reviewer Major 1). Round 4 wrote `report.fail`
+            // unconditionally here, on a premise that reading `commit`'s callee refutes.** The premise,
+            // written at `fsutil::claim_destination_handle`, was *"`commit` only ever returns
+            // `Refusal::failure`"*. It is true of `DestinationSite::ByPath`, which does
+            // `commit_replacement(...).map_err(Refusal::failure)`; it is false of the **`Beneath`** arm
+            // this loop uses, which returns `open_beneath::rename_beneath`'s `Refusal` unchanged — and
+            // that function's `descend(root, Act::Commit, dirs)` calls `refuse_link` on a directory
+            // component that has become a link since the claim. `policy: true`. Executed, not read off:
+            // `fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`.
+            //
+            // With `report.fail` unconditional, that entry landed in the **failed** bucket carrying
+            // *"clear that and extract again"* — advice that cannot work, because re-extracting into a
+            // folder whose component is a planted link refuses again, and refuses at the *claim* this
+            // time, where the arm above already calls it a **skip**. So one refusal, one folder, two
+            // buckets and two different sentences, decided by nothing but which microsecond the link
+            // was planted in. The fork makes the two moments agree: `policy` — "not writing is the
+            // correct outcome" — is a **skip** whether the guard that reached that verdict fired at the
+            // claim or at the commit, and everything else is still this entry's failure.
+            //
+            // **CPE-1929 pair, run rather than reasoned about — and the pair is SPLIT ACROSS
+            // PLATFORMS, which round 5 could not see from one of them** (`Compiling cpe-server` seen on
+            // every run; baselines 2,456 Windows and 2,445 Linux, 0 failed / 14 ignored):
+            //
+            // ```text
+            //                                       Windows --lib          Linux --lib
+            // A  disable (`if false && r.policy`)   2456 / 0   GREEN(r5)   2444 / 1   RED  (r6)
+            // B  lie     (`if true  || r.policy`)   2455 / 1   RED         2445 / 0   GREEN
+            //
+            //   A (Linux): cpe_1961_a_link_planted_mid_write_skips_that_entry_and_writes_its_neighbours
+            //        left: (2, 1, 0)   right: (2, 0, 1)
+            //   B (Windows): cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run
+            //      "two entries written and the blocked one in the FAILED bucket … which is a failure
+            //       and not a policy skip: ArchiveReport { done: 2, failed: 0, skipped: 1, … }"
+            //        left: (2, 0, 1)   right: (2, 1, 0)
+            // ```
+            //
+            // **Both arms are now reached, and neither platform reds both.** Each sabotage is answered
+            // by a fixture the *other* platform cannot construct: B's is Windows-only because it needs
+            // a foreign process's share mode to make a commit fail for an I/O reason, and A's is
+            // Unix-only because NTFS refuses to rename a directory with our staging handle open inside
+            // it. Read the column you are standing in and you will conclude one arm is uncovered; read
+            // the row and it is not. Say which platform a number came from, always.
+            //
+            // **Round 5 wrote that A's green was structural** — *"a leg-level fixture would have to
+            // race the extraction and could pass by missing it, which is worse than none"* — and the
+            // Reviewer built the fixture that refutes it (round 6). The move is to plant on a **signal**
+            // rather than on a timer: the `.cpe-tmp` staging sibling exists only between a successful
+            // claim and its commit, so polling for its appearance and then asserting the plant landed
+            // is fail-closed in *both* directions. Full argument at the test.
+            //
+            // The two halves this arm is built from are still pinned independently, and remain the only
+            // coverage on the platform that cannot construct the leg-level case: that `commit` really
+            // does produce a `policy: true` refusal
+            // (`fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`,
+            // red-proofed on Linux against a real planted link) and that `policy: false` still reaches
+            // `failed` (B, above).
+            //
+            // **Red-proof, run rather than asserted** (Windows `--lib`, `Compiling cpe-server` seen).
+            // Putting `claimed.commit().map_err(|r| r.why)?` back:
+            //
+            // ```text
+            // cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run ... FAILED
+            //   THE POINT: the entry AFTER the blocked one must be written too. … :
+            //   Err("…the path component \"victim.txt\" could not be replaced by the staged copy of it
+            //   (Access is denied. (os error 5)) …")   left: None  right: Some([65,70,84,69,82])
+            // cpe1935_a_blocked_entry_never_takes_the_run_down ... ok
+            // ```
+            //
+            // Note the second line: CPE-1935's own test does **not** red on this, because nothing in
+            // the tree drove a commit failure until the test above existed. That is why the `?` shipped
+            // through three rounds — a clean interdiff of the rebase proved the resolutions textually
+            // right and could not see that the loop's contract had changed underneath them.
+            if let Err(r) = claimed.commit() {
+                // Same two arms, same order and the same meaning as the claim's above — a verdict is a
+                // skip, an I/O refusal is this entry's failure.
+                if r.policy {
+                    report.skip(&name, &r.why);
+                } else {
+                    report.fail(&name, &EntryFailure::retryable(r.why));
+                }
+                prog.done_items += 1;
+                emit(&prog);
+                continue;
             }
             report.done += 1; // only files count toward "done" — a dir is a placeholder, not content
         }
@@ -7088,6 +7237,565 @@ mod tests {
             b"ORDINARY FILE".to_vec(),
             "the rest of the archive must still extract"
         );
+    }
+
+    /// **CPE-1961 round 3 (Reviewer F3): one planted alternate data stream must cost ONE entry, not the
+    /// whole extraction.**
+    ///
+    /// Round 2's Security Auditor found that `claim_destination_handle`'s two carry-over refusals — "could
+    /// not read what is at the destination" and `HandleCarryover::capture` failing — were
+    /// `Refusal::failure`, i.e. `policy: false`, which the loop above matches as *a file the user asked
+    /// for and did not get* and turns into `return Err`. Writing an alternate data stream needs only
+    /// write access to the file, and `HandleCarryover::capture` refuses outright once the streams exceed
+    /// `CARRY_CAP` (8 MiB). So **one 9 MiB stream planted on one pre-existing name inside the destination
+    /// killed the entire extraction** — an attacker-triggerable denial of service that arrived *with* the
+    /// carry-over and had to leave with it. Round 2 changed both to `policy: true`.
+    ///
+    /// **That fix shipped with nothing pinning it**, which is the same gap, one function over, that this
+    /// ticket closed for the Unix-mode leg on exactly this argument.
+    /// `ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped` covers an ADS-shaped
+    /// *entry name*, a different hazard on the other side of the write, and a search for `CARRY_CAP`
+    /// found one hit — the constant. A future refactor could put `Refusal::failure` back and every gate
+    /// in the tree would stay green.
+    ///
+    /// Asserts on the **filesystem**, in the order this family has learned to assert: the victim's own
+    /// unnamed stream is untouched, both neighbours landed, no `.cpe-tmp` residue survives, and only then
+    /// the counts and the recorded reason. `failed: 0` matters as much as `skipped: 1` — a refusal
+    /// reclassified into the failure bucket is still a wrong answer even when it does not abort.
+    ///
+    /// **Red-proofed. Round 3's transcript here was PRE-REBASE evidence presented as re-taken, and
+    /// round 4 re-ran it** (Reviewer Blocker 2). It said *"The whole extraction comes back `Err` and
+    /// `after.txt` is never created"*, quoting the `.expect()` sentence below — and CPE-1935, merged
+    /// into this branch's base by the round-3 rebase, had already deleted the `return Err` that
+    /// sentence describes. Flipping the `HandleCarryover::capture` refusal in
+    /// `claim_destination_handle` back to `policy: false`, re-run on the round-4 head (`Compiling
+    /// cpe-server` seen):
+    ///
+    /// ```text
+    /// cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest ... FAILED
+    ///   two entries written, one refused as a policy skip, and NOTHING in the failed bucket … :
+    ///   ArchiveReport { done: 2, failed: 1, skipped: 0, cancelled: false, errors:
+    ///     ["victim.txt: …\out\victim.txt: its alternate data streams are larger than 8388608 bytes,
+    ///       which this app will not copy across onto the replacement — nothing was written, and the
+    ///       original is untouched. Nothing was written for this entry. The rest of the archive was
+    ///       extracted; clear that and extract again to get this entry too."] }
+    ///     left: (2, 1, 0)   right: (2, 0, 1)
+    /// ```
+    ///
+    /// So: **`Ok`, not `Err`, and `after.txt` IS created.** The test still reds, on the classification
+    /// assert, which is the assert that should carry it — `policy` no longer decides whether the run
+    /// survives on this leg, only which bucket the entry lands in and therefore which sentence the user
+    /// reads. The `.expect()` below is now a backstop for a regression nothing currently produces,
+    /// which is why the counts assertion above it is doing the work.
+    ///
+    /// Windows-only because alternate data streams are.
+    #[test]
+    #[cfg(windows)]
+    fn cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest() {
+        let d = scratch("cpe1961-ads-carry-dos");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        // A pre-existing file inside the destination, which the archive is about to overwrite — so the
+        // claim runs with `created == false` and `HandleCarryover::capture` actually reads its streams.
+        let victim = dest.join("victim.txt");
+        fs::write(&victim, b"ORIGINAL").unwrap();
+        // 9 MiB > CARRY_CAP (8 MiB). Writing this needs nothing but write access to `victim`.
+        let ads = format!("{}:planted", victim.to_string_lossy());
+        if fs::write(&ads, vec![0u8; 9 * 1024 * 1024]).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest: \
+                 this volume does not support alternate data streams (not NTFS). NOTHING on this run \
+                 covered the carry-over denial-of-service classification"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        // Three entries, with the poisoned one in the MIDDLE: `after.txt` is what tells "skipped one
+        // entry" apart from "abandoned the run at the first refusal".
+        let zip_path = d.join("in.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("before.txt", opts).unwrap();
+            w.write_all(b"BEFORE").unwrap();
+            w.start_file("victim.txt", opts).unwrap();
+            w.write_all(b"REPLACEMENT").unwrap();
+            w.start_file("after.txt", opts).unwrap();
+            w.write_all(b"AFTER").unwrap();
+            w.finish().unwrap();
+        }
+
+        let cancel = AtomicBool::new(false);
+        let outcome =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        // Filesystem first, before the Result is unwrapped.
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"ORIGINAL".to_vec(),
+            "the refused entry must leave the destination exactly as it found it: {outcome:?}"
+        );
+        let residue: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "a refused claim must take its staging sibling with it — found {residue:?}: {outcome:?}"
+        );
+
+        let report = outcome.expect(
+            "one planted alternate data stream must cost ONE entry. An Err here means SOME per-entry \
+             path in the loop has regained run-abort semantics — round 2's `policy: false` did that \
+             through the carry-over refusal, and CPE-1935 removed it; round 4 removed a second one on \
+             the commit. The counts assertion below is what this test actually turns on now",
+        );
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (2, 0, 1),
+            "two entries written, one refused as a policy skip, and NOTHING in the failed bucket — a \
+             carry-over refusal reclassified as a failure is still the wrong answer: {report:?}"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.starts_with("victim.txt:")
+                && e.contains("alternate data streams are larger than 8388608 bytes")),
+            "and the skip must be RECORDED against the entry, with the reason the user can act on: \
+             {:?}",
+            report.errors
+        );
+        assert_eq!(
+            fs::read(dest.join("before.txt")).ok().as_deref(),
+            Some(&b"BEFORE"[..]),
+            "the entry before the poisoned one must be written: {report:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("after.txt")).ok().as_deref(),
+            Some(&b"AFTER"[..]),
+            "THE POINT: the entry AFTER the poisoned one must be written too. Missing means the run was \
+             abandoned at the refusal rather than skipping past it: {report:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 4 (Reviewer Blocker 1): a destination the commit cannot rename over costs ONE
+    /// entry, not the whole extraction.**
+    ///
+    /// CPE-1961 adds a per-entry failure point this loop did not have — `sync_all` plus a rename that
+    /// the filesystem can refuse — and round 3 gave it `claimed.commit().map_err(|r| r.why)?`, the only
+    /// bare `?` left in the per-entry body. That is a **run abort**, inside the loop whose entire
+    /// ticket (CPE-1935, merged one commit before this branch's base) exists to remove run aborts from
+    /// it. Measured on the round-3 head against the base, same three-entry zip, `victim.txt` held open
+    /// by another handle:
+    ///
+    /// ```text
+    ///                          outcome                        before.txt  victim.txt   after.txt
+    /// base 104b0bc5 (main)     Ok(done: 3)                    BEFORE      REPLACEMENT  AFTER
+    /// head 9902e1f5 (round 3)  Err("…could not be replaced…")  BEFORE      ORIGINAL     ABSENT
+    /// ```
+    ///
+    /// Refusing the *entry* is correct and stays: the user's `victim.txt` is intact and the reason is
+    /// named. Aborting the archive is not, and it is a regression against `main`.
+    ///
+    /// # The fixture needs no race and no privilege
+    ///
+    /// A handle opened with `FILE_SHARE_READ | FILE_SHARE_WRITE` and **not** `FILE_SHARE_DELETE` — what
+    /// a program not using Rust's `std` opens a file with by default, `std`'s own share mode being
+    /// `READ|WRITE|DELETE`. `create_beneath`'s leaf open asks `FILE_GENERIC_WRITE` and shares all
+    /// three, so the *claim* succeeds; the commit's
+    /// `NtSetInformationFile(FileRenameInformation, ReplaceIfExists)` is what the holder's missing
+    /// `FILE_SHARE_DELETE` refuses. Deterministic, unprivileged, and the shape a user actually hits —
+    /// an editor or a viewer with the extracted file already open.
+    ///
+    /// **Windows-only, and the Linux leg is genuinely not constructible here rather than merely
+    /// omitted.** `rename(2)` over an open file always succeeds on Linux, and the other half of the
+    /// commit — `sync_all` — needs `ENOSPC` or an I/O error to fail, neither of which an unprivileged
+    /// test can produce on demand. The `?` this pins was reachable on both platforms (`sync_all`
+    /// returning `ENOSPC` under ext4's delayed allocation is cost row 1's own prediction); only the
+    /// *fixture* is Windows-only. Nothing on the Linux matrix leg covers it.
+    ///
+    /// **Red-proofed** — see the transcript on the fix site in `extract_zip_archive_stream`.
+    #[test]
+    #[cfg(windows)]
+    fn cpe_1961_a_destination_the_commit_cannot_replace_costs_one_entry_not_the_run() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Named here rather than pulled from `windows-sys`: this test is about the share mode a
+        // *foreign* program picks, so the literal is the specification.
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+        let d = scratch("cpe1961-commit-refused");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let victim = dest.join("victim.txt");
+        fs::write(&victim, b"ORIGINAL").unwrap();
+        let hold = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&victim)
+            .expect("holding the victim open for reading must succeed");
+
+        // The poisoned name in the MIDDLE again: `after.txt` is the whole difference between "skipped
+        // one entry" and "abandoned the run".
+        let zip_path = d.join("in.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("before.txt", opts).unwrap();
+            w.write_all(b"BEFORE").unwrap();
+            w.start_file("victim.txt", opts).unwrap();
+            w.write_all(b"REPLACEMENT").unwrap();
+            w.start_file("after.txt", opts).unwrap();
+            w.write_all(b"AFTER").unwrap();
+            w.finish().unwrap();
+        }
+
+        let cancel = AtomicBool::new(false);
+        let outcome =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        // Filesystem first, before the Result is unwrapped — every bug in this family returned a
+        // Result that was less informative than the disk.
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"ORIGINAL".to_vec(),
+            "a refused commit must leave the destination exactly as it found it: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("before.txt")).ok().as_deref(),
+            Some(&b"BEFORE"[..]),
+            "the entry before the blocked one must be written: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("after.txt")).ok().as_deref(),
+            Some(&b"AFTER"[..]),
+            "THE POINT: the entry AFTER the blocked one must be written too. Missing means the commit \
+             failure took the run down — CPE-1935's regression, reintroduced by CPE-1961's new failure \
+             point: {outcome:?}"
+        );
+        let residue: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "a failed commit must take its staging sibling with it — found {residue:?}: {outcome:?}"
+        );
+
+        let report = outcome.expect(
+            "one destination another process holds open must cost ONE entry. An Err here is a run \
+             abort: the entries after the blocked one are never written, and the one error names \
+             none of them",
+        );
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (2, 1, 0),
+            "two entries written and the blocked one in the FAILED bucket — the user asked for a file \
+             and did not get it, which is a failure and not a policy skip: {report:?}"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.starts_with("victim.txt:")
+                && e.contains("could not be replaced by the staged copy")),
+            "and the failure must be RECORDED against the entry, with the reason the user can act on \
+             (close the program holding the file): {:?}",
+            report.errors
+        );
+        drop(hold);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 6: the commit-time `policy: true` arm, driven end to end through the real
+    /// extractor** — the fixture rounds 4 and 5 called structurally impossible, and the Reviewer built.
+    ///
+    /// # The objection, and why it does not hold
+    ///
+    /// The note at the commit fork used to say a leg-level fixture *"would have to race the extraction
+    /// and could pass by missing it, which is worse than none"*. That is true of a fixture that plants
+    /// on a **timer**. It is false of one that plants on a **signal**, and this one has a signal: the
+    /// `.cpe-tmp` staging sibling exists **only** between a successful claim and its commit
+    /// ([`crate::fsutil::staging_sibling_name`]), so its appearance is proof that the window is open
+    /// right now rather than a guess that it might be. Polling for it and then asserting that the plant
+    /// landed makes the fixture **fail-closed in both directions**:
+    ///
+    /// - **miss the window** (nothing staged inside the deadline, or the rename lost) → the `planted`
+    ///   assertion reds. It cannot pass by racing badly.
+    /// - **plant after the commit** → the entry lands, `(done, failed, skipped)` is `(3, 0, 0)`, and the
+    ///   `(2, 0, 1)` equality reds. It cannot pass by racing late either.
+    ///
+    /// A middle entry of **192 MB stored** is what buys the margin: `io::copy` is still moving bytes
+    /// through the staging handle for a few hundred milliseconds after the name appears, which is four
+    /// orders of magnitude more than the `rename` + `symlink` the planter needs.
+    ///
+    /// # What it establishes that the two unit halves do not
+    ///
+    /// Round 5 pinned the halves — that `commit` can produce `policy: true`
+    /// (`fsutil::tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`)
+    /// and that `policy: false` still reaches `failed`. Neither says the **leg** behaves: that the
+    /// verdict reaches `report.skip` rather than `report.fail`, that the run is not aborted, that the
+    /// neighbours on either side are still written, and — the one that matters — that **nothing is
+    /// written through the planted link**. The link here points *outside* the extraction root, so a
+    /// commit that followed it would deposit `big.bin` at a path the user never named. Asserted on the
+    /// filesystem before the `Result` is unwrapped, for the usual reason.
+    ///
+    /// **Unix only, measured rather than assumed** (round 5): NTFS refuses to rename a directory with
+    /// our staging handle open inside it (`ERROR_ACCESS_DENIED`), so the swap cannot be constructed on
+    /// Windows at all. That is an accident of the handle we happen to hold and never a contract — see
+    /// the fsutil test above, whose Windows arm asserts the block by its error code.
+    ///
+    /// **The gate is `#[cfg(unix)]`; the evidence is Linux/ext4** (round 7). CI's backend matrix also
+    /// runs `macos-latest`, so this test compiles and runs on APFS — where it has never been measured.
+    /// Every reliability figure quoted for it (50/50 on the authoring run, 100/100 on the Reviewer's
+    /// re-run across solo, twelve hogs and single-core-pinned) was taken on Linux/ext4. APFS is
+    /// *expected* to behave like ext4 here — a directory rename with a descendant handle open is
+    /// permitted — and if it does not, the plant never lands and the `planted` assertion **reds**: the
+    /// unmeasured direction fails loudly rather than passing green, which is why this ships un-gated on
+    /// macOS rather than narrowed to `#[cfg(target_os = "linux")]`. Round 6's own rule — report the
+    /// matrix, not the pair — applied to round 6's own new test.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1961_a_link_planted_mid_write_skips_that_entry_and_writes_its_neighbours() {
+        let d = scratch("cpe1961-commit-link-fork");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        // Where the planted link points — an empty directory OUTSIDE the extraction root, so a commit
+        // that followed it would be an escape and not merely a misfiling. `pen` is where the real
+        // `out/sub` is parked so its name comes free; the two are kept separate deliberately, so that
+        // `elsewhere` contains nothing the extraction put there before the link existed.
+        let elsewhere = d.join("elsewhere");
+        let pen = d.join("pen");
+        fs::create_dir_all(&elsewhere).unwrap();
+
+        // The poisoned entry in the MIDDLE again, and 192 MB **stored** so the window is wide. Written
+        // a megabyte at a time rather than as one allocation.
+        const CHUNKS: usize = 192;
+        let zip_path = d.join("in.zip");
+        {
+            let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            let stored: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("before.txt", opts).unwrap();
+            w.write_all(b"BEFORE").unwrap();
+            w.start_file("sub/big.bin", stored).unwrap();
+            let mb = vec![b'x'; 1024 * 1024];
+            for _ in 0..CHUNKS {
+                w.write_all(&mb).unwrap();
+            }
+            w.start_file("after.txt", opts).unwrap();
+            w.write_all(b"AFTER").unwrap();
+            w.finish().unwrap();
+        }
+
+        let sub = dest.join("sub");
+        // Raw `fs::rename`, and the `disallowed_methods` allow is the POINT of this test rather than an
+        // exemption from it — the same reason `backup.rs`'s racer carries one. The lint exists because
+        // `rename` replaces its destination silently and destroys a link at it, which is exactly the
+        // primitive the attacker uses here; routing the planter through `fsutil::rename_into_slot`
+        // would make it refuse to do the thing being measured.
+        #[allow(clippy::disallowed_methods)]
+        let planter = {
+            let (sub, elsewhere, pen) = (sub.clone(), elsewhere.clone(), pen.clone());
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while std::time::Instant::now() < deadline {
+                    // **The gate.** A `.cpe-tmp` in `sub/` exists only after this entry's claim
+                    // succeeded and only until its commit renames it away, so seeing one means the
+                    // window is open *now*. No sleep, no timer, no guess.
+                    let staged = fs::read_dir(&sub)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|e| e.file_name().to_string_lossy().ends_with(".cpe-tmp"));
+                    if staged {
+                        // Move the real directory into a holding pen and leave a link to a SEPARATE,
+                        // empty directory behind. The staging handle the extractor is writing through
+                        // follows the real directory; the NAME the commit has to resolve is now a
+                        // symlink pointing outside the root. `elsewhere` starts empty and is reachable
+                        // only through that link, so anything found in it afterwards arrived through
+                        // it — which is what makes the assertion below mean what it says.
+                        if fs::rename(&sub, &pen).is_err() {
+                            return false;
+                        }
+                        return std::os::unix::fs::symlink(&elsewhere, &sub).is_ok();
+                    }
+                    std::thread::yield_now();
+                }
+                false
+            })
+        };
+
+        let cancel = AtomicBool::new(false);
+        let outcome =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+        let planted = planter.join().unwrap();
+
+        // Filesystem first, before the Result is unwrapped.
+        let through_the_link: Vec<_> = fs::read_dir(&elsewhere)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            through_the_link.is_empty(),
+            "the commit followed the planted link and wrote OUTSIDE the extraction root — found \
+             {through_the_link:?}: {outcome:?}"
+        );
+        // The claim had already created `out/sub/big.bin` as an empty destination before the link
+        // existed, and the planter carried that directory off wholesale, so a zero-byte stub survives
+        // in the pen. That is the attacker's own doing and not an escape — but it must never be the
+        // 192 MB payload, which is what a commit that resolved the name late would have put there.
+        let stub = fs::metadata(pen.join("big.bin")).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(stub, 0, "the payload reached the directory the attacker moved aside: {outcome:?}");
+        assert_eq!(
+            fs::read(dest.join("before.txt")).ok().as_deref(),
+            Some(&b"BEFORE"[..]),
+            "the entry before the poisoned one must be written: {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("after.txt")).ok().as_deref(),
+            Some(&b"AFTER"[..]),
+            "THE POINT: the entry AFTER it must be written too — a commit refusal is one entry's cost, \
+             never the run's: {outcome:?}"
+        );
+
+        let report = outcome.expect(
+            "a link planted mid-write must cost ONE entry. An Err here is a run abort: the entries \
+             after the poisoned one are never written, and the one error names none of them",
+        );
+        // Both halves of the fail-closed argument, and they must be read together: `planted` says the
+        // window was really hit, the tuple says the verdict was really a skip. Either one alone is
+        // satisfiable by a fixture that raced badly.
+        assert!(
+            planted,
+            "the planter never got the directory swapped, so nothing below is evidence — an extraction \
+             nobody attacked skips nothing no matter what the commit does: {report:?}"
+        );
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (2, 0, 1),
+            "the two neighbours written and the poisoned entry SKIPPED — a planted link is a policy \
+             verdict, and telling the user to clear it and extract again is advice that cannot work: \
+             {report:?}"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("big.bin") && e.contains("is a link")),
+            "and the reason must be recorded against the entry, naming the link: {:?}",
+            report.errors
+        );
+
+        let _ = fs::remove_file(&sub); // the symlink itself, never its target
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 4 (Reviewer MAJOR 3): a long-but-legal entry name still extracts, and a refused
+    /// staging create leaves nothing at the destination.**
+    ///
+    /// `staging_sibling_name` appends `.<pid>-<nanos>.cpe-tmp` — about 31 bytes — and round 3 appended
+    /// it with **no length cap**, so a destination whose own name was legal but long stopped being
+    /// writable at all. 244 characters here, comfortably under the 255 both `NAME_MAX` (ext4, APFS) and
+    /// NTFS enforce; on `main` the same entry extracts normally.
+    ///
+    /// Two distinct regressions in one fixture, which is why both are asserted:
+    ///
+    /// 1. **The entry fails.** `"…nnn….txt.28088-…cpe-tmp" could not be created as a staging file (The
+    ///    filename, directory name, or volume label syntax is incorrect. (os error 123))`. Closed by
+    ///    capping the base name — see `fsutil::staging_sibling_name` for why truncation is the
+    ///    conservative direction for the sweep that parses these names back apart.
+    /// 2. **The refusal leaks a zero-byte stub.** `create_beneath` had already *created* the
+    ///    destination, and the staging create's `?` returned before `ClaimedDestination` existed to own
+    ///    the undo — so an empty file survived at a name that did not exist before the run, under a
+    ///    message saying nothing was written. Closed by `fsutil::undo_created_destination`.
+    ///
+    /// **Not platform-gated.** `NAME_MAX` is 255 on ext4 too, so both halves reproduced on both.
+    ///
+    /// **Red-proof, both halves, run rather than asserted** (Windows `--lib`, `Compiling cpe-server`
+    /// seen on each). Removing the cap from `staging_sibling_name` while keeping the undo:
+    ///
+    /// ```text
+    /// cpe_1961_a_long_but_legal_entry_name_still_extracts ... FAILED
+    ///   a legal entry name under NAME_MAX must extract, with its bytes … :
+    ///   Ok(ArchiveReport { done: 2, failed: 1, skipped: 0, cancelled: false, errors:
+    ///     ["nnn….txt: … the path component \"nnn….txt.35788-1787920395378223800.cpe-tmp\" could not
+    ///       be created as a staging file (The filename, directory name, or volume label syntax is
+    ///       incorrect. (os error 123)). Nothing was written for this entry …"] })
+    ///     left: None            right: Some((true, 4))
+    /// ```
+    ///
+    /// and removing **both** the cap and the `undo_created_destination` call on that arm — same
+    /// refusal, same counts, one line different:
+    ///
+    /// ```text
+    ///     left: Some((true, 0))  right: Some((true, 4))
+    /// ```
+    ///
+    /// That `left` is the second half's whole evidence: the difference between the two runs is a
+    /// zero-byte file at a name the user did not have before, under a message ending *"Nothing was
+    /// written for this entry."* **With the cap in place that arm is
+    /// no longer reachable from any input a test can construct** — what is left for it is a quota, a
+    /// full disk, or a share that drops between the destination create and the staging create in the
+    /// same directory. So the undo is a live backstop with no standing test, said here rather than
+    /// implied by a green suite.
+    #[test]
+    fn cpe_1961_a_long_but_legal_entry_name_still_extracts() {
+        let d = scratch("cpe1961-long-name");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        // 244 bytes. The stamped suffix takes it past 255 without the cap, and nowhere near it with.
+        let long = format!("{}.txt", "n".repeat(240));
+        assert_eq!(long.len(), 244, "the fixture must stay under 255 and over 255-minus-the-stamp");
+
+        let zip_path = d.join("in.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("before.txt", opts).unwrap();
+            w.write_all(b"BEFORE").unwrap();
+            w.start_file(&long, opts).unwrap();
+            w.write_all(b"LONG").unwrap();
+            w.start_file("after.txt", opts).unwrap();
+            w.write_all(b"AFTER").unwrap();
+            w.finish().unwrap();
+        }
+
+        let cancel = AtomicBool::new(false);
+        let outcome =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        // Filesystem first. The zero-byte stub is the half that a counts-only assertion misses
+        // entirely: the report says "failed", the disk says a new empty file.
+        let landed = fs::metadata(dest.join(&long)).ok().map(|m| (m.is_file(), m.len()));
+        assert_eq!(
+            landed,
+            Some((true, 4)),
+            "a legal entry name under NAME_MAX must extract, with its bytes — `Some((true, 0))` is the \
+             zero-byte stub a refused staging create used to leave behind, and `None` is the entry \
+             simply failing: {outcome:?}"
+        );
+        assert_eq!(fs::read(dest.join(&long)).unwrap(), b"LONG".to_vec());
+        let residue: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(residue.is_empty(), "no staging residue may survive a committed run: {residue:?}");
+
+        let report = outcome.expect("a long-but-legal entry name must not fail the extraction");
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (3, 0, 0),
+            "all three entries land — the long name is ordinary user data, not a hostile input: \
+             {report:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// Gzip `raw`, so the row-13/14 legs can build a single-file gzip whose extraction leaf lands on the
@@ -11247,11 +11955,13 @@ mod tests {
     /// test that only asserted `MODES_CHANGED_OUTSIDE == 0` would pass on a runner where the swapper
     /// never got in, which is the invisible-green failure CPE-1952 round 2 is about.
     ///
-    /// The swapper is bounded by a **deadline**, not by a stop flag, precisely so that assertion cannot
-    /// flake into a false alarm on a loaded or single-core runner: the slot is a real file for the rest
-    /// of the process, so a starved thread still stages its swap. That the window is real *during* the
-    /// run is not asserted here — it is the sabotage measurement below, which is where timing evidence
-    /// belongs.
+    /// The swapper is bounded by a **deadline**, not by a stop flag, and **retries on `EEXIST`**,
+    /// precisely so that assertion cannot flake into a false alarm on a loaded or single-core runner:
+    /// the slot is a real file from the commit onwards, so a starved thread still stages its swap. The
+    /// retry is not a relaxation — see the note at the swapper itself for why CPE-1961's
+    /// claim-then-commit staging made the old one-shot form lose 90% of its trials at a 2 ms induced
+    /// gap, and for the discriminator that measured it. That the window is real *during* the run is not
+    /// asserted here — it is the sabotage measurement below, which is where timing evidence belongs.
     ///
     /// # Setuid — measured, not inferred (CPE-1938 round 2, Security Auditor)
     ///
@@ -11336,11 +12046,59 @@ mod tests {
             fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
 
             let slot = dest.join("a.txt");
-            // **Bounded by a deadline rather than by a stop flag, so `swaps` is deterministic.** The
-            // swapper exits the moment it has replaced the slot; with the fix in, `a.txt` is a real
-            // file for the whole run and stays one afterwards, so a thread that was starved during the
-            // extraction still stages its swap and the liveness assertion below cannot flake. The
-            // deadline is the hang guard for the case where nothing ever creates the slot.
+            // **Bounded by a deadline rather than by a stop flag, so `swaps` is deterministic**, and
+            // the swapper **retries on `EEXIST`** rather than giving up on its first attempt. It exits
+            // the moment it has replaced the slot; `a.txt` is a real file once the extraction has
+            // committed and stays one afterwards, so a thread that was starved during the extraction
+            // still stages its swap and the liveness assertion below cannot flake. The deadline is the
+            // hang guard for the case where nothing ever creates the slot.
+            //
+            // **The retry is CPE-1961's doing, and the positive control is what noticed** (round 6,
+            // Reviewer blocker). This comment used to say `a.txt` "is a real file for the WHOLE run",
+            // and until CPE-1961 that was true: the extractor created the name once, opened it, and the
+            // bytes went through that handle — **nothing ever re-created it**. Claim-then-commit
+            // staging re-creates it, because `commit()` renames a `.cpe-tmp` sibling onto that name. So
+            // a swapper preempted in the gap between its `remove_file` and its `symlink` now finds the
+            // name occupied and gets `EEXIST` — a lost trial, contributing nothing to
+            // `changed_outside`, which is exactly the invisible-green shape `swaps == TRIALS` exists to
+            // catch. It caught it on a shared runner, three rounds after the change that broke the
+            // premise, and nothing in that diff pointed here.
+            //
+            // **Discriminator** (an env-gated sleep spliced between the swapper's two syscalls,
+            // identical instrumentation on both revisions, `TRIALS = 20`, real ext4). Pre-branch `main`
+            // cannot lose a trial at any inducible gap; the pre-retry round-5 revision does:
+            //
+            // ```text
+            // gap        pre-branch main  pre-retry r5      this fixture (retry in)
+            // 0 us       20/20           20/20             20/20   (0 EEXIST)
+            // 200 us     20/20           20/20             20/20   (0 EEXIST)
+            // 2000 us    20/20            2/20  <- CI      20/20  (19 EEXIST, all recovered)
+            // 20000 us   20/20            0/20             20/20  (20 EEXIST, all recovered)
+            // 200000 us  -                -                20/20  (20 EEXIST, all recovered)
+            // ```
+            //
+            // **Both columns are addressed by commit subject, not by sha, because a rebase rewrites
+            // every sha on this branch** (round 7). "pre-branch main" is *"sprint: 'use the shape from
+            // the other leg' is not a mechanical transform"*; "pre-retry r5" is *"CPE-1961 round 5:
+            // commit CAN refuse with policy: true, so the two legs stop classifying one refusal two
+            // ways"*. This table first named the latter `66090006`, which is a **pre-rebase** copy:
+            // `git merge-base --is-ancestor 66090006 <head>` is **false**, so a reader checking it out
+            // lands on a different base. Nothing rests on the sha — the losses reproduce from the
+            // current head with the retry removed — but the sha was wrong and shas here are not stable.
+            //
+            // **Two independent runs of this discriminator disagree in magnitude and agree in
+            // direction**: at the 2000 us gap the Reviewer's own from-scratch re-derivation gave
+            // **5/20** where this one gave 2/20 — draw noise, same direction, same conclusion, and
+            // saying so is stronger evidence than either number alone.
+            //
+            // `changed_outside` was 0 in every cell of every column, including the lost ones: **a lost
+            // trial is strictly safer than a won one** (the committed file ends at `a.txt` with no link
+            // present), so the escape assertion was never weakened — the liveness one simply stopped
+            // being evidence. After the commit `a.txt` is a stable real file, so the retry lands
+            // deterministically and `swaps == TRIALS` is a hard equality again rather than a relaxed
+            // bound. Natural (uninstrumented) reproduction did not occur here in ~1,900 trials across
+            // solo, single-core-pinned, `--test-threads 4` and CPU-loaded runs, because this box's ext4
+            // is faster than a GitHub runner; the discriminator is what settles it.
             let swapper = {
                 let (slot, victim) = (slot.clone(), victim.clone());
                 std::thread::spawn(move || {
@@ -11348,7 +12106,11 @@ mod tests {
                     while std::time::Instant::now() < deadline {
                         if fs::symlink_metadata(&slot).map(|m| m.is_file()).unwrap_or(false) {
                             let _ = fs::remove_file(&slot);
-                            return std::os::unix::fs::symlink(&victim, &slot).is_ok();
+                            if std::os::unix::fs::symlink(&victim, &slot).is_ok() {
+                                return true;
+                            }
+                            // `EEXIST` — `commit()`'s rename put a real `a.txt` back in the gap. Keep
+                            // spinning rather than returning: this is the retry the note above is about.
                         }
                         std::thread::yield_now();
                     }
@@ -11382,6 +12144,171 @@ mod tests {
              run where nothing was ever swapped in would report zero escapes no matter what the \
              extraction did. The fix does not prevent the swap — it makes it irrelevant"
         );
+    }
+
+    /// **CPE-1961 round 2: the zip-extract Unix-mode leg, which had NO test at all.**
+    ///
+    /// # Why this exists
+    ///
+    /// Round 1 renamed the extraction loop's local `f` to `claimed` and moved the write to
+    /// `claimed.file`, but left the `#[cfg(unix)]` mode block referring to the old `f` *and* below
+    /// `claimed.commit()`, which consumes the claim. `crates/server` stopped compiling on Linux and
+    /// macOS (`error[E0425]: cannot find value `f``) and **the whole Windows CI leg stayed green**,
+    /// because the block is `#[cfg(unix)]` and a Windows build never parses past `#[cfg]`. Two
+    /// reviewers found it by building on Linux; nothing in the suite could have. The gap is that this
+    /// leg — an archive-chosen mode arriving on an extracted file — had no assertion anywhere, so even
+    /// on Linux the only thing standing between it and silence was the compiler.
+    ///
+    /// # What it asserts, and which half is one-sided
+    ///
+    /// 1. **The mode lands.** Three entries with distinct modes come out wearing them. Deleting the
+    ///    `#[cfg(unix)]` block turns this red on every Unix runner.
+    /// 2. **The bytes land with it**, so a green mode assertion cannot be satisfied by an empty or
+    ///    staged-but-uncommitted file.
+    /// 3. **No `.cpe-tmp` residue survives** in the destination. A commit that silently failed, or a
+    ///    claim dropped after a successful write, would leave one.
+    /// 4. **The name is never observed holding CONTENT at a non-final mode** — the ordering half, and
+    ///    the one the moved block is actually about. The staging file is born `0600`
+    ///    (`create_staging_beneath`), the mode is applied to it while it is still nameless, and only
+    ///    then does `commit()` give it the name. So the bytes and the final mode arrive at
+    ///    `dest/exec.sh` in the same instant. A future edit that applied the mode after the commit
+    ///    would make a *populated* `dest/exec.sh` observable at `0600` first.
+    ///
+    /// **Assertion 4 is about CONTENT-at-a-mode, not existence-at-a-mode, and the first draft got that
+    /// wrong — the test caught it, which is the point of running one.** The draft asserted the name is
+    /// never seen at anything but `0o755` and came back red with five observations of `0o644`. That is
+    /// not a bug: `claim_destination_handle` opens the destination through `create_beneath`, which
+    /// **creates the name** when it is absent (`created == true`, which is what `Drop` later removes on
+    /// an abandoned claim) so the guards have an object to interrogate. That placeholder is an **empty
+    /// file at the platform default `0o666 & ~umask`**, and it stands at the destination name for the
+    /// whole of the caller's write. It is recorded in this ticket's cost list; it is not what this
+    /// assertion is for, so the assertion is scoped to observations where `len > 0`.
+    ///
+    /// **This half is one-sided and says so rather than pretending otherwise**: the observer polls, so
+    /// on a fast or loaded runner it may see the file only after the run finished, in which case it
+    /// observes the final state and passes. It can produce a true red and cannot produce a trustworthy
+    /// green on its own — which is why 1–3 carry the regression and this carries the ordering claim.
+    ///
+    /// # Red-proof (run by hand on Linux, CPE-1929's first half)
+    ///
+    /// - **Delete the `#[cfg(unix)]` mode block**: red on assertion 1, all three entries arriving at
+    ///   `0o600` — the staging birth mode, which is itself the measurement behind the `0600` row in
+    ///   this ticket's cost list.
+    /// - **Move the block back below `claimed.commit()`**: does not compile, which is the defect this
+    ///   test was written for and the reason the position is called out in a comment at the site.
+    /// - **Assertion 4 on its own**: shown red above, by the placeholder, before it was scoped to
+    ///   populated observations — so the observer demonstrably does see the file mid-run on this
+    ///   runner rather than only after the extraction has finished.
+    #[cfg(unix)]
+    #[test]
+    fn cpe1961_a_zip_entrys_unix_mode_lands_on_the_committed_file() {
+        use std::os::unix::fs::PermissionsExt;
+        const WANT: [(&str, u32); 3] = [("exec.sh", 0o755), ("private.txt", 0o600), ("plain.txt", 0o644)];
+
+        let d = scratch("cpe1961-zip-mode");
+        let ap = d.join("modes.zip");
+        {
+            let mut w = zip::ZipWriter::new(fs::File::create(&ap).unwrap());
+            for (name, mode) in WANT {
+                let o: zip::write::FileOptions<()> =
+                    zip::write::FileOptions::default().unix_permissions(mode);
+                w.start_file(name, o).unwrap();
+                w.write_all(name.as_bytes()).unwrap();
+            }
+            // Filler AFTER the observed entry, so the extraction is still running when the observer
+            // starts looking — the same trick, and the same reason, as the CPE-1938 race above.
+            let plain: zip::write::FileOptions<()> =
+                zip::write::FileOptions::default().unix_permissions(0o644);
+            for i in 0..12 {
+                w.start_file(format!("filler{i}.bin"), plain).unwrap();
+                w.write_all(&vec![b'x'; 100_000]).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        // Assertion 4's observer. Bounded by a deadline, never by a flag, so it cannot hang a run.
+        let watched = dest.join("exec.sh");
+        let observer = {
+            let watched = watched.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                let (mut seen, mut wrong) = (0usize, Vec::<u32>::new());
+                while std::time::Instant::now() < deadline {
+                    if let Ok(m) = fs::symlink_metadata(&watched) {
+                        // `len > 0` is what distinguishes the COMMITTED file from the empty
+                        // placeholder `create_beneath` left at the name at claim time — see the doc.
+                        if m.len() > 0 {
+                            seen += 1;
+                            let mode = m.permissions().mode() & 0o7777;
+                            if mode != 0o755 {
+                                wrong.push(mode);
+                            }
+                            if seen > 4 {
+                                break; // it is committed and has settled; stop burning the CPU
+                            }
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+                (seen, wrong)
+            })
+        };
+
+        let report = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("a plain archive of mode-carrying entries must extract");
+        assert_eq!(
+            report.done,
+            (WANT.len() + 12) as u64,
+            "every entry must be reported as extracted: {report:?}"
+        );
+
+        for (name, mode) in WANT {
+            let p = dest.join(name);
+            assert_eq!(
+                fs::read(&p).unwrap_or_default(),
+                name.as_bytes(),
+                "{name}: the committed file must hold the entry's bytes — a mode on an empty or \
+                 uncommitted file proves nothing"
+            );
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+                mode,
+                "{name}: the archive's mode did not reach the extracted file. `0600` here means the \
+                 `#[cfg(unix)]` block stopped running and the file is wearing the staging birth mode"
+            );
+        }
+
+        let residue: Vec<String> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "the extraction left staging siblings behind, so a commit did not happen or a claim was \
+             dropped after a successful write: {residue:?}"
+        );
+
+        let (seen, wrong) = observer.join().unwrap();
+        assert!(
+            seen > 0,
+            "the observer never saw {watched:?} holding any bytes, so assertion 4 measured nothing"
+        );
+        assert!(
+            wrong.is_empty(),
+            "the destination name was observed holding CONTENT at a non-final mode {wrong:?} — the \
+             mode is being applied AFTER the commit, so there is a window in which the finished file \
+             is readable under its real name at the staging birth mode"
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// **CPE-1938 round 2: a component the filesystem refuses for an I/O reason stops the whole run,

@@ -193,10 +193,31 @@ Four independent protections apply automatically — you don't opt into any of t
   sitting at the name, a destination that would land outside your folder, or a shortcut pointing out of
   it. Those four are refused in **every** format, and they are counted as *skipped*.
 
+  **The same answer now applies however late the shortcut appears.** Because an entry is written to a
+  temporary neighbour and only renamed into place at the end, a folder on the way to it can turn into a
+  shortcut *while the entry is still being written* — the one window a check made up front cannot cover.
+  That is caught at the rename, and it is counted as **skipped**, exactly as it is when the shortcut was
+  already there when extraction reached the entry. It used to be counted as *failed*, which came with
+  the advice to close whatever was in the way and extract again — advice that could not work, because
+  nothing was holding the file: the folder is a shortcut, and extracting again refuses again. Your files
+  are untouched either way; only which number the entry lands in, and what the reason tells you to do
+  about it, has changed.
+
+  **ZIP adds two more refusals**, both about a file already sitting at the entry's name that this app
+  cannot fully describe before replacing it. An entry is written to a temporary neighbour and then
+  renamed into place, so that a failure part-way through can never leave you with half a file — and the
+  things a rename does not carry across (on Windows the permissions, the hidden extra data streams and
+  the attribute flags; on Linux and macOS the extended attributes) have to be read off the existing file
+  first and put onto the replacement. If that reading does not work, or if the existing file's hidden
+  extra data comes to more than 8 MB, the entry is **refused and your existing file is left exactly as
+  it was** — rather than replaced by one whose protections this app had to guess at. Both are reported
+  by name with the reason, and the rest of the archive extracts.
+
   "**Failed**" means the write itself did not work — a read-only file or a folder already sitting at the
   entry's name, a permission problem, a full disk, a damaged entry inside the archive, a TAR hard link
-  whose target is not in the archive. Nobody chose that, so it is counted as *failed* rather than
-  skipped, and the two are always reported as different things.
+  whose target is not in the archive, or **a file another program is holding open so it cannot be
+  replaced** (close the program and extract again). Nobody chose that, so it is counted as *failed*
+  rather than skipped, and the two are always reported as different things.
 
   **One exception, and it is worth knowing before you extract over files you care about: a read-only
   file stops a ZIP or 7z entry, but a TAR entry replaces it.** TAR extraction is handled by a different

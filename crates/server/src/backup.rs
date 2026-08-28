@@ -680,7 +680,11 @@ fn copy_one_verified(
         // write, because there is no second lookup of any parent to race. Missing directories are
         // created the same way, inside the handle we hold, which is why no refusal can leave directory
         // debris outside the root either.
-        || crate::open_beneath::create_beneath(root, rel),
+        // CPE-1961: the closure became a `DestinationSite` so the same root handle also creates and
+        // commits the staging sibling the bytes actually go into. `copied.written` below is now the
+        // identity of a file THIS call created, not of one it found at the destination — which makes
+        // `landed_inside`'s comparison strictly stronger.
+        crate::fsutil::DestinationSite::Beneath { root, rel },
     )?;
 
     // (3) AFTER the write (CPE-1896): where did the bytes actually go? This is the only check in the

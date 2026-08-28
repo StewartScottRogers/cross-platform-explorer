@@ -1485,12 +1485,10 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
     dst: &Path,
     wording: LinkGuardWording,
 ) -> Result<CopiedOnto, String> {
-    copy_file_onto_destination_handle(src, dst, wording, || {
-        crate::batch_media::open_no_follow(dst)
-            .map(|(file, created)| crate::open_beneath::Opened { file, created })
-            .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: could not open the destination for writing: {e}", dst.display())))
-    })
-    .map_err(|r| r.why)
+    // CPE-1961: the `open_no_follow` closure that stood here moved INTO `claim_destination_handle` as
+    // `DestinationSite::ByPath`, because the staging sibling has to be created the same way the
+    // destination is addressed and a closure could only describe the destination.
+    copy_file_onto_destination_handle(src, dst, wording, DestinationSite::ByPath).map_err(|r| r.why)
 }
 
 /// The same copy, onto a destination handle **the caller opens** (CPE-1896).
@@ -1525,11 +1523,17 @@ pub(crate) fn copy_file_onto_no_follow_with_wording(
 /// came from the atomic walk. It costs one path stat and it is the only thing standing if a hard-coded
 /// no-follow constant is ever wrong on a platform this crate does not test — the same reasoning
 /// `batch_media` records for its own copy of that check.
+///
+/// **CPE-1961 changed the destination opener from a closure to a [`DestinationSite`]**, and the
+/// paragraph above about ordering still holds: nothing is opened or created at `dst` until the source
+/// has been opened and described. What the closure could not express is where the destination's
+/// *staging sibling* goes, which is the whole of the containment fix — see
+/// [`claim_destination_handle`].
 pub(crate) fn copy_file_onto_destination_handle(
     src: &Path,
     dst: &Path,
     wording: LinkGuardWording,
-    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
+    site: DestinationSite<'_>,
 ) -> Result<CopiedOnto, crate::open_beneath::Refusal> {
     // **The source is NOT named in these two messages, deliberately** (CPE-1845 + CPE-1846 merge). The
     // known production callers are `revert_engine::apply_write` and `snapshot_capture::restore` (both
@@ -1561,29 +1565,500 @@ pub(crate) fn copy_file_onto_destination_handle(
         });
     }
 
-    let ClaimedDestination { file: mut w, written } =
-        claim_destination_handle(dst, wording, open_dst)?;
+    let mut claimed = claim_destination_handle(dst, wording, site)?;
+    let written = claimed.written;
     // `meta.len()` comes off the OPEN SOURCE HANDLE above, not a path stat (CPE-1870): it only sizes
     // the copy buffer, but taking it from the handle keeps this function free of a second path question.
     let copied =
-        stream_bytes(&mut r, &mut w, meta.len())
+        stream_bytes(&mut r, &mut claimed.file, meta.len())
             .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
     // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
-    w.set_permissions(meta.permissions())
+    // CPE-1961: this now lands on the STAGED file, before the commit — so the source's mode is on the
+    // object from the moment it takes the destination's name, rather than being applied afterwards to a
+    // file that was briefly readable at whatever the destination carried.
+    claimed
+        .file
+        .set_permissions(meta.permissions())
         .map_err(|e| crate::open_beneath::Refusal::failure(format!("{}: {e}", dst.display())))?;
-    carry_file_times(&meta, &w);
+    carry_file_times(&meta, &claimed.file);
+    // Every `?` above drops `claimed` without committing, which removes the staging sibling and — when
+    // this call created the destination name — the empty destination too. See [`ClaimedDestination`].
+    claimed.commit()?;
     Ok(CopiedOnto { bytes: copied, written })
 }
 
-/// What [`claim_destination_handle`] hands back: the write handle every guard has already passed, and
-/// the identity of the object it names (see [`CopiedOnto::written`] for what `None` and a degenerate
-/// value mean — this is the same value, read off the same handle).
-pub(crate) struct ClaimedDestination {
-    /// Open for writing, truncated, and proven not to be a link, a directory or a hard link.
+/// **Where the destination lives, and therefore how its staging sibling is opened and committed**
+/// (CPE-1961).
+///
+/// This replaced a `FnOnce() -> Opened` closure. The closure could say how to open the *destination*
+/// and nothing else, which was enough while [`claim_destination_handle`] wrote through that handle. It
+/// no longer does: the bytes go into a sibling this call exclusively creates, and the sibling has to be
+/// created and committed **the same way the destination is addressed**, or the fix would hand back its
+/// own containment at the commit.
+pub(crate) enum DestinationSite<'a> {
+    /// The destination is addressed by path, no-follow at the final component only
+    /// ([`crate::batch_media::open_no_follow`]). `revert_engine`, `snapshot_capture` and every caller
+    /// of [`copy_file_onto_no_follow`] arrive here.
+    ///
+    /// The interior components are resolved by the kernel at open time, so this arm has never had —
+    /// and still does not have — containment against a junction swapped in above the leaf. That is
+    /// `open_beneath`'s job and those legs have not been wired to it. What CPE-1961 gives this arm is
+    /// the *leaf* property: the bytes never enter an object that already existed.
+    ByPath,
+    /// The destination is `root/rel`, resolved one component at a time against a root handle held for
+    /// the whole run ([`crate::open_beneath::create_beneath`]). `backup`, `archive` and `transfer`
+    /// arrive here, and this arm gets the handle-relative commit
+    /// ([`crate::open_beneath::rename_beneath`]).
+    Beneath { root: &'a crate::open_beneath::RootDir, rel: &'a Path },
+}
+
+/// What [`claim_destination_handle`] hands back: **a handle on a file it created a moment ago that has
+/// never had another name**, plus that file's identity.
+///
+/// # This changed meaning in CPE-1961, and the change is the whole fix
+///
+/// Before, `file` was the destination itself — opened, interrogated, and then written through. Every
+/// guard was a fact read off that handle, and one of those facts (`links > 1`) is a property an
+/// attacker can change **after** the read: hard-link an outside victim to the destination, let the open
+/// land on the victim's object, unlink the second name before `handle_facts` runs, and the count reads
+/// `1` while the bytes destroy a file outside the root. Measured live at **166 / 2,000 (Windows,
+/// NTFS)** and **2,887 / 10,000 (Linux, ext4)** through `copy_file_onto_no_follow`, with the outside
+/// file's bytes read back off disk rather than any verdict believed.
+///
+/// Now `file` is a **staging sibling**, exclusively created next to the destination. Nothing an
+/// attacker does at the destination name can make these bytes enter a pre-existing object, because the
+/// object they enter did not exist a moment ago. The destination is still opened and still asked every
+/// question it was asked before — those verdicts are worth stating to a user — but no answer is
+/// load-bearing for containment any more. Same structural argument as
+/// [`stage_and_replace_at`]'s, reached the same way, and stated at both sites deliberately.
+///
+/// # It MUST be committed, and dropping it is a real (if noisy) outcome
+///
+/// [`Self::commit`] renames the staged file over the destination. Dropping without committing removes
+/// the staging sibling — and, when this call created the destination name, the empty destination too —
+/// so a caller that returns early on an error leaves the user's tree exactly as it found it. A caller
+/// that simply *forgets* silently writes nothing, which is why the type is `#[must_use]` and why every
+/// call site is pinned by a test that asserts the destination holds the new bytes.
+///
+/// # What staging COSTS, in full
+///
+/// Round 1 listed the syscall and the residue costs and was accurate on both. Round 2's Reviewer and
+/// Security Auditor found the list **incomplete**, and these are the rows it was missing. Every one is
+/// a real, user-visible consequence of writing beside the destination instead of into it.
+///
+/// 1. **Peak disk space doubles for the file being written.** The destination's folder transiently
+///    holds the old file *and* the new one. `set_len(0)`-then-write peaked at the new size; this peaks
+///    at old + new. **On the backup leg — overwriting a large file on a nearly-full external drive —
+///    that turns operations that used to succeed into `ENOSPC`.** It is per-file, not per-job: the
+///    extra is released at each commit. There is no way to avoid it and keep the containment property,
+///    because "do not write into the object that is already there" is the containment property. Derived
+///    from the mechanism (two names in one folder hold two files' worth of blocks until the rename),
+///    **not measured** — no run in this ticket filled a volume. Labelled for the same reason row 2 is:
+///    rows 3 and 4 below *were* measured, so an unlabelled derivation sitting beside them reads as one
+///    (round 3, Reviewer F4).
+/// 2. **On Unix the destination's OWNER changes.** The object landing at `dst` was created by the
+///    running user, so it carries that user's uid/gid. Writing through the pre-existing handle
+///    preserved whatever owner and group the destination had. [`carried_mode`] handles the consequence
+///    that matters for privilege — setuid/setgid are dropped when the owner changed — but **ownership
+///    itself is neither carried nor recoverable here**: `fchown` to another uid needs `CAP_CHOWN`,
+///    which this process does not have and should not ask for. Derived from the mechanism (a
+///    `create`-then-`rename` cannot preserve an owner without privilege), not measured, and said so.
+/// 3. **A destination created at a brand-new name lands at `0600`, not `0666 & ~umask`.** The staging
+///    file is born at [`STAGING_MODE`] and [`HandleCarryover`] only runs when `created == false`, so
+///    there is nothing to widen it. Legs that set a mode of their own afterwards are unaffected
+///    (`archive` does, for any entry whose `unix_mode()` is `Some` — which is every entry of every zip
+///    a `ZipWriter` produced). The two that are affected: **`transfer::download_tree`**, where every
+///    downloaded file is now `0600`, and archive entries whose external attributes are zero. Measured
+///    rather than reasoned: disabling `archive`'s mode block makes
+///    `cpe1961_a_zip_entrys_unix_mode_lands_on_the_committed_file` report `0o600` where `0o755` was
+///    asked for. More restrictive, so not a hole — but a change, and in the docs page now.
+/// 4. **The destination NAME exists as an empty placeholder for the whole of the caller's write.**
+///    [`claim_destination_handle`] opens the destination through `create_beneath` /
+///    [`crate::batch_media::open_no_follow`], which *creates* the name when it is absent, so the guards
+///    have an object to interrogate. Until the commit that name is a zero-byte file at the platform
+///    default mode. Before this ticket the same name existed and *grew*, so nothing regressed — a
+///    watcher sees "empty, then complete" instead of "partial, then complete", which is the better of
+///    the two — but a caller that treats "the name exists" as "the file is finished" is wrong on both.
+///    Observed directly by the archive test above, which was written asserting the opposite and
+///    reddened.
+///
+/// **Not on this list, deliberately: the hard-linked-batch behaviour change.** A batch output that was
+/// a second name for another file inside the selected folder used to have both names updated, because
+/// the write went into the shared inode; it now updates only the output that was asked for. That is an
+/// operation no longer mutating a name it was never pointed at — a security improvement, listed as a
+/// behaviour change in the docs page and not as a cost (round 2, Security Auditor item 6).
+#[must_use = "a claimed destination writes nothing until it is committed"]
+pub(crate) struct ClaimedDestination<'a> {
+    /// Open for writing, empty, and — unlike every version of this field before CPE-1961 — **not** the
+    /// destination. It is a sibling of it, created with `create_new` in the same folder.
     pub(crate) file: std::fs::File,
-    /// Identity of the object the bytes are about to enter, off the handle. `None` on a platform
-    /// whose identity model [`crate::batch_media::handle_facts`] does not know.
+    /// Identity of the object the bytes are about to enter, off the handle. After [`Self::commit`]
+    /// that is the object standing at the destination, which is what `backup::landed_inside` compares
+    /// against. `None` on a platform whose identity model [`crate::batch_media::handle_facts`] does not
+    /// know — see [`CopiedOnto::written`].
+    ///
+    /// # ONE of the five legs reads this, and that bounds what "detectable" is allowed to mean
+    ///
+    /// `backup::copy_one_verified` is the only caller that consumes it (`landed_inside`, `backup.rs`).
+    /// `archive::extract_zip_archive_stream`, `transfer::download_tree`, `revert_engine::apply_write`
+    /// and `snapshot_capture::restore` all discard it. So the sentence "on Unix the `Beneath` commit's
+    /// residual aliasing becomes *detectable* rather than silent" — which round 1 wrote unqualified —
+    /// is true of **`backup` only**. On the other four the aliasing is exactly as silent as it was.
+    ///
+    /// The residual is real and large, not a corner: CPE-1961 round 2's Security Auditor pointed
+    /// CPE-1963's racer at the new `Beneath` commit and measured **2,785 of 3,000 destinations aliased
+    /// on Linux/ext4 (92.8%)**, against **0 of 3,000 on Windows**. `written != identity(dst)` held in
+    /// all 2,785, so the signal exists everywhere — it is only *read* in one place. **Closing it is
+    /// CPE-1963's job, not this ticket's**; wiring the comparison into the other four is a separate
+    /// change, because each needs its own answer to "and then what do we tell the user".
     pub(crate) written: Option<crate::batch_media::FileIdentity>,
+    /// `None` once [`Self::commit`] has taken it, so [`Drop`] can tell "committed" from "abandoned"
+    /// without a second flag.
+    staged: Option<Staged<'a>>,
+}
+
+/// The staging state [`ClaimedDestination`] carries between the claim and the commit.
+struct Staged<'a> {
+    /// The staging sibling's full path — for the by-path commit and for cleanup.
+    tmp: PathBuf,
+    /// The destination this commits over.
+    target: PathBuf,
+    /// The root handle and the two root-relative names, when the destination is addressed beneath a
+    /// held root. `None` for [`DestinationSite::ByPath`].
+    beneath: Option<(&'a crate::open_beneath::RootDir, PathBuf, PathBuf)>,
+    /// Whether the claim CREATED the destination name. An abandoned claim removes what it created.
+    created: bool,
+}
+
+impl Staged<'_> {
+    /// Undo what the claim brought into existence: the staging sibling always, and the destination
+    /// name too when this claim created it. One implementation, called from both [`Drop`] and
+    /// [`ClaimedDestination::commit`]'s failure path, so the two halves cannot drift.
+    ///
+    /// # The `Beneath` arm unlinks through the ROOT HANDLE (CPE-1961 round 2)
+    ///
+    /// Both of these were `std::fs::remove_file` on an absolute path, on both arms, and the comment
+    /// defending that said they were the same bounded exception the refusal arms record: a name this
+    /// call created moments ago and is now giving up on. **The Security Auditor's round-2 finding is
+    /// that "moments ago" stopped being true.** `Drop` fires on *any* early return, including an I/O
+    /// failure part-way through the caller's write — and the caller's write can be a multi-gigabyte
+    /// download or a whole archive entry. The window between the exclusive create and the unlink is
+    /// therefore the entire byte stream, not microseconds, and a by-path unlink across that window is a
+    /// deletion primitive: swap a directory component for a junction while the copy runs and the
+    /// cleanup unlinks a file outside the root.
+    ///
+    /// `open_beneath::remove_file_beneath` is exactly the primitive for this and CPE-1937 added it for
+    /// exactly this reason — descent one component at a time against the held root, then `unlinkat` /
+    /// `FileDispositionInfo` on the parent handle, never a re-resolved path. Its own doc records the
+    /// measurement (89 files deleted outside the root in 200 trials when the leaf is by-path after the
+    /// same descent). The `Beneath` arm has the root handle in hand, so there is no reason left not to
+    /// use it.
+    ///
+    /// **The `ByPath` arm keeps `std::fs::remove_file`, and that is a residual, not a decision that it
+    /// is safe.** Those callers (`revert_engine`, `snapshot_capture`, the `copy_file_onto_no_follow`
+    /// family) hold no root handle to be relative to; giving them one is wiring `open_beneath` into
+    /// them, which CPE-1913 scoped out of this family deliberately. The exposure is unchanged from
+    /// before this ticket on that arm, and it is smaller than the `Beneath` arm's was, because those
+    /// legs' interior components are already unprotected — the leaf unlink adds nothing new.
+    ///
+    /// Errors are discarded on both arms on purpose: this runs on a path that is already failing, and
+    /// a cleanup that cannot complete must not replace the caller's real reason with its own.
+    fn abandon(&self) {
+        match &self.beneath {
+            Some((root, tmp_rel, rel)) => {
+                let _ = crate::open_beneath::remove_file_beneath(root, tmp_rel);
+                if self.created {
+                    let _ = crate::open_beneath::remove_file_beneath(root, rel);
+                }
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.tmp);
+                if self.created {
+                    let _ = std::fs::remove_file(&self.target);
+                }
+            }
+        }
+    }
+}
+
+impl ClaimedDestination<'_> {
+    /// Commit the staged bytes over the destination name.
+    ///
+    /// # Which rename, and why the two arms are not equivalent
+    ///
+    /// - [`DestinationSite::Beneath`] commits with [`crate::open_beneath::rename_beneath`]. On
+    ///   **Windows** that is `NtSetInformationFile(FileRenameInformation)` **on this very handle** —
+    ///   *not* the Win32 `SetFileInformationByHandle` wrapper this doc named until CPE-1961 round 2,
+    ///   which refuses a non-null `RootDirectory` with `ERROR_INVALID_PARAMETER (0x80070057)`; see
+    ///   `open_beneath::sys::rename` for the measurement. The source operand is an object rather than a
+    ///   name, so CPE-1963's source-aliasing race cannot reach it. On **Unix** it is
+    ///   `renameat(parent_fd, tmp, parent_fd, target)` — both leaves resolved inside one held directory
+    ///   object, which is the strongest rename POSIX has, and the source is still a name. See that
+    ///   function's doc for the residual and who owns it.
+    /// - [`DestinationSite::ByPath`] commits with [`commit_replacement`]'s rename arm, both operands by
+    ///   path. That is the same commit `stage_and_replace_at` uses and it inherits the same residual on
+    ///   both platforms. It is not an oversight: these legs have no root handle to be relative to, and
+    ///   giving them one is wiring `open_beneath` into `revert_engine` and `snapshot_capture`, which
+    ///   CPE-1913 scoped out of this family deliberately.
+    ///
+    /// **So "CPE-1963 is closed on Windows" is true of the `Beneath` arm and FALSE of `ByPath`**, and
+    /// CPE-1961 round 2's Security Auditor measured the difference rather than leaving it as a caveat:
+    /// pointed at the `ByPath` commit on Windows, **19 destinations of 2,000 were aliased and 20 more
+    /// returned `Ok` without writing the user's bytes**, against a delete-only control of 0. Pointed at
+    /// the `Beneath` commit on the same runner: **0 of 3,000, against 11,666 successful attacker relinks
+    /// of the staging name.** Any summary of this ticket that says "fully closed on Windows" without
+    /// naming which arm is wrong; the two legs that arrive by path — `revert_engine::apply_write` and
+    /// `snapshot_capture::restore` — do not have it.
+    ///
+    /// **`ReplaceFileW` is not an option in either arm**, for [`Commit::ReplacingTheName`]'s reason: it
+    /// resolves the destination *path* at commit time, which is the window this closes. What it would
+    /// have carried is carried explicitly instead — see [`HandleCarryover`], captured off the
+    /// destination handle at claim time and applied to the staged file while it was still empty.
+    ///
+    /// # Cost
+    ///
+    /// One `sync_all` and one rename per claimed destination, plus — on the `Beneath` arm — one extra
+    /// per-component descent (`rename_beneath` does not hold the walk open across the caller's write,
+    /// which may be a multi-gigabyte stream). On a 10,000-file backup of a two-level tree that is
+    /// ~20,000 additional `openat`/`NtCreateFile` calls, against a walk the run already pays twice per
+    /// file for the claim and `landed_inside`.
+    pub(crate) fn commit(mut self) -> Result<(), crate::open_beneath::Refusal> {
+        // `take` first: from here on, every exit path has already disarmed `Drop`, so a failed commit
+        // cleans up exactly once, here, with the message that says why.
+        let Some(staged) = self.staged.take() else {
+            // Unreachable: `commit` consumes `self`, so it cannot run twice, and nothing else takes
+            // this field. Refuse rather than `unwrap` — a panic in a backup loop is worse than an
+            // entry reported as not written.
+            return Err(crate::open_beneath::Refusal::failure(
+                "internal: a destination was committed twice".to_string(),
+            ));
+        };
+        let cleanup = Staged::abandon;
+        // The bytes reach the disk BEFORE the name does. Without this a crash between the rename and
+        // the writeback leaves the destination's name pointing at a file with the right size and no
+        // content — the one failure mode a staged write is supposed to have removed, since the
+        // original is gone by then. Same order, and the same reason, as `stage_and_replace_at`.
+        if let Err(e) = self.file.sync_all() {
+            cleanup(&staged);
+            return Err(crate::open_beneath::Refusal::failure(format!(
+                "{}: the copy could not be flushed to disk, so nothing was replaced: {e}",
+                staged.target.display()
+            )));
+        }
+        // **The handle stays OPEN across the rename, on both arms and both platforms.** The `Beneath`
+        // arm needs it — on Windows it IS the source operand — and the `ByPath` arm is unharmed:
+        // `std`'s opens carry `FILE_SHARE_DELETE`, so a rename of a file this process holds open
+        // succeeds. Closing it first would therefore buy nothing and would fork the two arms.
+        let result = match &staged.beneath {
+            Some((root, tmp_rel, rel)) => {
+                crate::open_beneath::rename_beneath(root, &self.file, tmp_rel, rel)
+            }
+            None => commit_replacement(&staged.tmp, &staged.target, false)
+                .map_err(crate::open_beneath::Refusal::failure),
+        };
+        if result.is_err() {
+            cleanup(&staged);
+            return result;
+        }
+        // CPE-1738's collector, run after the commit has already succeeded so a failed claim never pays
+        // for it. Without it the five legs CPE-1961 routes through staging would accumulate debris in
+        // the user's own folders — exactly the regression CPE-1958 round 2 found and fixed for the
+        // confirmed-overwrite path.
+        //
+        // **This call deletes MORE than `stage_and_replace_at`'s does, and round 2's comment here said
+        // the opposite** (round 3, Reviewer F1). It read *"on the same terms `stage_and_replace_at`
+        // calls it … scoped to this destination's own `<name>.<pid>-<nanos>.cpe-tmp` siblings"*, which
+        // was true of round 1 and false from the moment SEC-8 changed the argument below to
+        // [`SweepScope::EveryDestination`]. As it stands, one commit may unlink **any**
+        // `<something>.<pid>-<nanos>.cpe-tmp` in the directory — not only this destination's — less the
+        // ones still carrying this process's own pid ([`stamp_pid_is_this_process`]). A widened deletion
+        // described at its call site as narrowly scoped is the one claim that cannot be left standing:
+        // this is the comment a reader hits first, because it sits at the call rather than the
+        // definition, so it is the one that has to say how much may go. [`SweepScope::EveryDestination`]
+        // states exactly what the remaining bound is, and — the part that is easy to over-read — what it
+        // is *not*: a name shape and an age, never proven ownership.
+        //
+        // **Memoised, and the reason is a measurement rather than tidiness.** `sweep_stale_temp_siblings`
+        // does a `read_dir` of up to `SWEEP_SCAN_CAP` = 4,096 entries. The editor's save pays that once
+        // per save; this type is called in a loop — a backup or a restore of ten thousand files — so an
+        // unmemoised call here is 10,000 directory scans, tens of seconds added to a run for residue
+        // that, in the ordinary case, does not exist (a committed claim has already renamed its own
+        // staging file away). See [`sweep_stale_temp_siblings_once_per_directory`].
+        sweep_stale_temp_siblings_once_per_directory(&staged.target);
+        Ok(())
+    }
+}
+
+impl Drop for ClaimedDestination<'_> {
+    /// An abandoned claim removes the staging sibling, and the destination too when this claim created
+    /// it — through the held root handle on the `Beneath` arm, by path on `ByPath`. See
+    /// [`Staged::abandon`], which is the whole of it and which records why the by-path form was not
+    /// good enough here even though every name involved is one this call created.
+    ///
+    /// **This is the path that made the window big.** `Drop` fires on any early return between the
+    /// claim and the commit, and the caller's write sits in that gap — a multi-gigabyte download, a
+    /// whole archive entry — so an unlink here is not the microseconds-later cleanup the refusal arms
+    /// perform.
+    fn drop(&mut self) {
+        if let Some(staged) = self.staged.take() {
+            staged.abandon();
+        }
+    }
+}
+
+// The directory `sweep_stale_temp_siblings_once_per_directory` last swept on this thread. (A plain `//`
+// comment: rustdoc does not document a macro invocation and `-D unused-doc-comments` is right to say so
+// — the same note `open_beneath::WALK_SYSCALLS` carries.)
+//
+// **One slot, not a set**, and that is the whole design: every caller in this family walks a tree
+// depth-first, so consecutive files share a directory and one slot collapses essentially all of the
+// repetition. A set would grow without bound over a long run for no additional coverage on the shape
+// that actually occurs, and an LRU would be a cache with an eviction policy to argue about.
+//
+// Thread-local for the same reason `open_beneath::WALK_SYSCALLS` is: a process-wide slot would let two
+// concurrent runs in different trees each suppress the other's sweep, which is the one way this
+// optimisation could stop a real sweep from ever happening.
+thread_local! {
+    static LAST_SWEPT_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`sweep_stale_temp_siblings`], skipped when this thread's previous claim committed into the same
+/// directory (CPE-1961).
+///
+/// # What is given up, stated rather than implied
+///
+/// A stale `.cpe-tmp` in a directory this thread has already swept is **not** collected again until a
+/// *different* thread commits into that directory. That is acceptable and it is not a weakening of
+/// CPE-1738's guarantee, because the guarantee was always best-effort and always opportunistic: the
+/// sweep exists so residue does not accumulate *forever*, not so it is gone within one operation. What
+/// it buys is that a ten-thousand-file backup does ten-ish directory scans instead of ten thousand.
+///
+/// **Two corrections from CPE-1961 round 2, both of which round 1 got wrong in the optimistic
+/// direction.**
+///
+/// 1. [`LAST_SWEPT_DIR`] is **thread-local and never cleared at a run boundary**, so the memo is once
+///    per directory per *thread lifetime*, not once per run. Round 1's doc said residue is "not
+///    collected until some later run enters that directory first"; on a reused pool thread — which is
+///    every thread in this app — a later run **on that same thread skips it too**. Only a different
+///    thread ever sweeps it. (Reviewer, ASK 4. It cannot go stale in any load-bearing way: it
+///    suppresses best-effort cleanup and nothing else, and it can never affect where bytes land.)
+/// 2. The memo remembers a **directory** while the filter matched a **name**, so the two disagreed on
+///    a unit and the coverage loss was not "later" but *never* — see [`SweepScope`], which is the fix.
+///    This call now sweeps with [`SweepScope::EveryDestination`] so one scan per directory collects
+///    that directory's residue rather than one file's worth of it.
+///
+/// [`stage_and_replace_at`] deliberately keeps calling the **unmemoised**, name-scoped form. It is not
+/// in a loop, its callers are single saves, and leaving it alone means CPE-1961 changes nothing about
+/// the editor's behaviour — the memo is a cost fix for a new caller, not a policy change for an old one.
+fn sweep_stale_temp_siblings_once_per_directory(target: &Path) {
+    let Some(dir) = target.parent() else { return };
+    let already = LAST_SWEPT_DIR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_deref() == Some(dir) {
+            return true;
+        }
+        *slot = Some(dir.to_path_buf());
+        false
+    });
+    if !already {
+        sweep_stale_temp_siblings_scoped(target, SweepScope::EveryDestination);
+    }
+}
+
+/// The longest single path component the filesystems this app runs on accept: `NAME_MAX` is **255
+/// bytes** on ext4, APFS and HFS+, and NTFS caps a component at **255 UTF-16 code units** (CPE-1961
+/// round 4).
+///
+/// [`staging_sibling_name`] measures its output in UTF-8 **bytes** against this, and that is
+/// conservative on Windows rather than approximate: every scalar value costs at least as many UTF-8
+/// bytes as UTF-16 units (1/1 for ASCII, 2/1, 3/1, then 4/2), so a component of ≤255 UTF-8 bytes is
+/// always ≤255 UTF-16 units. It is exact on the Unix side, which counts bytes itself.
+const MAX_COMPONENT_BYTES: usize = 255;
+
+/// The `<name>.<pid>-<nanos>.cpe-tmp` staging name, in ONE place (CPE-1961).
+///
+/// [`stage_and_replace_at`] built this string inline and [`sweep_stale_temp_siblings`] parses it back
+/// apart; a second inline copy in [`claim_destination_handle`] would be two producers for one parser,
+/// which is how a collector quietly stops collecting half of what it is named for. The pid and the
+/// nanosecond stamp are what make two concurrent writers — or a stale temp left by a killed process —
+/// unable to collide on one sibling.
+///
+/// # The base name is TRUNCATED to fit, and a long-but-legal destination is why (round 4)
+///
+/// The stamp adds ~31 bytes and round 3 appended it with no cap, so a destination whose own name is
+/// legal but long stopped being writable at all. Measured on this branch's head against `main`, a
+/// 244-character entry name (`"n"*240 + ".txt"`, comfortably under NTFS's 255) in a three-entry zip:
+///
+/// ```text
+/// main                 the entry extracts normally
+/// round 3              "…nnn….txt.28088-1787919176899603600.cpe-tmp" could not be created as a
+///                      staging file (The filename, directory name, or volume label syntax is
+///                      incorrect. (os error 123))
+/// ```
+///
+/// Both platforms — `NAME_MAX` is 255 on ext4 too. That is a **regression against `main`** on ordinary
+/// user data, not a hostile input, so the name has to fit rather than the write having to fail.
+///
+/// **Truncating the base is safe in the direction that matters, and here is the whole argument.** The
+/// only consumer that parses this name back apart is [`sweep_stale_temp_siblings_scoped`], and it needs
+/// three things: a `.cpe-tmp` suffix, a structurally valid `<digits>-<digits>` stamp before it, and a
+/// non-empty base in front of that. Truncation touches none of them. What it does change is the
+/// *comparison* [`SweepScope::EveryDestination`] makes — `&head[..dot] != name_bytes` — which a
+/// truncated base fails, so the candidate reads as "not the target's own". That routes it into
+/// [`stamp_pid_is_this_process`], which **skips** a live-pid sibling. Skipping is the conservative
+/// answer: the cost is that a *killed* process's truncated residue is collected a little later (by any
+/// sweep from a different pid) rather than by the very next commit in that directory, and the benefit
+/// is that our own concurrent writer on a long name cannot lose its live staging file. Nothing here can
+/// delete more than round 3 could.
+///
+/// Three smaller consequences, stated rather than left to be found. [`SweepScope::ThisDestinationOnly`]
+/// — what [`stage_and_replace_at`] uses — matches on the target's **full** name, so it does not collect
+/// its own residue for a name long enough to be truncated; `EveryDestination` still does. And two long
+/// destinations in one directory sharing a truncated prefix would stage under the same base, which the
+/// pid and nanosecond stamp already make non-colliding and which the exclusive create refuses rather
+/// than clobbers if it ever did.
+///
+/// **The third is a collision class truncation creates rather than one it inherits, and round 4's doc
+/// named only its own residue** (round 5, Reviewer Minor 5). Truncation makes one destination's staging
+/// base equal to *another* destination's **full** name — destination `A` whose name is exactly `room`
+/// bytes, and destination `B` whose longer name begins with those same `room` bytes, stage under the
+/// same base. `ThisDestinationOnly` matches a candidate by that base against the target's full name, so
+/// a commit on `A` now recognises `B`'s staging file as its own residue — and that arm is the one with
+/// **no** [`stamp_pid_is_this_process`] guard, so the live-pid escape hatch `EveryDestination` gained in
+/// round 3 does not apply to it.
+///
+/// It is bounded and it is not a clobber. [`STALE_TEMP_FLOOR`] is 300 s, so nothing under five minutes
+/// old is touched at all; `B` would have to be mid-write for five minutes on a name that is a prefix
+/// extension of `A`'s, in `A`'s own directory, with `A` committing inside that window. If it did
+/// happen, `B`'s staged file is unlinked and `B`'s commit then fails and **reports its entry** — a
+/// refused entry with a reason, on the legs that report per entry, never a wrong file at `B`'s name.
+/// Recorded because the enumeration in this doc is the thing the next reader will trust, not fixed:
+/// narrowing it means giving `ThisDestinationOnly` the same pid guard, which changes
+/// `stage_and_replace_at`'s residue collection for a case this bound already makes remote.
+fn staging_sibling_name(target_name: &std::ffi::OsStr) -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Built first so the cap is measured against the real suffix rather than an assumed width: a pid
+    // is 1–10 digits and a nanosecond stamp is 19–20, and hard-coding "about 31" is how a cap goes one
+    // byte wrong on the machine nobody tested on.
+    let suffix = format!(".{}-{stamp}.cpe-tmp", std::process::id());
+    let base = target_name.to_string_lossy();
+    let room = MAX_COMPONENT_BYTES.saturating_sub(suffix.len());
+    let base = if base.len() > room {
+        // Back off to a char boundary — at most three bytes, so with `room` in the low 200s the base
+        // can never be emptied here (an empty base is the one shape the sweep's `dot == 0` check
+        // refuses, and it would make this file uncollectable).
+        let mut cut = room;
+        while cut > 0 && !base.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        &base[..cut]
+    } else {
+        &base[..]
+    };
+    format!("{base}{suffix}")
 }
 
 /// **Claim a destination to write into — the whole handle-side gate, in one place (CPE-1913).**
@@ -1597,25 +2072,100 @@ pub(crate) struct ClaimedDestination {
 /// file body) now gets the identical guards and the identical wording rather than a fifth
 /// re-derivation.
 ///
-/// `open_dst` is the caller's open — in production always
-/// [`crate::open_beneath::create_beneath`], which resolves the destination one component at a time
-/// against a held root handle, so the containment is atomic with the open. What this function adds is
-/// everything that can only be asked **of the handle that open returned**: is the object a name
-/// surrogate, a directory, or a second name for a file that may live anywhere.
+/// `site` says how the destination is addressed — in production either
+/// [`crate::open_beneath::create_beneath`], which resolves it one component at a time against a held
+/// root handle so the containment is atomic with the open, or a plain no-follow open by path. What this
+/// function adds is everything that can only be asked **of the handle that open returned**: is the
+/// object a name surrogate, a directory, or a second name for a file that may live anywhere.
 ///
-/// On return the handle is at offset 0 and the file is truncated, so the caller writes its bytes and
-/// nothing of a previous, longer occupant survives.
+/// # CPE-1961: the guards stayed, the WRITE moved
+///
+/// **This function no longer writes through the handle it checks.** Every refusal below is unchanged —
+/// same order, same wording, same `policy` flags — but not one of them is load-bearing for containment
+/// any more, and the site says so where each one sits. `links > 1` in particular is now a **policy**
+/// verdict (a user overwriting one of two names for the same file wants to be told) rather than a
+/// defence, exactly as CPE-1958 left the same refusal in `overwrite_confirmed_no_follow`.
+///
+/// Why it had to move: `facts.links` is a property of the object at the moment it is read, and an
+/// attacker with write access to the destination's folder can change it **after** the read. Hard-link
+/// an outside victim to the destination, let the open land on the victim's object, unlink the second
+/// name before `handle_facts` runs — the count reads `1`, every guard passes, and `set_len(0)` plus the
+/// caller's bytes destroy a file outside the root. Re-checking harder does not help; a second read is
+/// as stale as the first. Measured, with the outside file's bytes read back off disk:
+///
+/// | shape | Windows / NTFS | Linux / ext4 |
+/// |---|---|---|
+/// | attacker owns both halves | 166 / 2,000 | 2,887 / 10,000 |
+/// | harness plants each trial | 188 / 2,000 (773 planted) | 2,563 / 10,000 (1,538 planted) |
+///
+/// So the bytes now go into a **staging sibling** this function exclusively creates, and the caller
+/// commits it over the destination with [`ClaimedDestination::commit`]. See that type's doc for the
+/// structural argument and [`crate::open_beneath::rename_beneath`] for the commit primitive CPE-1961
+/// had to add.
+///
+/// On return the handle is at offset 0 and the file is empty — it was created empty — so the caller
+/// writes its bytes exactly as before and nothing of a previous, longer occupant survives the commit.
+///
+/// # What the destination handle is still opened FOR
+///
+/// Three things, all of which need the object rather than the name: the refusals above; the
+/// destination's metadata, so the staged file can be given the mode it is replacing; and
+/// [`HandleCarryover`], which reads the DACL, the named streams and the attribute word off the handle
+/// on Windows and the extended attributes off the descriptor on Unix. Without that last one this fix
+/// would ship CPE-1739's downgrade — a file that comes back more readable than the one it replaced —
+/// which is precisely what CPE-1958's first round did until its Auditor measured it.
 ///
 /// # Errors
 ///
 /// Every refusal ends "Nothing was written for this entry" and, when this call created the name, the
 /// name is removed again — so a refused entry leaves no empty file behind for the user to puzzle over.
-pub(crate) fn claim_destination_handle(
+/// Remove the destination name [`claim_destination_handle`] brought into existence, on a refusal that
+/// fires **after** the create and **before** [`ClaimedDestination`] exists to own the undo (CPE-1961
+/// round 4).
+///
+/// [`Staged::abandon`] is this same obligation once the claim is built; this is the window in front of
+/// it, and until round 4 two arms in that window leaked a zero-byte file at a name that did not exist
+/// before the call — under a refusal ending *"Nothing was written for this entry."*
+///
+/// **`remove_file_beneath` on the `Beneath` arm**, for the reason [`Staged::abandon`] records: the leaf
+/// is unlinked through the held root handle rather than by a path that could have had a directory
+/// component swapped under it. The window here is microseconds rather than a whole byte stream, so this
+/// is smaller than the one that finding was about — but the primitive is already in hand and there is
+/// no reason to keep a by-path unlink on an arm that has a root handle. `ByPath` keeps
+/// `std::fs::remove_file` because those callers hold no root handle; same residual, same owner.
+///
+/// Errors are discarded: this runs on a path that is already failing, and a cleanup that cannot
+/// complete must not replace the caller's real reason with its own.
+fn undo_created_destination(site: &DestinationSite<'_>, dst: &Path, created: bool) {
+    if !created {
+        return;
+    }
+    match site {
+        DestinationSite::ByPath => {
+            let _ = std::fs::remove_file(dst);
+        }
+        DestinationSite::Beneath { root, rel } => {
+            let _ = crate::open_beneath::remove_file_beneath(root, rel);
+        }
+    }
+}
+
+pub(crate) fn claim_destination_handle<'a>(
     dst: &Path,
     wording: LinkGuardWording,
-    open_dst: impl FnOnce() -> Result<crate::open_beneath::Opened, crate::open_beneath::Refusal>,
-) -> Result<ClaimedDestination, crate::open_beneath::Refusal> {
-    let crate::open_beneath::Opened { file: w, created } = open_dst()?;
+    site: DestinationSite<'a>,
+) -> Result<ClaimedDestination<'a>, crate::open_beneath::Refusal> {
+    let crate::open_beneath::Opened { file: w, created } = match &site {
+        DestinationSite::ByPath => crate::batch_media::open_no_follow(dst)
+            .map(|(file, created)| crate::open_beneath::Opened { file, created })
+            .map_err(|e| {
+                crate::open_beneath::Refusal::failure(format!(
+                    "{}: could not open the destination for writing: {e}",
+                    dst.display()
+                ))
+            })?,
+        DestinationSite::Beneath { root, rel } => crate::open_beneath::create_beneath(root, rel)?,
+    };
 
     // THE authority on Windows, where a junction is a reparse point that `is_symlink` (the path check,
     // now BELOW this block since CPE-1896 round 4) may or may not report depending on its tag:
@@ -1640,13 +2190,18 @@ pub(crate) fn claim_destination_handle(
     // swapping a junction back defeats. `None` on a platform whose identity model `batch_media` does
     // not know; degenerate values are judged by the caller via `FileIdentity::is_degenerate`, never
     // here — this function has no policy about them.
-    // Declared without an initialiser on purpose (CPE-1913 round 2): the `else` below now returns, so
-    // the compiler itself proves this is always assigned — which is the invariant the `else` arm's
-    // comment describes, checked rather than asserted. A `= None` default would compile and quietly
-    // re-open the fail-open the moment someone made that `else` fall through again.
-    let written: Option<crate::batch_media::FileIdentity>;
+    // **CPE-1961 moved `written`.** It used to be assigned here, from the DESTINATION handle, because
+    // the destination was the object the bytes went into. It is not any more: the bytes go into a
+    // staging sibling created at the end of this function, so `written` is read off THAT handle and is
+    // the identity of the object that will be standing at the destination once
+    // [`ClaimedDestination::commit`] has renamed it. `backup::landed_inside` therefore compares against
+    // an object this call created rather than one it merely found, which is a strictly stronger
+    // question — a swapped-back name is a different object either way, but now so is an aliased commit.
+    //
+    // The CPE-1913 round-2 invariant the old declaration encoded is preserved by the `else` arm below,
+    // which still returns rather than falling through: `handle_facts` answering "cannot describe this"
+    // is a refusal, never a shrug.
     if let Some(facts) = crate::batch_media::handle_facts(&w) {
-        written = Some(facts.id);
         // CPE-1896 round 3 (F5): refuse a reparse point only when it is a **name surrogate** — a tag
         // whose whole purpose is to make this name mean another name. The bare
         // `FILE_ATTRIBUTE_REPARSE_POINT` bit that used to sit here is set by a great deal that is not a
@@ -1714,9 +2269,19 @@ pub(crate) fn claim_destination_handle(
         };
         if let Some(why) = why {
             drop(w);
-            if created {
-                let _ = std::fs::remove_file(dst);
-            }
+            // Round 5 (Reviewer Minor 2): was an inline `if created { remove_file(dst) }`, on both
+            // arms, including the one holding a root handle — which is precisely what
+            // `undo_created_destination` exists to stop, and its own doc said so while this site went
+            // on doing it. **`created` is not tested here any more because the helper tests it**, and
+            // duplicating the guard is how the two copies come to disagree.
+            //
+            // Unreachable with `created == true` — a name this call just made with `create_new` is
+            // neither a link nor a directory — and the cleanup is kept anyway, as it was before, for
+            // the reason the helper's doc gives: a refusal ending *"Nothing was written for this
+            // entry"* must not leave a zero-byte file at a name that did not exist. Kept as a
+            // fail-closed backstop, said out loud per CPE-1929 so the next person's green sabotage of
+            // it is expected rather than alarming.
+            undo_created_destination(&site, dst, created);
             // `policy: true` throughout this function's refusals — every one of them is a verdict
             // about what is sitting at the name, not an I/O failure. See `open_beneath::Refusal`.
             return Err(crate::open_beneath::Refusal {
@@ -1731,6 +2296,25 @@ pub(crate) fn claim_destination_handle(
         // `create_new` has exactly one link, so a fresh destination can never reach this branch. The
         // count is read from `facts`, which came off the handle already opened — never a second path
         // question, which is the property the rest of this function is built on.
+        //
+        // **CPE-1961 demoted this from a defence to a POLICY verdict, exactly as CPE-1958 demoted its
+        // twin in `overwrite_confirmed_no_follow`.** It is still right to refuse — a user overwriting
+        // one of two names for the same file wants to be told, and the `BACKUP` wording explains why a
+        // deduplicating store is being protected rather than broken — but it is no longer what keeps
+        // the bytes out of a file outside the root. It cannot be: `facts.links` is read after the open
+        // and an attacker changes it in between, which is the whole measured defect.
+        //
+        // **The CPE-1929 pair, run, with both numbers here.**
+        //   - *Disable it* (`if false && facts.links > 1`): **10 tests fail** —
+        //     `fsutil::cpe_1857_a_hard_linked_destination_is_never_written_through`,
+        //     `backup::cpe_1879_…`, `archive::cpe_1857_…` ×3, `transfer::cpe_1857_…`/`cpe_1913_…`,
+        //     `revert_engine::cpe_1857_…`/`cpe_1881_…`.
+        //   - *Force the predicate to lie* (`HandleFacts { links: 1, ..facts }`): the **same 10** fail.
+        //
+        // Both halves change behaviour, so this guard is reachable and pinned by its own tests — not
+        // shadowed. And in both runs `cpe_1961_a_lying_link_count_cannot_destroy_a_file_outside_the_
+        // folder_through_a_copy` stayed **green**, which is the point of demoting it: the containment
+        // does not depend on this refusal, and each of the two is pinned by a different test.
         if facts.links > 1 {
             drop(w);
             // CPE-1881: the shared half of this sentence now lives in `wording.hard_link_reason()` — see
@@ -1784,9 +2368,12 @@ pub(crate) fn claim_destination_handle(
         // flow rather than a guard, and the alternative is changing a type to encode an invariant that
         // this branch could relax again.
         drop(w);
-        if created {
-            let _ = std::fs::remove_file(dst);
-        }
+        // Round 5 (Reviewer Minor 2): was an inline `if created { remove_file(dst) }` on both arms.
+        // This one IS reachable with `created == true` — `handle_facts` can fail to describe a handle
+        // this call created just as readily as one it found — so the `Beneath` arm was doing a by-path
+        // unlink, in a real scenario, inside the function whose whole subject is not asking the path
+        // twice. See [`undo_created_destination`].
+        undo_created_destination(&site, dst, created);
         return Err(crate::open_beneath::Refusal::failure(format!(
             "{}: could not check how many names this file has, or whether it is a link, so nothing \
              was written for it — refusing to guess rather than risk writing through a second name \
@@ -1830,20 +2417,44 @@ pub(crate) fn claim_destination_handle(
     // tripwire. Do not delete this line as redundant with the tag check below: the two are
     // independent, and only one of them is a path question.
     //
-    // **The two `remove_file(dst)` cleanups below are the only PATH writes left in this function, and
-    // that is worth naming** (CPE-1896 PR #1043, N3), since the whole thesis of the CPE-1896 caller is
-    // that the destination is addressed by handle and never by path. They are bounded and deliberate:
-    // they run only on `created`, i.e. a name **this call** claimed with an exclusive create moments
-    // ago and is now abandoning, so the worst a racing swap achieves is that the cleanup unlinks
-    // something else — it cannot make this function *write* anywhere, and the entry is refused either
-    // way. Doing it properly needs a handle-relative unlink (`FileDispositionInfo` on Windows,
-    // `unlinkat` on the parent fd on Unix), which means threading the parent handle out of
-    // `open_beneath` for the sake of a cleanup on a refusal path. Recorded rather than built.
+    // **The `created` cleanups were the only PATH writes left in this function, and CPE-1896 PR #1043
+    // (N3) recorded the handle-relative unlink as "recorded rather than built"** — since the whole
+    // thesis of the CPE-1896 caller is that the destination is addressed by handle and never by path.
+    // **It is built now.** All three of them go through [`undo_created_destination`], whose `Beneath`
+    // arm is `open_beneath::remove_file_beneath` — the handle-relative unlink N3 described, which
+    // CPE-1961 had to write anyway for [`Staged::abandon`]. Round 4 converted one of the three; round 5
+    // (Reviewer Minor 2) converted the two that were left, one of which is reachable with
+    // `created == true`.
+    //
+    // What remains by path is the `ByPath` arm of that helper and of `Staged::abandon`, and that is not
+    // a residual anyone can close here: those callers hold no root handle to be relative to, which is
+    // the whole difference between the two [`DestinationSite`]s. The bound CPE-1896 stated still holds
+    // for them, unchanged — the cleanup runs only on `created`, a name **this call** claimed with an
+    // exclusive create moments ago and is now abandoning, so the worst a racing swap achieves is that
+    // the cleanup unlinks something else; it cannot make this function *write* anywhere, and the entry
+    // is refused either way.
     if std::fs::symlink_metadata(dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
         drop(w);
-        if created {
-            let _ = std::fs::remove_file(dst);
-        }
+        // Round 4: was an inline by-path `remove_file` on both arms. Same obligation, one
+        // implementation — and the `Beneath` arm now unlinks through the root handle it is already
+        // holding. See [`undo_created_destination`].
+        //
+        // **Round 5 (Reviewer Minor 3): "same obligation, one implementation" is true and understates
+        // what changed on THIS arm.** This branch fires only when `symlink_metadata(dst)` says the name
+        // is a link, so with `created == true` its one reachable input is the race — a name this call
+        // created with `create_new`, replaced by a link between that create and this probe. And
+        // `remove_file_beneath` does not merely unlink a different way: it **classifies the leaf
+        // itself**, via `refuse_link` for a directory junction, and opens a file symlink
+        // `FILE_OPEN_REPARSE_POINT` before unlinking it. So the arm's only live input is precisely the
+        // one where the old and the new implementation reach the same outcome by *different
+        // mechanisms* — the by-path form unlinks the name; the handle form decides what the name is
+        // first, and unlinks the link rather than anything it points at.
+        //
+        // Equivalent outcomes, so this is not a defect and there is nothing to red-proof against; it is
+        // recorded because "one implementation" reads as a refactor, and on this arm it is a mechanism
+        // change whose safety rests on the two mechanisms agreeing about links — which is exactly the
+        // thing the rest of this function refuses to assume anywhere else.
+        undo_created_destination(&site, dst, created);
         return Err(crate::open_beneath::Refusal {
             why: format!(
                 "{}: this name is a link, and {} never writes through one — a link's target can be \
@@ -1855,17 +2466,296 @@ pub(crate) fn claim_destination_handle(
         });
     }
 
-    // Everything past here acts on `w`, the handle already pinned. Nothing re-opens `dst` by path.
-    // A partial destination is left behind on a mid-copy error, exactly as `fs::copy` leaves one.
-    // `policy: false` — unlike everything above it, a failed truncate is the filesystem saying no, and
-    // the entry the user asked for was not written.
-    w.set_len(0).map_err(|e| {
-        crate::open_beneath::Refusal::failure(format!(
-            "{}: could not truncate the destination: {e}",
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1961: everything above was a VERDICT about what is sitting at the name. Nothing above keeps
+    // the bytes out of a file outside the root, and the `set_len(0)` that used to stand here — the line
+    // that actually destroyed the victim — is gone. What follows is the containment.
+    // ---------------------------------------------------------------------------------------------
+
+    // What the destination carries today, read off the HANDLE every check above just interrogated,
+    // never a second `fs::metadata(dst)`. `None` when this call created the name, because then there
+    // was nothing there to carry anything from. Same shape, same policy and the same refusal wording as
+    // `overwrite_confirmed_no_follow`: a destination that exists and cannot be described **fails**
+    // rather than being replaced by a file whose permissions this app had to guess (CPE-1739).
+    //
+    // **Both refusals below are `policy: true`, and CPE-1961 round 2's Security Auditor is why.**
+    // They were `Refusal::failure` — `policy: false` — and writing an alternate data stream needs only
+    // write access to a file, while `HandleCarryover::capture` refuses outright past `CARRY_CAP`
+    // (8 MiB). So one planted 9 MiB stream on one pre-existing name inside the extraction folder was
+    // enough to make the archive leg give up (measured). On `main` these legs never read streams at all
+    // — they truncated and wrote — so the exposure arrived *with* the carry-over and leaves with this
+    // line.
+    //
+    // **What round 2 wrote here, and what round 4 measured instead** (Reviewer Blocker 2). It said the
+    // classification made the carry-over *"an attacker-triggerable denial of service on all five
+    // legs"*, on the grounds that `extract_zip_archive_stream` turns a `policy: false` refusal into
+    // `return Err(...)`, aborting the whole archive. **That `return Err` no longer exists** — CPE-1935
+    // deleted it, and it is in this branch's base. And "all five legs" never held: only two of the five
+    // ever abandoned a run over one entry, and only one of those did so *because of* `policy`. Read out
+    // of the callers rather than recalled:
+    //
+    // ```text
+    // leg                              policy: false does                    aborts the run?
+    // archive::extract_zip_archive_stream   report.fail + continue (CPE-1935) no  (did, pre-1935)
+    // transfer::download_tree               undelivered.push, per entry       no
+    // backup::apply_backup_plan_walk        emit(OpResult::err), per entry    no
+    // revert_engine::apply_write            Refused::transient, per file      no
+    // snapshot_capture::restore             `?` on ANY refusal                yes — and equally on
+    //                                                                         policy: true, so this
+    //                                                                         line changes nothing there
+    // ```
+    //
+    // **The same table, re-asked for the failure point THIS ticket adds** (round 4). `commit()` —
+    // `sync_all` plus a rename the filesystem can refuse — is reachable on all five, and two legs were
+    // answering "abandon the run" for a cause as ordinary as a file another program has open:
+    // `archive` (Reviewer Blocker 1, `?` → `report.fail` + `continue`) and `transfer::download_tree`
+    // (`hard_err` → `record!`). Both are fixed and both are pinned by a filesystem-asserting test.
+    // `backup` and `revert_engine` already reported per entry. `restore` still aborts, deliberately —
+    // see the note at its call site in `snapshot_capture.rs`.
+    //
+    // **`commit` can return `policy: true`, and round 4 wrote here that it cannot** (round 5, Reviewer
+    // Major 1). The sentence was *"'which bucket does `policy` pick' is the wrong question for it,
+    // because `commit` only ever returns `Refusal::failure`"*, and it is **false**. It holds for
+    // [`DestinationSite::ByPath`], whose commit is `commit_replacement(...).map_err(Refusal::failure)`
+    // — `policy: false` by construction. The [`DestinationSite::Beneath`] arm is
+    // `crate::open_beneath::rename_beneath(root, &self.file, tmp_rel, rel)` and passes its `Refusal`
+    // through **unchanged**; `rename_beneath` has two structural `policy: true` exits of its own and,
+    // the reachable one, `descend(root, Act::Commit, dirs)` → `refuse_link` on a directory component
+    // that has become a link since the claim. That is not an exotic input — it is **this ticket's own
+    // threat model**, a component swapped inside the window the caller's `write_all` holds open.
+    // Executed and red-proofed on a real planted link:
+    // [`tests::cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`],
+    // which also records the platform split (Unix constructs the swap; NTFS refuses to rename a
+    // directory with our staging handle open inside it, `ERROR_ACCESS_DENIED` — an accident of the
+    // handle we happen to hold, never a contract).
+    //
+    // So the bucket question is not the wrong one, it is the one that was answered from a false
+    // premise, and the answer per leg is:
+    //
+    // **All five legs are [`DestinationSite::Beneath`]** — read out of the legs rather than assumed,
+    // and round 5's first draft of this table got two rows wrong by assuming otherwise. `ByPath` is not
+    // an alternative any of them takes: its only route is [`copy_file_onto_no_follow`] /
+    // [`copy_file_onto_no_follow_with_wording`], whose two remaining callers **outside this file**
+    // (`backup.rs:2154`, `revert_engine.rs:3574`) are both inside `mod tests` — as are all twelve
+    // inside it, every one below this file's own `#[cfg(test)] mod tests`. Round 5 wrote "two
+    // remaining in-tree callers", which undercounts by those twelve (round 6 nit); the count was
+    // wrong, the conclusion — **no production caller reaches `ByPath`** — survives it. So `policy: true` at
+    // commit is a live input on **every** row below, not only on the two that were reviewed:
+    //
+    // ```text
+    // leg                                   a commit-time policy: true lands in…
+    // archive::extract_zip_archive_stream    report.skip — the SAME arm its claim-time refusal takes,
+    //                                        as of round 5. Was report.fail, unconditionally.
+    // transfer::download_tree                skipped, and the call then returns Ok. Its claim-time
+    //                                        link refusal has always done exactly this.
+    // revert_engine::apply_write             Refused::permanent (or ::hard_linked). This leg already
+    //                                        forks on `refusal.policy`, so a commit-time link verdict
+    //                                        arrives correctly classified with no change — "re-running
+    //                                        cannot fix a planted link" is the right advice for it.
+    // backup::apply_backup_plan_walk         one more OpResult::err, per entry. This leg reads `policy`
+    //                                        nowhere: one bucket, so there is nothing to disagree with.
+    // snapshot_capture::restore              `?` — aborts the restore, exactly as it does for every
+    //                                        other refusal. See the note at its call site.
+    // ```
+    //
+    // **The two legs that fork now fork by the same rule; they still differ in consequence, and that
+    // difference is theirs, not this line's.** `archive` counts a skip and returns `Ok(report)` either
+    // way; `download_tree` returns `Ok` because only `undelivered` changes its verdict — so on that leg
+    // a planted junction can leave a requested file undelivered with the call reporting success, named
+    // in `DownloadReport::skipped` but not in the `Result`. Round 5 states that plainly at the call
+    // site rather than leaving it to be inferred. Whether CPE-1709's "a link verdict is not a delivery
+    // failure" contract is the right one is a separate ticket's question; what changed here is that a
+    // claim-time and a commit-time link refusal no longer land in different buckets on the same leg.
+    //
+    // So the honest statement is narrower and still worth the change: `policy: true` is what keeps this
+    // refusal a **named per-entry skip with its reason** on the four legs that report per entry, rather
+    // than a failure that reads as "we tried and the file is broken". `snapshot_capture::restore`'s
+    // unconditional `?` is a separate question and not this ticket's; it is recorded here so the next
+    // reader does not mistake this line for having addressed it.
+    //
+    // `policy: true` is also the honest classification, not just the convenient one: `policy` means
+    // "not writing is the correct outcome", and that is exactly what both of these say — *we cannot
+    // describe this destination, so we are declining to replace it with a file whose protections we
+    // would have to guess*. It is a verdict about this one entry, in the same family as "this name is a
+    // link" and "this name is a directory", and it is reported to the user as a named skip with its
+    // reason rather than swallowed.
+    let (existing, carried) = if created {
+        (None, None)
+    } else {
+        let meta = w.metadata().map_err(|e| crate::open_beneath::Refusal {
+            why: format!(
+                "{}: could not read what is at the destination, so nothing was written rather than \
+                 replacing it with a file whose permissions this app had to guess: {e}. Nothing was \
+                 written for this entry",
+                dst.display()
+            ),
+            policy: true,
+        })?;
+        // And the half a rename drops that the metadata does not describe: on Windows the DACL, the
+        // named streams and the attribute word; on Unix the extended attributes, read off the
+        // descriptor rather than the path. See [`HandleCarryover`] — this is CPE-1958 round 2's
+        // measured regression arriving at a second site, closed here before it can ship.
+        let carried = HandleCarryover::capture(&w, dst).map_err(|why| {
+            crate::open_beneath::Refusal {
+                why: format!("{why}. Nothing was written for this entry"),
+                policy: true,
+            }
+        })?;
+        (Some(meta), Some(carried))
+    };
+    // The destination handle is dropped WITHOUT ever being written through. From here on, whatever an
+    // attacker does at `dst`, the worst outcome is that the commit replaces a name they planted —
+    // never that a pre-existing file's contents change.
+    drop(w);
+
+    let Some(target_name) = dst.file_name() else {
+        // The same undo as every other arm past the create. Unreachable in practice — a path with no
+        // final component cannot have had a leaf created at it — but "unreachable, so it may leak" is
+        // how the arm below leaked, and this one costs a call.
+        undo_created_destination(&site, dst, created);
+        return Err(crate::open_beneath::Refusal {
+            why: format!(
+                "{}: this name has no final component, so there is nothing here a file's bytes could \
+                 replace. Nothing was written for this entry",
+                dst.display()
+            ),
+            policy: true,
+        });
+    };
+    // The staging name is `<destination>.<pid>-<nanos>.cpe-tmp` — one producer, shared with
+    // `stage_and_replace_at`, so `sweep_stale_temp_siblings` collects both callers' residue.
+    //
+    // **It cannot be a Windows-unstable name even when the destination is one** (the obligation
+    // `open_beneath::create_beneath`'s doc records for new callers): appending `.<digits>-<digits>`
+    // strips nothing and removes the DOS-device meaning, so `NUL` stages as
+    // `NUL.1234-…cpe-tmp`, an ordinary file. The destination's own name is the caller's business and
+    // `backup::safe_join` is still the only filter for it.
+    let tmp_name = staging_sibling_name(target_name);
+    let tmp = dst.with_file_name(&tmp_name);
+    // **Whether `HandleCarryover::apply` is going to run on the staged handle** — which on Windows
+    // decides whether the staging open needs `READ_CONTROL | WRITE_DAC` at all. It is `carried.is_some()`
+    // and therefore `!created`: a destination this call brought into existence has no DACL, no streams
+    // and no attribute word to carry, so the common case for all five legs — a first backup, a fresh
+    // extraction, a download into an empty tree — asks for neither right.
+    //
+    // CPE-1961 round 2 (Security Auditor, SEC-7). Round 1 asked for both unconditionally on the grounds
+    // that Windows grants an object's creator them implicitly, so asking was free. It is free on local
+    // NTFS; it is one more thing an SMB or WebDAV redirector can refuse, and a backup destination is
+    // exactly where those live. Unmeasured against a real share — see `create_staging_beneath`'s doc.
+    let carrying = carried.is_some();
+    // **The staging create is the last thing that can fail before `Drop` is armed, and until round 4
+    // its `?` leaked a zero-byte file at the destination** (Reviewer MAJOR 3). `create_beneath` above
+    // may have *created* `dst` — that is what `created` means — and `ClaimedDestination` is what
+    // removes it again. A `?` here returns before that struct exists, so `Drop` never runs and an empty
+    // file survives at a name that did not exist before the call, under a refusal whose own last
+    // sentence is *"Nothing was written for this entry."* The comment on `written` below anticipated
+    // exactly this hazard for the `.cpe-tmp` side and missed the destination side of it.
+    //
+    // Reached with no race at all: a destination name long enough that `<name>.<stamp>.cpe-tmp` exceeds
+    // `MAX_COMPONENT_BYTES` (see [`staging_sibling_name`], now capped, which is the *other* half of
+    // that finding) — and, more durably, anything that makes the exclusive create fail on a directory
+    // the destination create just succeeded in: a quota, a full disk, a share that dropped between the
+    // two opens.
+    //
+    // So the undo record is built BEFORE the create and [`Staged::abandon`] — the one implementation
+    // `Drop` and the failed commit both already use — runs on the refusal. It unlinks through the root
+    // handle on the `Beneath` arm, for the reason its own doc gives.
+    let staging = match &site {
+        // `create_staging_file_for_carryover` only when `carrying`: on Windows it also asks for
+        // `WRITE_DAC`, which is what `HandleCarryover::apply` needs below, and asks for nothing extra
+        // when there is no carry-over to apply. `create_new` is `O_CREAT|O_EXCL` on both and does not
+        // follow a symlink at the final component, so a link pre-placed at the (pid+nanos-stamped)
+        // staging name cannot redirect these bytes either way.
+        DestinationSite::ByPath => {
+            (if carrying { create_staging_file_for_carryover } else { create_staging_file })(&tmp)
+                .map(|f| (f, None))
+                .map_err(|e| {
+                    crate::open_beneath::Refusal::failure(format!(
+                        "{}: could not create the staging file this write goes through ({}): {e}. \
+                         Nothing was written for this entry",
+                        dst.display(),
+                        tmp.display()
+                    ))
+                })
+        }
+        DestinationSite::Beneath { root, rel } => {
+            let tmp_rel = rel.with_file_name(&tmp_name);
+            crate::open_beneath::create_staging_beneath(root, &tmp_rel, carrying)
+                .map(|opened| (opened.file, Some((*root, tmp_rel, (*rel).to_path_buf()))))
+        }
+    };
+    let (staged, beneath) = match staging {
+        Ok(v) => v,
+        Err(r) => {
+            // Only the destination, never the staging name: the create is what just failed, so this
+            // call does not own whatever is (or is not) sitting at `tmp`, and unlinking a name we did
+            // not create is the one thing a cleanup path must not do.
+            undo_created_destination(&site, dst, created);
+            return Err(r);
+        }
+    };
+    let mut claimed = ClaimedDestination {
+        file: staged,
+        // Filled in below. Declared here so that every failure from this point on goes through `Drop`
+        // and removes the staging sibling — a `?` between the exclusive create and the struct would
+        // leave a `.cpe-tmp` behind for the sweep to find minutes later.
+        written: None,
+        staged: Some(Staged { tmp, target: dst.to_path_buf(), beneath, created }),
+    };
+
+    // Carried onto the staged file while it is still EMPTY — before the caller's bytes ever reach it,
+    // for exactly the reason the birth mode is `0600`: narrowing first and widening afterwards is the
+    // only order with no window in it.
+    if let Some(src) = existing.as_ref() {
+        let tmp_path = claimed.staged.as_ref().map(|s| s.tmp.clone()).unwrap_or_default();
+        carry_protections(dst, src, &claimed.file, &tmp_path, carried.is_none())
+            .map_err(crate::open_beneath::Refusal::failure)?;
+        if let Some(carried) = carried.as_ref() {
+            carried.apply(&claimed.file, &tmp_path).map_err(crate::open_beneath::Refusal::failure)?;
+        }
+    }
+
+    // The identity handed to `backup::landed_inside` — off the staged handle, which is the object the
+    // bytes go into and, after the commit, the object at the destination. `handle_facts` answering
+    // `None` refuses here for the same reason it refuses above: a gate that answers "no" when it cannot
+    // tell is a gate that is not there.
+    //
+    // **The CPE-1929 pair, run rather than reasoned about, both numbers recorded here.**
+    //   - *Disable it* (fall through with `written = None` instead of refusing): the suite is
+    //     **2,430 passed / 0 failed / 13 ignored** — completely green.
+    //   - *Force the predicate to lie* (`let lie: Option<HandleFacts> = None;`): **79 failed**.
+    //
+    // **This guard is SHADOWED, and round 1 filed it under the wrong heading** (CPE-1961 round 2,
+    // Security Auditor item 5). Round 1 called it *untestable by construction* on the grounds that
+    // `GetFileInformationByHandle` / `File::metadata` do not fail on a handle the kernel returned from
+    // an exclusive create three lines ago. That is true but it is not the reason, and the difference
+    // matters to the next reader: the only instrument in this crate that can make `handle_facts`
+    // answer `None` is `ProbeInjection::HandleUndescribable`, and it is **thread-global** — so arming
+    // it makes the *earlier* `handle_facts(&w)` call on the DESTINATION handle, at the top of this
+    // function, return `None` first, and that arm returns before control ever reaches here. The
+    // shadowing check is that twin, and it explains the measured pair exactly: the 79 failures in the
+    // "lie" half are hitting the earlier refusal, not this one.
+    //
+    // CPE-1929's answer to a shadowed guard is *reorder or delete*, and both are refused here with
+    // reasons rather than by default. **Reorder is meaningless**: the two guards ask about two
+    // different handles at two different moments, and this one cannot run before the staged file
+    // exists. **Delete fails open** — `backup::landed_inside` is the one consumer that needs `written`
+    // to mean something, and a `None` there turns a handle question back into a path question, which
+    // is exactly what an attacker swapping a junction back defeats. So it is kept **deliberately as an
+    // unreachable fail-closed backstop**, which is the third disposition that standard allows provided
+    // the site says so — this paragraph is that saying-so. Reaching it needs a driver that can make one
+    // handle undescribable and not another, which this crate has no seam for today; anyone adding a
+    // per-handle injection seam should give this arm a fixture in the same change.
+    let Some(facts) = crate::batch_media::handle_facts(&claimed.file) else {
+        return Err(crate::open_beneath::Refusal::failure(format!(
+            "{}: could not describe the staged copy this write goes through, so nothing was written \
+             for it — refusing to guess rather than report a write nothing can confirm the landing of. \
+             Nothing was written for this entry",
             dst.display()
-        ))
-    })?;
-    Ok(ClaimedDestination { file: w, written })
+        )));
+    };
+    claimed.written = Some(facts.id);
+    Ok(claimed)
 }
 
 /// Recursively copy `src` into `dst`, claiming **every** directory and file name it creates
@@ -2669,7 +3559,31 @@ const STAGING_MODE: u32 = 0o600;
 /// and by `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, both of which
 /// call **this** function rather than a copy of it.
 fn create_staging_file(path: &Path) -> std::io::Result<std::fs::File> {
+    staging_create_injected_failure()?;
     create_exclusive_with_mode(path, Some(STAGING_MODE))
+}
+
+/// The [`crate::batch_media::ProbeInjection::StagingCreateFails`] seam (CPE-1961), asked by **both**
+/// staging openers for the same reason `handle_facts_injected_none` is asked by both arms of
+/// `handle_facts`: a seam honoured on one opener and not the other is a test that passes for a
+/// different reason depending on whether the destination had a DACL to carry.
+///
+/// Compiles to nothing outside a test build — see the `#[cfg(not(test))]` twin below.
+#[cfg(test)]
+fn staging_create_injected_failure() -> std::io::Result<()> {
+    if crate::batch_media::probe_injection_is_staging_create_failure() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected staging-create failure (CPE-1961 test seam)",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline]
+fn staging_create_injected_failure() -> std::io::Result<()> {
+    Ok(())
 }
 
 /// [`create_exclusive_with_access`] without the Windows access knob — every caller but the
@@ -2686,6 +3600,7 @@ fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::R
 /// use is one more thing a network redirector can refuse, so the two openers are kept apart rather
 /// than merged. On Unix the two are the same function.
 fn create_staging_file_for_carryover(path: &Path) -> std::io::Result<std::fs::File> {
+    staging_create_injected_failure()?;
     create_exclusive_with_access(path, Some(STAGING_MODE), true)
 }
 
@@ -3009,6 +3924,49 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
     staged
 }
 
+/// **CPE-1961**: replace `target`'s contents with `bytes` by staging, for a caller that already holds a
+/// checked, no-follow handle on the destination and has no root handle to be relative to.
+///
+/// This is `batch_media::VerifiedOutput::write_all`'s new body, and it exists so that leg gets
+/// [`stage_and_replace_at`]'s structural property — *the only object written is one created a moment
+/// ago that has never had another name* — rather than a second, similar-looking staging routine grown
+/// beside it. It is the same three steps [`overwrite_confirmed_no_follow`] performs after its own
+/// checks, in the same order, for the same reasons; only the checks in front differ.
+///
+/// `destination` is the handle the caller's guards were asked of, and `created` says whether the caller
+/// brought the name into existence. When it did there is nothing to carry, which is why both are
+/// parameters rather than a stat taken here: a second `fs::metadata(target)` would be exactly the extra
+/// path question this whole family exists to remove.
+///
+/// # Why the batch engine could not simply keep truncating
+///
+/// `open_output_verified` refuses an output whose handle reports `links > 1`, and that count is a
+/// property an attacker can change **after** it is read. Measured live, with the outside file's bytes
+/// read back off disk rather than any verdict believed: **24 / 2,000 on Windows / NTFS** and
+/// **2,890 / 10,000 on Linux / ext4**. The Windows figure is low because `classify_output_containment`
+/// runs *before* the open and refuses a flickering destination outright, so far fewer trials reach the
+/// check-then-use at all — a **path gauntlet, not containment** (CPE-1929's shape), and Linux has no
+/// such shield. Staging removes the question rather than shielding it, on both platforms.
+pub(crate) fn stage_bytes_over_checked_handle(
+    target: &Path,
+    bytes: &[u8],
+    destination: &std::fs::File,
+    created: bool,
+) -> Result<(), String> {
+    let (existing, carried) = if created {
+        (None, None)
+    } else {
+        let meta = destination.metadata().map_err(|e| {
+            format!(
+                "could not read what is at the output, so nothing was written rather than replacing it \
+                 with a file whose permissions this app had to guess: {e}"
+            )
+        })?;
+        (Some(meta), Some(HandleCarryover::capture(destination, target)?))
+    };
+    stage_and_replace_at(target, bytes, existing.as_ref(), carried.as_ref(), Commit::ReplacingTheName)
+}
+
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let target = resolve_write_target(path)?;
     // CPE-1739: what the file the user is editing carries TODAY. Two different things depend on it — the
@@ -3098,15 +4056,9 @@ fn stage_and_replace_at(
 ) -> Result<(), String> {
     // A per-write pid+nanosecond stamp so two concurrent saves — or a stale temp left by an earlier crash
     // — cannot collide on the same sibling path.
-    let stamp = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = target.with_file_name(format!(
-        "{}.{}-{stamp}.cpe-tmp",
-        target.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
+    // CPE-1961 moved the name-building one function up ([`staging_sibling_name`]) so this producer and
+    // `claim_destination_handle`'s cannot drift apart from the parser in `sweep_stale_temp_siblings`.
+    let tmp = target.with_file_name(staging_sibling_name(target.file_name().unwrap_or_default()));
     // `create_new` is `O_CREAT|O_EXCL`, which refuses an existing entry **and does not follow a symlink at
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
     // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
@@ -3503,6 +4455,25 @@ struct HandleCarryover {
 /// effort, never fails the save — an unprivileged owner frequently cannot set `security.selinux` even
 /// though nothing is wrong. Moving the read to a descriptor does not change which attributes the
 /// kernel will let this process write.
+///
+/// # "Fails rather than downgrades" is a WINDOWS property, not this type's (CPE-1961 round 2)
+///
+/// The type-level doc and `claim_destination_handle`'s both say that a destination which cannot be
+/// described fails the entry rather than being replaced by a file carrying only defaults. On Windows
+/// that is exactly what happens: every arm of `capture` there returns `Err` and the entry is refused.
+/// **On Unix neither half can fail.** `capture` below reads the extended attributes behind
+/// `if let Ok(names)` — an unreadable list is silently "nothing to carry" — and `apply` discards every
+/// per-attribute error with `let _`. So a destination carrying a POSIX ACL (`system.posix_acl_access`)
+/// that this process cannot re-apply is replaced by a file that **degrades silently to mode bits**, and
+/// no caller is told. The mode itself is still carried exactly ([`carry_protections`] and
+/// [`carried_mode`]), so this is a loss of the *extended* protections only, not of the ordinary ones.
+///
+/// Left as-is rather than tightened here, and the reason is the paragraph above: making `apply` fail
+/// the save would turn the ordinary `security.selinux` refusal — which happens constantly and means
+/// nothing is wrong — into a failed backup on every SELinux machine. Distinguishing "an attribute this
+/// process was never going to be allowed to set" from "an ACL that mattered and was lost" needs a
+/// per-namespace policy this ticket does not have. **It is recorded because the doc read as
+/// cross-platform and was not**; a future ticket that wants Unix parity starts here.
 #[cfg(unix)]
 impl HandleCarryover {
     fn capture(file: &std::fs::File, target: &Path) -> Result<Self, String> {
@@ -3935,9 +4906,17 @@ fn read_alternate_data_streams(
 
         if id == BACKUP_ALTERNATE_DATA.0 {
             if out.len() as u64 + size + (HEADER + name_len) as u64 > CARRY_CAP {
+                // **Not "this confirmed overwrite" any more (CPE-1961 round 2).** That wording was
+                // written when the editor's save was this function's only caller. `HandleCarryover` is
+                // now reached from five more — a backup, a restore, a revert, a download and a zip
+                // extraction — and none of those is a confirmed overwrite, so the message named an
+                // interaction the user never had. Kept deliberately verb-free rather than plumbed a
+                // `LinkGuardWording` down through `HandleCarryover::capture`: what the sentence has to
+                // say is true of every caller, and a sixth caller should not have to remember to pass
+                // its verb here to keep it true.
                 err = Some(format!(
-                    "{}: its alternate data streams are larger than {CARRY_CAP} bytes, which this \
-                     confirmed overwrite will not copy across — nothing was written, and the original \
+                    "{}: its alternate data streams are larger than {CARRY_CAP} bytes, which this app \
+                     will not copy across onto the replacement — nothing was written, and the original \
                      is untouched",
                     display_path(target)
                 ));
@@ -4284,6 +5263,61 @@ fn commit_replacement(tmp: &Path, target: &Path, target_exists: bool) -> Result<
 /// after); every error inside it (the read_dir itself, a stat, a remove) is swallowed rather than surfaced,
 /// so a slow or flaky network mount can never turn an already-successful save into a reported failure.
 fn sweep_stale_temp_siblings(target: &Path) {
+    sweep_stale_temp_siblings_scoped(target, SweepScope::ThisDestinationOnly)
+}
+
+/// **Which `.cpe-tmp` names one scan is allowed to collect** (CPE-1961 round 2, Security Auditor SEC-8).
+///
+/// The two variants exist because the *memo* and the *filter* have to agree on a unit, and round 1's
+/// did not: [`sweep_stale_temp_siblings_once_per_directory`] remembers a **directory**, while the filter
+/// below matched only `<this target's own name>.<stamp>.cpe-tmp`. In a 10,000-file directory that means
+/// the first file swept its own temps and the other 9,999 never swept theirs — and the next run, walking
+/// the tree in the same order, memoises on the same first file and skips them again. A killed process's
+/// staging file for any non-first name is then collected **never**, not "by some later run" as the doc
+/// claimed. That is a partial copy of the user's data left in the user's own folder indefinitely.
+pub(crate) enum SweepScope {
+    /// Only `<target's own file name>.<pid>-<nanos>.cpe-tmp`. What [`stage_and_replace_at`] has always
+    /// used, and it keeps using it: its callers are single saves, it is not memoised, and narrowing
+    /// what one save may delete to the one name it was actually pointed at is the conservative default.
+    ThisDestinationOnly,
+    /// Any `<something>.<pid>-<nanos>.cpe-tmp` in the directory. The memoised caller uses this, so that
+    /// its one scan per directory collects everything that directory holds rather than one name's worth.
+    ///
+    /// **What this widens, stated rather than left to be discovered.** The "a pathologically slow save
+    /// can have its own live temp swept out from under it" window in the doc above stops needing the two
+    /// saves to be of the *same* destination — any two writes into the same folder can now collide.
+    ///
+    /// **What bounds it, said precisely, because round 2's wording here overstated it** (round 3,
+    /// Reviewer F2). Two filters survive and neither is weakened: the candidate must carry a
+    /// structurally valid `<digits>-<digits>` stamp, and its mtime must be [`STALE_TEMP_FLOOR`] behind
+    /// the just-committed target's. An actively-written staging file has a *fresh* mtime — every write
+    /// bumps it — so reaching the floor takes a writer that has produced no bytes at all for five
+    /// minutes. But note what those two together actually say, which is **not** what round 2 claimed
+    /// they bound this to: they bound it to *"our name shape, and stale"*. They do not bound it to
+    /// *"ours"*. Nothing in a stamp validator or an age comparison can, and reading them as if they
+    /// could is how the widening looked free.
+    ///
+    /// **So a third filter was added, and it is the only one that speaks to ownership.**
+    /// [`stamp_pid_is_this_process`] skips a candidate stamped with this process's own pid unless its
+    /// base name is the target's own — closing the case where one of our own stalled writers loses its
+    /// live sibling to a sweep our own next commit performs. Read that function for the mechanism and
+    /// for what the escape gives up.
+    ///
+    /// **Two widenings remain, deliberately, and both are stated rather than defended away.** A *foreign*
+    /// staging-shaped name is still collectable: (a) another instance of this app writing into a shared
+    /// folder — its pid differs, so five minutes of silence from it and this instance unlinks its temp;
+    /// and (b) a user file literally named `notes.txt.1-1.cpe-tmp`, which passes every check there is,
+    /// because every check there is looks at the name and the clock. Neither costs the user *content* —
+    /// (a) surfaces to the other instance as a failed rename with its original intact, (b) is a file
+    /// whose name is indistinguishable from residue this app is chartered to remove. That is the reason
+    /// they are accepted, and it is a different sentence from "they cannot happen".
+    ///
+    /// The user's file at the destination is never damaged by any of this, for the reason the doc above
+    /// gives: that guarantee comes from the staging design, not from this sweep.
+    EveryDestination,
+}
+
+fn sweep_stale_temp_siblings_scoped(target: &Path, scope: SweepScope) {
     let Some(dir) = target.parent() else { return };
     let Some(name) = target.file_name() else { return };
     // The reference clock for "how old is this candidate?" — THIS filesystem's own idea of `target`'s
@@ -4305,14 +5339,45 @@ fn sweep_stale_temp_siblings(target: &Path) {
         // `<digits>-<digits>` stamp shape — never `starts_with`/`ends_with` as two independent conditions
         // (Blocker 1: that let an empty middle and another file's own extension-suffixed temp both
         // through). See `is_valid_temp_stamp`.
-        if fbytes.len() <= name_bytes.len() + 1
-            || &fbytes[..name_bytes.len()] != name_bytes
-            || fbytes[name_bytes.len()] != b'.'
-        {
-            continue;
-        }
-        let rest = &fbytes[name_bytes.len() + 1..];
-        let Some(stamp_bytes) = rest.strip_suffix(b".cpe-tmp") else { continue };
+        //
+        // `EveryDestination` drops only the *prefix* half of that. The suffix and the stamp validation
+        // are unchanged and are what actually keeps an ordinary user file out: the name must end in
+        // `.cpe-tmp` AND the component before it must be a `<digits>-<digits>` stamp AND there must be a
+        // non-empty base name in front of it (`stamp_start > 0`), which is `staging_sibling_name`'s
+        // output shape exactly and nothing else's.
+        let stamp_bytes = match scope {
+            SweepScope::ThisDestinationOnly => {
+                if fbytes.len() <= name_bytes.len() + 1
+                    || &fbytes[..name_bytes.len()] != name_bytes
+                    || fbytes[name_bytes.len()] != b'.'
+                {
+                    continue;
+                }
+                let rest = &fbytes[name_bytes.len() + 1..];
+                let Some(stamp) = rest.strip_suffix(b".cpe-tmp") else { continue };
+                stamp
+            }
+            SweepScope::EveryDestination => {
+                let Some(head) = fbytes.strip_suffix(b".cpe-tmp") else { continue };
+                // The stamp is the LAST dot-separated component of what is left, and the base name is
+                // everything before it. `rposition` rather than a split-from-the-front, because a
+                // destination name may itself contain any number of dots (`archive.tar.gz`).
+                let Some(dot) = head.iter().rposition(|b| *b == b'.') else { continue };
+                if dot == 0 {
+                    continue; // no base name in front of the stamp — not our shape
+                }
+                // **The one piece of real ownership evidence in the name, and round 2 threw it away**
+                // (round 3, Reviewer F2). A candidate stamped with THIS process's pid, under a base name
+                // that is not the target's own, is a sibling one of our own concurrent writers may still
+                // be filling — see [`stamp_pid_is_this_process`] for the `download_tree`/`backup` shape
+                // that reaches it. Skip it. Nothing SEC-8 exists to collect is lost: residue from a
+                // *killed* process can never carry a live pid.
+                if &head[..dot] != name_bytes && stamp_pid_is_this_process(&head[dot + 1..]) {
+                    continue;
+                }
+                &head[dot + 1..]
+            }
+        };
         // A genuine stamp is pure ASCII digits and `-`, so this can only fail (and skip) on garbage that
         // could never be a valid stamp anyway — `is_valid_temp_stamp` still does the real check.
         let Ok(stamp) = std::str::from_utf8(stamp_bytes) else { continue };
@@ -4366,6 +5431,45 @@ fn is_valid_temp_stamp(s: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Whether a `<pid>-<nanos>` stamp names **this** process (CPE-1961 round 3, Reviewer F2).
+///
+/// [`SweepScope::EveryDestination`] widened one commit's sweep from "this destination's own staging
+/// siblings" to "every staging-shaped name in the directory". The defence written for it — the stamp
+/// validator plus [`STALE_TEMP_FLOOR`] — establishes *"shaped like ours **and** stale"*. It does **not**
+/// establish *ours*, and the ownership evidence was already in the string being parsed:
+/// [`staging_sibling_name`] writes the pid, and [`is_valid_temp_stamp`] read it only far enough to prove
+/// it was digits and then discarded it.
+///
+/// # The case that bites is ours, not an attacker's
+///
+/// `transfer::download_tree` / `backup` write N files into one folder. One write stalls — a hung socket,
+/// a paused NAS — and its staging file's mtime freezes. [`LAST_SWEPT_DIR`] is a **one-slot**
+/// `Option<PathBuf>`, so a depth-first walk that alternates `A/f1`, `A/sub/g1`, `A/f2` re-sweeps `A`
+/// every time it comes back to it. Past [`STALE_TEMP_FLOOR`] the next commit in `A` unlinks the **live**
+/// sibling. Staging handles are opened `SHARE_ALL`, which deliberately includes `FILE_SHARE_DELETE`
+/// (`open_beneath::SHARE_ALL`), **so this succeeds on Windows as well as on Unix** — the stalled writer
+/// goes on filling a now-nameless object and its own commit then fails at the rename. Under
+/// [`SweepScope::ThisDestinationOnly`] it could not happen: it needed two saves of the *same*
+/// destination, which is precisely why the slow-save window was defensible before SEC-8 and is wider
+/// after it.
+///
+/// # What the escape costs
+///
+/// A candidate is skipped when its pid is this process's **unless its base name is the target's own** —
+/// that one has always been in `ThisDestinationOnly`'s remit, and a just-committed claim has in any case
+/// already renamed its own staging file away. The only thing given up is a temp this process genuinely
+/// orphaned (a `Drop` that could not unlink), collected on the next launch rather than in this run.
+///
+/// A stamp that does not parse is reported as "not ours", which is the right answer twice over:
+/// [`is_valid_temp_stamp`] is the real gate downstream and rejects it anyway. A pid written with leading
+/// zeros compares equal to the same number and so errs toward *keeping* a file, which is the safe
+/// direction. A pid too large for `u32` cannot be this process's, since [`std::process::id`] returns one.
+fn stamp_pid_is_this_process(stamp: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(stamp) else { return false };
+    let Some((pid, _)) = s.split_once('-') else { return false };
+    pid.parse::<u32>().is_ok_and(|p| p == std::process::id())
 }
 
 /// The pure decision behind [`sweep_stale_temp_siblings`]: should this ONE already-matched candidate be
@@ -8123,6 +9227,68 @@ mod tests {
         );
     }
 
+    /// **CPE-1961's first guard, and one of the two CI actually runs.** The racer measures the hole;
+    /// this pins the property that closed it, with no race in it at all -- the same shape CPE-1958
+    /// used, pointed at the second site.
+    ///
+    /// The destination really is a second name for a file outside its folder -- a genuine hard link,
+    /// not a mock -- and [`crate::batch_media::ProbeInjection::HandleUnderReportsLinks`] makes
+    /// `handle_facts` report the count an attacker's `remove_file` produces: **1**. So
+    /// [`claim_destination_handle`]'s `links > 1` refusal is defeated exactly as the racer defeats it,
+    /// and every other guard is left switched on and honest.
+    ///
+    /// **Asserts on the filesystem, never on the `Result`.**
+    ///
+    /// **Red-proof, run rather than argued.** Reverting the write half to the pre-CPE-1961 body --
+    /// `w.set_len(0)` and handing the destination handle back for the caller to stream into -- fails
+    /// this test with `RACE_VICTIM.txt` holding the source's bytes. Keeping the staging write and
+    /// deleting the `links > 1` refusal entirely leaves it **passing**, which is the point: that
+    /// refusal is a policy verdict now and the containment does not rest on it. Both numbers are
+    /// recorded on [`claim_destination_handle`].
+    #[test]
+    fn cpe_1961_a_lying_link_count_cannot_destroy_a_file_outside_the_folder_through_a_copy() {
+        let d = scratch("cpe1961-lying-links-copy");
+        let outside = d.join("outside");
+        let root = d.join("root");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, CPE_1958_UNTOUCHED).unwrap();
+        let source = root.join("source.bin");
+        std::fs::write(&source, CPE_1958_PAYLOAD).unwrap();
+
+        let slot = root.join("slot.bin");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &slot.to_string_lossy()).is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1961] SKIPPED: this machine could not create a hard link at {}. NOTHING in this \
+                 test covered the containment property on this run.",
+                slot.display()
+            );
+            return;
+        }
+
+        let result = {
+            let _reset = crate::batch_media::ProbeReset::arm(
+                crate::batch_media::ProbeInjection::HandleUnderReportsLinks,
+            );
+            copy_file_onto_no_follow(&source, &slot)
+        };
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            CPE_1958_UNTOUCHED,
+            "a file OUTSIDE the destination's folder was written through the destination's name: the \
+             link count said 1 and the copy believed it (result was: {result:?})"
+        );
+        assert_eq!(
+            std::fs::read(&slot).unwrap(),
+            CPE_1958_PAYLOAD,
+            "with every guard's answer being 'ordinary file', the copy must still land at the name \
+             the caller named (result was: {result:?})"
+        );
+    }
+
     // ---------------------------------------------------------------------------------------------
     // CPE-1958 — the TOCTOU racer, and the deterministic guard that replaced trusting it.
     //
@@ -8445,6 +9611,371 @@ mod tests {
         }
     }
 
+    /// **CPE-1961 round 5 (Reviewer Major 1): `commit()` CAN return `policy: true`, and rounds 3–4
+    /// wrote at two sites that it cannot.**
+    ///
+    /// The sentences were *"`commit` only ever returns `Refusal::failure`"* (`claim_destination_handle`'s
+    /// table) and *"a `policy: false` refusal — which is what `commit` returns"*
+    /// (`transfer::download_tree`'s call site). Both were reasoned from `ByPath`, which does
+    /// `commit_replacement(...).map_err(Refusal::failure)` — every refusal `policy: false` by
+    /// construction. The **`Beneath`** arm returns [`crate::open_beneath::rename_beneath`]'s `Refusal`
+    /// **unchanged**, and that function has three `policy: true` exits: two structural ones of its own,
+    /// plus — the reachable one — `descend(root, Act::Commit, dirs)` hitting `refuse_link` on a
+    /// directory component that has become a link since the claim.
+    ///
+    /// That is not a hypothetical: it is **this ticket's own threat model**. `claim_destination_handle`
+    /// descends the same components with `Act::Write`, so at claim time they were real directories; the
+    /// commit re-descends them after the caller's `write_all`, which is a whole archive entry or a
+    /// whole downloaded file. Swapping a component in that window is exactly the substitution the
+    /// staging design exists to survive, and this is what surviving it *looks like*.
+    ///
+    /// # What this pins, and what it deliberately does not
+    ///
+    /// It pins the **fact** both corrected comments now assert: a link planted at an interior component
+    /// between the claim and the commit makes `commit()` return `policy: true`, with the link wording.
+    /// The refusal is produced by the real `rename_beneath` against a real link on a real filesystem.
+    ///
+    /// It does **not** drive that refusal through `archive::extract_zip_archive_stream` or
+    /// `transfer::download_tree` end to end, and the reason is structural rather than an omission: both
+    /// legs' windows open inside `io::copy`/`write_all` with no seam a test can stop at, so a
+    /// leg-level fixture would have to *race* the extraction — a timing-dependent test that can pass by
+    /// missing the window, which is worse than none. What the legs do with the refusal is pinned
+    /// instead by the two sites classifying it the same way their own claim-time arms already do; see
+    /// `extract_zip_archive_stream`'s commit site, which round 5 changed from an unconditional
+    /// `report.fail` to the same `policy` fork its claim site has used since CPE-1935.
+    ///
+    /// # Constructing the swap, and the platform split it measured
+    ///
+    /// The staging sibling is open **inside** the component being swapped, so the real directory is
+    /// *renamed aside* rather than removed, and a link is put in its place. That is the only swap shape
+    /// that can work with a live handle underneath it — and the two platforms answer it differently:
+    ///
+    /// ```text
+    /// platform  rename("root/sub", "root/../sub-real") with the staging handle open inside
+    /// Unix      succeeds — the fd keeps the inode, not the name; the link goes in and the
+    ///           commit's re-descent refuses it. `policy: true`, asserted below.
+    /// Windows   REFUSED, ERROR_ACCESS_DENIED (os error 5). Measured, not assumed. NTFS will not
+    ///           rename a directory with an open handle anywhere in its subtree, whatever share
+    ///           mode that handle carries — `std`'s `FILE_SHARE_DELETE` does not buy it.
+    /// ```
+    ///
+    /// **The Windows row is a platform accident, not a contract, and this test is written so it cannot
+    /// be read as one.** The staging handle happens to pin its own ancestor chain against rename for
+    /// exactly the window that matters. Nothing in `commit`, `rename_beneath` or `descend` arranges
+    /// that or depends on it; a future arm that closes the handle before the rename, a filesystem with
+    /// different semantics, or the in-place `FSCTL_SET_REPARSE_POINT` route would reopen it. So the
+    /// Windows arm asserts **the block**, by its error code, rather than asserting the refusal — and
+    /// the callers are corrected on the strength of the Unix arm and of `commit`'s signature, never on
+    /// "Windows currently makes it unreachable".
+    ///
+    /// # Red-proof, run rather than asserted
+    ///
+    /// Linux/ext4 (`TMPDIR` off tmpfs, `Compiling cpe-server` seen), `assert!(r.policy)` inverted to
+    /// `assert!(!r.policy)`:
+    ///
+    /// ```text
+    /// RED-PROOF: `commit` returns `policy: true` here … Rounds 3-4 asserted at two sites that this
+    /// cannot happen: Refusal { why: "refusing to write inside the download folder \"…/root\": the
+    /// path component \"sub\" is a link (a symlink, junction or other reparse point), and a link
+    /// inside the download folder redirects the write to wherever it points. Nothing was written for
+    /// this entry …", policy: true }
+    /// test … FAILED.  0 passed; 1 failed
+    /// ```
+    ///
+    /// Note the verb: `Act::Commit` and `Act::Write` share `"write"`/`"written"`, so the *wording*
+    /// cannot tell a commit-time refusal from a claim-time one. Only the call that produced it can,
+    /// which is why this fixture drives `commit()` directly instead of matching on the sentence. The
+    /// Windows block was measured the same way — the fixture's first draft `panic!`ed with the raw
+    /// error (`Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`) rather than
+    /// passing, which is how the platform split was found at all.
+    #[test]
+    fn cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true() {
+        use std::io::Write as _;
+        let d = scratch("cpe1961-commit-policy");
+        let root_dir = d.join("root");
+        let sub = root_dir.join("sub");
+        let elsewhere = d.join("elsewhere");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("marker.txt"), b"OUTSIDE").unwrap();
+
+        let root = crate::open_beneath::open_root(&root_dir, "download folder")
+            .expect("opening the destination root must succeed");
+        let rel = Path::new("sub").join("f.txt");
+        let mut claimed = claim_destination_handle(
+            &sub.join("f.txt"),
+            LinkGuardWording::DOWNLOAD,
+            DestinationSite::Beneath { root: &root, rel: &rel },
+        )
+        .expect("the claim must succeed while `sub` is still a real directory");
+        claimed.file.write_all(b"BODY").expect("writing the body into the staging sibling");
+
+        // The swap, in the window the caller's write holds open.
+        let aside = d.join("sub-real");
+        // A test fixture staging an attack, and the RAW call is the point of it: `aside` is a name this
+        // test created inside its own scratch tree, and what is being measured is whether the platform
+        // permits the rename at all. Routing it through a guarded helper would measure the helper.
+        #[allow(clippy::disallowed_methods)]
+        let moved = std::fs::rename(&sub, &aside);
+
+        #[cfg(windows)]
+        {
+            // Windows does not let the swap happen at all, and the assertion is on the BLOCK — with
+            // its error code, so a future change that quietly starts permitting the rename reds here
+            // rather than silently reopening the window. Not a skip and not a `return` before any
+            // assertion: "the swap did not happen" and "the swap happened and was allowed" have to
+            // look different from the outside.
+            let e = moved.expect_err(
+                "PREMISE CHANGED: NTFS renamed a directory with our staging handle open inside it. \
+                 The Windows unreachability this test records was never a contract — the link swap \
+                 is now constructible here, so the commit-time `policy: true` case needs the Unix \
+                 arm's assertions on this platform too",
+            );
+            assert_eq!(
+                e.raw_os_error(),
+                Some(5),
+                "and it must be ERROR_ACCESS_DENIED — the open-handle-in-subtree block — rather than \
+                 the fixture failing for an unrelated reason and reading as a measurement: {e:?}"
+            );
+            drop(claimed); // disarm the claim; the swap it was staged for never happened
+        }
+
+        #[cfg(unix)]
+        {
+            moved.expect("the fixture must move the real directory aside — an fd keeps the inode");
+            assert!(
+                make_dir_link(&elsewhere, &sub),
+                "the fixture could not put a directory link where the component was — nothing was \
+                 measured"
+            );
+
+            let r = claimed
+                .commit()
+                .expect_err("committing through a component that is now a link must be refused");
+            assert!(
+                r.policy,
+                "THE POINT: `commit` returns `policy: true` here, so every caller that buckets by \
+                 `policy` sends this down its SKIP arm. Rounds 3-4 asserted at two sites that this \
+                 cannot happen: {r:?}"
+            );
+            assert!(
+                r.why.contains("is a link"),
+                "and it is the link verdict, not an I/O failure that happens to be flagged: {r:?}"
+            );
+            assert!(
+                !elsewhere.join("f.txt").exists(),
+                "nothing may be written through the planted link: {r:?}"
+            );
+        }
+
+        // Put the real directory back before the scratch guard runs, so the cleanup is not walking a
+        // link out of the tree it is deleting. Scoped to the two names this test created.
+        let _ = std::fs::remove_dir_all(&sub);
+        // Test-fixture teardown, both operands names this test created inside its own scratch tree, and
+        // the destination has just been removed on the line above.
+        #[allow(clippy::disallowed_methods)]
+        let _ = std::fs::rename(&aside, &sub);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 2: the same racer, pointed at the NEW `Beneath` commit** — the arm
+    /// [`crate::open_beneath::rename_beneath`] introduced and the one every future containment ticket
+    /// is going to build on.
+    ///
+    /// # Why this had to be written rather than inferred from the arms already here
+    ///
+    /// The ticket's own racer arms D and E are both [`DestinationSite::ByPath`], so they commit through
+    /// [`commit_replacement`] — two paths, both platforms, CPE-1963's residual intact. **Neither of them
+    /// touches `rename_beneath` at all.** The new primitive therefore shipped with its headline property
+    /// (the source operand is an object, not a name, on Windows) measured by nothing in-tree, and the
+    /// PR body generalised D and E's Windows zeroes into a claim about the whole ticket. The Security
+    /// Auditor built this arm externally and measured the split; this lands it so the next worker
+    /// re-takes the numbers instead of quoting them.
+    ///
+    /// # What it does, and the two controls
+    ///
+    /// An attacker thread `readdir`s the destination folder for `*.cpe-tmp`, unlinks each one and
+    /// hard-links an outside victim into its place — the CPE-1963 shape exactly, against the staging
+    /// sibling `claim_destination_handle` creates. Between the claim and the commit the racer sleeps a
+    /// hair, so the window is real rather than nominal.
+    ///
+    /// - **`relinks`** is the liveness control. A run where the attacker never won is a clean sheet that
+    ///   means nothing, and it is reported next to the finding rather than left for the reader to ask
+    ///   about — the invisible-green failure CPE-1952 round 2 is about.
+    /// - **`victim_changed`** must be **0** on every platform. This is an *aliasing* race, never a
+    ///   destruction one: the outside file's bytes are not written. A non-zero here is a different and
+    ///   much worse finding than a non-zero `aliased`.
+    ///
+    /// # The numbers, taken twice by two people who did not share a harness
+    ///
+    /// ```text
+    ///                                aliased        relinks (liveness)  victim bytes changed
+    /// Windows/NTFS      (SA)         0 / 3,000       11,666             0
+    /// Windows/NTFS      (this fn)    0 / 3,000        9,692             0
+    ///   ...delete-only CONTROL       0 / 3,000            0             0
+    /// Linux/ext4        (SA)     2,785 / 3,000      (not reported)      0
+    /// Linux/ext4        (this fn) 2,790 / 3,000     714,892             0
+    ///   ...delete-only CONTROL       0 / 3,000            0             0
+    /// ```
+    ///
+    /// The `SA` rows are the Security Auditor's own external racer; the `this fn` rows are **this**
+    /// function. **2,790 against 2,785, and 0 against 0, from two harnesses written independently** is
+    /// what makes either set worth quoting — a single number from a single racer is a claim about that
+    /// racer. The Linux rows were taken on real ext4 with `TMPDIR` pointed off `/tmp`, which is **tmpfs
+    /// on WSL**: a run that does not override it is not measuring ext4 and must not be labelled as if
+    /// it were. The delete-only control separates "the commit sometimes failed" from "the commit landed
+    /// on the attacker's object", and it is 0 on both platforms, so the Windows 0 is not the attacker
+    /// failing to get in — it got in 9,692 times and it changed nothing.
+    ///
+    /// The Windows zero is `NtSetInformationFile`'s handle-sourced rename doing its job. The Linux
+    /// figure is **not a regression and not this ticket's to close** — POSIX has no fd-sourced rename
+    /// (see `rename_beneath`'s doc for why `renameat2`, `/proc/self/fd` and `linkat(AT_EMPTY_PATH)` all
+    /// fail to provide one), so `renameat(parent, from, parent, to)` is the strongest primitive that
+    /// exists and its source is still a name. It is CPE-1963's, and it is why this asserts only the
+    /// victim-content control and reports everything else.
+    ///
+    /// Returns `(aliased, relinks, victim_changed)`, all read off the filesystem.
+    fn cpe_1961_beneath_commit_race(trials: u64, delete_only: bool) -> Option<(u64, u64, u64)> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        const NEW: &[u8] = b"WHAT THE CALLER ASKED TO WRITE";
+        let d = scratch("cpe1961-beneath-commit");
+        let root_dir = d.join("root");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, CPE_1958_UNTOUCHED).unwrap();
+
+        // Liveness precondition, same as the CPE-1963 harness: a machine with no hard links measures
+        // nothing and must say so rather than returning a clean sheet.
+        let (v, probe) = (
+            victim.to_string_lossy().into_owned(),
+            root_dir.join("probe").to_string_lossy().into_owned(),
+        );
+        if crate::links::create_hard_link(&v, &probe).is_err() {
+            return None;
+        }
+        std::fs::remove_file(root_dir.join("probe")).ok()?;
+
+        let real_root = std::fs::canonicalize(&root_dir).ok()?;
+        let root = crate::open_beneath::open_root(&real_root, "race root").ok()?;
+        let slot = real_root.join("slot.bin");
+        let rel = Path::new("slot.bin");
+
+        let identity = |p: &Path| {
+            crate::batch_media::open_existing_no_follow_read(p)
+                .ok()
+                .and_then(|f| crate::batch_media::handle_facts(&f))
+                .map(|facts| facts.id)
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let relinks = Arc::new(AtomicU64::new(0));
+        let attacker = {
+            let (dir, v, stop, relinks) =
+                (real_root.clone(), v.clone(), Arc::clone(&stop), Arc::clone(&relinks));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                    for e in entries.flatten() {
+                        if !e.file_name().to_string_lossy().ends_with(".cpe-tmp") {
+                            continue;
+                        }
+                        let path = e.path();
+                        if std::fs::remove_file(&path).is_err() {
+                            continue;
+                        }
+                        if delete_only {
+                            continue;
+                        }
+                        if crate::links::create_hard_link(&v, &path.to_string_lossy()).is_ok() {
+                            relinks.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            })
+        };
+
+        let (mut aliased, mut changed) = (0u64, 0u64);
+        for _ in 0..trials {
+            let _ = std::fs::remove_file(&slot);
+            let claimed = claim_destination_handle(
+                &slot,
+                LinkGuardWording::BACKUP,
+                DestinationSite::Beneath { root: &root, rel },
+            );
+            if let Ok(mut c) = claimed {
+                use std::io::Write as _;
+                let _ = c.file.write_all(NEW);
+                // The window the attacker is racing. Without it the claim and the commit are close
+                // enough together that a `readdir`-driven attacker essentially never lands, and a zero
+                // would then be the harness's, not the primitive's.
+                std::thread::yield_now();
+                let _ = c.commit();
+            }
+            if let (Some(a), Some(b)) = (identity(&slot), identity(&victim)) {
+                if a == b {
+                    aliased += 1;
+                }
+            }
+            if std::fs::read(&victim).ok().as_deref() != Some(CPE_1958_UNTOUCHED) {
+                changed += 1;
+            }
+            // An aliased slot is a second NAME for the victim, so removing it here is what keeps the
+            // next trial honest rather than compounding.
+            let _ = std::fs::remove_file(&slot);
+            let _ = std::fs::write(&victim, CPE_1958_UNTOUCHED);
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = attacker.join();
+        Some((aliased, relinks.load(Ordering::Relaxed), changed))
+    }
+
+    /// The `Beneath`-arm report. `#[ignore]`d for the same reason every racer in this module is: it is a
+    /// measurement, not a guard, and a race that happens not to be won proves nothing on its own.
+    ///
+    /// ```text
+    /// cargo test -p cpe-server cpe_1961_beneath_commit_report -- --ignored --nocapture
+    /// ```
+    ///
+    /// **The one thing it does assert** is the victim-content control, on both platforms and both
+    /// shapes. Aliasing is CPE-1963's open residual on Unix and is reported; a change to the outside
+    /// file's *bytes* would be a destruction primitive and is not tolerated on either.
+    #[test]
+    #[ignore = "CPE-1961 round 2: the Beneath-arm commit racer. Run by hand with --ignored --nocapture."]
+    fn cpe_1961_beneath_commit_report() {
+        let trials: u64 =
+            std::env::var("CPE_1961_TRIALS").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+        for delete_only in [false, true] {
+            let shape = if delete_only { "delete-only (CONTROL)" } else { "relink an outside victim" };
+            match cpe_1961_beneath_commit_race(trials, delete_only) {
+                None => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[CPE-1961 Beneath] {shape}: SKIPPED — this machine cannot create a hard link, \
+                         so NOTHING was measured on this run."
+                    );
+                    return;
+                }
+                Some((aliased, relinks, changed)) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[CPE-1961 Beneath] {shape}: {aliased} destinations aliased to the outside file \
+                         / {trials} trials; attacker relinked the staging name {relinks} times \
+                         (liveness); {changed} trials changed the VICTIM's content"
+                    );
+                    assert_eq!(
+                        changed, 0,
+                        "the outside file's BYTES changed in {changed} of {trials} trials. This racer \
+                         measures an aliasing residual, not a destruction one — a non-zero here is a \
+                         different and much worse finding than a non-zero aliased count"
+                    );
+                }
+            }
+        }
+    }
+
     /// **CPE-1958's measurement harness.** `#[ignore]`d because it is a measurement, not a guard: it
     /// spends seconds, its rates move with the machine, and a race that happens not to be won proves
     /// nothing on its own. The guard CI actually runs is
@@ -8505,15 +10036,46 @@ mod tests {
     /// 188, 525 and 649. What did not move is arm C: **0 in every run, on both platforms, in both
     /// shapes.** Treat any single figure here as an order of magnitude, and re-take rather than quote.
     ///
-    /// **D and E are untouched by this ticket and both are live** — see the ticket's Work Log. D's
-    /// `0 / 2,000` in PR #1066 was luck, not a property, and this is the measurement that settles it
-    /// rather than arguing it: the same code destroys the victim 2–4 times per 2,000 on Windows and
-    /// **~30 times per 1,000 on Linux**. On Windows it is *shielded*, not safe — its
-    /// `classify_output_containment` gauntlet runs **before** the open and refuses a flickering
-    /// destination outright, so far fewer trials reach the identical check-then-use (681 writes reported
-    /// `Ok` against C's 1,249 in the same run) and a ~1-per-1,000 rate sits inside a 2,000-trial
-    /// sample's noise. Nothing about that shielding is a containment property, and it is absent on
-    /// Linux.
+    /// # CPE-1961 re-took every arm, before AND after, on both platforms
+    ///
+    /// The tables above are CPE-1958's and are kept as history: they are the run in which D and E were
+    /// live. CPE-1961 closed both, and re-measured rather than quoted -- the rates in this family move
+    /// **3x to 26x run to run on the same code**, which is why the ticket carries a range.
+    ///
+    /// **BEFORE (this branch's base, i.e. the merged CPE-1958 state), independently re-taken:**
+    ///
+    /// | arm | Windows / NTFS, 2,000 | Windows, planted | Linux / ext4, 10,000 | Linux, planted |
+    /// |---|---|---|---|---|
+    /// | A unguarded (control) | 577 | 833 (854 planted) | 4,460 | 9,245 (506 planted) |
+    /// | B pre-CPE-1958 body | 351 | 424 (797 planted) | 126 | 2,322 (1,608 planted) |
+    /// | C `overwrite_confirmed_no_follow` | **0** | **0** (665 planted) | **0** | **0** (7,641 planted) |
+    /// | D `batch_media::open_output_verified` | **24** | 1 (681 planted) | **2,890** | **2,224** (943 planted) |
+    /// | E `fsutil::copy_file_onto_no_follow` | **166** | **188** (773 planted) | **2,887** | **2,563** (1,538 planted) |
+    ///
+    /// **AFTER CPE-1961, same machines, same trial counts:**
+    ///
+    /// | arm | Windows / NTFS, 2,000 | Windows, planted | Linux / ext4, 10,000 | Linux, planted |
+    /// |---|---|---|---|---|
+    /// | A unguarded (control) | 568 | 749 (856 planted) | 4,399 | 8,853 (675 planted) |
+    /// | B pre-CPE-1958 body | 318 | 517 (801 planted) | 176 | 1,300 (2,421 planted) |
+    /// | C `overwrite_confirmed_no_follow` | **0** | **0** (859 planted) | **0** | **0** (7,345 planted) |
+    /// | D `batch_media::open_output_verified` | **0** | **0** (1,008 planted) | **0** | **0** (8,219 planted) |
+    /// | E `fsutil::copy_file_onto_no_follow` | **0** | **0** (870 planted) | **0** | **0** (8,975 planted) |
+    ///
+    /// **The `planted` columns run the right way this time, on both platforms**, which is the check
+    /// CPE-1958 round 2 had to retract for Windows: D began **1,008** trials genuinely hard-linked and
+    /// E began **870**, against the pre-fix body's **801** and the control's **856** -- the fixed arms
+    /// faced the *harder* attacker for their zeros, not an easier one. On Linux the gap is wider still
+    /// (8,219 and 8,975 against B's 2,421).
+    ///
+    /// **The Windows shield is visible in the BEFORE table and is still not a property.** D measured
+    /// 24 / 2,000 unplanted and 1 / 2,000 planted on Windows against 2,890 and 2,224 per 10,000 on
+    /// Linux -- two orders of magnitude apart on identical code, because `classify_output_containment`
+    /// runs before the open and refuses a *flickering* destination outright (626 writes reported `Ok`
+    /// against E's 1,337 in the same run). A path gauntlet, not containment. It is unchanged and it is
+    /// no longer load-bearing: both arms are zero on both platforms because neither writes through the
+    /// handle it checked any more.
+    ///
     #[test]
     #[ignore = "CPE-1958 measurement harness: two racer shapes x five arms x 1,000 racing trials. Run by hand with --ignored --nocapture."]
     fn cpe_1958_race_report() {
@@ -8583,6 +10145,20 @@ mod tests {
                 rows[2].2, 0,
                 "overwrite_confirmed_no_follow wrote into a file outside the destination's folder, in \
                  racer shape \"{shape}\""
+            );
+            // **CPE-1961 added D and E to the assertion, and that is the whole difference between a
+            // measurement and a guard.** Before this ticket both arms were live and the harness only
+            // printed their numbers, so a regression in either would have scrolled past in the log.
+            // Now the same run that says the control is hot says these two are zero.
+            assert_eq!(
+                rows[3].2, 0,
+                "batch_media::open_output_verified wrote into a file outside the batch's folder, in \
+                 racer shape \"{shape}\" (CPE-1961)"
+            );
+            assert_eq!(
+                rows[4].2, 0,
+                "fsutil::copy_file_onto_no_follow wrote into a file outside the destination's folder, \
+                 in racer shape \"{shape}\" (CPE-1961)"
             );
         }
     }
@@ -9468,6 +11044,204 @@ mod tests {
              the age reference is the filesystem's own clock, not the client's"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 3 (Reviewer F2): a directory-wide sweep must not eat one of THIS process's own
+    /// live staging siblings.**
+    ///
+    /// SEC-8 widened the memoised sweep to [`SweepScope::EveryDestination`], and the defence written for
+    /// it — the stamp validator plus [`STALE_TEMP_FLOOR`] — proves only "our name shape, and stale",
+    /// never "ours". `download_tree`/`backup` write N files into one folder; one stalls, its temp's mtime
+    /// freezes, the one-slot [`LAST_SWEPT_DIR`] memo is re-armed every time the depth-first walk returns
+    /// to that directory, and past the floor the next commit unlinks a sibling a live writer is still
+    /// filling. [`stamp_pid_is_this_process`] is the escape.
+    ///
+    /// Three legs, and each one is load-bearing on its own:
+    ///
+    /// 1. **A foreign pid's stale temp is still collected** — otherwise the fix would have bought its
+    ///    safety by turning SEC-8 off, which is the outcome the whole widening exists to avoid.
+    /// 2. **This process's stale temp under a DIFFERENT base name survives** — the fix itself. This is
+    ///    the leg that reds when the two lines in the `EveryDestination` arm are deleted.
+    /// 3. **This process's stale temp under the TARGET'S OWN base name is still collected** — the escape
+    ///    is not allowed to narrow what [`SweepScope::ThisDestinationOnly`] has always been permitted to
+    ///    do, and a committed claim has already renamed its own staging file away, so this name can only
+    ///    be residue.
+    ///
+    /// Calls [`sweep_stale_temp_siblings_scoped`] directly rather than going through
+    /// [`sweep_stale_temp_siblings_once_per_directory`], because the memo is thread-local and never
+    /// cleared: routing through it would make the test's result depend on which other test in this
+    /// binary happened to sweep a directory on this thread first.
+    ///
+    /// **Red-proofed, and here is the run** (round 3). With the `stamp_pid_is_this_process` skip in the
+    /// `EveryDestination` arm disabled (`if false && …`):
+    ///
+    /// ```text
+    /// cpe_1961_stamp_pid_is_this_process_reads_the_pid_half_only ... ok
+    /// cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling ... FAILED
+    ///   assertion `left == right` failed: a stale staging sibling carrying THIS process's pid, under a
+    ///   base name that is not the target's, must survive: …
+    ///     left: None
+    /// ```
+    ///
+    /// It reds on **leg 2**, so the test fails for the reason it exists rather than because the sweep
+    /// stopped working: leg 1 — a foreign pid's stale temp is still collected — ran and stayed green in
+    /// front of it.
+    ///
+    /// **Round 4 nit: this sentence used to say "legs 1 and 3 stayed green", and leg 3 never ran.** Its
+    /// assertion sits after leg 2's, so the panic reaches the harness first and leg 3 is unevaluated. It
+    /// changes nothing about the conclusion, and it is the difference between reporting what was
+    /// observed and reporting what was expected — which is the whole subject of this ticket's round 4.
+    #[test]
+    fn cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling() {
+        let d = scratch("sweep-pid-ownership");
+        let target = d.join("committed.txt");
+        std::fs::write(&target, b"just committed").unwrap();
+
+        let ours = std::process::id();
+        let foreign = ours.wrapping_add(1);
+        assert_ne!(foreign, ours, "the foreign-pid leg needs a pid that is genuinely not this process's");
+
+        // Ten minutes behind `target`'s own mtime — past STALE_TEMP_FLOOR (300s) on the filesystem's own
+        // clock, which is the reference `sweep_stale_temp_siblings_scoped` uses.
+        let stale = std::fs::symlink_metadata(&target).unwrap().modified().unwrap()
+            - std::time::Duration::from_secs(600);
+        let age = |p: &Path| {
+            std::fs::OpenOptions::new().write(true).open(p).unwrap().set_modified(stale).unwrap();
+        };
+
+        let foreign_temp = d.join(format!("elsewhere.bin.{foreign}-1000000000000.cpe-tmp"));
+        std::fs::write(&foreign_temp, b"a killed process left this").unwrap();
+        age(&foreign_temp);
+
+        let ours_other_name = d.join(format!("stalled-download.bin.{ours}-1000000000001.cpe-tmp"));
+        std::fs::write(&ours_other_name, b"a live writer is still filling this").unwrap();
+        age(&ours_other_name);
+
+        let ours_same_name = d.join(format!("committed.txt.{ours}-1000000000002.cpe-tmp"));
+        std::fs::write(&ours_same_name, b"residue for the target's own name").unwrap();
+        age(&ours_same_name);
+
+        sweep_stale_temp_siblings_scoped(&target, SweepScope::EveryDestination);
+
+        assert!(
+            !foreign_temp.exists(),
+            "a stale staging sibling stamped with a pid that is NOT this process's is exactly what SEC-8 \
+             widened the sweep to collect — if this survives, the ownership escape has silently reverted \
+             the widening rather than bounding it"
+        );
+        // `.ok().as_deref()`, not `.unwrap()`: when this leg regresses the file is GONE, and an unwrap
+        // would panic with a bare `NotFound` instead of the sentence that says what was lost.
+        assert_eq!(
+            std::fs::read(&ours_other_name).ok().as_deref(),
+            Some(&b"a live writer is still filling this"[..]),
+            "a stale staging sibling carrying THIS process's pid, under a base name that is not the \
+             target's, must survive: a stalled writer of ours holds it open and the age floor cannot \
+             tell 'killed' from 'has produced no bytes for five minutes'"
+        );
+        assert!(
+            !ours_same_name.exists(),
+            "the ownership escape must NOT narrow what ThisDestinationOnly has always collected — the \
+             target's own staging name is residue by construction once the commit has renamed the real \
+             one away"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The pure half of [`cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling`]:
+    /// [`stamp_pid_is_this_process`]'s truth table, including the two rows whose *direction* of error was
+    /// chosen deliberately — an unparseable stamp answers "not ours" (safe, because
+    /// [`is_valid_temp_stamp`] rejects it downstream anyway) and a leading-zero pid answers "ours" (safe,
+    /// because it errs toward keeping a file).
+    #[test]
+    fn cpe_1961_stamp_pid_is_this_process_reads_the_pid_half_only() {
+        let ours = std::process::id();
+        let foreign = ours.wrapping_add(1);
+        for (stamp, want, why) in [
+            (format!("{ours}-1000000000000"), true, "our pid, ordinary stamp"),
+            (format!("{foreign}-1000000000000"), false, "someone else's pid"),
+            (format!("0{ours}-1"), true, "leading zeros parse to the same number — errs toward keeping"),
+            // Round 4, Reviewer nit: the two digit-adjacency rows. A digit *prepended* is a different
+            // (larger) number and a digit *appended* is too — neither is a prefix match, because the
+            // comparison is on the parsed `u32` and not on the text.
+            (format!("9{ours}-1"), false, "a digit in front makes it a different pid, not a prefix"),
+            (format!("{ours}9-1"), false, "a digit behind makes it a different pid, not a prefix"),
+            // The caller splits on the LAST dot (`rposition`), so a dotted base name — `archive.tar.gz`
+            // — never puts a dot in the half that reaches here. A dot arriving anyway is not a number
+            // and reads as "not ours", which is the keeping direction.
+            (format!("{ours}.5-1"), false, "a dot in the pid half is not a number; the caller's \
+                                            rposition split is what keeps a dotted base name out"),
+            (format!("{ours}"), false, "no '-' at all, so there is no pid half to read"),
+            (format!("x{ours}-1"), false, "not digits, so not a stamp this app ever wrote"),
+            ("99999999999999-1".to_string(), false, "wider than a u32, so it cannot be a live pid"),
+            (String::new(), false, "empty"),
+        ] {
+            assert_eq!(
+                stamp_pid_is_this_process(stamp.as_bytes()),
+                want,
+                "stamp_pid_is_this_process({stamp:?}): {why}"
+            );
+        }
+        assert!(
+            !stamp_pid_is_this_process(&[0xff, b'-', b'1']),
+            "invalid UTF-8 is not a stamp this app wrote, so it reads as 'not ours' and the downstream \
+             is_valid_temp_stamp gate refuses it"
+        );
+    }
+
+    /// **CPE-1961 round 4 (Reviewer MAJOR 3): the staging name always fits in one path component, and a
+    /// truncated one is still the exact shape the sweep parses back apart.**
+    ///
+    /// The pure half of the long-name regression — `archive::tests::
+    /// cpe_1961_a_long_but_legal_entry_name_still_extracts` is the filesystem half. Both matter: the cap
+    /// is only useful if the truncated output still satisfies every condition
+    /// [`sweep_stale_temp_siblings_scoped`] imposes, since a name this app can create but never collect
+    /// is residue by construction.
+    ///
+    /// The `stamp_pid_is_this_process` assertion is the one that is easy to leave out and is the point
+    /// of the cap being *safe*: a truncated base no longer equals the target's own name, so
+    /// `EveryDestination` routes the candidate through that check — and it has to answer "ours" for a
+    /// name this process just produced, or our own live staging file becomes collectable by our own
+    /// next commit.
+    #[test]
+    fn cpe_1961_a_staging_sibling_name_always_fits_in_one_path_component() {
+        use std::ffi::OsStr;
+        // Around and well past the boundary: 221 is roughly where a 34-byte stamp starts to bite on
+        // this machine, and the two ends prove the untruncated case is untouched.
+        for base_len in [1usize, 8, 200, 215, 221, 222, 254, 255, 300, 4096] {
+            let base = "n".repeat(base_len);
+            let name = staging_sibling_name(OsStr::new(&base));
+            assert!(
+                name.len() <= MAX_COMPONENT_BYTES,
+                "a {base_len}-byte destination staged as a {}-byte component, which no filesystem this \
+                 app runs on accepts: {name:?}",
+                name.len()
+            );
+            // Exactly the sweep's own parse, in the sweep's own order.
+            let head = name
+                .strip_suffix(".cpe-tmp")
+                .unwrap_or_else(|| panic!("the suffix must survive truncation: {name:?}"));
+            let dot = head
+                .rfind('.')
+                .unwrap_or_else(|| panic!("the stamp separator must survive truncation: {name:?}"));
+            assert!(dot > 0, "a NON-EMPTY base must survive: `dot == 0` is refused by the sweep: {name:?}");
+            assert!(
+                is_valid_temp_stamp(&head[dot + 1..]),
+                "the stamp must still validate after truncation: {name:?}"
+            );
+            assert!(
+                stamp_pid_is_this_process(&head.as_bytes()[dot + 1..]),
+                "a truncated base stops matching the target's own name, so this check is what stands \
+                 between our own live staging file and our own next sweep — it must say 'ours': {name:?}"
+            );
+        }
+        // A short name is passed through byte-for-byte: the cap is a cap, not a reformat.
+        let short = staging_sibling_name(OsStr::new("a.txt"));
+        assert!(short.starts_with("a.txt."), "an ordinary name keeps its base exactly: {short:?}");
+        // Multi-byte: the cut backs off to a char boundary, so the result is still valid UTF-8 (this
+        // would panic on a byte slice) and still inside the cap.
+        let wide = staging_sibling_name(OsStr::new(&"é".repeat(300)));
+        assert!(wide.len() <= MAX_COMPONENT_BYTES, "{} bytes: {wide:?}", wide.len());
+        assert!(wide.starts_with('é'), "the base must not have been mangled: {wide:?}");
     }
 
     /// The IO wrapper actually skips a name that matches the staging pattern but is a symlink — wired

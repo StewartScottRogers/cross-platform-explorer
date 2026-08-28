@@ -114,6 +114,41 @@ Three details are worth knowing, because they are deliberate:
     not been checked against real OneDrive, only against a stand-in. A check on a real
     Files-On-Demand file is on the list. Nothing about this can put files **outside** the destination
     you chose; the uncertainty is confined to whether a cloud-offloaded file inside it copies cleanly.
+  - **A backup, restore, extraction or download now REPLACES the file at the destination rather than
+    writing into it** (CPE-1961). This is the same swap a confirmed Convert makes, and it was made for
+    the same reason: a file at the destination that shares its content with a file somewhere else — a
+    second name for one file — used to be written *through*, so the copy landed in both places. It was
+    measured happening: with someone attaching and detaching a second name to a destination while a
+    copy ran, **roughly one operation in ten on Windows and one in four on Linux** wrote the copy into
+    a file outside the folder you chose, while the run reported success. Now the bytes go into a new
+    file beside the destination and that file is swapped into place, so there is no moment at which
+    they could enter anything else. Four things follow, all of them the same as the Convert's:
+    the file at that name is a **new file** afterwards and its identity changes; its permissions and,
+    on Windows, its security settings and alternate data streams are copied across deliberately (and if
+    they cannot be read, the entry **fails** rather than coming back more readable than it was); the
+    job now needs permission to **create a file in the destination's folder**, not just to write the
+    file; and on Windows a destination carrying more than 8 MB of alternate data streams is skipped
+    with the original left untouched and a reason shown against that entry — the rest of the job keeps
+    going. A hard-linked destination is still refused outright before any of this, exactly as before.
+  - **What it costs on disk, and when that matters.** Because the new file is written beside the old
+    one before replacing it, the destination briefly holds **both** — so at the moment of the swap you
+    need room for the old file *and* the new one, where before you needed room only for the larger of
+    them. On a nearly-full drive this can turn a backup or a restore that used to succeed into one
+    that reports "not enough space", for a file that would have fit. This affects the largest file in
+    the job, not the whole job: the extra space is released as soon as each file is swapped in.
+  - **On macOS and Linux, two smaller changes to the file that lands.** Its **owner** is now whoever
+    ran the job — before, an existing destination kept its owner and group, because the app wrote into
+    the file that was already there. And a file created at a **brand-new** name comes out readable and
+    writable by you only (`0600`) rather than at the system default, unless the job itself specifies
+    permissions (a downloaded file is the case that does not; an extracted archive entry usually does,
+    and keeps the archive's). Both are more restrictive rather than less, so nothing becomes readable
+    that was not before — but a file you expected other accounts on the machine to be able to read may
+    need its permissions set once.
+  - **The same change applies to batch media operations** (CPE-1961). A batch output that is a second
+    name for another file *inside the selected folder* was allowed and used to update both names,
+    because the write went into the shared file. It now updates only the output you asked for; the
+    other name keeps its old contents. An output whose other name is **outside** the selected folder
+    was refused before and still is.
   - **The one thing it still cannot promise.** If someone with write access *renames one of your backup
     folders out of the backup destination* while the job is copying into it, the copy follows that
     folder — the app is writing into the folder itself, not into its name. On Windows this is not

@@ -401,6 +401,179 @@ pub(crate) fn remove_file_beneath(root: &RootDir, rel: &Path) -> Result<(), Refu
     sys::unlink(root, dirs, last)
 }
 
+/// Create a **staging** file at `root/rel` — exclusively, never opening anything that was already
+/// there — and hand back a handle that can later be committed over its final name with
+/// [`rename_beneath`] (CPE-1961).
+///
+/// # Why this is not [`create_beneath`] with a flag
+///
+/// [`create_beneath`] tries `FILE_CREATE`/`O_EXCL` first and then **falls back to opening** whatever is
+/// at the name, because its whole job is "give me the destination, whether or not it exists". A staging
+/// name has the opposite contract: if anything is already sitting at it, the only correct answer is to
+/// refuse. `created` is therefore always `true` on success and the type is only kept for symmetry with
+/// its sibling.
+///
+/// Two other differences, both load-bearing rather than cosmetic:
+///
+/// - **Windows always asks for `DELETE`, and for `READ_CONTROL | WRITE_DAC` only when `carrying`.**
+///   `DELETE` is not optional: `NtSetInformationFile(FileRenameInformation)` — the handle-sourced
+///   rename [`rename_beneath`] commits with — requires it on the *source* handle, and without it the
+///   commit fails `ERROR_ACCESS_DENIED` on every file. The other two are what
+///   `fsutil::HandleCarryover::apply` needs to put the destination's own DACL onto the staged file
+///   before the commit.
+///
+///   **`carrying` exists because "asking is free" was wrong, and CPE-1961 round 2's Security Auditor
+///   is why** (SEC-7). Round 1 asked for all three unconditionally and defended it as free, because
+///   Windows grants an object's creator `READ_CONTROL` and `WRITE_DAC` implicitly. But
+///   `HandleCarryover::apply` runs **only when `created == false`** — i.e. only when the destination
+///   already existed — and the common case for every one of the five legs (a first backup, a fresh
+///   extraction, a download into an empty tree) is `created == true`, where nothing ever touches the
+///   DACL. That is precisely the shape `create_beneath`'s own comment refuses, in the sentence this
+///   doc used to quote approvingly: *an access right nothing goes on to use is one more thing a
+///   network redirector can refuse.* Local NTFS grants it; an SMB or WebDAV redirector is the one that
+///   might not, and that is exactly where a backup destination lives. **Unmeasured against a real
+///   SMB/WebDAV/NFS share** — stated so, rather than claimed as verified.
+///
+///   `create_beneath` asks for none of the three, which is the same split
+///   `fsutil::create_staging_file_for_carryover` records against `fsutil::create_staging_file`; the
+///   `ByPath` arm of `fsutil::claim_destination_handle` now chooses between those two on the same
+///   `carrying` flag this parameter carries.
+///
+///   On Unix `carrying` is ignored — `openat` has no access-right knob to narrow.
+/// - **Unix creates at `0600`**, not `0666 & ~umask`, for `fsutil::STAGING_MODE`'s reason:
+///   POSIX checks permission at `open`, so a file created wide and narrowed afterwards leaves a window
+///   in which another local process can take a descriptor it keeps. The eventual mode is applied to the
+///   handle before the commit, so the staged file is never for an instant wider than it ends up.
+///
+/// # Errors
+///
+/// The same [`Refusal`] contract as [`create_beneath`]. A name that is already occupied refuses with
+/// `policy: false` — it is an I/O answer about this attempt, not a verdict about what the user asked
+/// for.
+///
+/// **There is no internal retry, and round 1's doc said there was.** It read "the caller's next
+/// attempt gets a fresh pid+nanosecond stamp", which describes a loop this function does not contain
+/// and no caller writes: `fsutil::staging_sibling_name` is called **once** per claim, and an occupied
+/// staging name refuses the entry outright. That is the right behaviour — the name carries this
+/// process's pid and a nanosecond stamp, so something already standing at it is a signal, not a
+/// collision to paper over — but it is not what the sentence said. Corrected in round 2 (Reviewer,
+/// ASK 4).
+pub(crate) fn create_staging_beneath(
+    root: &RootDir,
+    rel: &Path,
+    carrying: bool,
+) -> Result<Opened, Refusal> {
+    let parts = plain_components(root, rel)?;
+    let Some((last, dirs)) = parts.split_last() else {
+        return Err(Refusal {
+            why: format!(
+                "refusing to open {rel:?} inside {:?}: it names the destination root itself, not a \
+                 file inside it",
+                root.path
+            ),
+            policy: true,
+        });
+    };
+    sys::walk_staged(root, dirs, last, carrying)
+}
+
+/// **The handle-relative rename this module was missing (CPE-1961).**
+///
+/// Commit `staged` — the open handle [`create_staging_beneath`] returned for `from_rel` — over
+/// `to_rel`, replacing whatever name is there. Both operands are resolved one component at a time
+/// against the held root handle, so no interior component is ever presented to the filesystem as a
+/// path a concurrent rename could redirect.
+///
+/// # This is the primitive three tickets were waiting on
+///
+/// `std` has `fs::rename`, which takes two **paths** and re-resolves every component of both. That is
+/// the by-path question this module exists to stop asking, and its absence is what kept three separate
+/// pieces of work parked:
+///
+/// - **CPE-1961** — `fsutil::claim_destination_handle` could not take CPE-1958's claim-then-rename fix,
+///   because its handle comes from [`create_beneath`] and staging beside it needs exactly this.
+/// - **CPE-1963** — `fsutil::stage_and_replace_at`'s commit names its *source* by path
+///   (`*.cpe-tmp`, enumerable, in an attacker-writable folder), so the commit itself can be aliased.
+/// - **`copilot::apply_op`** — deferred through CPE-1913 and CPE-1937 with `renameat` named as the
+///   missing half; `remove_file_beneath` landed, this did not.
+///
+/// # What each platform actually guarantees, because they are NOT the same
+///
+/// - **Windows: the source is the HANDLE.** `NtSetInformationFile(staged, FileRenameInformation, …)`
+///   with `RootDirectory` set to the destination's parent handle renames *the object this handle is
+///   open on* to a single component resolved inside that directory. Neither operand is a path. Nothing
+///   an attacker does to the staging **name** between the write and the commit can change which object
+///   is committed — which is the whole of CPE-1963 on this platform.
+///
+///   **`NtSetInformationFile`, not `SetFileInformationByHandle`**, and this doc named the wrong one
+///   until CPE-1961 round 2. The Win32 wrapper takes the same `FILE_RENAME_INFO` buffer and **refuses
+///   it with `ERROR_INVALID_PARAMETER (0x80070057)` the moment `RootDirectory` is non-null** — the
+///   entire `transfer` and `archive` suites reddened on it before the call was moved down a layer, and
+///   `sys::rename` records the measurement. It matters that the *public* doc says so, because the
+///   reader most likely to "simplify" the implementation back to the Win32 call is precisely the one
+///   reading this page rather than the `#[cfg(windows)]` body.
+/// - **Unix: the source is a NAME, resolved against the parent directory handle.** There is no
+///   fd-sourced rename in POSIX, in Linux, or in any BSD: `renameat2` has no `AT_EMPTY_PATH` form,
+///   `/proc/self/fd/N` is not renameable, and `linkat(…, AT_EMPTY_PATH)` needs
+///   `CAP_DAC_READ_SEARCH`. So `renameat(parent, from, parent, to)` is the strongest primitive that
+///   exists, and it is strictly stronger than `fs::rename` — only the two **leaf** names are resolved,
+///   and they are resolved inside a directory object that cannot be substituted. **The residual is
+///   CPE-1963's and it is not closed here on Unix**: an attacker who unlinks the staging name and
+///   hard-links an outside file into its place makes this commit that object's name. It is an
+///   *aliasing* race, never a destruction one — the outside file's bytes are not changed — and
+///   `fsutil::ClaimedDestination::commit` turns it into a loud refusal by comparing the identity at
+///   the destination against the identity it wrote. Say "unblocks CPE-1963" only with that split
+///   stated; a claim that this closes it on both platforms would be false.
+///
+/// # Precondition: one parent
+///
+/// `from_rel` and `to_rel` must name siblings — same parent, different final component. That is what
+/// every staging commit wants, and it means the descent runs **once**, so the two operands cannot be
+/// resolved against two different directory objects. A cross-directory rename is refused rather than
+/// supported: nothing here needs it, and it would double the number of things a reader has to hold in
+/// their head about which handle each name is relative to.
+///
+/// # Cost
+///
+/// One extra descent per commit — the walk that opened the staging file is not held open across the
+/// caller's write, because the caller may be streaming gigabytes and a held directory handle is a
+/// resource with a lifetime. On a backup that is one additional per-component `openat`/`NtCreateFile`
+/// chain per file, on top of the one [`create_beneath`] already pays. Measured cost is recorded on
+/// `fsutil::ClaimedDestination::commit`, which is the only production caller.
+pub(crate) fn rename_beneath(
+    root: &RootDir,
+    staged: &File,
+    from_rel: &Path,
+    to_rel: &Path,
+) -> Result<(), Refusal> {
+    let from = plain_components(root, from_rel)?;
+    let to = plain_components(root, to_rel)?;
+    let (Some((from_last, from_dirs)), Some((to_last, to_dirs))) =
+        (from.split_last(), to.split_last())
+    else {
+        return Err(Refusal {
+            why: format!(
+                "refusing to commit {from_rel:?} onto {to_rel:?} inside {:?}: one of them names the \
+                 destination root itself, not a file inside it",
+                root.path
+            ),
+            policy: true,
+        });
+    };
+    if from_dirs != to_dirs {
+        return Err(Refusal {
+            why: format!(
+                "refusing to commit {from_rel:?} onto {to_rel:?} inside {:?}: a staged file is \
+                 committed over a name in its OWN folder, so that both names resolve against one \
+                 directory handle",
+                root.path
+            ),
+            policy: true,
+        });
+    }
+    sys::rename(root, to_dirs, from_last, to_last, staged)
+}
+
 /// What the walk is on its way to do. Exactly two things differ between [`create_beneath`]'s descent
 /// and [`remove_file_beneath`]'s — whether a missing directory is **created** on the way down, and the
 /// **verb** in a refusal — and both are carried here rather than by a second copy of the walk. A user
@@ -409,23 +582,43 @@ pub(crate) fn remove_file_beneath(root: &RootDir, rel: &Path) -> Result<(), Refu
 enum Act {
     Write,
     Delete,
+    /// **A write that must not CREATE anything on its way down** — [`rename_beneath`]'s descent, and
+    /// [`Staged::abandon`]'s cleanup reaching this module through [`remove_file_beneath`] is the same
+    /// idea from the other side (CPE-1961 round 2, Security Auditor SEC-5, minor).
+    ///
+    /// The descent's disposition is `FILE_OPEN_IF` / `mkdirat`-if-missing for [`Act::Write`], because
+    /// creating a destination's missing parents is exactly what `create_beneath` is for. A **commit**
+    /// arrives after the staging file already exists inside those parents, so every directory it walks
+    /// through is one that was there a moment ago. If the parent has been renamed away in between,
+    /// `Act::Write` would silently **re-create an empty directory** and then fail `ENOENT` at the
+    /// rename itself — fails closed, but leaves debris, which is the precise thing CPE-1937 gave the
+    /// delete leg `FILE_OPEN` to avoid. This variant gets the delete leg's disposition and the write
+    /// leg's wording, because the user asked for a write and the message must say so.
+    Commit,
 }
 
 impl Act {
-    /// "write" / "delete" — the verb in the refusal's first clause and in its closing sentence.
+    /// The verb in the refusal's first clause and in its closing sentence.
     fn verb(self) -> &'static str {
         match self {
-            Act::Write => "write",
+            Act::Write | Act::Commit => "write",
             Act::Delete => "delete",
         }
     }
 
-    /// "written" / "deleted" — the participle in "Nothing was … for this entry".
+    /// The participle in "Nothing was … for this entry".
     fn past(self) -> &'static str {
         match self {
-            Act::Write => "written",
+            Act::Write | Act::Commit => "written",
             Act::Delete => "deleted",
         }
+    }
+
+    /// Whether this act's descent may **create** a missing intermediate directory. Only a plain
+    /// [`Act::Write`] may — see [`Act::Commit`] for why a commit must not, and `descend`'s own comment
+    /// for why a delete must not.
+    fn descent_creates(self) -> bool {
+        matches!(self, Act::Write)
     }
 }
 
@@ -589,7 +782,7 @@ mod sys {
         FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
         FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
         FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
-        SYNCHRONIZE,
+        READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
     };
     use windows::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -820,9 +1013,10 @@ mod sys {
             // **`FILE_OPEN` for a delete** (CPE-1937): `remove_file` on a path whose parents do not
             // exist is an error, and a destructive operation that silently *materialises* two
             // directories on its way to failing leaves debris behind a delete. So the disposition is
-            // the one thing the two acts differ on here; everything below is shared, which is the
-            // point of parameterising rather than copying the walk.
-            let disposition = if act == Act::Write { FILE_OPEN_IF } else { FILE_OPEN };
+            // the one thing the acts differ on here; everything below is shared, which is the
+            // point of parameterising rather than copying the walk. `Act::Commit` joins the delete
+            // side of that split — see its doc.
+            let disposition = if act.descent_creates() { FILE_OPEN_IF } else { FILE_OPEN };
             let dir = nt_child(
                 parent,
                 name,
@@ -1120,6 +1314,134 @@ mod sys {
                 &format!("could not be marked for deletion ({e}){note}"),
             )
         })
+    }
+
+    /// [`create_staging_beneath`](super::create_staging_beneath)'s arm — CPE-1961.
+    ///
+    /// `FILE_CREATE` with **no** `FILE_OPEN` fallback: a staging name that is already occupied is
+    /// refused, never opened. See the public doc for why `DELETE` is always asked for here and
+    /// deliberately not by [`walk`], and why `READ_CONTROL | WRITE_DAC` are asked for only when
+    /// `carrying` says a DACL is actually going to be written to this handle.
+    pub(super) fn walk_staged(
+        root: &RootDir,
+        dirs: &[&OsStr],
+        last: &OsStr,
+        carrying: bool,
+    ) -> Result<Opened, Refusal> {
+        let mut sofar = PathBuf::new();
+        let held = descend(root, Act::Write, dirs, &mut sofar)?;
+        let parent = held.as_ref().unwrap_or(&root.dir);
+        sofar.push(last);
+        let dacl = if carrying { READ_CONTROL.0 | WRITE_DAC.0 } else { 0 };
+        let access = FILE_ACCESS_RIGHTS(
+            FILE_GENERIC_WRITE.0 | FILE_READ_ATTRIBUTES.0 | DELETE.0 | dacl | SYNCHRONIZE.0,
+        );
+        let options = NTCREATEFILE_CREATE_OPTIONS(
+            FILE_NON_DIRECTORY_FILE.0 | FILE_OPEN_REPARSE_POINT.0 | FILE_SYNCHRONOUS_IO_NONALERT.0,
+        );
+        match nt_child(parent, last, access, FILE_CREATE, options) {
+            Ok(file) => Ok(Opened { file, created: true }),
+            // No `leaf_is_link` classification here, and the omission is deliberate: this leaf never
+            // opens an existing object, so "what is sitting at the name" cannot change the verdict —
+            // the answer is refuse either way, and the caller retries with a fresh stamp. The status is
+            // reported so a genuinely broken folder (no `CreateFiles` right) says so.
+            Err(s) => Err(refuse(
+                root,
+                Act::Write,
+                &sofar,
+                &format!("could not be created as a staging file ({})", io_err(s)),
+            )),
+        }
+    }
+
+    /// [`rename_beneath`](super::rename_beneath)'s arm — CPE-1961.
+    ///
+    /// **The source operand is the `staged` HANDLE, not `from`.** `from` is carried only so the
+    /// refusal can name it; nothing here presents it to the filesystem. `FILE_RENAME_INFO`'s
+    /// `RootDirectory` field makes `FileName` a single component resolved inside the parent directory
+    /// object, and `ReplaceIfExists` makes it replace whatever name is there.
+    pub(super) fn rename(
+        root: &RootDir,
+        dirs: &[&OsStr],
+        from: &OsStr,
+        to: &OsStr,
+        staged: &File,
+    ) -> Result<(), Refusal> {
+        use windows::Wdk::Storage::FileSystem::{FileRenameInformation, NtSetInformationFile};
+        use windows::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+        let mut sofar = PathBuf::new();
+        // `Act::Commit`, not `Act::Write`: the parents already exist (the staging file is sitting in
+        // them), so a `FILE_OPEN_IF` descent here would only ever re-create a directory something
+        // removed under us, and then fail at the rename anyway. See `Act::Commit`.
+        let held = descend(root, Act::Commit, dirs, &mut sofar)?;
+        let parent = held.as_ref().unwrap_or(&root.dir);
+        sofar.push(to);
+
+        let wide: Vec<u16> = to.encode_wide().collect();
+        let name_bytes = match u32::try_from(wide.len().saturating_mul(2)) {
+            Ok(n) => n,
+            Err(_) => {
+                return Err(refuse(
+                    root,
+                    Act::Commit,
+                    &sofar,
+                    "has a name too long to describe to the filesystem",
+                ))
+            }
+        };
+        // `FILE_RENAME_INFO` ends in a one-element `FileName` array, so the buffer is the struct plus
+        // room for the rest of the name. Allocated as `u64`s rather than `u8`s because the struct holds
+        // a `HANDLE` and must be 8-byte aligned; a `Vec<u8>` guarantees alignment 1.
+        let header = std::mem::size_of::<FILE_RENAME_INFO>();
+        let total = header + wide.len().saturating_mul(2);
+        let mut buf: Vec<u64> = vec![0; total.div_ceil(8).max(1)];
+        let ptr = buf.as_mut_ptr().cast::<u8>();
+        // **`NtSetInformationFile`, not `SetFileInformationByHandle`, and the difference is not
+        // stylistic — it is measured.** The Win32 wrapper takes the same `FILE_RENAME_INFO` buffer and
+        // refuses it with `ERROR_INVALID_PARAMETER (0x80070057)` the moment `RootDirectory` is
+        // non-null: the entire `transfer` and `archive` suites reddened on it, every entry, before the
+        // call was moved down one layer. The NT form is the one that has always honoured a
+        // directory-relative rename, and it is the same layer `nt_child` above already opens through,
+        // so this module talks to one API rather than two. If a future reader "simplifies" this back to
+        // the Win32 call, every commit on the `Beneath` arm fails; the wrapper is not a superset.
+        //
+        // SAFETY: `buf` owns at least `total` bytes at 8-byte alignment and outlives the call below;
+        // `info` is written entirely within it, and `wide` is copied into the `FileName` tail whose
+        // room was reserved above. `parent` and `staged` are borrowed from live `File`s, and `iosb` is
+        // a correctly-typed out-parameter.
+        let status = unsafe {
+            let info = ptr.cast::<FILE_RENAME_INFO>();
+            (*info).Anonymous.ReplaceIfExists = BOOLEAN(1);
+            (*info).RootDirectory = HANDLE(parent.as_raw_handle() as isize);
+            (*info).FileNameLength = name_bytes;
+            std::ptr::copy_nonoverlapping(
+                wide.as_ptr(),
+                std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                wide.len(),
+            );
+            let mut iosb: IO_STATUS_BLOCK = std::mem::zeroed();
+            tick();
+            NtSetInformationFile(
+                HANDLE(staged.as_raw_handle() as isize),
+                &mut iosb,
+                ptr.cast(),
+                u32::try_from(total).unwrap_or(u32::MAX),
+                FileRenameInformation,
+            )
+        };
+        if status.is_ok() {
+            return Ok(());
+        }
+        Err(refuse(
+            root,
+            Act::Commit,
+            &sofar,
+            &format!(
+                "could not be replaced by the staged copy of it ({}) [staged as {from:?}]",
+                io_err(status)
+            ),
+        ))
     }
 
     pub(super) fn walk(root: &RootDir, dirs: &[&OsStr], last: &OsStr) -> Result<Opened, Refusal> {
@@ -1466,7 +1788,7 @@ mod sys {
                 Some(f) => f.as_raw_fd(),
                 None => root.dir.as_raw_fd(),
             };
-            let dir = child_dir(parent, &c, act == Act::Write).map_err(|e| {
+            let dir = child_dir(parent, &c, act.descent_creates()).map_err(|e| {
                 // Classified by asking the filesystem, NOT by reading the errno — see [`link_at`].
                 // A symlink at an intermediate component reports `ENOTDIR` on Linux and macOS, and so
                 // does a plain file sitting where a directory should be; they need different
@@ -1535,6 +1857,100 @@ mod sys {
                 Act::Delete,
                 &sofar,
                 &format!("could not be deleted ({e})"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`create_staging_beneath`](super::create_staging_beneath)'s arm — CPE-1961.
+    ///
+    /// `O_CREAT|O_EXCL|O_NOFOLLOW` with **no** fallback open: a staging name that is already occupied
+    /// is refused, never opened. The mode is `crate::fsutil::STAGING_MODE`'s `0600`, spelled here
+    /// rather than imported because this module takes nothing from `fsutil` — see the public doc for
+    /// why the file is born narrow instead of being narrowed afterwards.
+    pub(super) fn walk_staged(
+        root: &RootDir,
+        dirs: &[&OsStr],
+        last: &OsStr,
+        carrying: bool,
+    ) -> Result<Opened, Refusal> {
+        // `openat` has no access-right knob to narrow — the Windows arm's `carrying` split has no
+        // analogue here. Named rather than `_carrying` so the two signatures read identically.
+        let _ = carrying;
+        let mut sofar = PathBuf::new();
+        let held = descend(root, Act::Write, dirs, &mut sofar)?;
+        sofar.push(last);
+        let c = cname(last).map_err(|()| {
+            refuse(root, Act::Write, &sofar, "contains a NUL byte, which no filesystem name can hold")
+        })?;
+        let parent = match held.as_ref() {
+            Some(f) => f.as_raw_fd(),
+            None => root.dir.as_raw_fd(),
+        };
+        tick();
+        // SAFETY: ordinary FFI; `c` outlives the call and `parent` is borrowed from a live `File`.
+        // `openat` is variadic — the mode argument is read because `O_CREAT` is set.
+        let fd = unsafe {
+            libc::openat(
+                parent,
+                c.as_ptr(),
+                libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_CREAT | libc::O_EXCL,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(refuse(
+                root,
+                Act::Write,
+                &sofar,
+                &format!("could not be created as a staging file ({e})"),
+            ));
+        }
+        // SAFETY: `fd` is a fresh, owned descriptor this call just created.
+        Ok(Opened { file: unsafe { File::from_raw_fd(fd) }, created: true })
+    }
+
+    /// [`rename_beneath`](super::rename_beneath)'s arm — CPE-1961.
+    ///
+    /// **Both operands are single components resolved against one directory handle**, which is the
+    /// strongest rename POSIX offers: there is no fd-sourced rename anywhere in Unix (see the public
+    /// doc, which states the residual this leaves and which ticket owns it). `staged` is accepted and
+    /// unused here so the two platforms share one signature; on Windows it is the source operand.
+    pub(super) fn rename(
+        root: &RootDir,
+        dirs: &[&OsStr],
+        from: &OsStr,
+        to: &OsStr,
+        staged: &File,
+    ) -> Result<(), Refusal> {
+        let _ = staged; // the Windows arm renames the handle itself; POSIX has no such call
+        let mut sofar = PathBuf::new();
+        // `Act::Commit`, not `Act::Write`: the parents already exist (the staging file is sitting in
+        // them), so a descent that would `mkdirat` a missing one is only ever re-creating a directory
+        // something removed under us, and then failing at the rename anyway. See `Act::Commit`.
+        let held = descend(root, Act::Commit, dirs, &mut sofar)?;
+        sofar.push(to);
+        let cf = cname(from).map_err(|()| {
+            refuse(root, Act::Commit, &sofar, "contains a NUL byte, which no filesystem name can hold")
+        })?;
+        let ct = cname(to).map_err(|()| {
+            refuse(root, Act::Commit, &sofar, "contains a NUL byte, which no filesystem name can hold")
+        })?;
+        let parent = match held.as_ref() {
+            Some(f) => f.as_raw_fd(),
+            None => root.dir.as_raw_fd(),
+        };
+        tick();
+        // SAFETY: ordinary FFI; both C strings outlive the call and `parent` is borrowed from a live
+        // `File`. No ownership transfer.
+        if unsafe { libc::renameat(parent, cf.as_ptr(), parent, ct.as_ptr()) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(refuse(
+                root,
+                Act::Commit,
+                &sofar,
+                &format!("could not be replaced by the staged copy of it ({e}) [staged as {from:?}]"),
             ));
         }
         Ok(())

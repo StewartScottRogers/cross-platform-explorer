@@ -1126,7 +1126,7 @@ fn apply_write(
         // CPE-1913: the destination is opened one component at a time against the root handle this
         // run holds, so the containment is atomic with the open and there is no path left for a
         // racing rename — or a junction already sitting there — to redirect.
-        || crate::open_beneath::create_beneath(root, &rel),
+        crate::fsutil::DestinationSite::Beneath { root, rel: &rel },
     )
     .map(|_| ())
     .map_err(|refusal| {

@@ -720,7 +720,7 @@ pub fn download_tree(
         let mut claimed = match crate::fsutil::claim_destination_handle(
             &local,
             crate::fsutil::LinkGuardWording::DOWNLOAD,
-            || crate::open_beneath::create_beneath(&root_handle, &rel_local),
+            crate::fsutil::DestinationSite::Beneath { root: &root_handle, rel: &rel_local },
         ) {
             Ok(c) => c,
             Err(r) => {
@@ -730,6 +730,94 @@ pub fn download_tree(
         };
         if let Err(e) = std::io::Write::write_all(&mut claimed.file, &data) {
             hard_err = Some(format!("{}: {e}", local.display()));
+            return;
+        }
+        // CPE-1961: the bytes are in a staging sibling until this line renames it over `local`. A
+        // `return` above drops the claim, which removes the staged file — so a download that fails
+        // mid-write no longer leaves a truncated local file where a complete one used to be.
+        //
+        // **`record!`, not `hard_err` — CPE-1961 round 4, and it is the same finding as the archive
+        // leg's Blocker 1 arriving here.** Rounds 1–3 wrote `hard_err = Some(r.why)`, on the reasoning
+        // that a local write failure has always set `hard_err` (`write_all` above still does). That
+        // reasoning is about the *bucket*, and the thing that changed is the *input*: this ticket adds
+        // a failure point the loop did not have — `sync_all`, then a rename the filesystem can refuse
+        // — and the commonest way to reach it is a destination another program is holding open. On
+        // `main` that download succeeded, because writing through an already-open handle is not
+        // something a sharing mode blocks; here it took the whole tree down at the first such file,
+        // and `hard_err` also short-circuits every entry after it (`if hard_err.is_some()` at the top
+        // of this closure).
+        //
+        // **Which bucket `record!` picks, and the sentence round 4 got wrong (Reviewer Major 1).**
+        // Round 4 wrote *"`record!` with a `policy: false` refusal — which is what `commit` returns"*.
+        // The parenthetical is **false**. It is true of `DestinationSite::ByPath`, which does
+        // `commit_replacement(...).map_err(Refusal::failure)`; it is false of the **`Beneath`** arm
+        // this leg uses, which returns `open_beneath::rename_beneath`'s `Refusal` unchanged — and that
+        // function's `descend(root, Act::Commit, dirs)` calls `refuse_link` on a directory component
+        // that has become a link since the claim, which is `policy: true`. Executed, red-proofed, on a
+        // real planted link: `fsutil::tests::
+        // cpe_1961_a_link_planted_at_an_interior_component_makes_commit_refuse_with_policy_true`.
+        //
+        // So `record!` here forks, and both arms are live:
+        //
+        // ```text
+        // commit refuses with…  bucket        the walk   this call returns
+        // policy: false         undelivered   continues  Err, naming this file  (a lock, ENOSPC, a
+        //                                                                        dropped share)
+        // policy: true          skipped       continues  Ok(DownloadReport)     (a component swapped
+        //                                                                        for a link mid-write)
+        // ```
+        //
+        // **The second row has to be said out loud rather than left to be inferred: a link planted on a
+        // directory component between this claim and this commit produces a file the user asked for,
+        // did not get, and that `download_tree` reports as `Ok`.** The reason it is not delivered is
+        // named — it goes into `DownloadReport::skipped` with its wording, and onto stderr — but the
+        // call's verdict is success. That is not something this ticket introduced and not something it
+        // changes: it is CPE-1709/CPE-1881's standing contract for this leg, which classifies a **link
+        // verdict** as neither delivered nor a delivery failure ("not writing is the correct, safe
+        // outcome" — `DownloadReport::skipped`'s own doc), and which has produced exactly this
+        // `skipped` + `Ok` for a link found at *claim* time since long before CPE-1961 — verified
+        // against `git show 8c9ddb60:crates/server/src/transfer.rs`, a **pre-branch** revision on
+        // `main` (*"sprint: 'use the shape from the other leg' is not a mechanical transform"*), where
+        // it is byte-identical. Round 5 called `8c9ddb60` "this branch's merge base" and it is **not**
+        // one — it is an *ancestor* of the merge base, which sat fifteen commits later. The
+        // substantive claim is unaffected, and it is stated in the rebase-proof form that should have
+        // been used first: `8c9ddb60` is an ancestor of this branch's merge base, and
+        // `git diff 8c9ddb60 $(git merge-base origin/main HEAD) -- crates/server/src/transfer.rs` is
+        // **empty**, so the file is unchanged all the way to the branch point and the silent `Ok`
+        // genuinely predates this branch. Naming the merge base by sha is what went stale: the sha
+        // written at round 7 was falsified by round 7's own rebase, minutes later. Say what the
+        // revision *is* and derive the rest. Saying "merge base" of a revision that is not one is the
+        // CPE-1933 shape — a sentence that reads as verified while naming a different object.
+        // Whether that contract is right is a real question, and it is **CPE-1980**;
+        // what this round fixes is that the two moments now answer it the same way, so the outcome no
+        // longer depends on which microsecond the link was planted in.
+        //
+        // **A ticket rather than a note** (round 6, Reviewer). Round 5 wrote "a separate ticket's" with
+        // no ticket behind it, and an unnamed follow-up is a follow-up nobody can find: the next reader
+        // sees a sentence that sounds resolved. CPE-1980 carries the decision — skip, failure, or a
+        // report shape a caller cannot ignore by accident — along with the measurement that it predates
+        // this branch, so the argument does not have to be reconstructed.
+        //
+        // **The other leg, and why the two now agree.** `archive::extract_zip_archive_stream` had the
+        // identical refusal going to `report.fail` unconditionally — the opposite bucket from this one,
+        // with *"clear that and extract again"* attached, which cannot work for a planted link. Round 5
+        // gave it the same `policy` fork its own claim site has had since CPE-1935. Both legs now
+        // classify a commit refusal by exactly the rule they already used for a claim refusal. They
+        // still differ in **consequence** — `archive` returns `Ok(report)` with counted skips either
+        // way, this leg returns `Ok` only when nothing reached `undelivered` — and that difference is
+        // the two legs' own pre-existing report shapes, identical for claim-time refusals, not
+        // something either site decides.
+        //
+        // The rest of round 4's reasoning stands and is why `record!` replaced `hard_err` at all: it
+        // is what CPE-1709's own sentence forty lines below asks for — *"Everything deliverable IS
+        // still delivered first (the walk runs to completion, matching the skip-on-error ethos); only
+        // the final verdict changes, and it names what was lost."*
+        //
+        // `write_all`'s `hard_err` above is left alone deliberately: it predates this ticket, it is a
+        // different question (a failure writing into a file nothing else has a name for), and moving
+        // it is a behaviour change this ticket did not measure.
+        if let Err(r) = claimed.commit() {
+            record!(r);
             return;
         }
         files += 1;
@@ -923,6 +1011,91 @@ mod tests {
         assert_eq!(files, 2);
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
         assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// **CPE-1961 round 4: one local file another program holds open costs THAT file, not the rest of
+    /// the download.**
+    ///
+    /// The archive leg's Blocker 1, arriving here. This ticket adds a failure point `download_tree` did
+    /// not have — `sync_all`, then a rename the filesystem can refuse — and rounds 1–3 routed it into
+    /// `hard_err`, which both ends the transfer `Err` **and** short-circuits every entry after it. On
+    /// `main` the same download succeeded outright: writing through an already-open handle is not
+    /// something a sharing mode blocks, so nothing about a held-open destination could fail a write.
+    ///
+    /// The transfer still ends `Err` — CPE-1709 requires that, and the message names the file — but the
+    /// walk runs to completion and everything deliverable is delivered, which is that ticket's own
+    /// stated ethos. So the assertion that matters is on the **filesystem**, not the `Result`: both
+    /// are `Err` either way, and only `z_after.txt` tells the two apart.
+    ///
+    /// **Red-proof, run** (`record!(r)` back to `hard_err = Some(r.why)`, `Compiling cpe-server` seen):
+    ///
+    /// ```text
+    /// cpe_1961_a_local_file_held_open_costs_that_file_not_the_rest_of_the_download ... FAILED
+    ///   THE POINT: the entry AFTER the held-open one must still be delivered … left: None
+    /// ```
+    ///
+    /// Windows-only for the same reason the archive leg's twin is: `rename(2)` over an open file always
+    /// succeeds on Linux, so the fixture does not exist there. The code path is shared.
+    #[test]
+    #[cfg(windows)]
+    fn cpe_1961_a_local_file_held_open_costs_that_file_not_the_rest_of_the_download() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+        let mut fs = FakeProvider::new();
+        fs.write("a_before.txt", b"BEFORE").unwrap();
+        fs.write("m_victim.txt", b"REPLACEMENT").unwrap();
+        fs.write("z_after.txt", b"AFTER").unwrap();
+
+        let out = std::env::temp_dir().join(format!("cpe-xfer-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let victim = out.join("m_victim.txt");
+        std::fs::write(&victim, b"ORIGINAL").unwrap();
+        // No FILE_SHARE_DELETE — the share mode a program not using Rust's `std` picks by default.
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&victim)
+            .expect("holding the victim open for reading must succeed");
+
+        let cancel = AtomicBool::new(false);
+        let outcome = download_tree(&fs, "", &out, &cancel);
+
+        assert_eq!(
+            std::fs::read(out.join("a_before.txt")).ok().as_deref(),
+            Some(&b"BEFORE"[..]),
+            "the entry before the held-open one must be delivered: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(out.join("z_after.txt")).ok().as_deref(),
+            Some(&b"AFTER"[..]),
+            "THE POINT: the entry AFTER the held-open one must still be delivered. Missing means the \
+             commit failure set `hard_err`, which short-circuits the rest of the walk: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(&b"ORIGINAL"[..]),
+            "and the file that could not be replaced must be exactly as it was: {outcome:?}"
+        );
+        let residue: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(residue.is_empty(), "a refused commit takes its staging sibling with it: {residue:?}");
+
+        let why = outcome.expect_err(
+            "a tree that was not fully delivered must not report success — CPE-1709 F1",
+        );
+        assert!(
+            why.contains("m_victim.txt"),
+            "and the verdict must name the file that was lost: {why}"
+        );
+        drop(hold);
         let _ = std::fs::remove_dir_all(&out);
     }
 

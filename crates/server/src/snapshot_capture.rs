@@ -539,12 +539,51 @@ pub fn restore(store_dir: &str, manifest_id: &str, dest: &str) -> Result<(), Str
             &blob,
             &target,
             crate::fsutil::LinkGuardWording::RESTORE,
-            || crate::open_beneath::create_beneath(&root, &joined),
+            crate::fsutil::DestinationSite::Beneath { root: &root, rel: &joined },
         )
         // The blob is named by its already-hex-validated **hash**, never by its absolute path inside
         // the app's private checkpoint store — the rule `copy_file_onto_destination_handle`'s own doc
         // states and `revert_engine::apply_write` follows. The previous wording here leaked the store
         // path into a user-visible message.
+        //
+        // **This `?` abandons the restore, and CPE-1961 widened what can reach it — stated, not fixed**
+        // (round 4). The ticket adds a failure point every leg it touches did not have: `sync_all`, then
+        // a rename the filesystem can refuse. The archive leg (Blocker 1) and `transfer::download_tree`
+        // both had that routed into a run abort and both were changed to report the one entry and carry
+        // on. **This leg is deliberately not** — and round 5 (Reviewer Minor 4) corrects the reason
+        // round 4 gave for it.
+        //
+        // Round 4 argued the abort was safe *because* "pass 1 pre-flights the whole manifest before a
+        // byte is written, precisely so that a refusal is answered before anything changes". **Pass 1
+        // cannot pre-flight this.** It is pure judgement — it creates nothing and opens nothing — so a
+        // destination another program is holding open, or a disk that fills at `sync_all`, is invisible
+        // to it by construction. Everything pass 1 catches is caught before byte one; a commit failure
+        // is not one of those things, and citing pass 1 for it made an all-or-nothing claim this leg
+        // does not have.
+        //
+        // **The operative reason is three screens up, and it is a stronger one:** pass 2 *already*
+        // aborts mid-loop on three per-entry causes it likewise cannot pre-flight — `safe_segments`,
+        // `blob_source`, and the `written` collision check — and each of the first two says so in its
+        // own wording, *"entries written before this one may already be on disk"*. So a mid-loop abort
+        // with earlier entries on disk is this loop's **existing, worded contract**, not a new
+        // condition CPE-1961 introduces; the commit failure is a fourth cause of a shape the loop
+        // already has and already tells the user about. Leaving it is therefore consistent rather than
+        // merely convenient.
+        //
+        // Turning pass 2 into a per-entry reporter is a different product question — *what is a
+        // half-restored snapshot, and what do we tell the user it is* — and it would have to move all
+        // four causes together, which is its own ticket rather than a line changed in passing here.
+        //
+        // **Note that a commit refusal here can be `policy: true`** (round 5, Reviewer Major 1): this
+        // leg is `DestinationSite::Beneath`, so a directory component swapped for a link mid-write
+        // reaches this `?` as a link verdict. It aborts on that exactly as it aborts on any other
+        // refusal, which is the same answer this leg already gives a link found at claim time — so
+        // unlike `archive`, nothing here classified the same refusal two ways.
+        //
+        // What did change in practice: on `main`, a destination another program held open restored
+        // fine (writing through an already-open handle is not something a sharing mode blocks); here it
+        // stops the restore, with the entries before it already on disk. That is a real behaviour
+        // change on this leg and it is recorded here rather than left for the next reader to measure.
         .map_err(|refused| refusal(rel, &format!("{} (blob {})", refused.why, file.hash)))?;
         if let Ok(at) = fs::canonicalize(&target) {
             written.insert(at);
