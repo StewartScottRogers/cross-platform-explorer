@@ -2467,3 +2467,235 @@ check reads a different thing at a different moment, it is not shadowing — it 
 Same PR, the other direction: it also declared a *new* guard **untestable by construction** (disable →
 green, lie → 79 failed) and **said so at the site with both numbers**, which is what the standard asks
 for when a backstop genuinely cannot be reached. Both dispositions in one diff, argued separately.
+
+## 2026-08-28 — the report claimed a leg ran, because the count came from intent rather than work
+
+CPE-1966's round 2 fixed three safeguards that stayed green while permitting what they existed to
+prevent. A **narrow** re-review — scoped to only the round-2 changes — found the same class again, in
+the legs the PR exists to add.
+
+Three of the four measurement legs could measure **nothing** and still print
+`PASS — every enforced site clears its bar in both schemes.`, exit 0:
+
+- **states**: `const stateRules = []` → PASS, 844 readings instead of 1306. And it can happen with
+  nobody editing anything, because the loop wraps its query in a bare `catch { continue; }` — a CDP
+  change makes every rule skip **silently**.
+- **base**: `const all = []` → `0 raw readings -> 0 distinct sites, 0 enforced`, then PASS. Caught under
+  `--verify-pixels` only **incidentally** (the pixel leg is fed from `all`), so the documented local
+  invocation — the package.json script, no flag — passes on zero measurements.
+- **time**: disabled → PASS, **and the log still prints `3 CSS animations x 21 frames`.**
+
+**That third one is the one worth keeping.** The count is read from `animMeta.count` — the metadata
+describing what the harness *intended to sample* — not from readings that exist. So the report does
+not merely fail to notice the leg did nothing; **it actively asserts the leg ran, with a plausible
+number.** A silent zero invites suspicion. A confident "3 animations × 21 frames" closes the question.
+
+**The rule: every number a report prints must be derived from work done, not from the plan.** Counts
+sourced from configuration, targets, or intent will keep reporting the shape of the job after the job
+stops happening. The tell is asking, of each figure, *what would this print if the loop body never
+ran?* — and `animMeta.count` prints the same thing either way.
+
+Two smaller notes from the same pass. `--json` returned **0 unconditionally**, evaluating no verdict at
+all. And the round-2 JS comment stripper failed **both** ways — four shapes silently deleting real code
+(`return /[//]/;` → `return /[ `, because `prevSignificant` is a single character so every keyword
+matches `[\w$)\]]`) and three letting a comment survive. One path tokenized the **entire HTML
+document**: a single apostrophe in prose outside every `<script>` shifted the output by **11,872
+characters**. Latent only because the swallowed region happened to be copied verbatim.
+
+**And the narrow re-review is the reusable part.** A round-2 fix is new code that no review has seen;
+scoping a pass to *only what changed* cost a fraction of a full review and found two blockers the
+original reviewer could not have — it was reading round 1.
+
+## 2026-08-28 — a doc cited a guard by name, and the guard had never existed
+
+`ArchiveReport`'s doc comment has said, since **CPE-1775**, that its count/reason invariant is enforced
+by `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path`. CPE-1935's worker went
+looking for it: **two grep hits — the sentence itself, and its copy carried into `bindings.gen.ts`.**
+The test has never existed.
+
+**This is the purest form of the CPE-1933 defect the repo has found.** The other instances were claims
+that were *once* true and went stale, or claims about another file's behaviour that nobody ran. This
+one was **never true at any revision** — and it survived because a named test in a doc comment is the
+most convincing possible citation. It reads as a pointer to something you could go and check, which is
+exactly why nobody did.
+
+**It also propagated.** The sentence was copied verbatim into the generated TypeScript bindings, so the
+false claim now had two homes and would have read as corroboration to anyone who grepped for it.
+
+**The cheap check, and it is genuinely cheap:** any comment naming a test, a function or a job as its
+enforcement is a **derivable** claim — grep for the name and count the hits. Two hits where one is the
+comment itself means the citation is empty. That is one command, and it would have caught this in 2026
+when it was written.
+
+It was replaced with a real source-derived guard, which is the right ending.
+
+## 2026-08-28 — the entry-verdict rule: scope first, severity second
+
+CPE-1935 and CPE-1938 (#1084) appeared to hold opposite positions on per-entry failures. #1084 kept an
+`Abort` for a transient `ENOENT` where `main` had degraded to a per-entry Skip, and its Auditor flagged
+that as *"the same 'one planted junction = total denial' shape it just fixed, re-entered through
+another door."* CPE-1935's ticket asked for the opposite. I briefed it as a conflict and asked for a
+rule.
+
+**It found the two were never in conflict — they were being told apart by the wrong question.**
+
+> **Scope — what is this evidence about?** The **one name the archive asked for** ⇒ *entry* verdict.
+> The **extraction folder**, **a path component many entries travel through**, or **the archive
+> container** ⇒ *run* verdict.
+>
+> **Severity — did anyone choose not to write?** A guard chose ⇒ `Skip`. The filesystem refused ⇒ `Fail`.
+>
+> **The leaf is the archive's business; the chain is the run's.**
+
+`entry_component_action` walks *directory components*, which every sibling beneath them travels
+through, and `create_dir_beneath` **creates** missing levels — so a refusal there is the destination
+being mutated under a run in progress, and #1084's `Abort` was right all along. It stayed unchanged.
+
+**The generalisable part is the diagnosis, not the answer.** One enum was carrying two orthogonal
+questions in three arms, so every argument about it was really an argument about which question the
+arms encoded. When two careful people reach opposite conclusions about the same enum, the enum is
+usually the problem.
+
+## 2026-08-28 — a gate reported from a platform where the code does not build
+
+PR #1089's body reported `crates/server --lib` Linux at **2,414 / 0 / 13** and clippy *"clean … under
+the WSL toolchain."* Its Reviewer tried to reproduce and found the tree **does not compile on Linux or
+macOS**: a rename left a `#[cfg(unix)]` block referring to a variable that no longer exists, so Windows
+builds and Unix does not. With the fix applied the real number is **2432**; **2,414 is unreproducible
+either way.**
+
+**This is a different defect from the stale numbers this shift has been finding, and worse.** Those
+were figures that had been true and drifted. This is a **reported measurement of work that cannot have
+happened** — the platform in question could not produce any number at all. On a security PR, in a repo
+that spent the day removing exactly that class of claim.
+
+**The mechanism is almost certainly innocent and that is the point.** A Linux run taken before the
+rename, or from a stale worktree, or carried forward from an earlier round, all produce the same
+artefact: a plausible number attached to a run that never happened on this code. Nobody fabricates
+these; they **survive an edit** the way a stale comment does, and a test count looks far more like
+evidence than a sentence does.
+
+**Two cheap checks, both of which this would have failed.** A gate table should be reproducible from
+the branch as pushed — so *re-run it after the last edit*, not before. And when a number does not move
+across a round that changed code, ask whether it was re-taken or copied; **2,414 appearing beside a
+tree that cannot compile is the tell.**
+
+Worth pairing with the same PR's other finding: **three newly-added doc sites named the exact Win32
+call the PR itself had measured as refusing this operation** — including the *public* doc of the new
+primitive — while the implementation correctly used the NT form and carried a warning against
+"simplifying" it back. The reader most likely to attempt that simplification is the one reading the
+public doc, and it told them the wrapper was what's used.
+
+## 2026-08-28 — the evidence and the claim were about different code paths
+
+PR #1089's headline is a handle-relative rename that resolves no path. Its evidence is a race harness
+whose two arms go from live to **zero** on both platforms, reproduced by two independent gates. Both
+halves are true. **They are about different code.**
+
+The new primitive is reached only from one of two destination shapes. **Both racer arms take the other
+one**, which commits by path on both platforms — and the Security Auditor measured that shape still
+aliasable at **19 / 2,000 on Windows**, against a control of 0. So the PR's zeros are real zeros for a
+path its headline is not about, and the sentence *"fully closed on Windows"* is false for the two legs
+whose numbers it prints beside it.
+
+**Nobody misreported anything.** The site comment states the split correctly; the PR body and the
+ticket summary do not, and those are what get read. The zeros came from the arms that existed, which
+were written for the *previous* ticket — and the new primitive, the thing every future ticket in this
+family will build on, **ended up covered by no race arm at all.**
+
+**The check is one question, asked of the evidence rather than the code: which code path does this
+number exercise, and is it the one the headline names?** A harness inherited from the previous ticket
+answers the previous ticket's question. When a fix introduces a new path, the arm has to be added, or
+the claim has to shrink to what was actually measured.
+
+## 2026-08-28 — a hardening that handed an attacker a new denial primitive
+
+The same PR reused an existing carryover helper so the destination's ACL, attributes and alternate data
+streams survive an overwrite. Sound, and it fails the entry rather than silently downgrading. But the
+helper carries an 8 MiB budget for streams, and **writing an alternate data stream needs only write
+access to the file.**
+
+Before, five legs — backup, restore, extraction, download, revert — truncated and wrote, and never read
+streams at all. After, **any process that can write a file can permanently break every one of those
+operations on that name.** And the refusal is a *failure*, not a *policy* verdict, so the archive leg's
+match arm returns instead of skipping: **one planted stream on one pre-existing name aborts the entire
+extraction.**
+
+**The general shape: inheriting a helper inherits its refusals, and a refusal that was proportionate on
+the leg it was written for may not be on the legs you just gave it.** The original leg was a
+user-confirmed single-file overwrite where failing loudly is right. A bulk extraction is not that.
+Ask, for every leg newly reached: **who can trigger this refusal, and what does it cost them to do it?**
+Here the answer is "anyone with write access, once" and the cost is an entire archive.
+
+The tell was cheap to spot and nobody spotted it: the refusal's own message still said *"this
+**confirmed overwrite** will not copy across"* — on four legs that are not confirmed overwrites. **A
+message naming an operation the caller did not perform is a sign the code reached somewhere it was not
+written for.**
+
+## 2026-08-28 — "untestable by construction" is where shadowing hides
+
+CPE-1929's rule catches a guard that is unreachable because an earlier guard answers the same question.
+Its tell is a pair of green sabotages. #1089 carried a guard labelled **"untestable by construction"**
+with the pair recorded honestly beside it: disabling it left the suite green, forcing its predicate to
+lie changed nothing.
+
+The Security Auditor worked out why, and it is not untestability. **The only instrument that can make
+the guard fire is thread-global, so arming it trips the guard's own twin, three lines earlier in the
+same function, and that arm returns first.** It is shadowed — by itself. The recorded "79 tests red
+when the predicate lies" were all hitting the earlier copy.
+
+**"Untestable by construction" and "shadowed" produce identical evidence, and only one of them is a
+reason to stop looking.** The label is what did the damage: it explains the green pair, so the pair
+stops being a question. The rule should therefore read — *when you cannot test a guard, name the reason
+it cannot be reached, and check whether that reason is another guard.* Here the honest comment is
+"shadowed by the destination-handle check, deliberately kept as a fail-closed backstop", which sends the
+next reader to the shadowing check instead of leaving them to conclude the guard is inert.
+
+Keeping it is still right: it fails closed, and deleting it fails **open**. This is the fourth distinct
+answer the family has produced — redundant → delete; misordered → reorder; unreachable-by-test → build
+the seam; **shadowed but load-bearing → keep, and say what shadows it.**
+
+## 2026-08-28 — a guard whose verdict depends on the checkout's line endings
+
+PR #1090 replaced a comment citing a test that had never existed with a real guard. The guard has two
+opposite failures on the two platforms CI runs:
+
+- **On LF it is red — against itself.** Its comment stripper only cuts at `//`, so the guard's own list
+  of forbidden fragments is scanned as code and it reports its own line as the offender. Both Linux and
+  macOS jobs fail.
+- **On CRLF it is blind.** It locates the end of each exempt helper with `find("\n    }\n")`. **In a
+  CRLF file that pattern occurs zero times** — the CRLF form occurs 230 — so both spans fall back to
+  `src.len()` through an `unwrap_or`, and every line after byte 251,835 of 713,733 counts as "inside a
+  helper". **Roughly 65% of the file, including all three stream extractors and the entire test module,
+  is unguarded on Windows.**
+
+**One `unwrap_or` turned "I could not find the end of this span" into "the span runs to the end of the
+file",** which is the widest possible exemption. That is the fail-open family again, and this time it is
+*inside* a guard: "did not run" reading as "ran and found nothing", the exact rule CLAUDE.md states.
+
+**Two checks, both cheap.** Any scanner over Rust source must be run once against an **LF** checkout and
+once against **CRLF** — this repo has both, because CI is Linux and macOS and development is Windows. And
+**a span locator must fail loudly when it cannot find its end**, never widen to the whole file.
+
+## 2026-08-28 — the red-proof described a mutation the code cannot express
+
+The same guard's doc said it *"fails if `skipped`/`failed` is incremented or `errors` pushed anywhere but
+inside these two helpers"*, and red-proofed that as *"adding `self.failed += 1;` to any extractor leg
+turns this red."*
+
+**Extractor legs have no `self`.** They hold a local `report`. The Reviewer planted `report.failed += 1;`
+and `report.errors.push(...)` directly inside an extractor and the test **stayed green**. The guard can
+only ever catch a new `self`-receiver method inside the one `impl` block — and on Windows, only one
+defined before a particular line.
+
+**The red-proof was not weak, it was impossible** — it named an edit the codebase's own shape forbids.
+And because a red-proof is prose until someone runs it, nothing objected. CLAUDE.md already says *change
+the referenced source and watch the test fail*; the sharper form is: **the mutation you name must be one
+the code can actually express, and you must have performed it.** Write the result at the site — "planted
+X at line N, test failed" — not the intention.
+
+**Related and worse in the same PR:** its headline finding was that a comment cited a test which had
+never existed in any commit. In fixing that, it **planted a fresh phantom citation** — in the module's
+canonical rule block, pointing at the very test the PR had just renamed away. Along with seven other
+sites still asserting the rule the PR inverted. A comment that names a test is derivable in one `git
+grep`; the ones that rot are the ones nobody thinks to grep because they read as background.
