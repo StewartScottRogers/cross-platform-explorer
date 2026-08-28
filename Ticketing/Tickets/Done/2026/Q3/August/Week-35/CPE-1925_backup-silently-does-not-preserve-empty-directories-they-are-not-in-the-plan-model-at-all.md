@@ -3,7 +3,7 @@ id: CPE-1925
 title: backup silently does not preserve empty directories — they are not in the plan model at all
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -322,3 +322,66 @@ untouched; only the two clauses that asserted emptiness were re-pointed at the r
 all of it #1080/#1081/#1082 landing on main, none of it this branch). `npm run check` 0 errors 0 warnings.
 `bindings.gen.ts`: re-ran the real export (`--features "specta-bindings sidecar-platform"`) rather than
 assuming a rebase cannot move it; `git diff --exit-code` **0**, so the drift guard is satisfied.
+
+## Closed 2026-08-28 — what the gauntlet actually proved
+
+Merged as PR #1083, **fully green (25/25)**, after two rounds. **It was filed as "backup silently drops
+empty directories." It found data loss.**
+
+**The empty-directory loss itself**, measured end to end with the *real* frontend planner between the
+*real* backend scan and the *real* engine (`planBackup` executed under `vite-node`, never
+reimplemented): `ok=3 fail=0` with **5 of 5 directories missing on disk**, on **both** the backup and
+the restore legs. Another healthy-looking report over incomplete work. Its Reviewer reproduced the
+before-half exactly.
+
+**Both ends, one place:** `planBackup`'s `walk` recursed into directories and only pushed file leaves,
+and restore is that same planner with the roots swapped — so one defect, not two. Behind it, the engine
+had **no directory entry kind at all**.
+
+**The destructive finding — CPE-1972, closed here.** An **unreadable source directory** made a *mirror*
+run **delete the destination's copies of everything inside it**, reporting `ok=3 fail=0`. Mirror mode
+read "no children" as "these were deleted at the source" and cleaned the one place the data still
+existed. Reproduced on disk against `main` by the Reviewer, independently of the worker who found it.
+
+**The fix fell out of getting the epistemics right, not from hunting the bug.** `scan_tree` reported
+`children: []` for reasons that are not the same fact, and only one meant *empty*. The rule that
+matters: **an entry dropped for an ERROR sets `unreadable`; an entry dropped for its TYPE does not** —
+because flagging a directory that merely contains symlinks would mark half the tree "unknown" and
+neuter the flag. Creating a directory for an unreadable one *"asserts a fact never established."*
+
+**Round 1 closed one of three ways that bug fires, and claimed the class.** Its Reviewer measured the
+other two still live on the branch:
+
+- **readable-but-not-searchable (`dr--------`)** — `read_dir` succeeds, every `entry.metadata()` fails
+  `EACCES`, entries silently dropped: `delete:["nosearch/a.txt"]`, `skippedDirs:[]`, `ok=1 fail=0`,
+  **file gone while the source still had it**.
+- **an unreadable ROOT** — `scan_tree` computed the very bool this PR introduced and **discarded it**
+  (`Ok(scan_children(p, max_depth).0)`), returning `Ok([])`: **the entire destination planned for
+  deletion, silently** — and reachable on the **unattended drive-connect path** against a stored
+  `job.source`, e.g. a remounted volume with different ownership.
+
+Round 2 closed both with on-disk before/after, and **it is not a no-op**: a genuinely stale destination
+file is still deleted alongside the disclosure. **The enumeration is seven-way, not three**, and it now
+lives in the code on `TreeNode` rather than in a PR body.
+
+**Case 5 has no portable fixture** — you cannot make `readdir` fail an entry on demand — so its
+flag-setting arm is **shared in three visible lines** with case 4, which does have an on-disk test, and
+the consequences are pinned on the exact node shape it emits.
+
+**Another silent vacuity found on the way:** `App.autoBackupConsent.test.ts`'s poll helper advanced
+**20 s in one step** while the notice auto-clears at **5 s** — so **no toast assertion in that file
+could ever have seen anything**. Now steps 1 s at a time.
+
+**It corrected its own sabotage record**, twice: sabotage 1 reds **four** tests, not three, and the
+textual-filter test was passing **vacuously** — `all(|r| !r.ok)` is trivially true over an empty vec —
+so it now asserts `results.len() == 2` first.
+
+**A shadowed guard found and KEPT, deliberately:** swapping `create_dir_beneath` for `create_dir_all`
+creates a directory **outside** the destination returning `ok: true`, while the `..` version of the same
+test stays **green** under that sabotage. Two tests kept, separately documented — which is exactly what
+CPE-1929 asks for.
+
+**Left open with reasons:** **CPE-1971** — `revert_engine` / `restore_plan` / `snapshot_capture` carry
+the same empty-directory loss in a **separate model**, where `scan_dir` records only files and
+`restore_plan`'s own doc says *"Directories are implied by their files"* — true for every directory that
+has one, silently false for every one that does not.
