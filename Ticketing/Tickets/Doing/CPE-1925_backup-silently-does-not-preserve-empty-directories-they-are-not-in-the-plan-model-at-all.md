@@ -298,3 +298,27 @@ ext4, and no `SKIPPING` notices — the three new Unix-only tests are live, not 
 `src-tauri` on Windows. Frontend: **5025 passed / 2 skipped** (was 4997/2), `npm run check` 0 errors.
 `bindings.gen.ts` regenerated: `TreeNode`'s doc comments flow into it, so the doc change alone would
 have failed CI's typed-bindings drift guard.
+
+**Rebased onto `origin/main` (12e97cad), 2026-08-27.** One conflict, in `docs/design/RATCHETS.md`
+and expected: PR #1081 (CPE-1948) moved the enumeration table's `bidi-render-registry` row `1552 -> 1553`
+while this branch moved the same line `1552 -> 1555`. Resolved to **1555** — this branch's value — which is
+the measured truth for its tree, and the licence row's `1553 -> 1555` is now exactly right against the new
+base rather than approximately right against the old one. Re-verified the whole chain #1081 introduced:
+`ratchetsDoc.test.ts` **13/13** green (the `today` cell is now asserted against the live measurer, and the
+id column against `REGISTRY` as an ordered array), and `node scripts/ratchet-baselines.mjs compare
+origin/main` reports `bidi-render-registry: 1553 -> 1555 RAISED, and declared ... under CPE-1925`, **exit 0**.
+
+Two sentences of #1081's ledger prose were re-worded, and only because the rebase falsified them: it opened
+"Why this table is still empty ...", which stops being true the moment this branch's row lands, and leaned on
+"the reading that makes an empty ledger worth anything". #1081's actual argument — that a licence is not a
+history entry, so the `1552 -> 1553` movement is recorded in the recount rather than backdated here — is
+untouched; only the two clauses that asserted emptiness were re-pointed at the row's meaning.
+
+**Checks (post-rebase).** `cargo clippy --locked --all-targets -- -D warnings` clean in all four modes
+(`cpe-server` default + `index` on Linux; `src-tauri` default + `sidecar-platform` on Windows).
+`cargo test`: **2421** lib tests, 0 failed, **zero `SKIPPING` notices** on real ext4 — all four `#[cfg(unix)]`
+`scan_tree` tests ran and passed — plus the integration binaries; **230** green for `src-tauri`. Frontend
+**5163 passed / 2 skipped across 355 files**, up from round 2's 5104/2 across 352 (**+59 tests, +3 files**,
+all of it #1080/#1081/#1082 landing on main, none of it this branch). `npm run check` 0 errors 0 warnings.
+`bindings.gen.ts`: re-ran the real export (`--features "specta-bindings sidecar-platform"`) rather than
+assuming a rebase cannot move it; `git diff --exit-code` **0**, so the drift guard is satisfied.
