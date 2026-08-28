@@ -1991,15 +1991,19 @@ impl VerifiedOutput {
     /// holding `ATTACKER PAYLOAD` **and the call returning `Ok(())`** — a successful-looking batch write
     /// that destroyed a file the batch was never pointed at.
     pub(crate) fn write_all(self, bytes: &[u8], path: &str) -> Result<(), String> {
+        // CPE-1963: the handle is handed over rather than lent. It is closed before the commit, because
+        // the handle-relative rename cannot replace a destination anything still holds open — see that
+        // function's `drop(destination)` for the measurement. Destructured first so the `created` flag
+        // survives the move.
+        let VerifiedOutput { file, created } = self;
         let result = crate::fsutil::stage_bytes_over_checked_handle(
             std::path::Path::new(path),
             bytes,
-            &self.file,
-            self.created,
+            file,
+            created,
         )
         .map_err(|e| format!("could not write output: {e}"));
-        if result.is_err() && self.created {
-            drop(self.file);
+        if result.is_err() && created {
             let _ = std::fs::remove_file(path);
         }
         result

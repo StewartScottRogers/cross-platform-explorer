@@ -180,6 +180,15 @@ and renaming the colliding file by hand. The dry-run confirm avoids that:
   re-running works. This is the same limitation the Metadata Studio's save has always had.
   A destination that is genuinely shared under two names is still refused outright before any of this,
   with the count in the message.
+- **A confirmed Convert now checks, after the swap, that the file standing at the name really is the one
+  it just wrote.** The temporary copy the swap goes through is an ordinary file in the same folder, so
+  another program on the machine can interfere with it while the write is in flight. On Windows the swap
+  no longer names that temporary file at all — it moves the file the app is holding open, so nothing done
+  to the temporary name can redirect it. On macOS and Linux the operating system offers no equivalent, so
+  the app checks afterwards instead: if the name has ended up pointing at some other file, you get an
+  error telling you your bytes are **not** at that name and to check what is there before saving again,
+  rather than a success message for a save that did not happen. **Nothing outside the folder is ever
+  written to in either case** — the file that was interfered with keeps its own contents.
 - **No pickers.** The Move destination and any `{ask:label}` answer are plain text fields — there's no
   Browse dialog for either.
 - **The run-flow Undo is separate from Ctrl+Z.** It only exists in the confirm dialog right after a run;

@@ -264,4 +264,12 @@ You've selected 40 JPEGs to prep for a web gallery: shrink them, convert to WebP
   and now refuses one outright if anything hands it one, saying so in plain terms rather than reporting it
   as a folder escape (it isn't one — the data would have stayed in the folder, just hidden on the wrong
   file).
+- **Each output is checked, after it is written, to be the file the batch actually produced (CPE-1963).**
+  Batch Media writes each output into a temporary copy beside it and then swaps that copy over the name.
+  The temporary copy is an ordinary file in the same folder, so another program on the machine can
+  interfere with it mid-write. On Windows the swap no longer names the temporary file at all — it moves
+  the file the app is holding open — so nothing done to that name can redirect where the bytes land. On
+  macOS and Linux there is no equivalent, so the check happens afterwards: an output whose name ends up
+  pointing at a different file is reported as a **failed** item, with the reason, instead of being counted
+  as written. Either way no file outside the selected folder ever has its contents changed.
 - **No command-palette entry or shortcut** — right-click is the only way in.

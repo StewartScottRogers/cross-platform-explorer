@@ -332,6 +332,18 @@ fn root_itself_refusal(field: &str, path: &Path) -> String {
 ///   states about itself. The window is small and the attacker must already have write access inside the
 ///   folder the human confirmed; it is nonetheless real, and this is not a security boundary against a
 ///   local adversary racing the app.
+///
+///   **`crate::open_beneath::rename_beneath` (CPE-1961) does NOT close this, and CPE-1963 checked
+///   rather than assumed.** Three of CPE-1963's family read as though one primitive unblocked all of
+///   them; two of the three were `fsutil` sites and the missing primitive really was the whole of it.
+///   This one is not. `rename_beneath` requires the two operands to be **siblings under one held root
+///   handle**, and it is one call in a five-armed match: `Rename` fits its shape, `Move` is
+///   cross-directory and refused by that precondition outright, `Copy` and `Mkdir` need
+///   `create_beneath`/`create_dir_beneath` instead, and `Delete` goes through an OS trash API that
+///   takes a **path** and has no handle-relative form on any platform. What this site is actually
+///   waiting on is the *descent* — a `RootDir` held for the run and every arm re-expressed against it —
+///   which is a change to `copilot`, not a primitive it lacks. Left deferred, and now deferred for the
+///   stated reason rather than for a reason that has since been supplied elsewhere.
 /// - **It says nothing about what the primitive then does to a link the path resolves *inside* the root.**
 ///   A contained link may still be written *through* or destroyed; that is the separate CPE-1710/CPE-1716
 ///   question, answered by [`crate::fsutil::rename_into_slot`]/[`crate::fsutil::rename_slot_refusal`],

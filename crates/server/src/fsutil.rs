@@ -1796,8 +1796,11 @@ impl ClaimedDestination<'_> {
     ///   object, which is the strongest rename POSIX has, and the source is still a name. See that
     ///   function's doc for the residual and who owns it.
     /// - [`DestinationSite::ByPath`] commits with [`commit_replacement`]'s rename arm, both operands by
-    ///   path. That is the same commit `stage_and_replace_at` uses and it inherits the same residual on
-    ///   both platforms. It is not an oversight: these legs have no root handle to be relative to, and
+    ///   path. It inherits CPE-1963's residual on both platforms. **It is no longer "the same commit
+    ///   `stage_and_replace_at` uses", and CPE-1963 is what made that sentence stale**: that function's
+    ///   [`Commit::ReplacingTheName`] arm now commits through [`StagedBeneath`], and only its
+    ///   [`Commit::CarryingTheDestination`] arm still reaches [`commit_replacement`]. It is not an
+    ///   oversight: these legs have no root handle to be relative to, and
     ///   giving them one is wiring `open_beneath` into `revert_engine` and `snapshot_capture`, which
     ///   CPE-1913 scoped out of this family deliberately.
     ///
@@ -3758,26 +3761,33 @@ fn create_exclusive_with_access(
 ///   claimed the collector part while the sweep still had exactly one call site, in
 ///   [`stage_and_replace`]; it was false then and is true now.
 ///
-/// ## What this does NOT close: the commit's SOURCE (CPE-1963)
+/// ## The commit's SOURCE — closed on Windows, reported on Unix (CPE-1963)
 ///
-/// The invariant above is about the DESTINATION. The commit is `rename(tmp, target)`, and `tmp` is a
+/// The invariant above is about the DESTINATION. The commit **was** `rename(tmp, target)` with `tmp` a
 /// **path** — an enumerable `*.cpe-tmp` entry in the same attacker-writable folder. An attacker that
-/// `readdir`s for it, unlinks it and hard-links an outside file into its place makes the rename commit
+/// `readdir`s for it, unlinks it and hard-links an outside file into its place made the rename commit
 /// **that file's inode** over the confirmed name. Measured with `cpe_1958_rename_source_report`:
-/// **2,834 / 3,000 on Linux ext4** and **6 / 3,000 on Windows**, each leaving the destination aliased to
-/// the outside object with `Ok(())` returned and the slot still holding its **old** bytes. A
-/// delete-only attacker produces **0** in 3,000 on either platform, so this is the re-link, not
-/// flakiness.
+/// **2,834 / 3,000 on Linux ext4** and, on Windows, a rate rather than a number: CPE-1958 recorded
+/// 5 then 6 per 3,000, and CPE-1963 re-measured the same harness on a second machine at
+/// **8, 3, 3, 3, 1 per 3,000** and on a third at 1, 1, 2, 4. Every trial that hits leaves the
+/// destination aliased to the outside object with `Ok(())` returned and the slot still holding its
+/// **old** bytes. A delete-only attacker produced **0** in 12,000 on that second machine (2 in 12,000
+/// on the third), so it was the re-link, not flakiness. The victim's content was unchanged in every
+/// trial, so it was never CPE-1958's destruction bug.
 ///
-/// **The victim's content was unchanged in all 24,000 trials across both platforms**, so this is not
-/// CPE-1958's destruction bug and the property above holds. What it is instead is a successful-looking
-/// confirmed overwrite that did not write the user's bytes and left the destination as a second name
-/// for a file outside the scope root. It is **pre-existing in [`stage_and_replace`]** — and this change
-/// newly routes the confirmed path through it, so the confirmed path did not have this exposure before.
-/// The honest summary of the trade: the confirmed path swaps a *destruction* race (bytes lost outside
-/// the root) for an *aliasing* race (bytes not written, destination aliased). Closing it needs a
-/// handle-relative rename (`renameat`), which `std` does not expose — the same gap that keeps
-/// `copilot::apply_op` deferred and that CPE-1961 names. Owned by **CPE-1963**.
+/// **CPE-1963 routed this commit through [`StagedBeneath`]**, which holds the destination's folder open
+/// and hands both operands to [`crate::open_beneath::rename_beneath`]. On Windows the source operand is
+/// the staged handle, so the aliasing cannot be constructed: **0 / 3,000** on three consecutive runs
+/// against a same-machine pre-fix spread of 1–8, delete-only control 0 throughout. On Unix
+/// `renameat`'s source is still a name and
+/// the aliasing remains; what changed there is that it is no longer silent — the commit is checked
+/// against the identity of the object the bytes went into and an aliased destination returns `Err`.
+/// Read [`StagedBeneath`] before summarising this as "closed".
+///
+/// **Still open, and named rather than implied**: [`ClaimedDestination::commit`]'s `ByPath` arm
+/// (`revert_engine::apply_write`, `snapshot_capture::restore`) commits by path exactly as this used to,
+/// and its `Beneath` arm has the Unix residual with no comparison in front of it — CPE-1961 measured
+/// 2,785 / 3,000 aliased there on Linux. `copilot::apply_op` is deferred on the same primitive.
 ///
 /// ## The reparse-point doctrine split is NOT settled here, and one input to it moved
 ///
@@ -3950,7 +3960,7 @@ pub fn overwrite_confirmed_no_follow(target: &Path, bytes: &[u8]) -> Result<(), 
 pub(crate) fn stage_bytes_over_checked_handle(
     target: &Path,
     bytes: &[u8],
-    destination: &std::fs::File,
+    destination: std::fs::File,
     created: bool,
 ) -> Result<(), String> {
     let (existing, carried) = if created {
@@ -3962,8 +3972,23 @@ pub(crate) fn stage_bytes_over_checked_handle(
                  with a file whose permissions this app had to guess: {e}"
             )
         })?;
-        (Some(meta), Some(HandleCarryover::capture(destination, target)?))
+        (Some(meta), Some(HandleCarryover::capture(&destination, target)?))
     };
+    // **The handle is taken BY VALUE and closed here, and CPE-1963 is why it had to change** — it was a
+    // `&std::fs::File` the caller kept open across the commit. `std::fs::rename` tolerated that
+    // (`std`'s opens carry `FILE_SHARE_DELETE`, so a rename over an open destination succeeds); the
+    // handle-relative commit does not. `NtSetInformationFile(FileRenameInformation)` — *not* the `Ex`
+    // form — cannot replace a destination that has any handle open on it, and it says so as
+    // `ERROR_ACCESS_DENIED`. Measured: with the handle still held, **17 tests across `batch_execute`,
+    // `batch_media` and `archive`** failed with "could not be replaced by the staged copy of it (Access
+    // is denied. (os error 5))" on every ordinary, unattacked output.
+    //
+    // Closing it here costs nothing this function was relying on: every guard the caller asked of this
+    // handle has already been answered, and everything a rename drops is already captured in `carried`
+    // above. It is the same move — and the same sentence — as [`overwrite_confirmed_no_follow`]'s
+    // `drop(file)`: from here on the worst an attacker at `target` can achieve is that the commit
+    // replaces a name they planted.
+    drop(destination);
     stage_and_replace_at(target, bytes, existing.as_ref(), carried.as_ref(), Commit::ReplacingTheName)
 }
 
@@ -4003,13 +4028,20 @@ enum Commit {
     ///
     /// **That sentence is scoped to the destination on purpose, and round 1's version was not.** It
     /// said "nothing planted after the caller's checks ran", full stop, which reads as covering both
-    /// operands and does not: the *source* of the rename is `tmp`, an enumerable `*.cpe-tmp` path in
+    /// operands and did not: the *source* of the rename was `tmp`, an enumerable `*.cpe-tmp` path in
     /// the same attacker-writable folder, and an attacker that unlinks it and hard-links an outside
-    /// file into its place makes this commit alias that file over the confirmed name — measured at
-    /// **2,834 / 3,000 on Linux ext4**, **6 / 3,000 on Windows**, with the victim's own content
-    /// unchanged in every trial. Pre-existing in [`stage_and_replace`], newly on the confirmed path,
-    /// owned by **CPE-1963**, and closable only with a handle-relative rename `std` does not expose.
-    /// See [`overwrite_confirmed_no_follow`]'s "What this does NOT close".
+    /// file into its place made this commit alias that file over the confirmed name — measured at
+    /// **2,834 / 3,000 on Linux ext4** and, on Windows, **1–8 per 3,000** across nine runs on three
+    /// machines (CPE-1958's 5 and 6; CPE-1963's 8, 3, 3, 3, 1 and a reviewer's 1, 1, 2, 4), with the
+    /// victim's own content unchanged in every trial. It is a rate, and quoting any single run of it as
+    /// "the" Windows figure — which round 1 of CPE-1963 did with the 8 — over-reads it.
+    ///
+    /// **CPE-1963 closed the source half, and this variant no longer commits by path at all**: see
+    /// [`StagedBeneath`], which holds the destination's folder open and gives both operands to
+    /// [`crate::open_beneath::rename_beneath`]. Prevented on Windows, where the source operand is the
+    /// staged handle; **reported rather than prevented on Unix**, where POSIX has no fd-sourced rename
+    /// and the guarantee is that an aliased commit returns `Err` instead of `Ok(())`. Read that type's
+    /// doc before shortening this to "closed".
     ///
     /// **CPE-1958's arm**, and the trade is stated rather than implied: on Windows this gives up
     /// `ReplaceFileW`'s carry-over, so the replaced file's ACL, attribute word and alternate data
@@ -4018,6 +4050,310 @@ enum Commit {
     /// the reason this variant exists: it resolves the destination *path* at commit time, which is the
     /// window this ticket closed.
     ReplacingTheName,
+}
+
+// The seam [`StagedBeneath::commit`] fires between the staged file's last byte reaching the disk and
+// the rename that commits it — CPE-1963's whole window, in one place a test can stop at.
+//
+// It exists because the exposure this ticket closes is **a race**, and a racing fixture is the one kind
+// that can pass by missing the window: `cpe_1958_rename_source_report` needs 3,000 trials to see one to
+// eight hits on Windows, and the spread is wide enough that one run of it settles nothing. A hook here
+// stages the same attack in one trial, deterministically, on every runner.
+//
+// Same three properties as `open_beneath::BETWEEN_DESCENT_AND_LEAF`, and for the same reasons: it is
+// `#[cfg(test)]` so it cannot become a production hook, it is **taken** rather than borrowed so it
+// fires once and a re-entrant hook cannot deadlock the `RefCell`, and it is disarmed by a guard on
+// every exit path of the function that carries it — including the exits *before* the seam, or an
+// unrelated later save fires a hook armed for a call that refused early.
+//
+// (A plain `//` comment: rustdoc does not document a macro invocation and `-D unused-doc-comments` is
+// right to say so — the same note `open_beneath::WALK_SYSCALLS` carries.)
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BETWEEN_STAGE_AND_COMMIT: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Disarms [`BETWEEN_STAGE_AND_COMMIT`] however [`stage_and_replace_at`] returns — see that cell's
+/// comment for the cross-test leak this closes.
+#[cfg(test)]
+struct StageSeamGuard;
+
+#[cfg(test)]
+impl Drop for StageSeamGuard {
+    fn drop(&mut self) {
+        BETWEEN_STAGE_AND_COMMIT.with(|h| {
+            let _ = h.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn between_stage_and_commit() {
+    let hook = BETWEEN_STAGE_AND_COMMIT.with(|h| h.borrow_mut().take());
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn between_stage_and_commit() {}
+
+/// **CPE-1963**: the destination's own folder, held open, plus the two leaf names the commit moves
+/// between — so [`stage_and_replace_at`]'s [`Commit::ReplacingTheName`] arm can name its SOURCE by
+/// something other than a path.
+///
+/// # The exposure this exists for
+///
+/// The commit used to be `std::fs::rename(tmp, target)`. `target` was covered — moving a name cannot
+/// follow a link sitting at it — but `tmp` was not: `<name>.<pid>-<nanos>.cpe-tmp` is an ordinary,
+/// **enumerable** directory entry in the same attacker-writable folder as the destination. An attacker
+/// that `readdir`s for it, unlinks it and hard-links an outside file into its place makes the rename
+/// commit *that file's inode* over the confirmed name — a successful-looking overwrite that did not
+/// write the user's bytes, leaving the destination as a second name for a file outside the scope root.
+/// Measured on the merged state by `cpe_1958_rename_source_report`; the numbers and the delete-only
+/// control are on that test.
+///
+/// # What each platform gets, because they are NOT the same
+///
+/// - **Windows: closed.** [`crate::open_beneath::rename_beneath`] commits with
+///   `NtSetInformationFile(FileRenameInformation)` whose source operand is *the staged handle itself*.
+///   The staging **name** is no longer part of the commit at all, so nothing done to it in the window
+///   can change which object lands. That is why [`Self::open`] stages through
+///   `create_staging_beneath` rather than [`create_staging_file`]: the NT rename requires `DELETE` on
+///   the source handle and the `OpenOptions` opener does not ask for it.
+/// - **Unix: NOT closed, and detected instead.** There is no fd-sourced rename in POSIX — see
+///   `rename_beneath`'s doc for why `renameat2`, `/proc/self/fd` and `linkat(AT_EMPTY_PATH)` are all
+///   dead ends. `renameat(parent_fd, tmp, parent_fd, target)` is the strongest primitive that exists
+///   and its source is still a name, so the relink still aliases the destination. What changes is that
+///   it stops being **silent**: [`Self::landed_object_is_the_one_we_wrote`] compares the identity of
+///   the object now standing at the name against the identity of the object the bytes went into, and
+///   an aliased commit returns `Err` instead of `Ok(())`.
+///
+/// So the honest statement of this arm, which no summary of the ticket should shorten: **the aliasing
+/// is prevented on Windows and reported on Unix.** A Unix caller whose save is aliased still ends up
+/// with a destination that names the attacker's object — nothing here can put the original back, since
+/// the rename already replaced it — but it is told so, rather than handed `Ok(())`.
+///
+/// # What the interior components still are
+///
+/// `open_root` is given `target`'s parent **by path**, so every component above the folder is resolved
+/// by the kernel exactly as it was before this change. That is unchanged exposure, not new: this arm's
+/// callers ([`overwrite_confirmed_no_follow`], [`stage_bytes_over_checked_handle`]) already opened
+/// `target` by path to ask it every question they ask. Both names the commit touches are *single
+/// components* under that one handle, which is the part CPE-1963 is about. Wiring these callers to a
+/// root handle they hold for a whole run is `open_beneath`'s job and is scoped out here for the same
+/// reason [`DestinationSite::ByPath`] records.
+struct StagedBeneath {
+    /// The destination's folder, held open for the life of the save.
+    root: crate::open_beneath::RootDir,
+    /// The staging sibling's leaf name — the commit's `from`.
+    tmp_name: String,
+    /// The destination's leaf name — the commit's `to`.
+    target_name: std::ffi::OsString,
+}
+
+impl StagedBeneath {
+    /// Open the destination's folder. `tmp_name` is [`staging_sibling_name`]'s output for `target`, so
+    /// the two names are siblings by construction — which is `rename_beneath`'s one-parent precondition.
+    fn open(target: &Path, tmp_name: &str) -> Result<Self, String> {
+        let Some(target_name) = target.file_name() else {
+            // The same shape as `claim_destination_handle`'s arm for this. Unreachable for a name a
+            // save ever reaches — a path with no final component has nothing at it to replace — but
+            // refusing costs a line and the alternative is a commit against an empty component.
+            return Err(format!(
+                "{}: this name has no final component, so there is nothing here a file's bytes could \
+                 replace",
+                display_path(target)
+            ));
+        };
+        // `Path::new("")` is not openable; a bare file name's parent is the current directory.
+        let dir = match target.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let root = crate::open_beneath::open_root(&dir, "folder").map_err(|e| {
+            format!(
+                "{}: could not open the folder this file lives in, so nothing was written rather than \
+                 committing the save through a name that could be swapped underneath it: {e}",
+                display_path(target)
+            )
+        })?;
+        Ok(Self { root, tmp_name: tmp_name.to_string(), target_name: target_name.to_os_string() })
+    }
+
+    /// Commit `staged` — the open handle [`Self::open`]'s folder holds the staging file for — over the
+    /// destination name, and then check that the object standing at that name is the one the bytes went
+    /// into.
+    ///
+    /// # It takes the handle BY VALUE, and that is load-bearing rather than tidy
+    ///
+    /// The verification below has to run **after every handle this call holds on the object is closed**,
+    /// because one of the outcomes it exists to catch only becomes visible at the last close. An
+    /// attacker can `unlink` the staging file while this process holds it open; on Windows that leaves a
+    /// disposition on the file object which the NT rename does **not** clear. The rename succeeds — the
+    /// object really does become the destination, and replaces the file that was there — and then the
+    /// object is destroyed the moment the last handle to it closes, leaving **nothing** at the confirmed
+    /// name and, before this, a returned `Ok(())`.
+    ///
+    /// **This mode is much RARER before the handle-sourced commit than after it — not absent, and round
+    /// 1 of this doc said "NEW", which its own control refutes** (round 2, Reviewer MINOR-3). It was
+    /// found by the delete-only control, which is exactly the job that control has. Windows / NTFS,
+    /// `cpe_1958_rename_source_report`, lying `Ok`s per 3,000 trials — a returned `Ok` with the user's
+    /// bytes not at the name:
+    ///
+    /// ```text
+    /// commit shape                                     relink            delete-only (CONTROL)
+    /// before this ticket (std::fs::rename by path)      8, 3, 3, 3, 1     0, 0, 0, 0  (this machine)
+    ///                                                                     2 per 12,000 (Reviewer's)
+    /// rename_beneath, verify with the handle OPEN       3                 1, 2, 3, 0
+    /// rename_beneath, verify after drop(staged) only    0                 13, 11, 0, 0
+    /// rename_beneath, verify after BOTH handles close   0, 0, 0           0, 0, 0
+    /// ```
+    ///
+    /// Row 1's control is the honest correction. Four runs here produced **0 / 12,000**, which is what
+    /// "NEW" was written from; an independent reviewer's four runs of the same harness on the same
+    /// pre-fix revision produced **2 / 12,000**. So the delete-on-close lying `Ok` exists before this
+    /// change at a rate low enough that one machine's 12,000 trials can miss it entirely. "Much rarer
+    /// before" is what the data supports; "new" is not.
+    ///
+    /// Row 3 is the other one to read twice: dropping the staged handle first is a real improvement on
+    /// row 2 for the relink shape and made the control **worse**, because
+    /// [`Self::landed_object_is_the_one_we_wrote`] then opened its own handle and kept the doomed object
+    /// alive across its own check. Three intermediate versions of this doc claimed a close that the next
+    /// run refuted; the numbers are all here rather than only the last one.
+    ///
+    /// **The relink column is a rate, not a constant, and this doc's own first figure over-read it.**
+    /// Round 1 recorded a single pre-fix run of 8 and quoted it as the machine's number; four further
+    /// runs of the same binary on the same volume gave 3, 3, 3, 1. An independent reviewer's runs on a
+    /// different machine gave 1, 1, 2, 4. Every one is the same defect; none of them is "the" rate, and
+    /// a post-fix zero is only worth reading next to a same-machine pre-fix figure — which is what
+    /// `cpe_1958_rename_source_race`'s attack counter now makes checkable rather than remembered.
+    fn commit(&self, target: &Path, staged: std::fs::File) -> Result<(), String> {
+        // Read off the handle BEFORE the commit, which is the only moment at which "the object these
+        // bytes went into" is unambiguous. A rename does not change an object's identity, so this is
+        // also the identity the destination must have afterwards.
+        let written = crate::batch_media::handle_facts(&staged).map(|f| f.id);
+        crate::open_beneath::rename_beneath(
+            &self.root,
+            &staged,
+            Path::new(&self.tmp_name),
+            Path::new(&self.target_name),
+        )
+        .map_err(|r| {
+            // Never leave the temp behind on a failed commit — through the held folder handle, the
+            // same primitive and the same reason as `Staged::abandon`'s `Beneath` arm.
+            let _ = crate::open_beneath::remove_file_beneath(&self.root, Path::new(&self.tmp_name));
+            // **The message leads with the file the user asked about — CPE-1958 round 2's Auditor F2,
+            // which round 1 of THIS ticket re-broke thirty lines below where it had just honoured it.**
+            // `open_beneath`'s refusal names the *folder* and ends with `[staged as
+            // "held.bin.35776-….cpe-tmp"]`, an internal artefact the user has never seen; the staging
+            // *create* failure at the opener above is wrapped with `display_path(target)` for exactly
+            // this reason, quoting F2. This one is not a rare attack path either — it is what a
+            // third-party handle produces on a volume that refuses the `Ex` rename (see
+            // `open_beneath::sys::rename`), so it is a message ordinary users can reach.
+            format!("{}: {}", display_path(target), r.why)
+        })?;
+        drop(staged);
+        Self::landed_object_is_the_one_we_wrote(target, written)
+    }
+
+    /// **The Unix half of CPE-1963**: after the commit, is the object at the destination the object the
+    /// bytes were written into?
+    ///
+    /// # This is a refusal, and it is deliberately NOT symmetric with the guards in front of it
+    ///
+    /// Every other check in this family runs *before* anything is written and its answer is "do not
+    /// write". This one runs after the rename has already happened, so the only thing it can do is tell
+    /// the truth about what landed. It never deletes the aliased entry: the user's original is gone by
+    /// then (the rename replaced it), and unlinking what is now at the name would leave them with
+    /// nothing at all instead of something wrong they can see.
+    ///
+    /// # The two "cannot tell" cases fail in OPPOSITE directions, and the split was measured
+    ///
+    /// **"The name is not there once we let go of it" refuses**, and it is asked twice for one reason:
+    /// the open answers "is there an object at this name", and the `symlink_metadata` after the drop
+    /// answers "is it still there once nothing this call holds is keeping it alive". The second is the
+    /// delete-on-close outcome [`StagedBeneath::commit`]'s table measures, and only the second catches
+    /// it. The cost of refusing is a false alarm if some other process holds the destination in a share
+    /// mode that blocks a read-only open in the microseconds after the commit; that is loud, and the
+    /// message says what it saw.
+    ///
+    /// **"The identity is undescribable" does not refuse.** `written` is `None` on a platform whose
+    /// identity model [`crate::batch_media::handle_facts`] does not know, and the re-opened
+    /// destination's id is `None` for [`crate::batch_media::FileIdentity::is_degenerate`]'s
+    /// network-redirector case. Refusing *there* would fail ordinary saves on those volumes after they
+    /// had already succeeded, on a question the volume simply cannot answer. So the residual is stated
+    /// rather than hidden: on a volume that cannot describe a file's identity, an aliased commit on
+    /// Unix is as silent as it was before this ticket.
+    ///
+    /// # The destination is re-opened BY PATH, which is a second path question
+    ///
+    /// It is a *detection* read, never a write, and its failure direction is a false alarm rather than
+    /// a silent pass: a substitution in this window makes an honest save report a mismatch. Reading it
+    /// through the held folder handle instead would need an open-existing-beneath primitive
+    /// `open_beneath` does not have; adding one is a change to that module, not to this one.
+    ///
+    /// # CPE-1929's two sabotages, run on WINDOWS, with the numbers rather than an argument
+    ///
+    /// ```text
+    /// sabotage                                        `cargo test -p cpe-server --lib`
+    /// baseline                                        2,460 passed /  0 failed
+    /// disable it (`if false { … } Ok(())`)            2,460 passed /  0 failed
+    /// make its predicate lie (`if true || landed !=`) 2,435 passed / 25 failed
+    /// ```
+    ///
+    /// **One green, not two, so this is not a shadowed guard — but the green half is real and it is
+    /// worth being precise about what it means.** The code path is reached on every confirmed
+    /// overwrite (25 tests fail the moment it answers wrongly), and on Windows its answer is *always*
+    /// "the same object", because [`crate::open_beneath::rename_beneath`]'s source operand there is the
+    /// staged HANDLE and an aliased commit cannot be constructed. On Unix it is the decider and the
+    /// only thing standing between the user and a silent `Ok(())`, since `renameat`'s source is still a
+    /// name. **The pair was run on Windows only** — a Linux run of the same two sabotages is not
+    /// something this change measured, and the expectation that the first would go red there is a
+    /// prediction, not a result.
+    ///
+    /// The `symlink_metadata`-after-drop half is invisible to the suite either way (both sabotages
+    /// leave it green) because no shipped test attacks a live save. What measures it is the racer:
+    /// [`StagedBeneath::commit`]'s table, rows 3 and 4.
+    fn landed_object_is_the_one_we_wrote(
+        target: &Path,
+        written: Option<crate::batch_media::FileIdentity>,
+    ) -> Result<(), String> {
+        let missing = |e: &dyn std::fmt::Display| {
+            format!(
+                "{}: the save was committed, but the file is not standing at this name afterwards — so \
+                 your bytes are NOT here and the save is reported as failed rather than confirmed. \
+                 Something removed this app's staging file while it was being written. Check what is \
+                 at this name before saving again: {e}",
+                display_path(target)
+            )
+        };
+        let reopened =
+            crate::batch_media::open_existing_no_follow_read(target).map_err(|e| missing(&e))?;
+        let landed = crate::batch_media::handle_facts(&reopened).map(|f| f.id);
+        // **Let go of the name before asking whether it is still there** — the second half of the
+        // delete-on-close outcome, and the half that cost this change two measurement rounds. A
+        // disposition an attacker set on the staging file survives the rename, and the object is
+        // destroyed at the moment the LAST handle closes. Dropping `staged` in the caller is not enough
+        // on its own, because this very function then opens a second handle and keeps the doomed object
+        // alive across its own check. See the run figures in [`StagedBeneath::commit`].
+        drop(reopened);
+        std::fs::symlink_metadata(target).map_err(|e| missing(&e))?;
+        let Some(written) = written else { return Ok(()) };
+        match landed {
+            Some(landed) if landed != written => Err(format!(
+                "{}: the save completed, but the name now refers to a DIFFERENT file from the one your \
+                 bytes were written into — so your bytes are NOT at this name. Something replaced this \
+                 app's staging file between the write and the moment it was committed, which means this \
+                 name is now a second name for some other file. Nothing of yours was overwritten \
+                 anywhere else. Check what is at this name before saving again.",
+                display_path(target)
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Write `bytes` into a fresh, exclusively-created sibling and then commit it over `target` — the
@@ -4054,11 +4390,23 @@ fn stage_and_replace_at(
     carried: Option<&HandleCarryover>,
     commit: Commit,
 ) -> Result<(), String> {
+    // Disarm the seam on EVERY exit path, including the refusals below that never reach it. See
+    // [`BETWEEN_STAGE_AND_COMMIT`] for the cross-test leak this closes.
+    #[cfg(test)]
+    let _seam = StageSeamGuard;
     // A per-write pid+nanosecond stamp so two concurrent saves — or a stale temp left by an earlier crash
     // — cannot collide on the same sibling path.
     // CPE-1961 moved the name-building one function up ([`staging_sibling_name`]) so this producer and
     // `claim_destination_handle`'s cannot drift apart from the parser in `sweep_stale_temp_siblings`.
-    let tmp = target.with_file_name(staging_sibling_name(target.file_name().unwrap_or_default()));
+    let tmp_name = staging_sibling_name(target.file_name().unwrap_or_default());
+    let tmp = target.with_file_name(&tmp_name);
+    // **CPE-1963: the [`Commit::ReplacingTheName`] arm holds a handle on the destination's own folder
+    // and addresses BOTH operands of the commit against it.** See [`StagedBeneath`] for what that buys
+    // on each platform and what it does not.
+    let beneath = match commit {
+        Commit::CarryingTheDestination => None,
+        Commit::ReplacingTheName => Some(StagedBeneath::open(target, &tmp_name)?),
+    };
     // `create_new` is `O_CREAT|O_EXCL`, which refuses an existing entry **and does not follow a symlink at
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
     // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
@@ -4078,18 +4426,45 @@ fn stage_and_replace_at(
         // named an internal artefact instead of a file the user has ever seen: a folder the user lacks
         // `CreateFiles` on produces `"…8f3c.1234-1756…cpe-tmp: Access is denied"`, and nothing in that
         // string connects it to the folder.
-        let mut f = if carried.is_some() {
-            create_staging_file_for_carryover(&tmp)
-        } else {
-            create_staging_file(&tmp)
-        }
-        .map_err(|e| {
-            format!(
-                "{}: could not create the staging file this write goes through ({}): {e}",
-                display_path(target),
-                display_path(&tmp)
-            )
-        })?;
+        //
+        // **CPE-1963 forked the opener, and the fork is not cosmetic.** The `Beneath` arm opens through
+        // [`crate::open_beneath::create_staging_beneath`], which asks for `DELETE` on Windows —
+        // `NtSetInformationFile(FileRenameInformation)` refuses a source handle without it, so the
+        // commit below would fail `ERROR_ACCESS_DENIED` on every save if this used the `OpenOptions`
+        // opener. The injection seam is asked here rather than inside that function so it stays asked
+        // by every staging opener this function can reach (see [`staging_create_injected_failure`]).
+        let mut f = match beneath.as_ref() {
+            Some(b) => staging_create_injected_failure()
+                .map_err(|e| crate::open_beneath::Refusal::failure(e.to_string()))
+                .and_then(|()| {
+                    crate::open_beneath::create_staging_beneath(
+                        &b.root,
+                        Path::new(&tmp_name),
+                        carried.is_some(),
+                    )
+                    .map(|opened| opened.file)
+                })
+                .map_err(|r| {
+                    format!(
+                        "{}: could not create the staging file this write goes through ({}): {}",
+                        display_path(target),
+                        display_path(&tmp),
+                        r.why
+                    )
+                })?,
+            None => if carried.is_some() {
+                create_staging_file_for_carryover(&tmp)
+            } else {
+                create_staging_file(&tmp)
+            }
+            .map_err(|e| {
+                format!(
+                    "{}: could not create the staging file this write goes through ({}): {e}",
+                    display_path(target),
+                    display_path(&tmp)
+                )
+            })?,
+        };
         // Then widen/adjust to whatever the user's own file actually carries, while the staged file is
         // still EMPTY — before the user's bytes ever reach it. On Windows this is a deliberate no-op:
         // `commit_replacement`'s `ReplaceFileW` carries the attributes, ACL and named streams across at
@@ -4149,23 +4524,39 @@ fn stage_and_replace_at(
             let _ = std::fs::remove_file(&tmp);
             return Err(format!("{}: {e}", display_path(&tmp)));
         }
+        // NOT `rename_into_slot`, and the reason is its FIRST half, measured rather than assumed (PR #899
+        // Reviewer): `clobber_refusal` runs first and `try_exists` follows a live link, so on the user's
+        // symlinked media file it refuses with `"01 - My Track.wav" already exists` and the link half is
+        // never reached at all. Nor does resolving first rescue it — the resolved target is an existing file
+        // by construction, so the occupancy half then refuses that instead (`Some("real.wav already
+        // exists")`, measured). "Already exists" is this call's *precondition*, not its error. The link half
+        // would additionally refuse a dangling symlinked path, which `resolve_write_target` has already
+        // judged. So this is a genuinely different primitive, not a duplicate: the guard that matters here is
+        // that resolution — `target` is a real file, never a link — and it has already run.
+        //
+        // **CPE-1958 added the `commit` arm.** `ReplaceFileW` resolves the destination path; a rename
+        // replaces the name. See [`Commit`] for which caller needs which, and what the rename arm gives up.
+        //
+        // **CPE-1963 moved the commit INSIDE this block**, because the `Beneath` arm's source operand on
+        // Windows is `f` itself: the handle has to still be open when the rename runs. The `ByPath` arm
+        // drops it first, exactly as it always did — `ReplaceFileW` is a two-path call and gains nothing
+        // from a live handle on the replacement.
+        let carrying = matches!(commit, Commit::CarryingTheDestination) && existing.is_some();
+        // CPE-1963's window, opened for a test **before the fork** so a fixture measures the same
+        // instant on both arms — a seam inside one arm would make a sabotage that switched arms look
+        // like a fixture that failed to stage its attack rather than like the defect returning. Nothing
+        // in a shipped binary; see [`BETWEEN_STAGE_AND_COMMIT`].
+        between_stage_and_commit();
+        match beneath.as_ref() {
+            Some(b) => b.commit(target, f)?,
+            None => {
+                drop(f);
+                commit_replacement(&tmp, target, carrying).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed commit
+                })?;
+            }
+        }
     }
-    // NOT `rename_into_slot`, and the reason is its FIRST half, measured rather than assumed (PR #899
-    // Reviewer): `clobber_refusal` runs first and `try_exists` follows a live link, so on the user's
-    // symlinked media file it refuses with `"01 - My Track.wav" already exists` and the link half is
-    // never reached at all. Nor does resolving first rescue it — the resolved target is an existing file
-    // by construction, so the occupancy half then refuses that instead (`Some("real.wav already
-    // exists")`, measured). "Already exists" is this call's *precondition*, not its error. The link half
-    // would additionally refuse a dangling symlinked path, which `resolve_write_target` has already
-    // judged. So this is a genuinely different primitive, not a duplicate: the guard that matters here is
-    // that resolution — `target` is a real file, never a link — and it has already run.
-    //
-    // **CPE-1958 added the `commit` arm.** `ReplaceFileW` resolves the destination path; a rename
-    // replaces the name. See [`Commit`] for which caller needs which, and what the rename arm gives up.
-    let carrying = matches!(commit, Commit::CarryingTheDestination) && existing.is_some();
-    commit_replacement(&tmp, target, carrying).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed commit
-    })?;
     // **CPE-1738's sweep, moved down one level by CPE-1958 round 2 — and the reason is a claim that did
     // not survive being checked.** Round 1's cost list said a `.cpe-tmp` left by a killed process was
     // *"the same residue, and the same collector, as every editor save"*. The residue half was true; the
@@ -9495,7 +9886,7 @@ mod tests {
     /// same finding.
     ///
     /// Returns `(aliased, lying_oks, victim_changed)`, all read off the filesystem.
-    fn cpe_1958_rename_source_race(trials: u64, delete_only: bool) -> Option<(u64, u64, u64)> {
+    fn cpe_1958_rename_source_race(trials: u64, delete_only: bool) -> Option<(u64, u64, u64, u64)> {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         const OLD: &[u8] = b"OLD BYTES AT THE CONFIRMED NAME";
@@ -9527,8 +9918,15 @@ mod tests {
         };
 
         let stop = Arc::new(AtomicBool::new(false));
+        // **How many times the attack actually LANDED** (CPE-1963 round 2, Reviewer NIT-7). A post-fix
+        // `0 / 3,000` is only worth reading next to evidence that the attacker did something — and
+        // relying on the person running it to remember to take a pre-fix figure on the same machine is
+        // exactly the kind of "remembering" this repo keeps paying for. `cpe_1961_beneath_commit_race`
+        // already counts its own swaps; this one did not.
+        let staged_attacks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let attacker = {
-            let (root, v, stop) = (root.clone(), v.clone(), Arc::clone(&stop));
+            let (root, v, stop, landed) =
+                (root.clone(), v.clone(), Arc::clone(&stop), Arc::clone(&staged_attacks));
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     let Ok(entries) = std::fs::read_dir(&root) else { continue };
@@ -9541,8 +9939,11 @@ mod tests {
                         if std::fs::remove_file(&path).is_err() {
                             continue;
                         }
-                        if !delete_only {
-                            let _ = crate::links::create_hard_link(&v, &path.to_string_lossy());
+                        if delete_only {
+                            // For the control the unlink IS the whole attack, so it counts here.
+                            landed.fetch_add(1, Ordering::Relaxed);
+                        } else if crate::links::create_hard_link(&v, &path.to_string_lossy()).is_ok() {
+                            landed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -9573,16 +9974,43 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         let _ = attacker.join();
-        Some((aliased, lying, changed))
+        Some((aliased, lying, changed, staged_attacks.load(Ordering::Relaxed)))
     }
 
-    /// **The F3 measurement, reported rather than asserted** — it is a live, pre-existing exposure that
-    /// this PR does not fix (it is **CPE-1963**), so a guard here would just be a red build. What it
-    /// exists for is that the next worker can re-take the numbers instead of quoting these.
+    /// **The F3 measurement, reported rather than asserted.** It was filed as a live, unfixed exposure
+    /// (CPE-1958 round 2), so a guard here would have been a red build; **CPE-1963 fixed it and kept
+    /// the harness reporting rather than asserting**, because the numbers are timing-dependent and a
+    /// threshold on a race is a flaky build. The deterministic assertion lives next door in
+    /// `cpe_1963_relinking_the_staging_source_cannot_produce_a_successful_looking_overwrite`.
     ///
     /// ```text
     /// cargo test -p cpe-server cpe_1958_rename_source_report -- --ignored --nocapture
     /// ```
+    ///
+    /// Windows 11 / NTFS, `TMP` on a local volume, 3,000 trials per shape, `aliased / lying Ok /
+    /// victim changed`:
+    ///
+    /// ```text
+    ///                                  relink                    delete-only (CONTROL)
+    /// before CPE-1963, five runs       8/8, 2/3, 3/3, 2/3, 1/1   0 / 0 / 0  x4 (0 in 12,000)
+    /// after  CPE-1963, three runs      0 / 0 / 0  x3             0 / 0 / 0  x3
+    /// ```
+    ///
+    /// **The relink column is a rate and the spread is wide** — 1 to 8 per 3,000 on one machine, and an
+    /// independent reviewer's four runs on another gave 1, 1, 2, 4. Quote the spread, never one run.
+    /// The control's four pre-fix zeroes here are also not proof of absence: the same reviewer saw
+    /// **2 / 12,000** on the same pre-fix revision, which is what corrected `StagedBeneath::commit`'s
+    /// "this mode is NEW" to "much rarer before".
+    ///
+    /// The `{n} attacks actually landed on a staging file` field is the reason a post-fix zero means
+    /// anything at all: without it, a run in which the attacker never got hold of a staging file prints
+    /// the same clean sheet as a fixed defect. A run reporting **0 landed** measured nothing and says
+    /// so (Reviewer NIT-7).
+    ///
+    /// **Linux is not in that table and was not measured by this ticket's author** — the fix's Unix
+    /// half converts the aliasing into a refusal rather than preventing it, so the `aliased` column is
+    /// expected to stay high there while `lying Ok` goes to zero. That is a prediction until someone
+    /// runs it on ext4.
     #[test]
     #[ignore = "CPE-1963 measurement harness (filed from CPE-1958 round 2, Auditor F3). Run by hand with --ignored --nocapture."]
     fn cpe_1958_rename_source_report() {
@@ -9599,16 +10027,370 @@ mod tests {
                     );
                     return;
                 }
-                Some((aliased, lying, changed)) => {
+                Some((aliased, lying, changed, staged)) => {
                     let _ = writeln!(
                         std::io::stderr(),
                         "[CPE-1963] {shape}: {aliased} destinations aliased to the outside file / \
                          {trials} trials; {lying} returned Ok WITHOUT writing the user's bytes; \
-                         {changed} trials changed the VICTIM's content"
+                         {changed} trials changed the VICTIM's content; {staged} attacks actually \
+                         landed on a staging file"
                     );
+                    // A run in which the attacker never once got hold of a staging file measured
+                    // nothing, and a `0 / 0 / 0` from it would read exactly like a fixed defect. Say so
+                    // rather than print a clean sheet (Reviewer NIT-7).
+                    if staged == 0 {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[CPE-1963] {shape}: WARNING — the attacker never reached a staging file, \
+                             so this run's zeroes mean NOTHING was measured, not that nothing happened."
+                        );
+                    }
                 }
             }
         }
+    }
+
+    /// **CPE-1963's guard, staged deterministically instead of raced.**
+    ///
+    /// The racer above needs 3,000 trials to see the exposure a handful of times on Windows. This arms
+    /// [`BETWEEN_STAGE_AND_COMMIT`] and puts the victim at the staging name inside the window itself,
+    /// so it lands on the first attempt on every runner. It runs **twice**, once per
+    /// [`Cpe1963Attack`], and the reason there are two is the whole of the next section.
+    ///
+    /// # It asserts an OUTCOME SET on the filesystem, never a verdict
+    ///
+    /// Nothing here reads an enum or matches a message. Everything is a fact read off disk after the
+    /// call: what the destination holds, whether the destination and the victim are the same object,
+    /// and what the victim holds. There are exactly two acceptable outcomes:
+    ///
+    /// - **prevented** — the call succeeds and the user's bytes are at the name, which is not a second
+    ///   name for the victim. The commit's source operand was the staged HANDLE, so the name the victim
+    ///   occupies was never part of the rename.
+    /// - **reported** — the call fails, and the user's bytes are not at the name. The commit either
+    ///   refused outright or landed on some other object and was caught by
+    ///   [`StagedBeneath::landed_object_is_the_one_we_wrote`].
+    ///
+    /// A third outcome — `Ok(())` with the user's bytes absent, or with the destination aliased to the
+    /// victim — is exactly the defect, and it fails here with all four facts printed. So does the
+    /// victim's own content changing, which no version of this has ever done and which would mean a
+    /// *destruction* bug rather than an aliasing one.
+    ///
+    /// # Which outcome each platform takes, corrected — round 1 mapped them wrong (round 2, MAJOR-2)
+    ///
+    /// Round 1 wrote *"prevented → Windows, reported → Unix"* and shipped only the
+    /// [`Cpe1963Attack::UnlinkThenRelink`] shape. On Windows that shape takes **reported**, and it
+    /// takes it for a reason that has nothing to do with this ticket's property: the attacker's
+    /// `unlink` sets a delete disposition on the object this process still holds open, so the rename is
+    /// refused before the operand question is ever reached. The fixture was therefore proving *"a
+    /// delete-pending handle cannot be renamed"* — true, and not the claim — which is CPE-1929's
+    /// reads-as-coverage shape in this file's flagship guard.
+    ///
+    /// Measured on Windows 11 / NTFS with both shapes shipped:
+    ///
+    /// ```text
+    /// attack shape          Windows outcome   why
+    /// UnlinkThenRelink      reported          the staged object is delete-pending; the rename refuses
+    /// MoveAsideThenRelink   prevented         nothing is marked, so the HANDLE decides — the property
+    /// ```
+    ///
+    /// Both remain meaningful and neither is redundant: the first is the shape an attacker writes
+    /// first and pins the delete-disposition path; the second is the only one of three tried spellings
+    /// that leaves the staged object unmarked and so is the one that exercises the handle source. On
+    /// Unix both are expected to take **reported**, for the real reason — `renameat`'s source is a name
+    /// — and that is a prediction from the primitive, not something measured here; CI's Linux backend
+    /// job is what runs it.
+    ///
+    /// # The two legs that stop it from passing vacuously
+    ///
+    /// The hook increments a counter only when the relink actually succeeded, and the test asserts it
+    /// fired exactly once — an attack that silently failed to stage would otherwise leave every
+    /// assertion below trivially true. And the positive control runs the identical call with **no** hook
+    /// armed first, and requires `Ok(())` with the bytes at the name, so a change that broke ordinary
+    /// saves outright could not pass this by refusing everything.
+    ///
+    /// # Red-proof, run rather than asserted
+    ///
+    /// With the commit forced back to the by-path `commit_replacement` (`Commit::ReplacingTheName`
+    /// mapped to `beneath = None`), on Windows / NTFS:
+    ///
+    /// ```text
+    /// CPE-1963: the commit returned Ok(()) while the destination is a second name for the outside
+    /// victim and holds Some("UNTOUCHED") instead of the user's bytes.
+    /// test result: FAILED. 2 passed; 2 failed
+    /// ```
+    ///
+    /// **Both** shapes fail there, with the same message — which is worth noting, because it is the one
+    /// place the two cases agree: the by-path commit takes whatever is at the staging name, so *how* the
+    /// victim got there does not matter to it. It matters only to the fixed code, which is why the two
+    /// cases diverge on the head (`reported` / `prevented`) and converge on the sabotage.
+    ///
+    /// **The seam sits before the arm fork for that red-proof's sake, and the first attempt at it is
+    /// why.** With `between_stage_and_commit()` inside `StagedBeneath::commit`, the same sabotage
+    /// failed on `relinked == 0` — the hook never fired, because the sabotage had switched to the arm
+    /// that did not contain it. That reads as a broken fixture rather than as the defect returning,
+    /// which is the one way a red-proof can mislead.
+    /// How the fixture below puts the victim at the staging name. **The two shapes are not
+    /// interchangeable, and round 1 shipped only the first while the doc described the second.**
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Cpe1963Attack {
+        /// `unlink(tmp)` then `link(victim, tmp)` — the shape the racer uses and the one an attacker
+        /// writes first. On Windows the unlink sets a **delete disposition** on the object this process
+        /// still holds open, and *that* is what stops the commit: the rename is refused outright, so
+        /// the handle-source property is never the thing being tested.
+        UnlinkThenRelink,
+        /// `rename(tmp, stolen)` then `link(victim, tmp)` — the staged object is **moved aside to a
+        /// free name**, which is a pure directory-entry move that marks nothing, and the victim is then
+        /// hard-linked into the vacated staging name. Same aliasing, and the staged object's
+        /// disposition is never touched, so the commit is decided by *which operand the platform
+        /// uses* rather than by a delete-pending refusal. This is the shape that exercises "the name
+        /// the victim is at is not part of the commit", and it is the one that reaches
+        /// `prevented` on Windows.
+        ///
+        /// **This shape is the round-2 Reviewer's, not this author's** — they proposed it and measured
+        /// `prevented` from it before it was written here. Recorded because the alternative is a reader
+        /// inferring from the paragraph below that all three spellings were tried here and that the
+        /// working one was found rather than handed over; a provenance left implicit is one that gets
+        /// re-attributed by the next person to summarise this file (CPE-1933, one scope out from code).
+        ///
+        /// **Two other spellings do collapse into [`Cpe1963Attack::UnlinkThenRelink`] on Windows,
+        /// measured rather than reasoned:** `unlink(tmp)` obviously, and `rename(aside, tmp)` —
+        /// replacing the staging name — because `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` sets a
+        /// delete disposition on the file it *replaces*. Both printed `reported — aliased=false,
+        /// refusal=… Access is denied. (os error 5)`, which is the rename being refused, not the
+        /// handle-source property working. **`rename(aside, tmp)` was nobody's suggestion** — it is a
+        /// third variant tried here on the way to understanding the mechanism, and it is written down
+        /// because knowing *which* rename spellings mark the object is the whole finding. Moving the
+        /// object to a **free** name is the only one of the three that leaves it unmarked.
+        MoveAsideThenRelink,
+    }
+
+    #[test]
+    fn cpe_1963_relinking_the_staging_source_cannot_produce_a_successful_looking_overwrite() {
+        cpe_1963_staging_source_attack(Cpe1963Attack::UnlinkThenRelink);
+    }
+
+    /// **The case round 1 was missing (round 2, Reviewer MAJOR-2).** Without it, the Windows leg of the
+    /// fixture above proves only that a delete-pending handle cannot be renamed — a true fact about
+    /// Windows, and *not* the property this ticket claims. See [`Cpe1963Attack::MoveAsideThenRelink`],
+    /// which leaves the staged object unmarked so the commit is decided by which operand the platform
+    /// uses.
+    #[test]
+    fn cpe_1963_a_victim_put_at_the_staging_name_without_marking_the_staged_object_is_not_committed() {
+        cpe_1963_staging_source_attack(Cpe1963Attack::MoveAsideThenRelink);
+    }
+
+    fn cpe_1963_staging_source_attack(attack: Cpe1963Attack) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        const OLD: &[u8] = b"OLD BYTES AT THE CONFIRMED NAME";
+        const NEW: &[u8] = b"WHAT THE USER CONFIRMED WRITING";
+        let tag = match attack {
+            Cpe1963Attack::UnlinkThenRelink => "cpe1963-relink-source",
+            Cpe1963Attack::MoveAsideThenRelink => "cpe1963-move-aside",
+        };
+        let d = scratch(tag);
+        let root = d.join("root");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("RACE_VICTIM.txt");
+        std::fs::write(&victim, CPE_1958_UNTOUCHED).unwrap();
+        let slot = root.join("slot.bin");
+        std::fs::write(&slot, OLD).unwrap();
+
+        let identity = |p: &Path| {
+            crate::batch_media::open_existing_no_follow_read(p)
+                .ok()
+                .and_then(|f| crate::batch_media::handle_facts(&f))
+                .map(|facts| facts.id)
+        };
+        let victim_id = identity(&victim).expect("the victim's identity must be readable");
+
+        // Positive control, with no hook armed: the ordinary save still works. Without this the whole
+        // fixture would pass for a change that simply refused every confirmed overwrite.
+        overwrite_confirmed_no_follow(&slot, NEW).expect("an unattacked confirmed overwrite must succeed");
+        assert_eq!(
+            std::fs::read(&slot).unwrap(),
+            NEW,
+            "control: an unattacked confirmed overwrite must leave the user's bytes at the name"
+        );
+        std::fs::write(&slot, OLD).unwrap();
+
+        // Liveness: without hard links there is no attack to stage, and a clean sheet from a machine
+        // that measured nothing must say so rather than read as a pass.
+        let (v, probe) = (
+            victim.to_string_lossy().into_owned(),
+            root.join("probe").to_string_lossy().into_owned(),
+        );
+        if crate::links::create_hard_link(&v, &probe).is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1963] SKIPPED — this machine cannot create a hard link, so NOTHING was measured."
+            );
+            return;
+        }
+        std::fs::remove_file(root.join("probe")).unwrap();
+
+        let relinked = Arc::new(AtomicUsize::new(0));
+        {
+            let (count, v, dir) = (Arc::clone(&relinked), v.clone(), root.clone());
+            BETWEEN_STAGE_AND_COMMIT.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+                    for e in entries.flatten() {
+                        if !e.file_name().to_string_lossy().ends_with(".cpe-tmp") {
+                            continue;
+                        }
+                        let path = e.path();
+                        let ok = match attack {
+                            Cpe1963Attack::UnlinkThenRelink => {
+                                std::fs::remove_file(&path).is_ok()
+                                    && crate::links::create_hard_link(&v, &path.to_string_lossy())
+                                        .is_ok()
+                            }
+                            Cpe1963Attack::MoveAsideThenRelink => {
+                                let stolen = dir.join("stolen.bin");
+                                // A fixture staging an attack, and the RAW rename is the point of it:
+                                // what is being measured is whether the *name* the victim now occupies
+                                // can redirect the commit, with the staged object left unmarked.
+                                // Routing it through a guarded helper would measure the helper. Same
+                                // reasoning, and the same `allow`, as
+                                // `cpe_1961_a_link_planted_at_an_interior_component…`.
+                                #[allow(clippy::disallowed_methods)]
+                                let moved = std::fs::rename(&path, &stolen).is_ok();
+                                moved
+                                    && crate::links::create_hard_link(&v, &path.to_string_lossy())
+                                        .is_ok()
+                            }
+                        };
+                        if ok {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }));
+            });
+        }
+        let result = overwrite_confirmed_no_follow(&slot, NEW);
+        assert_eq!(
+            relinked.load(Ordering::Relaxed),
+            1,
+            "the fixture must actually have put the victim at the staging name — nothing below \
+             measures anything if it did not"
+        );
+
+        // Every fact from here on is read off the filesystem.
+        let landed = std::fs::read(&slot).ok();
+        let aliased = identity(&slot) == Some(victim_id);
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1958_UNTOUCHED),
+            "the victim's own CONTENT must never change — that would be a destruction bug, not this one"
+        );
+        match (result.is_ok(), landed.as_deref() == Some(NEW), aliased) {
+            (true, true, false) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1963] {tag}: prevented — the commit ignored the name the victim was put at"
+                );
+            }
+            (false, _, _) => {
+                assert_ne!(
+                    landed.as_deref(),
+                    Some(NEW),
+                    "a refused commit must not also have written the user's bytes"
+                );
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1963] {tag}: reported — aliased={aliased}, refusal={}",
+                    result.as_ref().err().map(String::as_str).unwrap_or("")
+                );
+            }
+            _ => panic!(
+                "CPE-1963: the commit returned Ok(()) while the destination is {} and holds {:?} \
+                 instead of the user's bytes.",
+                if aliased { "a second name for the outside victim" } else { "not the object written" },
+                landed.as_deref().map(String::from_utf8_lossy)
+            ),
+        }
+    }
+
+    /// **CPE-1963 round 2, Reviewer MAJOR-1: another program holding the file open must not fail the
+    /// write.**
+    ///
+    /// Round 1 moved the confirmed overwrite's commit onto
+    /// `NtSetInformationFile(FileRenameInformation)` — the **non-`Ex`** form, which cannot replace a
+    /// destination that has any handle open on it. Round 1 met that as *its own* handle (17 tests) and
+    /// closed ours, which fixed the symptom and left the cause: the same refusal fires for anybody
+    /// else's, and on Windows a third-party handle on a file being saved is routine — Defender, the
+    /// Search indexer, Explorer's preview and thumbnail handlers, OneDrive, a media player. Measured on
+    /// the round-1 head, on an ordinary unattacked save with one extra `File::open`: `Err "Access is
+    /// denied. (os error 5)"` and the **old** bytes still at the name, against `Ok(())` and the new
+    /// bytes on the merge base.
+    ///
+    /// The holder here is `std::fs::File::open`, which is the *friendliest* share mode Windows offers
+    /// (`READ | WRITE | DELETE`) — so a failure at this fixture is a lower bound on the real-world
+    /// blast radius, not an exotic case. It asserts on the filesystem: the bytes at the name.
+    ///
+    /// Both `Commit::ReplacingTheName` callers are covered by one call here because they share
+    /// `stage_and_replace_at`; `Commit::CarryingTheDestination` never had the problem, because
+    /// `ReplaceFileW` does not refuse an open destination the same way.
+    #[test]
+    fn cpe_1963_a_third_party_handle_on_the_destination_does_not_fail_an_ordinary_overwrite() {
+        const OLD: &[u8] = b"OLD BYTES AT THE CONFIRMED NAME";
+        const NEW: &[u8] = b"WHAT THE USER CONFIRMED WRITING";
+        let d = scratch("cpe1963-third-party-handle");
+        let slot = d.join("held.bin");
+        std::fs::write(&slot, OLD).unwrap();
+        // Somebody else's handle, opened before the save and held across it — the whole point.
+        let holder = std::fs::File::open(&slot).expect("opening a second handle on the destination");
+        let r = overwrite_confirmed_no_follow(&slot, NEW);
+        assert_eq!(
+            std::fs::read(&slot).ok().as_deref(),
+            Some(NEW),
+            "a confirmed overwrite must still land while another program holds the file open — \
+             result was {r:?}"
+        );
+        r.expect("and it must report success rather than a refusal");
+        drop(holder);
+    }
+
+    /// **The fallback in `open_beneath::sys::rename`, exercised rather than assumed** (CPE-1963
+    /// round 2).
+    ///
+    /// The Windows commit asks for `FileRenameInformationEx` with POSIX semantics and falls back to the
+    /// plain form when the volume or the OS refuses it — pre-Windows-10-1607, FAT32, exFAT, some
+    /// network redirectors. None of those exists on the machines this repo is developed or CI'd on, so
+    /// the fallback would otherwise ship as a branch nothing has ever run, **on the backup path**,
+    /// reading as covered because the function around it is. `FORCE_RENAME_WITHOUT_EX` makes the `Ex`
+    /// attempt fail the way an unsupporting volume fails it.
+    ///
+    /// What it pins is that an ordinary save still commits down that branch. It deliberately does
+    /// **not** assert the third-party-handle case, because the fallback genuinely cannot satisfy it —
+    /// that is the residual `sys::rename` records, and asserting the opposite here would be a test
+    /// claiming a property the code does not have.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1963_the_rename_fallback_still_commits_when_the_ex_form_is_refused() {
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                crate::open_beneath::FORCE_RENAME_WITHOUT_EX.with(|c| c.set(false));
+            }
+        }
+        const OLD: &[u8] = b"OLD BYTES AT THE CONFIRMED NAME";
+        const NEW: &[u8] = b"WHAT THE USER CONFIRMED WRITING";
+        let d = scratch("cpe1963-rename-fallback");
+        let slot = d.join("plain.bin");
+        std::fs::write(&slot, OLD).unwrap();
+        let _disarm = Disarm;
+        crate::open_beneath::FORCE_RENAME_WITHOUT_EX.with(|c| c.set(true));
+        overwrite_confirmed_no_follow(&slot, NEW)
+            .expect("the plain-form fallback must still commit an ordinary save");
+        assert_eq!(
+            std::fs::read(&slot).ok().as_deref(),
+            Some(NEW),
+            "the fallback commit must leave the user's bytes at the name"
+        );
     }
 
     /// **CPE-1961 round 5 (Reviewer Major 1): `commit()` CAN return `policy: true`, and rounds 3–4
