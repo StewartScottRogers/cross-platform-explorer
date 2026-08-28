@@ -3207,3 +3207,48 @@ letting the real curl hit the real URL** — which 404s today because of the out
 about. The attacker capability required turned out to be *less* than the mitigations already assume. A
 test environment that is realistic in one more dimension than the author's found a site the author's
 list had no reason to contain.
+
+## 2026-08-28 — 400,000 draws that were 120 programs
+
+#1087's round 5 answered "is there a third failure family?" with a fuzz sweep: **36,861 parseable
+generated inputs, 0 desyncs.** Its reviewer refuted the conclusion with a 27-character input, and I
+recorded the lesson as *a negative over a generated space is only as good as the generator*.
+
+Round 6 found the sharper reason. **The generator's LCG lost precision in JS doubles, so 400,000 draws
+deduped to roughly 120 distinct programs.** The sweep was not merely aimed at the wrong space; it was
+sampling the same hundred-odd strings tens of thousands of times and counting each one.
+
+**The size was the entire persuasive content of the claim, and the size was an artefact of the
+arithmetic.** Nobody could see it from the outside: 36,861 is exactly what a healthy fuzzer prints. The
+number was not wrong about how many inputs ran — it was wrong about how many *questions were asked*, and
+those are the same word in a report and different facts.
+
+**One line would have caught it: report distinct inputs, not draws.** A generator that cannot say how
+many unique programs it produced is not reporting coverage, it is reporting effort. The rewritten sweep
+does — **29,285 distinct** — and is now **committed with a `--compare <ref>` mode**, which is the other
+half: round 5's lived in scratch, so neither the next round nor the reviewer could re-run it, and the
+reviewer had to rebuild an equivalent from scratch to disprove it.
+
+## 2026-08-28 — the new family turned the existing table's property red, which was the correct answer
+
+Same round, and this is the good news half. Told to add the newly-found deleting family to the
+`DELETING_GAPS` table, the worker tried it and **the table's derived safety property went red — correctly.**
+That table's whole invariant is *no entry in it parses before stripping*; the new family deletes **valid**
+JavaScript, so it cannot live there without falsifying the one thing the table proves.
+
+The wrong move is obvious and was available: relax the property, or quietly widen the table's meaning.
+Instead the family got its **own** table with its own three assertions (the input parses, the output does
+not, the checked wrapper throws) — **and the oracle now asserts which tables it sweeps**, so a family
+held back from both is visible rather than merely absent.
+
+**That last clause is the real fix.** Every version of this defect on this PR — five rounds of it — was
+something true about a written-down list being read as true about the world. An oracle that enumerates
+*which lists it covers* is the first structure in six rounds that makes an omission show up as an
+omission rather than as silence.
+
+Also worth keeping from the same round, because it is the opposite of what a worker under pressure
+usually does: the author **volunteered that its own new majority check would not have caught the earlier
+glyph bug** — agreement with the suppressor off is 51%, one point above the bar — and used that to argue
+for keeping the older, stricter flatness check fatal rather than letting the new one replace it. A
+weaker check that arrives with an honest account of what it misses is worth more than a stronger one
+that arrives without.
