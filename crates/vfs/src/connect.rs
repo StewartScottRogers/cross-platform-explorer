@@ -239,10 +239,24 @@ fn authority(loc: &Location) -> String {
 /// 3xx response and silently reported `Ok(())` having deleted nothing (fixed alongside this comment —
 /// see [`FileSystemProvider::delete`]'s WebDAV impl and
 /// `delete_of_an_already_slashed_directory_that_redirects_is_reported_as_an_error_not_ok`).
-/// `crates/vfs/tests/real_server_conformance.rs`'s `remote()` helper mirrors this function so the
-/// real-server-rig E2E job (OpenSSH/vsftpd/mod_dav) actually exercises the new shape end-to-end, rather
-/// than leaving it unverified beyond the in-process fakes.
-fn join_remote(dir: &str, name: &str, is_dir: bool) -> String {
+/// CPE-1950: this is `pub` for ONE reason — `crates/vfs/tests/real_server_conformance.rs` calls it
+/// directly instead of reimplementing it.
+///
+/// That test file used to carry its own copies of this join (`remote`/`remote_dir`), plus a sentence
+/// here claiming `remote()` "mirrors this function so the real-server-rig E2E job actually exercises
+/// the new shape".
+/// That sentence named the **wrong helper**: `remote()` is the `is_dir: false` join and never appends
+/// the slash; the slashed coverage came from `remote_dir()`, which
+/// `assert_slashed_directory_path_round_trips` drives through `mkdir`/`stat`/`list`/`delete` against
+/// the real servers. Both landed in the same commit as this sentence (b15c9f7b, CPE-1737 #908), so
+/// the claim's **conclusion was true from the day it was written** — only its pointer was wrong. (An
+/// earlier draft of this comment, PR #1067, asserted the opposite and said the rig had been testing a
+/// stale shape; that was incorrect and is corrected here.)
+///
+/// A misnamed reference is still a provenance claim nothing could check, and the fix is the same one
+/// that removes the whole class: there are no copies left. The rig and production run this exact
+/// function, and the compiler enforces it.
+pub fn join_remote(dir: &str, name: &str, is_dir: bool) -> String {
     let base = dir.trim_end_matches('/');
     let suffix = if is_dir { "/" } else { "" };
     if base.is_empty() {

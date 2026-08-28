@@ -146,13 +146,29 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
      the same crate. A capital letter is not a hiding place; use `-i`.
   2. ***Anchor on code, never on prose.*** A scanner that finds "the first `format!(` after the fn",
      or "lines containing `gh release download`", will happily parse a **comment** that quotes the old
-     value and pass **silently**. Do not hand-roll the stripper: `src/lib/shellScriptLines.ts` (TS) and
-     `crates/updater-verify/src/workflow_scan.rs` (its Rust port, pinned to it by the shared
-     `shellScriptLines.cases.json`) already handle quotes, escapes, trailing comments and heredoc
-     bodies. A whole-line-comment filter is *not* enough — a **trailing** comment walks straight
-     through it, which is how CPE-1933's first draft reintroduced the hole it was closing.
+     value and pass **silently**. Do not hand-roll the stripper. For **shell/workflow** sources:
+     `src/lib/shellScriptLines.ts` (TS) and `crates/updater-verify/src/workflow_scan.rs` (its Rust
+     port, pinned to it by the shared `shellScriptLines.cases.json`) already handle quotes, escapes,
+     trailing comments and heredoc bodies. For **Rust** sources: `src/lib/rustSource.ts`
+     (`stripRustComments`, `rustStringLiteralAfter`, `rustStrSliceAfter`) — CPE-1950 lifted it out of
+     `MacroRunConfirm.test.ts` rather than let a third scanner grow a fourth copy of the rules. A
+     whole-line-comment filter is *not* enough — a **trailing** comment walks straight through it,
+     which is how CPE-1933's first draft reintroduced the hole it was closing.
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
-     never actually re-reads its source is the same defect with extra steps.
+     never actually re-reads its source is the same defect with extra steps. Write the red-proof's
+     **result at the site**, not only in the PR body — a code comment that merely asserts, next to a
+     PR body that argues, is how the claim gets re-established one review later.
+
+  **A shared case file catches divergence, not shared blindness (CPE-1950).** Pinning two
+  implementations to one oracle (`shellScriptLines.cases.json`, `platformConfigGuard.cases.json`)
+  proves they agree; it cannot prove either is right. A shape nobody thought of is simply absent from
+  the file, both sides answer it the same wrong way, and it passes green — measured on #1060, where a
+  `<<` inside a quoted string opened a phantom heredoc in *both* scanners while their shared oracle
+  agreed with itself. So pair every cross-language oracle with a leg that does **not** depend on
+  anyone having written the case: read one side's own declaration out of the other's source
+  (`sidecarBundleResources.test.ts` reads `TAURI_PLATFORM_TOKENS` out of the Rust guard), and say at
+  the site what the oracle cannot catch. Better still, where the duplication is removable, remove it —
+  CPE-1950 closed three of its seven by deleting the second copy rather than deriving it.
 
   Worked examples: `crates/updater-verify/tests/release_workflow_wiring.rs` (reads both release
   workflows' argv and **executes** the real binary with it), `src/lib/keymap.test.ts` (joins two data

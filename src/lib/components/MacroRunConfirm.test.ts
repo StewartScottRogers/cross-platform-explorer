@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripRustComments, rustStringLiteralAfter } from "../rustSource";
 
 // The two hazard sentences EXACTLY as the box must render them (CPE-1928): differentiator first,
 // path stripped (CPE-1891, Visual Critic round 3 — the hoisted sentence is shared across
@@ -468,92 +469,11 @@ describe("MacroRunConfirm run results + undo (CPE-1191)", () => {
  * source-reading guards (`channelPurityCoverage`, `catalogPublishFreshnessGuard`, `lockfileLockedGuard`).
  */
 describe("blocked-reason fixtures are DERIVED from the Rust guards, not hand-copied (PR #1056, Finding 2)", () => {
-  /** Reads the Rust string literal starting at the first `"` at or after `fromIndex`, resolving the
-   *  escapes that appear in these two literals: `\"`, `\\`, and — the one that matters — Rust's
-   *  `\`-at-end-of-line continuation, which swallows the newline AND the next line's indentation. */
-  function rustStringLiteralAfter(src: string, fromIndex: number): string {
-    const start = src.indexOf('"', fromIndex);
-    if (start < 0) throw new Error("no string literal found");
-    let out = "";
-    for (let i = start + 1; i < src.length; ) {
-      const ch = src[i];
-      if (ch === "\\") {
-        const next = src[i + 1];
-        if (next === "\n" || next === "\r") {
-          i += 1;
-          while (i < src.length && /\s/.test(src[i])) i += 1;
-          continue;
-        }
-        out += next === "n" ? "\n" : next === "t" ? "\t" : next;
-        i += 2;
-        continue;
-      }
-      if (ch === '"') return out;
-      out += ch;
-      i += 1;
-    }
-    throw new Error("unterminated Rust string literal");
-  }
-
-  /** Blanks Rust line comments and block comments, preserving every offset (comment bytes become
-   *  spaces) so indices into the result still address the original file.
-   *
-   *  CPE-1933. `linkRefusalTemplate` anchors on "the first `format!(` after the fn", and PR #1056's
-   *  Reviewer found the one adversarial source that beats that anchor **silently**: a comment
-   *  sitting between the signature and the real call, containing the text `format!(` and quoting the
-   *  OLD message. The extractor reads the comment, the fixture still matches it, and the derivation
-   *  certifies a message the backend no longer emits — this file's whole purpose, inverted. Every
-   *  other adversarial shape the Reviewer tried failed loudly; this one did not.
-   *
-   *  Stripping comments before scanning kills the class rather than that one shape, and is the same
-   *  rule `crates/updater-verify/src/workflow_scan.rs` applies to workflows: **anchor on code, never
-   *  on text a comment can also contain.** Quote-aware, so a `//` inside a string literal (a URL in a
-   *  message) is left alone.
-   *
-   *  Known limitation, deliberate: this tracks `"` string literals but not Rust CHAR literals, so a
-   *  `'"'` sitting before the target fn would open a phantom string and swallow what follows. The
-   *  failure direction is **loud** — the extractor then finds the wrong `format!` or none at all, and
-   *  the byte-equality assertion below fails — never the silent wrong-message pass this stripping
-   *  exists to prevent. `fsutil.rs` contains no such literal today; add char-literal handling if one
-   *  ever appears, rather than trusting this note. */
-  function stripRustComments(src: string): string {
-    const out = src.split("");
-    let i = 0;
-    let quote: '"' | null = null;
-    while (i < src.length) {
-      const ch = src[i];
-      if (quote) {
-        if (ch === "\\") {
-          i += 2;
-          continue;
-        }
-        if (ch === quote) quote = null;
-        i += 1;
-        continue;
-      }
-      if (ch === '"') {
-        quote = '"';
-        i += 1;
-        continue;
-      }
-      if (ch === "/" && src[i + 1] === "/") {
-        while (i < src.length && src[i] !== "\n") {
-          out[i] = " ";
-          i += 1;
-        }
-        continue;
-      }
-      if (ch === "/" && src[i + 1] === "*") {
-        const end = src.indexOf("*/", i + 2);
-        const stop = end < 0 ? src.length : end + 2;
-        for (let j = i; j < stop; j += 1) if (out[j] !== "\n") out[j] = " ";
-        i = stop;
-        continue;
-      }
-      i += 1;
-    }
-    return out.join("");
-  }
+  // CPE-1950: `stripRustComments` and `rustStringLiteralAfter` were written here and now live in
+  // `src/lib/rustSource.ts`, imported at the top of this file, so the other Rust-source scanners
+  // (`sidecarBundleResources.test.ts`, `RepoBrowser.test.ts`) reuse this exact escape/comment handling
+  // instead of becoming a fifth hand-rolled stripper. Their doc comments moved with them; the two
+  // adversarial cases below still run here, against the shared implementation.
 
   /** The `Ok(true)` (it IS a link) arm's `format!` template out of the named function. */
   function linkRefusalTemplate(src: string, fnName: string): string {

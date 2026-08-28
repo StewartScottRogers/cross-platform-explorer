@@ -7,7 +7,15 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/sv
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
-import RepoBrowser, { stripRepoUrl, looksLikeUrl, isRepoId } from "./RepoBrowser.svelte";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { stripRustComments, rustStringLiteralAfter } from "../rustSource";
+import RepoBrowser, {
+  stripRepoUrl,
+  looksLikeUrl,
+  isRepoId,
+  PROVIDER_HOSTS,
+} from "./RepoBrowser.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -424,5 +432,100 @@ describe("RepoBrowser — Clone shares the Browse-side repo-id guard (CPE-1668)"
     await typeAndClickClone("github", "git@gitlab.com:owner/name.git");
     expect(calls.some((c) => c.cmd === "forge_clone")).toBe(false);
     expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+});
+
+/**
+ * CPE-1950 — `PROVIDER_HOSTS` "mirrors clone_host()", derived instead of claimed.
+ *
+ * The old comment was the only thing tying this map to the backend. The map is not decoration: its
+ * strings build `stripRepoUrl`'s lookalike-host anchoring regexes, so a provider the backend learns
+ * to clone that this map does not know about silently stops having its host stripped — the pasted URL
+ * survives into `forge_browse` as a malformed repo id (the CPE-1650/CPE-1663 class).
+ *
+ * `clone_host` is a plain `if/else if` chain of `is("<provider>")` → `Some(("<host>", …))`, i.e. it is
+ * already data. This reads it, comments stripped first via `rustSource.ts` so a commented-out old
+ * branch cannot be mistaken for a live one, and checks BOTH directions — the backend-adds-a-provider
+ * direction is the one that matters and the one prose could never catch.
+ *
+ * **Red-proofed, not assumed.** Adding a `sourcehut` branch returning `Some(("git.sr.ht", "oauth2"))`
+ * to `clone_host` fails "every host clone_host can return is one stripRepoUrl anchors on" with
+ * `git.sr.ht`; changing GitHub's branch to `github.example.com` fails the per-provider leg. Both
+ * reverted.
+ */
+describe("PROVIDER_HOSTS is DERIVED from clone_host(), not claimed to mirror it (CPE-1950)", () => {
+  /** `clone_host`'s body, comments blanked, from its `fn` line to the first column-0 `}`. */
+  const CLONE_HOST_BODY = (() => {
+    const src = stripRustComments(
+      readFileSync(join(process.cwd(), "src-tauri", "src", "lib.rs"), "utf8"),
+    );
+    const start = src.indexOf("fn clone_host(");
+    expect(start, "clone_host not found in src-tauri/src/lib.rs — renamed?").toBeGreaterThan(-1);
+    const end = src.indexOf("\n}", start);
+    expect(end, "clone_host has no closing brace at column 0").toBeGreaterThan(start);
+    return src.slice(start, end);
+  })();
+
+  /** Every `Some(("<host>", …))` the chain can return, in source order. */
+  function hostsCloneHostCanReturn(): string[] {
+    const hosts: string[] = [];
+    let at = CLONE_HOST_BODY.indexOf("Some((");
+    while (at >= 0) {
+      hosts.push(rustStringLiteralAfter(CLONE_HOST_BODY, at));
+      at = CLONE_HOST_BODY.indexOf("Some((", at + 1);
+    }
+    return hosts;
+  }
+
+  it("finds a real clone_host body to read (an empty scan would pass vacuously)", () => {
+    // CPE-1932. If the extraction silently came back empty, every assertion below would hold for
+    // nothing at all — so assert the scan actually found the chain first.
+    expect(hostsCloneHostCanReturn().length).toBeGreaterThanOrEqual(4);
+    expect(CLONE_HOST_BODY).toContain('is("github")');
+  });
+
+  it("each provider's host is the one clone_host returns for that provider", () => {
+    for (const [provider, host] of Object.entries(PROVIDER_HOSTS)) {
+      const branch = CLONE_HOST_BODY.indexOf(`is("${provider}")`);
+      expect(
+        branch,
+        `PROVIDER_HOSTS names provider "${provider}", which clone_host() has no branch for.`,
+      ).toBeGreaterThan(-1);
+      expect(rustStringLiteralAfter(CLONE_HOST_BODY, CLONE_HOST_BODY.indexOf("Some((", branch))).toBe(
+        host,
+      );
+    }
+  });
+
+  it("every host clone_host can return is one stripRepoUrl anchors on", () => {
+    // The direction that matters: a provider added on the BACKEND alone. Without this, the new
+    // provider's pasted URLs keep their host and go to forge_browse as a malformed repo id.
+    const backendHosts = [...new Set(hostsCloneHostCanReturn())].sort();
+    expect(
+      Object.values(PROVIDER_HOSTS).sort(),
+      "clone_host() can clone from a host RepoBrowser's PROVIDER_HOSTS does not know about, so " +
+        "stripRepoUrl will not strip that host from a pasted URL. Add it to PROVIDER_HOSTS.",
+    ).toEqual(backendHosts);
+  });
+
+  it("the self-hosted providers clone_host refuses are deliberately absent from the map", () => {
+    // These have no fixed host by design, so there is nothing to anchor a strip on. Asserted rather
+    // than described, so that "absent" stays a decision rather than an omission.
+    for (const selfHosted of ["github-enterprise", "gitea", "forgejo"]) {
+      expect(CLONE_HOST_BODY).toContain(`is("${selfHosted}")`);
+      expect(Object.keys(PROVIDER_HOSTS)).not.toContain(selfHosted);
+    }
+  });
+
+  it("stripRepoUrl actually uses the derived host for every provider in the map", () => {
+    // Closes the loop: the map matching the backend is only useful if the strip consumes it.
+    for (const [provider, host] of Object.entries(PROVIDER_HOSTS)) {
+      expect(stripRepoUrl(`https://${host}/owner/name.git`, provider)).toBe("owner/name");
+      expect(stripRepoUrl(`git@${host}:owner/name.git`, provider)).toBe("owner/name");
+      // A lookalike host must NOT be stripped — the anchoring the map's strings build.
+      expect(stripRepoUrl(`https://${host}.evil.example/owner/name`, provider)).not.toBe(
+        "owner/name",
+      );
+    }
   });
 });

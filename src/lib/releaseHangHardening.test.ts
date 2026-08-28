@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseYaml } from "./preview/yaml";
 import { logicalLines } from "./shellScriptLines";
+import { HARDENING_FLAGS, APT_COMMAND_WORD } from "./aptGetHardening";
 
 const WORKFLOWS = join(process.cwd(), ".github", "workflows");
 
@@ -63,18 +64,23 @@ function findStep(job: WorkflowJob, name: string): WorkflowStep {
   return step;
 }
 
-/** Verbatim from ciAptGetHardening.test.ts (CPE-1787) -- the full option string every hardened
- *  apt-get invocation in this repo carries. Reused rather than re-derived, per that ticket's
- *  Reviewer round asking future sites to reuse this exact string. */
-const HARDENING_FLAGS =
-  "-o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20";
-
-/** Verbatim from ciAptGetHardening.test.ts (CPE-1787) -- matches `apt`/`apt-get` as an isolated
- *  COMMAND WORD (not a substring of `apt-transport-https`/`adapter`/etc). That ticket's Reviewer
- *  round widened this from a literal `"apt-get"` substring check specifically so a future site
- *  written with the bare `apt` alias wouldn't sail through; reused verbatim here instead of
- *  re-deriving a third copy. */
-const APT_COMMAND_WORD = /(?<![\w-])apt(?:-get)?(?![\w-])/;
+// CPE-1950: HARDENING_FLAGS and APT_COMMAND_WORD are IMPORTED from `src/lib/aptGetHardening.ts` (at
+// the top of this file) instead of being re-declared here.
+//
+// They used to be local copies under the comment "Verbatim from ciAptGetHardening.test.ts … reused
+// rather than re-derived" -- and that claim was ALREADY FALSE when CPE-1950 read it. CPE-1916 widened
+// the command-word lookbehind in ciAptGetHardening.test.ts from `(?<![\w-])` to `(?<![\w\-/])`, so a
+// path segment like `/etc/apt/sources.list.d/` stopped counting as an apt invocation THERE and kept
+// counting HERE. Two suites, both green, both claiming to hold the same regex, holding two. Nothing
+// could have reddened: "verbatim" was prose. One declaration, imported by both, is the fix.
+//
+// SIDE EFFECT of unifying on the CPE-1916 (wider) lookbehind, stated rather than discovered later:
+// this file now also excludes `/` before the command word, so an apt invocation written with an
+// ABSOLUTE PATH -- `/usr/bin/apt-get update` -- would stop being counted as a site here, exactly as it
+// already did in ciAptGetHardening.test.ts. No workflow this file reads contains such a line today
+// (checked across release.yml and release-sidecar.yml), and the narrower alternative reintroduces the
+// `/etc/apt/sources.list.d/` false positive CPE-1916 fixed. If a path-qualified apt invocation is ever
+// added, this filter will miss it -- widen the shared regex in aptGetHardening.ts, not one copy.
 
 // stripShellComment()/logicalLines() now live in src/lib/shellScriptLines.ts (CPE-1908
 // round 2) so channelPurityCoverage.test.ts can reuse the exact same comment/continuation

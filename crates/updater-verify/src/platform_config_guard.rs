@@ -292,6 +292,82 @@ pub fn platform_config_override_message(dir: &Path, hits: &[PlatformConfigOverri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// CPE-1950 — the shared oracle for this guard's TypeScript twin,
+    /// `src/lib/sidecarBundleResources.test.ts`.
+    ///
+    /// The two copies used to be held together by the sentence "keep the two derivations in
+    /// lockstep" on the TS side: a provenance claim, untested by construction, sitting on the app's
+    /// updater root of trust. Both now run `src/lib/platformConfigGuard.cases.json` — this test and
+    /// that file's `the platform-config guard is DERIVED from its Rust twin` block — so a change on
+    /// one side that the other does not follow reds on the side that made it.
+    ///
+    /// **What this cannot catch: shared blindness.** Agreement is not correctness. A filename or
+    /// merge-patch shape neither implementation considered is absent from the case file, both sides
+    /// answer it the same wrong way, and this passes. Measured on PR #1060: a `<<` inside a quoted
+    /// string opened a phantom heredoc in both the TS and Rust shell scanners while their shared
+    /// case file agreed with itself. The leg that does NOT depend on anyone having thought of a case
+    /// is the TS side reading [`TAURI_PLATFORM_TOKENS`] out of this file at run time; the rest of the
+    /// cover is each side's own tests. If you touch either implementation, add the case to the
+    /// SHARED file, never to one side's own test.
+    ///
+    /// **Red-proofed, not assumed.** Requiring one extra segment in
+    /// [`is_auto_merged_platform_config_name`] (`segments.next().is_some() && segments.next().is_some()`,
+    /// which makes this side stop matching `Tauri.<t>.toml`) fails this test on shared case
+    /// `"TOML tail, ConfigFormat::Toml's exact spelling"`. Reverted.
+    fn shared_cases() -> serde_json::Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("src")
+            .join("lib")
+            .join("platformConfigGuard.cases.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        serde_json::from_str(&text).expect("platformConfigGuard.cases.json")
+    }
+
+    #[test]
+    fn both_implementations_agree_on_every_shared_case() {
+        let cases = shared_cases();
+
+        let names = cases["names"].as_array().expect("names array");
+        let refusals = cases["refusals"].as_array().expect("refusals array");
+        // CPE-1932: an empty or truncated fixture would let this guard agree with its twin
+        // vacuously. Both sides assert the same floor.
+        assert!(names.len() >= 20, "only {} shared name cases", names.len());
+        assert!(refusals.len() >= 18, "only {} shared refusal cases", refusals.len());
+
+        for case in names {
+            let label = case["name"].as_str().expect("case name");
+            let file_name = case["fileName"].as_str().expect("case fileName");
+            let expected = case["autoMerged"].as_bool().expect("case autoMerged");
+            assert_eq!(
+                is_auto_merged_platform_config_name(file_name),
+                expected,
+                "SECURITY (CPE-1903/CPE-1950): this guard disagrees with its TypeScript twin \
+                 (src/lib/sidecarBundleResources.test.ts) on shared case {label:?} \
+                 ({file_name:?}). One of the two now refuses a file Tauri auto-merges that the other \
+                 lets through. Fix the implementation, and put any new case in \
+                 src/lib/platformConfigGuard.cases.json rather than in one side's own test."
+            );
+        }
+
+        for case in refusals {
+            let label = case["name"].as_str().expect("case name");
+            let text = case["text"].as_str().expect("case text");
+            let expected = case["refused"].as_bool().expect("case refused");
+            // The oracle pins the DECISION, never the message: the two sides word their refusals
+            // differently on purpose (each names its own remediation path).
+            assert_eq!(
+                platform_config_updater_refusal(text).is_some(),
+                expected,
+                "SECURITY (CPE-1903/CPE-1950): this guard disagrees with its TypeScript twin on \
+                 shared refusal case {label:?}."
+            );
+        }
+    }
 
     /// Every filename `ConfigFormat::into_platform_file_name` can produce in tauri-utils 2.x: three
     /// formats x five `Target` variants. Written out ONLY as test data — the guard itself never sees

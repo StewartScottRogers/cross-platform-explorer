@@ -18,9 +18,17 @@
 
 /**
  * The canonical form of `p`: backslashes normalise to forward slashes and exactly one trailing
- * separator is stripped — but ONLY when `p` actually had one. Mirrors `Sidebar.svelte`'s pre-existing
- * local `norm()` (that idiom already existed for parent/child tree comparisons) — factored out here so
- * every path-keyed consumer in the app agrees with the sidebar's own notion of "the same folder".
+ * separator is stripped — but ONLY when `p` actually had one.
+ *
+ * **It does NOT agree with [`treePrefixPath`] (the sidebar's `norm`) everywhere, and must not.** This
+ * function's own docs used to claim it "mirrors `Sidebar.svelte`'s local `norm()` … so every
+ * path-keyed consumer agrees with the sidebar's notion of 'the same folder'", and that claim was
+ * false when it was written: `norm` strips trailing separators unconditionally, so `norm("/") === ""`
+ * and `norm("C:/") === "C:"`, while this function deliberately preserves both. The *code* on both
+ * sides is deliberate — see [`treePrefixPath`] for why the sidebar needs the root to collapse — but
+ * the claim of agreement was not. `paths.test.ts` now derives the real relationship from the two
+ * functions themselves (they agree on every non-root input and differ exactly at the roots), so the
+ * next divergence reds instead of sitting in a comment. CPE-1950.
  *
  * A bare Windows drive letter + colon ("C:", no separator at all) is left EXACTLY as given, never
  * rewritten into a root: it means something different to the OS than its root ("C:\"/"C:/") — the
@@ -48,4 +56,23 @@ export function canonicalPath(p: string): string {
 /** Whether `a` and `b` name the same folder once trailing-slash/separator spelling is ignored. */
 export function samePath(a: string, b: string): boolean {
   return canonicalPath(a) === canonicalPath(b);
+}
+
+/**
+ * The sidebar tree's normalisation: separators unified and EVERY trailing separator stripped,
+ * unconditionally — so `treePrefixPath("/") === ""` and `treePrefixPath("C:/") === "C:"`.
+ *
+ * This is the single definition of what was `Sidebar.svelte`'s local `norm` (CPE-1950 moved it here;
+ * it is the only caller today). It is NOT interchangeable with [`canonicalPath`], and the difference
+ * is load-bearing rather than an oversight: the sidebar's `isAncestorOrSelf` asks
+ * `b === a || b.startsWith(a + "/")`, and that idiom only works if the root normalises to the empty
+ * string. Fed `canonicalPath`'s `"/"` instead, the POSIX root would test `"/home".startsWith("//")`
+ * and no root would ever be an ancestor of anything — the tree would stop revealing.
+ *
+ * Use [`canonicalPath`] for IDENTITY (a key into a persisted store, a cache slot, a history entry);
+ * use this one only for the sidebar's prefix arithmetic. `paths.test.ts` pins both the agreement on
+ * every non-root input and the deliberate divergence at the roots.
+ */
+export function treePrefixPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "");
 }

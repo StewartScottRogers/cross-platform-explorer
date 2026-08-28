@@ -14,7 +14,11 @@
 //! Regenerate with:
 //!   cargo run -p cpe-server --example gen_vault_fixture
 //! then paste the printed base64 into `VAULT_FIXTURE_BASE64` in gui-smoke/wdio.conf.ts. The passphrase
-//! is `VAULT_FIXTURE_PASSPHRASE` there — keep both in sync with the constants below.
+//! is `VAULT_FIXTURE_PASSPHRASE` there. (CPE-1950 removed the "keep both in sync" instruction that used
+//! to sit here: the constants below are now compared against `wdio.conf.ts` by
+//! `src/lib/guiSmokeFixtureLiterals.test.ts` on every PR, so asking the reader to remember was both
+//! unbacked and redundant. The base64 blob itself is NOT derivable — regenerating it is a manual step,
+//! which is what this example exists for.)
 
 use std::io::Write;
 
@@ -22,7 +26,12 @@ use age::secrecy::SecretString;
 use base64::Engine;
 use cpe_server::vault_crypto::{pack_entries, EntryKind, TreeEntry, MAGIC, SCHEMA_VERSION};
 
-/// Must match `VAULT_FIXTURE_PASSPHRASE` in gui-smoke/wdio.conf.ts.
+/// Must match `VAULT_FIXTURE_PASSPHRASE` in gui-smoke/wdio.conf.ts — and, since CPE-1950, that is a
+/// *checked* fact rather than a note: `src/lib/guiSmokeFixtureLiterals.test.ts` reads this constant
+/// out of this file (comments stripped) and `VAULT_FIXTURE_PASSPHRASE` out of `wdio.conf.ts`, and
+/// compares them on every PR. Same for the first sealed entry's name below vs
+/// `VAULT_FIXTURE_INNER_NAME`. A Rust example cannot import a TypeScript module, so a text derivation
+/// is the honest form here; the alternative was leaving a "must match" claim nothing could falsify.
 const PASSPHRASE: &str = "open-sesame-1249";
 /// A deliberately-low scrypt log2(N): trivially cheap to decrypt (this is a throwaway fixture), well
 /// under the backend's accepted `MAX_WORK_FACTOR` of 22.
