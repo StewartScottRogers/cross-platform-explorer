@@ -271,19 +271,39 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      spellings of a real table — `let X`, **`export const X`** (what `docs.coverage.test.ts` and
      `invoke.guard.test.ts` both use), `readonly Case[]`, `X:Case[]`, a two-line annotation,
      `as Case[]`, `= KNOWN_GAPS.concat(…)` — were swept by nothing, declared held back nowhere, and
-     all **75/75 green**. The column-0 anchor that was documented as load-bearing bought nothing
-     (dropping it returns the identical 10 names; the regex literal cannot match itself either way,
-     because its own source text is `Case\[\]` and `const|` is not `const `) while being the only
-     reason `export const` was invisible. So: follow `RATCHET_SHAPED`
-     (`src/lib/ratchetBaselines.test.ts`), which already allows leading whitespace, `export`, and a
-     loose annotation — **and write down at the site which shapes the scan CANNOT see**
-     (`as Case[]`, a split-across-lines annotation, and a type alias all still escape any regex), then
-     **red-proof one of them**. This is the second instance in one night — #1091's derived taint set
+     all **75/75 green**. So: follow `RATCHET_SHAPED` (`src/lib/ratchetBaselines.test.ts`), which
+     already allows leading whitespace, `export`, and a loose annotation. Two spelling axes are easy
+     to miss because they are not the type: the **name charset** (`[A-Z][A-Z0-9_]*` hides
+     `FifthFamily`) and the **other canonical spelling of the same type** (`Array<Case>` for
+     `Case[]`) — and this repo has **no ESLint / Biome / Prettier config anywhere** to steer an author
+     to one of them.
+     **The BLIND-SPOT LIST IS A CLAIM OF THE SAME KIND, and it fails the same way (round 9).** Round 8
+     did the right thing — widened the scan and wrote down what it still missed — and then wrote that
+     remainder as a **closed count of three**: *"`as Case[]`, a split-across-lines annotation, and a
+     type alias all still escape any regex."* Three more real unregistered tables broke it in minutes
+     (`Array<Case>`, a non-SCREAMING name, `] satisfies Case[]`), and **two of the three "escape any
+     regex" shapes were one regex away**. So when you write down what a scan cannot see: say **"at
+     least these"**, never a number; **split it into *cannot be caught* and *not caught today***
+     (only the alias needed more than a regex — it needs the alias resolved); and **red-proof one of
+     them**. If you find yourself writing a count of blind spots, write "at least" instead.
+     **And do not name a backstop without checking it can fire.** Round 8 pointed at the `vm.Script`
+     oracle as covering "shapes nobody enumerated" — but that oracle iterates the very enumeration the
+     scan feeds, so a table invisible to the scan is absent from it too; all three sabotages left it at
+     75 passed. A backstop that structurally cannot fire is worse than none, because it reads as one.
+     **Re-measure a "this safeguard bought nothing" note in the file it SHIPS in.** Round 8 recorded
+     that the column-0 anchor bought nothing (dropping it returned the identical 10 names) — true of
+     round 7's file, and false of round 8's, because the same commit's red-proof sentence put a literal
+     `export const FOURTH_FAMILY: Case[] = [` into the docblock: 10 anchored, **11** unanchored (12 after
+     round 9's own prose). Harmless — it reds loudly rather than hiding anything — but stale the moment
+     it was written, because the commit that writes such a claim is often the commit that falsifies it.
+     This is the second instance in one night — #1091's derived taint set
      missed transitive assignment and inline substitutions, found the same way, by sabotage. A scan
-     with a stated blind spot is worth more than one advertised as closing the class. Related, and
-     also corrected: "a decoy inside a comment reds, which is the safe direction" is true only for a
-     bare `/*` block whose body starts at the margin — in ` * ` JSDoc and `//` lines a decoy is not
-     picked up at all.
+     with an OPEN stated blind spot is worth more than one advertised as closing the class. Related,
+     and also corrected: "a decoy inside a comment reds, which is the safe direction" is true only for
+     a bare `/*` block whose body starts at the margin — in ` * ` JSDoc and `//` lines a decoy is not
+     picked up at all. And a scan leg that spans LINES must read stripped code, not raw source: the
+     `as`/`satisfies` leg over raw text reaches back through the docblock quoting it and reports a
+     phantom table.
      **Also: a claim about how many families exist is measured over whatever found them.** Round 6
      called `DELETING_ON_VALID_JS` "the honest third category" while the same commit shipped the
      generator that produces two more (`of` before a `/=`, and `yield`/`await` as plain identifiers in

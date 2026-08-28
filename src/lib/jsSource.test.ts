@@ -456,6 +456,10 @@ const DELETING_ON_VALID_JS: Case[] = [
  * from an older worktree):
  *   node scripts/dev-harness/js-strip-sweep.mjs \
  *     --compare "$(git log -1 --format=%H --grep='CPE-1966 round 4' origin/main..HEAD)"
+ * That addressing resolves today and has two known edges, stated rather than designed around:
+ * `--grep` searches commit BODIES too and `-1` takes the NEWEST match, so a later commit whose body
+ * quotes "CPE-1966 round 4" would silently resolve to the wrong revision; and `origin/main..HEAD` is
+ * empty once this branch merges, so the range needs widening after that.
  * And re-take the 32 / 8 SPLIT with `--all`: a plain run caps its listing at 20 of the 40, so
  * without the flag the tool hands back the total and not the grouping this docblock quotes.
  *
@@ -615,45 +619,110 @@ describe("stripJsComments — the oracle that does not depend on anyone writing 
    * hand-written list catches "remembered the table, forgot the sweep" and misses "a family held back
    * from the enumeration", which is precisely the sentence the test is there to make true.
    *
-   * **A SCAN'S SCOPE IS ITSELF A CLAIM, and its default failure is that it covers the spelling the
-   * author happened to use (CPE-1966 round 8).** Round 7 replaced the hand list with
-   * `/^const ([A-Z][A-Z0-9_]*): Case\[\] = \[/gm` and called that "closing the class". Measured: it
-   * closes the class for exactly one spelling. Seven other spellings of a real `Case[]` table were
-   * each swept by nothing and declared held back nowhere, all **75/75 green** — `let X`,
-   * **`export const X`** (the spelling `docs.coverage.test.ts` and `invoke.guard.test.ts` both use for
-   * their own guarded tables), `readonly Case[]`, `X:Case[]` with no space, a type annotation broken
-   * across two lines, `= [...] as Case[]`, and `= KNOWN_GAPS.concat([...])`.
+   * **A SCAN'S SCOPE IS ITSELF A CLAIM — AND SO IS THE LIST OF WHAT IT MISSES (CPE-1966 rounds
+   * 8-9).** Round 7 replaced the hand list with `/^const ([A-Z][A-Z0-9_]*): Case\[\] = \[/gm` and
+   * called that "closing the class"; round 8 measured that it closed the class for exactly one
+   * spelling, widened it — and then wrote its own remainder as a *closed count of three*, which round
+   * 9 broke with three further real, unregistered tables. **A blind-spot list is a claim of the same
+   * kind as the claim it qualifies, and it fails the same way: it enumerates what the author thought
+   * of.** So the remainder below is written as "at least", and the number of blind spots is
+   * deliberately not stated.
    *
-   * The column-0 anchor bought nothing, which is worth stating because it read as the load-bearing
-   * safeguard: dropping `^`/`m` from round 7's regex returns the **identical 10 names**. The regex
-   * literal below cannot match itself either way — its own source text is `Case\[\]`, not `Case[]`,
-   * and `const|` is not `const `. So the anchor's only measured effect was to hide `export const` and
-   * every indented declaration. It is gone; the pattern below allows leading whitespace, `export`,
-   * `let`, `readonly`, and free spacing around the colon, following the repo's own precedent for this
-   * job (`RATCHET_SHAPED`, `src/lib/ratchetBaselines.test.ts`).
+   * Spellings MEASURED invisible and now covered. Each was a real `Case[]` table, swept by nothing
+   * and declared held back nowhere, and each ran **75/75 green** until it forced the widening:
+   *   - round 8 — `let X`, **`export const X`** (the spelling `docs.coverage.test.ts` and
+   *     `invoke.guard.test.ts` both use for their own guarded tables), `readonly Case[]`, `X:Case[]`
+   *     with no space, any indented declaration, and `= KNOWN_GAPS.concat([...])`.
+   *   - round 9 — **`Array<Case>` / `ReadonlyArray<Case>`**, the other canonical TS spelling of the
+   *     identical type, with **no ESLint / Biome / Prettier config anywhere in this repo** to steer an
+   *     author toward `Case[]`; a **non-SCREAMING name** (`FifthFamily`) — the name charset
+   *     `[A-Z][A-Z0-9_]*` was a second, unstated axis, invisible whatever the type spelling; a
+   *     **split annotation** (`const X:\n  Case[] = [`), which `\s` instead of `[ \t]` around the
+   *     colon kills for free; and **`= [ … ] as Case[]` / `satisfies Case[]`**.
    *
-   * **What this scan still CANNOT see** — stated rather than left as "closes the class":
-   *   - `const X = [...] as Case[];` — no type annotation to match on.
-   *   - an annotation split across lines (`const X:\n  Case[] = [`) — the pattern is single-line.
-   *   - an alias (`type Cases = Case[]; const X: Cases = [...]`) — the word `Case[]` never appears.
-   * Declare a table in one of those three shapes and it is invisible here. The backstop for that is
-   * not this scan: it is the `vm.Script` oracle below, which speaks for shapes nobody enumerated.
+   * The column-0 anchor, re-measured in the file it actually ships in. Round 8 recorded that it
+   * "bought nothing", because dropping `^`/`m` from round 7's regex returned the identical 10 names.
+   * True of round 7's file; **false of the file that sentence shipped in** — round 8's own red-proof
+   * paragraph below puts a literal `export const FOURTH_FAMILY: Case[] = [` into this docblock, so
+   * anchored gave 10 and anchor-dropped gave **11**. In THIS revision it is 10 against **12**: the
+   * prose decoy above plus a second one in a `//` line inside `declaredCaseTables` itself. The anchor
+   * is load-bearing against this file's own comments rather than idle, and it is kept. Dropping it
+   * would red loudly rather than hide anything (names in `declared` with no matching key in
+   * `tables`), so round 8's note was a stale rationale and not a hole — and the lesson generalises:
+   * re-measure a "this safeguard bought nothing" claim in the file it ships in, because the commit
+   * that writes the claim can be the commit that falsifies it.
+   * What the anchor did cost is gone: the pattern below allows leading whitespace,
+   * `export`, `let`/`var`, `readonly`, and free spacing, following the repo's own precedent for this
+   * job (`RATCHET_SHAPED`, `src/lib/ratchetBaselines.test.ts`). The patterns cannot match their own
+   * source either way — they are assembled from `String.raw` fragments, so the text on the page is
+   * `Case\[\]` and `(?:const|let|var)`, neither of which is a declaration.
+   *
+   * **What this scan still cannot see — AT LEAST these. The list is open.** Two kinds, kept apart
+   * because "not caught" and "cannot be caught" are different claims and round 8 merged them:
+   *   - GENUINELY BEYOND ONE REGEX PASS: an alias (`type Cases = Case[]; const X: Cases = [ … ]`), and
+   *     equivalently `interface Cases extends Array<Case> {}`. The word `Case` never appears at the
+   *     declaration, so seeing it needs the alias RESOLVED — a second pass over the file's type
+   *     declarations, or a type checker. This one really is not a regex away.
+   *   - MERELY NOT COVERED TODAY, each about one regex away: a table produced by a call rather than a
+   *     literal (`Object.values(X).flat()`, an un-annotated `[...A, ...B]`), a table declared in
+   *     another module and re-exported from here, a name assembled dynamically. Listed so that nobody
+   *     reads "not caught" as "impossible".
+   * Round 8's sentence "`as Case[]`, a split-across-lines annotation, and a type alias all still
+   * escape any regex" was false as written — two of those three were one regex away and are covered
+   * above — so it is deleted rather than softened.
+   *
+   * **AND THERE IS NO BACKSTOP BEHIND THIS SCAN.** Round 8 named one: "the `vm.Script` oracle below,
+   * which speaks for shapes nobody enumerated". That oracle iterates `all`. A table invisible to this
+   * scan is by construction absent from `tables` **and** from `all`, so the oracle never sees one of
+   * its cases. Measured on round 8's revision: each of the three sabotages it could not see left the
+   * suite at **75 passed** with that oracle running. Naming a backstop that cannot fire is worse
+   * than naming none, so the claim is withdrawn rather than repaired. This scan is the only thing
+   * between a declared-and-unmentioned table and a green run — which is why its scope gets widened
+   * instead of qualified.
    *
    * Round 7's other claim, corrected: "a decoy inside a comment WOULD be picked up" holds only for a
    * bare `/*` block whose body lines begin at the margin. In this file's two dominant comment styles —
    * ` * ` JSDoc continuation lines and `//` — a decoy is **not** picked up, then or now. Where a comment
    * decoy IS picked up it still reds in the safe direction (a name in `tables` that does not exist is a
-   * compile error), which is why this does not need the comment stripper this very file is testing.
+   * compile error), which is why the ANNOTATED leg does not need the comment stripper this file tests.
    *
-   * RED-PROOFED (CPE-1933 rule 3), not argued: inserting
+   * RED-PROOFED (CPE-1933 rule 3), not argued. Round 8: inserting
    * `export const FOURTH_FAMILY: Case[] = [ … ];` and mentioning it nowhere gives **75 passed** on
-   * round 7's pattern and **1 failed / 74 passed** on this one, naming FOURTH_FAMILY as declared but
-   * missing from `tables`.
+   * round 7's pattern and **1 failed / 74 passed** on round 8's, naming FOURTH_FAMILY as declared but
+   * missing from `tables`. Round 9 re-ran that shape and six more against the pattern below, each
+   * appended to the real file and each run through the real suite: `Array<Case>`, `FifthFamily`,
+   * `] satisfies Case[]`, `] as Case[]`, the split annotation and `ReadonlyArray<Case>` all give
+   * **1 failed / 74 passed**, naming the table. The seventh — the type alias — gives **75 passed**,
+   * still invisible, exactly as declared above rather than quietly omitted. The unmodified file
+   * returns the same 10 names as before the widening, with no self-match.
+   *
+   * Why the `as`/`satisfies` leg reads `stripJsComments(src)` and not `src` — measured, not a
+   * precaution. That leg spans lines, and with this docblock's own "`[ … ] satisfies Case[]`" left in
+   * place the same regex over RAW source reaches back to `const all = [` above and reports a phantom
+   * table named `all` — a permanent spurious red. It is CLAUDE.md rule 2 ("anchor on code, never on
+   * prose") pointing the other way: the scanner parses a COMMENT. Using the module under test as its
+   * own scanner input is circular, and bounded on purpose — the ANNOTATED leg still reads raw source,
+   * so a stripper regression can only remove the `as`/`satisfies` coverage this round added, never
+   * hide an annotated table, and the `>= 9` floor below catches wholesale destruction.
    */
   function declaredCaseTables(): string[] {
     const src = readFileSync(join(process.cwd(), "src/lib/jsSource.test.ts"), "utf8");
-    const decl = /^[ \t]*(?:export[ \t]+)?(?:const|let)[ \t]+([A-Z][A-Z0-9_]*)[ \t]*:[ \t]*(?:readonly[ \t]+)?Case\[\][ \t]*=/gm;
-    return [...src.matchAll(decl)].map((m) => m[1]).sort();
+    // Both canonical spellings of the identical type. No linter in this repo picks one for you.
+    const CASE_ARRAY = String.raw`(?:readonly\s+)?(?:Case\[\]|(?:Readonly)?Array<Case>)`;
+    // Any binding name, not just SCREAMING_CASE — the charset was a second, unstated blind spot.
+    const HEAD = String.raw`^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)`;
+    // `const X: Case[] = [` — `\s`, not `[ \t]`, around the colon, so a split annotation matches too.
+    const annotated = new RegExp(`${HEAD}\\s*:\\s*${CASE_ARRAY}\\s*=`, "gm");
+    // `const X = [ … ] as Case[]` / `… satisfies Case[]`. The gap is TEMPERED against the next
+    // declaration head so it cannot run past one table and pin the assertion on an earlier name.
+    const asserted = new RegExp(
+      `${HEAD}\\s*=(?:(?!^\\s*(?:export\\s+)?(?:const|let|var)\\s)[\\s\\S])*?\\]\\s*(?:as|satisfies)\\s+${CASE_ARRAY}`,
+      "gm",
+    );
+    const hits = (re: RegExp, text: string) => [...text.matchAll(re)].map((m) => m[1]);
+    // The `as`/`satisfies` leg spans lines, so it reads CODE, not prose — see the docblock's last
+    // paragraph for the phantom table it reports when pointed at raw source.
+    return [...new Set([...hits(annotated, src), ...hits(asserted, stripJsComments(src))])].sort();
   }
 
   it("every Case[] table declared in this file is either swept by the oracle or declared held back", () => {
@@ -672,8 +741,9 @@ describe("stripJsComments — the oracle that does not depend on anyone writing 
       Object.keys(tables).sort(),
       "a `Case[]` table is declared in this file but missing from `tables` — every table is either " +
         "swept by the oracle below or named as held back, and one that is in neither is invisible. " +
-        "(The scan covers `[export] const|let X[: readonly] Case[] =`; see `declaredCaseTables` for " +
-        "the three spellings it cannot see.)",
+        "(The scan covers `[export] const|let|var X[: readonly] Case[]|[Readonly]Array<Case> =` and " +
+        "`= [ … ] as|satisfies Case[]`. It is NOT exhaustive: see `declaredCaseTables` for what it " +
+        "still misses — at least an aliased annotation, and that list is open, not a count.)",
     ).toEqual(declared);
 
     const swept = Object.entries(tables).filter(([, t]) => t.every((c) => all.includes(c)));

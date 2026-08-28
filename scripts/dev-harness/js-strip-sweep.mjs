@@ -27,6 +27,11 @@
 // commit subject instead, which survives rebasing:
 //   node scripts/dev-harness/js-strip-sweep.mjs \
 //     --compare "$(git log -1 --format=%H --grep='CPE-1966 round 4' origin/main..HEAD)"
+// Two caveats on that addressing, stated rather than designed around. `--grep` searches commit
+// BODIES as well as subjects and `-1` takes the NEWEST match, so a later commit whose body quotes
+// "CPE-1966 round 4" would silently resolve to the wrong revision. And `origin/main..HEAD` is empty
+// once this branch merges — after that, widen the range (or drop it) or the command resolves to
+// nothing at all rather than to the wrong thing.
 //
 // `--compare` extracts the stripper from <git-ref> into a temp module and runs both head to head, so
 // a change can be scored as "N fixed, M regressed" instead of asserted to be an improvement. That
