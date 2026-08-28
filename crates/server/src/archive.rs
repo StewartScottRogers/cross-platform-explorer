@@ -659,6 +659,11 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 /// session root** (`e<seq>`, see [`session_root`]), which was created exclusively moments ago and which
 /// nothing else numbers into. A monotonic counter inside a private directory cannot collide with itself,
 /// so the namespace cannot exhaust; see [`temp_extract_target`].
+///
+/// **Process-global, and correctly so** — the `fetch_add` + exclusive `create_dir` walk in
+/// [`temp_extract_target_in`] is built for exactly that. What it is *not* is predictable: a test that
+/// reads this counter and then acts on the value it read is racing every sibling test that extracts
+/// anything, which is CPE-1927. Such a test takes its own namespace instead; see [`ExtractNamespace`].
 static EXTRACT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Refuse before creating a file at `dest` when a **link** already occupies that name (CPE-1733) — the
@@ -1478,8 +1483,9 @@ fn extraction_dest_error(dest: &Path, e: &std::io::Error) -> String {
 /// in a private directory cannot collide with itself, so **exhaustion is no longer reachable by
 /// accumulation**; every attempt after the first would have to lose a race with something that is
 /// deliberately squatting names inside our own session directory. The bound stays because that squatter
-/// (a same-user process, or our own `row1_a_squatted_temp_directory_is_stepped_over_not_written_into`
-/// test) must still end as a clear error rather than an infinite loop.
+/// (a same-user process; or, in its own private namespace, our own
+/// `row1_a_squatted_temp_directory_is_stepped_over_not_written_into` test) must still end as a clear
+/// error rather than an infinite loop.
 const TEMP_TARGET_ATTEMPTS: u64 = 1024;
 
 /// The shared root every extraction directory lives under, named once so the claim, the sweeper and the
@@ -2123,15 +2129,43 @@ fn remove_session_tree(session: &Path) {
 ///   up"*, and it was the truest sentence in the file: 1,394,403 leftover directories. What owns them
 ///   now, and why it cannot simply be a `Drop` guard, is on [`session_root`].
 fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
+    temp_extract_target_in(&session_root()?, &EXTRACT_SEQ, inner)
+}
+
+/// A caller-supplied extraction namespace: **the root to number inside, and the counter that hands out
+/// the numbers.** `None` means the process-global pair ([`session_root`] + [`EXTRACT_SEQ`]) — which is
+/// what production always passes, via [`temp_extract_target`].
+///
+/// It exists for one reason (CPE-1927), and the reason is *not* that the sharing is wrong. Both halves of
+/// the process-global pair are deliberately shared, and surviving that sharing is exactly what
+/// [`temp_extract_target_in`]'s atomic `fetch_add` + exclusive `create_dir` walk is for; the app runs
+/// concurrent extractions through it every day. The problem is one-sided: a **test** that stages the
+/// CWE-377 hazard has to predict which `e<seq>` name the extraction is about to claim, and a counter every
+/// sibling test is also moving cannot be predicted. Measured on this suite before this seam existed,
+/// `row1_a_squatted_temp_directory_is_stepped_over_not_written_into` silently lost names out of its
+/// squatted block in 2 of 7 full-suite runs and was raced clean past the block in 1 of 7 — drifting toward
+/// proving nothing, with a `skip_notice!` (a passing test) as its only signal.
+///
+/// Handing that one test a namespace of its own **removes** the sharing rather than serialising around it.
+/// A `HOME_ENV_LOCK`-style mutex would have been the other option and is worse here: it leaves the
+/// prediction in place (it only makes it likelier to hold), it puts an ordering requirement on every
+/// future test that extracts anything, and it would have hidden the coupling instead of deleting it.
+type ExtractNamespace<'a> = Option<(&'a Path, &'a std::sync::atomic::AtomicU64)>;
+
+/// [`temp_extract_target`]'s body with the namespace passed in explicitly — see [`ExtractNamespace`].
+fn temp_extract_target_in(
+    session: &Path,
+    seq_source: &std::sync::atomic::AtomicU64,
+    inner: &str,
+) -> Result<std::path::PathBuf, String> {
     let base = Path::new(inner)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .ok_or_else(|| "invalid entry name".to_string())?;
-    let session = session_root()?;
     for _ in 0..TEMP_TARGET_ATTEMPTS {
         // Per-extraction unique subdir (monotonic seq inside this session's private root) so the basename
         // is preserved for the opened file while concurrent extractions can never collide (CPE-1195).
-        let seq = EXTRACT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = seq_source.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = session.join(format!("e{seq}"));
         match fs::create_dir(&dir) {
             // Exclusive: this returning `Ok` is the whole basis for rows 2–5 being unguarded.
@@ -2145,7 +2179,7 @@ fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
             // extracted nothing for `SESSION_TTL`), or a user emptied `%TEMP%`. Re-create it and carry
             // on rather than failing an extraction over a cleanup decision made elsewhere.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let _ = fs::create_dir_all(&session);
+                let _ = fs::create_dir_all(session);
                 continue;
             }
             Err(e) => return Err(e.to_string()),
@@ -2161,6 +2195,15 @@ fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
 /// Extract a single entry of a zip to a temp file and return its path (CPE-242). Read-only: the temp
 /// copy is what opens, not the archived bytes.
 pub fn extract_archive_entry(zip: &str, inner: &str) -> Result<String, String> {
+    extract_archive_entry_in(zip, inner, None)
+}
+
+/// [`extract_archive_entry`]'s body with the extraction namespace passed in — see [`ExtractNamespace`]
+/// for why the seam exists (CPE-1927). The public function above is a one-line dispatcher into this, so
+/// a test driving it with its own root and counter is exercising the production path byte for byte,
+/// `File::create` and all: that is the whole point, because the bug row 1 guards is a write that lands
+/// somewhere else entirely and still returns `Ok`.
+fn extract_archive_entry_in(zip: &str, inner: &str, ns: ExtractNamespace<'_>) -> Result<String, String> {
     let file = fs::File::open(zip).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     // The frontend uses "/"; some zips store "\" — try the given name then the backslash variant.
@@ -2174,7 +2217,10 @@ pub fn extract_archive_entry(zip: &str, inner: &str) -> Result<String, String> {
     // Row 2 of the CPE-1733 table: unguarded on purpose — `temp_extract_target` is a fresh, per-call,
     // app-owned directory, and the leaf is `file_name()` of the entry, so no user and no archive can have
     // placed a link at this path.
-    let out = temp_extract_target(inner)?;
+    let out = match ns {
+        Some((session, seq_source)) => temp_extract_target_in(session, seq_source, inner)?,
+        None => temp_extract_target(inner)?,
+    };
     let mut w = fs::File::create(&out).map_err(|e| e.to_string())?;
     std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
     Ok(out.to_string_lossy().to_string())
@@ -5226,38 +5272,57 @@ mod tests {
     ///
     /// This drives `temp_extract_target` through the real public API (`extract_archive_entry`).
     ///
-    /// # Why it squats a BLOCK of names rather than the next one (PR #906 review, round 4)
+    /// # Why it squats a PRIVATE namespace rather than predicting a shared counter (CPE-1927)
     ///
-    /// The first version read `EXTRACT_SEQ`, squatted that single name, and its doc claimed that a
-    /// concurrent test consuming the number first would make the leg "announce rather than pass quietly".
-    /// **There was no announce mechanism**, and `EXTRACT_SEQ` is shared with every sibling test that
-    /// extracts anything, which cargo runs in parallel — so when the squat was missed, the
-    /// `!landed.starts_with(&squat)` assertion was trivially true and the test passed in silence. With
-    /// row 1's guard fully removed the review measured **two of three runs green**: a confident,
-    /// unmeasured claim about coverage, shipped inside the ticket about confident unmeasured claims.
+    /// Two earlier versions both tried to predict which `e<seq>` name the extraction would claim, out of
+    /// a counter (`EXTRACT_SEQ`) and a root (`SESSION_ROOT`) that **every sibling test that extracts
+    /// anything shares**, and which cargo runs in parallel inside one process.
     ///
-    /// The fix is to stop predicting one number and instead **occupy a contiguous block wider than any
-    /// plausible parallel width** (`SQUAT_BLOCK`, far under `TEMP_TARGET_ATTEMPTS`), plant the link in
-    /// every directory the test actually created, and then check *where the extraction landed*:
+    /// - **v1** read the counter and squatted that one name. Its doc claimed a sibling consuming the
+    ///   number first would make the leg "announce rather than pass quietly"; **there was no announce
+    ///   mechanism**, so when the squat was missed the assertion was trivially true and the test passed in
+    ///   silence. With row 1's guard fully removed, PR #906's review measured **two of three runs green**.
+    /// - **v2** squatted a 64-wide contiguous block and retried five times, which narrowed the window but
+    ///   kept the prediction. Measured on this suite (WSL, 32 cores, cargo's default parallelism): the
+    ///   block **silently lost names to a sibling in 2 of 7 full-suite runs** — one run planted only 62 of
+    ///   64 links — and in 1 of 7 the extraction was raced 20 names clean past the block, burning an
+    ///   attempt. Five such attempts in a row end in `skip_notice!`, which is a **passing** test. Under
+    ///   `--test-threads=1` the same run is bit-identical 25 times out of 25 (`start=37 end=101
+    ///   landed=101 ours=64`), which is what "shared mutable fixture" looks like from the outside: green
+    ///   either way, and only one of the two greens means anything.
     ///
-    /// - **Inside the block ⇒ FAIL.** Either it wrote through a planted link (the victim assertion fires,
-    ///   naming the damage) or it claimed a squatted name we did not plant in (the sequence assertion
-    ///   fires). Both are `create_dir_all`'s behaviour and neither is reachable with `create_dir`.
-    /// - **Exactly at the end of the block ⇒ PASS, walk proven.** It started inside and stepped over every
-    ///   occupied name.
-    /// - **Beyond the end ⇒ nothing was proven** (a sibling burned the counter past the block, or a
-    ///   recycled PID left directories there). The leg **retries**, and only if every attempt is raced out
-    ///   does it `skip_notice!` — which is a real announce, unlike the sentence this replaces.
+    /// So this version **stops predicting**. It builds its own root and its own `AtomicU64` and drives
+    /// the production path through [`ExtractNamespace`] — nothing else can number into either, so the
+    /// squat is exact, `create_dir` on every one of the 64 names must succeed, every link is planted, and
+    /// the extraction must land at **exactly** `e{SQUAT_BLOCK}`. The retry loop, the `ours` bookkeeping
+    /// and the `skip_notice!` are all gone, and the sequence assertion tightened from `>=` to `==`: this
+    /// test can no longer pass by being lucky, because there is nothing left to be lucky about.
     ///
-    /// The victim assertion runs on every attempt regardless, before the `Result` is unwrapped, because
-    /// the bug being guarded returns an ordinary-looking `Ok(path)` while destroying a file elsewhere.
+    /// The victim assertion still runs before the `Result` is unwrapped, because the bug being guarded
+    /// returns an ordinary-looking `Ok(path)` while destroying a file elsewhere.
+    ///
+    /// **What the private namespace does not prove, and what closes it:** that the hazard is staged at the
+    /// address production actually numbers into. The last leg extracts once through the *real*
+    /// `extract_archive_entry` and asserts the directory it gets is an `e…` child of `session_root()` —
+    /// a race-free check, since it predicts no number.
+    ///
+    /// # Red-proof (CPE-1927), and the suite delta
+    ///
+    /// Two sabotages, each run 30× under cargo's default parallelism:
+    ///
+    /// - `create_dir` → `create_dir_all` in [`temp_extract_target_in`] — the actual CWE-377/CWE-59 bug
+    ///   this row guards: **30/30 red**, on `e0`, with the victim assertion naming the damage. The
+    ///   equivalent sabotage against the v1 test was measured green in 2 of 3 runs.
+    /// - the injected namespace ignored (fall back to the process globals): **30/30 red** on the landing
+    ///   assertion. So the isolation is load-bearing, not decoration.
+    ///
+    /// The suite is otherwise **unchanged** — same test count before and after, one test in, one test out;
+    /// what changed is that the test's outcome no longer depends on which sibling ran first.
     #[test]
     fn row1_a_squatted_temp_directory_is_stepped_over_not_written_into() {
-        /// Wider than any plausible parallel test width, and far under `TEMP_TARGET_ATTEMPTS` (1024) so a
-        /// walked-over block never turns into the "could not claim" error.
+        /// The squatted run of names. Far under `TEMP_TARGET_ATTEMPTS` (1024) so a walked-over block
+        /// never turns into the "could not claim" error.
         const SQUAT_BLOCK: u64 = 64;
-        /// Attempts to get a measurement no sibling raced out of.
-        const STAGE_ATTEMPTS: usize = 5;
 
         let d = scratch("cpe1733_row1_squat");
         let src = d.join("a.txt");
@@ -5279,73 +5344,67 @@ mod tests {
             return;
         }
 
-        // CPE-1786 moved the numbered directories from the shared root into this process's own session
-        // root, so the squat has to move with them or it would stage the hazard somewhere the extraction
-        // no longer looks — a test that could only ever pass. The hazard itself is unchanged (a same-user
-        // process, or this test, pre-creating the name the extraction is about to claim); only its
-        // address moved.
-        let root = session_root().unwrap();
-        for _ in 0..STAGE_ATTEMPTS {
-            let start = EXTRACT_SEQ.load(std::sync::atomic::Ordering::Relaxed);
-            let end = start + SQUAT_BLOCK;
-            // Claim what we can of [start, end). A name we could NOT create is a leftover or a live
-            // sibling — also occupied, so it is walked over too; we simply cannot plant a link in it.
-            let mut ours: Vec<std::path::PathBuf> = Vec::new();
-            for seq in start..end {
-                let dir = root.join(format!("e{seq}"));
-                if fs::create_dir(&dir).is_ok() {
-                    // The leaf name is archive-controlled: an attacker supplying the archive knows it.
-                    stage_live_link(&victim, &dir.join("a.txt"));
-                    ours.push(dir);
-                }
-            }
+        // This test's own extraction namespace: a root nothing else numbers into, and a counter nothing
+        // else moves (CPE-1927). The hazard is unchanged — a same-user process, or this test, pre-creating
+        // the name the extraction is about to claim — but it is now staged against a fixture this test
+        // owns outright, so every step below is deterministic rather than probable.
+        let root = d.join("session");
+        fs::create_dir(&root).unwrap();
+        let seq = std::sync::atomic::AtomicU64::new(0);
 
-            let outcome = extract_archive_entry(&zip.to_string_lossy(), "a.txt");
-
-            assert_eq!(
-                fs::read(&victim).unwrap(),
-                b"VICTIM ORIGINAL".to_vec(),
-                "row 1: the extraction wrote through a link planted in a SQUATTED temp directory — \
-                 `create_dir_all` accepts a directory it did not create, so the leaf was never ours \
-                 (outcome was {outcome:?})"
-            );
-            let landed =
-                outcome.expect("row 1: a squatted name must be stepped over, not fail the extraction");
-            let landed_dir = Path::new(&landed).parent().unwrap().to_path_buf();
-            let landed_seq: u64 = landed_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_prefix('e'))
-                .and_then(|n| n.parse().ok())
-                .unwrap_or_else(|| panic!("row 1: unrecognised extraction directory name {landed_dir:?}"));
-
+        for n in 0..SQUAT_BLOCK {
+            let dir = root.join(format!("e{n}"));
+            // `unwrap`, not `if is_ok()`: in a private root a name we cannot create is a bug in this
+            // fixture, and the version this replaces shrugged that off and silently squatted less.
+            fs::create_dir(&dir).unwrap();
+            // The leaf name is archive-controlled: an attacker supplying the archive knows it.
             assert!(
-                landed_seq >= end,
-                "row 1: the extraction claimed e{landed_seq}, INSIDE the squatted block \
-                 [{start}, {end}) — every one of those names was already taken, so exclusive creation \
-                 must have stepped over all of them. Claiming a directory it did not create is what makes \
-                 rows 2–5's leaf reachable by a pre-planted link (landed {landed})"
+                stage_live_link(&victim, &dir.join("a.txt")),
+                "row 1: the probe above proved this machine can create file symlinks, so failing to plant \
+                 one now means the block is only partly armed — which is how this test used to pass \
+                 without covering anything"
             );
-
-            let proven = landed_seq == end;
-            assert_eq!(fs::read(&landed).unwrap(), b"ARCHIVED A".to_vec(), "row 1: and it must still extract");
-            for dir in &ours {
-                let _ = fs::remove_dir_all(dir);
-            }
-            let _ = fs::remove_dir_all(&landed_dir);
-            if proven {
-                let _ = fs::remove_dir_all(&d);
-                return;
-            }
-            // Landed past the block: a sibling consumed the counter, or a recycled PID left directories
-            // beyond it. Nothing about the walk was demonstrated, so measure again rather than pass.
         }
 
-        crate::skip_notice!(
-            "[CPE-1733] SKIPPED row 1's squat leg: after {STAGE_ATTEMPTS} attempts the extraction always \
-             started past the squatted block, so stepping-over was never exercised. This is the announce \
-             the earlier version of this test claimed to have and did not."
+        let outcome = extract_archive_entry_in(&zip.to_string_lossy(), "a.txt", Some((&root, &seq)));
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"VICTIM ORIGINAL".to_vec(),
+            "row 1: the extraction wrote through a link planted in a SQUATTED temp directory — \
+             `create_dir_all` accepts a directory it did not create, so the leaf was never ours \
+             (outcome was {outcome:?})"
         );
+        let landed = outcome.expect("row 1: a squatted name must be stepped over, not fail the extraction");
+        let landed_dir = Path::new(&landed).parent().unwrap().to_path_buf();
+
+        assert_eq!(
+            landed_dir,
+            root.join(format!("e{SQUAT_BLOCK}")),
+            "row 1: the extraction had to start at e0, find all {SQUAT_BLOCK} squatted names occupied and \
+             step over every one of them, landing exactly at e{SQUAT_BLOCK}. Anything inside the block \
+             means it claimed a directory it did not create — which is what makes rows 2–5's leaf \
+             reachable by a pre-planted link — and anything past it means the walk skipped a name it \
+             should have tried (landed {landed})"
+        );
+        assert_eq!(fs::read(&landed).unwrap(), b"ARCHIVED A".to_vec(), "row 1: and it must still extract");
+
+        // The private namespace above proves the *walk*; this proves the walk happens where the hazard
+        // can actually be staged — an `e<seq>` child of this process's session root. It predicts no
+        // number, so it cannot be raced by a sibling extraction.
+        let live = extract_archive_entry(&zip.to_string_lossy(), "a.txt").unwrap();
+        let live_dir = Path::new(&live).parent().unwrap().to_path_buf();
+        assert_eq!(
+            live_dir.parent().unwrap(),
+            session_root().unwrap(),
+            "row 1: production must number inside this process's session root, or the squat above is \
+             staged at an address the real extraction never looks at — a test that could only ever pass"
+        );
+        assert!(
+            live_dir.file_name().unwrap().to_string_lossy().starts_with('e'),
+            "row 1: and it must use the `e<seq>` names the squat imitates, not some other shape — {live_dir:?}"
+        );
+        let _ = fs::remove_dir_all(&live_dir);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -5365,6 +5424,18 @@ mod tests {
     /// halves are asserted, because dropping either would be a regression in opposite directions:
     /// collapsing the per-extraction directories would bring back the CPE-1195 same-name race, and
     /// putting them back under the shared root would bring back the leak.
+    ///
+    /// # Why this one keeps the live globals (CPE-1927)
+    ///
+    /// CPE-1927 named this test alongside `row1_…` as sharing `EXTRACT_SEQ` and `SESSION_ROOT` with every
+    /// parallel sibling, and the two answers are opposite on purpose. Row 1 was **predicting** a value out
+    /// of the counter, which a sibling can invalidate; this test predicts nothing. Its two claims survive
+    /// any interleaving by construction: `dirs.len() == N` because `fetch_add` hands out each number once,
+    /// so N extractions get N distinct names no matter who else is drawing from it, and `parents.len() ==
+    /// 1` because `SESSION_ROOT` is a `OnceLock` — a sibling can only ever observe the same root this
+    /// test does. Handing it a private namespace would make it **vacuous**: "all extractions share one
+    /// session root" is a claim about the process-global root, so measuring it anywhere else measures
+    /// nothing. It stays on the live globals, and that is the fix, not an omission from it.
     #[test]
     fn cpe_1786_many_extractions_add_one_directory_to_the_shared_root() {
         const N: usize = 25;

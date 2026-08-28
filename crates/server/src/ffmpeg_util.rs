@@ -252,13 +252,38 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// **The one other test in this crate that writes a process-global a sibling can read** — found by
+    /// CPE-1927's sweep for `archive.rs`'s `EXTRACT_SEQ`/`SESSION_ROOT` shape, and kept here rather than
+    /// isolated, for the same reason `cpe_1786_many_extractions_add_one_directory_to_the_shared_root`
+    /// keeps its globals: the `OnceLock` **is** the subject. Testing it against a local `OnceLock` would
+    /// assert `OnceLock`'s own contract, not this seam's.
+    ///
+    /// What the sweep did change is that its assertion is no longer vacuous. It used to say *"doesn't
+    /// panic and doesn't change already-set state … nothing else to assert"* and then assert nothing at
+    /// all — the same "guard that proves nothing" shape CPE-1927 exists to remove, in a test whose whole
+    /// subject is a state change. It now reads the state back.
+    ///
+    /// It is also **order-dependent by nature and safe anyway**: nothing else in the crate calls
+    /// `set_native_dep_dir`, so this test is the only writer, but it cannot assume it won a race it does
+    /// not control — hence the assertion is "the second call did not move it", against whatever the first
+    /// observation was, rather than against `d`. The value it may leak into the global is harmless:
+    /// `resolve_ffmpeg_bin` only *prefers* that directory when a real `ffmpeg` binary exists inside it,
+    /// and this one is an empty scratch dir that is removed on the next line.
     #[test]
     fn set_native_dep_dir_is_a_silent_no_op_on_a_second_call() {
         let d = scratch("native-dep");
         set_native_dep_dir(d.to_path_buf());
+        let after_first = NATIVE_DEP_DIR.get().cloned();
+        assert!(after_first.is_some(), "a first call must set the injected dir");
+
         set_native_dep_dir(Path::new("Z:/somewhere/else").to_path_buf());
-        // Doesn't panic and doesn't change already-set state (OnceLock semantics); nothing else to
-        // assert without a bundled binary present.
+        assert_eq!(
+            NATIVE_DEP_DIR.get().cloned(),
+            after_first,
+            "a second call must be a silent no-op — `OnceLock::set` returns Err and the first value \
+             stands. An app adapter that called this twice must not be able to redirect where the \
+             bundled ffmpeg is looked for"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 }
