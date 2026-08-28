@@ -3906,3 +3906,46 @@ with a synthetic workflow rather than reading the regex. The regex looks right �
 correctly does *not* match `pull_request_target`, which is exactly what a careful author would check for.
 **The bug is that the correct non-match routes to the wrong bucket**, and no amount of reading the pattern
 shows that; only running a workflow through it does.
+
+## 2026-08-28 — extracting a shared helper moves the surviving mutant, it does not remove it
+
+#1091 round 4 had a green sabotage: disable a scanner predicate, delete a live sanitiser, everything
+passes. Round 5 fixed it the right way — extracted the predicate into one `flagPrintf` called by both the
+real scan and the synthetic driver — and the sabotage now reds.
+
+Its reviewer then ran the sabotage **one level out**, on the loop that *consumes* the predicate:
+`if (false && substitution)` plus the same sanitiser deletion → **23 passed, 0 failed.** Green again.
+
+**Round 5 moved the surviving mutant from the predicate to its caller.** That is not a failed fix — the
+predicate really is covered now — but it is the thing to expect: **the untested boundary is wherever the
+shared code stops, and extracting code moves that line rather than erasing it.** The same move one level
+out closes it (extract the consuming loop, drive *that* from the synthetic test), and the next boundary
+after that is the assertion itself, which is where it should end.
+
+**Paired with a second instance of the same shape in the same diff:** round 5 widened one assignment
+regex to handle two names on one line, and left the sibling regex — the one for `read`/`printf -v`/
+`mapfile` targets — capturing only the first. **Same defect, same diff, one fixed and one not**, with a
+comment above the sibling saying its targets are tainted *"UNCONDITIONALLY"*, which is what turns a
+latent gap into a false claim.
+
+**So: when you fix a class, grep for the siblings before writing the sentence that says the class is
+closed.** And when you extract a helper to close a mutant, **re-run the sabotage at the new boundary in
+the same round** — it is thirty seconds and it tells you whether you finished or relocated.
+
+## 2026-08-28 — three recorded measurements, none of them what the tool prints
+
+The same review found three numbers-at-the-site that do not survive re-running:
+
+- An assertion message quoted as `expected [false,false,false,false] to deeply equal [false,true,false,true]`.
+  The real set is **six** entries and vitest prints `[ false, false, false, false, …(2) ] to deeply equal
+  [ Array(6) ]`. **The transcription dropped the ellipsis and invented the expected side.**
+- *"Four shapes the round-4 pass walked straight through"* — under a faithful revert, **all six** red.
+  The round understated its own result.
+- *"A new line that transforms `$assets` is picked up automatically"* — the slice filter drops **by
+  spelling** (`includes("$(")`), not by fetch-versus-transform, so a transformation written as a command
+  substitution is invisible to the probe. Demonstrated with a live fail-open the block stays green on.
+
+**None of the three is a defect in the code; all three are the write-up.** One overstates coverage, one
+understates the work done, and one fabricates a string. **The fix for all three is the same and it is
+mechanical: paste what the runner prints.** A remembered assertion message is a summary, and a summary of
+an error message is exactly the artefact nobody re-checks — it looks like evidence and is prose.
