@@ -91,3 +91,34 @@ Related: **CPE-1948** (the doc guard, PR #1081 — where this was found), **CPE-
 undeclared raise), **CPE-1934** (the ratchet-guard job this bypassed), **CPE-1906** (PR #1078,
 `ci-poll.mjs`'s verdict vocabulary), **CPE-1956** (PR #1074, where `main`-unprotected was first
 measured).
+
+## Evidence sharpened 2026-08-27 — confirmed independently, and there is a better instrument
+
+PR #1081's Reviewer re-checked all three timestamps via `gh api` and confirmed them exactly:
+run **33093506408** created `16:29:53Z`, `ratchet-guard` landed at `17:42:59Z` (commit `47cb1240`,
+PR #1052), #1056 merged `18:36:20Z`.
+
+**Two precision corrections to the summary above:**
+
+- *"last CI run was 16:29Z"* is the **created-at**. That run **finished at 18:35:13Z** — one minute
+  before the merge. So the merge was not made on an obviously-ancient run; it was made on a run that
+  had just completed, which is exactly why nobody noticed. **A recency check on the run's finish time
+  would not have caught this.**
+- The **GUI smoke** workflow *was* re-run at `17:47:13Z` (attempt 2, after the guard landed). That did
+  not help, because `ratchet-guard` lives in **`ci.yml`** — a partial re-run re-judges only the
+  workflow you re-ran.
+
+**A stronger instrument than timestamps, and the one to build the fix on:** `ratchet-guard` does not
+appear in that run's job list at all (14 jobs, none of them it), and **`ratchet-guard` is absent from
+`ci.yml` at #1056's head SHA `1b5c6651` — grep count 0.** So it *could not* have judged that PR. That
+is a definite answer where a timestamp comparison is only an inference.
+
+Generalised: **ask whether the guard's job name appears in the PR's own rollup**, and whether the
+guard's definition exists at the PR's head SHA. Both are one API call or one `git cat-file` and neither
+depends on clock reasoning.
+
+**The same instrument settled a live question this shift.** Four open PRs showed a `GUI smoke shard 2`
+red after CPE-1960's fix merged, which would have meant the fix did not work. `git cat-file -e
+<head-sha>:gui-smoke/lib/scrollIntoView.ts` returned **not-found on all four branches and found on
+`main`** — so the branches simply predate the fix, decisively, in one command. Reading four job logs
+would have suggested the same thing without proving it.
