@@ -3176,3 +3176,34 @@ the fallback for when you cannot.
 And one small thing worth stealing: `waitForPortFree` **returns a boolean** so that *"did not settle"*
 cannot be read as *"settled"*. A timeout that returns nothing is the same fail-open family this shift has
 found ten times; a timeout that returns `false` makes the caller decide in the open.
+
+## 2026-08-28 — the universal in the test name, the list in the test body
+
+#1091 round 2 closed a log-injection hole by sanitising every place a remote-controlled string reaches
+the Actions log. Its header enumerates three: the API body on two exits, curl's and jq's stderr, and the
+release tag on the permissive exit-0 path. The test block that covers them is titled **"nothing fetched
+can become a workflow command in the job log"** — and it is backed by exactly those three.
+
+There is a fourth. The exit-10 path prints `$tag` raw. Same variable, same source, same forged API
+response, sanitised eleven lines earlier on a different exit. **And it is the worst of the four to
+miss**: exit 10 is a *failure*, and `::stop-commands::` injected there silences annotations for the rest
+of a job whose entire purpose is being loud when it does not publish.
+
+**The title is a universal and the body is a list, and the gap between them is where the fourth site
+lived.** That is the same defect this shift has now found in a gap list, a red-proof, a quantifier over
+JavaScript, a sweep over generated inputs, and a fixture — five different costumes, one shape: *a claim
+about all of something, evidenced over the instances somebody wrote down, with a green run underneath
+making it read as proved.*
+
+**What makes this instance the most useful of the five is that the fix is structural and cheap.** The
+test should range over the exit codes the script can produce, not over three chosen paths. The script
+already knows its own exits — they are a closed set, each with a distinct code the suite already asserts
+on. **When a test claims "nothing X", find the enumerable thing the claim ranges over and iterate it.**
+If nothing enumerable exists, the claim has to shrink to the list. Here one did exist, and nobody looked
+for it.
+
+Worth noting how the reviewer found it: not by reading the enumeration, but by **stubbing only `gh` and
+letting the real curl hit the real URL** — which 404s today because of the outage this very ticket is
+about. The attacker capability required turned out to be *less* than the mitigations already assume. A
+test environment that is realistic in one more dimension than the author's found a site the author's
+list had no reason to contain.
