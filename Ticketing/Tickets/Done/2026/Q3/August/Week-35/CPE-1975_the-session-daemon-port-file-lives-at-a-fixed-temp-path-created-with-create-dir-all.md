@@ -3,7 +3,7 @@ id: CPE-1975
 title: the session-daemon **port file** lives at a **fixed** `<temp>/cpe-ai-console/` path created with `create_dir_all` — redirect it and the console talks to the attacker's "daemon"
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-28
@@ -603,3 +603,140 @@ The stated blind spot the Reviewer judged honest is kept exactly as it was.
   the split).
 - No production behaviour changed this round: the two refusals, the reaper's delete primitive and the
   ungated stderr report are byte-identical to round 3.
+
+## Closing record — merged as PR #1097 (`e343acc4`), 2026-08-28
+
+### The most valuable finding is that the headline attack is NOT reachable
+
+The ticket was filed on the premise that the session-daemon's **port file** is a control channel: redirect
+the fixed `<temp>/cpe-ai-console/` directory and the console connects to the attacker's "daemon".
+
+**That is not reachable today.** `discover_or_spawn` is the port file's only reader and only writer and has
+**zero callers** anywhere — verified by sweeping the whole tree, and confirmed by the production path:
+`ensure_session_daemon` spawns the child with `stdout(Stdio::piped())`, reads `PORT <n>` off its own pipe,
+and injects `CPE_AICONSOLE_SESSION_DAEMON_ADDR`, which the console feeds to `SessionDaemonHandle::external`.
+Corroborated on disk: this machine's `cpe-ai-console` directory (last write 2026-08-20) holds only the diag
+log — **no port file has ever been written.**
+
+So the ticket's priority came down, and what shipped is the exposure that **is** live: a **write** primitive
+(the trace log landing inside an attacker's directory) and a **delete** primitive (the reaper unlinking
+inside one). Both measured, both closed. *No consequence was manufactured to justify the ticket.*
+
+**The second-order answer, named at the site rather than built:** `daemon_answers()` is a **liveness probe,
+not authentication** — `TcpStream::connect`, write `{"op":"list"}`, accept any nonzero read. **Any loopback
+listener passes it.** So hardening the directory would not be sufficient once CPE-309 S4 wires a real
+reattach; a defence on a path with no callers cannot be exercised, so it is recorded for that day.
+
+### Reproduced first, both platforms, asserting on the filesystem
+
+**Windows** (junction, no admin): `create_dir_all` succeeded onto the plant, **both** `session-diag.log` and
+`session-daemon.port` landed in the attacker's directory, and `exists()`/`remove_file` deleted through it.
+**Linux on real ext4** (`TMPDIR` moved off WSL's tmpfs, `df -T` confirmed): `mkdir -p` exit 0, same escape,
+while bare `mkdir(2)` returned **EEXIST** and `lstat` reported the plant as a symlink. The Unix half went
+through the **syscalls, not Rust's `std`** (no C linker, no passwordless sudo in the local distro), so that
+is marked **unmeasured** and left to CI's 3-OS job.
+
+### The fix
+
+One primitive for all three sites: **`create_dir`**, then `symlink_metadata().is_dir()` on `AlreadyExists`,
+plus a leaf-link refusal, and **no `exists()` pre-check** (that would be a shadowed guard — CPE-1964 refused
+it explicitly for the same reason). CPE-1964's *pure* exclusive create does **not** transfer: a rendezvous
+must tolerate already existing, so `AlreadyExists` cannot be terminal.
+
+The residual TOCTOU that re-opens between `create_dir` and the `symlink_metadata` is **stated rather than
+implied** at the module header, with the handle-based fix named — the subsequent open does trust the
+verdict, and the code says so instead of claiming the window is closed.
+
+### Controls, and the sabotage numbers
+
+9 ordinary `#[test]`s across both crates, all three OSes, **none `#[ignore]`d**, opening with the attack
+**succeeding**, planting at the **real** `temp_dir()`, and **panicking** when a link cannot be planted —
+because PR #1075 twice lost a control that went green because it could not plant its link, **invisibly**.
+ADR 0001 puts `skip_notice!` out of a sidecar's reach, so the one leg that legitimately cannot stage writes
+to the real stderr handle with `writeln!`; the Reviewer confirmed **the "NOT VERIFIED" notice appeared in
+none of its runs**, so that leg genuinely ran.
+
+**Eight CPE-1929 sabotage runs, numbers at every site, all eight RED, each pair redding a different test**
+— so the expected shadowing **did not occur**. All Windows-only, and **said so at each site**, which matters
+because this shift found a pair that was **split across platforms**.
+
+### Four rounds of review, and every finding was about a sentence
+
+**Round 1 → 2.** *"The duplication is forced: ADR 0001's one-way rule means the host may not depend on a
+sidecar crate, and CI fails the build if it tries."* **False.** The ADR rule and its CI guard are about the
+**opposite direction** — a sidecar depending on the *app* — and the guard's grep would not have matched the
+edge in question. **CI would have passed. The experiment was never run**, and a green test sat beside the
+claim vouching only for two string literals being equal.
+
+And it mattered: both crates already depend on `sidecar-contract`, so the constants simply **moved there** —
+no new dependency edge, **no manifest and no lockfile touched at all**, one copy instead of two. *A false
+claim had been holding a removable duplication in place.*
+
+**Round 2 → 3.** *"The error is now propagated rather than dropped."* Both halves false: the function was
+**already** `io::Result` before the diff, and its sole caller still read `let _ = …`. The error had moved
+one frame up and was **still swallowed**.
+
+**Round 3 → 4.** The fix routed the report through `session_diag::trace` — which opens `if !enabled() {
+return; }`, gated on four env vars, **none of which the console process sets**. *The refusal was reported to
+nobody.* Fixed with an ungated `writeln!` to the real stderr handle. The stated reason for not using `?` was
+also wrong — `Drop` reaps the child, so `?` would **kill** the daemon, not orphan it; the conclusion
+survives and gets stronger, because `?` would hand an attacker a **kill switch**.
+
+**Round 4 → 5.** The guard added to protect that fix **could not fire**. Both sabotages green: it asserted a
+property of `trace` from another module's unit tests with nothing structurally connecting it to the call
+site, and its second leg compared `log_path().exists()` to itself — **true on any machine where the log
+already exists**, which this crate's own suite guarantees, since two integration tests spawn the real daemon
+and append to that file. Replaced with a **source-derived** guard over `discover_or_spawn`'s error arm,
+red-proofed **by construction** (written while the sabotage was still applied), plus a token-content check
+that a concurrent daemon cannot satisfy or defeat.
+
+**Round 5 → close.** The new guard's own justification — *"comment-stripping is load-bearing here"* — was
+**false in both directions**: the quoting comment sat **outside** the scanned slice, so raw and stripped
+gave identical verdicts. Fixed by **widening the slice so the claim became true**, then re-measuring all
+four cells (because the call-site comment now lives inside the region, and carrying the old numbers over
+would have been the same defect a fourth time):
+
+| | strip ON | strip OFF |
+|---|---|---|
+| **real code** | 3 passed | **1 failed** — the `enabled()` leg reds on the comment |
+| **`writeln!` deleted** | **1 failed** — stderr leg reds, naming the missing call | **stderr leg PASSES** on the comment's quotation |
+
+The bottom-right cell is CPE-1933's silent-pass shape **reproduced live rather than asserted**, and the
+Reviewer watched it happen. The two assertions were split into separate `it()` blocks because in that cell
+the file reports "1 failed" either way and only the per-test `✓` reveals which leg went green.
+
+The Reviewer also built the missing half of the pair itself rather than reasoning about it — re-introducing
+the gate while keeping the call — and confirmed each leg has a sabotage that reaches **only** it.
+
+**The author's own summary, which is the lesson:** *"I routed a report through a channel that was off, then
+pinned it with a guard that couldn't see the thing it named. Check the channel, and check that the guard can
+fire."* And: *each underlying fix was right, and that is exactly what made the next sentence easy to
+overstate. The fix being correct is not evidence that the sentence about it is.*
+
+### Two side items
+
+`reaper.rs`'s untested *"Keep them in sync"* claim was **killed with a derived test** (red-proofed twice).
+And CPE-1964's enumerator was **lifted into a shared module rather than copied** — CPE-1950's stated
+preference, verified as genuinely one copy.
+
+### Filed, not fixed
+
+**CPE-1982** — two more fixed-name `temp_dir()` paths outside this ticket's three-site enumeration, found by
+the Reviewer verifying the enumeration rather than accepting it. One of them holds **verified catalog
+manifests**, a higher-value target than a trace log.
+
+### Gates at merge
+
+`sidecar/ai-console` **423/0** (no `NOT VERIFIED` notice) · `sidecar/host` **153/0** · `sidecar/contract`
+**12/0** · clippy clean in all three **plus `src-tauri` in both feature modes** · `npm run check` 0/0 · all
+three CPE-1975 TS guards green at 8 tests · **no lockfile or manifest change** · `%TEMP%` left with one real
+directory and no planted junction · CI `completed success — total_count=26 pending=0 skipped=1 coverage=ok`.
+
+**Linux and macOS remain unmeasured locally and are marked so at every site.**
+
+**Family:** CPE-1964 (PR #1086 — the same class, the exclusive-create argument, the controls and the pairs),
+CPE-1952 (`create_dir_all` follows a link; delete the seam where possible), CPE-1982 (the two sites this
+enumeration missed), CPE-1929 (shadowed guards, and a guard that cannot fire), CPE-1933 (derive provenance;
+do not name a backstop without checking it can fire), CPE-1950 (remove removable duplication), CPE-1972 (an
+absence of information must never license a delete), CPE-309 S4 (the reattach path that would make the
+headline attack live).
