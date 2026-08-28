@@ -4472,3 +4472,31 @@ The only way to tell the two apart is to re-run.
 rebasing rewrites the exact revision the new comment cites as its measurement baseline, and force-pushing
 would orphan it. Pushed fast-forward instead. **The sha-rot lesson from another PR arriving as a decision
 rather than a correction.**
+
+## 2026-08-29 — two agents died on network errors, and the first move was to ask the remote
+
+A transient connectivity failure took out two workers within a minute of each other — one `ENOTFOUND`
+reaching the API, one connection lost mid-response — and my own `ci-poll` reported `gh_failures=2` in the
+same window. One agent's last line was *"This pushes to GitHub"*, which is exactly the shape that invites
+a wrong assumption in either direction.
+
+**First action was three API probes to establish the network was back** (4998, 5000, 5000 — clean), then
+`gh pr list --json headRefOid` to see what had actually landed. **Neither PR's head had moved.** The
+"pushes to GitHub" line was the intent, not the outcome.
+
+**That is the resume rule from earlier this shift, arriving in its harder form.** Then, the question was
+"which of five agents pushed before the process exited" and the answer was two of five. Here the
+transcript *says* it pushed. **A sentence in a transcript describing an action is not evidence the action
+completed**, and under a network fault it is exactly the sentence most likely to be wrong — the failure
+happens *at* the network call.
+
+**Second thing worth recording: diagnose the fault before retrying into it.** Two simultaneous failures
+with network error types is a signal about the environment, not about the work. The circuit-breaker rule
+here is retry with backoff *and* throttle — so the probe came first, and resuming only after connectivity
+was confirmed cost about thirty seconds and removed the possibility of two more failures for the same
+reason.
+
+**And both resumes carried the verified head sha**, so neither worker has to guess whether its own push
+landed. **Telling a resumed agent what the world looks like now is cheaper than letting it re-derive
+that**, and it removes the one failure mode a resume has that a fresh dispatch does not: acting on a
+memory of a state that has since changed.
