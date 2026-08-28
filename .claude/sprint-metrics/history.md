@@ -3279,3 +3279,30 @@ prefixes cannot collide. Three separate places where the cheap move was to accep
 And it verified the one new number written into a code comment — a CI job's suite-step duration — **against
 the API**: 119 seconds exactly, whole job 181. After a shift in which numbers in comments have been wrong
 four times, checking the one that was newly added is exactly the right instinct.
+
+## 2026-08-28 — three doc sites and the one an operator actually reads
+
+#1092's reviewer found a supporting sentence that was true for one port and false for the other, and
+named **three** places carrying it: a function doc, a sibling module's doc, and the README. The worker
+fixed those and found a **fourth** — the same false claim inside `settleDriverPorts`'s own **WARNING log
+line**.
+
+**That is the copy a human reads at 3 a.m. when the thing has actually gone wrong**, and it was the one
+site nobody enumerated. Three docs corrected and the runtime message left lying would have been close to
+the worst outcome available: the paper is right, and the only sentence anyone reads under pressure still
+misleads.
+
+**The generalisation: when a claim is wrong, sweep the *emitted* strings, not only the comments.** A
+grep for the doc's wording finds docs. The message a user or operator sees is usually phrased
+differently — it is shorter, it names the runtime values, it lives in a `printf` — so it survives the
+sweep that fixes everything around it. Log lines, error messages, toast text and CLI help are all
+documentation with a different audience and no reviewer.
+
+Two details worth keeping from how it was done. It **verified the reviewer's line numbers before acting
+on them** (all three checked out) and then removed the line citation entirely in favour of the symbol,
+with the reason written at the site: *a line number in prose is a provenance claim nothing checks, and
+this one rotted inside a single round while the code comments citing the symbol did not.* And when it
+rewrote the WARNING it **read both port numbers from the shared constant** rather than typing them, so
+the "zero live port literals outside `driverPorts.ts`" property the reviewer had just verified stayed
+true. Fixing a claim without breaking a neighbouring invariant is the kind of care that does not show up
+in a diff summary.
