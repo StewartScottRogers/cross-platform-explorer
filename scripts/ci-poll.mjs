@@ -44,6 +44,26 @@
 //      a slow-but-healthy run. Now: consecutive `gh` failures are counted, `MAX_CONSECUTIVE_GH_FAILURES`
 //      of them ends the poll immediately, and ANY run that reaches the end with no successful read at all
 //      prints `CI VERDICT: unknown` and exits 3. Exit 3 never means "wait"; it means "I could not ask".
+//
+//      ROUND 2 CLOSED THE OTHER HALF OF THIS, AND IT WAS THE SAME BUG ONE LAYER DOWN. Counting THROWN
+//      failures only closes the path where `gh` throws. A `gh` that exits 0 and prints well-formed JSON
+//      of the WRONG SHAPE threw nothing, so it sailed past the counter into `readFromPrJson`, whose
+//      `Array.isArray(json?.statusCheckRollup) ? … : []` turned an absent rollup into `total_count=0` —
+//      which `decideFromReads` reports as "no checks scheduled yet". Measured: `{"message":"Not
+//      Found"}`, `{"data":null,"errors":[…]}` (GraphQL answers a field-level failure with HTTP 200,
+//      partial `data` and an `errors` array, and `statusCheckRollup` is a NULLABLE field), `null`,
+//      `"nope"` and `[1,2,3]` all printed `CI VERDICT: pending — total_count=0 … CI still pending on
+//      unknown` and exited 2. That is "did not run" reported as "not finished" — and it is exactly the
+//      defect CLAUDE.md already records for `audit-npm-projects.mjs`, where npm's `--json` error path
+//      emits well-formed JSON with no `metadata` key and a parse-only check read an unreachable
+//      registry as a clean audit. In `--run` mode it was worse than a wrong wait: a payload with no
+//      `jobs` key (`{"status":"completed","conclusion":"success"}`) read as `total_count=0` +
+//      `terminal` + `conclusion: success` and exited **0 — GREEN, on a board nobody ever saw**.
+//      `assertReadableShape()` now rejects a payload that does not answer the question we asked, and
+//      routes it through `classifyGhFailure` like any other `gh` failure → exit 3. The discrimination
+//      is structural, not a heuristic: we ASK `gh` for `statusCheckRollup` (or `status,…,jobs`), and a
+//      response that answered has them. A genuinely check-less PR still returns
+//      `statusCheckRollup: []` — an ARRAY, plus a real `headRefOid` — so it stays a pending board.
 //   2. A HUNG `gh` CALL CROSSED THE CAP. `execFileSync` had no `timeout`, so the deadline bounded the
 //      LOOP but not one CALL: a single 300 s hang put the run at ~630 s and it was auto-backgrounded —
 //      the exact defect this file exists to make impossible. Now every call is bounded by
@@ -78,19 +98,34 @@
 //   node scripts/ci-poll.mjs --pr <number>             # poll a PR's whole check rollup
 //   node scripts/ci-poll.mjs --pr 1031 --budget 300    # shorter budget, in seconds (clamped, never raised)
 //
-// EXIT CODES
-//   0  completed, every check that ran concluded success (or NEUTRAL, which GitHub itself treats as
-//      non-blocking), and every skipped check was skipped by design
-//   1  completed, at least one check FAILED (or was cancelled/timed out) — read the logs
-//   2  still pending when the budget ran out — this is a NORMAL, EXPECTED outcome, not an error.
-//      Report the printed `CI still pending on <SHA>` line and hand CI to the Foreman, or re-invoke.
-//   3  COULD NOT ASK. `gh` errored, hung, or returned unparseable output. This is NOT a pending board and
-//      NOT a green one — nothing was read. Do not merge on it and do not wait on it: check `gh auth
-//      status`, the run/PR id and the network, then re-invoke.
-//   4  completed with NO failures, but one or more checks were SKIPPED without a job-level `if:` to
-//      explain it — i.e. they did not run, almost certainly a `needs:` cascade off an earlier failure.
-//      Not a red build and NOT a green one. Do not merge; find out why they were skipped.
+// EXIT CODES — and the verdict PREFIX that goes with each, one-to-one
+//   0  `completed success`     every check that ran concluded success (or NEUTRAL, which GitHub itself
+//                              treats as non-blocking), at least one check actually ran, and every
+//                              skipped check was skipped by design
+//   1  `completed failure`     at least one check FAILED (or was cancelled/timed out), or the run-level
+//                              conclusion is `failure` — read the logs
+//   2  `pending`               still pending when the budget ran out — this is a NORMAL, EXPECTED
+//                              outcome, not an error. Report the printed `CI still pending on <SHA>`
+//                              line and hand CI to the Foreman, or re-invoke.
+//   3  `unknown`               COULD NOT ASK. `gh` errored, hung, returned unparseable output, or
+//                              returned well-formed JSON that is not a board at all. NOT a pending
+//                              board and NOT a green one — nothing was read. Do not merge and do not
+//                              wait: check `gh auth status`, the run/PR id and the network, re-invoke.
+//   4  `completed did-not-run` finished with NO failure, but nothing usable ran: a check was SKIPPED
+//                              with no job-level `if:` to explain it (a `needs:` cascade), or every
+//                              check that finished was skipped, or the board finished empty.
+//      `completed unclear`     finished in a shape this poll has never seen — no failure, but no
+//                              positive evidence of success either. Both are "not red, not green": do
+//                              not merge, find out why.
 //   64 bad usage
+//
+//   CPE-1906 round 2 — THE PREFIX AND THE EXIT CODE ARE COMPUTED FROM ONE PREDICATE (`verdictClass`),
+//   because they were computed from two and the two disagreed. `formatVerdict` branched on
+//   `failedNames` while the exit branched on `failedNames || conclusion === "failure"`, so a board whose
+//   only finished checks were by-design skips printed `completed skipped` and exited **1** — "at least
+//   one check FAILED", with zero failures — and `completed skipped` was simultaneously the prefix for
+//   exit 4, so the prefix discriminated nothing. Every branch above now comes out of the single
+//   classifier, and a test pins prefix→code.
 //
 // The pure functions below are exported and unit-tested by `src/lib/sprintStallControls.test.ts`; the
 // `main()` path only runs when this file is executed directly. `src/lib/ciPollFailClosed.test.ts` drives
@@ -300,6 +335,8 @@ export function shouldSleepAgain(nowMs, intervalMs, deadlineMs, tick, ticks) {
  * @property {string|null} sha      the head SHA the reading is keyed to
  * @property {string[]} skippedNames  checks that reported SKIPPED — they DID NOT RUN
  * @property {string[]} failedNames   checks that reported a hard failure
+ * @property {number} ranCount        finished checks that ACTUALLY RAN (finished minus skipped) — the
+ *                                    difference between "everything passed" and "nothing happened"
  * @property {number} neutralCount    checks that ran and declined to judge
  * @property {number|null} oldestPendingAgeMs  age of the longest-running unfinished check
  * @property {string|null} oldestPendingName   its name — "slow or hung?" made mechanical
@@ -316,6 +353,7 @@ function emptyRead() {
     sha: null,
     skippedNames: [],
     failedNames: [],
+    ranCount: 0,
     neutralCount: 0,
     oldestPendingAgeMs: null,
     oldestPendingName: null,
@@ -425,7 +463,24 @@ export function scanWorkflowJobs(source) {
       continue;
     }
     if (/^ {4}if:\s*\S/.test(line)) {
+      // Covers `if: <expr>` and every folded/literal block header (`if: >-`, `if: |`), whose `>`/`|` is
+      // itself the `\S`.
       entry.conditional = true;
+      continue;
+    }
+    if (/^ {4}if:\s*$/.test(line)) {
+      // CPE-1906 round 2: the BLOCK-MAPPING form — a bare `if:` with the expression on the following,
+      // more-indented line — is legal YAML (a multi-line plain scalar) and used to yield
+      // `conditional=false`. That direction fails CLOSED (the job's skips stop being explainable, so the
+      // poll over-blocks at exit 4), which is the safe way to be wrong but still wrong: reformatting
+      // `gui-smoke.yml`'s `if:` onto two lines would have exited 4 on every PR. A continuation line is
+      // indented deeper than the four-space job-key column and is not itself a key at that column.
+      let j = i + 1;
+      while (j < lines.length && /^\s*$/.test(lines[j])) j += 1;
+      if (j < lines.length && /^ {5,}\S/.test(lines[j])) {
+        entry.conditional = true;
+        i = j;
+      }
       continue;
     }
     const needsInline = /^ {4}needs:\s*(.+?)\s*$/.exec(line);
@@ -450,19 +505,33 @@ export function scanWorkflowJobs(source) {
 }
 
 /**
- * The set of check-name prefixes GitHub is ALLOWED to skip: every job with a job-level `if:`, plus the
+ * @typedef {object} SkipMatcher
+ * @property {string} text   the literal to compare a skipped check's name against
+ * @property {boolean} prefix  compare with `startsWith` rather than `===`
+ */
+
+/**
+ * The set of check-name matchers GitHub is ALLOWED to skip: every job with a job-level `if:`, plus the
  * transitive closure of jobs that `needs:` one of those (a skipped dependency cascades, and nobody
  * should have to re-declare that).
  *
- * Prefixes rather than exact names because a matrix job's `name:` contains a `${{ matrix.… }}`
- * expression; the literal text before the first template expression is the part GitHub keeps verbatim.
- * A job with no `name:` reports under its id.
+ * CPE-1906 round 2 — EXACT MATCH, NOT PREFIX, UNLESS THE NAME IS TEMPLATED. Every matcher used to be a
+ * `startsWith` prefix, which is the fail-OPEN direction, and four of the six matchers this repo derives
+ * are bare job ids of `name:`-less jobs (`notify-on-failure`, `verify-published-manifest-sidecar`,
+ * `verify-published-manifest`, `catalog`). Measured: the prefix `"catalog"` excused BOTH
+ * `"catalog-freshness nightly"` and `"catalogue rebuild"` — checks nothing had declared skippable. No
+ * live collision today (all four are release-workflow jobs that never reach a PR rollup), but silently
+ * excusing a future `catalog-*` job is the exact defect this file exists to remove. So a matcher is a
+ * PREFIX only when it had to be: a matrix job's `name:` contains a `${{ matrix.… }}` expression, and
+ * only the literal text before the first `${{` is what GitHub keeps verbatim. Everything else — an
+ * explicit `name:` with no template, or a job reporting under its bare id — is compared exactly. Being
+ * wrong now over-blocks (exit 4, named and diagnosable) instead of going quiet.
  *
  * @param {string[]} sources raw text of each workflow file
- * @returns {string[]}
+ * @returns {SkipMatcher[]}
  */
 export function explainableSkipMatchers(sources) {
-  /** @type {string[]} */
+  /** @type {SkipMatcher[]} */
   const matchers = [];
   for (const source of sources) {
     const jobs = scanWorkflowJobs(source);
@@ -484,8 +553,9 @@ export function explainableSkipMatchers(sources) {
     for (const id of allowed) {
       const job = jobs.get(id);
       const label = job?.name ?? id;
-      const prefix = label.split("${{")[0].trim();
-      if (prefix) matchers.push(prefix);
+      const templated = label.includes("${{");
+      const text = (templated ? label.split("${{")[0] : label).trim();
+      if (text) matchers.push({ text, prefix: templated });
     }
   }
   return matchers;
@@ -498,15 +568,32 @@ export function explainableSkipMatchers(sources) {
  * unexplained. That is the fail-closed direction on purpose: the alternative is a tool that goes quiet
  * about jobs that did not run the moment it is run from the wrong directory.
  *
+ * WHAT "EXPLAINED" ACTUALLY MEANS HERE, precisely, because the first version of this comment claimed
+ * more precision than the code has: a skip is explained iff the job carries a job-level `if:` AT ALL,
+ * or transitively `needs:` one that does — **whatever that `if:` says**. It is not evaluated. This
+ * repo's six job-level conditions include three (`always()`, `!cancelled()`) whose jobs cannot
+ * legitimately skip, so those are excused for free. That is a deliberate, bounded over-approximation,
+ * not an oversight, and narrowing it is not free: the general rule has to stay "carries a condition"
+ * because conditions like `github.event.workflow_run.conclusion != 'success'` skip on every HEALTHY
+ * run, and separating "can legitimately be false" from "is always true" means evaluating GitHub
+ * expressions against a run context — an evaluator, not a line scan. The residual fail-open is
+ * therefore exactly: a job whose `if:` is a tautology is excused if it ever skips.
+ *
  * @param {string[]} skippedNames
- * @param {string[]|null} matchers
+ * @param {SkipMatcher[]|null} matchers
  * @returns {{explained: string[], unexplained: string[]}}
  */
 export function classifySkips(skippedNames, matchers) {
   /** @type {string[]} */ const explained = [];
   /** @type {string[]} */ const unexplained = [];
   for (const name of skippedNames ?? []) {
-    const ok = Array.isArray(matchers) && matchers.some((m) => m.length > 0 && String(name).startsWith(m));
+    const ok =
+      Array.isArray(matchers) &&
+      matchers.some((m) => {
+        const text = String(m?.text ?? "");
+        if (text.length === 0) return false;
+        return m?.prefix ? String(name).startsWith(text) : String(name) === text;
+      });
     (ok ? explained : unexplained).push(name);
   }
   return { explained, unexplained };
@@ -531,6 +618,75 @@ export function readWorkflowSources(dir) {
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The error `assertReadableShape` throws. A distinct name (rather than a bare `Error`) is what lets
+ * `classifyGhFailure` report "unexpected payload shape" instead of "gh exited non-zero" — the caller's
+ * next move for a wrong-shaped 200 is different from the next move for a dead `gh`.
+ */
+export class GhPayloadShapeError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message);
+    this.name = "GhPayloadShapeError";
+  }
+}
+
+/**
+ * Refuse a `gh` payload that did not answer the question we asked (CPE-1906 round 2).
+ *
+ * THE HOUSE RULE, ONE LAYER DOWN. "A wrapper around an external tool must distinguish 'ran and found
+ * nothing' from 'did not run', and fail closed on the latter." Round 1 applied it to a `gh` that THREW.
+ * A `gh` that exits 0 with well-formed JSON of the wrong shape throws nothing, and the readers below are
+ * written defensively (`Array.isArray(json?.x) ? … : []`) precisely so a formatter can never crash — so
+ * an API error payload became `total_count=0`, which `decideFromReads` calls "no checks scheduled yet".
+ * Measured, all exit 0 out of `gh`: `{"message":"Not Found","documentation_url":…}` (REST), `{"data":
+ * null,"errors":[…]}` (GraphQL answers a field-level failure with HTTP 200 and a partial `data`, and
+ * `statusCheckRollup` is a NULLABLE field), `null`, `"nope"`, `[1,2,3]` — every one of them printed
+ * `CI VERDICT: pending — total_count=0 … CI still pending on unknown` and exited 2. And in `--run` mode
+ * a payload with no `jobs` key exited **0, green**.
+ *
+ * The test is structural rather than a heuristic, which is what makes it safe against a genuinely
+ * check-less PR: we ASK `gh` for these fields, so a response that answered has them. An empty board
+ * still returns `statusCheckRollup: []` — an ARRAY — and a real `headRefOid`; the wrong-shape payloads
+ * have no such key at all, which is why they print `sha=unknown mergeable=n/a` alongside
+ * `total_count=0`, a combination no real board produces.
+ *
+ * @param {unknown} json
+ * @param {"run"|"pr"} mode
+ * @returns {any} the same payload, so callers can chain
+ */
+export function assertReadableShape(json, mode) {
+  const shown = (() => {
+    try {
+      return JSON.stringify(json)?.slice(0, 200) ?? String(json);
+    } catch {
+      return String(json);
+    }
+  })();
+  if (json === null || typeof json !== "object" || Array.isArray(json)) {
+    throw new GhPayloadShapeError(
+      `gh returned JSON that is not an object (${typeof json}) — not a board at all: ${shown}`,
+    );
+  }
+  const obj = /** @type {any} */ (json);
+  if (mode === "pr") {
+    if (!Array.isArray(obj.statusCheckRollup)) {
+      throw new GhPayloadShapeError(
+        "gh returned JSON with no `statusCheckRollup` array — a real PR rollup always has one (an " +
+          `empty board is []), so this is an error payload, not a board: ${shown}`,
+      );
+    }
+    return obj;
+  }
+  if (!Array.isArray(obj.jobs) || typeof obj.status !== "string") {
+    throw new GhPayloadShapeError(
+      "gh returned JSON with no `jobs` array and/or no `status` string — both were requested, so a " +
+        `response that answered has them; this one did not: ${shown}`,
+    );
+  }
+  return obj;
+}
 
 /**
  * @param {unknown} v
@@ -614,6 +770,9 @@ export function readFromRunJson(json, nowMs = Date.now()) {
     sha: json?.headSha ?? null,
     skippedNames,
     failedNames,
+    ranCount: jobs.filter(
+      (/** @type {any} */ j) => j?.status === "completed" && conclusionOf(j) !== "skipped",
+    ).length,
     neutralCount: jobs.filter((/** @type {any} */ j) => conclusionOf(j) === "neutral").length,
     oldestPendingAgeMs: oldest.ageMs,
     oldestPendingName: oldest.name,
@@ -689,6 +848,7 @@ export function readFromPrJson(json, nowMs = Date.now()) {
     sha: json?.headRefOid ?? null,
     skippedNames,
     failedNames,
+    ranCount: ran.length,
     neutralCount: finished.filter(isNeutral).length,
     oldestPendingAgeMs: oldest.ageMs,
     oldestPendingName: oldest.name,
@@ -697,10 +857,21 @@ export function readFromPrJson(json, nowMs = Date.now()) {
 
 // ── Verdict lines ────────────────────────────────────────────────────────────────────────────────────
 
-/** @param {CiRead|null} latest */
-function totalsOf(latest) {
+/**
+ * @param {CiRead|null} latest
+ * @param {number} [ghFailures] total failed `gh` reads this invocation — appended, never inserted
+ */
+function totalsOf(latest, ghFailures = 0) {
+  // CPE-1906 round 2: `gh_failures` is APPENDED at the end, after `sha=`. The interface pin asserts the
+  // presence and RELATIVE ORDER of the pre-existing keys, so a new key may only ever go on the end.
+  // Why it exists: a poll could take one good read, then fail two more (below the bail threshold), hit
+  // the deadline and print a plain `pending` verdict that said nothing at all about the failures —
+  // "still pending" and "still pending, and I stopped being able to ask" are different situations.
+  const tail = ` gh_failures=${Number.isFinite(ghFailures) ? ghFailures : 0}`;
   if (!latest) {
-    return "total_count=n/a pending=n/a oldest_pending_min=n/a skipped=n/a neutral=n/a mergeable=n/a sha=unknown";
+    return (
+      "total_count=n/a pending=n/a oldest_pending_min=n/a skipped=n/a neutral=n/a mergeable=n/a sha=unknown" + tail
+    );
   }
   // Every field is read defensively. This is a FORMATTER on the failure path — it runs when something
   // has already gone wrong — so it must degrade to `n/a` rather than throw and take the verdict line
@@ -710,8 +881,69 @@ function totalsOf(latest) {
   return (
     `total_count=${latest.totalCount ?? "n/a"} pending=${latest.pending ?? "n/a"} oldest_pending_min=${age} ` +
     `skipped=${latest.skippedNames?.length ?? "n/a"} neutral=${latest.neutralCount ?? "n/a"} ` +
-    `mergeable=${latest.mergeable ?? "n/a"} sha=${latest.sha ?? "unknown"}`
+    `mergeable=${latest.mergeable ?? "n/a"} sha=${latest.sha ?? "unknown"}` +
+    tail
   );
+}
+
+/**
+ * THE single predicate for "what did CI actually say" — the verdict prefix and the exit code both come
+ * out of here, and nothing else decides either (CPE-1906 round 2).
+ *
+ * WHY THIS FUNCTION EXISTS. There used to be two predicates for "is this red": `formatVerdict` branched
+ * on `failedNames`, and the exit code branched on `failedNames || conclusion === "failure"`. They
+ * disagreed on two real shapes. (i) A board whose only finished checks were skips the workflows
+ * explain: it printed `CI VERDICT: completed skipped — … Skipped by design: …` and exited **1**, which
+ * this file's own table defines as "at least one check FAILED" — with zero failures. (ii) A `--run`
+ * whose run-level `conclusion` is `failure` with no failing job and one unexplained skip: it printed
+ * the "neither red nor green" sentence and exited 1. And because `completed skipped` was the prefix for
+ * BOTH exit 4 and that exit 1, the prefix discriminated nothing — a caller grepping the line could not
+ * tell which had happened.
+ *
+ * The ladder, in order, and every rung is "fail closed":
+ *   pending      not done — the budget ran out.
+ *   failure      a named failing check, OR a run-level `failure` conclusion. Red outranks everything:
+ *                the caller's next move is the logs whatever else is true.
+ *   did-not-run  an unexplained skip; or nothing that finished actually RAN (`ranCount === 0`, e.g.
+ *                every finished check was a by-design skip — explained, but it verified nothing); or a
+ *                board that finished with no checks on it at all.
+ *   success      a positive `success` conclusion with something having run. `--run` mode reports
+ *                `skipped` when GitHub said `success` and at least one job skipped; by the time it
+ *                reaches here the skips have been adjudicated (unexplained ones exited above) and
+ *                `ranCount > 0`, so it is a pass — never "skipped folded into success" ahead of the
+ *                adjudication, which is the hole CPE-1906 opened this file to close.
+ *   unclear      done, nothing failed, and no positive evidence of success. Not a pass. Exit 4 with a
+ *                DIFFERENT prefix, because "I do not recognise this board" is not "a job did not run".
+ *
+ * @param {{done: boolean, reason: string}} decision
+ * @param {CiRead|null} latest
+ * @param {string[]} [unexplainedSkips]
+ * @returns {{kind: "pending"|"failure"|"did-not-run"|"success"|"unclear", code: number, why: string}}
+ */
+export function verdictClass(decision, latest, unexplainedSkips = []) {
+  if (!decision?.done) return { kind: "pending", code: 2, why: "the budget ran out before CI finished" };
+  const failed = latest?.failedNames ?? [];
+  if (failed.length > 0) return { kind: "failure", code: 1, why: "a check reported a hard failure" };
+  if (latest?.conclusion === "failure") {
+    return { kind: "failure", code: 1, why: "the run-level conclusion is `failure`" };
+  }
+  if ((unexplainedSkips?.length ?? 0) > 0) {
+    return { kind: "did-not-run", code: 4, why: "a check was skipped and no job-level `if:` explains it" };
+  }
+  if ((latest?.totalCount ?? 0) === 0) {
+    return { kind: "did-not-run", code: 4, why: "the board finished with no checks on it at all" };
+  }
+  if (typeof latest?.ranCount === "number" && latest.ranCount === 0) {
+    return { kind: "did-not-run", code: 4, why: "every check that finished was SKIPPED — nothing ran" };
+  }
+  if (latest?.conclusion === "success" || latest?.conclusion === "skipped") {
+    return { kind: "success", code: 0, why: "every check that ran concluded success" };
+  }
+  return {
+    kind: "unclear",
+    code: 4,
+    why: `the board finished with conclusion=${latest?.conclusion ?? "none"} and no check reported a failure`,
+  };
 }
 
 /**
@@ -722,33 +954,45 @@ function totalsOf(latest) {
  * @param {{done: boolean, reason: string}} decision
  * @param {CiRead|null} latest
  * @param {{ticks: number, elapsedMs: number, target: string}} run
- * @param {{unexplainedSkips?: string[], explainedSkips?: string[]}} [skips]
+ * @param {{unexplainedSkips?: string[], explainedSkips?: string[], ghFailures?: number}} [skips]
  * @returns {string}
  */
 export function formatVerdict(decision, latest, run, skips = {}) {
-  const totals = totalsOf(latest);
+  const totals = totalsOf(latest, skips.ghFailures ?? 0);
   const timing = `after ${run.ticks} tick(s) / ${Math.round(run.elapsedMs / 1000)}s`;
   const unexplained = skips.unexplainedSkips ?? [];
   const explained = skips.explainedSkips ?? [];
-  if (decision.done) {
+  const byDesign = explained.length > 0 ? ` Skipped by design: ${explained.join(", ")}.` : "";
+  // ONE predicate, shared with main()'s exit code. Never re-derive "is this red" here.
+  const klass = verdictClass(decision, latest, unexplained);
+  if (klass.kind === "failure") {
     const failed = latest?.failedNames ?? [];
-    if (failed.length > 0) {
-      return (
-        `CI VERDICT: completed failure — ${totals} ${timing} — ${decision.reason}. ` +
-        `Failed: ${failed.join(", ")}. Read the logs; do not merge.`
-      );
-    }
-    if (unexplained.length > 0) {
-      return (
-        `CI VERDICT: completed skipped — ${totals} ${timing} — ${decision.reason}. ` +
-        `${unexplained.length} check(s) DID NOT RUN and no job-level \`if:\` explains it: ` +
-        `${unexplained.join(", ")}. This is neither red nor green — almost certainly a \`needs:\` ` +
-        `cascade off an earlier failure. Do not merge; find out why they were skipped.`
-      );
-    }
-    const conclusion = latest?.conclusion ?? "unknown";
-    const note = explained.length > 0 ? ` Skipped by design: ${explained.join(", ")}.` : "";
-    return `CI VERDICT: completed ${conclusion} — ${totals} ${timing} — ${decision.reason}.${note}`;
+    const detail =
+      failed.length > 0
+        ? `Failed: ${failed.join(", ")}.`
+        : `No individual check reported a failure, but the run-level conclusion is \`failure\` — ` +
+          `treat it as red and read the run's own log.`;
+    return `CI VERDICT: completed failure — ${totals} ${timing} — ${decision.reason}. ${detail} Do not merge.`;
+  }
+  if (klass.kind === "did-not-run") {
+    const detail =
+      unexplained.length > 0
+        ? `${unexplained.length} check(s) DID NOT RUN and no job-level \`if:\` explains it: ` +
+          `${unexplained.join(", ")}. Almost certainly a \`needs:\` cascade off an earlier failure.`
+        : `${klass.why} — so nothing here verified this commit.${byDesign}`;
+    return (
+      `CI VERDICT: completed did-not-run — ${totals} ${timing} — ${decision.reason}. ${detail} ` +
+      `This is neither red nor green. Do not merge; find out why they did not run.`
+    );
+  }
+  if (klass.kind === "unclear") {
+    return (
+      `CI VERDICT: completed unclear — ${totals} ${timing} — ${decision.reason}. ${klass.why} — a shape ` +
+      `this poll has never seen, so it is NOT a pass. Do not merge; read the board by hand.${byDesign}`
+    );
+  }
+  if (klass.kind === "success") {
+    return `CI VERDICT: completed success — ${totals} ${timing} — ${decision.reason}.${byDesign}`;
   }
   const sha = latest?.sha ?? "unknown";
   const age =
@@ -776,10 +1020,10 @@ export function formatVerdict(decision, latest, run, skips = {}) {
 export function formatErrorVerdict(failure, lastGood, run) {
   const timing = `after ${run.ticks} tick(s) / ${Math.round(run.elapsedMs / 1000)}s`;
   const seen = lastGood
-    ? `Last successful read: ${totalsOf(lastGood)} — but it is STALE and must not be merged on.`
+    ? `Last successful read: ${totalsOf(lastGood, failure.count)} — but it is STALE and must not be merged on.`
     : "No successful read was ever obtained.";
   return (
-    `CI VERDICT: unknown — could not ask GitHub (${failure.kind}) — ${totalsOf(null)} ${timing} — ` +
+    `CI VERDICT: unknown — could not ask GitHub (${failure.kind}) — ${totalsOf(null, failure.count)} ${timing} — ` +
     `${failure.count} consecutive \`gh\` failure(s), last: ${failure.message}. ` +
     `This is NOT a pending board and NOT a green one: nothing was read, so do not merge and do not ` +
     `wait on it. Check \`gh auth status\`, the run/PR id, and the network, then re-invoke. ${seen}`
@@ -876,6 +1120,10 @@ function gh(args, timeoutMs) {
 export function classifyGhFailure(err) {
   const e = /** @type {any} */ (err);
   const first = (e?.message ? String(e.message) : String(err)).split("\n")[0].slice(0, 300);
+  // CPE-1906 round 2. Matched on `name` rather than `instanceof` so it survives a payload thrown across
+  // a module realm; the kind is separate from "unparseable output" because the caller's move differs —
+  // unparseable means a proxy or a banner, wrong-shape means the id, the token or the API is wrong.
+  if (e?.name === "GhPayloadShapeError") return { kind: "unexpected payload shape", message: first };
   if (e instanceof SyntaxError) return { kind: "unparseable output", message: first };
   if (e?.killed === true || e?.signal === "SIGKILL" || e?.code === "ETIMEDOUT") {
     return { kind: "timed out", message: `gh exceeded its per-call timeout — ${first}` };
@@ -933,14 +1181,21 @@ async function main() {
     let read;
     try {
       const budgetForCall = ghCallTimeoutMs(Date.now(), deadline);
+      // `assertReadableShape` sits INSIDE this try on purpose (CPE-1906 round 2): a `gh` that exits 0
+      // with a payload that is not a board has not answered, which means the same thing to the caller
+      // as a `gh` that threw. Same counter, same bail, same exit 3 — one path, not two.
       if (opts.mode === "run") {
-        read = readFromRunJson(
+        const json = assertReadableShape(
           JSON.parse(gh(["run", "view", opts.target, "--json", "status,conclusion,headSha,jobs"], budgetForCall)),
+          "run",
         );
+        read = readFromRunJson(json);
       } else {
-        read = readFromPrJson(
+        const json = assertReadableShape(
           JSON.parse(gh(["pr", "view", opts.target, "--json", "mergeable,headRefOid,statusCheckRollup"], budgetForCall)),
+          "pr",
         );
+        read = readFromPrJson(json);
       }
     } catch (err) {
       lastFailure = classifyGhFailure(err);
@@ -1009,14 +1264,18 @@ async function main() {
   const matchers = sources.length === 0 ? null : explainableSkipMatchers(sources);
   const { explained, unexplained } = classifySkips(latest?.skippedNames ?? [], matchers);
 
-  console.log(formatVerdict(decision, latest, run, { explainedSkips: explained, unexplainedSkips: unexplained }));
+  console.log(
+    formatVerdict(decision, latest, run, {
+      explainedSkips: explained,
+      unexplainedSkips: unexplained,
+      ghFailures: totalFailures,
+    }),
+  );
 
-  if (!decision.done) process.exit(2);
-  if ((latest?.failedNames.length ?? 0) > 0 || latest?.conclusion === "failure") process.exit(1);
-  if (unexplained.length > 0) process.exit(4);
-  if (latest?.conclusion === "success") process.exit(0);
-  // Anything else — no conclusion, a shape this code has never seen — is not a pass. Fail closed.
-  process.exit(1);
+  // ONE predicate for the line above and the code below — see `verdictClass`. There used to be two, and
+  // they disagreed: a board of nothing but by-design skips printed `completed skipped` and exited 1
+  // ("at least one check FAILED") with zero failures.
+  process.exit(verdictClass(decision, latest, unexplained).code);
 }
 
 // Only run the poll when this file is the process entry point — importing it (as the unit tests do)

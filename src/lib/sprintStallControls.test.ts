@@ -27,7 +27,8 @@
 //      the product's own "watcher" vocabulary) is not; and a second stall from the same agent escalates
 //      to take-over rather than a third re-invoke, which is the loop bound the ticket asks for.
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   HARNESS_TOOL_TIMEOUT_MS,
@@ -48,6 +49,8 @@ import {
   boundedWallClockMs,
   classifyGhFailure,
   formatErrorVerdict,
+  verdictClass,
+  assertReadableShape,
   GH_CALL_TIMEOUT_MS,
   GH_MIN_CALL_TIMEOUT_MS,
 } from "../../scripts/ci-poll.mjs";
@@ -222,13 +225,34 @@ describe("ci-poll mechanises the poll traps sprint.md states in prose (CPE-1880)
     for (const key of ["total_count=19", "pending=0", "mergeable=MERGEABLE", "sha=84d20517"]) {
       expect(done).toContain(key);
     }
-    const order = ["total_count=", "pending=", "oldest_pending_min=", "skipped=", "neutral=", "mergeable=", "sha="];
+    // CPE-1906 round 2 appended `gh_failures=` AFTER `sha=` for the same reason and under the same rule:
+    // new keys go on the end, so every existing position is untouched.
+    const order = [
+      "total_count=",
+      "pending=",
+      "oldest_pending_min=",
+      "skipped=",
+      "neutral=",
+      "mergeable=",
+      "sha=",
+      "gh_failures=",
+    ];
     let at = -1;
     for (const key of order) {
       const next = done.indexOf(key, at + 1);
       expect(next, `${key} missing from the verdict line`).toBeGreaterThan(at);
       at = next;
     }
+  });
+
+  it("reports how many `gh` reads failed, so a pending verdict is not silent about them", () => {
+    const line = formatVerdict(
+      { done: false, reason: "1 of 1 checks still pending" },
+      read({ pending: 1, totalCount: 1 }) as never,
+      { ticks: 8, elapsedMs: 8_000, target: "1078" },
+      { ghFailures: 5 },
+    );
+    expect(line).toContain("gh_failures=5");
   });
 
   it("a budget-exhausted verdict is a real report — it carries the prescribed handoff line, not a promise", () => {
@@ -524,27 +548,54 @@ describe("the harness scripts stay importable from vitest (CPE-1880)", () => {
   // case: a script in `scripts/` that nobody imports yet (a future one, or `organize-done.mjs`) sitting
   // unpinned, where this names the file and points at `.gitattributes` instead of leaving the next
   // author to rediscover the whole thing. So it scans the directory rather than a hard-coded pair.
-  it("every scripts/**/*.mjs is checked out LF, not CRLF", () => {
+  it("every tracked *.mjs is checked out LF, not CRLF — enumerated, not remembered", () => {
     // RECURSIVE, and `.gitattributes` matches `scripts/**/*.mjs`, not `scripts/*.mjs`: the first
     // version of both missed `scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs`, which was
     // sitting unpinned and unseen. A guard that cannot see the file it guards is the failure mode this
     // whole ticket is about.
-    const dir = join(process.cwd(), "scripts");
-    const mjs = readdirSync(dir, { recursive: true })
-      .map((f) => String(f).split("\\").join("/"))
-      .filter((f) => f.endsWith(".mjs"));
-    expect(mjs.length).toBeGreaterThanOrEqual(4); // ci-poll, stall-check, organize-done, dev-harness/check
-    expect(mjs.some((f) => f.includes("/"))).toBe(true); // the recursion actually reaches a subdirectory
+    //
+    // CPE-1906 round 2 widened the ROOT for the same reason, one directory over. This scanned
+    // `scripts/` only, and `.gitattributes` pinned `scripts/**/*.mjs` only, so
+    // `src/lib/fixtures/ghStub.mjs` — a .mjs under `src/` — was unpinned AND unseen, and checked out
+    // CRLF (measured: 131 CRLF in the worktree against an LF blob). It survived only because it is
+    // spawned as a child process rather than imported through Vite's transform. That is luck, not
+    // design, and it is exactly CPE-1932: enumerate the whole class at run time, do not list the
+    // instances someone remembered. `git ls-files` is the enumeration; the near-empty check is the
+    // guard against the enumeration silently returning nothing.
+    const listed = execFileSync("git", ["ls-files", "*.mjs"], { cwd: process.cwd(), encoding: "utf8" });
+    const mjs = listed
+      .split("\n")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    expect(mjs.length, "git ls-files returned no .mjs at all — the enumeration itself is broken").toBeGreaterThanOrEqual(5);
+    expect(mjs.some((f) => f.startsWith("scripts/"))).toBe(true);
+    expect(mjs.some((f) => !f.startsWith("scripts/")), "the scan no longer reaches outside scripts/").toBe(true);
     for (const rel of mjs) {
-      const bytes = readFileSync(join(dir, rel));
+      const bytes = readFileSync(join(process.cwd(), rel));
       expect(
         bytes.includes("\r\n"),
-        `scripts/${rel} is checked out with CRLF, which makes Vite's transform of it throw an ` +
-          `unlocatable SyntaxError. .gitattributes pins scripts/**/*.mjs to LF, but git does not ` +
-          `rewrite a working tree it is not otherwise touching, so an existing checkout keeps its CRLF ` +
-          `copy. Fix this checkout with:  rm scripts/${rel} && git checkout -- scripts/${rel}  ` +
-          `(the index bytes are already LF, so the checkout re-materialises it with the pin applied).`,
+        `${rel} is checked out with CRLF, which makes Vite's transform of it throw an unlocatable ` +
+          `SyntaxError. .gitattributes pins it to LF, but git does not rewrite a working tree it is not ` +
+          `otherwise touching, so an existing checkout keeps its CRLF copy. Fix this checkout with:  ` +
+          `rm ${rel} && git checkout -- ${rel}  (the index bytes are already LF, so the checkout ` +
+          `re-materialises it with the pin applied).`,
       ).toBe(false);
+    }
+  });
+
+  it("and .gitattributes actually pins every one of them — the guard above only sees THIS checkout", () => {
+    // Red-proofing the pin rather than the symptom: the CRLF test passes on a Linux CI runner whatever
+    // `.gitattributes` says, because that checkout is LF regardless. Ask git what attributes it will
+    // apply, which is the thing that has to be true for a Windows checkout to come out right.
+    const listed = execFileSync("git", ["ls-files", "*.mjs"], { cwd: process.cwd(), encoding: "utf8" });
+    const mjs = listed
+      .split("\n")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    expect(mjs.length).toBeGreaterThanOrEqual(5);
+    const attrs = execFileSync("git", ["check-attr", "eol", "--", ...mjs], { cwd: process.cwd(), encoding: "utf8" });
+    for (const line of attrs.split("\n").filter(Boolean)) {
+      expect(line, `${line} — add a matching rule to .gitattributes`).toMatch(/: eol: lf$/);
     }
   });
 });
@@ -709,6 +760,75 @@ describe("S4 RED-PROOF: the no-backgrounding bound is ENFORCED at runtime, not m
     });
     expect(read.conclusion).toBe("skipped");
     expect(read.skippedNames).toEqual(["Server crates (windows-latest)"]);
+  });
+
+  it("refuses a gh payload that did not answer the question we asked (CPE-1906 round 2)", () => {
+    // `gh` exits 0 on all of these. The readers are written defensively so a formatter can never crash,
+    // which is exactly why an API error body became `total_count=0` — "no checks scheduled yet".
+    for (const bad of [
+      { message: "Not Found", documentation_url: "https://docs.github.com/rest" },
+      { data: null, errors: [{ message: "Could not resolve" }] },
+      { mergeable: "MERGEABLE", headRefOid: "abc", statusCheckRollup: null },
+      null,
+      "nope",
+      [1, 2, 3],
+    ]) {
+      expect(() => assertReadableShape(bad, "pr"), JSON.stringify(bad)).toThrow(/gh returned JSON/);
+      // …and it is classified as its own kind, because "the id or the token is wrong" is a different
+      // next move from "a proxy printed HTML at me".
+      let kind = "";
+      try {
+        assertReadableShape(bad, "pr");
+      } catch (err) {
+        kind = classifyGhFailure(err).kind;
+      }
+      expect(kind).toBe("unexpected payload shape");
+    }
+    // A REAL PR with nothing scheduled yet has the rollup ARRAY and a real SHA. It must pass, or the
+    // guard reds a legitimate board — the whole risk of doing this at all.
+    expect(() => assertReadableShape({ mergeable: "MERGEABLE", headRefOid: "abc", statusCheckRollup: [] }, "pr")).not.toThrow();
+    // `--run` demands BOTH `jobs` and `status`, not "neither of them": a payload with `status` and no
+    // `jobs` read as terminal + conclusion success + total_count 0 and exited 0, GREEN.
+    expect(() => assertReadableShape({ status: "completed", conclusion: "success" }, "run")).toThrow();
+    expect(() => assertReadableShape({ jobs: [] }, "run")).toThrow();
+    expect(() => assertReadableShape({ status: "completed", jobs: [] }, "run")).not.toThrow();
+  });
+
+  it("the verdict prefix and the exit code come from ONE predicate, and it fails closed", () => {
+    const done = { done: true, reason: "pending=0 with total_count stable" };
+    const base = { totalCount: 1, failedNames: [], ranCount: 1 };
+    // Red, both ways in — a named failing check, or a run-level `failure` with no failing job. The
+    // second one is where the two old predicates disagreed.
+    expect(verdictClass(done, { ...base, failedNames: ["MSRV check"], conclusion: null } as never)).toMatchObject({
+      kind: "failure",
+      code: 1,
+    });
+    expect(verdictClass(done, { ...base, conclusion: "failure" } as never)).toMatchObject({ kind: "failure", code: 1 });
+    // Red outranks a skip: same board, plus an unexplained skip, is still exit 1.
+    expect(verdictClass(done, { ...base, conclusion: "failure" } as never, ["MSRV check"])).toMatchObject({ code: 1 });
+    // Did not run: an unexplained skip, OR nothing that finished actually ran, OR an empty board.
+    expect(verdictClass(done, { ...base, conclusion: "success" } as never, ["MSRV check"])).toMatchObject({
+      kind: "did-not-run",
+      code: 4,
+    });
+    expect(verdictClass(done, { ...base, ranCount: 0, conclusion: "skipped" } as never)).toMatchObject({
+      kind: "did-not-run",
+      code: 4,
+    });
+    expect(verdictClass(done, { ...base, totalCount: 0, conclusion: "success" } as never)).toMatchObject({ code: 4 });
+    // Green needs a positive conclusion AND something to have run. `--run` says `skipped` when GitHub
+    // said success and a job skipped; by here the skips are adjudicated and `ranCount > 0`.
+    expect(verdictClass(done, { ...base, conclusion: "success" } as never)).toMatchObject({ kind: "success", code: 0 });
+    expect(verdictClass(done, { ...base, conclusion: "skipped" } as never)).toMatchObject({ kind: "success", code: 0 });
+    // Anything else is NOT a pass, and says so under its own prefix rather than borrowing "failure".
+    expect(verdictClass(done, { ...base, conclusion: "cancelled" } as never)).toMatchObject({
+      kind: "unclear",
+      code: 4,
+    });
+    expect(verdictClass({ done: false, reason: "budget" }, { ...base } as never)).toMatchObject({
+      kind: "pending",
+      code: 2,
+    });
   });
 
   it("reports the age and name of the longest-running pending check", () => {

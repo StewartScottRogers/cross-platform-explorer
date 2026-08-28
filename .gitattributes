@@ -17,11 +17,19 @@ samples/** -text
 # green, so CI cannot catch it and the next person loses an hour. Pin them to LF on
 # every checkout regardless of the user's autocrlf setting, the same way the .cmd/.bat
 # rule above pins the opposite direction for cmd.exe.
-scripts/*.mjs text eol=lf
-
 # CPE-1880 follow-up: `scripts/*.mjs` does not match subdirectories, so
-# `scripts/dev-harness/**/check.mjs` was left unpinned. Match nested scripts too.
-scripts/**/*.mjs text eol=lf
+# `scripts/dev-harness/**/check.mjs` was left unpinned.
+#
+# CPE-1906 round 2 stopped patching the directory list and pinned the FILE TYPE, because the list was
+# wrong twice more. `src/lib/fixtures/ghStub.mjs` (a .mjs under src/) and
+# `sidecar/agent-board/clickthrough.mjs` both matched no rule and both checked out CRLF against an LF
+# blob — measured 131 and 201 CRLF respectively. Each was harmless only by accident (neither is
+# imported through Vite's transform today), and "harmless until someone imports it" is not a property
+# anyone maintains. This is CPE-1932's rule applied to a .gitattributes: name the class, not the
+# instances you remembered. `src/lib/sprintStallControls.test.ts` enumerates every tracked *.mjs via
+# `git ls-files` and asserts BOTH that this checkout is LF and that `git check-attr` reports `eol: lf`
+# for each — so a new .mjs anywhere in the tree is covered on the day it lands.
+*.mjs text eol=lf
 
 # CPE-1893: the same CRLF-on-a-Windows-checkout risk CPE-1880 fixed for scripts/*.mjs applies here
 # too, with a harsher failure mode — a CRLF .sh sourced/run by a GitHub Actions step on the

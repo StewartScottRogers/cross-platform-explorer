@@ -9,6 +9,8 @@
 //
 // The mode comes from `GH_STUB_MODE`. Every mode reproduces something `gh` really does.
 
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+
 const mode = process.env.GH_STUB_MODE ?? "pending";
 const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
 
@@ -114,6 +116,74 @@ switch (mode) {
     // Exactly what PR #1068 returned on 2026-08-27. Must stay exit 0, or the tool reds every PR and
     // gets switched off.
     process.stdout.write(JSON.stringify(prPayload([ok("Frontend — type-check and test"), skipped(BY_DESIGN_SKIP)])));
+    break;
+  }
+  // ── CPE-1906 round 2: a `gh` that exits 0 and answers with something that is not a board ──────────
+  case "rest-error": {
+    // GitHub's REST error body, verbatim in shape. `gh` exits 0 having printed it when the API answered
+    // — a wrong PR number against a token that CAN see the repo, a renamed repo, a 404 behind a proxy.
+    process.stdout.write(
+      JSON.stringify({ message: "Not Found", documentation_url: "https://docs.github.com/rest" }),
+    );
+    break;
+  }
+  case "graphql-partial": {
+    // `gh pr view --json statusCheckRollup` is a GraphQL query, `statusCheckRollup` is a NULLABLE field,
+    // and GitHub answers a field-level failure with HTTP 200, a partial `data` and an `errors` array.
+    // Exit 0, well-formed JSON, no rollup — the shape that read as `total_count=0` i.e. "pending".
+    process.stdout.write(
+      JSON.stringify({ data: null, errors: [{ message: "Could not resolve to a PullRequest with the number of 1." }] }),
+    );
+    break;
+  }
+  case "no-checks-yet": {
+    // The control: a REAL PR with no checks scheduled yet. Has the rollup ARRAY (empty) and a real SHA,
+    // which is exactly what distinguishes it from the two payloads above. Must stay a pending board.
+    process.stdout.write(JSON.stringify(prPayload([])));
+    break;
+  }
+  case "all-skipped-by-design": {
+    // Every finished check is a skip the workflows explain. Nothing failed — and nothing RAN either, so
+    // it is not a pass. This used to print `completed skipped` and exit 1, "at least one check FAILED".
+    process.stdout.write(JSON.stringify(prPayload([skipped(BY_DESIGN_SKIP)])));
+    break;
+  }
+  case "run-no-jobs": {
+    // `gh run view --json status,conclusion,headSha,jobs` answering without `jobs`. This one was not a
+    // wrong wait — it was `CI VERDICT: completed success`, exit 0, GREEN, on a board never seen.
+    process.stdout.write(JSON.stringify({ status: "completed", conclusion: "success", headSha: "deadbeef" }));
+    break;
+  }
+  case "run-failure-no-failing-job": {
+    // Run-level `conclusion: failure` with no failing JOB, plus one unexplained skip. The two red
+    // predicates disagreed here: the line said "neither red nor green", the exit code said 1.
+    process.stdout.write(
+      JSON.stringify({
+        status: "completed",
+        conclusion: "failure",
+        headSha: "deadbeef",
+        jobs: [
+          { name: "Frontend — type-check and test", status: "completed", conclusion: "success" },
+          { name: "MSRV check", status: "completed", conclusion: "skipped" },
+        ],
+      }),
+    );
+    break;
+  }
+  case "flaky": {
+    // Reads 1, 4, 7… succeed and the rest fail, so the CONSECUTIVE-failure counter never reaches its
+    // bail threshold of 3 and the poll ends on the deadline with a genuinely pending board — plus a
+    // pile of `gh` failures the verdict used to be completely silent about. The invocation count lives
+    // in the file named by `GH_STUB_COUNTER` because each read is a fresh process.
+    const counter = process.env.GH_STUB_COUNTER ?? "";
+    const n = counter && existsSync(counter) ? Number(readFileSync(counter, "utf8")) || 0 : 0;
+    if (counter) writeFileSync(counter, String(n + 1));
+    if (n % 3 === 0) {
+      process.stdout.write(JSON.stringify(prPayload([running("Server crates (windows-latest)", 12)])));
+    } else {
+      process.stderr.write("gh: HTTP 502 Bad Gateway (https://api.github.com/graphql)\n");
+      process.exit(1);
+    }
     break;
   }
   case "failure-and-skips": {

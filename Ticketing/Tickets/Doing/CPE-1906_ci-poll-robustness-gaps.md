@@ -132,7 +132,10 @@ Fixes, all in `scripts/ci-poll.mjs` unless noted:
    zero successful reads and at least one failure takes the same path. The line says which kind of
    failure (`gh exited non-zero` / `timed out` / `unparseable output` / `gh not found`), says nothing was
    read, and says what to do. Neither `CI VERDICT: pending` nor `CI still pending on …` is reachable from
-   an error any more.
+   a **thrown** `gh` failure any more. *(Round 2 correction: as first written this said "from an error",
+   which was measurably false — a `gh` that exits 0 with a wrong-shaped payload throws nothing and went
+   straight to the pending verdict. See the round-2 entry below; the claim is now true of every error
+   path, but only because the shape guard was added, not because this sentence was right.)*
 2. **Hung call crosses the cap → bounded per call.** `execFileSync` now carries
    `timeout: ghCallTimeoutMs(now, deadline)` + `killSignal: "SIGKILL"`, the per-call budget being
    `clamp(deadline - now, 5 s, 60 s)`. The structural worst case is now `budget + 5 s`
@@ -195,3 +198,98 @@ not answer at all. Worth its own ticket.
 
 Related: **CPE-1880** (the scripts), **CPE-1907** (the stall detector over-flagging this app's own
 background vocabulary).
+
+---
+
+**2026-08-27 — round 2 (review findings on PR #1078).**
+
+**BLOCKER — a `gh` that exits 0 with the wrong shape was still read as "pending", and in `--run` mode as
+GREEN.** Round 1 counted *thrown* `gh` failures. A well-formed JSON payload of the wrong shape throws
+nothing, so it walked past the counter into the readers, whose deliberately defensive
+`Array.isArray(json?.statusCheckRollup) ? … : []` turned an absent rollup into `total_count=0` — which
+`decideFromReads` reports as *"no checks scheduled yet"*. Structurally the same defect CLAUDE.md already
+records for `audit-npm-projects.mjs` (npm's `--json` error path is well-formed JSON with no `metadata`
+key), re-emitted one layer down inside the guard built to close that class. Not hypothetical: GraphQL's
+`statusCheckRollup` is nullable and GitHub answers a field-level failure with HTTP 200 plus a partial
+`data` and an `errors` array.
+
+Resolution **(a)** — reject the payload, do not soften the claim. Measured, `gh` exit 0 in every row:
+
+| payload | before | after |
+|---|---|---|
+| `--pr` `{"message":"Not Found","documentation_url":…}` | `pending — total_count=0 … CI still pending on unknown`, **exit 2** | `unknown — could not ask GitHub (unexpected payload shape)`, **exit 3** |
+| `--pr` `{"data":null,"errors":[{"message":"Could not resolve"}]}` | pending, exit 2 | unknown, exit 3 |
+| `--pr` `null` / `"nope"` / `[1,2,3]` | pending, exit 2 | unknown, exit 3 |
+| `--pr` `{…,"statusCheckRollup":null}` | pending, exit 2 | unknown, exit 3 |
+| `--run` `{"status":"completed","conclusion":"success"}` (no `jobs`) | **`completed success`, exit 0 — GREEN** | unknown, exit 3 |
+| `--run` `{…,"jobs":[]}` | `completed success`, **exit 0** | `completed did-not-run`, exit 4 |
+| `--pr` `{…,"statusCheckRollup":[]}` — a REAL check-less PR | pending, exit 2 | **pending, exit 2 (unchanged)** |
+| `--pr` a real green rollup | `completed success`, exit 0 | **unchanged** |
+| `--run` 20 jobs ran + 1 by-design skip | `completed success`, exit 0 | **unchanged** |
+
+The `--run` row in bold is why (a) beat (b): this was not merely a wrong wait, it was a **green verdict
+on a board nobody ever saw**, on a repo whose `main` has no branch protection. `assertReadableShape()`
+demands the fields we actually asked `gh` for — `statusCheckRollup` as an ARRAY for `--pr`, both `jobs`
+(array) and `status` (string) for `--run` — and throws `GhPayloadShapeError`, which goes through the
+existing `classifyGhFailure` → counter → exit 3 path as its own kind, `unexpected payload shape`. The
+discrimination is structural rather than a heuristic, which is what makes it safe against a genuinely
+check-less PR: an empty board still has the array and a real `headRefOid`; `sha=unknown mergeable=n/a`
+beside `total_count=0` is a combination no real board produces. For `--run` the guard is deliberately
+stricter than the review's suggested "no `jobs` **and** no `status`", because "`status` but no `jobs`" is
+precisely the row that exited 0.
+
+**Finding 1 — two predicates for "is this red", now one.** `formatVerdict` branched on `failedNames`;
+the exit branched on `failedNames || conclusion === "failure"`. Measured disagreements: a board whose
+only finished checks were by-design skips printed `CI VERDICT: completed skipped — … Skipped by design:
+…` and exited **1** ("at least one check FAILED") with zero failures; and `completed skipped` was
+*simultaneously* the exit-4 prefix, so the prefix discriminated nothing. New: `verdictClass(decision,
+latest, unexplainedSkips)` is the single classifier, and both the line and `process.exit` read it.
+Prefix→code is now one-to-one — `completed success`→0, `completed failure`→1, `pending`→2, `unknown`→3,
+`completed did-not-run`/`completed unclear`→4 — pinned by a test that runs the whole stub matrix and
+fails if any prefix maps to two codes. The exit-4 prefix was renamed off `completed skipped` for the
+same reason. Greenness now also requires that something actually RAN (`ranCount`), so an all-skipped
+board is exit 4 rather than 1; a run with 20 successes and one by-design skip stays exit 0 (measured).
+
+**Finding 2 — prefix matching on bare job ids was the fail-open direction.** Four of the six matchers
+this repo derives are ids of `name:`-less jobs. Measured on the pre-fix code: the prefix `"catalog"`
+explained `"catalog"`, `"catalog-freshness nightly"` **and** `"catalogue rebuild"`. After: only
+`"catalog"`; the other two are unexplained. A matcher is now `{text, prefix}` and is a prefix **only**
+when the job's `name:` contains a template expansion GitHub fills in at run time — everything else is
+compared exactly. The repo's live matcher set is unchanged in effect: `GUI smoke (windows-latest) —
+tauri-driver + WebdriverIO` is still explained, `MSRV check` still is not.
+
+**Finding 3 — the `if:` block-mapping form: fixed, and the comment corrected.** `if:` alone on its line
+with the expression indented beneath is legal YAML and scanned as `conditional=false` (measured). It
+fails *closed*, but reformatting `gui-smoke.yml:121` onto two lines would then have exited 4 on every
+PR. The scanner now looks ahead one non-blank line for a deeper-indented continuation; `if: >-` already
+worked (the `>` satisfies the same-line test) and still does. The over-claiming half is **documented
+rather than tightened**, at the site: "explained" means the job carries a job-level `if:` *at all*,
+unevaluated — including `always()` / `!cancelled()`, whose jobs cannot legitimately skip. Narrowing is
+not free and would not be safe by inspection: the general rule must stay "carries a condition" because
+conditions like `github.event.workflow_run.conclusion != 'success'` skip on every HEALTHY run, so
+separating "can legitimately be false" from "is always true" needs a GitHub-expression evaluator rather
+than a line scan. The residual fail-open is now stated exactly — a job whose `if:` is a tautology is
+excused if it ever skips — instead of being implied away.
+
+**Finding 4 — a pending verdict was silent about `gh` failures it survived.** `gh_failures=N` is now on
+the totals line, **appended after `sha=`**, so the interface pin (presence + relative order) is
+untouched; the pin was extended to require the new key last. Measured: one good read then failures that
+never reach the 3-in-a-row bail → `pending … gh_failures=5`, exit 2, where the line previously mentioned
+them nowhere.
+
+**Finding 5 — the `.gitattributes` pin, and the guard that could not see it.** `src/lib/fixtures/ghStub.mjs`
+matched neither `scripts/*.mjs` nor `scripts/**/*.mjs` and checked out CRLF (131) against an LF blob.
+Rather than add a third directory rule, the pin is now `*.mjs text eol=lf` — and generalising the guard
+from a `scripts/` tree walk to a `git ls-files` enumeration immediately found a **third** unpinned file
+nobody had named, `sidecar/agent-board/clickthrough.mjs` (344 CRLF). Both worktree copies normalised. A
+second guard now asserts `git check-attr eol` reports `lf` for every tracked `.mjs`, because the CRLF
+check alone passes on a Linux runner whatever `.gitattributes` says.
+
+**Red-proofs** — the pre-fix script was loaded from its own HEAD blob into a scratch file and run
+against every input above; it answered the wrong way in every row of the table (including
+`conditional=false` on the block-mapping `if:`, and the three-way `catalog` over-match). The
+`.gitattributes` widening was red-proofed by the new guard failing on `clickthrough.mjs` before the pin
+was broadened. **Endorsed and left alone:** no threshold on job age (a repo-wide constant is a category
+error twice over — the 58.9-min median is whole-run wall clock, and the useful comparison is per-job);
+the `CI_POLL_GH_SCRIPT` seam (unreachable in production, implies no privilege a PATH shim does not).
+**Not ours:** the residual spawn/`timeout-minutes` gap is **CPE-1967**.
