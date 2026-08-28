@@ -3731,3 +3731,38 @@ that agrees with the first only until someone edits one.
 
 Both blockers this round are the same shape: **a verification that verified something adjacent to the
 thing claimed.** A shim adjacent to a tool; a copy adjacent to a rule.
+
+## 2026-08-28 — the trap that did not exist was hiding one that did
+
+CPE-1970's settings recommendation was built around a warning: turning on required checks would leave a
+path-filtered job pending forever on ticket-only PRs, making them unmergeable. Its reviewer showed the
+filter is on the `push:` trigger, not `pull_request:` — **and the workflow says so in its own words
+eleven lines above.**
+
+Round 2 withdrew the section rather than softening it, and then found what the false warning had been
+occupying the space of: **407 of 589 commits in the window carry no PR number. Sixty-nine percent of
+`main`'s movement is direct pushes**, which a branch ruleset must decide about explicitly, and which no
+amount of required-status-check configuration touches. That is a far more consequential fact for the
+recommendation than the thing it replaced.
+
+**A wrong claim does not merely mislead — it occupies the slot where the right one would go.** The
+section existed, it looked like diligence, and its presence is exactly why nobody asked what *else* could
+make this setting expensive. Deleting it is what made the question visible.
+
+Two more things this round did in the right order.
+
+**It measured a carve-out's cost before deciding whether to keep it.** The guard excused a workflow that
+contributed zero checks — a whole-guard-set blind spot. Rather than arguing about it or softening the
+token, it grouped every one of the 186 merged boards by workflow and found **0 missing `CI`, 0 missing
+`GUI smoke`**. So closing the carve-out outright costs **zero added firings**, which turns a judgement
+call into an arithmetic one.
+
+**And it re-ran the CPE-1929 sabotage counts rather than carrying them forward** — 3/67 and **11/59**,
+against the previous round's 3/60 and 7/56. The suite had grown; the old numbers would still have *read*
+fine. That is the "a rebase invalidates transcripts" lesson applied without being asked.
+
+One shape worth naming, since it recurs: the fail-open in the `on:`-block parser was fixed by making it
+**tri-state** — an unclassifiable block returns `null` and becomes `coverage=unknown`, exit 5, rather
+than a quiet `false`. **A boolean predicate over parsed input has three outcomes and only two return
+values, and the third is the one that fails open.** Every scanner this shift has touched has had that
+same missing arm.
