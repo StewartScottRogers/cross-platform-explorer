@@ -3423,3 +3423,34 @@ tree it returns `Ok` with `after.txt` present — the test still reds, correctly
 assert. **Pre-rebase evidence presented as re-taken.** And the comment justifying that fix still argues
 it on the grounds of a `return Err` the base deleted. **A rebase invalidates transcripts as surely as it
 invalidates code, and nothing recomputes them.**
+
+## 2026-08-28 — the worker classified the findings and found one mechanism where the review saw two
+
+#1087's sixth reviewer reported two newly-discovered families of deleting-valid-JavaScript inputs and
+named a mechanism for each: one about an identifier before the `/=` **compound operator**, one about
+`yield`/`await` as plain identifiers.
+
+Round 7 did not take that split. It classified all 40 desyncs programmatically — **24 distinct cores, 16
+in the known family (×2 for a prelude variant = 32), 8 not, nothing unclassified; by word, 5 `yield`, 2
+`of`, 1 `await`** — and found the `/=` detail **incidental**: `of /re////c` breaks with plain division
+and no compound operator at all. **One mechanism, three words** — membership in the regex-follows set by
+a word that is only a *contextual* keyword — not two mechanisms with a shared symptom.
+
+**This matters beyond the bug.** Two mechanisms means two tables, two docblocks, and a fix that has to be
+argued twice; the wrong count would have been carried forward in every subsequent sentence about it. And
+it is the same defect as the rest of the shift wearing yet another costume: **a mechanism named from the
+first example that exhibits it, rather than from the set.** The reviewer had two examples and each
+suggested a story; the worker had forty and could group them.
+
+**The check is the one this shift keeps arriving at: classify before you characterise.** If you have a
+handful of instances, the mechanism you name is a hypothesis about the handful. If you can enumerate
+them — and here the committed sweep made that possible — group them first and let the count tell you how
+many mechanisms there are.
+
+Two more things from the same round worth keeping. Asked *"is 40 the whole set?"*, it answered **only
+where provable**: a measurement of this generator at this seed, grouped by hand, **explicitly not a claim
+about JavaScript**, with the re-run instruction beside it. After six rounds of over-reaching claims, that
+is the instruction landing exactly. And registering the exemption list as a ratchet **falsified a
+standing sentence in `RATCHETS.md`** — *"No registered baseline contains a regex today"* — which it
+corrected rather than quietly working around. **A new registration that invalidates the registry's own
+prose is the kind of thing that gets left, because fixing it is somebody else's file.**
