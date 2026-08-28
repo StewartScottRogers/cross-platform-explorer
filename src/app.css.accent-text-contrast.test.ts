@@ -32,12 +32,32 @@
 //       The declaration half was added in review, because the resolution half alone did not do what
 //       this comment originally claimed. A reviewer deleted --accent-text from the hc-dark block:
 //       hc-contrast.test.ts, app.css.test.ts and warn-token.test.ts all stayed GREEN (that is no
-//       longer true of the first two — CPE-1962 closed it; see the table below), and so did
-//       this test — `tokenHex` falls back to the palette layer, and the bare :root semantic block's
-//       own --accent-text (#0067c0) is in that map, so a hex came back and the assertion passed.
+//       longer true of the FIRST — CPE-1962 closed it; see the table below, and the paragraph after
+//       this one for the other two, both of which were re-measured rather than reasoned about), and
+//       so did this test — `tokenHex` falls back to the palette layer, and the bare :root semantic
+//       block's own --accent-text (#0067c0) is in that map, so a hex came back and the assertion
+//       passed.
 //       Only the RATIO tests (b)/(c) caught it, because the inherited light blue then measured
 //       3.70/3.43/3.07 in hc-dark. Safe by luck, not by design: had the inherited value happened to
 //       clear the bar, the omission would have shipped silently.
+//
+//       THE OTHER TWO NAMES IN THAT SENTENCE, each re-run on its own against the same deletion
+//       (--accent-text removed from the hc-dark block, nothing else changed):
+//         * app.css.test.ts is STILL fully GREEN for it — 22 passed, 0 failed. An earlier draft of
+//           this very annotation said CPE-1962 had closed it here too; that was wrong, and it is
+//           the reason this paragraph exists. CPE-1962's new check in that file is the bare-:root
+//           <-> light pair ONLY, so no hc block is within its reach by construction. Reading the
+//           table below as "three files now catch an hc-dark omission" is the mistake to avoid:
+//           for hc-dark, exactly one file changed behaviour, and it is hc-contrast.test.ts.
+//         * warn-token.test.ts DOES now fail that deletion — but not because of CPE-1962, and it
+//           fails identically on main (a334bd9f, 1 failed / 72 passed), message
+//           ':root[data-theme="hc-dark"] defines --accent-text as a concrete hex (referenced from
+//           AgentTimeline.svelte x3, IcalPreview.svelte, SidecarManager.svelte)'. CPE-1875's guard
+//           only sees a token some component spells as `var(--token, <fallback>)`; those five call
+//           sites landed after CPE-1919 took its reading, so that third of the sentence went stale
+//           on its own, silently, exactly the way the other two did. Four stale coverage claims in
+//           one lineage now, every one of them found by re-running the deletion and none by
+//           re-reading the code.
 //       The parity coverage that DOES exist was uneven, and worth stating exactly — an earlier draft
 //       of this note said flatly that there is no general theme-parity guard in this repo, which is
 //       false for the dark block and was corrected in review. **CPE-1962 then made it even**, by
@@ -67,8 +87,24 @@
 //           block: --accent-text" (1 failed, 21 passed).
 //       So parity for a brand-new token now holds in all five live theme blocks by derivation, not
 //       only where a test like this one names the token by hand. What the symmetric checks still do
-//       NOT cover: a token missing from EVERY block including light (nothing to compare against),
-//       and a value that is present but wrong — which is what the ratio assertions below are for.
+//       NOT cover — stated because a table of three YESes reads as more than it is:
+//         * A token missing from EVERY block including light. Nothing to compare against.
+//         * A value that is present but wrong. That is what the ratio assertions below are for.
+//         * THE REVERSE DIRECTION, for three of the five blocks. dark's, hc-light's and hc-dark's
+//           checks all ask only "is everything light declares also declared here?"; a token
+//           declared in dark or an hc block but absent from light is unchecked by anything. Only
+//           app.css.test.ts's bare-:root/light pair runs both ways, and it says so at its own site
+//           (that pair is symmetric by construction; a theme block is not). Swept in both
+//           directions today: all four data-theme blocks declare the same 46-token non-empty set,
+//           so this is a gap in the guards rather than a live defect — no reverse-direction
+//           omission exists to find right now.
+//         * THE EMPTY-VALUE FORM, in the dark row only. hc's and app.css.test.ts's new checks
+//           filter `--foo: ;` out before comparing (see the `declaredNames` note in either file);
+//           dark-contrast.test.ts's `lightOnly` still reads raw `lightSemanticDecls.keys()`, so a
+//           token present-but-empty in dark would satisfy it. The dark row's YES below is
+//           therefore marginally weaker than the other two. Deliberately left alone here — it is a
+//           one-line change in a file this ticket does not otherwise touch, and it deserves its own
+//           red-proof rather than a drive-by.
 //
 //       One live omission fell out of CPE-1962's sweep, and it was a real defect rather than a
 //       legitimate exception: --log-warn was declared in bare :root, light and dark but in neither
@@ -77,6 +113,19 @@
 //       below the AA body-text floor in the theme whose premise is legibility. Fixed in app.css
 //       (both hc blocks now alias their own --warn) rather than added to an exception list; the
 //       symmetric checks ship with NO exception list at all, which is the point.
+//       --log-warn backs a SECOND role nobody had measured, and it is worth recording where the
+//       remaining hole is: `.log-chip[data-level="warn"].active` (LogPreview.svelte:341) paints it
+//       as a 16% `color-mix` tint background under `color: var(--text)`, with the undiluted token
+//       as `border-color`. src/lib/components/LogPreview.contrast.test.ts derives and asserts that
+//       pairing for the light and dark blocks ONLY — it never reads an hc block — so nothing
+//       guarded either hc theme's chip before this change and nothing guards it after. No
+//       regression either way: measured on both sides of the fix, every reading improves or holds.
+//       Text on the tint, hc-dark 17.38 -> 13.80 and hc-light 16.75 -> 16.31, both far above the
+//       4.5:1 floor; the chip's border against --surface, hc-dark 3.28 -> 13.03 and hc-light
+//       5.93 -> 7.83, i.e. the one reading that was near 1.4.11's 3:1 non-text floor gains four
+//       times its headroom. Extending LogPreview.contrast.test.ts over the two hc blocks is a
+//       follow-up, not this ticket: it is a real coverage gap, but widening that file's theme list
+//       means re-deriving its surfaces per theme and red-proofing each, which is its own change.
 //   (b) --accent-text clears the text bar on every painted surface in every theme.
 //   (c) EVERY colour role the JSON preview paints — not just the string value that was reported —
 //       clears the text bar on every painted surface in every theme, with the role list DERIVED by

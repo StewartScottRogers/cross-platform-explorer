@@ -163,6 +163,12 @@ describe("app.css theme-token layering (CPE-1534)", () => {
   // palette-resolution and hex-literal paths too, where a tighter value pattern risks a false
   // positive on the valid multi-line declaration form. Filtered at the call site instead; the shared
   // helper is untouched.
+  //
+  // SELECTOR LISTS: this check reads one brace-balanced block per selector, exactly as
+  // src/app.css.hc-contrast.test.ts's note records for its own pair, so a token declared via a
+  // selector list that merely INCLUDES a block (`:root, [data-theme="light"] { … }`) reads as
+  // missing from it. Over-strict on purpose: it fails CLOSED, and it holds the
+  // one-block-per-selector convention this file already assumes elsewhere.
   it("bare :root and :root[data-theme=\"light\"] declare the same token set, fixture or not (CPE-1962)", () => {
     const declaredNames = (block: string): Set<string> =>
       new Set([...extractDecls(block)].filter(([, value]) => value !== "").map(([name]) => name));

@@ -862,10 +862,19 @@
      legibility: under WCAG AA's 4.5:1 body-text floor on every surface, and under 1.4.11's 3:1
      non-text floor on the hover fill. Aliased to --warn (hc-dark's bright amber, #ffcc66, already
      verified for its own foreground role): 14.08 / 13.03 / 11.67. --warn is the right alias target
-     here and NOT in the dark theme — dark's --warn doubles as --warn-fill under white text so it has
-     to stay dim, which is exactly why dark declares a separate brighter --log-warn; hc-dark already
-     split --warn-fill onto its own primitive (next line), so its --warn is free to be the bright,
-     legible one both roles want. */
+     here and NOT in the dark theme, and the discriminator is ROLE TENSION, not the alias spelling —
+     hc-light aliases --warn-fill to --warn as well (see its block above), so "dark's --warn doubles
+     as --warn-fill" does not actually separate the two cases. What separates them is whether ONE
+     amber can serve both roles at once. In hc-light it can: --warn #734900 reads 7.83:1 as text on
+     that theme's white --surface AND carries white at 7.83:1 as a solid fill, so both roles want the
+     same dark amber and --log-warn joins them for free. In dark they pull in opposite directions:
+     --warn #c38800 carries white at only 3.07:1, essentially zero headroom over WCAG 1.4.11's 3:1
+     fill floor, so it cannot be brightened; while --log-warn #ffb84d reads 9.48 / 8.24 / 8.80 as
+     text but would carry white at just 1.72:1. Each value is right for one role and disqualifying
+     for the other, which is why dark keeps them as two tokens. hc-dark has no tension left to
+     resolve, because it already split --warn-fill onto its own primitive (next line) — that leaves
+     its --warn free to be the bright, legible amber both foreground roles want. Same shape as the
+     bare :root block's "no role tension" note above, measured per theme rather than assumed. */
   --warn: var(--pal-hc-dark-amber-300);  /* CPE-1810 — see that palette entry's comment above */
   --log-warn: var(--warn);  /* CPE-1962 — see the note directly above */
   --warn-fill: var(--pal-hc-dark-amber-fill);  /* same negative-window split as --danger-fill above */

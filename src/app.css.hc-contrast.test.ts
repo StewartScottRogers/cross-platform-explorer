@@ -207,9 +207,9 @@ const SEMANTIC_TOKENS = [
 // And the three red-proofs of the new checks, each run on its own (one deletion proving one of three
 // is not evidence for the other two):
 //   * delete --accent-text from hc-light -> this file fails, "tokens present in light but missing
-//     from hc-light: --accent-text" (1 failed, 23 passed).
+//     from hc-light: --accent-text" (1 failed, 22 passed).
 //   * delete --accent-text from hc-dark  -> this file fails, "tokens present in light but missing
-//     from hc-dark: --accent-text" (1 failed, 23 passed) — the deletion that was green above.
+//     from hc-dark: --accent-text" (1 failed, 22 passed) — the deletion that was green above.
 //   * the bare-:root/light pair's red-proof lives in src/app.css.test.ts; see its own note.
 //
 // NO EXCEPTION LIST, and that is a measured claim too, not an assumption. Sweeping every name the
@@ -221,6 +221,18 @@ const SEMANTIC_TOKENS = [
 // than excepted here. If a future theme genuinely must omit a token, name it in an exception list
 // with the reason at this site — do not widen the filter, because a fixture the guard skips is the
 // exact defect this check exists to close.
+//
+// ONE-DIRECTIONAL, and worth saying plainly because the word "symmetric" above invites the opposite
+// reading: both checks ask only "is everything the light block declares also declared here?", never
+// the reverse. A token present in hc-light or hc-dark but ABSENT from light is not checked by
+// anything. src/app.css.dark-contrast.test.ts's `lightOnly` has exactly the same one-way shape; only
+// src/app.css.test.ts's bare-:root/light pair runs both directions, and it says so at its own site —
+// that pair is symmetric by construction (bare :root is the fallback `light` must reproduce), while
+// a theme block legitimately is not. Measured today rather than assumed: sweeping all four
+// data-theme blocks against each other in BOTH directions, every one declares the same 46-token
+// non-empty set, so there are zero reverse-direction omissions live right now. That makes this a
+// known gap in the guard, not a live defect — closing it is a follow-up's call, and would need a
+// policy for a deliberately theme-only token before the check could be turned on.
 //
 // SELECTOR LISTS: like every other app.css guard here, these checks read one brace-balanced block per
 // theme selector, so a token declared via a selector list that merely INCLUDES the block

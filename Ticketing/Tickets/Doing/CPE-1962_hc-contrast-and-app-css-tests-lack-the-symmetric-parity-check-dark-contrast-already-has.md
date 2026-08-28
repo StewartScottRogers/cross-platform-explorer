@@ -187,3 +187,107 @@ finding and why it was fixed rather than excepted.
   baseline raised.
 - Docs: `src/docs/35-appearance.md` gained a short user-facing note on the High-contrast WARN colour
   (no new section, so `sectionDocs.ts` is unchanged).
+
+---
+
+## Round 2 — three factual errors in the coverage comments themselves
+
+Review round 2 blocked on three defects in the **comments**, not the code: the exact defect class
+this ticket exists to close, in the exact files it exists to fix. Text-only change; no behaviour
+moved. Every correction below was re-measured by running the thing, not by re-reading it.
+
+### R2.1 — wrong tally, twice
+
+`src/app.css.hc-contrast.test.ts` recorded both hc red-proofs as `(1 failed, 23 passed)`. The file
+has **23 tests total** (`npx vitest run src/app.css.hc-contrast.test.ts` -> `23 passed (23)`), so a
+single failure leaves **22**. Re-ran the hc-dark deletion to confirm the shape: `1 failed | 22 passed
+(23)`. Both lines corrected to `22`. The PR already recorded 22 correctly in
+`accent-text-contrast.test.ts`, so the diff had been contradicting itself.
+
+### R2.2 — a coverage claim that was false, disproved by deletion
+
+`accent-text-contrast.test.ts` annotated CPE-1919's stale "all stayed GREEN" paragraph with *"that is
+no longer true of the first two"*. Re-ran the deletion under discussion — `--accent-text` removed
+from the **hc-dark** block, nothing else changed — against each named file on its own:
+
+| file | result | note |
+|---|---|---|
+| `app.css.hc-contrast.test.ts` | **1 failed, 22 passed** | the only file CPE-1962 changed here |
+| `app.css.test.ts` | **22 passed, fully GREEN** | its new check is bare-`:root` <-> `light` only, so no hc block is in its reach |
+| `app.css.warn-token.test.ts` | **1 failed, 72 passed** | fails on `main` too — not CPE-1962's doing |
+
+So `"the first two"` -> `"the first"`.
+
+`warn-token.test.ts` turned out to be a **fourth** stale coverage claim in this lineage, and it is
+not one this ticket created: re-ran the same deletion on `main` at `a334bd9f` and it fails there
+identically, `:root[data-theme="hc-dark"] defines --accent-text as a concrete hex (referenced from
+AgentTimeline.svelte x3, IcalPreview.svelte, SidecarManager.svelte)`. CPE-1875's guard only sees a
+token some component spells as `var(--token, <fallback>)`; those five call sites landed *after*
+CPE-1919 took its reading, so that third of the sentence went stale on its own, silently. Recorded
+at the site with the measurement rather than left standing. Four stale claims now in one lineage,
+every one found by re-running the deletion and none by re-reading the code.
+
+Keeping the stale paragraph and annotating it (rather than deleting it) was confirmed correct in
+review — it records the measurement that motivated the ticket. The annotation just had to be true.
+
+### R2.3 — three honest limitations now stated
+
+1. **One-directional.** `dark`'s, `hc-light`'s and `hc-dark`'s symmetric checks all ask only
+   "is everything `light` declares also declared here?". A token in a theme block but absent from
+   `light` is unchecked by anything. Only `app.css.test.ts`'s bare-`:root`/`light` pair runs both
+   ways (that pair is symmetric by construction; a theme block is not). Swept both directions over
+   all four `data-theme` blocks: each declares the **same 46-token non-empty set**, zero omissions
+   either way, zero empty-value declarations — so this is a **gap in the guards, not a live
+   defect**. Stated in `hc-contrast.test.ts` and in the header's "does NOT cover" list.
+2. **The empty-value hole survives in the `dark` row.** `dark-contrast.test.ts`'s `lightOnly` still
+   reads raw `lightSemanticDecls.keys()`, so a `--foo: ;` in `dark` would satisfy it; the other
+   three blocks now filter it. The header table's `YES` for `dark` is therefore marginally weaker
+   than the other two rows. Stated, not fixed — it deserves its own red-proof, not a drive-by in a
+   file this ticket does not otherwise touch.
+3. **Selector-list behaviour** was stated in `hc-contrast.test.ts` but not in `app.css.test.ts`.
+   Added there, with the same fails-closed reasoning.
+
+### R2.4 — the `--warn`-doubles-as-`--warn-fill` phrasing: corrected
+
+Round 1's hc-dark comment justified aliasing `--log-warn` to `--warn` by saying dark's `--warn`
+"doubles as `--warn-fill`". `hc-light` does exactly the same (`--warn-fill: var(--warn)`), so the
+phrase does not distinguish the two cases — and the bare `:root` block's own comment already frames
+this correctly as **role tension**. Rewritten to that language, with per-theme measurements:
+
+- `hc-light` `--warn` `#734900` — **7.83:1** as text on its white `--surface` *and* **7.83:1**
+  carrying white as a fill. Both roles want the same dark amber; `--log-warn` joins them for free.
+- `dark` `--warn` `#c38800` — carries white at **3.07:1**, essentially zero headroom over 1.4.11's
+  3:1 fill floor, so it cannot be brightened. `dark` `--log-warn` `#ffb84d` reads
+  **9.48 / 8.24 / 8.80** as text (`--bg` / `--surface` / `--surface-alt`) but would carry white at
+  **1.72:1**. Each value is right for one role and disqualifying for the other — hence two tokens
+  in `dark`.
+- `hc-dark` has no tension left: it already split `--warn-fill` onto its own primitive, leaving
+  `--warn` free to be the bright amber both foreground roles want.
+
+### R2.5 — a `--log-warn` role nobody had measured
+
+`.log-chip[data-level="warn"].active` (`LogPreview.svelte:341`) paints `--log-warn` as a **16%
+`color-mix` tint background** under `color: var(--text)`, with the undiluted token as
+`border-color`. `LogPreview.contrast.test.ts` derives that pairing for the **light and dark blocks
+only** — it never reads an hc block — so nothing guarded either hc chip before this change and
+nothing guards it after. **No regression**; every reading improves or holds:
+
+| reading | hc-dark | hc-light |
+|---|---|---|
+| `--text` on the 16% tint | 17.38 -> **13.80** | 16.75 -> **16.31** |
+| chip border vs `--surface` | 3.28 -> **13.03** | 5.93 -> **7.83** |
+
+The border reading that sat near 1.4.11's 3:1 non-text floor gains four times its headroom.
+Extending `LogPreview.contrast.test.ts` over the two hc blocks is a genuine coverage gap and a
+**follow-up** — widening its theme list means re-deriving its surfaces per theme and red-proofing
+each, which is its own change.
+
+### Round 2 verification
+
+- Rebased on `origin/main` (`a334bd9f`) before touching anything.
+- `npm run check` — 0 errors, 0 warnings.
+- `npm test` — 348 files, 4986 passed, 2 skipped (unchanged; text-only round).
+- `node scripts/ratchet-baselines.mjs compare origin/main` — 12 baselines, all unchanged;
+  `hex-files: 85` and `hex-occurrences: 277` both unchanged. (That ratchet walks `.svelte` files
+  only, so comment edits in `app.css` cannot reach it either way.)
+- Every deletion made for measurement was reverted; `git status` clean before committing.
