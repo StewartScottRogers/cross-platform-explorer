@@ -2052,3 +2052,36 @@ The corroborating half of the same finding was genuinely valuable and nearly los
 independently re-measured arm E at **51/1,000 (Windows) and 55/1,000 (Linux)** on the fixed branch,
 a second confirmation of CPE-1961's numbers from a different harness run. Worth separating the
 verifiable half of a finding from the stale half rather than discarding both.
+
+## 2026-08-27 — three successive characterisations of one failure, each better than the last, each still wrong
+
+CPE-1960 was described three times before anyone got it right, and the progression is worth keeping
+because each step *looked* like the correction that ended the matter.
+
+1. **"Intermittent"** — filed that way from two observations.
+2. **"Consistent; every completed shard-2 run shows it"** — my correction, raised to High. Wrong, and I
+   had the disproof in hand: *"three unrelated branches"* is the signature of three branches rebased
+   past one commit, not of a race.
+3. **"100% deterministic on either side of commit `48aa8697`"** — the worker's root-cause, from 5
+   sampled jobs. It identified the real mechanism (a lockfile-only webdriverio bump turning
+   `scrollIntoView` from a no-op into a real mouse wheel at viewport (0,0)) and the real fix. The
+   boundary was still wrong.
+4. **The measured answer** — its Reviewer enumerated **all 32** shard-2 jobs in the window and
+   fingerprinted what `npm ci` actually installed (`added 479 packages` = wdio 9.30.0, `489` = 9.31.4,
+   a clean split). Result: **0/14 fail on 9.30.0, 9/10 fail on 9.31.4**. Onset is **20:33Z on the
+   branch**, two hours before the merge. The rate is **~90%, not 100%**.
+
+**The discriminator was what got *installed*, not what got *merged*.** Every wrong version of the story
+used merge time as the boundary, which is why the falsifier hid in plain sight: job `98681871872`, cited
+in three separate files as the clean *pre-bump* run, checked out PR #1065's own **merge commit**,
+installed **489** packages, and passed. A clean, complete run **on the broken version**.
+
+**The consequence is operational, not academic.** At ~90%, **one green CI run does not verify this
+fix** — a green run already happened on the broken version. The PR, the ticket, the harness README and
+two source comments all told the next person the opposite, and that claim was about to land inside a
+permanent guard file where a passing test would appear to vouch for it. Same shape as CPE-1933.
+
+Two rules fall out. **Sampling a handful of CI jobs and calling the pattern deterministic is a guess
+with a table around it** — enumerate the window and fingerprint the artefact, because the *effective*
+version is what the runner installed, not what the branch had merged. And **a rate is not a detail**:
+"100%" and "90%" imply opposite verification strategies, and only one of them is safe.
