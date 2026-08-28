@@ -3,7 +3,7 @@ id: CPE-1960
 title: "`macro-param-prompt.smoke.ts`: webdriverio 9.31.4's `scrollIntoView` wheels at (0,0) and closes the flyout the spec is about to click"
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -317,3 +317,57 @@ row now centred). That is a **new baseline, not a regression**.
 Files corrected: the PR body, this ticket, `gui-smoke/README.md`,
 `gui-smoke/lib/scrollIntoViewUsage.test.ts` (header only), `gui-smoke/specs/macro-param-prompt.smoke.ts`
 (comment only). No executable code changed in this round.
+
+## Closed 2026-08-27 — and BOTH earlier characterisations were wrong, including the Foreman's
+
+Merged as PR #1072.
+
+**Correcting this ticket's own "Raised to High" note, which I wrote.** It argued the word "intermittent"
+should come out because *"every shard-2 run that actually completed has reported this failure."* **That
+was false.** Fourteen completed runs are clean. The tell was in the evidence I used to argue it:
+*"three unrelated branches"* is not the signature of a race — it is the signature of three branches
+rebased past the same commit — and I drew the opposite conclusion from a fact I already had.
+
+**The worker's correction was better and also wrong.** It root-caused the mechanism correctly and
+called the boundary *"100% deterministic on either side of `48aa8697`"*, from **5 sampled jobs**.
+
+**The measured answer** came from its Reviewer enumerating **all 32** shard-2 jobs in the window and
+fingerprinting what `npm ci` actually installed — `added 479 packages` = webdriverio 9.30.0, `added 489
+packages` = 9.31.4, a clean split:
+
+| webdriverio | complete (14/14) runs | failed `macro-param-prompt` |
+|---|---|---|
+| **9.30.0** | 13 | **0** |
+| **9.31.4** | 11 | **10** |
+
+**Onset 20:33Z on the CPE-1945 branch** (job `98661503323`) — about **two hours before** `48aa8697`
+merged. **The discriminator is lockfile content, not merge time**, which is why the falsifier hid in
+plain sight: job `98681871872`, cited in three separate files as the clean *pre-bump* control, checked
+out PR #1065's own **merge commit**, installed **489** packages, and passed. A clean, complete run **on
+the broken version**.
+
+**The consequence is operational, and it is why the prose blocked the merge: at ~90%, one green CI run
+does not verify this fix.** That claim was about to land inside a permanent guard file where a passing
+test would appear to vouch for it.
+
+**The cause.** `48aa8697` is CPE-1945's `npm audit` sweep, and its only functional change is
+`gui-smoke/package-lock.json`: **webdriverio 9.30.0 → 9.31.4**. `element.scrollIntoView()` is not the
+DOM API — it injects a real mouse wheel. 9.30.0 assigned the computed deltas to the origin **offset**
+fields and left `deltaX`/`deltaY` at 0 — a no-op anchored on the element. 9.31.4 fixed that
+wrong-field bug and thereby made the command **scroll for the first time**, with **no `origin`**, so
+the wheel lands at viewport **(0,0)**.
+
+**Causation was established in CI, not by proxy.** From failing run `98705756557`'s own rect probe:
+`block:"center"` → `deltaY = 589 − (700−32)/2 = 255`; `inline` undefined → `deltaX` keeps
+`553.296875`; rounded to **(553, 255)**, non-zero, so the `deltaX===0 && deltaY===0` early return does
+not fire. `isVisibleY`/`isVisibleX` are consulted **only** in the `nearest` branches, so `block:"center"`
+bypasses the already-visible check entirely. The row existed 250 ms before the wheel and was gone
+208 ms after, with nothing in between. The *passing* 9.31.4 run has byte-identical geometry and
+dispatches the same wheel — the flyout simply survived that once, which is what ~90% means.
+
+**Five of the seven call sites were latent.** Because 9.30.0's command was a no-op, they had never
+scrolled anything; they now will.
+
+**The transferable lesson: a lockfile-only dependency bump is a functional change.** This one silently
+converted a no-op into an input event, inside the harness that guards the entire GUI verification leg,
+in a diff nobody reviews.

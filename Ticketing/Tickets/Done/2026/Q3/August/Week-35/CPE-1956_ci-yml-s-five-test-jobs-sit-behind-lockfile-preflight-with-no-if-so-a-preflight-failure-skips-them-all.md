@@ -3,7 +3,7 @@ id: CPE-1956
 title: `ci.yml`'s five test jobs all sit behind `lockfile-preflight` with no `if:`, so one preflight failure silently skips the entire test suite
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -175,3 +175,42 @@ not this diff's.
 ### Checks
 
 `npm run check` clean. `npm test` run. No Rust touched, so no clippy leg needed.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1074.
+
+**The fix kept the `needs:` edge and added a terminal `if: always()` verdict job.** The edge was
+established as **ordering, not data** — the preflight declares no `outputs:`, uploads no artifact, and
+leaves nothing the five consume — so deleting it was available. The argument for keeping it is the
+load-bearing part and it survived review: **decoupling would not have fixed the defect.** The skip is
+not the problem; the skip being *silent* is. A job can still be skipped by cancellation, and the next
+`needs:` edge anyone adds reopens the hole. A terminal gate is the durable answer and it generalises.
+
+**Anti-rationalisation check, run by the Reviewer:** deleting `needs:` from five jobs is a five-line
+diff. What shipped is a 150-line script, a 276-line derived guard, and a rework of an existing ratchet.
+The choice cost more work, not less.
+
+**The live benefit turned out to be one layer down from where the PR argued it, and larger.** The PR
+reasoned about a skipped job satisfying a *required check* — which cannot happen here, because
+`branches/main/protection` returns **404** and `rulesets` is **`[]`**: this repo has **no required
+status checks at all**. The Reviewer then looked at what actually consumes the signal and found
+`scripts/ci-poll.mjs:341` counting `SKIPPED` as **success** — so a preflight failure produced
+`CI VERDICT: completed success` on a run where the entire Rust suite never executed, in **the gate this
+crew merges on**. That is not latent. It became **CPE-1906** / PR #1078.
+
+**The lesson that generalises: when a change guards against a hazard, check what already consumes the
+signal it is changing.** The honest answer to "is this worth it" was in a different file than the diff.
+
+**The declared gap was closed by this PR's own CI run.** Its author stated plainly that no real Actions
+run with a genuinely failing `lockfile-preflight` had been triggered, leaving GitHub's delivery of
+`toJSON(needs)` to the step untested. The Reviewer noted the `MIN_DEPENDENT_JOBS = 3` floor makes a
+green verdict *itself* that proof — and the job log reads:
+
+    5 needed job(s) reported to the verdict:
+      backend: success   crates: success   msrv: success   net-e2e: success   sidecar: success
+
+**Merged past three verified reds:** shard 2 (CPE-1960), shard 4 (CPE-1965 — a **4.3%** intermittent
+measured across 69 shard-4 jobs and present on `main` itself), and the verdict job downstream of both.
+My original claim that #1074 carried something `main` did not was a **sampling artefact** from two data
+points.
