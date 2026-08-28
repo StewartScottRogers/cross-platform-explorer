@@ -3,7 +3,7 @@ id: CPE-1906
 title: ci-poll.mjs robustness gaps — a hung `gh` call still crosses the cap, an error reads as pending, and a usage error exits as "CI failed"
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-26
@@ -293,3 +293,54 @@ was broadened. **Endorsed and left alone:** no threshold on job age (a repo-wide
 error twice over — the 58.9-min median is whole-run wall clock, and the useful comparison is per-job);
 the `CI_POLL_GH_SCRIPT` seam (unreachable in production, implies no privilege a PATH shim does not).
 **Not ours:** the residual spawn/`timeout-minutes` gap is **CPE-1967**.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1078, **fully green — 24 of 24 checks, no failures** — after two rounds. This is the tool
+the Foreman merges on, so the record matters more than usual.
+
+**Three fail-open paths fixed, and the sweep found a fourth elsewhere.** An error now produces
+**exit 3** (`unknown — could not ask GitHub`) rather than `pending`, a hung `gh` can no longer cross the
+advertised budget, and an unexplained skip produces **exit 4** (`completed did-not-run`). `scripts/organize-done.mjs`
+was found fail-open in the same class and fixed: a failed auto-commit printed to stdout and exited **0**
+*after renaming files*, and `git diff --cached --quiet` could not tell exit 1 from exit **128** — the
+same exit-code confusion as the bash `[ -lt ]` returning 2 earlier that day.
+
+**The Foreman's routing was wrong and the worker refused it, correctly.** Having found
+`ci-poll.mjs:341` counting `SKIPPED` as success, I routed *"treat SKIPPED as not-success."* The worker
+measured first: **`GUI smoke (windows-latest)` is SKIPPED on every PR** by its own job-level `if:`, so a
+blanket rule would have reddened every board forever — not fail-closed, **broken**, and reverted within
+a day taking the real fix with it. What shipped derives the distinction from the workflow files: a job
+with an `if:` **plus its transitive `needs:` closure** is by-design; anything else did not run; an empty
+scan treats every skip as unexplained. **The discrimination was the work.** Collapsing the category only
+looks like rigour.
+
+**Round 1's Reviewer found a SEVENTH fail-open of the day — inside the fix for the class.** The file
+claimed *"neither `CI VERDICT: pending` nor `CI still pending on …` is reachable from an error any
+more."* False: a `gh` that exits **0** returning well-formed JSON of the **wrong shape** (a GraphQL
+partial `{"data":null,"errors":[…]}`, `null`, a bare string) landed on `total_count=0` → pending.
+Structurally identical to the `audit-npm-projects.mjs` bug CLAUDE.md already records.
+
+**And round 2 found it was worse than reported.** The review's matrix covered `--pr` mode, where the
+wrong shape exits 2 — never green. In **`--run` mode**, `{"status":"completed","conclusion":"success"}`
+with **no `jobs` array** read as terminal + success + `total_count=0` and exited **0 — GREEN**, on a repo
+with no branch protection. That removed the document-it option outright.
+
+**Two red predicates were deciding "is this red" independently** — `formatVerdict` branched on
+`failedNames` while the exit code branched on `failedNames || conclusion === "failure"` — so an
+all-by-design-skipped board printed `completed skipped` and exited **1**, which the file's own table
+defines as "at least one check FAILED", with zero failures. Unified behind one `verdictClass()`, pinned
+by a test that fails if any prefix maps to two exit codes.
+
+**Job age is reported and deliberately NOT thresholded.** The median run here is **58.9 min** *whole-run
+wall clock*, so any threshold under it fires on healthy jobs and any over it fires on nothing — and the
+useful comparison is per-job (`Frontend` at 19m is alarming; `Server crates (windows-latest)` at 19m is
+normal). Printing the age **and the name** hands the caller the diagnostic without minting an unmeasured
+constant. That is the hour the Foreman lost comparing timestamps by hand, fixed properly.
+
+**Prefix matching on bare job ids was fail-open**: `"catalog"` excused `"catalog-freshness nightly"` and
+`"catalogue rebuild"`. Now exact unless the job's `name:` carries a `${{ … }}`.
+
+**Postscript, the same evening:** the Foreman then read `pend=0 fail=0` off a hand-rolled `jq` for a PR
+whose board was **empty** after a force-push — the very case this tool already refuses. Recorded in
+`history.md`. **Use the tool.**
