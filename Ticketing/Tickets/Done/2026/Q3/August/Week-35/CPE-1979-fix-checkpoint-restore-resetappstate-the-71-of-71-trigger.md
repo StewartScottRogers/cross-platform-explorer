@@ -3,7 +3,7 @@ id: CPE-1979
 title: Fix `checkpoint-restore.smoke.ts`'s `resetAppState` — it is the trigger in 71 of 71 shard-2 jobs, and fixing it makes CPE-1955 and CPE-1910 near-dead code
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-28
@@ -178,3 +178,100 @@ CPE-1910's `$GITHUB_STEP_SUMMARY` respawn count, whose expected value is now 0.
 | After | **0.50 s** |
 
 ≈ 49.7 s per shard-2 job, on every run, green ones included.
+
+## Closing record — merged as PR #1094 (`19773815`), 2026-08-28
+
+**The ticket was filed as a harness flake and closed as a user-facing app bug.** That is the whole result.
+
+### What the defect actually was
+
+`NavToolbar.svelte#commit()` returned early on `if (!value || value === currentPath)` **before** dispatching
+`navigate`. `App.svelte#enterArchive` sets `archive` and leaves the tab's history alone, so `currentPath`
+never moves when you enter an archive — the address bar keeps showing the archive's **containing folder**
+while the listing shows its inner entries. Re-entering that same path (a user's natural "get me out") was
+**silently swallowed**, so `onCrumbNavigate`'s `exitArchive()` and `loadPath`'s `archive = null` — the app's
+single chokepoint for dismissing the archive / smart-folder / structured-search views — were **unreachable
+from the address bar**.
+
+Fix: `App.svelte` hoists `$: pathOverlaidByView = !!archive || !!smartFolder || !!structuredSearch` out of
+the existing CPE-1854 boolean (one declaration, two consumers) and threads it in; the guard becomes
+`value === currentPath && !pathOverlaidByView`.
+
+### Two fixes the worker refused, and said why at the site
+
+An archive escape hatch in `resetAppState`, or an `afterEach` in `archive-browse.smoke.ts`. **Either would
+have passed the reset while the app stayed broken for every user — and would have destroyed the only
+detector that found this.** The harness was not lying; it was reporting.
+
+### Measured, with the population stated
+
+- **Before: 77 of 77.** 97 completed `gui-smoke` runs over 2026-08-28T00:21:30Z→17:11:19Z (16 h 50 m) → 81
+  completed shard-2 jobs → 77 with a retrievable log that reached the transition, **every one** carrying
+  `resetFailedRestartingSession` naming `checkpoint-restore.smoke.ts`, with exactly one
+  `expected the breadcrumb to show` error (cause/symptom 1:1). 11 of 77 (14.3 %) spent a driver respawn.
+  **4 cancelled jobs were excluded and reported as `FETCH_FAILED`/`LOG_TOO_SMALL` by a 10,000-byte floor
+  rather than counted as clean.**
+- **After: 0 of 3** consecutive completed shard-2 jobs, 19:02:32Z→19:25:18Z. Same-transition cost
+  **50.19 s → 0.50 s**, ≈ 49.7 s off every shard-2 job.
+- **The ticket title's "71 of 71" and the report's "77 of 77" are both right for their own windows** — 71 was
+  CPE-1910's reviewer's figure over a 13.5 h window ending 08:47Z; 77 is this ticket's own later
+  re-measurement. Recorded rather than silently reconciled.
+- **What n=3 does not do, stated in the PR and unchanged through review:** it cannot bound a residual
+  low-rate flake. The before rate was 100 %, so consecutive clean jobs falsify *"always"* — which is the
+  claim being fixed. Bounding needs a post-merge window on `main`.
+
+### Coverage given up, and the argument for giving it up
+
+CPE-1955's respawn and CPE-1910's retry go near-dead on this path. Both now say so **at their own sites**.
+Rejected: a **synthetic respawn exercise** (~35 s, a real driver kill as a new flake source inside the gate,
+and it pegs the counter at ≥1 forever — destroying the one live signal); and an **alert on "0 respawns for N
+runs"** (it fires on *health*, so it gets muted, and cannot tell healthy-and-unneeded from broken). Kept:
+CPE-1910's retry *decision* logic is pure and stays deterministically exercised every push
+(`sessionRetry.test.ts`, `runSuite.integration.test.ts`); the in-process half (`recoverSession` /
+`respawnTauriDriver`) **is** genuinely uncovered and is named as such rather than papered over with a test
+that would only assert the mock. The standing signal is that **zero is now the baseline** in CPE-1910's
+`$GITHUB_STEP_SUMMARY` block — `run-suite.ts:285` gates it on `attempt > 1 || driverRespawns > 0`, so zero
+prints "nothing to report" and any respawn prints the loud block.
+
+### What the gauntlet actually proved
+
+**Zero code defects.** An independent Reviewer re-derived the mechanism from source rather than from the
+comments — confirming `commit()` is the **only** address-bar route to `navigate` (`on:blur` merely clears
+`editingPath`), that `pathOverlaidByView` reaches the guard, and that the extra dispatch is cheap:
+`visit()` returns history unchanged for the same path (**no duplicate entry**) and `loadListing` runs with
+`useCache = true`. It re-ran both sabotages and got the author's counts exactly — `&& !false` → **2 red of
+11** with CPE-1366's Back test green; `&& !true` → **1 red of 9**.
+
+**All six findings were claim-scope**, and the correction round fixed sentences, not behaviour:
+
+1. *"The three views that render a listing other than `currentPath`'s own"* — **Replay mode is a fourth**,
+   and the same file says so 100 lines up. The exclusion is functionally correct (`loadPath` never clears
+   `replayOverlayEntries`), so the wording became **"the three views that `loadPath` dismisses"**.
+2. *"Exactly one declaration of the condition"* held for the **variable**, not the condition — the raw
+   boolean still appears inline at four pre-existing sites, two of them pinned on purpose by
+   `App.statusBarCountStaleness.test.ts`. Reworded and the four named as out of scope.
+3. A comment quantified over "the window" while **4 of 81 jobs were never inspected**. The PR body disclosed
+   that; the comment did not — **and the comment is what survives**. The author applied the same correction
+   to a second file nobody had flagged, on the grounds that it was the same defect.
+4. **151 polls, not 150** — in both jobs. Corrected *as a correction*, naming the old figure, so the change
+   is visible rather than silently swapped.
+5. The after-rate **understated itself**: a third clean job existed on the PR head. 0 of 2 → **0 of 3**, with
+   the "cannot bound a residual flake" sentence otherwise untouched.
+6. Docs: `explorer-smart-folders.md` and `explorer-saved-searches.md` now say how to get back out, since the
+   fix works there too. `explorer-archives.md` gained "Getting back out". No new section, so no
+   `sectionDocs.ts` entry — judgement checked and correct.
+
+### Gates at merge
+
+`npm test` 359 files / 5,380 passed / 2 skipped (pre-existing `it.skipIf(!ghStubWorks)` pair, file
+untouched) · `npm run check` 0/0 · `gui-smoke` unit 181 passed / 51 suites / 0 skipped · `gui-smoke`
+typecheck clean · `ratchet-baselines.mjs compare origin/main` 13 enumerated, all unchanged ·
+`audit-npm-projects.mjs` **both** projects, root 10 + `gui-smoke/` 15 = **25**, identical to `origin/main` ·
+CI `completed success — total_count=26 pending=0 skipped=1 coverage=ok`.
+
+`bidiEscape.guard.test.ts`'s two `App.svelte` line registries shifted twice (9/10 lines, then 17 more);
+counts unchanged at 31 and 2, so **no `RATCHETS.md` row** — reasoning verified against the doc.
+
+**Family:** CPE-1955 and CPE-1910 (the respawn and retry this makes near-dead), CPE-1965 (the sibling
+spec-side fix), CPE-1854 (the boolean this hoists), CPE-1366 (the Back-navigation test that had to stay
+green), CPE-1866 (session-per-shard, why the spec reaches the dialog so fast).
