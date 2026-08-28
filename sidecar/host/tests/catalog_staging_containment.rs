@@ -38,11 +38,31 @@
 //! the attacker's position — the staging path was computable in advance, so they never needed to win
 //! anything. Both tests are ordinary `#[test]`s and run on all three OSes in the `sidecar` CI job.
 //!
-//! ## Privileges
+//! ## Privileges — and why a link that cannot be planted is RED, never a skip
 //!
 //! Windows uses a **junction** (`junction::create`, the same primitive `mklink /J` uses), which
-//! needs no administrator rights and no Developer Mode; Unix uses `symlink(2)`, likewise. If the
-//! link cannot be planted at all the test skips loudly rather than passing quietly.
+//! needs no administrator rights and no Developer Mode; Unix uses `symlink(2)`, likewise. Every
+//! platform this crate is built for is one or the other, and on both the mechanism is *supposed* to
+//! work — so a failure to plant is a broken runner, not an environment quirk, and [`Scene::planted`]
+//! panics rather than returning.
+//!
+//! That is `cpe_server::fsutil::require_staged`'s CPE-1717 policy, applied here **by hand and one
+//! notch stricter**. By hand because a sidecar may not depend on `cpe-server` (ADR 0001), so the
+//! helper itself is unreachable from this crate — the policy travels, the call does not. Stricter
+//! because `require_staged` is deliberately lenient off CI, for legs whose mechanism a developer's
+//! environment might legitimately lack (a deny ACE, a root Docker shell, an ACL-less filesystem);
+//! creating a junction or a symlink inside one's own temp directory is not such a mechanism, so
+//! there is no environment to be lenient about here and no `LegitimateSkip` arm to write.
+//!
+//! The stakes are why this is worth spelling out. The first test below is a **sensitivity control**:
+//! its whole job is to show the escape still happens with the fix disabled. A control that returns
+//! green because it could not plant its link proves nothing, and proves it invisibly — which is
+//! worse than not having it, because the green reads as coverage. The first draft of this file
+//! returned early with an `eprintln!` skip notice and `fsutil`'s
+//! `skip_notices_never_use_a_captured_print_macro` scan failed the build over it: libtest swallows
+//! that macro's output for a passing test, so both legs would have announced "verified nothing" to
+//! nobody. It is the same argument that put the planted link at the **real** predictable path rather
+//! than a stand-in, taken one step further out.
 
 use std::path::{Path, PathBuf};
 
@@ -59,17 +79,31 @@ fn trusted_key() -> String {
 }
 
 /// Plant a directory link at `link` pointing at `target` — a junction on Windows, a symlink on Unix.
-/// Returns `false` if the platform refused, so a caller can skip instead of asserting on nothing.
-fn plant_dir_link(target: &Path, link: &Path) -> bool {
+///
+/// `Err` names the **step** that failed rather than only reporting that one did, so a red log on a
+/// runner nobody can log into says which half broke. (Same reasoning as
+/// `cpe_server::fsutil::require_staged_reason`, which exists for exactly that; unreachable from a
+/// sidecar under ADR 0001.)
+fn stage_dir_link(target: &Path, link: &Path) -> Result<(), &'static str> {
     #[cfg(windows)]
     let made = junction::create(target, link).is_ok();
     #[cfg(unix)]
     let made = std::os::unix::fs::symlink(target, link).is_ok();
+    // There is no third platform: this crate builds for Windows, macOS and Linux, and the `sidecar`
+    // CI job runs exactly those three. A fourth would need its own recorded decision here — the
+    // platform named and the reason stated — rather than joining the others in one shared silent
+    // early return, which is what this arm used to feed.
     #[cfg(not(any(windows, unix)))]
     let made = false;
+    if !made {
+        return Err("creating the directory link (junction on Windows, symlink(2) on Unix)");
+    }
     // The premise, asserted rather than assumed: something is at `link`, it is not a real directory
     // we made ourselves, and it leads to `target`.
-    made && std::fs::canonicalize(link).ok() == std::fs::canonicalize(target).ok()
+    if std::fs::canonicalize(link).ok() != std::fs::canonicalize(target).ok() {
+        return Err("the planted link does not resolve to the target directory");
+    }
+    Ok(())
 }
 
 /// The scene: the attacker's link, planted at **the real pre-fix staging path**.
@@ -104,8 +138,12 @@ struct Scene {
 static SCENE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Scene {
-    /// Build the tree and plant the link. `None` when the platform would not create the link.
-    fn planted() -> Option<Self> {
+    /// Build the tree and plant the link.
+    ///
+    /// **Panics when the link cannot be planted**, rather than reporting an unstaged leg as a pass.
+    /// See this file's "Privileges" section for the argument: on every platform this crate builds
+    /// for, the mechanism needs no privilege, so a failure means the runner changed.
+    fn planted() -> Self {
         let lock = SCENE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The pre-fix path expression, written once so nothing here can drift about what "the
         // predictable staging path" is.
@@ -119,10 +157,27 @@ impl Scene {
         let out = root.path().join("catalog");
         std::fs::create_dir_all(&victim).expect("victim");
         std::fs::create_dir_all(&out).expect("out");
-        if !plant_dir_link(&victim, &predictable) {
-            return None;
+        if let Err(step) = stage_dir_link(&victim, &predictable) {
+            // The panic happens BEFORE the `Scene` exists, so its `Drop` guard cannot run — and
+            // `stage_dir_link` can fail with the link already created (the second arm: created, but
+            // not resolving to the target). Measured while red-proofing this very change: the
+            // sabotaged run left a live junction behind in `%TEMP%`, which is the exact hazard this
+            // file exists about. Clean up on this path too, before saying anything.
+            let _ = std::fs::remove_dir_all(&predictable);
+            panic!(
+                "[CPE-1952] the attacker's directory link could not be planted, so this leg \
+                 verified NOTHING — going red rather than passing quietly.\n  \
+                 failed step: {step}\n  link:        {}\n  target:      {}\n\
+                 A junction (Windows) and `symlink(2)` (Unix) both need no elevated privilege and \
+                 no Developer Mode, so this means the runner or its temp filesystem changed, not \
+                 that the environment is unusual. Fix the runner; do not soften this back into a \
+                 skip. (CPE-1717's policy, applied by hand: `cpe_server::fsutil::require_staged` is \
+                 unreachable from a sidecar under ADR 0001.)",
+                predictable.display(),
+                victim.display(),
+            );
         }
-        Some(Scene { _lock: lock, _root: root, victim, predictable, out })
+        Scene { _lock: lock, _root: root, victim, predictable, out }
     }
 
     /// Everything the attacker's directory holds right now, sorted — the on-disk evidence both
@@ -143,9 +198,16 @@ impl Drop for Scene {
         let _ = std::fs::remove_dir_all(&self.predictable);
         // Never panic in `Drop` (it would mask the test's own failure), but do not go quiet either:
         // a junction left behind in the shared temp directory is precisely the hazard this ticket is
-        // about, so say so loudly enough to be found in a CI log.
+        // about, so say so loudly enough to be found in a CI log. `writeln!` straight to the
+        // process's stderr handle, NOT `eprintln!`: libtest installs its capture inside the print
+        // macros and discards what it captured when the test passes, so the macro would route this
+        // warning to nobody on the one harness that matters. The emitter is load-bearing — this is
+        // what `cpe_server::skip_notice!` expands to, written out longhand because ADR 0001 puts
+        // the macro out of a sidecar's reach.
         if self.predictable.exists() {
-            eprintln!(
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
                 "WARNING: CPE-1952's test could not remove its planted link at {} — remove it by hand",
                 self.predictable.display()
             );
@@ -175,13 +237,11 @@ fn signed_bundle(version: u64) -> MemBundle {
 ///
 /// This must FAIL to contain — the staged bytes must land in the victim directory. It is the
 /// evidence that the scene is a real attack and that the containment test below is measuring
-/// something. A skip here (platform refused the link) skips both, which is the honest outcome.
+/// something. If the link cannot be planted, [`Scene::planted`] panics: a control that could not
+/// stage its own attack has verified nothing, and the honest outcome for that is red.
 #[test]
 fn the_old_staging_primitive_writes_through_a_planted_link() {
-    let Some(scene) = Scene::planted() else {
-        eprintln!("SKIP: this platform would not create a directory link; nothing to demonstrate");
-        return;
-    };
+    let scene = Scene::planted();
     assert_eq!(scene.victim_entries(), Vec::<String>::new(), "the victim starts empty");
 
     // The three lines `do_fetch_catalog` used to run. `create_dir_all` is the whole defect: it walks
@@ -212,10 +272,7 @@ fn the_old_staging_primitive_writes_through_a_planted_link() {
 /// catalog still installs. "Refuses everything" must not be able to pass this.
 #[test]
 fn the_fetched_bundle_never_touches_the_filesystem() {
-    let Some(scene) = Scene::planted() else {
-        eprintln!("SKIP: this platform would not create a directory link; nothing to demonstrate");
-        return;
-    };
+    let scene = Scene::planted();
     assert_eq!(scene.victim_entries(), Vec::<String>::new(), "the victim starts empty");
 
     let vpath = scene.out.join("versions.json");

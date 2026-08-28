@@ -10329,6 +10329,14 @@ fn do_fetch_catalog(
     // What this does NOT claim: `dir` (the *destination*, `catalog_dir(app)`) is still resolved and
     // created by path — that is the same question `open_beneath` explicitly declines to answer about
     // its own root, and it is a separate site with its own verdict in CPE-1952's enumeration.
+    //
+    // The trade this makes, stated rather than left for the next reader to find: every asset is now
+    // held in RAM *simultaneously*, where before each was written and dropped, so the peak is the
+    // sum of the responses rather than the largest one. Two things bound it. Each response is capped
+    // at `CATALOG_MAX_ASSET_BYTES` (8 MiB), which `catalog_http_get` had no equivalent of when the
+    // bytes went to disk; and the number of responses comes from `VerifiedIndex::open` below, so
+    // only an index signed by a trusted key can name entries to fetch. A wire attacker can make each
+    // response big, up to the cap, but cannot make there be more of them.
     let mut bundle = sidecar_host::catalog::MemBundle::new();
 
     // Index + its detached signature.
@@ -10464,8 +10472,27 @@ fn do_fetch_catalog(
     }))
 }
 
+/// The most a single catalog asset may be (CPE-1952). `catalog-index.json` and the per-agent
+/// manifests are a few kilobytes each; the GitHub Releases API listing is the largest thing that
+/// rides this helper and is well under a megabyte. 8 MiB is therefore roughly three orders of
+/// magnitude of headroom, and still small enough that the whole bundle cannot exhaust memory.
+///
+/// **Why it exists.** Before CPE-1952 each fetched asset was written to a staging directory and
+/// dropped; now `do_fetch_catalog` holds the whole bundle in RAM at once, so the peak is the *sum*
+/// of the responses rather than the largest one. Unbounded `read_to_end` was survivable when the
+/// bytes went straight to disk (a disk-fill, which is worse) and is not something to leave unstated
+/// once it becomes a heap allocation. This cap is the bound that makes the trade safe.
+///
+/// The sum is bounded too, and not by this constant alone: the member count comes from
+/// `VerifiedIndex::open`, so only an index carrying a **signature from a trusted key** can name
+/// entries to fetch. An attacker on the wire can serve 8 MiB of garbage per request but cannot
+/// increase how many requests are made.
+#[cfg(feature = "sidecar-platform")]
+const CATALOG_MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+
 /// One allow-listed HTTPS GET for a catalog asset (CPE-376), proxy/offline-aware (reuses CPE-369).
 /// The host builds every URL from `catalog_url()` — the sidecar never supplies one (no SSRF).
+/// Bounded by [`CATALOG_MAX_ASSET_BYTES`]; a response over it is an error, never a truncation.
 #[cfg(feature = "sidecar-platform")]
 fn catalog_http_get(url: &str) -> Result<Vec<u8>, String> {
     use std::io::Read;
@@ -10486,8 +10513,20 @@ fn catalog_http_get(url: &str) -> Result<Vec<u8>, String> {
         .set("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| format!("fetch failed: {e}"))?;
+    // `take(cap + 1)` rather than `take(cap)`: reading exactly the cap is indistinguishable from a
+    // body that was cut off at it, so allow one byte past and treat reaching it as the refusal. A
+    // silently truncated asset would be a *worse* outcome than a large one — it would fail
+    // signature verification with a message about the key rather than about the size.
     let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    resp.into_reader()
+        .take(CATALOG_MAX_ASSET_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > CATALOG_MAX_ASSET_BYTES {
+        return Err(format!(
+            "catalog asset exceeds {CATALOG_MAX_ASSET_BYTES} bytes; refusing to buffer it"
+        ));
+    }
     Ok(buf)
 }
 
