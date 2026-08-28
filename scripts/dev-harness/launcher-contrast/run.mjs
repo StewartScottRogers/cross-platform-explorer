@@ -10,14 +10,19 @@
 //   --site <substr>    print every measured site whose path/prop/state contains <substr>
 //   --verify-pixels    additionally screenshot each scheme and compare the painted ground against
 //                      the computed-style prediction (the independent second path)
-//   --json             dump the whole measurement as JSON on stdout
+//   --json             dump the whole measurement as JSON on stdout, with a `verdict` object, and
+//                      exit on the SAME verdict the report would (round 2's --json returned 0
+//                      unconditionally: it ran the entire sweep and evaluated nothing)
 //
 // EXIT CODE is the point. 1 the moment any ENFORCED site is under its bar — naming the site, the two
 // colours, the ground it was measured against, and the bar it missed — and equally on any of:
 //   * a styled class no fixture mounts (the fixture-completeness enumeration, CPE-1932);
 //   * a `--verify-pixels` ground the screenshot painted differently from the prediction;
 //   * a `--verify-pixels` pass that verified ZERO grounds, because "0 verified, 0 disagreeing" reads
-//     as success and is really the leg not running (this repo's "did not run" != "found nothing").
+//     as success and is really the leg not running (this repo's "did not run" != "found nothing");
+//   * ANY of the other three legs measuring nothing — no base readings, no forced pseudo-states, no
+//     animation frames actually stepped, or a state rule the engine refused to select. See
+//     `legsThatDidNotRun` for the three sabotages that used to print PASS and exit 0.
 // 2 is the harness itself refusing to answer: a failed WCAG anchor, a fixture whose provenance claim
 // is no longer in the launcher's source, a Chrome that would not start.
 
@@ -92,11 +97,130 @@ function signature(s) {
   return [s.scheme, s.role, s.prop, s.declared, s.painted, w.against, s.bar, s.pseudo ?? (s.animated ? "animation" : "base")].join(" | ");
 }
 
+/**
+ * DID EACH LEG ACTUALLY RUN? — a per-scheme floor on WORK DONE, for every leg this harness exists to
+ * add.
+ *
+ * Round 2 enforced this for exactly one of the four legs (the pixel cross-check), and the other three
+ * could measure NOTHING and still print `PASS`, exit 0:
+ *
+ *   - STATES: `const stateRules = []` gave 844 raw readings instead of 1306, 244 enforced instead of
+ *     384, a log line reading "0 forced pseudo-state readings", and `PASS`. It did not even need an
+ *     edit — the rule loop's `catch { continue; }` was bare, so one CDP change would have skipped
+ *     every rule silently.
+ *   - TIME: `if (false && animMeta.targets.length)` took zero frames, exited 0, and the report STILL
+ *     printed "3 CSS animations x 21 frames", because that count came from `animMeta.count` — the
+ *     page's metadata — rather than from readings taken. A report that claims a leg ran is worse than
+ *     one that says nothing.
+ *   - COMPUTED-STYLE (base): `const all = []` gave "0 raw readings -> 0 distinct sites, 0 enforced"
+ *     followed by "PASS — every enforced site clears its bar in both schemes." under plain
+ *     `npm run harness:launcher-contrast`. `--verify-pixels` caught it, but only incidentally (the
+ *     pixel leg is fed from `all`), and the no-flag invocation is the documented local one.
+ *
+ * So every number below is derived from readings that EXIST. `animations` (the page's own count) is
+ * still printed, but beside `animFrames` rather than in place of it, and it is never floored.
+ */
+function legsThatDidNotRun(res) {
+  const out = [];
+  for (const scheme of ["light", "dark"]) {
+    const d = res.schemes[scheme];
+    if (!(d.baseReadings > 0)) {
+      out.push(`${scheme}: the COMPUTED-STYLE leg took ${d.baseReadings} base readings — it measured nothing at all`);
+    }
+    if (!(d.forced.length > 0)) {
+      out.push(
+        `${scheme}: the STATES leg forced 0 pseudo-states, from ${d.stateRuleCount} ` +
+          ":hover/:focus/:active rule(s) found in the stylesheet",
+      );
+    }
+    if (!(d.stateReadings > 0)) {
+      out.push(`${scheme}: the STATES leg took 0 readings while a pseudo-state was forced`);
+    }
+    if (d.stateSkips.length) {
+      out.push(
+        `${scheme}: the STATES leg SKIPPED ${d.stateSkips.length} rule(s) it could not select — every ` +
+          "one is a state nothing measured:\n        " + d.stateSkips.join("\n        "),
+      );
+    }
+    if (!(d.animFrames > 0)) {
+      out.push(
+        `${scheme}: the TIME leg stepped 0 animation frames (the page reports ${d.animations} ` +
+          `animation object(s) on ${d.animTargets} element(s) — that is intent, not work)`,
+      );
+    }
+    if (!(d.animReadings > 0)) {
+      out.push(`${scheme}: the TIME leg took 0 readings across the ${d.animFrames} frame(s) it stepped`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Everything the exit code depends on, computed ONCE so `--json` renders the same verdict the report
+ * does. Round 2's `--json` returned 0 unconditionally: it dumped the measurement and evaluated
+ * nothing, so `--json` was a way to run the whole sweep and never be told it failed.
+ */
+function analyse(res) {
+  // Collapse repeats (fixtures mount two tabs, animations produce ANIM_SAMPLES frames per element)
+  // down to the WORST reading for each site, which is the one a user can actually encounter.
+  const worst = new Map();
+  let measured = 0;
+  for (const scheme of ["light", "dark"]) {
+    for (const s of res.schemes[scheme].sites) {
+      measured++;
+      const k = key(s);
+      const w = worstOf(s).r;
+      const prev = worst.get(k);
+      if (!prev || w < worstOf(prev).r) worst.set(k, s);
+    }
+  }
+  const sites = [...worst.values()];
+  const checked = sites.filter(enforced);
+  const failures = checked.filter((s) => worstOf(s).r < s.bar);
+
+  // Fixture completeness (CPE-1932): a styled class that matches nothing is a rule this sweep never
+  // measured, and it must be declared rather than quietly skipped.
+  const declared = new Set(res.unreachable.map(([c]) => c));
+  const unmatched = res.classNames.filter((c) => !res.schemes.light.matched[c] && !declared.has(c));
+
+  // The pixel leg's two failure modes. `pixelBad` is a real disagreement between the two paths;
+  // `pixelEmpty` is a leg that ran and measured nothing, which prints as "0 verified, 0 disagreeing"
+  // and reads exactly like success.
+  let pixelBad = 0;
+  const pixelEmpty = [];
+  for (const scheme of ["light", "dark"]) {
+    const d = res.schemes[scheme];
+    if (!d.pixels) continue;
+    pixelBad += d.pixels.filter((p) => p.delta > 1).length;
+    if (d.pixels.length === 0) pixelEmpty.push(scheme);
+  }
+
+  const legsDown = legsThatDidNotRun(res);
+  const clean = !failures.length && !unmatched.length && !pixelBad && !pixelEmpty.length && !legsDown.length;
+  return { measured, sites, checked, failures, unmatched, pixelBad, pixelEmpty, legsDown, clean };
+}
+
 function main() {
   return sweep({ verifyPixels: flag("--verify-pixels") }).then((res) => {
+    const a = analyse(res);
+
     if (flag("--json")) {
-      process.stdout.write(JSON.stringify(res, null, 2));
-      return 0;
+      // The verdict travels WITH the data, and the exit code is the same one the report would give.
+      process.stdout.write(JSON.stringify({
+        ...res,
+        verdict: {
+          clean: a.clean,
+          rawReadings: a.measured,
+          distinctSites: a.sites.length,
+          enforced: a.checked.length,
+          failures: a.failures.length,
+          unmatchedClasses: a.unmatched,
+          pixelDisagreements: a.pixelBad,
+          pixelLegEmpty: a.pixelEmpty,
+          legsThatDidNotRun: a.legsDown,
+        },
+      }, null, 2));
+      return a.clean ? 0 : 1;
     }
 
     console.log("AI Console launcher — contrast sweep (CPE-1966)\n");
@@ -125,23 +249,7 @@ function main() {
     }
     console.log("");
 
-    // Collapse repeats (fixtures mount two tabs, animations produce ANIM_SAMPLES frames per element)
-    // down to the WORST reading for each site, which is the one a user can actually encounter.
-    const worst = new Map();
-    let measured = 0;
-    for (const scheme of ["light", "dark"]) {
-      for (const s of res.schemes[scheme].sites) {
-        measured++;
-        const k = key(s);
-        const w = worstOf(s).r;
-        const prev = worst.get(k);
-        if (!prev || w < worstOf(prev).r) worst.set(k, s);
-      }
-    }
-
-    const sites = [...worst.values()];
-    const checked = sites.filter(enforced);
-    const failures = checked.filter((s) => worstOf(s).r < s.bar);
+    const { measured, sites, checked, failures, unmatched, pixelBad, pixelEmpty, legsDown } = a;
 
     const wanted = opt("--site");
     const listed = flag("--all") ? sites : wanted ? sites.filter((s) => key(s).toLowerCase().includes(wanted.toLowerCase())) : [];
@@ -160,20 +268,24 @@ function main() {
     console.log(`── coverage ─────────────────────────────────────────────────────────────`);
     console.log(`  ${measured} raw readings -> ${sites.length} distinct sites, ${checked.length} enforced`);
 
-    // The pixel leg's verdict, and the two ways it can fail. `bad.length` is a real disagreement
-    // between the two paths; `pixels.length === 0` is a leg that ran and measured nothing, which
-    // prints as "0 verified, 0 disagreeing" and reads exactly like success. Round 1 exited 0 on
-    // both — forcing every prediction to #ff00ff gave 59/59 disagreeing, PASS, exit 0, in the shape
-    // the blocking CI job runs — so both are counted here and both fail the run below.
-    let pixelBad = 0;
-    let pixelEmpty = [];
+    // Per-leg WORK DONE, per scheme. Every count here comes from readings that exist: `animFrames`
+    // and `animReadings` are incremented inside the frame loop, never read off `animMeta.count`,
+    // which is the metadata that let round 2 print "3 CSS animations x 21 frames" for a leg that
+    // took no frames at all. The page's own count is still shown, in brackets, so the two can be
+    // compared rather than confused. `legsThatDidNotRun()` floors all of them below.
     for (const scheme of ["light", "dark"]) {
       const d = res.schemes[scheme];
-      console.log(`  ${scheme}: ${d.forced.length} forced pseudo-state readings, ${d.animations} CSS animations x ${ANIM_SAMPLES} frames`);
+      console.log(
+        `  ${scheme}: ${d.baseReadings} base readings; ${d.forced.length} forced pseudo-states over ` +
+          `${d.stateRuleCount} rule(s) -> ${d.stateReadings} readings` +
+          (d.stateSkips.length ? ` (${d.stateSkips.length} SKIPPED)` : ""),
+      );
+      console.log(
+        `  ${scheme}: ${d.animFrames} animation frames stepped on ${d.animTargets} element(s) -> ` +
+          `${d.animReadings} readings  [page reports ${d.animations} animation object(s); ANIM_SAMPLES=${ANIM_SAMPLES}]`,
+      );
       if (d.pixels) {
         const bad = d.pixels.filter((p) => p.delta > 1);
-        pixelBad += bad.length;
-        if (d.pixels.length === 0) pixelEmpty.push(scheme);
         console.log(`  ${scheme}: pixel cross-check — ${d.pixels.length} grounds screenshot-verified, ${bad.length} disagreeing by more than 1/255`);
         for (const p of bad.slice(0, 8)) console.log(`      predicted ${p.predicted} painted ${p.painted} (delta ${p.delta})  ${p.path}`);
         if (bad.length > 8) console.log(`      ... and ${bad.length - 8} more`);
@@ -265,9 +377,7 @@ function main() {
     console.log("");
 
     // Fixture completeness (CPE-1932): a styled class that matches nothing is a rule this sweep never
-    // measured, and it must be declared rather than quietly skipped.
-    const declared = new Set(res.unreachable.map(([c]) => c));
-    const unmatched = res.classNames.filter((c) => !res.schemes.light.matched[c] && !declared.has(c));
+    // measured, and it must be declared rather than quietly skipped. (Computed in `analyse`.)
     if (unmatched.length) {
       console.log("UNMEASURED — the stylesheet declares these classes but nothing on the page has them.");
       console.log("Add a fixture in fixtures.mjs, or a reason in its UNREACHABLE list:");
@@ -318,9 +428,20 @@ function main() {
       );
     }
 
-    const clean = !failures.length && !unmatched.length && !pixelBad && !pixelEmpty.length;
-    if (clean) console.log("PASS — every enforced site clears its bar in both schemes.");
-    return clean ? 0 : 1;
+    // The other three legs' floors. Same rule as the pixel one above, applied to the legs this PR
+    // exists to add: a leg that measured nothing prints numbers that read like a clean bill.
+    if (legsDown.length) {
+      console.log("");
+      console.log(
+        `LEG(S) DID NOT RUN — ${legsDown.length} floor(s) on WORK ACTUALLY DONE were not met. A sweep that\n` +
+          "measured nothing prints the same PASS as one that measured everything, so this is a failure\n" +
+          'rather than a quiet zero (this repo\'s "did not run" != "found nothing"):',
+      );
+      for (const l of legsDown) console.log(`      ${l}`);
+    }
+
+    if (a.clean) console.log("PASS — every enforced site clears its bar in both schemes.");
+    return a.clean ? 0 : 1;
   });
 }
 

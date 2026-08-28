@@ -198,9 +198,19 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      port, pinned to it by the shared `shellScriptLines.cases.json`) already handle quotes, escapes,
      trailing comments and heredoc bodies. For **Rust** sources: `src/lib/rustSource.ts`
      (`stripRustComments`, `rustStringLiteralAfter`, `rustStrSliceAfter`) — CPE-1950 lifted it out of
-     `MacroRunConfirm.test.ts` rather than let a third scanner grow a fourth copy of the rules. A
-     whole-line-comment filter is *not* enough — a **trailing** comment walks straight through it,
-     which is how CPE-1933's first draft reintroduced the hole it was closing.
+     `MacroRunConfirm.test.ts` rather than let a third scanner grow a fourth copy of the rules. For
+     **JavaScript** sources: `src/lib/jsSource.mjs` (`stripJsComments`, `htmlScriptBodies`,
+     `stripScriptBodiesChecked`) — CPE-1966 shipped the SIXTH private stripper, in a `.mjs` harness,
+     imported nowhere and untested; a Reviewer's 31 adversarial shapes found 7 wrong, **4 of them
+     deleting real code**. A whole-line-comment filter is *not* enough — a **trailing** comment walks
+     straight through it, which is how CPE-1933's first draft reintroduced the hole it was closing.
+     Two JS-specific rules learned the hard way: decide regex-vs-division on the previous **token**,
+     never the previous character (every keyword ends in a word char, so `return /[//]/;` reads as
+     division and the `/` opens a comment that eats the line); and **point a JS scanner at JS only** —
+     `sessionChipColours` tokenized a whole HTML document, where one apostrophe in prose shifted the
+     strip by 11,872 characters. Where a caller can afford it, compile the result
+     (`stripScriptBodiesChecked` runs `new vm.Script`): source that parsed before stripping and does
+     not after means code was deleted, and that oracle catches the shapes no case table names.
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
      never actually re-reads its source is the same defect with extra steps. Write the red-proof's
      **result at the site**, not only in the PR body — a code comment that merely asserts, next to a

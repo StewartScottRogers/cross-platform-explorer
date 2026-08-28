@@ -629,6 +629,14 @@ export const NOT_A_RATCHET = [
       "This guard's own test. Its R2-F1c decoy fixtures contain literal `const BASELINE_...` text inside " +
       "template literals, which is the point of those fixtures — none of it is a real stored baseline.",
   },
+  {
+    file: "src/lib/jsSource.test.ts",
+    reason:
+      "KNOWN_GAPS is a CASE TABLE, not a suppression list: each entry asserts the stripper's exact " +
+      "output on an adversarial shape, so removing one removes coverage rather than paying down debt. " +
+      "Nothing is excused by being in it — the `vm.Script` oracle in the same file runs over every " +
+      "entry regardless (CPE-1966).",
+  },
 ];
 
 // ---------------------------------------------------------------------------------------------

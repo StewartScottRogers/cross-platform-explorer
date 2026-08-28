@@ -1,3 +1,11 @@
+// @ts-nocheck — this harness is run by plain `node`, has never been in `tsconfig.json`'s `include`,
+// and has never been type-checked. CPE-1966 round 3 gave `sessionChipColours` a real test, which
+// imports this module and so drags it into svelte-check's program for the first time: 40 implicit-any
+// errors in CDP payloads and probe JSON, none of them a defect, all of them noise that would bury the
+// `npm run check` 0/0 gate. Annotating a 1,100-line browser harness is its own ticket, not a rider on
+// a contrast fix. The parts worth checking were MOVED OUT instead — `src/lib/jsSource.mjs` is typed
+// via JSDoc and covered by `src/lib/jsSource.test.ts`.
+//
 // CPE-1966 — a real-browser contrast sweep for the AI Console launcher, covering the four things a
 // static stylesheet sweep structurally cannot see.
 //
@@ -104,6 +112,12 @@ import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { FIXTURES, UNREACHABLE } from "./fixtures.mjs";
+// The JS comment stripper lives in `src/lib/` with its own tests, not here. CPE-1966 round 2 shipped
+// it private to this harness — this repo's SIXTH hand-rolled stripper, imported nowhere, exercised
+// only by "the provenance check passed" in one CI job, and wrong in seven adversarial shapes, four of
+// which DELETED real code. `src/lib/jsSource.test.ts` now pins every one of them, and
+// `stripScriptBodiesChecked` carries the `vm.Script` desync backstop for the shapes it does not.
+import { htmlScriptBodies, stripScriptBodiesChecked } from "../../../src/lib/jsSource.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
@@ -268,90 +282,46 @@ export function preparedLauncherHtml() {
 }
 
 /**
- * Comments and their contents removed from JavaScript source, quote- and regex-aware.
+ * Every `<script>` body in launcher.html, in document order, with the HTML around them dropped.
  *
- * CPE-1933 rule 2, "anchor on code, never on prose", in the file that cites it. Round 1's
- * `checkFixtureProvenance` ran `scripts.includes(claim)` over the RAW script bodies. Renaming the
- * launcher's Close-all class to `closeAllBtn` reds correctly (exit 2, before any measurement) — but
- * the same rename PLUS `// historical note: this used to read b.className = "close-all-btn"` passed
- * green, exit 0, counts unchanged, with vitest 15/15 alongside it: both layers vouching for a button
- * whose class the stylesheet does not style, while the harness measured a `.close-all-btn` fixture
- * the app no longer renders. A comment is prose; the provenance claim is about code.
- *
- * A whole-line-comment filter is not enough (a trailing `//` walks straight through it), so this is
- * a character scanner in the shape `src/lib/shellScriptLines.ts` uses for shell and
- * `src/lib/rustSource.ts` uses for Rust: it tracks string and template literals so a `//` inside a
- * URL or a `/*` inside a message is not mistaken for a comment, and it replaces each comment with a
- * space rather than deleting it so `includes` cannot be satisfied by two fragments joining up.
- * Division vs. regex is the one genuinely ambiguous case in JS; a `/` after a value-shaped token is
- * treated as division, which is the conservative reading here — misreading it can only ever make a
- * claim FAIL to match (a false red that names the fixture), never silently pass.
+ * The distinction is the whole of CPE-1966 round 3's second blocker. `checkFixtureProvenance` always
+ * extracted the bodies first; `sessionChipColours` did not — it ran the JS tokenizer over the ENTIRE
+ * HTML DOCUMENT. HTML prose is not JavaScript, and one apostrophe in it (`<p>the agent's log</p>`,
+ * outside every script) opened a string literal that ran until the next `'` anywhere in the file:
+ * measured, that changed the stripped output by 11,872 characters, net DELETION, and two apostrophes
+ * re-synced. The palette parse survived only because the swallowed region happened to be copied
+ * through verbatim as a phantom string — luck, not design. A JS scanner is only ever pointed at JS now.
  */
-export function stripJsComments(src) {
-  let out = "";
-  let i = 0;
-  let prevSignificant = "";
-  while (i < src.length) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (c === "/" && d === "/") {
-      const nl = src.indexOf("\n", i);
-      out += " ";
-      i = nl === -1 ? src.length : nl;
-      continue;
-    }
-    if (c === "/" && d === "*") {
-      const end = src.indexOf("*/", i + 2);
-      out += " ";
-      i = end === -1 ? src.length : end + 2;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === "\\") { j += 2; continue; }
-        if (src[j] === c) break;
-        j++;
-      }
-      out += src.slice(i, Math.min(j + 1, src.length));
-      prevSignificant = c;
-      i = j + 1;
-      continue;
-    }
-    if (c === "/" && !/[\w$)\]]/.test(prevSignificant)) {
-      // A regex literal in a value position: consume it whole so a `//` or `/*` inside it is not
-      // read as a comment (`/\/\*/` is legal source).
-      let j = i + 1;
-      let inClass = false;
-      while (j < src.length) {
-        if (src[j] === "\\") { j += 2; continue; }
-        if (src[j] === "[") inClass = true;
-        else if (src[j] === "]") inClass = false;
-        else if (src[j] === "/" && !inClass) break;
-        else if (src[j] === "\n") { j = i; break; }   // unterminated: treat the `/` as itself
-        j++;
-      }
-      if (j > i) {
-        out += src.slice(i, Math.min(j + 1, src.length));
-        prevSignificant = "/";
-        i = j + 1;
-        continue;
-      }
-    }
-    out += c;
-    if (!/\s/.test(c)) prevSignificant = c;
-    i++;
-  }
-  return out;
+export function launcherScriptBodies(raw = readFileSync(LAUNCHER, "utf8")) {
+  return htmlScriptBodies(raw);
+}
+
+/**
+ * Those bodies with comments stripped, through the shared module's parse backstop.
+ *
+ * ── Why the comments come out (CPE-1933 rule 2, in the file that cites it) ────────────────────────
+ * Round 1's `checkFixtureProvenance` ran `scripts.includes(claim)` over the RAW script bodies.
+ * Renaming the launcher's Close-all class to `closeAllBtn` reds correctly (exit 2, before any
+ * measurement) — but the same rename PLUS `// historical note: this used to read b.className =
+ * "close-all-btn"` passed green, exit 0, counts unchanged, with vitest alongside it: both layers
+ * vouching for a button whose class the stylesheet does not style, while the harness measured a
+ * `.close-all-btn` fixture the app no longer renders. A comment is prose; the claim is about code.
+ *
+ * ── Why the stripper is not in this file any more ─────────────────────────────────────────────────
+ * It was, for two rounds: this repo's SIXTH private hand-rolled stripper, imported nowhere and
+ * exercised only by "the provenance check passed" in one CI job — and wrong in seven adversarial
+ * shapes, four of which DELETED real code (`return /[//]/;` lost the rest of its line; `return /[/*]/;`
+ * ate everything to the next block-comment terminator). It lives in `src/lib/jsSource.mjs` now, beside
+ * the shell and Rust ones, with `src/lib/jsSource.test.ts` pinning every one of those shapes and a
+ * `vm.Script` oracle for the ones nobody has thought of.
+ */
+export function strippedLauncherScripts(raw = readFileSync(LAUNCHER, "utf8")) {
+  return stripScriptBodiesChecked(launcherScriptBodies(raw)).join("\n");
 }
 
 /** CPE-1933: a fixture claiming to mirror the launcher's own JS must be checked against that JS. */
 export function checkFixtureProvenance() {
-  const raw = readFileSync(LAUNCHER, "utf8");
-  // Comments stripped FIRST: a claim must be found in code, never in a comment quoting the old value.
-  const scripts = stripJsComments(
-    [...raw.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n"),
-  );
+  const scripts = strippedLauncherScripts();
   if (scripts.length < 2000) throw new Error("launcher.html: no <script> body found — the fixture provenance check is broken, not passing");
   const missing = [];
   for (const f of FIXTURES) {
@@ -372,11 +342,13 @@ export function checkFixtureProvenance() {
  * The session-identity palette, read out of launcher.html's own script rather than copied here.
  * `sessionColor()` picks an entry by hash, so the chip's white numeral can land on ANY of them —
  * measuring one sampled colour would measure the luck of the sample.
+ *
+ * Reads the SCRIPT BODIES (see `launcherScriptBodies`), never the whole document: a commented-out
+ * older palette must not be the one this parse finds, and the HTML prose around the scripts must not
+ * be able to shift the parse at all.
  */
-export function sessionChipColours() {
-  // Comments stripped for the same reason `checkFixtureProvenance` strips them: a commented-out
-  // older palette earlier in the file would otherwise be the one this parse finds.
-  const raw = stripJsComments(readFileSync(LAUNCHER, "utf8"));
+export function sessionChipColours(document = readFileSync(LAUNCHER, "utf8")) {
+  const raw = strippedLauncherScripts(document);
   const m = raw.match(/const SESSION_CHIP_COLORS = \[([^\]]*)\]/);
   if (!m) throw new Error("launcher.html: SESSION_CHIP_COLORS not found — the chip fixture cannot be derived");
   const colours = [...m[1].matchAll(/"(#[0-9a-fA-F]{3,8})"/g)].map((x) => x[1]);
@@ -962,11 +934,20 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
       // the state, not a rewritten stylesheet, so nothing about the cascade has to be simulated.
       const stateRules = pseudoRulesFromCss();
       const forced = [];
+      // NOT a bare `catch { continue; }` any more (round-3 blocker 1). A CDP change that made
+      // `DOM.querySelectorAll` reject the launcher's selectors would have skipped every rule
+      // SILENTLY: the log would print "0 forced pseudo-state readings" and the run would still say
+      // PASS. What a guard swallowed is now counted, named, and failed on in run.mjs — "did not run"
+      // is not "found nothing", and that is the rule this whole leg exists under.
+      const stateSkips = [];
       for (const { pseudo, base: baseSel } of stateRules) {
         let matchIds = [];
         try {
           matchIds = (await client.send("DOM.querySelectorAll", { nodeId: root.nodeId, selector: baseSel })).nodeIds;
-        } catch { continue; }
+        } catch (err) {
+          stateSkips.push(`${baseSel}:${pseudo} — DOM.querySelectorAll refused the selector: ${err?.message ?? String(err)}`);
+          continue;
+        }
         for (const nodeId of matchIds) {
           await client.send("CSS.forcePseudoState", { nodeId, forcedPseudoClasses: [pseudo] });
           const cid = nodeIds.indexOf(nodeId);
@@ -981,13 +962,21 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
       // ── ANIMATION FRAMES ──────────────────────────────────────────────────────────────────────
       // Every CSS animation paused and stepped across its own duration. A single static frame is how
       // `.boot-label`'s trough (site 3) stayed invisible.
+      //
+      // `animMeta.count` is METADATA — how many animation objects the page reports — and round 2's
+      // report printed "3 CSS animations x 21 frames" straight out of it. Wrapping this whole block
+      // in `if (false && …)` therefore took ZERO frames and the report still claimed the leg ran, in
+      // a run that exited 0. Intent is not work. `animFrames` and `animReadings` below are counted
+      // from probes that actually happened, and they are what run.mjs floors and prints.
       const animMeta = JSON.parse(await client.evaluate(`(${ANIM_SOURCE})(0)`));
+      let animFrames = 0;
       if (animMeta.targets.length) {
         for (let k = 0; k < ANIM_SAMPLES; k++) {
           const frac = k / (ANIM_SAMPLES - 1);
           await client.evaluate(`(${ANIM_SOURCE})(${frac})`);
           const r = JSON.parse(await client.evaluate(probeExpr({ chromaMin: CHROMA_MIN, state: `anim@${frac.toFixed(2)}`, only: animMeta.targets })));
           for (const s of r.sites) all.push({ ...s, state: `animation frame ${(frac * 100).toFixed(0)}%`, animated: true, scheme });
+          animFrames++;
         }
         await client.evaluate(`document.getAnimations().forEach(function(a){try{a.play()}catch(e){}});`);
       }
@@ -1007,6 +996,23 @@ export async function sweep({ chromePath = defaultChromePath(), port, cdpPort, v
         composite: engineResolvedComposite(base),
         systemColours: { Canvas: base.canvas, CanvasText: base.canvasText, Field: base.field, ButtonFace: base.buttonFace },
         sites: all, matched: setup.matched, mounted: setup.mounted, forced, animations: animMeta.count, pixels,
+        // ── WORK DONE, per leg, per scheme (round-3 blocker 1) ─────────────────────────────────
+        // Counted OUT OF `all` — the one array the report is actually built from — rather than from
+        // each leg's own bookkeeping. That choice is the round-3 lesson repeated: a count taken
+        // where the work is *intended* still reads as work. The Reviewer's base-leg sabotage was
+        // `const all = []`, which leaves the base probe's own `sites.length` at 422 and would sail
+        // straight through a floor on it, while the report saw nothing. Deriving all three from
+        // `all` means every sabotage that empties it reds all three at once.
+        // `animations` (the page's metadata) and `animFrames` (frames actually stepped) are BOTH
+        // reported, side by side, so they can be compared rather than confused; only the second is
+        // ever floored.
+        baseReadings: all.filter((s) => s.state === "base").length,
+        stateRuleCount: stateRules.length,
+        stateReadings: all.filter((s) => s.pseudo).length,
+        stateSkips,
+        animTargets: animMeta.targets.length,
+        animFrames,
+        animReadings: all.filter((s) => s.animated).length,
       };
     }
     ws.close();

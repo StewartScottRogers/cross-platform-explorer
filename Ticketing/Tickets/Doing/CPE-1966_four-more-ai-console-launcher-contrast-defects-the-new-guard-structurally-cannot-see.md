@@ -399,3 +399,105 @@ Printed by `run.mjs` every run (`── what this sweep does NOT see ──`) an
 - `node scripts/ratchet-baselines.mjs compare origin/main`: all 12 **unchanged**.
 - `npm run harness:launcher-contrast -- --verify-pixels`: **exit 0**, PASS, 1306 raw readings → 786
   distinct sites → 384 enforced, 59 grounds screenshot-verified per scheme with 0 disagreeing.
+
+## Round 3 — two blockers, both about a guard that could not see itself
+
+### Blocker 1 — three of the four legs could measure NOTHING and still print `PASS`
+
+"Did not run != found nothing" was enforced for exactly one leg (the pixel cross-check). The other
+three were not, and two of the three sabotages exited **0**:
+
+| leg | sabotage | round 2 | round 3 |
+|-----|----------|---------|---------|
+| STATES | `const stateRules = []` | exit **0**, `PASS`, 844 readings / 244 enforced, log says "0 forced pseudo-state readings" | exit **1**, 4 floors named |
+| STATES (no edit needed) | make CDP reject every selector | silently skipped, `PASS` | exit **1**, 6 floors, every skipped rule named with the CDP error |
+| TIME | `if (false && animMeta.targets.length)` | exit **0**, and the log **still claimed** "3 CSS animations x 21 frames" | exit **1**, "0 animation frames stepped … [page reports 3 animation object(s)]" |
+| COMPUTED-STYLE | `const all = []`, run as plain `npm run harness:launcher-contrast` | exit **0**, "0 raw readings -> 0 distinct sites, 0 enforced" then `PASS` | exit **1**, both schemes named |
+
+**Counts now come from work done, not intent.** `animMeta.count` is the page's own metadata, which is
+why round 2's report could describe a leg that never ran; it is still printed, but *beside*
+`animFrames` (frames actually stepped) rather than in place of it, and only the second is floored.
+
+The counts are taken **out of `all`** — the one array the report is built from — not out of each
+leg's own bookkeeping. That is the same lesson twice: the Reviewer's base sabotage was `const all =
+[]`, which leaves the base probe's own `sites.length` at 422, so a floor on *that* would have sailed
+straight through while the report saw nothing. Deriving all three from `all` means any sabotage that
+empties it reds all three at once.
+
+The bare `catch { continue; }` in the state loop is gone. A rule the engine refuses to select is
+recorded, counted, printed as `(N SKIPPED)` in the coverage block, named with its CDP error in the
+failure block, and fails the run. Zero are skipped today, so making it a failure costs nothing.
+
+**`--json` no longer returns 0 unconditionally.** It emits a `verdict` object (clean, raw readings,
+distinct sites, enforced, failures, unmatched classes, pixel disagreements, pixel-leg-empty, legs
+that did not run) and exits on the **same** verdict the report does — verified: exit 0 clean, exit 1
+under the TIME sabotage. The verdict is computed once, in `analyse()`, so the two paths cannot drift.
+
+### Blocker 2 — the sixth hand-rolled stripper, moved, fixed and tested
+
+The stripper is now `src/lib/jsSource.mjs`, beside `shellScriptLines.ts` and `rustSource.ts`, with
+`src/lib/jsSource.test.ts` (29 tests) carrying every one of the Reviewer's seven wrong shapes. It is
+a `.mjs` because `engine.mjs` is run by plain `node` with no build step; `checkJs` types it via JSDoc.
+
+Root cause of the four FALSE-STRIPs was one thing: `prevSignificant` was a single CHARACTER, so every
+keyword ended in a word char, matched the "value-shaped token" class, and its regex literal was read
+as division — at which point the `/` inside a character class opened a comment. The scanner now
+tracks the previous **token**.
+
+| shape | direction | round 2 | round 3 |
+|-------|-----------|---------|---------|
+| `return /[//]/;` | FALSE-STRIP | `return /[ ` | **fixed** |
+| `typeof /[//]/;` | FALSE-STRIP | `typeof /[ ` | **fixed** |
+| `switch(x){case /[//]/: break;}` | FALSE-STRIP | `switch(x){case /[ ` | **fixed** |
+| `return /[/*]/;` | FALSE-STRIP (ate to the next `*/`) | `return /[ ` | **fixed** |
+| `` `a${ "`" }b`; // c `` | FALSE-KEEP | comment kept | **fixed** (templates carry a mode stack; `${…}` is re-scanned as code) |
+| `` `a${x /* c */}b` `` | FALSE-KEEP | comment kept | **fixed** (same mechanism) |
+| `const n = "5" / 2; // c` | FALSE-KEEP | comment kept | **fixed** (a string literal is a value, so `/` is division) |
+
+`obj.return / 2` is handled too — a `.` in front demotes the keyword back to a value.
+
+**Declared gaps, each a passing test asserting the real output, not a paragraph:** a regex directly
+after `)` is read as division (`if (x) /re/.test(s)` — genuinely ambiguous without a parser; the text
+survives verbatim); no ASI awareness; an unterminated string stops at the newline rather than
+swallowing the file. **All three fail toward KEEPING source**, which is the defensible direction: a
+kept comment can only make a provenance claim fail to match (a loud red naming the fixture), while
+deleted code makes one pass on a mutilated file.
+
+**The oracle that does not depend on anyone writing the case.** Every case in the table that parses as
+JavaScript before stripping is required to parse after. Reinstating the round-2 keyword bug reds **5**
+tests: the four named FALSE-STRIP cases *and* the oracle — which is the point, because the oracle
+would have caught them without anyone naming them.
+
+**`sessionChipColours()` reads the script bodies, not the document.** Both it and
+`checkFixtureProvenance` go through `strippedLauncherScripts()`. Red-proofed with a decoy: inject
+`<p>const SESSION_CHIP_COLORS = ["#111111", "#222222"] …</p>` into the HTML above the scripts and the
+whole-document read returns `"#111111", "#222222"` while `sessionChipColours` returns the real
+eight-colour palette. The apostrophe case (`<p>the agent's log</p>`) leaves the script bodies
+byte-identical.
+
+**The `vm.Script` desync backstop** is `stripScriptBodiesChecked` in the shared module: a body that
+parsed before stripping must parse after; a body that never parsed (a JSON `<script>`, a minified
+bundle) cannot red the run. Honest limit stated at the site — launcher.html contains **none** of the
+shapes the round-2 stripper mangled, so reinstating that exact bug does not red it against the real
+file. That is why the stripper is a parameter: the test hands it one that really does delete and
+requires the throw. A backstop nobody has watched fail is a claim, not a guard.
+
+`engine.mjs` carries `// @ts-nocheck`. It has never been in `tsconfig.json`'s `include` and has never
+been type-checked; giving `sessionChipColours` a real test imports it into svelte-check's program for
+the first time and surfaces 40 implicit-anys in CDP payloads, none of them a defect. Annotating a
+1,100-line browser harness is its own ticket. The parts worth checking were **moved out** instead.
+
+### Round-3 gates
+
+- `npm run check`: **0 errors, 0 warnings**.
+- `npm test`: **358 files / 5,264 passed, 2 skipped**, rebased onto `origin/main`. Delta from this
+  round: **+1 file / +29 tests** (`src/lib/jsSource.test.ts`); the rest of the difference from round
+  2's 356/5,232 is `origin/main` moving under the branch.
+- `node scripts/ratchet-baselines.mjs compare origin/main`: all 12 **unchanged**.
+  `src/lib/jsSource.test.ts`'s `KNOWN_GAPS` is registered in `NOT_A_RATCHET` with a reason — it is a
+  case table asserting exact outputs, not a suppression list, and the `vm.Script` oracle runs over
+  every entry regardless.
+- `npm run harness:launcher-contrast -- --verify-pixels`: **exit 0**, PASS, **1306 → 786 → 384**, 59
+  grounds screenshot-verified per scheme, 0 disagreeing.
+- Round 2's three verified fixes untouched and re-checked: `ratio()` x 1.6 still exits **2 in 0.19 s
+  before Chrome**, all six anchors named.
