@@ -3,7 +3,7 @@ id: CPE-1910
 title: GUI smoke shard 2 dies on a WebDriver socket failure often enough to cost a re-run per PR
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-26
@@ -282,3 +282,57 @@ path, the one this ticket itself calls the worse of the two.
 socket error, so a local `EMFILE`/`EACCES` would read as "free". Symmetric with `waitForPort` (any error
 reads as "not ready") and harmless given a loopback address and a non-fatal caller. Named in the doc
 comment so the next reader knows it was considered rather than missed.
+
+## Closing record — merged as PR #1092 (`d16253c3`), 2026-08-28
+
+**What the gauntlet actually proved — and the measurement changed the design before a line was written.**
+
+The ticket and the dispatch brief both said, emphatically: *reuse the existing `log-signature` classifier,
+do not invent a second one.* The worker measured first, across **312 shard jobs**, and classified the raw
+log of **all 26** shard-2 failures. Three populations, not one:
+
+| population | count |
+|---|---|
+| session died before asserting — the ticket's defect | **2** |
+| a **real regression** carrying `ENVIRONMENT SIGNATURE ONLY` | **24** |
+| genuine chai `AssertionError` | **3** (of 30 across all shards) |
+
+**`expect-webdriverio` waits throw a plain `Error`, never an `AssertionError`** — the string does not
+occur anywhere in `expect-webdriverio/lib/` or `webdriverio/build/` — so a reproducible regression carries
+the exact "no AssertionError anywhere in this run" line while reporting a healthy 14/14 specs. **A retry
+keyed on that verdict alone would have silently re-run 24 of 26 real failures.** The shipped trigger is
+the verdict **AND** the spec-file count: two pre-existing facts, still no second classifier. Its sabotage
+pair reds on **disjoint** sets (`comm -12` empty), so neither condition shadows the other.
+
+**The defect is already at zero, and the PR says so.** All three genuine socket deaths predate CPE-1955,
+which merged five hours before the work started: pre-merge 2 fatal of 26 shard-2 jobs, **post-merge 0 of
+45**. This shipped as an honest backstop for the *second* death, not a fix for a live defect — and the
+reviewer's judgement that the two halves are not equally justified is recorded in the PR body rather than
+buried.
+
+**The half that earned its keep unambiguously was the one nobody asked for.** The loud summary counts
+CPE-1955's in-process respawns too: **8 of 45** sampled shard-2 jobs had already used one, all recovered,
+**and nothing anywhere said so.** That is the CPE-1893 shape live in the suite today.
+
+**Round 2's blocker is the one worth remembering.** The retry archived `.results/*.json` into an attempt
+directory and swept up the **shard manifest** with the reporter chunks; the upload is flat and
+non-recursive, so a retried shard uploaded its results but not its manifest and the verdict job announced
+*"shard 2 never reported a manifest — its spec files did not run"*. **False, on the exact scenario the
+feature exists for**, and strictly worse than the diagnosable failure it replaced. A sibling module
+already filtered manifests out of that directory by prefix, with a test for the co-location: **an existing
+filter is notice that a directory holds two populations.**
+
+**And the fixture could not have caught it.** The integration test drove the real scripts through a real
+retry — good coverage — but its `.results/` only ever held reporter chunks. Round 2 **rebuilt the fixture
+before writing the assertion**, seeding it by executing the real manifest writer in CI's order, leaving
+every pre-existing count unchanged. The reviewer then ran the **converse** red-proof nobody had — forcing
+the filter over-broad — and found it caught by a *pre-existing* assertion, so the filter is pinned in both
+directions.
+
+Round 3 was prose only, and found a **fourth** site carrying a claim the reviewer had named in three: the
+runtime WARNING line, the copy an operator reads when it has actually gone wrong.
+
+**Follow-up filed: CPE-1979** — fixing `checkpoint-restore.smoke.ts`'s `resetAppState` takes the restart
+path from **71 of 71** to near zero and makes both recovery mechanisms near-dead code.
+
+Gates on the merge sha: 25 checks green, `GUI smoke (windows-latest)` skipped by design.
