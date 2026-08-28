@@ -3116,3 +3116,32 @@ measured at **0 of 45**, adding ~500 lines to the critical path of every run —
 is the evidence for that cost**, a break on the rarely-exercised path that survived both authoring and
 review. Still worth landing, but the reviewer said which half earned it and which half is insurance.
 That distinction belongs in the PR body, not just in the review.
+
+## 2026-08-28 — the worker declined both gates' suggested fix, and was right
+
+#1091's Security Auditor found a bash comparison that fails open on integer overflow, and handed over a
+fix: cap the operand at 19 digits before comparing. The Reviewer, independently, agreed. I forwarded it
+as the fix to take.
+
+The worker took the finding and declined the fix, with a reason: **a 19-digit cap still leaves a hole
+for values in `[2^63, 9999999999999999999]`** — all 19 digits, all above `i64::MAX`, all still
+overflowing — **and it narrows away legal `u64` versions at the top of the range.** It wrote an exact
+length-then-digit comparator that converts nothing instead, so the whole legal range compares correctly,
+and gave "the largest will not fit" its own exit code rather than folding it into "no numeric version
+anywhere", on the grounds that they are different facts.
+
+**Two gates converging on a fix is evidence about the bug, not about the fix.** They agreed because they
+found the same defect, and the cap is the first thing that occurs to anyone looking at an overflow —
+it makes the reproduction stop reproducing. That is not the same as closing the class, and the gap it
+leaves is in the digit range the original bug actually lives in.
+
+**The rule: a suggested fix in a review is a hypothesis, not a spec.** The finding is the deliverable;
+the suggestion is a courtesy. A worker who implements it unexamined converts a reviewer's five minutes
+of thought into shipped code with none of the measurement the finding itself got — and here that would
+have left the guard failing open on exactly the values that produced the report.
+
+Worth recording the measurement that came with it, because it sharpens the `[[ ]]` warning written last
+tick. On bash 5.3: **`[[ 9223372036854775808 -le 5 ]]` returns 0 — it *wraps* rather than erroring**,
+which is strictly worse than `[`'s loud-but-falsy failure, because nothing is printed at all. And
+`v='a[$(touch PWNED)]'; [[ $v -le 1 ]]` returns 0 **and creates the file**, while `[ "$v" -le 1 ]` errors
+and creates nothing. Both halves of the hazard are now measured rather than asserted, at the site.
