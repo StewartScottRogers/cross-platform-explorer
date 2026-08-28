@@ -26,8 +26,25 @@ but the caller's `Result` says the download worked.
 
 ## Scope: this is pre-existing, and CPE-1961 is not what to revert
 
-Measured, not assumed. `git show 8c9ddb60:crates/server/src/transfer.rs` — the merge base of PR #1089 —
-carries the identical silent-`Ok`, byte for byte. The behaviour is **CPE-1709 / CPE-1881's standing
+Measured, not assumed. `git show 8c9ddb60:crates/server/src/transfer.rs` — a **pre-branch** revision —
+carries the identical silent-`Ok`, byte for byte.
+
+> **Correction (round 7).** This section first called `8c9ddb60` "the merge base of PR #1089". It is
+> not — it is an **ancestor** of that merge base, which sat fifteen commits later. The substantive
+> claim survives unchanged, and is restated in the form that does not go stale:
+>
+> ```
+> git merge-base --is-ancestor 8c9ddb60 HEAD                                    # true
+> git diff 8c9ddb60 $(git merge-base origin/main HEAD) -- crates/server/src/transfer.rs   # empty
+> ```
+>
+> So the file is unchanged from `8c9ddb60` all the way to the branch point, and the silent `Ok`
+> genuinely predates the branch. **Naming the merge base by sha is what went stale**: round 7's own
+> first draft of this correction wrote the merge-base sha down, and its own rebase falsified it minutes
+> later. A sentence that reads as verified while naming the wrong object is the CPE-1933 shape; fixed
+> here and at the code site (`crates/server/src/transfer.rs`).
+
+The behaviour is **CPE-1709 / CPE-1881's standing
 contract** for this leg: a link verdict is *"not writing is the correct, safe outcome"*
 (`DownloadReport::skipped`'s own doc), i.e. neither delivered nor a delivery failure. It has produced
 exactly this `skipped` + `Ok` for a link found at **claim** time since long before CPE-1961.

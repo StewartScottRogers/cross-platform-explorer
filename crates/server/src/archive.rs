@@ -7548,6 +7548,16 @@ mod tests {
     /// our staging handle open inside it (`ERROR_ACCESS_DENIED`), so the swap cannot be constructed on
     /// Windows at all. That is an accident of the handle we happen to hold and never a contract — see
     /// the fsutil test above, whose Windows arm asserts the block by its error code.
+    ///
+    /// **The gate is `#[cfg(unix)]`; the evidence is Linux/ext4** (round 7). CI's backend matrix also
+    /// runs `macos-latest`, so this test compiles and runs on APFS — where it has never been measured.
+    /// Every reliability figure quoted for it (50/50 on the authoring run, 100/100 on the Reviewer's
+    /// re-run across solo, twelve hogs and single-core-pinned) was taken on Linux/ext4. APFS is
+    /// *expected* to behave like ext4 here — a directory rename with a descendant handle open is
+    /// permitted — and if it does not, the plant never lands and the `planted` assertion **reds**: the
+    /// unmeasured direction fails loudly rather than passing green, which is why this ships un-gated on
+    /// macOS rather than narrowed to `#[cfg(target_os = "linux")]`. Round 6's own rule — report the
+    /// matrix, not the pair — applied to round 6's own new test.
     #[cfg(unix)]
     #[test]
     fn cpe_1961_a_link_planted_mid_write_skips_that_entry_and_writes_its_neighbours() {
@@ -12055,17 +12065,31 @@ mod tests {
             // premise, and nothing in that diff pointed here.
             //
             // **Discriminator** (an env-gated sleep spliced between the swapper's two syscalls,
-            // identical instrumentation on both revisions, `TRIALS = 20`, real ext4). `main`
-            // (`8c9ddb60`) cannot lose a trial at any inducible gap; the pre-retry head does:
+            // identical instrumentation on both revisions, `TRIALS = 20`, real ext4). Pre-branch `main`
+            // cannot lose a trial at any inducible gap; the pre-retry round-5 revision does:
             //
             // ```text
-            // gap        main 8c9ddb60   head 66090006     this fixture (retry in)
+            // gap        pre-branch main  pre-retry r5      this fixture (retry in)
             // 0 us       20/20           20/20             20/20   (0 EEXIST)
             // 200 us     20/20           20/20             20/20   (0 EEXIST)
             // 2000 us    20/20            2/20  <- CI      20/20  (19 EEXIST, all recovered)
             // 20000 us   20/20            0/20             20/20  (20 EEXIST, all recovered)
             // 200000 us  -                -                20/20  (20 EEXIST, all recovered)
             // ```
+            //
+            // **Both columns are addressed by commit subject, not by sha, because a rebase rewrites
+            // every sha on this branch** (round 7). "pre-branch main" is *"sprint: 'use the shape from
+            // the other leg' is not a mechanical transform"*; "pre-retry r5" is *"CPE-1961 round 5:
+            // commit CAN refuse with policy: true, so the two legs stop classifying one refusal two
+            // ways"*. This table first named the latter `66090006`, which is a **pre-rebase** copy:
+            // `git merge-base --is-ancestor 66090006 <head>` is **false**, so a reader checking it out
+            // lands on a different base. Nothing rests on the sha — the losses reproduce from the
+            // current head with the retry removed — but the sha was wrong and shas here are not stable.
+            //
+            // **Two independent runs of this discriminator disagree in magnitude and agree in
+            // direction**: at the 2000 us gap the Reviewer's own from-scratch re-derivation gave
+            // **5/20** where this one gave 2/20 — draw noise, same direction, same conclusion, and
+            // saying so is stronger evidence than either number alone.
             //
             // `changed_outside` was 0 in every cell of every column, including the lost ones: **a lost
             // trial is strictly safer than a won one** (the committed file ends at `a.txt` with no link

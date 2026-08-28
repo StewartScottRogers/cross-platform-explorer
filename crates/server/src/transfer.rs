@@ -776,8 +776,19 @@ pub fn download_tree(
         // verdict** as neither delivered nor a delivery failure ("not writing is the correct, safe
         // outcome" — `DownloadReport::skipped`'s own doc), and which has produced exactly this
         // `skipped` + `Ok` for a link found at *claim* time since long before CPE-1961 — verified
-        // against `git show 8c9ddb60:crates/server/src/transfer.rs`, this branch's merge base, where it
-        // is byte-identical. Whether that contract is right is a real question, and it is **CPE-1980**;
+        // against `git show 8c9ddb60:crates/server/src/transfer.rs`, a **pre-branch** revision on
+        // `main` (*"sprint: 'use the shape from the other leg' is not a mechanical transform"*), where
+        // it is byte-identical. Round 5 called `8c9ddb60` "this branch's merge base" and it is **not**
+        // one — it is an *ancestor* of the merge base, which sat fifteen commits later. The
+        // substantive claim is unaffected, and it is stated in the rebase-proof form that should have
+        // been used first: `8c9ddb60` is an ancestor of this branch's merge base, and
+        // `git diff 8c9ddb60 $(git merge-base origin/main HEAD) -- crates/server/src/transfer.rs` is
+        // **empty**, so the file is unchanged all the way to the branch point and the silent `Ok`
+        // genuinely predates this branch. Naming the merge base by sha is what went stale: the sha
+        // written at round 7 was falsified by round 7's own rebase, minutes later. Say what the
+        // revision *is* and derive the rest. Saying "merge base" of a revision that is not one is the
+        // CPE-1933 shape — a sentence that reads as verified while naming a different object.
+        // Whether that contract is right is a real question, and it is **CPE-1980**;
         // what this round fixes is that the two moments now answer it the same way, so the outcome no
         // longer depends on which microsecond the link was planted in.
         //
