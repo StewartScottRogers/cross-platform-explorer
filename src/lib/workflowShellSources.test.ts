@@ -79,9 +79,13 @@ describe("the workflow/script enumeration is derived, not recalled (CPE-1969)", 
     expect(found.length).toBeGreaterThanOrEqual(MIN_EXPECTED_WORKFLOWS);
   });
 
-  it("finds the three extracted shell scripts no consumer used to read", () => {
+  it("finds every extracted shell script no consumer used to read", () => {
+    // Enumerated at run time, asserted as an exact set: a new script under scripts/ reds here on the
+    // day it lands, which is how CPE-1951's catalog-lower-bound.sh got added to this list rather
+    // than joining the release path unread by any guard.
     expect(discoverWorkflowScripts(ROOT)).toEqual([
       ".github/workflows/scripts/catalog-freshness-check.sh",
+      ".github/workflows/scripts/catalog-lower-bound.sh",
       ".github/workflows/scripts/catalog-version.sh",
       ".github/workflows/scripts/ffmpeg-anchor-check.sh",
     ]);

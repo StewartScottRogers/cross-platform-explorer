@@ -679,7 +679,7 @@ describe("release.yml's catalog job keeps the structure these red-proofs depend 
 
   it("every step the gate reads an outcome from has the id the gate names", () => {
     const ids = new Set((catalogJob.steps ?? []).map((s) => s.id).filter(Boolean));
-    for (const id of ["k", "sign", "bundle", "sigverify", "up", "confirm"]) {
+    for (const id of ["k", "lb", "sign", "bundle", "sigverify", "up", "confirm"]) {
       expect(ids.has(id), `catalog job is missing step id "${id}" that the outcome gate reads`).toBe(true);
     }
   });

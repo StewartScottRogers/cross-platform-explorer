@@ -554,6 +554,48 @@ jobs:
           echo "catalog version ${VERSION} (${STAMPED}) — committer timestamp of ${TAG_SHA}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      # CPE-1951 — the MONOTONIC half of anti-rollback, and the reason it is a separate step from
+      # the derive above.
+      #
+      # CPE-1941 made the version the tagged commit's committer timestamp, which is right, and made
+      # the version track COMMIT order rather than RELEASE order, which is the hole. Cut a release
+      # from a commit older than the last released one — a hotfix off a maintenance branch, a revert
+      # branch, `git tag` on a non-tip commit — and the number goes DOWN while everything here stays
+      # green: CATALOG_VERSION_FLOOR is a static constant that such a version clears by a mile, the
+      # future-date check passes, the signatures verify, the sha256s bind, the upload succeeds. Every
+      # client then answers `ApplyOutcome::Rollback`, writes nothing, and logs nothing.
+      #
+      # `CATALOG_VERSION_FLOOR` STAYS and is not what this replaces. The floor asks "is this above
+      # what the installed base already holds" — a fact about clients that no fetch can observe,
+      # since a client can sit on an old catalog for months. This asks "is this strictly above what
+      # is published RIGHT NOW". Neither implies the other, and both are wanted.
+      #
+      # It resolves exactly what a default client resolves — `releases/latest/download/
+      # catalog-index.json` (`catalog_url()`, src-tauri/src/lib.rs) — which during a release run is
+      # still the PREVIOUS release, because tauri-action creates this tag's release as a DRAFT and
+      # `latest` never resolves to a draft. So the run cannot race itself, and `v0.57.32`'s
+      # higher-but-never-served draft number stays out of the bound.
+      #
+      # FATAL, and fails CLOSED on every fetch error, with a distinct message per cause (timeout /
+      # unreachable / truncated / 404 / 5xx / unparseable / missing tool). The one non-fatal route is
+      # "the latest published release exists and its enumerated asset list contains no
+      # catalog-index.json" — established POSITIVELY via the releases API before it is believed,
+      # never inferred from a failed fetch. That distinction is the whole of the 404 decision and it
+      # is argued at length in the script's header; read it before touching that branch.
+      - name: Refuse a catalog version that is not newer than the published one (CPE-1951)
+        if: steps.k.outputs.has == 'true'
+        id: lb
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.cv.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "$VERSION" # the derive step above is the only source
+          bash .github/workflows/scripts/catalog-lower-bound.sh "$VERSION" "$REPO"
+
       - name: Build + sign the catalog bundle
         id: sign
         if: steps.k.outputs.has == 'true'
@@ -802,6 +844,7 @@ jobs:
         shell: bash
         env:
           HAS_KEY: ${{ steps.k.outputs.has }}
+          LOWERBOUND: ${{ steps.lb.outcome }}
           SIGN: ${{ steps.sign.outcome }}
           BUNDLE: ${{ steps.bundle.outcome }}
           SIGVERIFY: ${{ steps.sigverify.outcome }}
@@ -829,6 +872,11 @@ jobs:
             exit 0
           fi
           failed=""
+          # CPE-1951: the monotonic lower-bound gate is accounted for here like every other step. It
+          # runs BEFORE the sign, so a refusal leaves SIGN/UPLOAD/CONFIRM as `skipped` — which this
+          # loop already reports as non-success, but naming the gate explicitly is what makes the
+          # summary say *why* nothing was published rather than listing three consequences of it.
+          [ "${LOWERBOUND:-}" = "success" ] || failed="${failed} lower-bound(${LOWERBOUND:-<none>})"
           [ "${SIGN:-}" = "success" ] || failed="${failed} build+sign(${SIGN:-<none>})"
           [ "${BUNDLE:-}" = "success" ] || failed="${failed} verify-bundle(${BUNDLE:-<none>})"
           [ "${SIGVERIFY:-}" = "success" ] || failed="${failed} verify-signatures(${SIGVERIFY:-<none>})"

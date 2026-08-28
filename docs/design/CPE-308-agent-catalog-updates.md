@@ -114,13 +114,39 @@ primitive) — same principle as `host.verify_key`.
     the first move: `CATALOG_TRUSTED_KEYS` is a **compile-time** list, so rotation makes every
     already-installed client reject *every* bundle — legitimate ones included — until it app-updates,
     and the same secret signs the model snapshot (CPE-450/451), so it breaks that catalog too.
-  - *Known gap the fix introduces (follow-up ticket):* the floor is a **static** ratchet, not a
-    monotonic one, and nothing on the publish side compares against the **last published** version.
-    A release cut from an older commit — a hotfix on a maintenance branch, or `git tag` on a non-tip
-    commit — stamps a `%ct` below the live catalog's while still clearing the floor, so the release
-    goes green and every client silently returns `Rollback`. `date +%s` could not do this, since
-    publish order *was* version order. Ordinary releases are cut from the tip (`release.ps1` pushes
-    `HEAD --tags`), so it only bites a deliberate off-tip tag.
+  - *The gap the fix introduced, and how it is closed (CPE-1951):* the floor is a **static** ratchet,
+    not a monotonic one, and nothing on the publish side used to compare against the **last
+    published** version. A release cut from an older commit — a hotfix on a maintenance branch, a
+    revert branch, or `git tag` on a non-tip commit — stamps a `%ct` below the live catalog's while
+    still clearing the floor, so the release goes green and every client silently returns `Rollback`,
+    writes nothing, and logs nothing. `date +%s` could not do this, since publish order *was* version
+    order. Ordinary releases are cut from the tip (`release.ps1` pushes `HEAD --tags`), so it only
+    bites a deliberate off-tip tag — which is exactly what someone reaches for under pressure.
+    - **The fix is a publish-time lower bound**, `.github/workflows/scripts/catalog-lower-bound.sh`,
+      run by `release.yml`'s `catalog` job **before** the bundle is signed. It resolves what a client
+      resolves — `releases/latest/download/catalog-index.json` (`catalog_url()`) — and refuses,
+      fatally, any candidate that is not **strictly greater** than the max `entries[].version` there.
+      During a release run `latest` is still the *previous* release (tauri-action creates this tag's
+      release as a **draft**, and `latest` never resolves to a draft), which is precisely the bound
+      wanted; it also keeps `v0.57.32`'s higher-but-never-served draft number out of the comparison.
+    - **A counter was rejected** for the second time here: it must be bumped by something, and
+      auto-bumping means the release job committing back to the repo from a detached tag checkout
+      while manual bumping rots — a stale counter *is* the static ratchet again. And this is not the
+      trust dependency CPE-1924 declined: the fetch is only a lower bound that **fails the build**,
+      so a hostile or garbage response can cause a false failure, never a false success.
+    - **`CATALOG_VERSION_FLOOR` stays.** The floor asks "is this above what the installed base already
+      holds" — unobservable by any fetch, since a client can sit on an old catalog for months — and
+      the bound asks "is this above what is published right now". Neither implies the other.
+    - **Fail-closed, with the two 404s told apart.** Today the live index URL genuinely 404s
+      (CPE-1953 / #1062: `/releases/latest/` is `v0.57.69-sidecar`, and the last release that
+      published an index was **v0.57.33 on 2026-07-25**), so the tempting shape is "404 ⇒ skip". The
+      script refuses that: it first asks the releases API for the latest published release and
+      **enumerates its assets**, and only an enumeration that succeeded and contained no
+      `catalog-index.json` yields "no lower bound exists". A failed fetch — timeout, unreachable,
+      truncated, 5xx, a 404 that contradicts the asset list, or a missing tool — is fatal with its own
+      distinct message and exit code. Every one of those paths is executed in
+      `src/lib/catalogPublishLowerBound.test.ts`; the client-and-disk consequence it prevents is in
+      `sidecar/host/tests/catalog_offtip_release_lower_bound.rs`.
 - **Schema migration (CPE-300):** an entry with an older `schema_version` is migrated up before
   validation; unknown-future schema is skipped (as today).
 
