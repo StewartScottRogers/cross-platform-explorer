@@ -3,7 +3,7 @@ id: CPE-1963
 title: The staging rename's SOURCE is an enumerable, attacker-writable path — the commit can be aliased onto a file outside the root
 type: bug
 priority: High
-status: Open
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -391,3 +391,150 @@ is a property of this machine's toolchain rather than of the repo.
 
 - `cargo test -p cpe-server` — **2,460** lib tests plus every integration target, 0 failed.
 - `cargo clippy --locked --all-targets -- -D warnings`, plain and `--features index` — clean.
+
+## Closing record — merged as PR #1098 (`5d11a3d3`), 2026-08-28
+
+### The defect
+
+`stage_and_replace_at` wrote the user's bytes into a sibling it exclusively created,
+`<name>.<pid>-<nanos>.cpe-tmp`, and committed with `std::fs::rename(tmp, target)`.
+`Commit::ReplacingTheName`'s invariant — *"nothing planted at the destination after the caller's checks ran
+can redirect the commit"* — was **true of the destination and silent about the source**. The tmp is a
+**path**: an enumerable `*.cpe-tmp` entry in the same attacker-writable folder. Unlink it, hard-link an
+outside victim into its place, and the rename commits **the victim's inode** over the confirmed name — a
+**successful-looking overwrite that did not write the user's bytes**.
+
+### Re-measured before anything was changed
+
+`cpe_1958_rename_source_report`, Windows 11 / NTFS, `TMP` on a real local volume (`DriveType 3` verified),
+3,000 trials/shape: relink **7 / 3,000** aliased, **delete-only control 0 / 3,000** — inside the ticket's
+Windows spread. **The round-1 headline was itself corrected**: the pre-fix relink rate is **1–8 per 3,000
+across nine runs on three machines**, not the single 8 first quoted. **Linux was not corroborated here**
+(no C toolchain in the local WSL distro for `ring`/`zstd-sys`/etc.), so the ticket's 2,834/3,000 stands as
+recorded, not re-measured — said plainly rather than implied.
+
+### The fix
+
+`Commit::ReplacingTheName` commits via `open_beneath::rename_beneath` against a `RootDir` on the
+destination's own folder (new `fsutil::StagedBeneath`). `Commit::CarryingTheDestination` **keeps
+`ReplaceFileW`** — the editor's save and its carry-over are untouched.
+
+- **Windows: prevented** — the source operand is the staged **handle**; the staging *name* is not part of
+  the commit.
+- **Unix: reported, not prevented** — `renameat`'s source is still a name, so the commit is followed by an
+  identity check that turns an aliased commit into `Err` instead of `Ok(())`. Leaving the destination
+  aliased on `Err` is deliberate and documented: unlinking would leave the user with nothing.
+
+**After: 0/3,000 relink, 0/3,000 control, three consecutive runs**, with the new counter showing
+**17,302–24,246 attacks actually landing** — so the zero is a zero, not an attack that never staged.
+
+### The Windows regression this shipped with, and the compatibility call
+
+Round 1 used the **non-`Ex`** `NtSetInformationFile(FileRenameInformation)`, which **cannot replace a
+destination that has any handle open on it**. The author found it as *their own* handle (17 tests failing
+`Access is denied` on ordinary unattacked outputs) and fixed that by closing ours. **The same refusal fires
+for anyone else's handle**, which the Reviewer caught by measuring an ordinary save with a second
+`std::fs::File::open` held across it:
+
+| | result | bytes at the name |
+|---|---|---|
+| merge base | `Ok(())` | NEW |
+| round-1 head | **`Err` — Access is denied. (os error 5)** | **OLD** |
+| round 2 | `Ok(())` | NEW |
+
+Real holders on Windows are routine — Defender, the Search indexer, Explorer's preview and thumbnail
+handlers, OneDrive, media players — and it hit **Batch Media**, whose outputs are exactly the files a
+thumbnailer holds open.
+
+**The `Ex` form is not used unconditionally, and that is the interesting decision.** `FILE_RENAME_INFO.Flags`
+is Windows 10 **1607+** and POSIX-semantics rename is **NTFS-only** — FAT32/exFAT and some redirectors
+refuse it. Since `sys::rename` also serves the **backup** path, `Ex`-only would trade a rare failure for
+**every write failing on an exFAT USB drive**. So the plain form is kept as a fallback behind a
+`FORCE_RENAME_WITHOUT_EX` seam, **with a sabotage that prices it**: forcing every `Ex` attempt to fail
+gives **2,459 passed / 1 failed** against a 2,460/0 baseline — the single failure being the
+third-party-handle test. *The fallback working, and its exact price, in one number.*
+
+The Reviewer verified structurally that the fallback cannot be reached when `Ex` would have succeeded, and
+that **both arms set `RootDirectory = parent` and pass the staged handle** — so an attacker who forced a
+volume onto the fallback does **not** get a by-path commit back. `Anonymous = zeroed()` before writing
+`ReplaceIfExists` was called out as correct hygiene (a stale `Flags = 0x3` would otherwise read as
+`BOOLEAN(3)`). The seam is `#[cfg(all(test, windows))]` with no production reference.
+
+Fixing this also fixed `ClaimedDestination::commit`'s `Beneath` arm (backup, merged in #1089), which shares
+`sys::rename`.
+
+### The guard that passed for the wrong reason
+
+Round 1's deterministic fixture reached `[CPE-1963] reported` on Windows, not `prevented`: the attacker's
+`remove_file` sets a **delete disposition** on the staged handle, so the rename refuses **before** the
+identity check runs. It therefore proved *"a delete-pending handle cannot be renamed"*, **not** *"the
+relinked name is not part of the commit"* — the CPE-1929 reads-as-coverage shape, in this file's flagship
+guard.
+
+**The working shape took three tries, and all three are recorded.** `rename(aside → tmp)` also lands on
+`reported`, because `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` delete-marks the file it replaces exactly
+as `unlink` does. The shape that works is **`rename(tmp → a free name)` then `link(victim, tmp)`** —
+moving the staged object to a free name marks nothing. That reaches `[CPE-1963] prevented`. **Both fixtures
+now ship**, both red-proof (`2 passed; 2 failed`), and the enum doc records all three spellings **with
+their attribution** — including that the working one is the Reviewer's, proposed and measured before it was
+written here, and that the non-working `rename(aside, tmp)` was nobody's suggestion, kept because *knowing
+which rename spellings delete-mark the object is the finding*.
+
+*(A Foreman error worth recording: the brief relayed this as "the Reviewer's suggested shape was wrong."
+It was not — the shipped shape is exactly what the Reviewer measured. The mis-attribution never reached
+the tree; the author checked the ticket, both commit messages and the PR body and found it in none of
+them, then corrected the adjacent problem — that the record credited the working spelling to nobody.)*
+
+### A failure mode the control found
+
+Unlinking the staging file while it is held open leaves a disposition the NT rename does not clear: the
+rename succeeds, the destination is replaced, and the object dies at last handle close — **nothing at the
+name, `Ok(())` returned.** Lying `Ok`s per 3,000, by verification point: by-path `8 | 0`; with the handle
+still open `3 | 1,2,3,0`; after `drop(staged)` only `0 | 13,11,0,0`; after both handles close
+`0,0,0 | 0,0,0`. **Two intermediate doc claims were refuted by the next run, and all four rows are at the
+site rather than only the last.**
+
+Related correction: *"this mode is NEW with the handle-sourced commit"* was **re-measured on the real merge
+base and withdrawn** — the delete-only control produced 2 lying `Ok`s in 12,000 there. Now stated as *much
+rarer before, not absent.*
+
+### CPE-1929 pair
+
+Baseline 2,460/0 · disable it **2,460/0** · force the predicate to lie 2,435/**25**. One green, one red —
+**not shadowed**: the path is reached on every confirmed overwrite, and on Windows its answer is always
+"same object" because the rename is handle-sourced. **Windows only; the Linux half is a prediction and is
+marked as one.**
+
+### Two findings recorded rather than acted on
+
+- **A CPE-1933 false claim removed:** `rename_beneath`'s doc said `ClaimedDestination::commit` compares
+  identities and refuses. It does not — it syncs, renames, sweeps, returns `Ok`. Corrected at the site,
+  and the correction independently verified.
+- **`copilot::apply_op` is NOT closed by this primitive** — checked arm by arm, not assumed:
+  `rename_beneath` needs sibling operands under one root handle; `Move` is cross-directory and refused by
+  that precondition, `Copy`/`Mkdir` need `create_beneath`/`create_dir_beneath`, `Delete` uses a
+  path-taking OS trash API with no handle-relative form. Only `Rename` is sibling-shaped. It waits on the
+  whole descent being wired into `copilot`. Recorded on the ticket and at `apply_op`.
+
+**Still open and named at the site:** `ClaimedDestination::commit`'s `ByPath` arm and its Unix `Beneath`
+residual (CPE-1961 measured 2,785/3,000 on Linux). Untouched by this work.
+
+### Gates at merge
+
+`cargo test -p cpe-server` **2,460 lib / 0 failed / 14 ignored** plus all integration targets 0 failed ·
+`cargo clippy --locked --all-targets -D warnings` clean in **both** modes · CI `completed success —
+total_count=26 pending=0 skipped=1 coverage=ok`.
+
+**`npm test` — a disagreement, settled, and recorded as such.** The author measured **19 failed / 5,316
+passed**, identical with the branch stashed, cause **measured not asserted**: `jq` is absent from that
+machine on both the PowerShell and Git-Bash paths, the scripts under test exit **127**,
+`catalogPublishLoudFailure.test.ts` self-skips on `!hasJq` while the other two files have no such guard and
+fail. The Reviewer first reported 0 failed / 5,376 passed and then **withdrew it** — its own direct run
+gave the same 19/5,316, and the earlier figure came from a subagent report that was simply wrong. Kept as
+*disagreed and retracted* rather than deleted. The "identical to `main`" half holds **by construction**: the
+diff contains **no `.ts`/`.js`/`.mjs`/`.svelte` file at all.
+
+**Family:** CPE-1958 (the destination race this is the other half of), CPE-1961 (the two check-then-use
+sites, and `rename_beneath` itself), CPE-1896 (`open_beneath`, the primitive extended here), CPE-1739
+(where `stage_and_replace` came from), CPE-1738 (the `.cpe-tmp` residue this makes enumerable), CPE-1929
+(the sabotage pair), CPE-1933 (the false claim removed).
