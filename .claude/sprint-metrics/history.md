@@ -2085,3 +2085,30 @@ Two rules fall out. **Sampling a handful of CI jobs and calling the pattern dete
 with a table around it** — enumerate the window and fingerprint the artefact, because the *effective*
 version is what the runner installed, not what the branch had merged. And **a rate is not a detail**:
 "100%" and "90%" imply opposite verification strategies, and only one of them is safe.
+
+## 2026-08-27 — the merge gate itself counted SKIPPED as success, and `main` has no branch protection
+
+Two facts, found by PR #1074's Reviewer while reviewing something else, that change how this crew
+should read a green CI verdict.
+
+**`scripts/ci-poll.mjs:341` counts `SKIPPED` as success.** `ci.yml`'s five Rust test jobs sit behind
+`needs: lockfile-preflight` with no `if:`, so a preflight failure makes GitHub **skip** all five —
+and `ci-poll.mjs` then reports **`CI VERDICT: completed success`** on a run where the entire Rust
+suite never executed. This is the fifth instance of the same family today (a bash `-lt` returning 2, an
+npm `--json` error path with no `metadata`, a catalog job green having published nothing, CI jobs
+skipped rather than failed) — and it is the worst placed, because it sits inside **the gate the
+Foreman merges on**. Routed into CPE-1906, which already owned the "an error reads as pending" half.
+
+**`main` has no branch protection.** `branches/main/protection` → 404, `rulesets` → `[]`,
+`branches/main` → `"protected": false`. So there are **no required status checks on this repo**, the
+`--admin` merges bypass nothing, and `ci-poll.mjs`'s verdict is effectively the only gate. That is
+what makes the point above matter rather than being a nuisance: there is no second line of defence
+behind it.
+
+**The transferable part is where the finding came from.** It was not found by auditing the poller. It
+was found by a reviewer asking, of a *different* PR, "what does this actually buy today?" — and
+following that question into the tool that consumes the thing being changed. The PR's own author had
+argued the benefit was a latent one (a skipped job satisfying a required check, which cannot happen
+here because nothing is required). The live benefit was one layer down and larger. **When a change
+guards against a hazard, check what already consumes the signal it is changing** — the honest answer
+to "is this worth it" is often in a different file than the change.
