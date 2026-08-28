@@ -3,7 +3,7 @@ id: CPE-1967
 title: **no job in `ci.yml` carries a `timeout-minutes` at all**, and three script wrappers spawn external tools untimed — everything sits under the 6-hour Actions default
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -250,3 +250,144 @@ ticket named.
 | `RunClaude.cmd` | `claude` | **OUT OF SCOPE.** A launcher for an interactive session; the session IS the process, and bounding it would be bounding the user. |
 | `hrdrClaudeNative.cmd` | interactive launcher | **OUT OF SCOPE.** Same. |
 | `samples/text/hello.py` | nothing | **N/A.** A test fixture, not a tool wrapper; never executed by anything here. |
+
+## Closing record — merged as PR #1096 (`50de654b`), 2026-08-28
+
+### The ticket's own number was wrong, and so was the PR's first correction of it
+
+The ticket said *"0 of `ci.yml`'s 10 jobs carry a `timeout-minutes`"*. Enumerated at run time from
+`git ls-files '.github/workflows/*.yml'` plus the repo's own `parseYaml`, the real position was **17
+uncapped jobs of 28, across 8 workflows** — `ci.yml`'s 10, plus `model-snapshot.yml` (1), `release.yml`
+(3), `release-sidecar.yml` (4).
+
+**Then the Reviewer found that 17 was wrong too.** `ci.yml` has **11** jobs, not 10, and `ci-verdict`
+**already carried `timeout-minutes: 10`** at the merge base — `git show 337ac334:.github/workflows/ci.yml
+| grep -nE '^    timeout-minutes:'` returns exactly one line (2042). So the true figure is **18 uncapped**,
+**8 more than the ten the ticket named**, and job-level caps went **10 → 28**.
+
+**The cause is the ticket's whole subject, one level up.** The PR carried the ticket's premise forward as a
+baseline instead of re-deriving it from the merge base — *CPE-1932 failing inside the PR arguing for
+CPE-1932* — and the miscount then appeared in four places, one of them the canonical comment block the new
+guard's failure message points readers to. All four were fixed **as corrections naming the old value**, not
+silent swaps.
+
+**The remedy was better than a better sentence.** Rather than restate the digits correctly, the docblock
+**stopped carrying them**: a new `describe("the counts this file's rationale quotes are DERIVED from
+ci.yml, not recalled")` measures the parsed job count, the job-level cap count, the step-level cap count and
+the comment mentions **at run time**, and cross-checks the text scan against the parser.
+
+### How the values were picked
+
+One rule, stated once above `jobs:` in `ci.yml`: **`cap = max(10, ceil_to_5(1.5 × measured max))`**, where
+the measured max is the slowest successful run's slowest matrix leg. The sample (`n`, min/p50/p90/max) sits
+on the comment line above **every** value, taken from read-only `gh api` over the 100 most recent completed
+runs per workflow, successful jobs only.
+
+Re-derived independently by the Reviewer with its own sweep, and every value checked out arithmetically:
+
+| job | measured | cap |
+|---|---|---|
+| `Frontend` | n=83, 3.0 / 5.1 / 5.4 / **5.9** | 10 |
+| `Server crates (windows-latest)` | n=51, 21.6 / 57.7 / 62.2 / **68.2** | **105** |
+| `msrv` | n=77, 2.7 / 14.4 / 15.4 / **17.1** | 30 |
+| `release (macos universal)` | n=73, 8.4 / 12.2 / 14.5 / **16.3** | 30 |
+| `release-sidecar (windows)` | n=31, 7.3 / 19.1 / 22.3 / **23.6** | 40 |
+
+**The ticket's own "`Frontend` runs ~19 min" is wrong** — measured max is **5.9** over 83 successful runs.
+`Server crates (windows-latest)` confirmed at ~60 min typical, which is why one shared constant would have
+been wrong; its cap is the largest in the tree and still under a third of the 360-minute default.
+
+**Three jobs have never executed at all** — `verify-published-manifest`, `verify-updater-pin`,
+`verify-published-manifest-sidecar`, all added after the last release run (2026-08-23T14:36Z), zero
+appearances in any conclusion. Confirmed genuinely absent rather than missed by the query, with commit dates
+explaining why. Each gets 30 min from a **named analogue** and says `UNMEASURED`, `ANALOGUE, not a
+measurement`, and `REPLACE WITH A REAL MEASUREMENT` in capitals at the site.
+
+### The `timed_out` question — measured, not assumed
+
+`timed_out` appears **zero times** in this repo's history (`ci.yml` job conclusions success 1247 /
+cancelled 133 / failure 48; `gui-smoke.yml` success 572 / skipped 91 / cancelled 31 / failure 38) — because
+before this PR only `gui-smoke.yml` had caps and none was ever reached. So `ci-poll.mjs` now collects
+`timed_out` **and** `cancelled` as one state rather than guessing which GitHub emits, reported as a new
+`halted=` field and a `STOPPED rather than judged (timed out or cancelled)` sentence.
+
+Classification was already correct and was verified by reading the predicates rather than trusting them: the
+run path's `failedNames` takes any conclusion outside `{"", success, neutral, skipped}` — a strict superset —
+and the PR path's `isSkipped` is `conclusion === "SKIPPED"` only, **so a halted check can never reach
+`skippedNames`.** Exits 3 / 4 / 5 are untouched.
+
+### The live fail-open, which the ticket did not ask about
+
+`scripts/audit-npm-projects.mjs` spawned `npm audit` untimed. With a 1 ms cap and the new guard **disabled**,
+the sweep printed:
+
+```
+UNAPPLIED non-major fix, measured (0): (none -- npm audit fix is a no-op here)   [both projects]
+No npm project has an unapplied non-major fix.
+EXIT=0
+```
+
+**A confident green over a probe that never ran** — and `gui-smoke` genuinely has 3 npm-claimed-fixable
+advisories it would have been measuring. Not a shadowed guard: a live fail-open, now closed, and checked
+**before** the `/npm error/i` sniff for the stated reason that a killed child writes no marker. Three spawns
+capped, not the one the ticket named. Both new CDP timeouts reuse `layout-guard/engine.mjs`'s existing
+`CDP_CALL_TIMEOUT_MS` shape rather than inventing a second.
+
+### The sweep past `*.mjs`, and the gap left open on purpose
+
+Ten files enumerated, not the ticket's three. `gen_samples.py` had two unbounded `ffmpeg` spawns —
+**fixed** (`TimeoutExpired` ⊂ `SubprocessError` ⊂ `Exception`, so both existing handlers absorb it into the
+stub path; no new failure route).
+
+**`scripts/release.ps1`'s `git push` is deliberately left uncapped**, with the reasoning and an **expiry
+condition** at the site: it is an attended-only script, and PowerShell has no native-command timeout, so
+bounding it means killing mid-push. The load-bearing half of that argument was **derived, not asserted**:
+every reference to `release.ps1` in workflows and `catalog-version.sh` is a **comment**, and the one
+unattended caller — the vitest harness in `frontend` — executes the real script but only with `-BumpOnly`,
+which `exit 0`s at **line 492**, above `Invoke-Git`'s definition at 536 (the file's only `git` execution is
+`& git @Args` at 538, called at 547–550). So no CI path reaches a `git` call. Expiry condition: *a caller
+reaching past the `-BumpOnly` exit.*
+
+### The guard, and what it deliberately does not do
+
+`src/lib/workflowJobTimeouts.test.ts` — derived from a real directory read (`refuseNearEmpty` at floor 8,
+`refuseSubdirectories`) and a parser that **throws on unparseable YAML rather than skipping silently**, plus
+its own `MIN_EXPECTED_JOBS = 20` floor and a per-file "parsed to zero jobs" refusal. It anchors on
+`job["timeout-minutes"]` off the **parsed object**, never text — verified against today's `ci.yml`, where a
+naive text scan finds **30** occurrences of which only **22** are real keys and **8** live in comments.
+
+**No allowlist and no ratchet**, because the invariant is total — confirmed against `RATCHET_SHAPED` in
+`ratchetBaselines.test.ts` and `docs/design/RATCHETS.md`, both untouched and both green.
+
+Red-proofs, re-run by the Reviewer with its own counts:
+
+| sabotage on `ci.yml` | result |
+|---|---|
+| insert a 12th job **with** a cap | **2 failed / 4 passed** — `expected 12 to be 11`, and `expected 11 to be 12` |
+| **remove** one job cap (`frontend`) | **3 failed / 3 passed** — parsed half still passes at 11 while the **text** half fails `expected 10 to be 11` |
+| **change** a cap's value (105 → 47) | **6/6 GREEN** |
+
+The remove case is the informative one: it is what proves the parsed and text measurements are
+**independent** rather than one number compared against itself. The insert case reds *both* legs, not one —
+correcting the Foreman's framing of it.
+
+**The third row is now a declared gap.** A cap's *value* is unchecked against the sample quoted above it —
+inherent, since only GitHub's run history could judge a cap and a test that queried it would be flaky by
+construction. It is item 3 on the guard's "deliberately does NOT do" list, re-measured for the ticket rather
+than quoted from the review.
+
+### Gates at merge
+
+`npm run check` 0/0 · `npx vitest run` **360 files / 5,388 passed / 2 pre-existing skips** · eight affected
+suites re-run by the Reviewer at **278 passed** · working tree clean after every sabotage ·
+`release.ps1` still CRLF and BOM-less · CI `completed success — total_count=26 pending=0 skipped=1
+coverage=ok`.
+
+**Blast radius:** `release.yml` **25/0** and `release-sidecar.yml` **31/0** — literally zero deletions, one
+`timeout-minutes:` plus a comment per job across 7 jobs — which is what made it safe to serialise against
+PR #1095 in either order.
+
+**Family:** CPE-1906 (the poller's side of the same problem), CPE-1956 (`ci.yml`'s silent-skip gate),
+CPE-1932 (enumerate, don't recall — and the rule this PR broke and then fixed by deriving), CPE-1933
+(anchor on parsed code, not comment text), CPE-1929 (the sabotage pair that found the npm fail-open),
+CPE-1171 (the gui-smoke harness, which already capped its jobs).
