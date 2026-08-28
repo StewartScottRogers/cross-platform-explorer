@@ -2947,3 +2947,49 @@ Two more things from the same measurement worth keeping:
   *existing* in-process respawns too: **6 of 40** sampled jobs had already used one, all recovered, and
   **nothing anywhere said so.** A silent recovery mechanism hiding its own rate is the shape that hid a
   month-long outage in this repo once already.
+
+## 2026-08-28 — I quoted the section above the failure as if it were the failure
+
+#1087's contrast job went red on CI with *"PIXEL CROSS-CHECK FAILED — 3 ground(s) painted a colour the
+computed-style path did not predict."* I read the four rows printed immediately above that line, saw
+deltas of `+0.05` to `+0.24`, and told the worker this looked like antialiasing or device scale — small,
+safe-direction, probably subpixel.
+
+**Those four rows were the THIN MARGINS section.** They are a different report that happens to print just
+before the verdict. The actual pixel disagreements were **12 and 37** — an order of magnitude past
+anything subpixel, and the worker said so rather than building on my framing.
+
+**The mechanics of the mistake are worth more than the mistake.** A log is not a structure; adjacency in
+a terminal is not containment. I had the failing line and I took the nearest numbers as belonging to it,
+because they were numbers, they were close, and they were consistent with a story I had already formed.
+The fix costs nothing: **when reading a failure out of a log, find where the failing section begins, not
+where the failing line ends.** Everything above it belongs to something else until proven otherwise.
+
+Second-order and more useful: **a plausible cause offered by a Foreman is a prior a worker has to
+overcome.** I handed over "probably antialiasing" with a caveat to measure — and the caveat is the only
+reason this went well. Had I stated it flatly, the likely outcome is a derived-looking tolerance built to
+absorb a 0.24 that was never the problem, and a real 37 shipping green underneath it.
+
+## 2026-08-28 — the premise in the comment was the defect, again
+
+The actual cause of that CI failure: the sampler read an element's ground colour as the **mode of 45
+interior samples**, resting on a premise written in the code — *"glyphs are a minority of an element's
+interior pixels."*
+
+Measured, it is false. A 25×14 tab-usage span sampled **28 distinct colours across 45 points**, the mode
+winning with **13 of 45**. Six grounds had the predicted colour appear **zero times** and passed only
+because whichever antialiased blend happened to win landed within 1/255 of the prediction. Which blend
+wins is decided by font rasterisation — so Windows gave 59/0 and ubuntu-latest gave 60/3 **on the same
+commit**, and neither number was measuring what it claimed.
+
+**The sentence was the defect.** That is the fourth time this shift: a comment asserting a property
+nobody checked, with a green run standing next to it. The others were a gap list, a red-proof naming an
+impossible mutation, and a quantifier over an infinite set. This one is the purest of them — a single
+declarative clause about pixel statistics, load-bearing for every ratio the harness reports.
+
+**And the fix was in the model, not the threshold.** Glyph *fill* is now suppressed for the screenshot
+via `-webkit-text-fill-color` — chosen deliberately narrower than `color` so `currentColor`, borders,
+outlines and shadows are untouched — and every ground comes back **45/45, one distinct colour, 118/118
+unanimous**. The guard then got *tighter*: flatness is now a fatal condition, which is the strongest form
+available and spends no margin at all. A tuned epsilon would have made the same red go away and left the
+sampler still measuring the wrong thing.
