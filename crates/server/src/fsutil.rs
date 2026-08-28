@@ -1651,7 +1651,11 @@ pub(crate) enum DestinationSite<'a> {
 ///    at old + new. **On the backup leg — overwriting a large file on a nearly-full external drive —
 ///    that turns operations that used to succeed into `ENOSPC`.** It is per-file, not per-job: the
 ///    extra is released at each commit. There is no way to avoid it and keep the containment property,
-///    because "do not write into the object that is already there" is the containment property.
+///    because "do not write into the object that is already there" is the containment property. Derived
+///    from the mechanism (two names in one folder hold two files' worth of blocks until the rename),
+///    **not measured** — no run in this ticket filled a volume. Labelled for the same reason row 2 is:
+///    rows 3 and 4 below *were* measured, so an unlabelled derivation sitting beside them reads as one
+///    (round 3, Reviewer F4).
 /// 2. **On Unix the destination's OWNER changes.** The object landing at `dst` was created by the
 ///    running user, so it carries that user's uid/gid. Writing through the pre-existing handle
 ///    preserved whatever owner and group the destination had. [`carried_mode`] handles the consequence
@@ -1856,11 +1860,23 @@ impl ClaimedDestination<'_> {
             cleanup(&staged);
             return result;
         }
-        // CPE-1738's collector, on the same terms `stage_and_replace_at` calls it: after the commit has
-        // already succeeded, so a failed claim never pays for it, and scoped to this destination's own
-        // `<name>.<pid>-<nanos>.cpe-tmp` siblings. Without this the five legs CPE-1961 routes through
-        // staging would accumulate debris in the user's own folders — exactly the regression CPE-1958
-        // round 2 found and fixed for the confirmed-overwrite path.
+        // CPE-1738's collector, run after the commit has already succeeded so a failed claim never pays
+        // for it. Without it the five legs CPE-1961 routes through staging would accumulate debris in
+        // the user's own folders — exactly the regression CPE-1958 round 2 found and fixed for the
+        // confirmed-overwrite path.
+        //
+        // **This call deletes MORE than `stage_and_replace_at`'s does, and round 2's comment here said
+        // the opposite** (round 3, Reviewer F1). It read *"on the same terms `stage_and_replace_at`
+        // calls it … scoped to this destination's own `<name>.<pid>-<nanos>.cpe-tmp` siblings"*, which
+        // was true of round 1 and false from the moment SEC-8 changed the argument below to
+        // [`SweepScope::EveryDestination`]. As it stands, one commit may unlink **any**
+        // `<something>.<pid>-<nanos>.cpe-tmp` in the directory — not only this destination's — less the
+        // ones still carrying this process's own pid ([`stamp_pid_is_this_process`]). A widened deletion
+        // described at its call site as narrowly scoped is the one claim that cannot be left standing:
+        // this is the comment a reader hits first, because it sits at the call rather than the
+        // definition, so it is the one that has to say how much may go. [`SweepScope::EveryDestination`]
+        // states exactly what the remaining bound is, and — the part that is easy to over-read — what it
+        // is *not*: a name shape and an age, never proven ownership.
         //
         // **Memoised, and the reason is a measurement rather than tidiness.** `sweep_stale_temp_siblings`
         // does a `read_dir` of up to `SWEEP_SCAN_CAP` = 4,096 entries. The editor's save pays that once
@@ -5003,13 +5019,35 @@ pub(crate) enum SweepScope {
     ///
     /// **What this widens, stated rather than left to be discovered.** The "a pathologically slow save
     /// can have its own live temp swept out from under it" window in the doc above stops needing the two
-    /// saves to be of the *same* destination — any two writes into the same folder can now collide. It
-    /// is bounded by the same two things it always was and neither is weakened: the candidate must carry
-    /// a structurally valid `<digits>-<digits>` stamp, and its mtime must be [`STALE_TEMP_FLOOR`] behind
+    /// saves to be of the *same* destination — any two writes into the same folder can now collide.
+    ///
+    /// **What bounds it, said precisely, because round 2's wording here overstated it** (round 3,
+    /// Reviewer F2). Two filters survive and neither is weakened: the candidate must carry a
+    /// structurally valid `<digits>-<digits>` stamp, and its mtime must be [`STALE_TEMP_FLOOR`] behind
     /// the just-committed target's. An actively-written staging file has a *fresh* mtime — every write
     /// bumps it — so reaching the floor takes a writer that has produced no bytes at all for five
-    /// minutes. The user's file is never damaged either way, for the reason the doc above gives: that
-    /// guarantee comes from the staging design, not from this sweep.
+    /// minutes. But note what those two together actually say, which is **not** what round 2 claimed
+    /// they bound this to: they bound it to *"our name shape, and stale"*. They do not bound it to
+    /// *"ours"*. Nothing in a stamp validator or an age comparison can, and reading them as if they
+    /// could is how the widening looked free.
+    ///
+    /// **So a third filter was added, and it is the only one that speaks to ownership.**
+    /// [`stamp_pid_is_this_process`] skips a candidate stamped with this process's own pid unless its
+    /// base name is the target's own — closing the case where one of our own stalled writers loses its
+    /// live sibling to a sweep our own next commit performs. Read that function for the mechanism and
+    /// for what the escape gives up.
+    ///
+    /// **Two widenings remain, deliberately, and both are stated rather than defended away.** A *foreign*
+    /// staging-shaped name is still collectable: (a) another instance of this app writing into a shared
+    /// folder — its pid differs, so five minutes of silence from it and this instance unlinks its temp;
+    /// and (b) a user file literally named `notes.txt.1-1.cpe-tmp`, which passes every check there is,
+    /// because every check there is looks at the name and the clock. Neither costs the user *content* —
+    /// (a) surfaces to the other instance as a failed rename with its original intact, (b) is a file
+    /// whose name is indistinguishable from residue this app is chartered to remove. That is the reason
+    /// they are accepted, and it is a different sentence from "they cannot happen".
+    ///
+    /// The user's file at the destination is never damaged by any of this, for the reason the doc above
+    /// gives: that guarantee comes from the staging design, not from this sweep.
     EveryDestination,
 }
 
@@ -5061,6 +5099,15 @@ fn sweep_stale_temp_siblings_scoped(target: &Path, scope: SweepScope) {
                 let Some(dot) = head.iter().rposition(|b| *b == b'.') else { continue };
                 if dot == 0 {
                     continue; // no base name in front of the stamp — not our shape
+                }
+                // **The one piece of real ownership evidence in the name, and round 2 threw it away**
+                // (round 3, Reviewer F2). A candidate stamped with THIS process's pid, under a base name
+                // that is not the target's own, is a sibling one of our own concurrent writers may still
+                // be filling — see [`stamp_pid_is_this_process`] for the `download_tree`/`backup` shape
+                // that reaches it. Skip it. Nothing SEC-8 exists to collect is lost: residue from a
+                // *killed* process can never carry a live pid.
+                if &head[..dot] != name_bytes && stamp_pid_is_this_process(&head[dot + 1..]) {
+                    continue;
                 }
                 &head[dot + 1..]
             }
@@ -5118,6 +5165,45 @@ fn is_valid_temp_stamp(s: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Whether a `<pid>-<nanos>` stamp names **this** process (CPE-1961 round 3, Reviewer F2).
+///
+/// [`SweepScope::EveryDestination`] widened one commit's sweep from "this destination's own staging
+/// siblings" to "every staging-shaped name in the directory". The defence written for it — the stamp
+/// validator plus [`STALE_TEMP_FLOOR`] — establishes *"shaped like ours **and** stale"*. It does **not**
+/// establish *ours*, and the ownership evidence was already in the string being parsed:
+/// [`staging_sibling_name`] writes the pid, and [`is_valid_temp_stamp`] read it only far enough to prove
+/// it was digits and then discarded it.
+///
+/// # The case that bites is ours, not an attacker's
+///
+/// `transfer::download_tree` / `backup` write N files into one folder. One write stalls — a hung socket,
+/// a paused NAS — and its staging file's mtime freezes. [`LAST_SWEPT_DIR`] is a **one-slot**
+/// `Option<PathBuf>`, so a depth-first walk that alternates `A/f1`, `A/sub/g1`, `A/f2` re-sweeps `A`
+/// every time it comes back to it. Past [`STALE_TEMP_FLOOR`] the next commit in `A` unlinks the **live**
+/// sibling. Staging handles are opened `SHARE_ALL`, which deliberately includes `FILE_SHARE_DELETE`
+/// (`open_beneath::SHARE_ALL`), **so this succeeds on Windows as well as on Unix** — the stalled writer
+/// goes on filling a now-nameless object and its own commit then fails at the rename. Under
+/// [`SweepScope::ThisDestinationOnly`] it could not happen: it needed two saves of the *same*
+/// destination, which is precisely why the slow-save window was defensible before SEC-8 and is wider
+/// after it.
+///
+/// # What the escape costs
+///
+/// A candidate is skipped when its pid is this process's **unless its base name is the target's own** —
+/// that one has always been in `ThisDestinationOnly`'s remit, and a just-committed claim has in any case
+/// already renamed its own staging file away. The only thing given up is a temp this process genuinely
+/// orphaned (a `Drop` that could not unlink), collected on the next launch rather than in this run.
+///
+/// A stamp that does not parse is reported as "not ours", which is the right answer twice over:
+/// [`is_valid_temp_stamp`] is the real gate downstream and rejects it anyway. A pid written with leading
+/// zeros compares equal to the same number and so errs toward *keeping* a file, which is the safe
+/// direction. A pid too large for `u32` cannot be this process's, since [`std::process::id`] returns one.
+fn stamp_pid_is_this_process(stamp: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(stamp) else { return false };
+    let Some((pid, _)) = s.split_once('-') else { return false };
+    pid.parse::<u32>().is_ok_and(|p| p == std::process::id())
 }
 
 /// The pure decision behind [`sweep_stale_temp_siblings`]: should this ONE already-matched candidate be
@@ -10525,6 +10611,132 @@ mod tests {
              the age reference is the filesystem's own clock, not the client's"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1961 round 3 (Reviewer F2): a directory-wide sweep must not eat one of THIS process's own
+    /// live staging siblings.**
+    ///
+    /// SEC-8 widened the memoised sweep to [`SweepScope::EveryDestination`], and the defence written for
+    /// it — the stamp validator plus [`STALE_TEMP_FLOOR`] — proves only "our name shape, and stale",
+    /// never "ours". `download_tree`/`backup` write N files into one folder; one stalls, its temp's mtime
+    /// freezes, the one-slot [`LAST_SWEPT_DIR`] memo is re-armed every time the depth-first walk returns
+    /// to that directory, and past the floor the next commit unlinks a sibling a live writer is still
+    /// filling. [`stamp_pid_is_this_process`] is the escape.
+    ///
+    /// Three legs, and each one is load-bearing on its own:
+    ///
+    /// 1. **A foreign pid's stale temp is still collected** — otherwise the fix would have bought its
+    ///    safety by turning SEC-8 off, which is the outcome the whole widening exists to avoid.
+    /// 2. **This process's stale temp under a DIFFERENT base name survives** — the fix itself. This is
+    ///    the leg that reds when the two lines in the `EveryDestination` arm are deleted.
+    /// 3. **This process's stale temp under the TARGET'S OWN base name is still collected** — the escape
+    ///    is not allowed to narrow what [`SweepScope::ThisDestinationOnly`] has always been permitted to
+    ///    do, and a committed claim has already renamed its own staging file away, so this name can only
+    ///    be residue.
+    ///
+    /// Calls [`sweep_stale_temp_siblings_scoped`] directly rather than going through
+    /// [`sweep_stale_temp_siblings_once_per_directory`], because the memo is thread-local and never
+    /// cleared: routing through it would make the test's result depend on which other test in this
+    /// binary happened to sweep a directory on this thread first.
+    ///
+    /// **Red-proofed, and here is the run** (round 3). With the `stamp_pid_is_this_process` skip in the
+    /// `EveryDestination` arm disabled (`if false && …`):
+    ///
+    /// ```text
+    /// cpe_1961_stamp_pid_is_this_process_reads_the_pid_half_only ... ok
+    /// cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling ... FAILED
+    ///   assertion `left == right` failed: a stale staging sibling carrying THIS process's pid, under a
+    ///   base name that is not the target's, must survive: …
+    ///     left: None
+    /// ```
+    ///
+    /// Legs 1 and 3 stayed green, so the test reds for the reason it exists rather than because the
+    /// sweep stopped working.
+    #[test]
+    fn cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling() {
+        let d = scratch("sweep-pid-ownership");
+        let target = d.join("committed.txt");
+        std::fs::write(&target, b"just committed").unwrap();
+
+        let ours = std::process::id();
+        let foreign = ours.wrapping_add(1);
+        assert_ne!(foreign, ours, "the foreign-pid leg needs a pid that is genuinely not this process's");
+
+        // Ten minutes behind `target`'s own mtime — past STALE_TEMP_FLOOR (300s) on the filesystem's own
+        // clock, which is the reference `sweep_stale_temp_siblings_scoped` uses.
+        let stale = std::fs::symlink_metadata(&target).unwrap().modified().unwrap()
+            - std::time::Duration::from_secs(600);
+        let age = |p: &Path| {
+            std::fs::OpenOptions::new().write(true).open(p).unwrap().set_modified(stale).unwrap();
+        };
+
+        let foreign_temp = d.join(format!("elsewhere.bin.{foreign}-1000000000000.cpe-tmp"));
+        std::fs::write(&foreign_temp, b"a killed process left this").unwrap();
+        age(&foreign_temp);
+
+        let ours_other_name = d.join(format!("stalled-download.bin.{ours}-1000000000001.cpe-tmp"));
+        std::fs::write(&ours_other_name, b"a live writer is still filling this").unwrap();
+        age(&ours_other_name);
+
+        let ours_same_name = d.join(format!("committed.txt.{ours}-1000000000002.cpe-tmp"));
+        std::fs::write(&ours_same_name, b"residue for the target's own name").unwrap();
+        age(&ours_same_name);
+
+        sweep_stale_temp_siblings_scoped(&target, SweepScope::EveryDestination);
+
+        assert!(
+            !foreign_temp.exists(),
+            "a stale staging sibling stamped with a pid that is NOT this process's is exactly what SEC-8 \
+             widened the sweep to collect — if this survives, the ownership escape has silently reverted \
+             the widening rather than bounding it"
+        );
+        // `.ok().as_deref()`, not `.unwrap()`: when this leg regresses the file is GONE, and an unwrap
+        // would panic with a bare `NotFound` instead of the sentence that says what was lost.
+        assert_eq!(
+            std::fs::read(&ours_other_name).ok().as_deref(),
+            Some(&b"a live writer is still filling this"[..]),
+            "a stale staging sibling carrying THIS process's pid, under a base name that is not the \
+             target's, must survive: a stalled writer of ours holds it open and the age floor cannot \
+             tell 'killed' from 'has produced no bytes for five minutes'"
+        );
+        assert!(
+            !ours_same_name.exists(),
+            "the ownership escape must NOT narrow what ThisDestinationOnly has always collected — the \
+             target's own staging name is residue by construction once the commit has renamed the real \
+             one away"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The pure half of [`cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling`]:
+    /// [`stamp_pid_is_this_process`]'s truth table, including the two rows whose *direction* of error was
+    /// chosen deliberately — an unparseable stamp answers "not ours" (safe, because
+    /// [`is_valid_temp_stamp`] rejects it downstream anyway) and a leading-zero pid answers "ours" (safe,
+    /// because it errs toward keeping a file).
+    #[test]
+    fn cpe_1961_stamp_pid_is_this_process_reads_the_pid_half_only() {
+        let ours = std::process::id();
+        let foreign = ours.wrapping_add(1);
+        for (stamp, want, why) in [
+            (format!("{ours}-1000000000000"), true, "our pid, ordinary stamp"),
+            (format!("{foreign}-1000000000000"), false, "someone else's pid"),
+            (format!("0{ours}-1"), true, "leading zeros parse to the same number — errs toward keeping"),
+            (format!("{ours}"), false, "no '-' at all, so there is no pid half to read"),
+            (format!("x{ours}-1"), false, "not digits, so not a stamp this app ever wrote"),
+            ("99999999999999-1".to_string(), false, "wider than a u32, so it cannot be a live pid"),
+            (String::new(), false, "empty"),
+        ] {
+            assert_eq!(
+                stamp_pid_is_this_process(stamp.as_bytes()),
+                want,
+                "stamp_pid_is_this_process({stamp:?}): {why}"
+            );
+        }
+        assert!(
+            !stamp_pid_is_this_process(&[0xff, b'-', b'1']),
+            "invalid UTF-8 is not a stamp this app wrote, so it reads as 'not ours' and the downstream \
+             is_valid_temp_stamp gate refuses it"
+        );
     }
 
     /// The IO wrapper actually skips a name that matches the staging pattern but is a symlink — wired

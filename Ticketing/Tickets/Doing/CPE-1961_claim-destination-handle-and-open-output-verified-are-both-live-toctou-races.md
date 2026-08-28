@@ -522,6 +522,9 @@ The audit was accurate on what it listed and incomplete. All four rows are now a
    overwriting a large file on a nearly-full external drive — this turns operations that used to succeed
    into `ENOSPC`.** Per-file, not per-job. Unavoidable while keeping the containment property, because
    "do not write into the object that is already there" *is* the containment property.
+   Derived from the mechanism, **not measured** — no run in this ticket filled a volume — and said so at
+   the site (round 3, Reviewer F4: rows 3 and 4 *were* measured, so an unlabelled derivation next to them
+   reads as one).
 2. **On Unix the destination's owner changes.** The object landing at `dst` was created by the running
    user; writing through the pre-existing handle preserved the destination's owner and group.
    `carried_mode` handles the privilege consequence (setuid/setgid dropped when the owner changed), but
@@ -639,3 +642,150 @@ hunting a temp-dir lock that is not there. **`bash` must resolve to Git Bash, no
 - `sidecar/host`'s `tests/keyring_roundtrip.rs` cannot link under WSL (`undefined symbol:
   sd_listen_fds`) — a genuine environment gap, not a code failure. It is in `sidecar/host`, which this
   diff does not touch, and it is covered by the Windows run.
+
+## Round 3 — Reviewer on PR #1089
+
+The narrow re-review reproduced every round-2 figure and re-took every gate, including building the
+**merge base** itself (2,429 / 0 / 13) — which confirms +4 passed / +1 ignored is exactly the three
+round-1 tests plus the round-2 archive test plus the `#[ignore]`d racer, and so that **2,414 matches
+nothing in the lineage**. One correction to carry: moving the Unix mode block back below the commit fails
+with **`E0382: borrow of moved value`**, not `E0425` — round 1's actual text was `E0425`, which is what
+the SEC-1 section says, so both statements stand as written.
+
+### F1 — the call site understated what a commit may delete
+
+`fsutil.rs`'s comment at the `sweep_stale_temp_siblings_once_per_directory` call still read *"on the same
+terms `stage_and_replace_at` calls it … scoped to this destination's own `<name>.<pid>-<nanos>.cpe-tmp`
+siblings"*. Both clauses stopped being true at SEC-8, which changed that very call to
+`SweepScope::EveryDestination`. The function's own doc, the next paragraph, and `SweepScope`'s doc all
+said so; the **call-site** comment did not — and that is the one a reader hits first, because it sits at
+the call rather than the definition. Rewritten to say plainly that this call may unlink any
+staging-shaped name in the directory, minus this process's own, and to point at `SweepScope` for the
+exact bound.
+
+### F2 — the SEC-8 defence proved "shaped like ours **and** stale", never "ours"
+
+**The revert was not taken.** The bug SEC-8 fixed is real: with the memo keyed on a *directory* and the
+filter keyed on a *name*, residue for every file but the first in a directory was collected **never** — a
+killed process's partial copy of user data sitting in the user's own folder indefinitely. Reverting to
+doc-only would trade a real defect for a paragraph.
+
+**But the defence as written overstated.** The stamp validator and the 300 s floor cannot establish
+ownership, and the ownership evidence was already in the string being parsed: `staging_sibling_name`
+writes `<name>.<pid>-<nanos>.cpe-tmp`, and `is_valid_temp_stamp` read the `<pid>` half only far enough to
+prove it was digits, then discarded it.
+
+**The worst case is ours, not an attacker's.** `download_tree` / `backup` write N files into one folder.
+One write stalls — a hung socket, a paused NAS — and its staging file's mtime freezes. `LAST_SWEPT_DIR`
+is a one-slot `Option<PathBuf>`, so a depth-first walk alternating `A/f1`, `A/sub/g1`, `A/f2` re-sweeps
+`A` every time it returns. Past the floor the next commit unlinks the **live** sibling. Staging handles
+are opened `SHARE_ALL`, which deliberately includes `FILE_SHARE_DELETE`, **so this succeeds on Windows as
+well as Unix** — the writer keeps filling a nameless object and its commit then fails. Under
+`ThisDestinationOnly` it was impossible: it needed two saves of the *same* destination, which is exactly
+why the slow-save window was defensible before SEC-8 and is wider after it.
+
+**Fix, keeping the whole SEC-8 win.** New `stamp_pid_is_this_process`; the `EveryDestination` arm skips a
+candidate whose `<pid>` equals `std::process::id()` **unless its base name is the target's own**. Residue
+from a *killed* process never carries a live pid, so nothing SEC-8 exists to collect is lost. What is
+given up: our own genuinely-orphaned temp, collected on the next launch instead of this run.
+
+**And the doc's bound is corrected rather than restated.** `SweepScope::EveryDestination` now says the
+stamp validator and the age floor bound this to *"our name shape, and stale"* — **not** to *"ours"* — and
+names the two foreign-file widenings that remain and are accepted: another instance's temp in a shared
+folder, and a user file literally named `notes.txt.1-1.cpe-tmp`, which passes every check because every
+check looks at a name and a clock. Neither costs user content, and that is the reason they are accepted,
+which is a different sentence from "they cannot happen".
+
+New tests, `crates/server/src/fsutil.rs`:
+
+- `cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling` — three legs, all
+  load-bearing: a foreign pid's stale temp is still collected (or the escape would have reverted SEC-8
+  rather than bounded it); this process's stale temp under a *different* base name survives; this
+  process's stale temp under the *target's own* base name is still collected. Calls
+  `sweep_stale_temp_siblings_scoped` directly, because `LAST_SWEPT_DIR` is thread-local and never
+  cleared — routing through the memoised wrapper would make the result depend on which other test in the
+  binary swept a directory on that thread first.
+- `cpe_1961_stamp_pid_is_this_process_reads_the_pid_half_only` — the pure truth table, including the two
+  rows whose *direction* of error was chosen: an unparseable stamp answers "not ours" (safe — the
+  downstream `is_valid_temp_stamp` rejects it anyway) and a leading-zero pid answers "ours" (safe — errs
+  toward keeping a file).
+
+**Red-proof, run** (`if false && …` on the pid skip):
+
+```text
+cpe_1961_stamp_pid_is_this_process_reads_the_pid_half_only ... ok
+cpe_1961_a_directory_wide_sweep_spares_this_processes_own_live_staging_sibling ... FAILED
+  assertion `left == right` failed: a stale staging sibling carrying THIS process's pid, under a base
+  name that is not the target's, must survive: …
+    left: None
+```
+
+Legs 1 and 3 stayed green — it reds for the reason it exists, not because the sweep stopped working. The
+assertion was also changed from `fs::read(..).unwrap()` to `.ok().as_deref()` during the red-proof: the
+unwrap panicked with a bare `NotFound` and never printed the sentence saying what was lost.
+
+### F3 — the `policy: true` fix had no test
+
+SEC-4's reclassification was correct and behaved exactly as claimed on the reviewer's hand-run, but
+nothing in the tree pinned it: `ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped`
+covers the ADS-shaped *entry name*, a different hazard on the other side of the write, and
+`grep -rn CARRY_CAP crates/server/src` returned one hit — the constant. A refactor could have put
+`Refusal::failure` back with every gate green.
+
+New `crates/server/src/archive.rs` test (Windows-only, because ADS are):
+`cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest`. Plants a 9 MiB stream
+(> `CARRY_CAP`'s 8 MiB) on a pre-existing `victim.txt` inside the destination, extracts a 3-entry zip with
+the poisoned name in the **middle**, and asserts on the filesystem first: victim byte-identical, no
+`.cpe-tmp` residue, then `(done, failed, skipped) == (2, 0, 1)`, the reason recorded against
+`victim.txt:`, and **both** neighbours written — `after.txt` is what separates "skipped one entry" from
+"abandoned the run at the first refusal". `failed: 0` is asserted as hard as `skipped: 1`: a refusal
+reclassified into the failure bucket is still a wrong answer.
+
+**Red-proof, run** (`HandleCarryover::capture`'s refusal back to `policy: false`):
+
+```text
+cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest ... FAILED
+  one planted alternate data stream must cost ONE entry. An Err here is round 2's denial of service
+  back: … : "…\out\victim.txt: its alternate data streams are larger than 8388608 bytes, which this
+  app will not copy across onto the replacement — nothing was written, and the original is untouched.
+  Nothing was written for this entry"
+```
+
+### F4 — cost row 1 was a derivation wearing no label
+
+Row 2 (Unix ownership) said *"Derived from the mechanism … not measured"*; rows 3 and 4 really were
+measured. Row 1 (peak disk doubles → `ENOSPC` on a nearly-full backup drive) is equally a derivation — no
+run in this ticket filled a volume — and carried no label, so it read as measured by the company it kept.
+Labelled, in both `ClaimedDestination`'s doc and the SEC-6 list above.
+
+### Rebase onto `104b0bc5` — two conflicts with CPE-1935 (#1090), both real
+
+CPE-1935 landed on `main` while this PR was open and changed the same two statements in
+`extract_zip_archive_stream` that CPE-1961 changes: the entry write and the Unix mode set. Both were
+merged rather than picked, because the two tickets want different halves of the same lines:
+
+1. **The entry write.** CPE-1935's `fail`-and-`continue` (one entry's decompression failure must not take
+   the run down) now targets `claimed.file` instead of the destination handle. The `continue` drops the
+   claim, so the staging file — and the destination name when this call created it — go with it: the
+   failure now leaves the entry's name exactly as the extraction found it rather than truncated.
+2. **The Unix mode set.** CPE-1935's `fail`-and-`continue` is kept, at CPE-1961's position **above** the
+   commit. One word of its message had to change and it is the load-bearing one: CPE-1935 said *"its
+   contents were written, but its permissions could not be set"* because the bytes were at the
+   destination by then. Under staging they are not — they are in a sibling the `continue` unlinks — so
+   the message now says nothing was written for the entry, which is what the filesystem will show. Still
+   a `fail` rather than a `done`, for CPE-1935's reason.
+
+### Verification (round 3 — every figure re-taken after the final edit, on the rebased head)
+
+- `crates/server --lib`: Windows **2,451 passed / 0 failed / 14 ignored**; Linux (WSL, `TMPDIR` on ext4)
+  **2,441 / 0 / 14**. Against round 2's 2,442 / 2,433: +9 and +8, of which **+3** are this round's tests
+  (the two sweep tests on both platforms, the ADS test on Windows only) and the rest arrived with the
+  rebase onto `104b0bc5`. The Windows-minus-Linux gap widens 9 → 10 by exactly the Windows-only ADS test.
+- `crates/server --tests` on Linux, all 8 integration targets: **21 / 22 / 2 / 1 / 1 / 45 / 16 / 32**, all
+  `ok`, 0 failed.
+- `cargo clippy --all-targets -- -D warnings` on `crates/server`: clean on **Windows** and **Linux**,
+  `Checking cpe-server` present in both, so neither was a cached no-op (sources touched first on Linux —
+  `touch` on `/mnt/z` does not force a rebuild by itself, so the line is the proof).
+- `src-tauri cargo test --lib`: **230 / 0**, unchanged.
+- Frontend: `npm run check` **0 errors / 0 warnings**; `npx vitest run` **358 files, 5,266 passed / 0
+  failed / 2 skipped** (up 6 from round 2's 5,260 with the rebase).

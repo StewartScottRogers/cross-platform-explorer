@@ -7122,6 +7122,137 @@ mod tests {
         );
     }
 
+    /// **CPE-1961 round 3 (Reviewer F3): one planted alternate data stream must cost ONE entry, not the
+    /// whole extraction.**
+    ///
+    /// Round 2's Security Auditor found that `claim_destination_handle`'s two carry-over refusals — "could
+    /// not read what is at the destination" and `HandleCarryover::capture` failing — were
+    /// `Refusal::failure`, i.e. `policy: false`, which the loop above matches as *a file the user asked
+    /// for and did not get* and turns into `return Err`. Writing an alternate data stream needs only
+    /// write access to the file, and `HandleCarryover::capture` refuses outright once the streams exceed
+    /// `CARRY_CAP` (8 MiB). So **one 9 MiB stream planted on one pre-existing name inside the destination
+    /// killed the entire extraction** — an attacker-triggerable denial of service that arrived *with* the
+    /// carry-over and had to leave with it. Round 2 changed both to `policy: true`.
+    ///
+    /// **That fix shipped with nothing pinning it**, which is the same gap, one function over, that this
+    /// ticket closed for the Unix-mode leg on exactly this argument.
+    /// `ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped` covers an ADS-shaped
+    /// *entry name*, a different hazard on the other side of the write, and a search for `CARRY_CAP`
+    /// found one hit — the constant. A future refactor could put `Refusal::failure` back and every gate
+    /// in the tree would stay green.
+    ///
+    /// Asserts on the **filesystem**, in the order this family has learned to assert: the victim's own
+    /// unnamed stream is untouched, both neighbours landed, no `.cpe-tmp` residue survives, and only then
+    /// the counts and the recorded reason. `failed: 0` matters as much as `skipped: 1` — a refusal
+    /// reclassified into the failure bucket is still a wrong answer even when it does not abort.
+    ///
+    /// **Red-proofed, and here is the run** (round 3). Flipping the `HandleCarryover::capture` refusal
+    /// in `claim_destination_handle` back to `policy: false`:
+    ///
+    /// ```text
+    /// cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest ... FAILED
+    ///   one planted alternate data stream must cost ONE entry. An Err here is round 2's denial of
+    ///   service back: … : "…\out\victim.txt: its alternate data streams are larger than 8388608
+    ///   bytes, which this app will not copy across onto the replacement — nothing was written, and
+    ///   the original is untouched. Nothing was written for this entry"
+    /// ```
+    ///
+    /// The whole extraction comes back `Err` and `after.txt` is never created — the abort, named by the
+    /// refusal that caused it.
+    ///
+    /// Windows-only because alternate data streams are.
+    #[test]
+    #[cfg(windows)]
+    fn cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest() {
+        let d = scratch("cpe1961-ads-carry-dos");
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        // A pre-existing file inside the destination, which the archive is about to overwrite — so the
+        // claim runs with `created == false` and `HandleCarryover::capture` actually reads its streams.
+        let victim = dest.join("victim.txt");
+        fs::write(&victim, b"ORIGINAL").unwrap();
+        // 9 MiB > CARRY_CAP (8 MiB). Writing this needs nothing but write access to `victim`.
+        let ads = format!("{}:planted", victim.to_string_lossy());
+        if fs::write(&ads, vec![0u8; 9 * 1024 * 1024]).is_err() {
+            crate::skip_notice!(
+                "SKIPPING cpe_1961_one_planted_alternate_data_stream_skips_its_entry_and_extracts_the_rest: \
+                 this volume does not support alternate data streams (not NTFS). NOTHING on this run \
+                 covered the carry-over denial-of-service classification"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        // Three entries, with the poisoned one in the MIDDLE: `after.txt` is what tells "skipped one
+        // entry" apart from "abandoned the run at the first refusal".
+        let zip_path = d.join("in.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("before.txt", opts).unwrap();
+            w.write_all(b"BEFORE").unwrap();
+            w.start_file("victim.txt", opts).unwrap();
+            w.write_all(b"REPLACEMENT").unwrap();
+            w.start_file("after.txt", opts).unwrap();
+            w.write_all(b"AFTER").unwrap();
+            w.finish().unwrap();
+        }
+
+        let cancel = AtomicBool::new(false);
+        let outcome =
+            extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        // Filesystem first, before the Result is unwrapped.
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"ORIGINAL".to_vec(),
+            "the refused entry must leave the destination exactly as it found it: {outcome:?}"
+        );
+        let residue: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "a refused claim must take its staging sibling with it — found {residue:?}: {outcome:?}"
+        );
+
+        let report = outcome.expect(
+            "one planted alternate data stream must cost ONE entry. An Err here is round 2's \
+             denial of service back: `policy: false` on a carry-over refusal makes the loop abort the \
+             whole archive, and everything after the poisoned entry is never written",
+        );
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (2, 0, 1),
+            "two entries written, one refused as a policy skip, and NOTHING in the failed bucket — a \
+             carry-over refusal reclassified as a failure is still the wrong answer: {report:?}"
+        );
+        assert!(
+            report.errors.iter().any(|e| e.starts_with("victim.txt:")
+                && e.contains("alternate data streams are larger than 8388608 bytes")),
+            "and the skip must be RECORDED against the entry, with the reason the user can act on: \
+             {:?}",
+            report.errors
+        );
+        assert_eq!(
+            fs::read(dest.join("before.txt")).ok().as_deref(),
+            Some(&b"BEFORE"[..]),
+            "the entry before the poisoned one must be written: {report:?}"
+        );
+        assert_eq!(
+            fs::read(dest.join("after.txt")).ok().as_deref(),
+            Some(&b"AFTER"[..]),
+            "THE POINT: the entry AFTER the poisoned one must be written too. Missing means the run was \
+             abandoned at the refusal rather than skipping past it: {report:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// Gzip `raw`, so the row-13/14 legs can build a single-file gzip whose extraction leaf lands on the
     /// staged link.
     fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
