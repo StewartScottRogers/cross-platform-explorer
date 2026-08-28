@@ -6914,8 +6914,9 @@ mod tests {
     /// off a HANDLE, with `GetKernelObjectSecurity` — so the assertion and the carry-over cannot drift
     /// into agreeing about a descriptor neither of them describes correctly.
     ///
-    /// "Protected" is `SE_DACL_PROTECTED`: inheritance broken, which is what `icacls /inheritance:r`
-    /// sets and what the round-2 Auditor watched the rename commit clear.
+    /// "Protected" is `SE_DACL_PROTECTED`: inheritance broken, which is what
+    /// [`stage_protected_single_ace_dacl`] sets and what the round-2 Auditor watched the rename commit
+    /// clear.
     #[cfg(windows)]
     fn dacl_shape(p: &Path) -> (bool, u32) {
         use std::os::windows::io::AsRawHandle as _;
@@ -6969,18 +6970,121 @@ mod tests {
         }
     }
 
-    /// Run `icacls` with no console window (this repo's automation must never flash one) and return
-    /// whether it succeeded.
+    /// Give `p` a DACL **this test built**: inheritance broken (`SE_DACL_PROTECTED`) and exactly ONE
+    /// ACE, granting the file's own owner full control. Panics if the volume will not take it.
+    ///
+    /// **Why not `icacls /inheritance:r /grant:r`, which is what round 2 shipped (CPE-1958 round 4).**
+    /// That pair *asks the environment* for a shape and then hopes the answer is one ACE. It is one on
+    /// a developer box; on the `windows-latest` GitHub runner the same two commands leave
+    /// `protected=true aces=3` — the account's own SID set survives `/inheritance:r` — and the fixture's
+    /// inertness guard fired on all three CI runs of the job. The count was never the environment's to
+    /// choose: building the descriptor here makes it ours, so the guard below asserts a number this
+    /// function *set* rather than a number a runner's account happened to produce.
+    ///
+    /// The ACE is granted to the file's **owner**, read back off the object rather than assumed, so it
+    /// is by construction an SID enabled in the token that created the file — the test keeps the access
+    /// it needs to overwrite and delete the fixture, whether that owner is the user (a filtered token)
+    /// or `BUILTIN\Administrators` (an elevated one, which is what CI runs).
     #[cfg(windows)]
-    fn icacls(args: &[&std::ffi::OsStr]) -> bool {
-        use std::os::windows::process::CommandExt as _;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("icacls")
-            .args(args)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    fn stage_protected_single_ace_dacl(p: &Path) {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::{BOOL, HANDLE};
+        use windows::Win32::Security::{
+            AddAccessAllowedAce, GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorOwner,
+            InitializeAcl, InitializeSecurityDescriptor, SetKernelObjectSecurity,
+            SetSecurityDescriptorControl, SetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE, ACL,
+            ACL_REVISION, DACL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            SECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ALL_ACCESS, FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC,
+        };
+
+        // `WRITE_DAC` is what `SetKernelObjectSecurity` needs; `READ_CONTROL` is what reading the owner
+        // off the same handle needs. The owner has both implicitly, but asking is free and explicit.
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .access_mode(FILE_GENERIC_READ.0 | READ_CONTROL.0 | WRITE_DAC.0)
+            .open(p)
+            .expect("the fixture must be openable for WRITE_DAC");
+        let h = HANDLE(f.as_raw_handle() as isize);
+
+        // SAFETY: every buffer below is sized by the two-pass/`GetLengthSid` idiom the APIs specify and
+        // outlives the call that reads it; `owner` stays alive for as long as `psid` points into it.
+        unsafe {
+            // ---- the owner's SID, read off the object.
+            let mut needed = 0u32;
+            let _ = GetKernelObjectSecurity(
+                h,
+                OWNER_SECURITY_INFORMATION.0,
+                PSECURITY_DESCRIPTOR(std::ptr::null_mut()),
+                0,
+                &mut needed,
+            );
+            let mut owner = vec![0u8; needed as usize];
+            let len = needed;
+            GetKernelObjectSecurity(
+                h,
+                OWNER_SECURITY_INFORMATION.0,
+                PSECURITY_DESCRIPTOR(owner.as_mut_ptr().cast()),
+                len,
+                &mut needed,
+            )
+            .expect("this volume must be able to report a file's owner");
+            let mut psid = windows::Win32::Foundation::PSID(std::ptr::null_mut());
+            let mut defaulted = BOOL(0);
+            GetSecurityDescriptorOwner(
+                PSECURITY_DESCRIPTOR(owner.as_mut_ptr().cast()),
+                &mut psid,
+                &mut defaulted,
+            )
+            .expect("the owner descriptor must carry an owner");
+
+            // ---- an ACL holding exactly that one ACE. `ACL` is DWORD-aligned, so the backing buffer is
+            // `u32`s rather than `u8`s.
+            let acl_len = std::mem::size_of::<ACL>()
+                + std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+                - std::mem::size_of::<u32>() // ACCESS_ALLOWED_ACE::SidStart is the SID's first DWORD
+                + GetLengthSid(psid) as usize;
+            let mut acl_buf = vec![0u32; acl_len.div_ceil(4)];
+            let pacl: *mut ACL = acl_buf.as_mut_ptr().cast();
+            InitializeAcl(pacl, (acl_buf.len() * 4) as u32, ACL_REVISION)
+                .expect("initializing a one-ACE ACL must work");
+            AddAccessAllowedAce(pacl, ACL_REVISION, FILE_ALL_ACCESS.0, psid)
+                .expect("granting the owner full control must work");
+
+            // ---- an absolute descriptor carrying it, applied PROTECTED so nothing is inherited.
+            let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
+            let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
+            const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+            InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION)
+                .expect("initializing an absolute security descriptor must work");
+            SetSecurityDescriptorDacl(psd, BOOL(1), Some(pacl.cast_const()), BOOL(0))
+                .expect("attaching the one-ACE DACL must work");
+            // **Measured, not assumed.** Passing `PROTECTED_DACL_SECURITY_INFORMATION` to the call
+            // below is NOT sufficient on its own here: with only that flag the fixture came back
+            // `protected=false aces=1`. It is the descriptor's OWN `SE_DACL_PROTECTED` control bit that
+            // Windows' auto-inherit computation reads — the same finding `HandleCarryover::apply`
+            // records from the other direction, where the captured self-relative descriptor already
+            // carries the bit and the flag turned out to be belt-and-braces.
+            SetSecurityDescriptorControl(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+                .expect("marking the descriptor's DACL protected must work");
+            SetKernelObjectSecurity(
+                h,
+                OBJECT_SECURITY_INFORMATION(
+                    DACL_SECURITY_INFORMATION.0 | PROTECTED_DACL_SECURITY_INFORMATION.0,
+                ),
+                psd,
+            )
+            .expect(
+                "this volume would not take a protected, one-ACE DACL — the confirmed overwrite's \
+                 Windows carry-over cannot be covered here, and skipping quietly on the only platform \
+                 that runs it is the defect, so this fails loudly instead",
+            );
+            drop(owner);
+        }
     }
 
     /// **CPE-1958 round 2's measured security regression, pinned.**
@@ -7012,6 +7116,31 @@ mod tests {
     /// auto-inherit computation, so the explicit flag is belt-and-braces, not the mechanism. An
     /// earlier draft of this comment claimed it failed on the ACE count; it does not.
     ///
+    /// **Round 4 — the fixture, not the guard.** Rounds 2/3 staged the destination by asking `icacls`
+    /// for `/inheritance:r /grant:r <user>:(F)` and then asserting the result was one ACE. That held on
+    /// a developer box and was wrong on `windows-latest`, where the same two commands leave
+    /// `protected=true aces=3`: the runner account's own SID set survives `/inheritance:r`. The
+    /// inertness guard fired — correctly — on all three CI runs of that job, so the guard stayed and
+    /// the fixture changed. [`stage_protected_single_ace_dacl`] now BUILDS the descriptor
+    /// (`InitializeAcl` + one `AddAccessAllowedAce` for the file's own owner, `SE_DACL_PROTECTED` set
+    /// on the descriptor's control word), so the count is this test's rather than the environment's.
+    ///
+    /// The literal `1` was only ever a *proxy* for "distinguishable from what inheritance would
+    /// produce", so round 4 asserts the thing as well: an untouched sibling in the same folder is
+    /// measured at run time as the control, and the staged destination must differ from it in **both**
+    /// protectedness and ACE count. Measured on the dev box: control `(protected=false, aces=5)`
+    /// against a staged `(protected=true, aces=1)`. That comparison is derived per run, so it cannot go
+    /// stale the way the literal did.
+    ///
+    /// Round 4's own red-proof, run twice against the rebuilt fixture: with `apply`'s body
+    /// short-circuited to `Ok(())` the test **FAILED on the "replacement inherited the FOLDER's ACL"
+    /// assertion** — *not* on either inertness guard, which is the whole point of rebuilding the
+    /// fixture; with `apply` restored, **ok**. One more measurement worth writing down, because it was
+    /// a surprise: passing `PROTECTED_DACL_SECURITY_INFORMATION` to `SetKernelObjectSecurity` did
+    /// **not** on its own make the staged DACL protected (it came back `protected=false aces=1`) — the
+    /// descriptor's own `SE_DACL_PROTECTED` control bit is what Windows reads. That confirms from the
+    /// staging side exactly what the fourth sabotage above found from the carry side.
+    ///
     /// Every assertion reads the filesystem back, never a `Result`.
     #[cfg(windows)]
     #[test]
@@ -7020,32 +7149,51 @@ mod tests {
         let f = d.join("downloaded.bin");
         std::fs::write(&f, b"old bytes").unwrap();
 
-        // Inheritance broken, one owner-only ACE — the shape the Auditor staged.
-        let me = std::env::var("USERNAME").unwrap_or_default();
-        let grant = format!("{me}:(F)");
-        let staged_acl = !me.is_empty()
-            && icacls(&[f.as_os_str(), "/inheritance:r".as_ref()])
-            && icacls(&[f.as_os_str(), "/grant:r".as_ref(), grant.as_ref()]);
-        // A real Mark-of-the-Web, written through NTFS's own `path:stream` syntax.
+        // A real Mark-of-the-Web, written through NTFS's own `path:stream` syntax. This doubles as the
+        // volume-capability probe: named streams and persistent ACLs are the same filesystem's
+        // features, so a volume that takes this one will take the DACL below, and the DACL staging is
+        // therefore a hard failure rather than a second skip. The skip stays narrow on purpose — a test
+        // that quietly opts out on the only platform its subject runs on is the defect, not the cure.
         let zone = f.with_file_name(format!("{}:Zone.Identifier", f.file_name().unwrap().to_string_lossy()));
         const MOTW: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
-        let staged_ads = std::fs::write(&zone, MOTW).is_ok();
-
-        if !staged_acl || !staged_ads {
+        if std::fs::write(&zone, MOTW).is_err() {
             crate::skip_notice!(
                 "SKIPPING cpe_1958_a_confirmed_overwrite_keeps_the_destinations_acl_and_alternate_data_streams: \
-                 this volume would not take a protected DACL or a named stream, so NOTHING on this run \
-                 covered the confirmed overwrite's Windows carry-over."
+                 this volume would not take a named stream, so NOTHING on this run covered the \
+                 confirmed overwrite's Windows carry-over."
             );
             let _ = std::fs::remove_dir_all(&d);
             return;
         }
+
+        // The CONTROL: a sibling left exactly as this folder's inheritance made it. It is what the
+        // destination looks like if the commit re-inherits — the round-2 Auditor's regression, measured
+        // here at run time instead of predicted. Round 3 asserted `aces_before == 1` against it in
+        // spirit; a literal `1` is only a *proxy* for "distinguishable from what inheritance produces",
+        // and the proxy is what broke on CI. Both halves are asserted below: the shape is ours, AND it
+        // is provably not the inherited one.
+        let control = d.join("inherited-control.bin");
+        std::fs::write(&control, b"control").unwrap();
+        let inherited = dacl_shape(&control);
+
+        // Inheritance broken, one owner-only ACE — the shape the Auditor staged, built rather than
+        // requested so the count is this test's and not the runner account's.
+        stage_protected_single_ace_dacl(&f);
+
         let (protected_before, aces_before) = dacl_shape(&f);
         assert!(
             protected_before && aces_before == 1,
             "fixture is inert: the destination must start with inheritance broken and exactly one ACE, \
              got protected={protected_before} aces={aces_before} — without that the assertions below \
              would pass against an unchanged, already-inherited DACL"
+        );
+        assert!(
+            !inherited.0 && inherited.1 != aces_before,
+            "fixture is inert: this folder's inheritance produces protected={} aces={} on an untouched \
+             sibling, which the staged destination must differ from in BOTH — otherwise a commit that \
+             re-inherited would satisfy every assertion below without carrying anything",
+            inherited.0,
+            inherited.1
         );
 
         overwrite_confirmed_no_follow(&f, b"new bytes").expect("a plain confirmed overwrite must work");
