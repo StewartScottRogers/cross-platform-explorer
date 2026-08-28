@@ -287,6 +287,11 @@ describe("ci-poll: the verdict PREFIX and the EXIT CODE come from one predicate 
       ["rest-error", "--pr"],
       ["run-no-jobs", "--run"],
       ["run-failure-no-failing-job", "--run"],
+      // CPE-1967's two stopped-job boards, added to the matrix rather than left to their own describe:
+      // the whole point of this test is that the prefix→code mapping stays one-to-one as new board
+      // states arrive, and a new state that is never driven through it proves nothing about that.
+      ["run-timed-out-job", "--run"],
+      ["cancelled-check", "--pr"],
     ];
     for (const [mode, flag] of matrix) {
       const run = runPoll(mode, [flag, "1", "--budget", "4", "--interval", "1"]);
@@ -1021,5 +1026,93 @@ describe("ci-poll: the required-job set is DERIVED from real workflows, not from
     // …and the same board WITH it is clean, so the assertion above is about that job and not about a
     // scanner that flags everything.
     expect(coverageOf([...everyOtherLabel, guardLabel!], base!.files).state).toBe("ok");
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// CPE-1967 — a job STOPPED at its `timeout-minutes` cap is red, named, and countable.
+//
+// That ticket gave every job in every workflow a cap (10 of `ci.yml`'s 11 had none, so a wedged job ran
+// to the 360-minute Actions default). A cap that fires creates a board state this poller had never
+// seen, and the ticket's requirement is that it "must not read as any other failure and must not read
+// as a skip".
+//
+// It already could not read as a skip: both readers funnel anything that is not
+// SUCCESS/NEUTRAL/SKIPPED into `failedNames`, which is exit 1, and that ladder is untouched. What
+// these tests pin is the half that was missing — that a stopped job is SAID, by name, and counted on
+// the machine-readable totals line, instead of disappearing into the same `Failed:` list as a test
+// that ran and reported an assertion. Same exit code, different next move.
+//
+// Both spellings are driven because the repo's own history could not settle which one GitHub emits
+// for a cap kill: `timed_out` appears zero times across the 100 most recent completed runs of
+// `ci.yml` and of `gui-smoke.yml` (measured read-only, 2026-08-28). See `haltedFrom`'s docblock in
+// `scripts/ci-poll.mjs` for the histograms and for why the two are deliberately one bucket.
+describe("ci-poll: a stopped job is red, named as stopped, and counted (CPE-1967)", () => {
+  it("`--run` mode, conclusion `timed_out`: exit 1, and NOT the did-not-run verdict", () => {
+    const run = runPoll("run-timed-out-job", ["--run", "1", "--budget", "6", "--interval", "1"]);
+    expect(run.status).toBe(1);
+    expect(run.verdict).toMatch(/^CI VERDICT: completed failure —/);
+    // The board also carries a downstream skip. Red outranks it: this must not come out as exit 4.
+    expect(run.verdict).not.toMatch(/completed did-not-run/);
+  });
+
+  it("`--run` mode names the stopped job and says an assertion is not what to look for", () => {
+    const run = runPoll("run-timed-out-job", ["--run", "1", "--budget", "6", "--interval", "1"]);
+    expect(run.verdict).toContain("STOPPED rather than judged (timed out or cancelled)");
+    expect(run.verdict).toContain("Server crates (windows-latest)");
+    expect(run.verdict).toContain("no assertion to read");
+    // Still listed as failed too — the stopped set is a SUBSET of the failed set, not a replacement.
+    expect(run.verdict).toMatch(/Failed: [^.]*Server crates \(windows-latest\)/);
+  });
+
+  it("the PR rollup's UPPER-CASE `CANCELLED` reaches the same verdict, not a green and not an unknown", () => {
+    const run = runPoll("cancelled-check", ["--pr", "1", "--budget", "6", "--interval", "1"]);
+    expect(run.status).toBe(1);
+    expect(run.verdict).toMatch(/^CI VERDICT: completed failure —/);
+    expect(run.verdict).toContain("STOPPED rather than judged (timed out or cancelled)");
+    expect(run.verdict).toContain("Server crates (windows-latest)");
+  });
+
+  it("`halted=` is on the totals line of EVERY verdict, zero included, and matches the names printed", () => {
+    // The `gh_failures=0` rule, one field along: a count printed only when it is non-zero is
+    // indistinguishable from a count nobody computed. Checked on a green board and on a stopped one.
+    const green = runPoll("green", ["--pr", "1", "--budget", "4", "--interval", "1"]);
+    expect(green.verdict).toContain("halted=0");
+
+    const stopped = runPoll("run-timed-out-job", ["--run", "1", "--budget", "6", "--interval", "1"]);
+    const counted = Number(/halted=(\d+)/.exec(stopped.verdict)?.[1] ?? "-1");
+    expect(counted).toBe(1);
+    // …and the number is the length of the list actually printed, not a second independent count.
+    const named = /\(timed out or cancelled\), so it verified nothing: ([^.]+)\./.exec(stopped.verdict)?.[1];
+    expect(named?.split(", ").length).toBe(counted);
+  });
+
+  it("`halted=` is appended AFTER `coverage=`, leaving the pinned key order untouched", () => {
+    const run = runPoll("green", ["--pr", "1", "--budget", "4", "--interval", "1"]);
+    const order = [
+      "total_count=",
+      "pending=",
+      "oldest_pending_min=",
+      "skipped=",
+      "neutral=",
+      "mergeable=",
+      "sha=",
+      "gh_failures=",
+      "coverage=",
+      "halted=",
+    ];
+    let at = -1;
+    for (const key of order) {
+      const i = run.verdict.indexOf(key);
+      expect(i, `${key} missing from the totals line`).toBeGreaterThan(-1);
+      expect(i, `${key} is out of the pinned order`).toBeGreaterThan(at);
+      at = i;
+    }
+  });
+
+  it("a stopped check is not counted as a skip, which is the verdict it must never collapse into", () => {
+    const run = runPoll("cancelled-check", ["--pr", "1", "--budget", "6", "--interval", "1"]);
+    expect(/skipped=(\d+)/.exec(run.verdict)?.[1]).toBe("0");
+    expect(run.verdict).not.toContain("Skipped by design:");
   });
 });

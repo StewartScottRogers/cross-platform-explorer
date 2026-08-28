@@ -51,6 +51,13 @@ jobs:
   # so all 3 legs converge on one draft.
   create-release:
     runs-on: ubuntu-latest
+    # CPE-1967 — every job in this file now carries a cap; none did before, so a wedged release build
+    # rode to the 360-minute Actions default with nobody watching. Same sizing rule as `ci.yml` (see
+    # that file's `jobs:` header): cap = max(10, ceil_to_5(1.5 x measured max)), measured max = the
+    # slowest successful run, slowest matrix leg. Sample throughout this file: the 100 most recent
+    # completed `release-sidecar.yml` runs as of 2026-08-28, successful jobs only.
+    # n=22, min 0.1 / p50 0.1 / p90 0.2 / max 1.9 min. 1.5 x 1.9 = 2.9, under the floor -> 10.
+    timeout-minutes: 10
     outputs:
       release_id: ${{ steps.create-release.outputs.release_id }}
     steps:
@@ -119,6 +126,15 @@ jobs:
   # config (base OR overlay) never reaches a signed, published sidecar release.
   verify-updater-pin:
     runs-on: ubuntu-latest
+    # CPE-1967 — UNMEASURED; the number is an ANALOGUE, not a measurement, and the difference is
+    # stated rather than left for the sample sizes elsewhere in this file to imply. Added by CPE-1873
+    # on 2026-08-26 (f1f0a4d5); the most recent `release-sidecar.yml` run is 2026-08-23T14:37Z, so it
+    # has never executed — it appears zero times, in any conclusion, across the 100 most recent
+    # completed runs. Analogue: `ci.yml`'s `msrv` (same shape — ubuntu-latest, checkout,
+    # dtolnay/rust-toolchain, swatinem/rust-cache, a cargo build off a cache nothing else warms),
+    # measured max 17.1 min over n=75; 1.5 x 17.1 = 25.7 -> 30. This job compiles less than that but
+    # also runs `npm ci` + vitest. REPLACE WITH A REAL MEASUREMENT after the next sidecar release.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -153,6 +169,14 @@ jobs:
 
   release-sidecar:
     needs: [create-release, verify-updater-pin]
+    # CPE-1967 — sized on the slowest leg of the CURRENT matrix shape. The matrix gained a third
+    # dimension partway through the sample, so GitHub's job names changed and the older 2-tuple legs
+    # are a different population; only the 3-tuple legs are quoted here.
+    #   windows-latest, windows, windows  n=31, min 7.3 / p50 19.1 / p90 22.3 / max 23.6 min
+    #   macos-latest, unix, macos         n=31, min 7.3 / p50 15.5 / p90 19.1 / max 22.1 min
+    #   ubuntu-latest, unix, linux        n=31, min 8.7 / p50 17.7 / p90 20.1 / max 21.3 min
+    # 1.5 x 23.6 = 35.4 -> 40.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -669,6 +693,13 @@ jobs:
     needs: [create-release, release-sidecar]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    # CPE-1967 — UNMEASURED; an ANALOGUE, not a measurement. Added by CPE-1908 on 2026-08-27
+    # (0d9a992d), after the most recent `release-sidecar.yml` run (2026-08-23T14:37Z), so it has
+    # never executed and appears zero times across the 100 most recent completed runs. Same analogue
+    # and arithmetic as `verify-updater-pin` above (`ci.yml`'s `msrv`, max 17.1 min, n=75;
+    # 1.5 x 17.1 = 25.7 -> 30), plus this job downloads every published asset.
+    # REPLACE WITH A REAL MEASUREMENT after the next sidecar release.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

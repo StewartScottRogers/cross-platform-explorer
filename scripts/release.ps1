@@ -498,6 +498,45 @@ if ($BumpOnly) {
 # So: relax the preference around git, and check $LASTEXITCODE explicitly instead.
 $ErrorActionPreference = "Continue"
 
+# CPE-1967 swept every external-tool wrapper in the repo, not only `scripts/*.mjs`, and this is the
+# one place it found a real UNTIMED spawn that it deliberately did NOT cap. Recorded here rather than
+# only in a PR body, so the next reader knows it was looked at and decided, not missed:
+#
+#   · Three of the four `git` calls in this file (`add`, `commit`, `tag`) are local and cannot stall
+#     on anything but a wedged filesystem. All four go through `Invoke-Git` below, whose single
+#     `& git @Args` is the ONLY place this file executes git at all — there are no git reads earlier,
+#     which an earlier draft of this very bullet claimed. (It said "four of the five calls", and it
+#     contradicted the derivation two bullets down. Miscounted in the block rewritten to stop
+#     miscounting — the same shape as this ticket's F1-F4, which is why it is corrected out loud.)
+#   · `push` is network-bound and genuinely can hang — the same stalled-transport shape the rest of
+#     CPE-1967 is about.
+#   · What makes it different: this script is ATTENDED BY CONSTRUCTION. That was the load-bearing
+#     claim, so it is DERIVED rather than asserted (CPE-1933). `git grep -i 'release\.ps1'` over the
+#     tracked tree returns every reference, and sorting them by kind:
+#       — RELEASING.md and `.claude/commands/run.md` — instructions for a HUMAN to type it.
+#       — CLAUDE.md — prose describing it.
+#       — `.github/workflows/release.yml:139`, `release-sidecar.yml:592` and
+#         `.github/workflows/scripts/catalog-version.sh:84` — all three are COMMENT lines that merely
+#         cite this file's encoding fix (CPE-1834) or its push behaviour. No `run:` invokes it.
+#       — Ticketing/**, docs/** — history and design notes.
+#       — `src/lib/releaseVersionBump.test.ts` and `src/lib/appVersionSync.test.ts` — the ONE genuinely
+#         unattended caller, and it is why this had to be derived rather than assumed. That harness
+#         runs in `ci.yml`'s `frontend` job and EXECUTES the real script — but only ever with
+#         `-BumpOnly`, and `-BumpOnly` `exit 0`s at line ~492, above the `$ErrorActionPreference`
+#         line below and above `Invoke-Git`'s definition. So no CI path reaches a `git` call in this
+#         file at all.
+#     Net: the git section runs only for a human at a terminal. There is no 360-minute Actions default
+#     underneath it and no silent budget to blow through — the operator IS the timeout, and they can
+#     see exactly which command is stuck.
+#   · And the cost of getting a cap wrong here is asymmetric. PowerShell has no `timeout` parameter
+#     for a native command; bounding one means `Start-Process` + `WaitForExit(ms)` + a kill, which
+#     would abort a push mid-transfer on a merely slow connection and leave a tagged-but-unpushed
+#     tree. A hang a human can Ctrl-C is a better failure than that.
+#
+# If this script ever gains an unattended caller that reaches PAST the `-BumpOnly` exit — a scheduled
+# task, a workflow `run:`, or a test that drops the switch — this reasoning expires and the push needs
+# a bound. `http.lowSpeedLimit`/`http.lowSpeedTime`, git's own stall detector, is the right mechanism
+# there; process-killing is not.
 function Invoke-Git {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
   & git @Args 2>&1 | ForEach-Object { Write-Host $_ }

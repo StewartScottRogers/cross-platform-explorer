@@ -157,10 +157,57 @@ concurrency:
   # expression been ignored, or the raw string coerced to truthy, both arms would have behaved alike.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# ─── Job timeouts (CPE-1967) ─────────────────────────────────────────────────────────────────────
+# All ELEVEN jobs below carry a job-level `timeout-minutes:`. Before CPE-1967 only `ci-verdict` did —
+# the other ten had step-level caps at best, which bound a step and say nothing about a job wedged
+# BETWEEN steps, in `actions/cache`, or on a runner that stopped answering. Those ten therefore ran
+# under the GitHub Actions default of **360 minutes**.
+#
+# (An earlier draft of this very block said "not one of them did" and counted ten jobs. Both were
+# wrong, and wrong in the direction this ticket is about — the number was carried forward from the
+# ticket text instead of re-derived from the file. Corrected here and asserted in
+# `src/lib/workflowJobTimeouts.test.ts`, which now measures the counts rather than restating them.)
+#
+# "Still running" is the one state no verdict can classify: a process that never finishes never
+# reports. This sprint spent over an hour unable to tell a slow `Server crates (windows-latest)` from
+# a hung one, with two approved PRs stuck behind it, and settled it by comparing start timestamps
+# against a sibling PR by hand. `gui-smoke.yml` has capped its jobs since CPE-1171; this workflow is
+# the one that skipped the practice.
+#
+# Every value is sized from MEASURED duration, not a round number, and the measurement is recorded on
+# the comment line above the value it justifies — so the next person can tell "this job hung" from
+# "we guessed low". One shared constant would be wrong: the spread across these jobs is 0.1 to 68.2
+# minutes.
+#
+# THE RULE, applied uniformly so each number is checkable rather than intuited:
+#
+#     cap = max(10, ceil_to_5(1.5 x measured max))
+#
+#   · `measured max` is the SLOWEST successful run in the sample, not the median — the p50-to-max
+#     spread here is dominated by cold Rust/npm caches, which are a normal condition on this repo
+#     rather than an outlier. For a matrix job it is the slowest LEG, because one `timeout-minutes:`
+#     covers every leg.
+#   · 1.5x, so a legitimately slow run never trips the cap and a cap that DOES fire means something
+#     is genuinely wrong.
+#   · A 10-minute FLOOR, because every job pays a network-bound fixed cost (checkout, toolchain
+#     install, `npm ci`) that is legitimately spiky on a shared runner. A sub-minute job with a
+#     sub-minute cap would flap rather than inform.
+#
+# THE SAMPLE, quoted per job as `n=… min/p50/p90/max`: the 100 most recent COMPLETED `ci.yml` runs as
+# of 2026-08-28, successful jobs only (a failed job's duration says nothing about how long the work
+# takes). Per-job `n` differs because a job skipped or cancelled in a given run contributes nothing,
+# and matrix legs are sampled per leg. Re-measure with `gh api
+# repos/{owner}/{repo}/actions/workflows/ci.yml/runs` + `.../actions/runs/{id}/jobs` rather than
+# adjusting these by feel.
+#
+# `src/lib/workflowJobTimeouts.test.ts` reds if any job in ANY workflow in this repo loses its cap.
 jobs:
   frontend:
     name: Frontend — type-check and test
     runs-on: ubuntu-latest
+    # `npm ci` + `npm run check` + vitest. n=83, min 3.0 / p50 5.1 / p90 5.4 / max 5.9 min.
+    # 1.5 x 5.9 = 8.9, under the floor -> 10.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -205,6 +252,12 @@ jobs:
     # `--force`, ever) on a scratch COPY. Seconds, not minutes.
     name: npm audit — every npm project in the tree
     runs-on: ubuntu-latest
+    # Two `npm audit` sweeps + two `npm audit fix --package-lock-only` probes, no install.
+    # n=81, min 0.4 / p50 0.5 / p90 0.5 / max 0.6 min. 1.5 x 0.6 = 0.9, under the floor -> 10.
+    # The floor earns its keep here: every call in this job is registry-bound, and the script's own
+    # per-call `NPM_CALL_TIMEOUT_MS` (scripts/audit-npm-projects.mjs, CPE-1967) fires first and names
+    # the project, so this cap is only the backstop for a wedge outside those calls.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -245,6 +298,9 @@ jobs:
     # script exit non-zero rather than skip: a guard that compares nothing must not report success.
     name: Ratchet guard — no baseline raised without a declaration
     runs-on: ubuntu-latest
+    # Plain `node` over the working tree plus the merge base, no toolchain, no install.
+    # n=82, min 0.1 / p50 0.1 / p90 0.2 / max 0.3 min. 1.5 x 0.3 = 0.5, under the floor -> 10.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -302,6 +358,11 @@ jobs:
     #    (regenerate a lockfile that was never the problem).
     name: Lockfile pre-flight — cargo metadata --locked (no compilation)
     runs-on: ubuntu-latest
+    # `cargo metadata --locked` over all 17 Cargo.lock files. Resolves, never compiles.
+    # n=83, min 0.3 / p50 0.3 / p90 0.4 / max 0.9 min. 1.5 x 0.9 = 1.4, under the floor -> 10.
+    # This job gates `backend`/`crates`/`net-e2e`/`sidecar`/`msrv` through `needs:`, so a wedge here
+    # used to stall five downstream jobs for six hours apiece rather than one.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -407,6 +468,12 @@ jobs:
     # is pushed. See CPE-028 (Windows) and CPE-042 (macOS).
     name: Backend (${{ matrix.os }}) — cargo check, clippy, test
     runs-on: ${{ matrix.os }}
+    # Sized on the SLOWEST leg, windows-latest, because one cap covers all three.
+    #   windows-latest  n=77, min 5.2 / p50 17.3 / p90 19.4 / max 23.9 min
+    #   ubuntu-latest   n=73, min 4.2 / p50  9.1 / p90 10.0 / max 16.0 min
+    #   macos-latest    n=76, min 2.6 / p50  8.1 / p90 10.7 / max 15.2 min
+    # 1.5 x 23.9 = 35.9 -> 40.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -684,6 +751,15 @@ jobs:
     name: Server crates (${{ matrix.os }}) — clippy + test
     needs: lockfile-preflight
     runs-on: ${{ matrix.os }}
+    # THE job this ticket was filed over: the sprint could not tell a slow `Server crates
+    # (windows-latest)` from a hung one, because nothing bounded it. Sized on that slowest leg.
+    #   windows-latest  n=50, min 21.6 / p50 58.2 / p90 62.4 / max 68.2 min
+    #   macos-latest    n=62, min 14.6 / p50 38.8 / p90 44.3 / max 48.1 min
+    #   ubuntu-latest   n=63, min 14.2 / p50 35.1 / p90 37.1 / max 38.9 min
+    # 1.5 x 68.2 = 102.3 -> 105. Deliberately the largest cap in this file and still under a third
+    # of the 360-minute default: a genuinely slow windows leg has ~37 minutes of headroom over the
+    # slowest run ever measured, and a wedged one now answers in 105 minutes instead of never.
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:
@@ -1213,6 +1289,9 @@ jobs:
     name: Network E2E (ubuntu-latest, real servers)
     needs: lockfile-preflight
     runs-on: ubuntu-latest
+    # Builds cpe-net and drives real SFTP/WebDAV/FTP servers in containers.
+    # n=75, min 6.9 / p50 13.6 / p90 14.0 / max 15.7 min. 1.5 x 15.7 = 23.6 -> 25.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -1614,6 +1693,12 @@ jobs:
     name: Sidecar platform (${{ matrix.os }}) — clippy + test
     needs: lockfile-preflight
     runs-on: ${{ matrix.os }}
+    # Sized on the slowest leg, windows-latest.
+    #   windows-latest  n=79, min 1.8 / p50 4.6 / p90 5.7 / max 10.5 min
+    #   ubuntu-latest   n=76, min 1.0 / p50 1.9 / p90 2.4 / max  3.4 min
+    #   macos-latest    n=79, min 0.9 / p50 1.9 / p90 2.5 / max  2.8 min
+    # 1.5 x 10.5 = 15.8 -> 20.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -1735,6 +1820,9 @@ jobs:
   ffmpeg-pin-guard:
     name: ffmpeg pin is a month-end anchor
     runs-on: ubuntu-latest
+    # A date-arithmetic check over one shell script. No toolchain, no network.
+    # n=83, min 0.1 / p50 0.1 / p90 0.1 / max 0.3 min. 1.5 x 0.3 = 0.5, under the floor -> 10.
+    timeout-minutes: 10
     permissions:
       contents: read
       # CPE-1802: actions:write lets the step below dispatch ffmpeg-pin-freshness.yml when this job
@@ -1879,6 +1967,10 @@ jobs:
     name: MSRV (1.88.0) compiles on every manifest
     needs: lockfile-preflight
     runs-on: ubuntu-latest
+    # A pinned-toolchain `cargo check` over every manifest in the tree, from a cache keyed on a
+    # toolchain nothing else in CI uses — so effectively always cold.
+    # n=75, min 2.7 / p50 14.4 / p90 15.4 / max 17.1 min. 1.5 x 17.1 = 25.7 -> 30.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -2039,6 +2131,9 @@ jobs:
     if: always()
     # Plain `node` on the runner, no `npm ci`, no toolchain — same shape as `ratchet-guard` above.
     # Seconds of work; 10 is the "something is genuinely wedged" backstop.
+    # THE ONE job in this file that already had a job-level cap before CPE-1967 — the other ten had
+    # none. Measured under CPE-1967's rule and left unchanged: n=36, min 0.1 / p50 0.1 / p90 0.1 /
+    # max 0.2 min. 1.5 x 0.2 = 0.3, under the 10-minute floor -> 10, which is what was already here.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

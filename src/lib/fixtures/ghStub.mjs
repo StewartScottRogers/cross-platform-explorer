@@ -199,6 +199,52 @@ switch (mode) {
     process.stdout.write(JSON.stringify(prPayload([ok("Frontend — type-check and test")])));
     break;
   }
+  // ── CPE-1967: a job STOPPED at its `timeout-minutes` cap rather than judged ──────────────────────
+  //
+  // Both spellings are driven, because which one GitHub uses for a cap kill could not be established
+  // from this repo's own history: over the 100 most recent completed runs of `ci.yml` and of
+  // `gui-smoke.yml`, `timed_out` appears zero times (measured 2026-08-28 — before CPE-1967 the only
+  // capped jobs were `gui-smoke.yml`'s, and none of them ever reached its cap). `ci-poll.mjs`'s
+  // `haltedFrom` therefore treats `TIMED_OUT` and `CANCELLED` as one state, and these two modes are
+  // what pins that it really does.
+  case "run-timed-out-job": {
+    // `--run` mode, the `gh run view` shape: lower-case conclusions, plus the `needs:` cascade that a
+    // stopped job leaves behind it. Red, and NOT "did not run" — the skip is downstream of the stop.
+    process.stdout.write(
+      JSON.stringify({
+        status: "completed",
+        conclusion: "failure",
+        headSha: "deadbeef",
+        jobs: [
+          { name: "Frontend — type-check and test", status: "completed", conclusion: "success" },
+          { name: "Server crates (windows-latest)", status: "completed", conclusion: "timed_out" },
+          { name: "CI verdict", status: "completed", conclusion: "skipped" },
+        ],
+      }),
+    );
+    break;
+  }
+  case "cancelled-check": {
+    // The PR rollup shape: UPPER-CASE conclusions, and `CANCELLED` — the spelling this repo has
+    // actually observed (job conclusion `cancelled`, in-flight step `cancelled`, later steps
+    // `skipped`; run 33138742329).
+    process.stdout.write(
+      JSON.stringify(
+        prPayload([
+          ok("Frontend — type-check and test"),
+          {
+            __typename: "CheckRun",
+            name: "Server crates (windows-latest)",
+            status: "COMPLETED",
+            conclusion: "CANCELLED",
+            startedAt: minutesAgo(105),
+            completedAt: minutesAgo(0),
+          },
+        ]),
+      ),
+    );
+    break;
+  }
   case "failure-and-skips": {
     // A red build that also cascaded. Failure outranks skips: the caller's next move is the logs.
     process.stdout.write(

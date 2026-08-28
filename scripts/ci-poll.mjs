@@ -354,6 +354,9 @@ export function shouldSleepAgain(nowMs, intervalMs, deadlineMs, tick, ticks) {
  * @property {string|null} sha      the head SHA the reading is keyed to
  * @property {string[]} skippedNames  checks that reported SKIPPED — they DID NOT RUN
  * @property {string[]} failedNames   checks that reported a hard failure
+ * @property {string[]} haltedNames   the SUBSET of `failedNames` that was stopped rather than judged —
+ *                                    a job killed by its own `timeout-minutes`, or cancelled. See
+ *                                    `haltedFrom` below for why these are one bucket and not two
  * @property {number} ranCount        finished checks that ACTUALLY RAN (finished minus skipped) — the
  *                                    difference between "everything passed" and "nothing happened"
  * @property {number} neutralCount    checks that ran and declined to judge
@@ -375,6 +378,7 @@ function emptyRead() {
     checkNames: [],
     skippedNames: [],
     failedNames: [],
+    haltedNames: [],
     ranCount: 0,
     neutralCount: 0,
     oldestPendingAgeMs: null,
@@ -1510,6 +1514,57 @@ function oldestOf(items, startedAt, nowMs) {
 }
 
 /**
+ * The names, out of `items`, that were STOPPED rather than judged — killed by a `timeout-minutes` cap,
+ * or cancelled. Case-insensitive so it serves both payload shapes: `gh run view` says `timed_out` /
+ * `cancelled`, the PR rollup says `TIMED_OUT` / `CANCELLED`.
+ *
+ * CPE-1967 — WHY THIS IS ONE BUCKET AND NOT TWO, and why it is not called `timedOutNames`.
+ *
+ * That ticket gave every job in every workflow a `timeout-minutes:`, which creates a state the poller
+ * had never seen. Both readers below already funnelled anything that is not SUCCESS/NEUTRAL/SKIPPED
+ * into `failedNames` — fail closed, exit 1 — and that stays exactly as it was: a stopped job IS red,
+ * and red outranks everything. What was missing is that the verdict then called it `Failed:`, which
+ * is indistinguishable from a test that ran and reported a real failure. Same code, different next
+ * move: one says read the assertion, the other says find out why the job never finished.
+ *
+ * WHICH TOKEN GITHUB USES FOR A CAP KILL IS NOT ESTABLISHED HERE, and it is not guessed at. Measured
+ * read-only over this repo's own history on 2026-08-28 (`gh api .../actions/runs/{id}/jobs`), the
+ * job-conclusion histograms are:
+ *   · `ci.yml`, 100 most recent completed runs:        success=1249  cancelled=131  failure=47
+ *   · `gui-smoke.yml`, 100 most recent completed runs: success=559   skipped=92     cancelled=30  failure=47
+ * `timed_out` appears ZERO times in either — unsurprising, because before CPE-1967 the only capped
+ * jobs were `gui-smoke.yml`'s and none of them ever hit its cap (the one job whose duration landed
+ * near a cap value, run 33138742329, was cancelled at 9.63 min against a 30-minute cap: a run-level
+ * cancellation, not a timeout). A real cancelled job's shape, read from that run: job
+ * `conclusion: "cancelled"`, the in-flight step `cancelled`, every later step `skipped`.
+ *
+ * So the repo's data cannot say whether a cap kill will surface as `timed_out` or as `cancelled`, and
+ * the fix is to stop needing to know: BOTH are collected here, and the wording at the call site says
+ * "timed out or cancelled" rather than picking one. That is also right on the merits — from this
+ * script's seat a cap kill and a run cancellation are the same fact (the job was stopped rather than
+ * judged) and call for the same next move. Splitting them would buy a distinction the API may not
+ * even offer, at the cost of a bucket that silently catches nothing.
+ *
+ * CPE-1929's two sabotages, run by hand on 2026-08-28 against `src/lib/ciPollFailClosed.test.ts`
+ * (`-t "CPE-1967"`, 6 tests in that describe), because a new reporting path is exactly where a
+ * shadowed guard hides and two GREEN sabotages would mean nothing can reach this:
+ *   · disable it (`return []`)                → 3 failed / 3 passed
+ *   · force it to lie (`return items.map(nameOf)`) → 3 failed / 3 passed
+ * Both red, so it is reached and covered. The 3 that survive both are the ones about the LADDER
+ * rather than the naming — exit 1, the key order, and "not a skip" — which is the expected split:
+ * the classification was already correct before this function existed and is deliberately unchanged
+ * by it. What this adds is the sentence and the count, and those are the 3 that move.
+ *
+ * @param {any[]} items
+ * @param {(item: any) => string} nameOf
+ * @param {(item: any) => string} conclusionOf  lower-cased conclusion, or "" when absent
+ * @returns {string[]}
+ */
+function haltedFrom(items, nameOf, conclusionOf) {
+  return items.filter((i) => ["timed_out", "cancelled"].includes(conclusionOf(i))).map(nameOf);
+}
+
+/**
  * Normalise `gh run view --json` output into a CiRead.
  *
  * The run-level `conclusion` is NOT trusted on its own: GitHub reports a run as `success` when jobs were
@@ -1535,6 +1590,7 @@ export function readFromRunJson(json, nowMs = Date.now()) {
     .map((/** @type {any} */ j) => String(j?.name ?? "(unnamed job)"));
   const oldest = oldestOf(pendingJobs, (/** @type {any} */ j) => j?.startedAt ?? j?.createdAt, nowMs);
   const runConclusion = json?.conclusion ?? null;
+  const haltedNames = haltedFrom(jobs, (/** @type {any} */ j) => String(j?.name ?? "(unnamed job)"), conclusionOf);
   return {
     ...emptyRead(),
     terminal: json?.status === "completed",
@@ -1551,6 +1607,7 @@ export function readFromRunJson(json, nowMs = Date.now()) {
     checkNames: jobs.map((/** @type {any} */ j) => String(j?.name ?? "(unnamed job)")),
     skippedNames,
     failedNames,
+    haltedNames,
     ranCount: jobs.filter(
       (/** @type {any} */ j) => j?.status === "completed" && conclusionOf(j) !== "skipped",
     ).length,
@@ -1605,6 +1662,12 @@ export function readFromPrJson(json, nowMs = Date.now()) {
   const failedNames = finished.filter((/** @type {any} */ c) => !isSkipped(c) && !passed(c)).map(nameOf);
   const ran = finished.filter((/** @type {any} */ c) => !isSkipped(c));
   const oldest = oldestOf(pendingChecks, (/** @type {any} */ c) => c?.startedAt ?? c?.createdAt, nowMs);
+  // CPE-1967: read off `finished`, the same list `failedNames` comes from, so `haltedNames` is always
+  // a genuine SUBSET of it. Deriving it from `rollup` instead would let a still-running check that
+  // reports no conclusion drift into one list and not the other.
+  const haltedNames = haltedFrom(finished, nameOf, (/** @type {any} */ c) =>
+    String(c?.conclusion ?? "").toLowerCase(),
+  );
 
   /** @type {string|null} */
   let conclusion = null;
@@ -1630,6 +1693,7 @@ export function readFromPrJson(json, nowMs = Date.now()) {
     checkNames: rollup.map(nameOf),
     skippedNames,
     failedNames,
+    haltedNames,
     ranCount: ran.length,
     neutralCount: finished.filter(isNeutral).length,
     oldestPendingAgeMs: oldest.ageMs,
@@ -1655,9 +1719,18 @@ function totalsOf(latest, ghFailures = 0, coverage = null) {
   // the ones where the check did not apply, because a coverage check that goes quiet when it could not
   // run is indistinguishable from one that ran and found nothing — the exact defect family this file
   // exists to close, and the reason `n/a` carries its own parenthesised reason.
+  //
+  // CPE-1967 appends `halted=` after `coverage=` under the same append-only rule, and prints it on
+  // EVERY verdict for the same reason `gh_failures=0` is printed: a count that appears only when it
+  // is non-zero cannot be distinguished from a count nobody computed. It is the number of checks that
+  // were STOPPED rather than judged — killed by a `timeout-minutes` cap, or cancelled. Those are
+  // already inside `failedNames` and the exit code is unchanged; this makes them countable without
+  // parsing prose.
+  const halted = latest?.haltedNames?.length;
   const tail =
     ` gh_failures=${Number.isFinite(ghFailures) ? ghFailures : 0}` +
-    ` ${formatCoverage(coverage ?? { state: "unknown", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "" })}`;
+    ` ${formatCoverage(coverage ?? { state: "unknown", unjudged: [], judgedWorkflows: [], silentWorkflows: [], detail: "" })}` +
+    ` halted=${Number.isFinite(halted) ? halted : "n/a"}`;
   if (!latest) {
     return (
       "total_count=n/a pending=n/a oldest_pending_min=n/a skipped=n/a neutral=n/a mergeable=n/a sha=unknown" + tail
@@ -1814,12 +1887,25 @@ export function formatVerdict(decision, latest, run, skips = {}) {
   const klass = verdictClass(decision, latest, unexplained, coverage);
   if (klass.kind === "failure") {
     const failed = latest?.failedNames ?? [];
+    // CPE-1967: a check that was STOPPED is still red and still listed under `Failed:` — the exit
+    // code and the ladder are untouched. It gets its own named sentence because the caller's next
+    // move differs: `Failed:` alone says "read the assertion", and for a job killed at its
+    // `timeout-minutes` cap there is no assertion to read. Named, never merely counted, and never
+    // folded silently into the same word as a test that ran and reported.
+    const halted = latest?.haltedNames ?? [];
+    const haltedDetail =
+      halted.length > 0
+        ? ` STOPPED rather than judged (timed out or cancelled), so ${halted.length === 1 ? "it" : "they"} ` +
+          `verified nothing: ${halted.join(", ")}. A job killed at its \`timeout-minutes\` cap reports ` +
+          `no assertion to read — check the job's own duration against its cap before treating this ` +
+          `as a code failure.`
+        : "";
     const detail =
       failed.length > 0
         ? `Failed: ${failed.join(", ")}.`
         : `No individual check reported a failure, but the run-level conclusion is \`failure\` — ` +
           `treat it as red and read the run's own log.`;
-    return `CI VERDICT: completed failure — ${totals} ${timing} — ${decision.reason}. ${detail} Do not merge.${against}`;
+    return `CI VERDICT: completed failure — ${totals} ${timing} — ${decision.reason}. ${detail}${haltedDetail} Do not merge.${against}`;
   }
   if (klass.kind === "did-not-run") {
     const detail =
