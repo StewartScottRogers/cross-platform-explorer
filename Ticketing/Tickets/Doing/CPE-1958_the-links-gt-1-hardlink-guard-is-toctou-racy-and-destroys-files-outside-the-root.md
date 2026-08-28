@@ -550,3 +550,88 @@ which lands inside CPE-1963's own Linux spread, from a harness nobody here set u
 
 Documentation-only, so the gates are re-run as a regression check rather than as evidence of new
 behaviour. Figures in the PR body.
+
+## Work Log — round 4 (CI red, two real failures)
+
+Rebased onto `origin/main` at `47daaba5` (six PRs since the last rebase: #1073, #1075, #1076, #1077,
+#1078 plus ticket commits). Clean, no conflicts. Nothing about the mechanism was revisited — the
+Reviewer, the Security Auditor and the security re-audit had all cleared it, and both failures were
+scaffolding.
+
+### Failure 1 — the ACL test's inertness guard fired on `windows-latest`
+
+`fixture is inert: … got protected=true aces=3`, on all three runs of the job (2427/1, 2475/1,
+2482/1). **The guard was right and stayed; the fixture was wrong and changed.**
+
+Rounds 2/3 staged the destination by *asking the environment* for a shape — `icacls /inheritance:r`
+then `icacls /grant:r <USERNAME>:(F)` — and then asserting the answer was exactly one ACE. It is one
+on this developer box. On the GitHub runner the same two commands leave `protected=true aces=3`: the
+runner account's own SID set survives `/inheritance:r`, so the count was never ours to predict.
+
+`stage_protected_single_ace_dacl` now **builds** the descriptor instead of requesting it:
+
+- read the file's own owner SID off the object (`GetKernelObjectSecurity` +
+  `GetSecurityDescriptorOwner`) rather than off `%USERNAME%`, so the ACE is by construction an SID
+  enabled in the token that created the file — the user on a filtered token, `BUILTIN\Administrators`
+  on the elevated one CI runs. The test keeps the access it needs to overwrite and delete its own
+  fixture either way;
+- `InitializeAcl` + exactly one `AddAccessAllowedAce` for `FILE_ALL_ACCESS`;
+- `SE_DACL_PROTECTED` set on the descriptor's own control word, applied with
+  `SetKernelObjectSecurity` through a `WRITE_DAC` handle.
+
+The ACE count is now this test's, not the environment's, so the `aces_before == 1` guard asserts a
+number the test *set*.
+
+**The literal `1` was only ever a proxy**, and the proxy is what broke, so the thing itself is now
+asserted too and derived per run: an untouched sibling is created in the same folder as the CONTROL —
+what the destination looks like if the commit re-inherits — and the staged destination must differ
+from it in **both** protectedness and ACE count. Measured on this box: control
+`(protected=false, aces=5)` against staged `(protected=true, aces=1)`. That comparison cannot go
+stale the way the literal did, because it is measured rather than remembered.
+
+**Not skipped on CI.** The skip narrowed to the one genuine volume-capability case — the named-stream
+write, which is a *direct probe* of the filesystem feature rather than an inference from "our staging
+failed" — and the DACL staging is now a hard, loud failure whose message says why it refuses to skip.
+A test that opts out on the only platform its subject runs on is the defect, not the cure.
+
+**Red-proof, two runs against the rebuilt fixture.** With `HandleCarryover::apply`'s body
+short-circuited to `Ok(())`, the test FAILS on *"the replacement inherited the FOLDER's ACL"* — the
+assertion — and **not** on either inertness guard, which is the whole point of rebuilding the fixture.
+With `apply` restored: **ok**.
+
+One more measurement, recorded at the site because it was a surprise: passing
+`PROTECTED_DACL_SECURITY_INFORMATION` to `SetKernelObjectSecurity` did **not**, on its own, protect
+the staged DACL — the fixture came back `protected=false aces=1`. It is the descriptor's own
+`SE_DACL_PROTECTED` control bit that Windows' auto-inherit computation reads. That confirms from the
+*staging* side exactly what round 2's fourth sabotage found from the *carry* side, and it is now
+written down in both places.
+
+### Failure 2 — the typed-bindings drift guard
+
+**Not a `specta::Type` struct, and not the rebase.** Round 3 edited the doc comment on `macro_undo` in
+`src-tauri/src/lib.rs`, which is a `#[tauri::command]` carrying
+`#[cfg_attr(feature = "specta-bindings", specta::specta)]`. `tauri-specta` emits a command's doc
+comment into the generated client as JSDoc, so CLAUDE.md's rule — *editing a `specta::Type` struct,
+even its doc comment, needs `bindings.gen.ts` regenerated* — applies to annotated **commands** as well
+as to types. Round 3 read the rule as struct-only, checked `fsutil.rs` (which has no specta types at
+all), and skipped the step.
+
+Regenerated with the exact command the guard prints, never hand-edited:
+`cargo run --locked --bin export_bindings --features "specta-bindings sidecar-platform"`.
+The result is 6 insertions / 3 deletions, all inside `macro_undo`'s JSDoc block, matching round 3's
+Rust edit line for line.
+
+### Verification (round 4) — delta against the round-3 gates
+
+| Gate | Round 3 | Round 4 | Delta |
+|---|---|---|---|
+| `crates/server --lib`, Windows | 2,428 / 0 / 13 | **2,428 / 0 / 13** | 0 |
+| `crates/server --lib`, Linux (WSL, ext4 `TMPDIR`) | 2,411 / 0 / 13 | **2,411 / 0 / 13** | 0 |
+| `src-tauri --lib` | 230 / 0 | **230 / 0** | 0 |
+| clippy `crates/server` default / `--all-features` (Win) | clean | **clean** | 0 |
+| clippy `crates/server` default (Linux) | clean | **clean** | 0 |
+| clippy `src-tauri` default / `--features sidecar-platform` | clean | **clean** | 0 |
+
+No test count moved: the ACL test was rebuilt, not added to, and every other change is a comment or a
+regenerated JSDoc block. The Windows count holding at 2,428 is the meaningful number here — the test
+that was failing on CI now passes on a fixture whose starting ACE count this repo controls.
