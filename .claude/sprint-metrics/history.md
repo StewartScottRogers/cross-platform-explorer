@@ -2911,3 +2911,39 @@ to drop.
 Worth noting how it was caught: the Reviewer's machine also lacked jq, saw 11/22, and **went and got jq
 rather than reporting the 11**. That instinct — when the number you measure disagrees with the number
 claimed, find out why before writing either down — is the whole of the finding.
+
+## 2026-08-28 — "reuse the existing classifier" was the wrong instruction, and measuring first caught it
+
+CPE-1910's ticket and my dispatch brief both said the same thing, emphatically: the suite already has a
+`log-signature` check that distinguishes an environment death from a real failure, so **reuse that signal
+rather than inventing a second classifier.** Two layers keyed on one fact are one layer — that rule has
+been right all shift.
+
+The worker measured before building, and the measurement inverted the design. Of 30 failures across 312
+shard jobs, **24 were a real, reproducible regression that classifies as `ENVIRONMENT SIGNATURE ONLY`** —
+because `expect-webdriverio` waits throw a plain `Error`, never an `AssertionError`, so a genuine
+regression carries the exact "no AssertionError anywhere in this run" line while reporting a healthy
+14/14 specs. **A retry keyed on that verdict alone would have silently re-run real regressions**,
+including the one another ticket had just root-caused.
+
+The shipped trigger is the verdict **AND** the spec-file count — both facts the suite already recorded,
+so still no second classifier, but no longer one fact either.
+
+**The lesson is about the instruction, not the code.** "Reuse the existing signal" is good advice that
+silently assumes the existing signal answers the question you are about to ask of it. This one answered
+*"did anything throw an AssertionError"*, which had been a fine proxy for *"was this environmental"* right
+up until a class of real failure stopped throwing one. **Before reusing a classifier for a new decision,
+measure what it actually separates on today's data — not what its name says it separates.** A signal
+inherits the population it was validated against, and nobody revalidates it when the population changes.
+
+Two more things from the same measurement worth keeping:
+
+- **The defect may already be fixed.** All three genuine socket deaths predate a ticket that merged five
+  hours before the work started: 3 of 31 shard-2 jobs fatal before, **0 of 40 after**. The worker shipped
+  the retry as an honest *backstop for the second death* and said so, rather than claiming a fix for
+  something already at zero. Reviewing whether a backstop for a 0-of-40 defect earns its complexity is a
+  fair question — the point is that it can now be asked, because the number is on the page.
+- **The louder half was unasked for and is probably the bigger win.** The summary block counts the
+  *existing* in-process respawns too: **6 of 40** sampled jobs had already used one, all recovered, and
+  **nothing anywhere said so.** A silent recovery mechanism hiding its own rate is the shape that hid a
+  month-long outage in this repo once already.
