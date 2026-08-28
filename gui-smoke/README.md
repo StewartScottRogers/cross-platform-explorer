@@ -639,6 +639,14 @@ against the corpse while the real bind failed. `settleDriverPorts` is the cross-
 `wdio.conf.ts#respawnTauriDriver`'s `killAndWaitForExit`. It is a poll, not a sleep: the usual cost is one
 refused connect, and a port that never frees is logged loudly rather than made fatal.
 
+Non-fatal is safe, but **not for the same reason on both ports**. On **4444** the replacement
+tauri-driver's own bind fails and its `exit` handler ends the worker, so that bind is the authoritative
+evidence. On **4445** the failing bind belongs to the grandchild `WebKitWebDriver` — we never spawned it
+and hold no handle to it, so nothing reports the failure and the readiness wait succeeds against the dying
+listener; there the authoritative evidence is one step later, in **attempt 2 failing with the same
+signature and the shard reding** on an incomplete run, with the `settleDriverPorts` WARNING above it in the
+same log. A stale port always costs a red shard with its cause printed. It never reads as a pass.
+
 **It fails closed.** A log it cannot read is *not* "no problem found": it refuses to retry and says the
 classifier did not run. If the retry driver itself cannot work — the suite command will not spawn, a
 results file will not parse — the step exits non-zero rather than reporting a clean run. The Ratchet

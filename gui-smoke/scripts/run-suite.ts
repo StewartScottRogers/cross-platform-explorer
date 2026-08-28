@@ -177,10 +177,26 @@ const PORT_RELEASE_BUDGET_MS = 15_000;
  * wait below succeed against the DYING listener"*. A job-level retry cannot reach that child handle, so
  * it waits on the observable fact instead.
  *
- * Never fatal. A port that never frees is reported LOUDLY and the attempt proceeds, because the attempt's
- * own bind is the authoritative evidence and a bounded settle guessing wrong must not be the thing that
- * ends the run. `waitForPortFree` returns a boolean precisely so "did not settle" cannot be mistaken for
- * "settled".
+ * Never fatal. A port that never frees is reported LOUDLY and the attempt proceeds — a bounded settle
+ * guessing wrong must not be the thing that ends the run. `waitForPortFree` returns a boolean precisely so
+ * "did not settle" cannot be mistaken for "settled".
+ *
+ * WHAT MAKES THAT SAFE IS NOT THE SAME FACT ON BOTH PORTS, and an earlier draft of this comment said it
+ * was ("the attempt's own bind is the authoritative evidence"). Round 3 traced both:
+ *
+ *   * **4444 stale** — the new tauri-driver's OWN bind fails, it exits, and `startTauriDriver`'s `exit`
+ *     handler calls `process.exit(1)`. Here the bind really is the authoritative evidence.
+ *   * **4445 stale** — the new tauri-driver binds 4444 fine. The failing bind belongs to the GRANDCHILD
+ *     `WebKitWebDriver`, which we never spawned and hold no handle or exit hook for, so nothing reports
+ *     it; `startTauriDriver`'s second `waitForPort` then SUCCEEDS against attempt 1's dying listener.
+ *     There is no authoritative bind to appeal to on this path — it is the exact failure CPE-1955's
+ *     comment describes and the one this function exists to prevent.
+ *
+ * The conclusion survives, by a different route: on 4445 the authoritative evidence is **attempt 2 failing
+ * with the same signature and the shard reding**. The budget stops the loop, the ratchet reds on an
+ * incomplete run, and the WARNING below sits in the same log above it. So the cost of a settle that gave
+ * up is a red shard with its cause printed — never a false green — which is what makes non-fatal the right
+ * call, not an appeal to a bind that on this port nobody watches.
  */
 async function settleDriverPorts(): Promise<void> {
   for (const { port, label } of DRIVER_PORTS) {
@@ -192,9 +208,12 @@ async function settleDriverPorts(): Promise<void> {
     } else {
       log(
         `[gui-smoke session-retry] WARNING: port ${port} (${label}) was STILL accepting connections after ` +
-          `${took} ms. Starting the next attempt anyway: its own readiness wait and bind are the ` +
-          "authoritative evidence, and if it does fail, THIS line is the reason — a leftover listener from " +
-          "the previous attempt, not a new fault.",
+          `${took} ms. Starting the next attempt anyway. If that attempt then fails, THIS line is the ` +
+          "reason — a leftover listener from the previous attempt, not a new fault. On " +
+          `${DRIVER_PORTS[0].port} the failure is loud (tauri-driver's own bind fails and it exits); on ` +
+          `${DRIVER_PORTS[1].port} nothing reports the bind at all (the native driver is a grandchild we ` +
+          "hold no handle to), so the evidence is the attempt dying with the same signature and the shard " +
+          "reding on an incomplete run. Either way it reds — it never reads as a pass.",
       );
     }
   }

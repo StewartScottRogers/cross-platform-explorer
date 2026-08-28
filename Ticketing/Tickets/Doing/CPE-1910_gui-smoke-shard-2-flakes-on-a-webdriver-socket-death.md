@@ -202,14 +202,19 @@ that file; restoring it returns 9/9.**
 
 **SHOULD FIX — no port-release handshake between attempts.** `run-suite.ts` spawned attempt 2 the instant
 attempt 1's `close` fired. wdio's teardown (`killTauriDriver`) is a bare non-waiting `tauriDriver?.kill()`,
-and attempt 2 binds the same two **fixed** ports. `wdio.conf.ts:1292-1295` names this exact race in its
-own words — *"racing that would have the readiness wait below succeed against the DYING listener"* — and
-solves it in-process with `killAndWaitForExit`; a job-level retry cannot reach that handle. 4445 is the
-worse case: the native WebKitWebDriver is a **grandchild**, never signalled, and it is precisely the
-process already in a bad state on the path being retried. Added `waitForPortFree` (the mirror of
-`waitForPort`, poll not sleep) + `settleDriverPorts`, and moved the two port constants into
+and attempt 2 binds the same two **fixed** ports. `wdio.conf.ts#respawnTauriDriver`'s doc comment names
+this exact race in its own words — *"racing that would have the readiness wait below succeed against the
+DYING listener"* — and solves it in-process with `killAndWaitForExit`; a job-level retry cannot reach that
+handle. 4445 is the worse case: the native WebKitWebDriver is a **grandchild**, never signalled, and it is
+precisely the process already in a bad state on the path being retried. Added `waitForPortFree` (the
+mirror of `waitForPort`, poll not sleep) + `settleDriverPorts`, and moved the two port constants into
 `lib/driverPorts.ts` so `wdio.conf.ts` and `run-suite.ts` share **one** declaration rather than a copied
 literal wearing a provenance claim.
+
+*(Cited by SYMBOL, not by line. Round 3 caught this paragraph citing `wdio.conf.ts:1292-1295` for that
+quote when it is at **1281-1284** — 1292-1295 is the budget-spent `throw`. The shipped code comments
+already cited the symbol and did not rot; the prose did. Line numbers in prose are a provenance claim
+nothing checks.)
 
 **Nits, all three taken.** (1) The summary formatters printed `MAX_SUITE_ATTEMPTS` while the loop ran on
 `maxAttempts()`, so `GUI_SMOKE_MAX_ATTEMPTS=3` rendered *"3 of 2 allowed"* — the budget is passed through
@@ -226,3 +231,54 @@ today. The **job-level retry is a backstop for a 0-of-45 event**, and the blocke
 for its cost: a break on the rarely-exercised retry path survived authoring and review. It still lands —
 a shard is 2 minutes, the policy is well-guarded, and CPE-1955's budget of 1 leaves a real hole — but
 CPE-1979 is the fix, and this is containment.
+
+---
+
+## Round 3 (2026-08-28) — APPROVED; prose only, no code
+
+The narrow re-review reproduced all seven round-2 items. Two things it did that round 2 had not, both
+worth recording because they closed real gaps rather than re-checking work:
+
+* **It enumerated every writer into `.results/`** instead of trusting the two named here, and confirmed
+  there is **no third population** — the obvious candidate, wdio's own reporter output, does not exist
+  because `reporters: ["spec"]` has no `outputDir`. It also confirmed the two prefixes cannot collide
+  (`shard-<i>-of-<t>-` vs `shard-manifest-`, `<i>` always an integer) and read CI's ordering out of the
+  **workflow** (`:775` manifest, `:827` suite) rather than out of a comment asserting it.
+* **It ran the CONVERSE red-proof I did not.** Forcing `archiveAttempt`'s filter over-broad (`|| true`)
+  fails **1 of 9** on the pre-existing `attempt-1/wdio-alpha.smoke.ts.json` assertion. So the filter is
+  pinned in **both** directions — "skips too little" (2 of 9) and "skips too much" (1 of 9) — which is a
+  stronger statement than the one I recorded.
+
+Also verified against the API: job `98661503323`'s suite step is **119 s exactly**, the whole job **181 s**.
+Both figures in this ticket are real.
+
+**Two prose defects fixed. No code, no test changes.**
+
+**Nit 1 — a stale line citation.** This Work Log and the PR body cited `wdio.conf.ts:1292-1295` for the
+"DYING listener" quote; it is at **1281-1284**, and 1292-1295 is the budget-spent `throw`. Both now cite
+`wdio.conf.ts#respawnTauriDriver` **by symbol**. The shipped code comments already did — a line number in
+prose is a provenance claim nothing checks, and it rotted inside one round.
+
+**Nit 2 — a supporting sentence that was false on the worse path.** *"The attempt's own bind is the
+authoritative evidence"* appeared in `settleDriverPorts`'s doc, in its WARNING log line, in
+`waitForPort.ts`, and in the README. It is true of **4444** only:
+
+| port stale | what actually happens |
+|---|---|
+| **4444** | the new tauri-driver's OWN bind fails, it exits, `startTauriDriver`'s `exit` handler calls `process.exit(1)`. The bind is authoritative. |
+| **4445** | the new tauri-driver binds 4444 fine. The failing bind belongs to the **grandchild** `WebKitWebDriver` — never spawned by us, no handle, no exit hook — so **nothing reports it**, and `startTauriDriver`'s second `waitForPort` succeeds against attempt 1's dying listener. There is no authoritative bind on this path at all. |
+
+The conclusion survives by a different route, and that route is now what the comments say: on 4445 the
+authoritative evidence is **attempt 2 failing with the same signature and the shard reding** — the budget
+stops the loop, the ratchet reds on an incomplete run, and the WARNING sits above it in the same log. A
+stale port always costs a red shard with its cause printed, never a false green. That is what makes
+non-fatal correct.
+
+Worth a round rather than a follow-up for the reason the reviewer gave: it was a claim we now knew to be
+false, sitting next to a green suite, in a comment explaining why a guard is non-fatal — and on the 4445
+path, the one this ticket itself calls the worse of the two.
+
+**Nit 3 — noted at the site, not fixed, by instruction.** `waitForPortFree` resolves `true` on *any*
+socket error, so a local `EMFILE`/`EACCES` would read as "free". Symmetric with `waitForPort` (any error
+reads as "not ready") and harmless given a loopback address and a non-fatal caller. Named in the doc
+comment so the next reader knows it was considered rather than missed.

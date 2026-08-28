@@ -75,10 +75,25 @@ export function waitForPort(
  *
  * Resolves `true` when the port is free, `false` on timeout — a boolean rather than a rejection because
  * the caller (a retry driver) must be able to say loudly that the settle did not happen and still let the
- * attempt proceed to produce the authoritative error. `false` is never silently equivalent to `true`.
+ * next attempt run. `false` is never silently equivalent to `true`.
+ *
+ * WHAT A `false` COSTS IS NOT THE SAME ON BOTH PORTS, and saying "the attempt's own bind is the
+ * authoritative error" — as an earlier draft of this comment did — is true of only one of them. On
+ * tauri-driver's own port the new process's bind fails and its `exit` handler ends the worker, so the bind
+ * really is the evidence. On the native driver's port the bind belongs to a GRANDCHILD nobody holds a
+ * handle to, nothing reports it, and the caller's readiness wait succeeds against the dying listener
+ * instead. There the evidence is one step later: the attempt dies with the same signature, the retry
+ * budget stops the loop, and the ratchet reds on an incomplete run. A stale port always costs a red shard
+ * with its cause in the log, never a false green — which is what makes a non-fatal `false` safe. See
+ * `scripts/run-suite.ts#settleDriverPorts` for the traced version of both paths.
  *
  * NOT a fixed sleep, for `waitForPort`'s reasons above: on the overwhelmingly common path the port is
  * already free and the first probe returns in single-digit milliseconds, so a retry pays nothing.
+ *
+ * KNOWN AND DELIBERATELY NOT FIXED: any socket error reads as "free", so a local `EMFILE`/`EACCES` would
+ * too. Symmetric with `waitForPort` above (where any error reads as "not ready"), and harmless here — the
+ * address is loopback and the caller is non-fatal either way. Named rather than silently left, so the next
+ * reader knows it was considered.
  */
 export function waitForPortFree(
   host: string,
