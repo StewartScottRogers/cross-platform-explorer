@@ -3835,3 +3835,40 @@ the doc says there is no reason to keep them. And `snapshot_capture::restore`'s 
 justification cites a pre-flight pass that **cannot** pre-flight a commit failure; the real reason is
 three screens up and better. **Leaving the behaviour is right in both cases; the sentence explaining it
 is wrong in both.**
+
+## 2026-08-28 — it was correct on both platforms for two different reasons
+
+#1091's `grep -Fxq` matched the asset name on Windows *and* on Linux, and replacing it broke Windows
+only. The round-5 diagnosis is the part worth keeping: **it worked on each platform for a different
+unstated reason.** Cygwin's grep strips a trailing CR; Linux's jq never emits one. Two independent
+accidents producing one uniform behaviour — and the replacement, written from the *behaviour*, inherited
+neither.
+
+**That is why the shim hid it.** A stub written from the contract reproduces the behaviour both platforms
+happened to share. It cannot reproduce the reason, because there were two reasons and the contract
+mentions neither.
+
+**The tell is available before the bug: a call that is correct everywhere without a stated reason.**
+`grep -Fxq` had no comment saying *why* the CR did not matter, because nobody had ever needed to know.
+Round 5's replacement is now correct on both platforms **for one stated reason** — an explicit strip at
+the boundary where jq creates the artefact, not at the one consumer that noticed — and it says so at the
+site.
+
+**Two follow-on decisions I want to keep as models.**
+
+**It declined to build a CRLF-emitting jq shim**, on the grounds that on Linux that is a third
+configuration existing on no real machine, and would break a sibling value in a way Windows does not.
+Instead the new check **lifts the function's own transformation lines out of the script and executes them
+on the bytes real jq hands them** — pure bash, so it also reds on CI's LF-only Linux, and **nothing
+asserts that a strip exists; the behaviour is the assertion.** Testing the code against the world rather
+than against a model of the world.
+
+**And the synthetic test stopped counting.** Round 4's version asserted a *count* of flags, which is green
+whenever one rule dies and another happens to fire. Round 5 asserts the two predicates **separately** —
+`[false,true,false,true]`, not `2`. **A count over independent checks is a single point of failure
+wearing an aggregate**, and it is exactly how the previous round's guard passed while half of it was
+disabled.
+
+Smaller, and characteristic of a good round: the author **predicted a red-proof number, measured a
+different one, and put the measured one in the file** — 1/22/60 where 2/17 was expected. That is the
+habit the whole shift has been arguing for, done without being asked.
