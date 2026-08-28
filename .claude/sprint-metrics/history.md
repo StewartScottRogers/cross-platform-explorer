@@ -4169,3 +4169,48 @@ parser self-check, and the exemption list cannot quietly grow because an unfound
 mutant one level out is **degenerate** — mutating an expected literal is just deleting the assertion,
 which is the natural terminus of that chain rather than another rung. **A docblock can overstate its own
 weakness as easily as its own strength**, and both are worth correcting.
+
+## 2026-08-29 — the fix changed the fixture's world, and the control is what noticed
+
+#1089's CI red is **this PR's doing**, and the reviewer proved it rather than arguing it.
+
+The mechanism is small. The swapper thread does two syscalls with a gap between them — `remove_file`,
+then `symlink`. **Before CPE-1961, nothing ever re-created that name after the extractor opened it**; the
+bytes went straight through the handle. CPE-1961's commit **renames a staging sibling onto that name**, so
+a swapper preempted between its two calls now finds the name occupied and gets `EEXIST`.
+
+**The discriminator is the part worth copying.** An env-gated sleep inserted between the swapper's two
+syscalls, identical instrumentation on both revisions:
+
+| gap | `main` | head |
+|---|---|---|
+| 0 µs | 20/20 | 20/20 |
+| 200 µs | 20/20 | 20/20 |
+| **2000 µs** | **20/20** | **2/20**, `AlreadyExists` ×18 |
+
+**`main` cannot lose the trial at any inducible gap; the head loses 90% at two milliseconds.** That is the
+runner's 19/20 with the errno to match. Natural reproduction failed — ~1,900 trials across solo,
+core-pinned, parallel and CPU-starved runs, zero losses, because local ext4 is faster than a shared
+runner. **Widening the window on purpose answered in minutes what repetition could not answer at all.**
+
+**The property was never in danger.** `changed_outside == 0` in all ~1,900 trials at full strength, and a
+*lost* trial is strictly safer than a won one. The control was not protecting the assertion from being
+wrong; it was protecting it from being **vacuous**, and it worked.
+
+**The transferable lesson: a positive control is the only part of a race test that can notice its own
+premise expiring.** That fixture's doc says, in as many words, *"`a.txt` is a real file for the whole run
+and stays one afterwards, so a starved thread still stages its swap and the liveness assertion cannot
+flake."* True when written. False three rounds later, because a different PR started writing to that
+path — and **nothing in the diff pointed at it.**
+
+**So: when you add a write to a path some other test races against, that test's premise is part of your
+blast radius.** Same enumeration lesson as the `download_tree` find two rounds ago, pointed at fixtures
+instead of callers.
+
+The fix is not to relax the bar. It is to **retry inside the deadline loop the fixture already has**,
+which restores `swaps == TRIALS` as a hard equality and **makes the fixture's own sentence true again**
+rather than negotiating it down. And the doc claim needs correcting either way.
+
+One more thing the reviewer did that I should have: **it read the failure's arithmetic.** CI reported
+2491 passed against a default `--lib` of 2444, so **the failure was in one of that step's *feature* runs**,
+not the default one. I had read the failure and not the count beside it.
