@@ -1199,32 +1199,57 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
    * 1. it reads argv **in this file** (`env::args`) -- if parsing is delegated to a module, a
    *    builder, or another crate, its CLI surface is not visible here, so we do not claim to have
    *    seen it (this is F2's "routed through another file" case, and it now fails closed);
-   * 2. **no comparison against any string literal** (`== "..."`) -- this is the clause that kills
-   *    the spelling axis: `verify`, `check`, `validate`, a word nobody has thought of, and the
-   *    `let cmd = args[1].as_str(); if cmd == "check"` shape all trip it equally;
-   * 3. **no string-literal match arm** (`"..." =>`) -- the other way a subcommand dispatch is
-   *    written;
+   * 2. **no comparison against a string literal** -- `== "..."`, and (round 3) the method spellings
+   *    `starts_with("` / `ends_with("` / `contains("` / `.eq("` / `eq_ignore_ascii_case("`, and
+   *    `matches!(`;
+   * 3. **no string-literal match arm** (`"..." =>`) -- another way a subcommand dispatch is written;
    * 4. **no `--`-prefixed literal** -- a verify path exposed as a flag rather than a subcommand;
    * 5. **no argument-parser crate** named (`clap`, `structopt`, `argh`, `bpaf`, `pico_args`,
-   *    `lexopt`) -- those move the whole surface into a builder this scan cannot read.
+   *    `lexopt`) -- those move the whole surface into a builder this scan cannot read;
+   * 6. **no `const`/`static … &str = "…"` declaration** (round 3) -- a subcommand token hoisted into
+   *    a named constant, which defeats every clause that looks for a quote next to the comparison.
    *
-   * A binary satisfying all five is a bare positional CLI with no options and no subcommands, which
-   * structurally cannot host a verify path of any spelling. `model_snapshot_sign.rs` is one today.
+   * What a binary satisfying all six has been shown to be: **no string-literal comparison, match
+   * arm, `--` flag, `matches!`, string constant or parser crate is visible in the file that declares
+   * it.** `model_snapshot_sign.rs` is one today.
    *
-   * ## What this still cannot see -- AT LEAST these, and the list is open
+   * That is the measured statement, and it is deliberately weaker than the one this docblock
+   * carried in round 2, which said such a binary "structurally cannot host a verify path of any
+   * spelling". **Three real Rust shapes falsified that** (PR #1095 round 3, all applied as working
+   * verify dispatches on a live CLI surface while `model-snapshot.yml` still published unverified,
+   * all **0 red** at the time): `args[1].starts_with("verif")`; a `const VERIFY_CMD: &str = "verify"`
+   * compared with `args[1] == VERIFY_CMD`; and `match args.len() { 2 => exit(0), _ => {} }`. The
+   * first two are now caught by clauses 2 and 6. **The lesson is CLAUDE.md's round-9 rule one scope
+   * in: a blind-spot list is a claim of the same kind as the guard, and round 2's fix turned round
+   * 1's defect into a narrower version of itself.** So the list below is split by *why* an entry is
+   * missed, says "at least these", and carries no count.
    *
-   * All of these now fail CLOSED (they make the detector return `true`, so the signer is NOT
-   * excused and must be verified in its workflow), which is the direction that costs a reviewable
-   * diff instead of hiding a gap:
+   * ## What this cannot see -- AT LEAST these
    *
-   * - a verify path reached through any of the five clauses above;
+   * These fail CLOSED (the detector returns `true`, the signer is NOT excused and must be verified
+   * in its workflow) -- the direction that costs a reviewable diff instead of hiding a gap:
+   *
+   * - a verify path reached through any of the six clauses above;
    * - a binary whose `[[bin]]` `path` this scan cannot resolve (it throws instead).
    *
-   * Still genuinely open, i.e. could still excuse a signer that should be wired: a verify path with
-   * **no CLI surface at all** -- selected by an environment variable, by the argv[0] the binary was
-   * invoked as, or by a build feature. None of those appear in this repo today, and none is
-   * reachable by widening a regex; catching them needs the binary's dispatch resolved rather than
-   * scanned. Say "at least these": nobody has enumerated the ways a program can branch.
+   * **NOT CAUGHT TODAY, but reachable** -- each would still excuse a signer that should be wired,
+   * and each is a regex or a resolution step away, so treat this as a to-do list and not as a
+   * boundary:
+   *
+   * - **argv-indexed branching with no string anywhere**, e.g. `match args.len() { 2 => … }`.
+   *   Measured 0 red, and deliberately not closed: `model_snapshot_sign.rs` legitimately branches on
+   *   `args.len() != 4`, so a general argv-arity clause would over-report on the one binary this
+   *   sweep excuses. Closing it needs the dispatch resolved, not a wider pattern.
+   * - **a token reaching the comparison indirectly** -- built by `format!`, read from a `&[&str]`
+   *   table, or returned by a helper. Clause 6 catches only the `const`/`static … &str` spelling.
+   * - **any comparison spelling nobody has written down yet.** Clause 2 is a list of method names,
+   *   and a list of names is exactly what round 2 was rewritten to stop relying on.
+   *
+   * **CANNOT be caught by scanning this file at all** -- these need the binary's dispatch resolved
+   * rather than read: a verify path with **no CLI surface**, selected by an environment variable, by
+   * the `argv[0]` the binary was invoked as, or by a build feature (`#[cfg(feature = …)]`).
+   *
+   * Nobody has enumerated the ways a program can branch, so neither list is closed.
    *
    * RED-PROOFED, results here rather than only in the PR body. Each sabotage was applied to
    * `model_snapshot_sign.rs` (whose workflow still publishes unverified) and then reverted:
@@ -1236,6 +1261,18 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
    *   that would still have been missed had the fix only widened the list of subcommand NAMES.
    * - renaming this file's pin so no title names the excused binary -- **1 red**, from
    *   `every signer this sweep EXCUSES is named by a pin in this file`.
+   *
+   * Round 3, the three shapes that falsified round 2's "structurally cannot" claim. All were
+   * **0 red** before this round's clauses 2-extended and 6:
+   *
+   * - `args[1].starts_with("verif")` -- now **2 red** (clause 2, method spelling).
+   * - `const VERIFY_CMD: &str = "verify";` + `args[1] == VERIFY_CMD` -- now **2 red** (clause 6).
+   *   This is the one worth remembering: it is the exact `==` dispatch clause 2 exists to catch,
+   *   defeated by a refactor -- hoisting the literal -- that a reviewer would routinely suggest.
+   * - `match args.len() { 2 => exit(0), _ => {} }` -- still **0 red**, deliberately. Re-measured
+   *   this round rather than assumed, so the "not caught today" entry above is a measurement and
+   *   not a guess; closing it would over-report on `args.len() != 4`, which this binary legitimately
+   *   uses.
    */
   function couldHostAVerifyPath(manifest: string, bin: string): boolean {
     const toml = readFileSync(join(process.cwd(), manifest), "utf8");
@@ -1251,7 +1288,23 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
       const matchesOnLiteral = /"[^"]*"\s*=>/.test(src);
       const hasFlagLiteral = /"--[A-Za-z0-9]/.test(src);
       const usesArgParser = /\b(clap|structopt|argh|bpaf|pico_args|lexopt)\b/.test(src);
-      return !readsArgvHere || comparesToLiteral || matchesOnLiteral || hasFlagLiteral || usesArgParser;
+      // Round-3 additions. `== "` alone is defeated by every other way Rust compares a string --
+      // and, worst, by hoisting the literal into a `const`, which is a refactor a reviewer would
+      // routinely suggest. Measured: `model_snapshot_sign.rs` contains none of these, so tightening
+      // costs no over-reporting today.
+      const comparesByMethod = /\b(?:starts_with|ends_with|contains|eq|eq_ignore_ascii_case)\s*\(\s*"/.test(src);
+      const usesMatchesMacro = /\bmatches!\s*\(/.test(src);
+      const declaresStrConst = /\b(?:const|static)\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*&(?:'static\s+)?str\s*=/.test(src);
+      return (
+        !readsArgvHere ||
+        comparesToLiteral ||
+        matchesOnLiteral ||
+        hasFlagLiteral ||
+        usesArgParser ||
+        comparesByMethod ||
+        usesMatchesMacro ||
+        declaresStrConst
+      );
     }
     throw new Error(`${manifest} declares no [[bin]] named ${bin} -- the invocation and the manifest disagree`);
   }
@@ -1264,13 +1317,38 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
    * listed (CPE-1932, one scope in): a hand-written list of "the ones with pins" is the same defect
    * this file exists to police.
    *
-   * Anchored on `it("` so a title has to be a real call, not prose in a comment. A comment could
-   * still spell `it("...")` verbatim and be counted -- that direction excuses, so it is named here
-   * rather than left to be discovered; nothing in this file does it today.
+   * ## What this scan actually counts, corrected (PR #1095 round 3)
+   *
+   * Round 2's docblock said it was "anchored on `it(` so a title has to be a real call, not prose in
+   * a comment", and that "nothing in this file does it today". **Both sentences were false.** The
+   * regex runs over RAW source, so it counts any `it("` sequence anywhere -- including one inside a
+   * string literal or a comment -- and this file contains a live example: the assertion message on
+   * `every signer this sweep EXCUSES is named by a pin in this file` embeds the text
+   * `an it("${s.bin} has no CLI surface ...")`, which the scan picks up as a title.
+   *
+   * That occurrence does not self-satisfy the pin only because `${s.bin}` is literal text rather
+   * than the binary's name -- i.e. the guard was **one "let's make this error message concrete"
+   * edit away from certifying its own excuse.** The `${` filter below closes exactly that: a title
+   * containing an un-interpolated `${` is source text quoting a title, never a title.
+   *
+   * The residual, stated rather than left to be found: a comment or string holding a fully concrete
+   * `it("<bin> has no CLI surface …")` would still be counted, and that direction EXCUSES. Nothing
+   * in this file does that today.
+   *
+   * **Why not the sanctioned stripper first (CLAUDE.md).** `src/lib/jsSource.mjs`'s entry point is
+   * `stripScriptBodiesChecked`, and it earns that status by compiling the stripped result with
+   * `new vm.Script`. This file is **TypeScript** -- type annotations, `interface`, generics -- so
+   * that oracle cannot compile it either before or after stripping, and the leg that makes the
+   * sanctioned entry point trustworthy is unavailable here. Rather than call `stripJsComments` bare
+   * (a stripper with its oracle removed) the scan stays raw and states its scope, which is the
+   * honest version of the same thing. Sabotage 3 in round 2 -- renaming the pin -- flipped this
+   * function's answer and reddened the caller, so the derivation is real, not decorative.
    */
   function declaredTestTitles(): string[] {
     const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
-    return [...self.matchAll(/\bit\s*(?:\.\w+(?:\([^)]*\))?)*\s*\(\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+    return [...self.matchAll(/\bit\s*(?:\.\w+(?:\([^)]*\))?)*\s*\(\s*"((?:[^"\\]|\\.)*)"/g)]
+      .map((m) => m[1])
+      .filter((title) => !title.includes("${"));
   }
 
   const CALLS = signFamilyCalls();

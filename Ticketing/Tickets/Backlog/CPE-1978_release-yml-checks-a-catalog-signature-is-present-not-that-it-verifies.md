@@ -133,16 +133,48 @@ publishing unverified → **62 passed, 0 red**. Control, same sabotage spelled `
 *The choice made:* **widen the detector so it fails closed**, rather than keep it and lean on the pin.
 The pin cannot be stronger than the detector it calls — the `"check"` sabotage fooled the pin and the
 sweep together, which is CPE-1950's shared blindness, not two legs. The question now has no verb in
-it: `couldHostAVerifyPath` excuses a binary only when **all** of five clauses hold over
+it: `couldHostAVerifyPath` excuses a binary only when **all** of six clauses hold over
 comment-stripped source — it reads argv *in this file* (F2: delegated parsing is no longer excused),
-no `== "…"` comparison of any kind, no `"…" =>` match arm, no `--`-prefixed literal, no arg-parser
-crate. A binary passing all five is a bare positional CLI that structurally cannot host a verify path
-of *any* spelling. The excuse is also no longer allowed to be silent: a new test requires every
-excused signer to be named by a pin whose title is read out of this test file's own source.
+no string-literal comparison (`== "…"` plus the `starts_with(" / ends_with(" / contains(" / .eq(" /
+eq_ignore_ascii_case("` method spellings and `matches!(`), no `"…" =>` match arm, no `--`-prefixed
+literal, no arg-parser crate, and no `const`/`static … &str = "…"` declaration. The excuse is also no
+longer allowed to be silent: a new test requires every excused signer to be named by a pin whose
+title is read out of this test file's own source.
 
-*Still open, "at least these", never a count:* a verify path with **no CLI surface at all** —
-selected by an environment variable, by `argv[0]`, or by a build feature — would still be excused.
-None exists in this repo today and none is reachable by widening a regex.
+**Round 3 (review) — the fix shipped with a closed safety claim, and three real shapes falsified
+it.** Round 2 wrote that a binary passing the clauses "structurally cannot host a verify path of any
+spelling", and listed the remaining blind spots as only the no-CLI-surface family, "none reachable by
+widening a regex". The reviewer broke both, each as a working verify dispatch on a live CLI surface
+with the workflow still publishing unverified, each **0 red**: `args[1].starts_with("verif")`; a
+`const VERIFY_CMD: &str = "verify"` compared with `args[1] == VERIFY_CMD`; and
+`match args.len() { 2 => exit(0), _ => {} }`. **The const one is the damning one** — it is literally
+the `==` dispatch the clause exists to catch, defeated by hoisting the literal, a refactor a reviewer
+would routinely suggest.
+
+This is CLAUDE.md's round-9 rule one scope in: *the blind-spot list is a claim of the same kind*, and
+round 2's fix turned round 1's defect into a narrower version of itself. Fixed both ways — the claim
+now states only what was measured (*no string-literal comparison, match arm, `--` flag, `matches!`,
+string constant or parser crate is visible in the file that declares it*), and the clauses were
+widened. Measured after: shape 1 → **2 red**, shape 2 → **2 red**, shape 3 → **0 red** (deliberately
+open). Verified the tightening does not over-report: `model_snapshot_sign.rs` contains none of the
+new patterns.
+
+*Blind spots, now split by why, "at least these", no count.* **Not caught today but reachable** (a
+regex or a resolution step away — a to-do list, not a boundary): argv-indexed branching with no
+string anywhere (`match args.len()`; not closed because a general argv-arity clause would over-report
+on this binary's own `args.len() != 4`); a token reaching the comparison indirectly via `format!`, a
+`&[&str]` table, or a helper; and any comparison spelling nobody has written down yet. **Cannot be
+caught by scanning at all:** a verify path with no CLI surface — selected by an environment variable,
+by `argv[0]`, or by a build feature.
+
+*Also round 3:* the pin-title scan's docblock claimed it was "anchored on `it(` so a title has to be a
+real call" and that "nothing in this file does it today". Both false — the regex runs over raw source
+and this file's own assertion message embeds `an it("${s.bin} has no CLI surface ...")`, which the
+scan counted. It failed to self-satisfy the pin only because `${s.bin}` is literal text, i.e. the
+guard was one "make this message concrete" edit from certifying its own excuse. Corrected the
+sentences and added a `${` filter. `stripScriptBodiesChecked` is not used here and the reason is
+stated at the site: this file is TypeScript, so its `vm.Script` oracle cannot compile it, and calling
+`stripJsComments` bare would be that stripper with the leg that makes it trustworthy removed.
 
 *What remains UNVERIFIED.* No release was cut and no workflow run was triggered, so the shipped step
 has **never executed on a GitHub runner**. What was executed is the step's own `run:` body, extracted
