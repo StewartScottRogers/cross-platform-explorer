@@ -2718,3 +2718,37 @@ finished one from a wedged one; the step list distinguishes all three immediatel
 
 Worth remembering that "compare against a sibling" was advice this crew wrote into the tool earlier this
 same shift, after a different misread. It is decent advice and it is strictly weaker than just looking.
+
+## 2026-08-28 — the documented "known gap" was the blocker, wearing a label
+
+PR #1087's round-2 blocker was a comment stripper that deleted source: a regex literal after a keyword
+whose character class contained `/*` made the scanner invent a comment and eat to the next `*/`. Round 3
+fixed it properly — root-caused to tracking the previous *character* instead of the previous *token* —
+and shipped 29 tests plus a written list of three **KNOWN GAPS**, each declared to *"fail toward KEEPING
+source rather than deleting it"*, each pinned by a passing test.
+
+**Gap 1 was the same defect, reached through a different prefix.** A regex after `)` or `]` is read as
+division — and when its class contains `//` or `/*`, the emitted `/` walks straight into the comment
+branches that sit *earlier* in the scanner than the regex branch. Parseable JavaScript in, unparseable
+out, **144 characters deleted.** The narrow re-review built the input and measured it.
+
+**Three separate things made it invisible, and they are the transferable part:**
+
+1. **The gap list was written from the *cause* rather than measured.** "A regex after `)` is read as
+   division" is true, and "division emits verbatim" is true, and the conclusion is still wrong, because
+   the emitted text re-enters the scanner. Nobody ran a deleting input through it.
+2. **The pinning test used the benign form of the case.** The table's gap-1 entry is `/re/`, which really
+   does keep. So the case was pinned, the oracle ran, everything was green — and the shape that fails was
+   simply not in the table. **A case table proves what is in it; it says nothing about what is missing,
+   and a green table reads like coverage of the whole class.**
+3. **The comment promised the oracle would catch a regression** — *"if any of these ever flips to
+   deleting, the `parses()` oracle below reds it"* — but the oracle only iterates the table.
+
+**The rule: a declared limitation is a claim, and claims get measured.** Writing "this fails safe" next
+to a green test is the CPE-1933 shape exactly — the test vouches for the sentence without testing it.
+Either construct an input for each declared gap and record which way it actually errs, or do not
+characterise the direction.
+
+Worth noting the pattern across this shift: **the narrow re-review — scoped to only what changed since
+the last round — has now found a blocker on this PR three times running**, each one invisible to the
+full review that preceded it, because each was created by the previous round's fix.
