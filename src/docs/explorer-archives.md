@@ -119,6 +119,7 @@ Four independent protections apply automatically — you don't opt into any of t
   folder that was a shortcut, and the rest of the archive still extracts. This applies to ZIP, TAR
   (`.tar`, `.tar.gz`, `.tgz`) and 7-Zip alike; before this, ZIP refused it and TAR and 7-Zip did not —
   7-Zip silently, TAR after already having written the file.
+- **That also covers a shortcut sitting on the way to a *link* the archive wants to create.** A ZIP entry can be a shortcut rather than a file, and those were the one kind still being placed by name. With a folder shortcut planted on the path, the entry was created through it — and because placing a shortcut over an existing name replaces it, a file of yours that happened to share the name was **deleted**, with the extraction still reporting success. Those entries now go through the same folder-by-folder check as everything else, so the entry is skipped and your file is left alone.
 - **Every format now answers a refused entry the same way: skip that entry, extract the rest.** This used
   to differ by format and by which action you used, which meant this page could only ever describe one of
   the behaviours honestly:

@@ -146,7 +146,7 @@ owns the inside-pointing one.
 
 | Path | Verdict | Action |
 |---|---|---|
-| rows 15/16/23 — the three ZIP loops | already handle-gated (CPE-1913) | F-B fixed; component walk not needed |
+| rows 15/16/23 — the three ZIP loops | **partly defective** — the *file* and *directory* branches are handle-gated (CPE-1913), the **symlink branch was not** | F-B fixed; component walk added to the symlink branch (**CPE-1973**, round 2) |
 | rows 21/22 — `tar_unpack`, `extract_tar_stream` | **defective** (inside-pointing) | component walk added |
 | rows 19/20 — `extract_7z_safe`, `extract_7z_stream` | **defective** (inside-pointing, silent) | component walk added |
 | rows 13/14 — the two `.gz` branches | one archive-named leaf in a user folder, `refuse_link_at_new_file` | unchanged — no component chain exists |
@@ -164,3 +164,138 @@ so it still reaches the guard it names rather than passing on the new one.
 **Verification.** `cargo test` green on Windows (2428 lib + integration) and Linux/ext4 (2415 lib);
 `cargo clippy --all-targets -D warnings` clean in both feature modes on both platforms. Docs:
 `src/docs/explorer-archives.md` gained the inside-pointing-shortcut bullet.
+
+---
+
+## Work Log — round 2 (2026-08-27)
+
+Reviewer returned APPROVE; the Security Auditor returned SEC FINDINGS with a HIGH blocker. Both are
+folded in here. Everything below was measured on this branch rather than reasoned about.
+
+### The Reviewer's Linux gap is closed
+
+The Reviewer could not run the Linux legs (no `cc`, no `sudo -n`) and reported the two `#[cfg(unix)]`
+F-B tests, the Linux clippy legs and sabotage D as unconfirmed. **A no-sudo toolchain is already staged
+at `~/lintools/bin` (gcc-15 via dpkg-extracted debs) and works** — `cpe-server` builds and tests there
+in ~37s with `CC=$HOME/lintools/bin/cc`. All five CPE-1938 legs pass on Linux, and everything below was
+run on real ext4 with `TMPDIR` pointed off `/tmp` (`/tmp` on WSL is **tmpfs**, which silently
+invalidates a "real ext4" label — the Auditor's methodology note, now recorded at the F-B test).
+
+### F1 / CPE-1973 (HIGH) — the ZIP symlink branch had no component walk. Fixed.
+
+Reproduced verbatim on the unmodified branch, real ext4, zip entry `sub/victim` (a link entry), a
+**planted** `dest/sub -> dest/other`, a real user file at `dest/other/victim`:
+
+```text
+outcome = Ok(ArchiveReport { done: 2, failed: 0, skipped: 0, cancelled: false, errors: [] })
+dest/other/victim is now a symlink: true      link target: Some("benign.txt")
+its content reads back as: None               <- the user's file was DELETED
+```
+
+`create_beneath` is called only in the loop's *file* branch and `create_dir_beneath` only under
+`entry.is_dir()`, so the symlink sub-branch reached a by-path `symlink`/`remove_file` with its
+components unresolved. `confined_to` canonicalises **through** the plant and truthfully answers
+"inside"; `materialise_entry_symlink`'s `AlreadyExists` retry then unlinks a file the archive never
+named — so the residual was a **delete**, not the harmless extra link the old note claimed.
+
+**Fix:** `entry_component_action(&root, &name, false)` now runs on that branch before anything by-path
+touches `out`. No `symlink_beneath` needed; only the raced case still wants that primitive. It does not
+shadow `link_target_action` (CPE-1929): the walk asks whether the entry's *name* stays inside, the other
+asks whether the link's *target* escapes, and each is refused only by its own guard.
+
+**Red-proof:** with the new walk forced to `EntrySlotAction::Write`, the regression
+`cpe1973_a_zip_symlink_entry_is_never_created_through_a_planted_component_link` reds on the harm
+assertion (victim `None` instead of `"USER FILE"`). Green with the walk. Passes on Windows too, where
+the plant is a privilege-free junction and the refusal lands before `create_entry_symlink`.
+
+**Two false statements corrected**, both load-bearing and both false in the safe-looking direction: the
+per-path row above, and the residual note on `extract_zip_archive_stream` (which had bounded the
+exposure to a race and called the exclusive-create retry harmless).
+
+### F2 (MEDIUM) — the Windows fail-open whose backstop this PR removed. Now fails closed.
+
+`open_beneath::sys::name_surrogate_at` was `unwrap_or(false)`, justified in `batch_media.rs` by "a
+genuine surrogate is caught one component later by NT itself". True for `create_beneath`, whose descent
+is always followed by a leaf open — **not** true for `create_dir_beneath` used as a verification-only
+pass in front of a by-path unpacker, where `sub/leaf.txt` is a **one-component** chain with no next NT
+open. Flipped to `unwrap_or(true)`. The `None` arm is untestable by construction (nothing can make
+`GetFileInformationByHandleEx` fail on a just-opened handle), so this costs nothing observable and
+removes the dependency. Both callers now fail closed; the "opposite defaults" split and the sentence
+claiming the NT backstop are gone. This is CPE-1933 landing on a doc comment: the claim was about
+another site's control flow, and this PR is what falsified it.
+
+### F3 (MEDIUM) — the raced residual is recorded, with its numbers.
+
+Rows 16 and 19–22 of the CPE-1733 table now carry an explicit **residual: a RACED component swap**
+marker instead of advertising containment the legs do not have (CPE-1958), and
+`entry_component_action`'s "What it is NOT" section carries the Auditor's measurement — 40 trials ×
+500 entries, `RENAME_EXCHANGE` so the component is never absent, target **outside** `dest`: tar one-shot
+8/40 (10 entries), tar streamed 5/40 (5 entries), against 9/40 and 17/40 with the walk disabled. Planted
+100% → 0%; raced narrows ~2–5× and stays open. Also recorded: the **naive** remove-then-create attacker
+looks harmless because the vanished component aborts the run, while the atomic one does not.
+
+### F4 (LOW-MED) — the Abort arm is now covered, and kept, with the argument written down.
+
+The Auditor's CPE-1929 pair came back green in both halves (2413/2 either way), so the arm that
+escalates a component refusal to whole-archive failure was uncovered.
+`cpe1938_a_component_the_filesystem_refuses_for_an_io_reason_stops_the_run` now forces a deterministic
+`EACCES` (a `0o555` `dest`, with a verified deny so a root runner gets a loud skip rather than a vacuous
+green) and pins the abort. Kept as an abort rather than demoted, argued at the site: `create_dir_beneath`
+*creates* missing components, so `ENOENT` means something removed one under a live extraction — the
+concurrent-mutation attacker this ticket is about — and the file branch one level down already returns
+`Err` on the same `Refusal::policy == false` class, so a Skip would leave two branches disagreeing about
+one fact. The wording complaint is real and deliberately **not** fixed here: the sentence is
+`open_beneath::refuse`'s, shared by three legs and pinned by tests in all of them.
+
+### Setuid: measured, no longer inferred
+
+Round 1 wrote "inferred, not measured". The `& 0o777` mask is the `zip` **writer's**, not the format's,
+so a hand-built STORED archive with external attributes `0o104755` answers it: the setuid bit is
+archive-controllable end to end (`dest/a.txt` lands `0o4755`), the old primitive moved a victim outside
+the root `0o644 -> 0o4755`, and end-to-end with `main`'s deferred drain restored,
+`trials=20 swaps=20 MODES_CHANGED_OUTSIDE=20 SETUID_OUTSIDE=20` — against `20 swaps, 0 escapes,
+0 setuid` on this branch. So F-B was a **privilege-escalation primitive on `main` at 20/20**. Scope
+stated honestly at the site: `chmod(2)` only succeeds for the file's owner, so this is fatal when
+extracting as root or a service account and a same-user integrity problem otherwise. Sabotage D
+re-ran at **20/20**, hotter than round 1's 19/20, which is now noted as a floor rather than a rate.
+
+### Three doc corrections from the Reviewer
+
+1. **The count reconciliation was stale on two of its three numbers.** Re-derived over the production
+   half of `archive.rs` (everything above `#[cfg(test)]`, comment lines excluded): **6** `create_dir_all`
+   (2 in row 1, 3 in row 17, 1 in row 21 — row 18 contributes **none** since CPE-1913), **11**
+   `File::create`, **2** exclusive `fs::create_dir`. The line said `8, 12, 2` and itemised "2 in row 18".
+   The Reviewer flagged the 8 and passed the 12; **the 12 was wrong too** — CPE-1913 replaced row 16's
+   `File::create` with `claim_destination_handle` + `create_beneath`, so rows 2–14 own all eleven and row
+   16 owns none. Both stale numbers are the two CPE-1913 changed, six lines above the rows this PR edits,
+   in a ticket about enumerating rather than recalling. Rows 16 and 18's table cells were stale in the
+   same way and were corrected with it. Verified identical on `origin/main`, so pre-existing.
+2. **`make_dir_link` "panics rather than skipping" was imprecise.** `require_staged` panics only under
+   `staging_is_strict()` (CI); locally it returns `false`. The effect holds because the fixture wraps the
+   call in `assert!`, which is what the sentence now says — the panic-vs-`false` distinction is
+   CI-vs-local.
+3. **The F-B hole the Reviewer flagged does not exist, and the reason is worth recording.**
+   "A leaf's mode cannot make anything else unwritable" is true across paths but was suspected false
+   across entries sharing a name. Measured: `zip::ZipArchive` **collapses duplicate names in its central
+   directory**, so a three-entry archive with `x.txt` twice lists two entries and extracts `done: 2` with
+   the last copy winning — identically with a `0o444` first copy and with a `0o644` one, and identically
+   on `origin/main`. `ZipWriter::start_file` refuses duplicates outright
+   (`InvalidArchive("Duplicate filename")`), so the fixtures were hand-built STORED zips. A read-only
+   leaf followed by *different* entries is unaffected (`done: 3`). Re-extraction into the same folder
+   does fail on the second run with `os error 13` — and fails **identically on `origin/main`**, measured,
+   so it is not this change's. The sentence was replaced by the measurement rather than narrowed on
+   reasoning.
+
+### Gates (round 2)
+
+| Gate | Result | Delta |
+|---|---|---|
+| `cargo test --lib`, Windows | **2429 passed / 0 failed / 11 ignored** | +1 vs 2428 (the second new test is `#[cfg(unix)]`) |
+| `cargo test --lib`, Linux/ext4 | **2415 passed / 2 failed / 11 ignored** | +2 vs the Auditor's 2413/2; the same 2 failures, both artifacts of the partial `crates/server`-only stage (they read repo files outside the crate) |
+| `cargo clippy --all-targets -D warnings`, Windows, default + `specta` | clean | — |
+| `cargo clippy --all-targets -D warnings`, Linux | clean | — |
+
+Docs: `src/docs/explorer-archives.md` gained the shortcut-on-the-way-to-a-link bullet, in plain
+language, including that the old behaviour **deleted** a same-named file of the user's.
+
+Rebased onto `origin/main` (was 10 behind); no file in that delta overlaps this change.

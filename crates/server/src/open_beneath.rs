@@ -760,9 +760,34 @@ mod sys {
     /// syscalls-per-file figures in `cpe_1896_report_the_walk_syscall_cost` already count it, and
     /// AC5's numbers stand as published.
     fn name_surrogate_at(dir: &File) -> bool {
-        // `unwrap_or(false)` — fail OPEN. See the shared helper's doc for why this caller takes the
-        // opposite default from the final-component guard in `fsutil`.
-        crate::batch_media::reparse_name_surrogate(dir).unwrap_or(false)
+        // **`unwrap_or(true)` — fail CLOSED, changed by CPE-1938 round 2 (Security Auditor, F2).**
+        //
+        // This was `unwrap_or(false)` — fail open — and the reason given was that containment here did
+        // not rest on the check: a genuine surrogate would be caught one component later by NT itself
+        // (`ERROR_CANT_RESOLVE_FILENAME`), so all the check bought was naming the link one component
+        // earlier. **That reasoning was true for every caller this module had at the time, and CPE-1938
+        // is the change that made it false.** It holds for [`create_beneath`], whose descent is always
+        // followed by another NT open (the leaf). It does **not** hold for [`create_dir_beneath`] used
+        // as a *verification-only* pass in front of a by-path third-party unpacker, which is exactly
+        // what `archive::entry_component_action` does: for `sub/leaf.txt` the chain is **one
+        // component**, this function is the only thing that can refuse it, and there is no next
+        // component for NT to trip over.
+        //
+        // Measured on Windows 11 with this arm forced to its documented fail-open value, tar with a
+        // single `sub/leaf.txt` entry and a junction at `dest/sub`:
+        //
+        // ```text
+        // outcome = Ok(... done: 1, skipped: 0, errors: [])
+        // dest/other/leaf.txt = "ARCHIVED LEAF"     <- the CPE-1938 defect, restored, silently
+        // ```
+        //
+        // The `None` arm remains untestable by construction (see [`crate::batch_media::
+        // reparse_name_surrogate`]): nothing can make `GetFileInformationByHandleEx` fail on a handle
+        // that was just opened successfully. So this flip costs nothing observable and removes a
+        // dependency on a backstop that is no longer always there — the safe direction for a default
+        // that cannot be exercised. Both callers now fail closed, and the "opposite defaults" split
+        // that used to justify the two values is gone with it.
+        crate::batch_media::reparse_name_surrogate(dir).unwrap_or(true)
     }
 
     /// NT status codes are not Win32 error codes, and `io::Error` speaks Win32. Translating means a

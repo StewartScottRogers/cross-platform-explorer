@@ -238,13 +238,13 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // | 13| `extract_archive` (`.gz` branch)           | `File::create`   | **user-named dir** + stem of the archive name| link |
 // | 14| `extract_archive_streamed` (`.gz` branch)  | `File::create`   | **user-named dir** + stem of the archive name| link |
 // | 15| `extract_zip_encrypted`                    | *row 16's loop* | **archive-controlled** name under user dir   | row 16's, exactly — this row no longer has an extractor of its own (CPE-1807) |
-// | 16| `extract_zip_archive_stream`               | `File::create`/`symlink` | **archive-controlled** name under user dir   | leaf link + **per-component containment** + **link-target containment** (skip, recorded) + `entry_name_is_safe` |
+// | 16| `extract_zip_archive_stream`               | `claim_destination_handle`/`symlink` (the `File::create` went with CPE-1913) | **archive-controlled** name under user dir   | leaf link + **per-component containment** + **handle-relative component walk** (file + dir branches CPE-1913, **symlink branch CPE-1973**) + **link-target containment** (skip, recorded) + `entry_name_is_safe`; **residual: a RACED component swap on the symlink branch** |
 // | 17| the three remaining extraction `dest` roots | `create_dir_all` | **user-named dir**                           | none (a live link is followed on purpose) — wording only, see below |
-// | 18| the two per-entry `create_dir_all(&out)` / `(parent)` inside row 16's loop, now shared by rows 15/23 | `create_dir_all` | **archive-controlled** dir name under user dir | **per-component containment** (skip) |
-// | 19| `extract_7z_safe`'s callback                | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) (skip) + `entry_name_is_safe` |
-// | 20| `extract_7z_stream`'s callback              | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) (skip, recorded) + `entry_name_is_safe` |
-// | 21| `tar_unpack`                                | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) + **link-target containment** (both link kinds) (skip, recorded) |
-// | 22| `extract_tar_stream`                        | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) + **link-target containment** (both link kinds) (skip, recorded) |
+// | 18| the per-entry directory creation inside row 16's loop, shared by rows 15/23 | `create_dir_beneath` / `create_beneath` — the two `create_dir_all`s went with CPE-1913 | **archive-controlled** dir name under user dir | **per-component containment** + **handle-relative component walk** (skip) |
+// | 19| `extract_7z_safe`'s callback                | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) (skip) + `entry_name_is_safe`; **residual: a RACED component swap — planted only, see `entry_component_action`** |
+// | 20| `extract_7z_stream`'s callback              | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) (skip, recorded) + `entry_name_is_safe`; **residual: a RACED component swap — planted only, see `entry_component_action`** |
+// | 21| `tar_unpack`                                | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) + **link-target containment** (both link kinds) (skip, recorded); **residual: a RACED component swap — planted only, see `entry_component_action`** |
+// | 22| `extract_tar_stream`                        | `File::create`/`symlink` **inside `tar`** | **archive-controlled** name under user dir | `entry_name_is_safe` + leaf link + **per-component containment** + **handle-relative component walk** (CPE-1938) + **link-target containment** (both link kinds) (skip, recorded); **residual: a RACED component swap — planted only, see `entry_component_action`** |
 // | 23| `extract_archive`'s zip branch              | *row 16's loop* | **archive-controlled** name under user dir | row 16's, exactly — this row no longer has an extractor of its own (CPE-1759) |
 //
 // **Rows 21–23 are CPE-1773 + CPE-1774, and the table itself is why they were missing.** The version of
@@ -269,23 +269,36 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // link is written as an ordinary file whose contents are the target text. CPE-1746 already covers a link
 // **already sitting in `dest`** on that path, which is the other half.
 //
-// **The row count reconciles to the source.** `archive.rs` has 8 `create_dir_all` calls (re-counted
-// after CPE-1807, which removed three — one off row 17, two off row 18): 2 in row 1 (the shared root, and re-creating this session's own
-// root if another instance's sweeper removed it — CPE-1786), 3 in row 17 (the extraction `dest` roots —
-// down from 4: [`extract_zip_encrypted`] no longer creates `dest` itself, since CPE-1807 made it call
-// row 16's loop, which already does), 2 in row 18 (per-entry, inside row 16's loop — down from 4 for the
-// same reason: the old row-15 loop's own two per-entry calls are gone with it), **1 in row 21**
-// (`tar_unpack`'s, which is `tar::Archive::_unpack`'s own `dst` creation, reproduced along with the rest
-// of that loop — CPE-1773; it is a row-17-shaped call, on the same user-named `dest`, and shares row 17's
-// wording guard via `extraction_dest_error`), plus row 1's two exclusive `fs::create_dir`s (the session
-// root, then the per-extraction directory inside it). Rows 2–16 are the 12 `File::create` calls (down
-// from 13 — row 15 no longer owns one, for the same reason as row 18 above), the 1 `fs::write` and the 1
-// `create_new`. Rows 15/21–23 add no `File::create` of their own (row 15's and row 23's are row 16's, row
-// 21–22's write is `tar`'s), so the `File::create` count moves only when a row stops owning an extractor
-// — re-counted after CPE-1807 rather than assumed: 8, 12, 2, as above.
-// Row 18 was missing from the first version of this table, which
-// billed itself as the inventory — the count line exists so the next reader can check that claim in one
-// subtraction instead of trusting it (PR #906 review).
+// **The row count reconciles to the source**, and all three numbers were re-derived from the file for
+// CPE-1938 round 2 rather than carried forward. `archive.rs` has **6** `create_dir_all` calls: **2 in
+// row 1** (the shared root, and re-creating this session's own root if another instance's sweeper
+// removed it — CPE-1786), **3 in row 17** (the extraction `dest` roots — down from 4:
+// [`extract_zip_encrypted`] no longer creates `dest` itself, since CPE-1807 made it call row 16's loop,
+// which already does), and **1 in row 21** (`tar_unpack`'s, which is `tar::Archive::_unpack`'s own
+// `dst` creation, reproduced along with the rest of that loop — CPE-1773; it is a row-17-shaped call, on
+// the same user-named `dest`, and shares row 17's wording guard via `extraction_dest_error`). **Row 18
+// contributes none**: CPE-1913 replaced both of its per-entry calls with the handle-relative walk.
+// Plus row 1's **2** exclusive `fs::create_dir`s (the session root, then the per-extraction directory
+// inside it).
+//
+// Rows 2–14 are the **11** `File::create` calls, plus the 1 `fs::write` (row 5) and the 1 `create_new`
+// (row 7). Rows 15, 16 and 21–23 add none of their own: row 15's and row 23's write is row 16's loop,
+// rows 21–22's is `tar`'s, and **row 16's own went with CPE-1913**, which replaced it with
+// `claim_destination_handle` + `create_beneath`. So the `File::create` count moves only when a row
+// stops owning an extractor.
+//
+// **The numbers this line used to carry, and why that matters more than the arithmetic.** Until
+// CPE-1938 round 2 it read `8, 12, 2` and itemised "2 in row 18" — the pre-CPE-1913 counts, wrong on
+// both of the two numbers CPE-1913 changed, six lines above the rows CPE-1938 was editing, in a ticket
+// about enumerating rather than recalling. That is the **CPE-1933** shape exactly: a claim *about the
+// source* that no test reads the source to check, going quietly false while every green test around it
+// reads as vouching for it. It is stated rather than mechanised because the derivation a guard would
+// need — "which table row owns this call site" — is not in the source; if that changes, derive it.
+// Current, counted over the production half of this file (everything above `#[cfg(test)]`, comment
+// lines excluded): **6 `create_dir_all`, 11 `File::create`, 2 exclusive `fs::create_dir`.**
+// Row 18 was missing from the first version of this table, which billed itself as the inventory — the
+// count line exists so the next reader can check that claim in one subtraction instead of trusting it
+// (PR #906 review), which only works if the subtraction is redone whenever a call site moves.
 //
 // **Rows 19–20 are deliberately outside that arithmetic**: they own no `File::create` in this file. The
 // write is `sevenz_rust::default_entry_extract_fn`'s, and the guard is a **pre-call check in the callback
@@ -1488,8 +1501,16 @@ fn open_extraction_root(dest: &Path) -> Result<crate::open_beneath::RootDir, Str
 }
 
 /// **Every directory component of `name` must be a real directory, opened relative to the handle above
-/// it** — the question `confined_to` cannot ask, for the two legs that still hand their write to a
-/// third-party unpacker (CPE-1938, rows 19–22).
+/// it** — the question `confined_to` cannot ask, for the legs that hand their write to something this
+/// module does not own (CPE-1938, rows 19–22; CPE-1973, row 16's symlink sub-branch).
+///
+/// **Three callers, not two, and the third is why CPE-1973 exists.** Round 1 scoped this to "the two
+/// legs that still hand their write to a third-party unpacker" and treated the whole zip loop as
+/// already handle-gated by CPE-1913. It is not: `create_beneath` is called only in that loop's *file*
+/// branch and `create_dir_beneath` only under `entry.is_dir()`, so a zip **symlink** entry reached a
+/// by-path `symlink`/`remove_file` with its components unresolved. "The loop was converted" was read
+/// as "every branch of the loop was converted", and the one branch that was not is the one whose
+/// residual is a delete. Enumerate the branches, not the function.
 ///
 /// # The defect this closes, measured on Windows before it landed
 ///
@@ -1549,6 +1570,24 @@ fn open_extraction_root(dest: &Path) -> Result<crate::open_beneath::RootDir, Str
 /// between this walk and the unpacker's own resolution is **not** covered, and this comment is the
 /// record of that rather than a green test implying otherwise.
 ///
+/// **The raced residual puts archive bytes OUTSIDE the folder, and the numbers are here because
+/// round 1 framed the whole ticket as an inside-redirect** (CPE-1938 round 2, Security Auditor). It
+/// narrows the race; it does not close it. Real ext4, 40 trials × 500 entries, `renameat2`'s
+/// `RENAME_EXCHANGE` swapping `dest/sub` atomically so the component is **never absent**, target
+/// **outside** `dest`:
+///
+/// ```text
+///                  with this walk        with this walk disabled
+/// tar one-shot     8/40 trials,  10 entries escaped     9/40, 18 entries
+/// tar streamed     5/40 trials,   5 entries escaped    17/40, 28 entries
+/// ```
+///
+/// Planted goes 100% → 0%, which is the ticket's point; raced narrows ~2–5× and stays open. The
+/// attacker shape matters as much as the numbers: a **naive** remove-then-create racer makes the
+/// component briefly vanish, which this walk turns into a whole-run stop, so the naive attacker looks
+/// harmless and the atomic one does not. Rows 16 and 19–22 of the CPE-1733 table carry this as an
+/// explicit residual marker rather than advertising containment the legs do not have (CPE-1958).
+///
 /// It also materialises the chain it verified (`create_dir_beneath` creates missing levels inside the
 /// handle above them), so the unpacker's own `create_dir_all` finds real directories where it would
 /// otherwise have followed a link.
@@ -1573,6 +1612,33 @@ fn entry_component_action(
         // a permission or sharing answer is an I/O **failure** and takes the run down, because an entry
         // the filesystem refused for an I/O reason is a file the user asked for and did not get.
         Err(r) if r.policy => EntrySlotAction::Skip(r.why),
+        // **The Abort arm escalates severity relative to `main`, and that is deliberate — but it was
+        // uncovered, which is how it got through round 1** (CPE-1938 round 2, Security Auditor).
+        // Before this function existed, `confined_to` failing closed degraded a component it could not
+        // resolve to a per-entry **Skip**; this arm turns the same condition into failure of the whole
+        // archive, and the Auditor's first attacker hit it *by accident* with a transient `ENOENT`.
+        // The CPE-1929 pair came back green in both halves — full `--lib` at 2413/2 with the arm
+        // demoted to `Skip`, and 2413/2 unmodified — i.e. nothing in the suite could tell the two
+        // apart. `cpe1938_an_unopenable_extraction_folder_aborts_the_tar_and_7z_runs` looks like
+        // coverage and is not: it exercises `open_extraction_root`, a different call.
+        //
+        // **Why total denial is nonetheless right here, argued rather than assumed.**
+        // `create_dir_beneath` *creates* missing components, so `ENOENT` is not the ordinary
+        // "not there yet" case that a Skip would be the kind answer to — it means something removed a
+        // component out from under an extraction that is already in progress, which is precisely the
+        // concurrent-mutation attacker the rest of this ticket is about. Continuing to write into a
+        // destination that is being mutated underneath us is the worse failure. And the file branch
+        // one level down already returns `Err` on the same `Refusal::policy == false` class, so a Skip
+        // here would leave two branches disagreeing about one fact — the drift
+        // `Refusal::policy` exists to prevent. Covered now by
+        // `cpe1938_a_component_the_filesystem_refuses_for_an_io_reason_stops_the_run`, which forces a
+        // real `EACCES` rather than racing for one.
+        //
+        // **The wording complaint is real and deliberately NOT fixed here.** "could not be opened
+        // (No such file or directory)" reads as a permissions problem. The sentence is
+        // `open_beneath::refuse`'s, shared by the archive, transfer and revert legs and pinned by
+        // tests in all three, so re-wording it is its own change with its own blast radius rather than
+        // a line in this ticket.
         Err(r) => EntrySlotAction::Abort(r.why),
     }
 }
@@ -3748,12 +3814,28 @@ fn extract_zip_stream(
 ///    link-safe: it removes the name, it does not follow it). So both halves stay by path, together,
 ///    until `symlink_beneath` exists — which is the piece of work, not a call-site edit.
 ///
-///    **What is at risk in the meantime, stated rather than waved at:** an attacker who can swap a
-///    *directory* component of a link entry's name between [`link_target_action`] and
-///    `create_entry_symlink` gets a symlink created outside the root. It creates a link, never bytes
-///    — [`create_entry_symlink`] is exclusive-create, so it clobbers nothing — and the link's own
-///    target has already been contained. A planted (non-racing) link at a component is refused,
-///    because `link_target_action`'s `confined_to` resolves the whole path.
+///    **CPE-1973 corrected the bound this paragraph used to put on that, and the correction is the
+///    reason the paragraph is now this long.** It said a planted (non-racing) link at a component was
+///    refused "because `link_target_action`'s `confined_to` resolves the whole path", and that the
+///    residual "creates a link, never bytes — [`create_entry_symlink`] is exclusive-create, so it
+///    clobbers nothing". **Both were false, and each was false in the direction that made the branch
+///    look safe.** `confined_to` *does* resolve the whole path — through the plant — so an
+///    inside-pointing link at a component satisfies containment, which is this ticket's entire
+///    premise applied to the one leg round 1 exempted; and the exclusive-create's `AlreadyExists`
+///    retry is an `fs::remove_file` on a re-resolved path, so the residual was a **delete of a file
+///    the archive never named**, not a harmless extra link. Measured, `Ok(done: 2, skipped: 0,
+///    errors: [])` with the victim gone — see the comment at the walk itself.
+///
+///    A [`entry_component_action`] call now runs on this branch before anything by-path touches
+///    `out`, so a **planted** component link is refused here exactly as it is on the tar and 7z legs.
+///
+///    **What is genuinely at risk in the meantime, stated rather than waved at:** an attacker who can
+///    swap a *directory* component of a link entry's name **between that walk and
+///    `create_entry_symlink`** still gets a symlink created outside the root — the same raced residual
+///    rows 19–22 carry, and for the same reason (`symlinkat` does not exist here yet). The link's own
+///    target has already been contained, so the escape is a dangling name rather than archive bytes;
+///    the `fs::remove_file` retry remains reachable in that raced window, so "it clobbers nothing" is
+///    not claimed for it either.
 /// 2. ~~**The `#[cfg(unix)]` permission pass at the bottom**~~ — **fixed by CPE-1938.** It used to
 ///    collect `(path, mode)` for every written file and `fs::set_permissions` them after the loop.
 ///    `set_permissions` is `chmod(2)` and **follows links**, and the mode is the *archive's*, so a
@@ -3864,18 +3946,61 @@ fn extract_zip_archive_stream(
                     // archive anything — the same call `tar_entry_refusal` makes, see `EMPTY_LINK_SKIP`.
                     Some(EMPTY_LINK_SKIP.to_string())
                 } else {
-                    match link_target_action(dest, &out, &target) {
+                    // **CPE-1973 — the link entry's PARENT CHAIN, asked of handles, before anything
+                    // by-path touches `out`.** This branch had no component walk at all:
+                    // `create_beneath` is called only in the file branch below, `create_dir_beneath`
+                    // only under `entry.is_dir()`. A zip *symlink* entry was therefore the one shape
+                    // left in this loop reaching a by-path call with its components unresolved — which
+                    // the per-path table opposite wrongly recorded as "already handle-gated
+                    // (CPE-1913)", and which the residual note on this function wrongly bounded as
+                    // race-only.
+                    //
+                    // Measured on real ext4, before this walk existed, with a zip carrying the link
+                    // entry `sub/victim`, a **planted** (no race, no privilege) `dest/sub ->
+                    // dest/other`, and a real user file at `dest/other/victim`:
+                    //
+                    // ```text
+                    // outcome = Ok(ArchiveReport { done: 2, failed: 0, skipped: 0, errors: [] })
+                    // dest/other/victim is now a symlink: true   target: Some("benign.txt")
+                    // its content reads back as: None            <- the user's file was DELETED
+                    // ```
+                    //
+                    // `confined_to` canonicalises `dest/sub/victim` **through** the planted link,
+                    // lands inside `dest/other` and so answers *inside* — the exact blind spot this
+                    // ticket exists for. `materialise_entry_symlink`'s `AlreadyExists` retry then
+                    // re-resolves `sub` through the link and `fs::remove_file`s a file the archive
+                    // never named. The old note called that retry harmless because
+                    // `create_entry_symlink` is exclusive-create; **the retry IS the clobber, and it
+                    // is a delete.** Regression:
+                    // `cpe1973_a_zip_symlink_entry_is_never_created_through_a_planted_component_link`.
+                    //
+                    // **This does not shadow `link_target_action`, and they are not one question**
+                    // (CPE-1929). The walk asks whether the entry's *name* stays inside, by opening
+                    // each component; `link_target_action` asks whether the link's *target* escapes,
+                    // which no walk can see. A top-level `evil_link -> ../../etc/passwd` has an empty
+                    // component chain and is refused only by the second; a planted `dest/sub` is
+                    // refused only by the first. Both stay, and each is red-proofed on its own shape.
+                    let chain = match entry_component_action(&root, &name, false) {
                         EntrySlotAction::Write => None,
                         EntrySlotAction::Skip(m) => Some(m),
-                        // Propagated, not collapsed with `Skip` — CPE-1814. This is the identical
-                        // construct `tar_entry_refusal` collapsed before CPE-1759: dead today (only
-                        // `link_target_action` feeds it, and that function returns `Write`/`Skip` only,
-                        // never `Abort`), and dead is exactly what it was there too, until a new feeder
-                        // made the collapsed arm live and an entry started silently skipping where the
-                        // rule (`EntrySlotAction`'s own doc) says it must abort — UAT finding 6.
-                        // Matching it explicitly, rather than folding it back into `Skip`, is what keeps
-                        // a future feeder honest instead of reintroducing that bug a third time.
                         EntrySlotAction::Abort(e) => return Err(e),
+                    };
+                    match chain {
+                        Some(m) => Some(m),
+                        None => match link_target_action(dest, &out, &target) {
+                            EntrySlotAction::Write => None,
+                            EntrySlotAction::Skip(m) => Some(m),
+                            // Propagated, not collapsed with `Skip` — CPE-1814. This is the identical
+                            // construct `tar_entry_refusal` collapsed before CPE-1759: dead today (only
+                            // `link_target_action` feeds it, and that function returns `Write`/`Skip`
+                            // only, never `Abort`), and dead is exactly what it was there too, until a
+                            // new feeder made the collapsed arm live and an entry started silently
+                            // skipping where the rule (`EntrySlotAction`'s own doc) says it must abort
+                            // — UAT finding 6. Matching it explicitly, rather than folding it back into
+                            // `Skip`, is what keeps a future feeder honest instead of reintroducing
+                            // that bug a third time.
+                            EntrySlotAction::Abort(e) => return Err(e),
+                        },
                     }
                 };
                 let refusal = match refusal {
@@ -3947,8 +4072,36 @@ fn extract_zip_archive_stream(
             // **Applying it here rather than after the loop loses nothing.** The deferral existed to
             // apply a directory's mode after its children (`zip`'s own `Reverse(path)` sort), and this
             // loop never recorded a directory: the push was inside the file branch, so `modes` only
-            // ever held leaves. A leaf's mode cannot make anything else unwritable, and the descriptor
-            // stays writable across its own `fchmod` regardless of what the new mode says.
+            // ever held leaves. The descriptor stays writable across its own `fchmod` regardless of
+            // what the new mode says.
+            //
+            // **"A leaf's mode cannot make anything else unwritable" is the sentence that used to close
+            // this paragraph, and it is true across paths but not across entries that share a NAME** —
+            // so it was replaced with the measurement rather than narrowed on reasoning (CPE-1938
+            // round 2). Applying a read-only mode inline means a *later* entry resolving to the same
+            // on-disk name meets a 0o444 file: `create_beneath`'s `O_CREAT|O_EXCL` gets `EEXIST`, the
+            // open-existing retry gets `EACCES`, and `Refusal::policy == false` takes the whole run
+            // down where the deferred drain would have landed both. Measured on real ext4 (`TMPDIR`
+            // off tmpfs), hand-built STORED zips because `ZipWriter::start_file` refuses a duplicate
+            // name outright (`InvalidArchive("Duplicate filename")`):
+            //
+            // ```text
+            // [x.txt 0o444, x.txt 0o644, zz_ok.txt]  reader lists ["x.txt", "zz_ok.txt"]
+            //                                        Ok(done: 2)  x.txt = "SECOND", mode 0o644
+            // [x.txt 0o644, x.txt 0o644, zz_ok.txt]  Ok(done: 2)  x.txt = "SECOND", mode 0o644
+            // [a.txt 0o444, b.txt, sub/c.txt]        Ok(done: 3)  all three land
+            // ```
+            //
+            // **The duplicate case never reaches the loop: `zip::ZipArchive` collapses duplicate names
+            // in its central directory**, so `archive.len()` is 2 for a three-entry archive and the
+            // last copy wins — identically with and without the read-only mode. The read-only leaf
+            // followed by *different* later entries (row 3) is the shape that does occur, and it is
+            // unaffected, which is the part the old sentence got right.
+            //
+            // **Re-extraction into the same folder is a real behaviour, and it is not this change's.**
+            // A second run over a 0o444 leaf fails with the component wording and `os error 13`; it
+            // failed identically before, because the deferred drain still left the file 0o444 at the
+            // end of the first run. Same on `main`, measured, so nothing here made it worse.
             #[cfg(unix)]
             if let Some(mode) = entry.unix_mode() {
                 use std::os::unix::fs::PermissionsExt;
@@ -10077,9 +10230,17 @@ mod tests {
     ///
     /// **The link is planted at the REAL destination**, `dest/sub`, not at a stand-in inside a
     /// `tempfile::tempdir()`: a stand-in is unreachable by the production code and every assertion about
-    /// it is unfalsifiable (CPE-1929). `make_dir_link` carries `supported_here = true`, so a runner that
-    /// cannot plant a directory link **panics** rather than skipping — a control that silently returns
-    /// green because it could not stage its own fixture proves nothing, invisibly (CPE-1952 round 2).
+    /// it is unfalsifiable (CPE-1929). A runner that cannot plant a directory link **fails** rather
+    /// than skipping — a control that silently returns green because it could not stage its own fixture
+    /// proves nothing, invisibly (CPE-1952 round 2).
+    ///
+    /// **The failure comes from the `assert!` below, not from `make_dir_link` itself, and the
+    /// distinction is CI-vs-local.** `make_dir_link` carries `supported_here = true`, so
+    /// `fsutil::require_staged` panics on a staging failure only when `staging_is_strict()` — which
+    /// follows `$CI` (and `CPE_STAGING_STRICT`). On a developer's machine it returns **`false`**
+    /// instead, which is the deliberate loud-skip path for an environment the mechanism genuinely
+    /// cannot work in. Wrapping the call in `assert!` is what makes the outcome red **either way**, so
+    /// this fixture is never the thing that quietly certifies nothing.
     fn stage_inside_pointing_dir_link(
         tag: &str,
         kind: &str,
@@ -10508,16 +10669,38 @@ mod tests {
     /// run is not asserted here — it is the sabotage measurement below, which is where timing evidence
     /// belongs.
     ///
-    /// # Setuid, and what is measured versus inferred
+    /// # Setuid — measured, not inferred (CPE-1938 round 2, Security Auditor)
     ///
-    /// The ticket names setuid as the worst case. This fixture cannot request it: `zip`'s writer masks
+    /// The ticket names setuid as the worst case. *This* fixture cannot request it: `zip`'s writer masks
     /// with `& 0o777` (`FileOptions::unix_permissions`, and its own `unix_permissions_bitmask` test says
-    /// so), so a fixture built through that API tops out at `0o777`. The *reader* has no such mask —
-    /// `ZipFile::unix_mode` returns the archive's external attributes — so a hand-built archive can
-    /// carry `S_ISUID` and the old pass would have applied it. **Measured here: 0o644 -> 0o777 on a file
-    /// outside the root. Inferred, not measured: the same with the setuid bit set.** Said plainly rather
-    /// than laundered into the measurement, which is the discipline the ticket itself asked for over the
-    /// 7z half.
+    /// so), so a fixture built through that API tops out at `0o777`. **That mask is the writer's, not the
+    /// format's** — `ZipFile::unix_mode` returns the archive's external attributes unmasked — so a
+    /// hand-built STORED archive carrying external attributes `0o104755` answers the question directly.
+    /// Round 1 wrote "inferred, not measured" here; round 2 measured it, on real ext4 with `TMPDIR`
+    /// pointed off `/tmp` (see the methodology note below):
+    ///
+    /// ```text
+    /// reader + extractor:  dest/a.txt lands as 0o4755        <- setuid is archive-controllable, end to end
+    /// old primitive through a planted link: victim outside the root 0o644 -> 0o4755
+    /// end to end, with `main`'s deferred path-addressed drain restored:
+    ///     trials=20  swaps=20  MODES_CHANGED_OUTSIDE=20  SETUID_OUTSIDE=20
+    /// this branch, unmodified:
+    ///     trials=20  swaps=20  MODES_CHANGED_OUTSIDE=0   SETUID_OUTSIDE=0
+    /// ```
+    ///
+    /// So F-B was a **privilege-escalation primitive on `main` at 20/20**, not merely a mode change,
+    /// and this branch closes it.
+    ///
+    /// **The honest scope, which the numbers do not by themselves give.** `chmod(2)` succeeds only for
+    /// the file's owner, so the victim must be owned by the extracting user. Extracting as root or as a
+    /// service account makes this fatal; between two files of the same unprivileged user it is an
+    /// integrity problem rather than an escalation. Stated here rather than left for the reader to
+    /// infer in the generous direction.
+    ///
+    /// **Methodology note, because it silently invalidates a "real ext4" claim.**
+    /// `std::env::temp_dir()` is `/tmp`, and on WSL `/tmp` is **tmpfs**, not ext4. Every number above
+    /// was taken with `TMPDIR` overridden to an ext4 path; a run that does not override it is measuring
+    /// tmpfs and should not be labelled otherwise.
     ///
     /// # Red-proof (CPE-1929's pair, run by hand on this branch)
     ///
@@ -10525,7 +10708,10 @@ mod tests {
     ///   `fs::set_permissions` loop, byte for byte as `main` had it): **red**, `MODES_CHANGED_OUTSIDE =
     ///   19 of 20` trials, on real ext4. Nineteen and not twenty because this test's filler is a
     ///   quarter of the standalone measurement's, so one trial's swapper lost a shorter window; the
-    ///   assertion is `== 0`, so a single escape is still red.
+    ///   assertion is `== 0`, so a single escape is still red. **Round 2's independent re-run of the
+    ///   same sabotage came back 20/20** (Security Auditor, `TMPDIR` on ext4) — hotter, not cooler, so
+    ///   the "one trial lost the window" reading is a floor rather than a ceiling and the 19 should not
+    ///   be quoted as the rate.
     /// - **Force the predicate to lie**: this guard has no predicate to falsify — it is an *addressing*
     ///   change, not a test. `f.set_permissions` cannot be made to consult a name. The honest analogue
     ///   is the first sabotage plus `cpe1938_the_old_path_addressed_mode_pass_chmods_through_a_planted_link`,
@@ -10612,5 +10798,158 @@ mod tests {
              run where nothing was ever swapped in would report zero escapes no matter what the \
              extraction did. The fix does not prevent the swap — it makes it irrelevant"
         );
+    }
+
+    /// **CPE-1938 round 2: a component the filesystem refuses for an I/O reason stops the whole run,
+    /// and this is the test that says so.**
+    ///
+    /// [`entry_component_action`]'s non-policy arm — `Err(r) => Abort` — was **uncovered**: the
+    /// Security Auditor's CPE-1929 pair came back green in both halves (full `--lib` 2413/2 with the
+    /// arm demoted to `Skip`, 2413/2 unmodified), so nothing in the suite could tell an abort from a
+    /// skip there. It is an escalation relative to `main`, where `confined_to` failing closed degraded
+    /// the same condition to a per-entry skip, so it is exactly the arm that must not be taken on
+    /// trust. The argument for keeping it an abort is at the arm itself; this is the coverage.
+    ///
+    /// **A forced `EACCES`, not a raced `ENOENT`.** The Auditor reached this arm by accident, with a
+    /// transient — which is evidence the arm is *reachable* but useless as a regression test. Making
+    /// `dest` `r-xr-xr-x` after it exists leaves `open_extraction_root` able to open it for read (so
+    /// the run gets past that, and this test cannot be satisfied by the *other* abort at
+    /// `cpe1938_an_unopenable_extraction_folder_aborts_the_tar_and_7z_runs`) while `mkdirat` of the
+    /// entry's `sub` component fails deterministically.
+    ///
+    /// Unix-only, and the deny is **verified rather than assumed**: `chmod` is advisory for `root`, so
+    /// a container running as uid 0 would silently turn this into a green test that proves nothing
+    /// (CPE-1717). The probe below turns that into a loud skip instead.
+    #[cfg(unix)]
+    #[test]
+    fn cpe1938_a_component_the_filesystem_refuses_for_an_io_reason_stops_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("cpe1938-io-refusal");
+        let stage = d.join("stage");
+        fs::create_dir_all(stage.join("sub")).unwrap();
+        fs::write(stage.join("sub").join("leaf.txt"), b"ARCHIVED LEAF").unwrap();
+        let archive = d.join("in.tar.gz");
+        compress_to_targz(
+            &[stage.join("sub").to_string_lossy().to_string()],
+            &archive.to_string_lossy(),
+        )
+        .unwrap();
+
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o555)).unwrap();
+        // Is the deny real on this machine? Running as root ignores it, and a green run would then be
+        // vacuous — a loud skip, never a silent pass (Evidence Rules).
+        if fs::create_dir(dest.join("probe")).is_ok() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "cpe1938_a_component_the_filesystem_refuses_for_an_io_reason_stops_the_run: SKIPPED — \
+                 a 0o555 directory is still writable here (running as root?), so the I/O refusal this \
+                 test needs cannot be staged"
+            );
+            let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755));
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let err = extract_archive(&archive.to_string_lossy(), &dest.to_string_lossy())
+            .expect_err("an I/O refusal at a component must stop the run, not be skipped past");
+        assert!(
+            err.contains("could not be opened") || err.contains("Permission denied"),
+            "the abort must name the component and the reason: {err}"
+        );
+
+        let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------
+    // CPE-1973 — the ZIP symlink-entry branch had no component walk
+    // -----------------------------------------------------------------------
+
+    /// **CPE-1973: a zip SYMLINK entry addressed through a planted, inside-pointing directory link is
+    /// refused, and the file the link points at is left alone.**
+    ///
+    /// This is CPE-1938's defect on the one leg CPE-1938's first round said was already covered. The
+    /// per-path table recorded rows 15/16/23 as "already handle-gated (CPE-1913)" and the residual note
+    /// bounded the exposure to a *race* — but `create_beneath` is called only in the file branch and
+    /// `create_dir_beneath` only under `entry.is_dir()`, so the symlink sub-branch reached a by-path
+    /// `symlink` with its components unresolved. No race and no privilege are needed.
+    ///
+    /// **The harm is a DELETE, not a redirect**, which is why this is worse than the file-branch shape
+    /// it mirrors. Measured on real ext4 against the branch before the walk was added, with
+    /// `dest/other/victim` holding a real user file:
+    ///
+    /// ```text
+    /// outcome = Ok(ArchiveReport { done: 2, failed: 0, skipped: 0, cancelled: false, errors: [] })
+    /// dest/other/victim is now a symlink: true      link target: Some("benign.txt")
+    /// its content reads back as: None               <- the user's file was DELETED
+    /// ```
+    ///
+    /// `link_target_action` cannot catch it: `confined_to` canonicalises `dest/sub/victim` *through*
+    /// the plant, lands in `dest/other`, and truthfully answers "inside". Then
+    /// `materialise_entry_symlink` hits `AlreadyExists` and its `fs::remove_file(out)` re-resolves
+    /// `sub` through the link. The old note called that retry harmless on the grounds that
+    /// `create_entry_symlink` is exclusive-create; the retry is the clobber.
+    ///
+    /// **Runs on all three OSes.** The plant is `make_dir_link` (a privilege-free junction on Windows),
+    /// and the refusal happens at the component walk, *before* `create_entry_symlink` — so this needs
+    /// no symlink-creation privilege anywhere, unlike the entry it refuses.
+    ///
+    /// `ok.txt` is the bystander: it is what separates "skipped the one entry" from "abandoned the
+    /// run", and it is why this asserts `done == 1` rather than only that the victim survived.
+    #[test]
+    fn cpe1973_a_zip_symlink_entry_is_never_created_through_a_planted_component_link() {
+        let d = scratch("cpe1973-zip-symlink-component");
+        let zp = d.join("in.zip");
+        fs::write(&zp, craft_zip_with_symlink("sub/victim", "benign.txt")).unwrap();
+
+        let dest = d.join("out");
+        let other = dest.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let victim = other.join("victim");
+        fs::write(&victim, b"USER FILE").unwrap();
+
+        assert!(
+            crate::fsutil::make_dir_link(&other, &dest.join("sub")),
+            "could not plant a directory link at {} — every assertion below would be vacuous, so this \
+             is a failure rather than a skip (CPE-1717)",
+            dest.join("sub").display()
+        );
+        // Liveness: the plant must really redirect, or the fixture certifies nothing (CPE-1952 r2).
+        fs::write(dest.join("sub").join("liveness.txt"), b"through").unwrap();
+        assert_eq!(
+            fs::read(other.join("liveness.txt")).ok().as_deref(),
+            Some(&b"through"[..]),
+            "the fixture is inert: the link at dest/sub does not redirect"
+        );
+
+        let outcome = extract_archive(&zp.to_string_lossy(), &dest.to_string_lossy())
+            .expect("a refused link entry is a skip, not a failure of the whole archive");
+
+        // The harm, first and on its own terms: the user's file is still there, still a file.
+        assert_eq!(
+            fs::read(&victim).ok().as_deref(),
+            Some(&b"USER FILE"[..]),
+            "the archive's link entry reached {} through the planted link and destroyed a file the \
+             archive never named",
+            victim.display()
+        );
+        assert!(
+            !fs::symlink_metadata(&victim).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "{} was replaced by the archive's symlink",
+            victim.display()
+        );
+        // And it was a per-entry verdict, not a whole-run abort: the bystander still landed.
+        assert_eq!(outcome.report.done, 1, "the bystander entry should still extract");
+        assert_eq!(outcome.report.skipped, 1, "the link entry should be a counted, recorded skip");
+        assert!(
+            outcome.report.errors.iter().any(|e| e.contains(CONTAINMENT_MARKER)
+                || e.contains("could not be opened")
+                || e.contains("stands in for another name")),
+            "the skip must say why, in the component walk's own wording: {:?}",
+            outcome.report.errors
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 }
