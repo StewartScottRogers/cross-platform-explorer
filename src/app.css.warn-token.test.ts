@@ -256,10 +256,14 @@ function scanFallbackCalls(content: string): { token: string; fallback: string }
  *      token reference. `--undefinedToken` is dead weight (an odd, never-populated first choice)
  *      but every render already resolves through to `--realToken`'s correctly-themed value in every
  *      theme, so this is NOT the masking bug — nothing ever silently locks to an untheed literal.
- *      `--agent-accent` (FileList.svelte, `var(--agent-accent, var(--agent-unknown))`),
- *      `--accent-soft` (IcalPreview.svelte, `var(--accent-soft, var(--surface))`) and `--surface-2`
- *      (DiffPeek.svelte, `var(--surface-2, var(--surface, #181818))`) are the current instances —
- *      already investigated and explicitly ruled out as "not this bug" by CPE-1876's own UAT pass.
+ *      `--agent-accent` (FileList.svelte, `var(--agent-accent, var(--agent-unknown))`) and
+ *      `--surface-2` (DiffPeek.svelte, `var(--surface-2, var(--surface, #181818))`) are the current
+ *      instances — already investigated and explicitly ruled out as "not this bug" by CPE-1876's own
+ *      UAT pass. `--accent-soft` (IcalPreview.svelte's `.cp-badge`) was a third until CPE-1919
+ *      removed it: not because it was masking anything, but because that badge's ground is an input
+ *      to a pinned contrast ratio, and a never-populated first choice sitting in front of the real
+ *      ground is a trapdoor — defining `--accent-soft` later would move the ground and invalidate
+ *      the ratio with no test to notice.
  */
 function fallbackIsLiveChain(fallback: string, semanticDeclsByTheme: Map<string, string>[]): boolean {
   const chain = fallback.match(/^var\(\s*(--[a-zA-Z0-9-]+)\s*(?:,[\s\S]*)?\)$/);

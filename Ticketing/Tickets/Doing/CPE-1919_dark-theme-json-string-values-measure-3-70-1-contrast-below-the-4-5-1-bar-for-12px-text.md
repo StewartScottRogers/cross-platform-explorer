@@ -196,3 +196,58 @@ hover *raises* contrast to ~5.38:1 (`--surface-alt` is darker than `--surface`),
 outline chip.
 
 Ratchets still all 12 unchanged. `npm run check` clean; `npm test` 346 files / 4940 passing.
+
+### 2026-08-27 — review round 2 on #1069: I shipped a wrong contrast ratio into CLAUDE.md
+
+**The blocker was mine and it was the ticket's own defect, one level up.** I wrote "white on
+`--accent-text` is 3.53:1 (dark) / 1.90:1 (hc-dark)" in four places — `src/app.css` twice, the guard
+test's header, and **`CLAUDE.md`**, the repo's primary convention doc. Both numbers were estimated,
+not measured. Run through the very `contrastRatio` the guard uses:
+
+| pair | I wrote | actual |
+|---|---|---|
+| `#ffffff` on `#3aa0f0` (dark `--accent-text`) | 3.53:1 | **2.81:1** |
+| `#ffffff` on `#72abdf` (hc-dark) | 1.90:1 | **2.44:1** |
+| `#ffffff` on `#0078e0` — control | — | **4.41:1**, matching CPE-1632's independent record |
+
+The conclusion holds *harder* — both true values are further under the 3:1 floor — but as written the
+dark sentence **contradicted itself**: 3.53 is above the floor I cited it as being below. A
+maintainer reading CLAUDE.md would have got a number saying the opposite of the sentence around it.
+In a PR whose thesis is "a ratio recorded at the wrong bar reads like coverage", that is the same
+defect in the prose. All four corrected, each site now carrying why the distinction earned a
+sentence: measure, don't recall.
+
+**The guard claimed a mechanism it did not have.** The header said assertion (a) made "a token
+missing from one theme loud rather than silently inherited". The reviewer deleted `--accent-text`
+from the `hc-dark` block: `hc-contrast`, `app.css.test`, `warn-token` **and (a) itself** all stayed
+green — `tokenHex` resolved the bare `:root` value through the palette map and got a valid hex. Only
+the ratio tests caught it, because the inherited light blue then measured 3.70/3.43/3.07 in hc-dark.
+Safe by luck: had the inherited value cleared the bar, the omission would have shipped.
+
+Rather than soften the claim I added the mechanism — a second assertion that each theme block
+**declares** the token itself, not merely resolves it. Red-proofed by repeating the reviewer's
+deletion: it now fails with `--accent-text missing from the block(s): hc-dark`. Recorded at the site,
+because it is worth knowing generally: **this repo has no general theme-parity guard.**
+`app.css.test.ts` checks bare `:root` vs light only; the dark and hc guards each check their own
+theme against a hand-kept fixture a new token never gets added to.
+
+**Two more, both taken.** `src/docs/35-appearance.md` said string values "used to sit at 3.7:1 —
+visibly dim against the preview pane": 3.7 is the `--bg` reading, so that sentence re-committed the
+exact `--bg`-vs-`--surface` conflation this PR corrects. Now **3.2:1 against the pane** — truer and
+more damning. And `IcalPreview .cp-badge` painted `background: var(--accent-soft, var(--surface))`
+where **`--accent-soft` is defined nowhere in the repo**. Harmless today, and the fallback is what
+makes that badge's pinned 5.03:1 correct — but a never-populated first choice sitting in front of a
+ground that feeds a pinned ratio is a trapdoor: define `--accent-soft` later and the ratio silently
+goes wrong with nothing to catch it. Now `background: var(--surface)`, with `warn-token.test.ts`'s
+"current instances" comment updated so it does not name an instance that no longer exists.
+
+**Count settled at eight** (two reported + five behind the `var(--accent, <fallback>)` spelling +
+`AboutDialog .link:hover` on `--accent-hover`), broken out in the guard comment rather than left as a
+bare total, since two different sevens were circulating.
+
+**One latent hole recorded, not fixed:** the sweep's `(?<![-\w])color` lookbehind also rejects
+`-webkit-text-fill-color`, `text-decoration-color` and `caret-color`, which *are* text roles. None
+exists anywhere in `src/`, so it is a hole in the net rather than a fish through it — but a
+fail-closed allowlist exists to catch the next person, so the comment tells them to widen the match.
+
+Ratchets still all 12 unchanged. `npm run check` clean; `npm test` 346 files / 4947 passing.

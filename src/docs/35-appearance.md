@@ -51,7 +51,7 @@ text to sit on is too dark to read as small text on a dark background.
 
 The practical effect: accent-tinted text meets the WCAG AA contrast bar (4.5:1 for normal text) on
 every background it's painted on, in every Theme and Contrast combination. In the Dark theme, JSON
-string values used to sit at 3.7:1 — visibly dim against the preview pane — and now measure 5.0:1
+string values used to sit at 3.2:1 against the preview pane — visibly dim — and now measure 5.0:1
 or better. Buttons and focus rings are unchanged.
 
 ## What's next

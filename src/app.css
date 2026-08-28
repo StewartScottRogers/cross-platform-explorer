@@ -423,8 +423,13 @@
      .jt-row:hover fill). Deliberately the DARKEST value on that hue line that still clears 4.5:1
      everywhere, so it stays maximally separated from --text (#f3f3f3, the number/boolean values
      beside it: 2.53:1) and unmistakably not --text-dim (#c5c5c5, the keys). Pinned by
-     src/app.css.accent-text-contrast.test.ts. Not a solid-fill colour: white on it is only 3.53:1,
-     so never repoint --accent at this. */
+     src/app.css.accent-text-contrast.test.ts. Not a solid-fill colour: white on it is 2.81:1, under
+     WCAG 1.4.11's 3:1 UI floor, so never repoint --accent at this. (Measured with the same
+     relativeLuminance/contrastRatio the guard uses, calibrated against CPE-1632's independently
+     recorded white-on-#0078e0 = 4.41:1. A first draft of this comment said 3.53:1 from estimate
+     rather than measurement, which would have put the number ABOVE the floor the sentence cites it
+     as being below — the exact "a contrast number recorded at the wrong bar reads like coverage"
+     failure this ticket is about, one level up in the prose. Measure, don't recall.) */
   --pal-dark-blue-350: #3aa0f0; /* accent-text */
 
   /* CPE-1632: --danger/--danger-hover have the same two-role tension as --accent above — (a)
@@ -667,7 +672,9 @@
      --bg/--surface/--surface-alt — it fails even plain AA on the hover fill, and is nowhere near
      this theme's AAA-inspired >=7:1 text bar. Brightened until it clears 7:1 on every painted
      surface: 8.61 on #000000 / 7.97 on #0d0d0d / 7.13 on #1a1a1a. Text role only — white on it is
-     1.90:1, so this must never back a solid fill. */
+     2.44:1, under WCAG 1.4.11's 3:1 UI floor, so this must never back a solid fill. (Measured, not
+     estimated — see --pal-dark-blue-350's note above for why that distinction earned its own
+     sentence.) */
   --pal-hc-dark-blue-250: #72abdf;    /* accent-text */
 
   /* CPE-1649: hc-dark's --danger has the SAME two-role tension as --accent above, but here the

@@ -27,9 +27,21 @@
 //      "painted surfaces" below — and fails if that CSS moves out from under it.
 //
 // WHAT THIS FILE ASSERTS. Four things:
-//   (a) --accent-text resolves to a concrete hex in all five live theme selectors (bare :root,
-//       light, dark, hc-light, hc-dark) — the hard-failure shape src/app.css.warn-token.test.ts
-//       established, so a token missing from one theme is loud rather than silently inherited.
+//   (a) --accent-text is DECLARED BY EACH of the five live theme selectors (bare :root, light,
+//       dark, hc-light, hc-dark) in its own block, and resolves there to a concrete hex.
+//       The declaration half was added in review, because the resolution half alone did not do what
+//       this comment originally claimed. A reviewer deleted --accent-text from the hc-dark block:
+//       hc-contrast.test.ts, app.css.test.ts and warn-token.test.ts all stayed GREEN, and so did
+//       this test — `tokenHex` falls back to the palette layer, and the bare :root semantic block's
+//       own --accent-text (#0067c0) is in that map, so a hex came back and the assertion passed.
+//       Only the RATIO tests (b)/(c) caught it, because the inherited light blue then measured
+//       3.70/3.43/3.07 in hc-dark. Safe by luck, not by design: had the inherited value happened to
+//       clear the bar, the omission would have shipped silently.
+//       Worth stating plainly, since it surprised everyone who looked: THERE IS NO GENERAL
+//       THEME-PARITY GUARD IN THIS REPO. app.css.test.ts checks bare :root vs light only;
+//       dark-contrast.test.ts and hc-contrast.test.ts each check their own theme against a
+//       hand-kept SEMANTIC_TOKENS fixture that a new token is not added to. So parity for any token
+//       outside those fixtures holds only where a test like this one asserts it by name.
 //   (b) --accent-text clears the text bar on every painted surface in every theme.
 //   (c) EVERY colour role the JSON preview paints — not just the string value that was reported —
 //       clears the text bar on every painted surface in every theme, with the role list DERIVED by
@@ -38,9 +50,16 @@
 //       list would not have been, and the sibling roles beside the reported one are exactly where
 //       nobody had looked.
 //   (d) --accent-text is never used as a `background`. It is deliberately the brightest of the
-//       accent family and white on it is only 3.53:1 (dark) / 1.90:1 (hc-dark) — under WCAG
+//       accent family and white on it is 2.81:1 (dark) / 2.44:1 (hc-dark) — both under WCAG
 //       1.4.11's 3:1 UI floor — so the inverse misuse is a real regression, and this is the same
 //       "a token calibrated for one role, used in another" mistake that caused CPE-1919 itself.
+//       Those two numbers were 3.53 and 1.90 in the first draft, written from estimate rather than
+//       run through the contrastRatio below. 3.53 is ABOVE the floor the sentence cites it as being
+//       under, i.e. the prose asserted its own opposite — in a file whose entire thesis is that a
+//       ratio recorded at the wrong bar reads like coverage. Both corrected values are calibrated
+//       against CPE-1632's independently recorded white-on-#0078e0 = 4.41:1, which this file's math
+//       reproduces exactly. Measure, don't recall — the same rule the code enforces applies to the
+//       comments about the code.
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -216,13 +235,28 @@ const JSON_TREE_ROLES = JSON_TREE_FILES.flatMap(colorRolesOf);
 const JSON_TREE_TOKENS = [...new Set(JSON_TREE_ROLES.map((r) => r.token))].sort();
 
 describe("--accent-text (CPE-1919): the accent's body-text role, split out of --accent", () => {
+  // Two separate assertions on purpose, because they fail for different reasons and only one of
+  // them used to exist. DECLARED is the strict half: the theme's own block must carry the token.
+  // Deleting it from a theme block leaves the token perfectly RESOLVABLE — `tokenHex` finds the
+  // bare :root value through the palette layer and hands back a valid hex — so the resolution
+  // assertion below cannot see the omission at all. See this file's header, item (a).
+  it("is declared by every live theme selector's own block (not inherited through the palette layer)", () => {
+    const undeclared = THEMES.filter((t) => !t.decls.has("--accent-text")).map((t) => t.label);
+    expect(
+      undeclared,
+      `--accent-text missing from the block(s): ${undeclared.join(", ")}. A theme that does not ` +
+        `declare it still RESOLVES — through the bare :root value in the palette map — so it would ` +
+        `silently paint another theme's blue rather than failing. Declare it per theme.`,
+    ).toEqual([]);
+  });
+
   it("resolves to a concrete hex in every live theme selector", () => {
     const unresolved = THEMES.map((t, i) => [t.label, tokenHex(i, "--accent-text")] as const).filter(
       ([, hex]) => !hex || !/^#[0-9a-fA-F]{6}$/.test(hex),
     );
     expect(
       unresolved.map(([label, hex]) => `${label} -> ${hex ?? "(unresolved)"}`),
-      "--accent-text must resolve in every theme; an unresolved token silently inherits another theme's value",
+      "--accent-text must resolve to a hex in every theme (e.g. it must not point at a --pal-* var that does not exist)",
     ).toEqual([]);
   });
 
@@ -338,7 +372,11 @@ describe("JSON preview palette (CPE-1919): every colour role, every surface, eve
 // `.repo-crumb` (12px, 3.21:1, sitting directly under a sibling that HAD been migrated, so one panel
 // showed two different blues) and `.pill.surf` (10px on --surface-alt, 3.43:1 — smaller text at
 // worse contrast than the case the ticket was filed for); widening the sweep past the bare
-// `var(--accent)` spelling then found five more hiding behind the `var(--accent, <fallback>)` idiom.
+// `var(--accent)` spelling then found five more hiding behind the `var(--accent, <fallback>)` idiom,
+// and one more (`AboutDialog .link:hover`) on `--accent-hover`. EIGHT call sites in total: two
+// reported, five behind the fallback spelling, one on the hover token. (Both "seven"s in the review
+// thread counted a different seven of those eight, which is exactly why the number is broken out
+// here rather than left as a total.)
 //
 // A per-surface guard could never have found those: it can only measure surfaces someone thought to
 // point it at, which is the same shape of blind spot as measuring a token at the loosest of its
@@ -368,11 +406,18 @@ const ICON_ROLES: { file: string; selector: string; note: string }[] = [
 
 /** Every `color:` declaration in a stylesheet/component whose value references `--accent` or
  *  `--accent-hover`, in either spelling (bare `var(--accent)` or `var(--accent, <fallback>)` — the
- *  second spelling is where five of this round's seven findings were hiding), paired with the
+ *  second spelling is where five of this round's eight findings were hiding), paired with the
  *  selector of the rule it sits in. `--accent-text`/`--accent-fg`/`--accent-2` are different tokens
  *  and deliberately do not match (the `[,)]` terminator is what excludes them).
  *  `border-color`/`background-color`/`outline-color` are excluded by the lookbehind — those are the
- *  non-text roles `--accent` exists for. */
+ *  non-text roles `--accent` exists for.
+ *
+ *  KNOWN HOLE, latent rather than live (found in review): that same lookbehind also rejects
+ *  `-webkit-text-fill-color`, `text-decoration-color` and `caret-color`, all of which ARE text roles
+ *  and would slip past this sweep. None of the three appears anywhere in `src/` today, so this is a
+ *  hole in the net rather than a fish through it — but a fail-closed allowlist earns its keep by
+ *  catching the NEXT person, so if you are adding the repo's first one, widen the property match
+ *  below to include it rather than assuming this sweep already saw you. */
 function accentColorRoles(label: string, source: string): { file: string; selector: string; decl: string }[] {
   const clean = stripComments(source);
   const out: { file: string; selector: string; decl: string }[] = [];

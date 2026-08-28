@@ -101,7 +101,8 @@ work. Observed 2026-08-20: `package-lock.json` had been three releases behind (`
   each asserted `--accent` only at the loosest of its bars. **A token backing several roles gets
   pinned at the loosest one, and that assertion then reads like coverage.** So: `color:` on text you
   read → `--accent-text`; `background`, `border-color`, focus rings, and icon glyphs → `--accent`.
-  Never the reverse — white on `--accent-text` is 3.53:1 (dark), under the UI floor.
+  Never the reverse — white on `--accent-text` is 2.81:1 (dark) / 2.44:1 (hc-dark), under 1.4.11's
+  3:1 UI floor.
   `src/app.css.accent-text-contrast.test.ts` pins both directions, derives the JSON preview's colour
   roles from the component CSS rather than a list, and derives the **painted** surfaces
   (`.preview-pane`'s background, `.jt-row:hover`'s fill) instead of assuming `--bg`. It also sweeps
