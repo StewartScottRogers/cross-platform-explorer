@@ -3346,3 +3346,39 @@ held every single time.** The checked wrapper throws on all eight newly-found de
 non-flat verdict is fatal, the inverted-box guard is real. **Six rounds of wrong sentences and zero
 rounds of wrong behaviour** — which is an argument for the layered design, and against ever letting the
 sentences ride on it.
+
+## 2026-08-28 — "re-listing more carefully would have made the same mistake more neatly"
+
+That sentence is from #1091's round-3 worker, and it is the shift's whole finding said better than I have
+managed to say it.
+
+The defect was a log sanitiser applied at three of four sites, with a header paragraph enumerating the
+three and a test titled as a universal. The obvious fix — the one I briefed — was to add the fourth to
+the list and add a fourth case. The worker did neither. **It rewrote the paragraph to say the list is no
+longer what the guard rests on, and pointed at a test that derives the sites**, then built two derived
+legs:
+
+- **Executed:** every exit code the suite exercises is derived from the script's own `return N`
+  statements, with a coverage assertion that reds on any difference. Notably it scanned **unanchored**,
+  because **two `return`s sit inside `case` arms and a start-anchored scan found neither** — a detail
+  that would have silently halved the derivation.
+- **Structural:** the **taint set is derived** — every variable assigned from a substitution running
+  `gh`/`curl`/`jq`/`cat`, minus those sanitised at assignment — and every `printf … >&2` must route each
+  through the sanitiser or declare it in `RAW_OK` with a reason. **Exact match both directions, so a
+  stale exemption reds too.** This is the leg that catches a *new* echo site the day it lands, with no
+  case for anyone to remember to add.
+
+**Why this is the right shape and a longer list is not:** a list is correct exactly once, at the moment
+someone reads the code carefully. Every subsequent edit is an opportunity for the list and the code to
+diverge, and nothing about the list's own correctness announces when that happens. A derivation is
+re-computed on every run — it cannot be *behind*, only wrong, and wrong shows up as a red rather than a
+silence.
+
+The pairing matters as much as either leg. The structural leg reads only `>&2`, which would be a gap on
+its own; it is safe **because** the executed leg scans stdout and stderr together, and the worker stated
+that dependency rather than leaving it implicit. **Two derivations whose scopes are declared and
+complementary is a much stronger structure than one derivation nobody has bounded.**
+
+Set against the six rounds on #1087 — where each fix replaced a false sentence with a more specific false
+sentence — this is what the alternative looks like when someone takes it seriously: **not a better
+sentence, but no sentence, replaced by something that computes the answer.**
