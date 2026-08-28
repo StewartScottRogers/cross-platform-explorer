@@ -246,7 +246,11 @@ always will — that is what a rendezvous is.
 - `sidecar/host`: **153 passed / 0 failed**; clippy clean.
 - `src-tauri`: `cargo clippy --locked --all-targets -- -D warnings` clean in **both** feature modes
   (default and `--features sidecar-platform`).
-- `npm test`: **5,380 passed / 2 skipped across 360 files**. `npm run check`: 0 errors, 0 warnings.
+- `npm test`: ~~**5,380 passed / 2 skipped across 360 files**~~ — **wrong, corrected in round 2 below
+  ("The `npm test` figure is corrected"): 5,380 is the TOTAL; the pass count is 5,378, and a second
+  machine sees 19 pre-existing environmental failures.** Struck through in place rather than silently
+  rewritten, because a reader landing on this section must not take the old count as current — which
+  is what a correction 95 lines further down allows. `npm run check`: 0 errors, 0 warnings.
 - No `specta::Type` struct touched, so `bindings.gen.ts` needs no regeneration.
 - Temp hygiene: no planted junction left behind — `%TEMP%` holds only the genuine `cpe-ai-console`
   directory (a plain Directory, no reparse attribute). WSL scratch removed.
@@ -365,3 +369,87 @@ The Reviewer found two more fixed-name temp paths of the same class, outside thi
 `src-tauri/src/lib.rs:10167` `cpe-ai-console-catalog` (holds **verified catalog manifests**) and
 `:11911` `cpe-sidecar-storage` — both `app_data_dir()` fallbacks, both higher-value targets than a
 trace log.
+
+---
+
+## Round 3 — review response (SEC PASS re-affirmed, one finding)
+
+Three of round 2's four fixes verified clean with the Reviewer's own numbers, and the constants move
+was measured **stronger** than I claimed: `git diff --name-only main...b382e051 | grep -i cargo`
+returns nothing — no manifest, **no lockfile**. One finding, both halves correct, and **half of it was
+functional rather than wording**.
+
+### (a) My reason for not using `?` was false — the conclusion survives, stronger
+
+I wrote that `?` "would abandon a live daemon nobody holds a handle to — an orphan process". Verified
+against the source: `spawn_detached` returns `SessionDaemonHandle { child: Some(child), .. }`, and
+`Drop` reaps exactly that case (`child.kill()`, `child.wait()`). **With `?` the handle drops at the `?`
+and the daemon is killed, not orphaned.**
+
+The real hazard is worse, and it is now what the comment says: `?` would hand the attacker a **kill
+switch** — plant a link → `write_port_file` refuses → `?` → `Drop` reaps the daemon we just spawned →
+the console has no session daemon at all. A refusal must never be able to take down the thing it is
+protecting.
+
+### (b) The functional half: I reported through a channel that is off by default
+
+I wrote that `session_diag::trace` "echoes to stderr unconditionally". Verified: `trace` opens with
+`if !enabled() { return; }`, and `enabled()` requires one of four env vars. The `eprintln!` is
+unconditional only **relative to the file writes after it** — which is why the same sentence is true
+*inside* `trace` and false *about* it.
+
+And it bites on exactly the path the change exists for. `CPE_AICONSOLE_DIAG` is set only by
+`run_session_daemon()` (`main.rs:125`), explicitly process-local to the **daemon**;
+`discover_or_spawn` runs in the **console** process; and `CPE_AICONSOLE_SESSION_DAEMON_ADDR` is set
+only on the host-injected path, which uses `SessionDaemonHandle::external` **instead of**
+`discover_or_spawn`. So on the future reattach path, **none of the four is set and the
+security-relevant refusal was reported to nobody** — the precise outcome the change was made to
+prevent.
+
+Fixed: the refusal now goes to the real stderr handle with an ungated
+`writeln!(std::io::stderr(), "[CPE-1975] …")` — the same pattern, for the same reason, as the notices
+in the containment tests — **and** still calls `trace`, so it also reaches the diagnostic log when
+tracing happens to be on. The message now also names what a refusal means ("something is planted at
+that path; look at it before removing it").
+
+**The lesson is the shift's pattern in one line, and it is recorded at the site: I fixed a swallowed
+error by routing it to a reporter that is itself off by default. A report is only as good as the
+channel it lands in — check the channel, not just the call.**
+
+### The gate is now pinned by a test, not just a comment
+
+`session_diag::tests::tracing_is_off_by_default_so_it_cannot_carry_a_must_see_message` asserts
+`!enabled()` in a default process and that a disabled `trace` does not even create the log file. A
+future edit routing a must-see message back through `trace` alone now has a red test standing next to
+it. `trace`'s own doc says the gate out loud, since the doc previously read as an unconditional echo
+and that misreading is what caused this.
+
+### That test moved the baseline, so every sabotage number was re-measured
+
+Adding it took `sidecar/ai-console` from **422 → 423**, which invalidates absolute figures recorded
+against 422. The deltas and the named tests never changed, but **a stale absolute figure sitting
+beside a green suite is the exact failure mode this file is about**, so all four ai-console legs were
+re-run against the shipping code rather than adjusted on paper:
+
+| refusal | disabled | predicate lies |
+|---|---|---|
+| `console_dir_is_real` | RED 421 / **2** | RED 422 / **1** |
+| `regular_file_or_absent` | RED 421 / **2** | RED 422 / **1** |
+
+`sidecar/host` is untouched by round 3, so its pairs were **not** re-run and its baseline is still 153
+— said explicitly so the two crates are not read as having had equal treatment.
+
+### The nit
+
+Round 1's §9 still read `npm test: 5,380 passed / 2 skipped` with the correction 95 lines below. Now
+struck through **in place** with a pointer to the correction, rather than silently rewritten, so a
+reader landing on §9 cannot take the wrong count as current.
+
+### Round-3 verification
+
+- `sidecar/ai-console` **423 / 0** (no `NOT VERIFIED` notice), `sidecar/host` **153 / 0**,
+  `sidecar/contract` **12 / 0**; clippy clean in all three.
+- `src-tauri` clippy clean in **both** feature modes; `npm run check` 0 errors / 0 warnings; both path
+  guards green.
+- Still unmeasured here and still marked so: every Linux and macOS leg (no C linker in this shift's
+  WSL). Those run in CI's 3-OS `sidecar` job.

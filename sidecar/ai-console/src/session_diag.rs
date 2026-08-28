@@ -45,6 +45,17 @@ fn now_ms() -> u128 {
 }
 
 /// Append one timestamped line, and echo it to stderr. Best-effort — never panics, never blocks I/O.
+///
+/// **Gated: it does nothing at all unless [`enabled()`] — one of four env vars — is true.** Stated
+/// here because the `eprintln!` below reads as an unconditional stderr echo and is only unconditional
+/// *relative to the file writes after it*. CPE-1975 round 2 relied on that misreading to report a
+/// security-relevant refusal from `session_supervisor::discover_or_spawn`, which runs in the
+/// **console** process where none of the four vars is set by default (`CPE_AICONSOLE_DIAG` is set by
+/// `run_session_daemon()` in the *daemon* process; `CPE_AICONSOLE_SESSION_DAEMON_ADDR` only on the
+/// host-injected path, which does not call `discover_or_spawn`) — so the report went nowhere.
+///
+/// If a message **must** be seen regardless of diagnostics, write it to the real stderr handle
+/// yourself and call this in addition, not instead. That is what that call site now does.
 pub fn trace(component: &str, msg: &str) {
     if !enabled() {
         return;
@@ -151,5 +162,36 @@ mod tests {
     fn log_path_is_under_the_daemon_temp_dir() {
         assert!(log_path().ends_with("cpe-ai-console/session-diag.log")
             || log_path().ends_with("cpe-ai-console\\session-diag.log"));
+    }
+
+    /// **`trace` is OFF by default, so it is not a channel for anything that must be seen.**
+    ///
+    /// This is the fact CPE-1975 round 2 got wrong, and it got it wrong in the direction that
+    /// matters: it routed a security-relevant refusal ("something is planted at the rendezvous
+    /// path", from `session_supervisor::discover_or_spawn`) through `trace` alone, on the reasoning
+    /// that `trace` "echoes to stderr unconditionally". The `eprintln!` is unconditional only
+    /// *relative to the file writes after it*; `trace` itself returns early unless [`enabled()`].
+    ///
+    /// `discover_or_spawn` runs in the **console** process, where none of the four vars is set by
+    /// default — `CPE_AICONSOLE_DIAG` is set by `run_session_daemon()` in the *daemon* process, and
+    /// `CPE_AICONSOLE_SESSION_DAEMON_ADDR` only on the host-injected path, which uses
+    /// `SessionDaemonHandle::external` instead. So the report reached nobody.
+    ///
+    /// Pinned here rather than left as a comment so that a future edit routing a must-see message
+    /// back through `trace` alone has a red test standing next to it. If this ever fails because a
+    /// fifth env var was added — or because the harness now sets one — the conclusion is not "relax
+    /// the test", it is "`trace` is still not guaranteed on, so must-see messages still need the real
+    /// stderr handle".
+    #[test]
+    fn tracing_is_off_by_default_so_it_cannot_carry_a_must_see_message() {
+        assert!(
+            !enabled(),
+            "a default process (this test binary is one) has none of the four diagnostics env vars \
+             set, so `trace` is inert — see this test's doc, and CPE-1975"
+        );
+        // And inert really means inert: no file is created, so nothing observable happened at all.
+        let before = log_path().exists();
+        trace("test", "CPE-1975: this line must go nowhere");
+        assert_eq!(log_path().exists(), before, "a disabled trace must not create the log file");
     }
 }

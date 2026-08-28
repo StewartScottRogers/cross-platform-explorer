@@ -187,20 +187,29 @@ pub fn console_temp_dir() -> PathBuf {
 /// Measured 2026-08-28 on **Windows**, `cargo test --locked --no-fail-fast` in `sidecar/ai-console`
 /// (`--no-fail-fast` because without it cargo stops after the first failing binary and the totals are
 /// not comparable). The `Compiling ai-console` line was confirmed present in every run below, so none
-/// of them is a stale-binary pass. Baseline: **422 passed / 0 failed**.
+/// of them is a stale-binary pass. Baseline: **423 passed / 0 failed**.
 ///
-/// **Re-run in round 2**, after the predicate was extracted into [`console_dir_is_real`] so a read
-/// path could ask the same question without the `mkdir` side effect. The extraction is meant to be
-/// behaviour-preserving, and "meant to be" is a claim — so both legs were run again rather than
-/// carried forward, and both reproduce the round-1 numbers exactly, naming the same tests.
+/// The numbers below are the **round-3 re-run against the shipping code**, and the baseline moved
+/// with it. Rounds 1 and 2 measured 420/2 and 421/1 against a **422** baseline; round 3 added
+/// `session_diag::tests::tracing_is_off_by_default_so_it_cannot_carry_a_must_see_message`, which
+/// shifts every total by one. The *deltas* never changed and the *named tests* never changed — but
+/// the absolute figures did, and a stale absolute figure beside a green suite is the whole failure
+/// mode this file is about, so they were re-measured rather than adjusted on paper.
 ///
-/// * **disabled** (`if false && !console_dir_is_real(dir)`) → **RED**, 420 passed / **2 failed**:
+/// Re-run three times in all: round 2 after the predicate was extracted into
+/// [`console_dir_is_real`] (a behaviour-preservation *claim*, so both legs were run rather than
+/// carried forward), and round 3 after `discover_or_spawn`'s reporting changed and again after the
+/// new test moved the baseline. (The `sidecar/host` pairs are **not** included in the round-3
+/// re-run — that crate is untouched by rounds 3's edits and its baseline is still 153. Stated so the
+/// two are not read as having had equal treatment.)
+///
+/// * **disabled** (`if false && !console_dir_is_real(dir)`) → **RED**, 421 passed / **2 failed**:
 ///   `console_temp_dir::tests::ensure_console_dir_at_refuses_a_plain_file_at_the_path` and
 ///   `the_hardened_primitive_refuses_a_planted_link`. So the refusal is reachable, and those two
 ///   tests are what reach it.
 /// * **predicate made to lie** (`std::fs::metadata(dir)` — the *following* stat — in place of
 ///   `symlink_metadata` inside [`console_dir_is_real`], so a junction reports `is_dir() == true`) →
-///   **RED**, 421 passed / **1 failed**: `the_hardened_primitive_refuses_a_planted_link`. One rather
+///   **RED**, 422 passed / **1 failed**: `the_hardened_primitive_refuses_a_planted_link`. One rather
 ///   than two, and the
 ///   difference is informative: a plain *file* at the path is refused by either stat, so only the
 ///   planted-link test can tell the two apart — which is exactly why the link test has to exist.
@@ -274,14 +283,15 @@ pub fn ensure_console_dir() -> io::Result<PathBuf> {
 /// ## CPE-1929 sabotage pair
 ///
 /// Measured 2026-08-28 on **Windows**, same command and baseline as [`ensure_console_dir_at`]'s
-/// (`cargo test --locked --no-fail-fast`, baseline 422 passed / 0 failed, `Compiling ai-console`
-/// confirmed in both runs).
+/// (`cargo test --locked --no-fail-fast`, baseline **423 passed / 0 failed**, `Compiling ai-console`
+/// confirmed in both runs). Re-measured in round 3 against the shipping code for the same reason
+/// given there — the new `session_diag` gate test moved every total by one.
 ///
-/// * **disabled** (`Ok(_meta) => true`, i.e. any existing entry accepted) → **RED**, 420 passed /
+/// * **disabled** (`Ok(_meta) => true`, i.e. any existing entry accepted) → **RED**, 421 passed /
 ///   **2 failed**: `console_temp_dir::tests::regular_file_or_absent_accepts_absent_and_regular_only`
 ///   and `a_link_at_the_port_file_name_is_refused`.
 /// * **predicate made to lie** (`std::fs::metadata(path)` instead of `symlink_metadata`, so a
-///   symlink to a regular file reports `is_file() == true`) → **RED**, 421 passed / **1 failed**:
+///   symlink to a regular file reports `is_file() == true`) → **RED**, 422 passed / **1 failed**:
 ///   `a_link_at_the_port_file_name_is_refused`. Only the link test separates the two stats, which is
 ///   the same asymmetry the other pair shows.
 ///

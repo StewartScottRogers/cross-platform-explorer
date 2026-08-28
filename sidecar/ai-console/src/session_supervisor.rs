@@ -76,25 +76,49 @@ impl SessionDaemonHandle {
         // error is "propagated rather than dropped" was **false of the code**: making
         // `write_port_file` return the error only moved the swallow one frame up, to here.
         //
-        // It is deliberately not `?`. The daemon has already been spawned **detached** at this
-        // point, so returning `Err` would abandon a live daemon nobody holds a handle to — trading a
-        // bookkeeping failure for an orphan process. The handle is still good and is still returned.
+        // It is deliberately not `?`, and round 2's reason for that was **wrong**. It said `Err`
+        // "would abandon a live daemon nobody holds a handle to — an orphan process". It would not:
+        // `spawn_detached` returns `SessionDaemonHandle { child: Some(child), .. }`, and this type's
+        // `Drop` reaps exactly that case (`child.kill()`, `child.wait()`). With `?` the handle drops
+        // at the `?` and the daemon is **killed**.
         //
-        // But the failure is no longer silent, and that matters: after the hardening, the *only*
-        // ways this fails are a real I/O error and **a refusal**, i.e. something has planted a link
-        // or a non-regular file at the rendezvous path. That is a security-relevant event reported to
-        // nobody if it is dropped. `session_diag::trace` echoes to stderr unconditionally, so the
-        // line survives even when the refusal is precisely what stops the trace log being written.
+        // Which makes the conclusion stronger, not weaker: `?` here would hand the attacker a **kill
+        // switch**. Plant a link at the rendezvous path → `write_port_file` refuses → `?` → `Drop`
+        // reaps the daemon we just spawned → the console has no session daemon at all. A refusal must
+        // never be able to take down the thing it is protecting, so the handle is returned and the
+        // failure is reported instead.
+        //
+        // And it must genuinely be *reported*: after the hardening the only ways this fails are a
+        // real I/O error and **a refusal**, i.e. something has planted a link or a non-regular file at
+        // the rendezvous path — a security-relevant event, silent if the error is dropped.
+        //
+        // Round 2 reported it through `session_diag::trace` and claimed that "echoes to stderr
+        // unconditionally". **False, and functionally so.** The `eprintln!` inside `trace` is
+        // unconditional only *relative to the file writes below it*; `trace` itself opens with
+        // `if !enabled() { return; }`, and `enabled()` requires one of four env vars. On the very
+        // path this code exists for, none of them is set: `CPE_AICONSOLE_DIAG` is set only by
+        // `run_session_daemon()`, in the **daemon** process ("process-local; it does not affect the
+        // UI sidecar"), while `discover_or_spawn` runs in the **console** process; and
+        // `CPE_AICONSOLE_SESSION_DAEMON_ADDR` is set only on the host-injected path, which uses
+        // `SessionDaemonHandle::external` *instead of* this function. So the report went to nobody by
+        // default — the exact outcome the change was made to prevent. The lesson, worth carrying: a
+        // report is only as good as the channel it lands in. **Check the channel, not just the call.**
+        //
+        // So the refusal goes to the real stderr handle **directly**, with no gate in front of it —
+        // the same pattern, and for the same reason, as the `writeln!(std::io::stderr(), …)` notices
+        // in `tests/console_temp_dir_containment.rs`. The `trace` call is kept as well, so the line
+        // also reaches the diagnostic log when tracing happens to be on.
         if let Err(e) = write_port_file(port_file, handle.port) {
-            session_diag::trace(
-                "supervisor",
-                &format!(
-                    "could not record the daemon port at {}: {e} — the daemon is running on {} but a \
-                     restarted console will not rediscover it (CPE-1975)",
-                    port_file.display(),
-                    handle.port
-                ),
+            let msg = format!(
+                "could not record the daemon port at {}: {e} — the daemon is running on 127.0.0.1:{} \
+                 but a restarted console will not rediscover it. After CPE-1975 the only causes are a \
+                 real I/O error or a REFUSAL, i.e. something is planted at that path; look at it \
+                 before removing it.",
+                port_file.display(),
+                handle.port
             );
+            let _ = writeln!(std::io::stderr(), "[CPE-1975] {msg}");
+            session_diag::trace("supervisor", &msg);
         }
         Ok(handle)
     }
