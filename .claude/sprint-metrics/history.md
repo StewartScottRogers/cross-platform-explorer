@@ -2302,3 +2302,29 @@ conclusion I already had, spend one more call establishing that the query can pr
 answer at all.* An empty result and a negative result are different facts, and only one of them is
 evidence. Where a real tool already answers the question — and here one did, with the right verdict
 already written into it — use the tool.
+
+## 2026-08-27 — two independent parties vouched for a number neither had derived
+
+PR #1084's Reviewer found a stale count in `archive.rs`: the reconciliation paragraph claimed *"8
+`create_dir_all` calls"* when CPE-1913 had removed two, so the real count is **6**. It reported that
+precisely, and in the same breath said `File::create` = **12** "is still right". I passed both to the
+round-2 worker in those terms.
+
+The worker counted. **`File::create` is 11.** CPE-1913 replaced row 16's `fs::File::create(&out)` with
+`claim_destination_handle` + `create_beneath`, so rows 2-14 own all eleven and row 16 owns none. **Both
+wrong numbers are exactly the two that CPE-1913 changed** — the same commit, the same reason, sitting
+one line apart, and the Reviewer caught one and vouched for the other.
+
+**That is the day's central defect in its cleanest form.** The Reviewer was not careless — it had just
+*derived* the `create_dir_all` count from source. Having done that work, the adjacent number felt
+checked. It was not; it was **adjacent to something checked**, which is a different thing and feels
+identical. Then I relayed the vouching in a brief, which is how a claim acquires a second author
+without acquiring a second measurement.
+
+**The narrow rule that would have caught it:** when you derive one number out of a group that a single
+change touched, derive **all** of them. A stale count and a fresh count look the same on the page, and
+the reason they are in the same paragraph is usually the reason they went stale together.
+
+The comment itself says why this matters, and it is worth quoting because it was right and still did
+not save it: *"the count line exists so the next reader can check that claim in one subtraction instead
+of trusting it."* Three readers trusted it.
