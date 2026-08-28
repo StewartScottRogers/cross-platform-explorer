@@ -251,3 +251,49 @@ exists anywhere in `src/`, so it is a hole in the net rather than a fish through
 fail-closed allowlist exists to catch the next person, so the comment tells them to widen the match.
 
 Ratchets still all 12 unchanged. `npm run check` clean; `npm test` 346 files / 4947 passing.
+
+### Round 4 — the parity-gap account in my own note was false, and I had not measured it
+
+The reviewer took the sentence I was proudest of and disproved it. Round 3's note said flatly
+**"THIS REPO HAS NO GENERAL THEME-PARITY GUARD"** — written from reading two `SEMANTIC_TOKENS.filter`
+calls and generalising. It is wrong for the `dark` block. `src/app.css.dark-contrast.test.ts` carries
+a **second, fixture-independent** check (`lightOnly`, ~lines 155-161) whose own comment says it
+"keeps the fixture itself honest if a future ticket adds a new semantic token to light but not
+dark" — a brand-new token joins it automatically, no fixture edit needed.
+
+Measured both halves before rewriting, since replacing an unmeasured claim with another unmeasured
+claim would have been round 2's defect a third time:
+
+- **`--accent-text` deleted from the `dark` block** → `dark-contrast.test.ts` **RED**, 1 failed / 12
+  passed, at `dark-contrast.test.ts:160` with `tokens present in light but missing from dark:
+  --accent-text` — **naming the new token**, which appears in no fixture. Covered.
+- **The same deletion from `hc-dark`** → `hc-contrast.test.ts` **GREEN**, 23/23. That file has only
+  the two `SEMANTIC_TOKENS.filter(...)` checks and no symmetric counterpart. Not covered.
+
+So the true shape is uneven, not absent: `dark` is guarded for new tokens; bare `:root`/`light`
+(`app.css.test.ts`) and `hc-light`/`hc-dark` (`hc-contrast.test.ts`) are not. The note now carries
+that as a three-row table with both measurements written beside it, and points at **CPE-1962** to
+give the two unguarded pairs the symmetric check `dark` already has.
+
+This mattered more than a wording nit. The note is the repo's written account of the gap and a
+follow-up ticket is being filed from it; as written it aimed that ticket at a half-solved problem and
+told the next maintainer that light↔dark parity is unguarded when it is guarded — the exact opposite
+of the truth, **inside a comment added specifically to stop people trusting unchecked claims.** The
+lesson is the one this ticket keeps re-teaching in a new costume: a negative claim ("nothing checks
+X") needs a measurement just as much as a positive one, and is harder to notice going unmeasured.
+
+**Second, non-blocking: the strict half has a hole the loose half covers.** The reviewer attacked the
+new DECLARED assertion six ways; five held (deletion, comment-out, mis-casing, whitespace/multi-line,
+selector-list — the last over-strict but failing closed). The sixth: `--accent-text: ;` **passes**
+it. Verified the mechanism in isolation before writing it down — `(--[a-zA-Z0-9-]+)\s*:\s*([^;]+);`
+backtracks, the `\s*` after the colon yielding its space so `[^;]+` can consume it, so the token is
+recorded with an empty value and `decls.has()` returns true. Verified end-to-end too: writing
+`--accent-text: ;` into the hc-dark block leaves DECLARED **green** and turns **three** other tests
+red (`hc-dark -> (unresolved)` plus both ratio tests). Defence-in-depth holds, so this is documented
+at the site rather than patched — tightening `extractDecls` risks a false positive on the valid
+multi-line declaration the reviewer confirmed is accepted today, and the regex is shared with the
+palette-resolution path. A check advertising itself as strict while the loose one covers its gap is
+worth a sentence, not a rewrite.
+
+Gates unchanged: `npm run check` 0 errors; `npm test` 346 files / 4947 passing, 2 skipped, 0
+failures; ratchets all 12 unchanged; hex 85/277. Rebased on `origin/main` (809f9c7c) first.

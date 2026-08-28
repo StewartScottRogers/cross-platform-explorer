@@ -37,11 +37,26 @@
 //       Only the RATIO tests (b)/(c) caught it, because the inherited light blue then measured
 //       3.70/3.43/3.07 in hc-dark. Safe by luck, not by design: had the inherited value happened to
 //       clear the bar, the omission would have shipped silently.
-//       Worth stating plainly, since it surprised everyone who looked: THERE IS NO GENERAL
-//       THEME-PARITY GUARD IN THIS REPO. app.css.test.ts checks bare :root vs light only;
-//       dark-contrast.test.ts and hc-contrast.test.ts each check their own theme against a
-//       hand-kept SEMANTIC_TOKENS fixture that a new token is not added to. So parity for any token
-//       outside those fixtures holds only where a test like this one asserts it by name.
+//       The parity coverage that DOES exist is uneven, and worth stating exactly — an earlier draft
+//       of this note said flatly that there is no general theme-parity guard in this repo, which is
+//       false for the dark block and was corrected in review. Measured, not read:
+//
+//         block                                     fixture check   symmetric check   new token covered?
+//         bare :root, light  (app.css.test.ts)      yes             no                NO
+//         dark               (dark-contrast.test)   yes             YES               yes
+//         hc-light, hc-dark  (hc-contrast.test)     yes             no                NO
+//
+//       dark-contrast.test.ts carries a second, FIXTURE-INDEPENDENT check beside its
+//       `SEMANTIC_TOKENS.filter(...)` one — `lightOnly`, "keeps the fixture itself honest if a
+//       future ticket adds a new semantic token to light but not dark" — so a brand-new token joins
+//       it automatically with no fixture edit. Deleting --accent-text from the dark block fails
+//       dark-contrast.test.ts with `tokens present in light but missing from dark: --accent-text`,
+//       naming a token that appears in no fixture. The same deletion from hc-dark leaves
+//       hc-contrast.test.ts fully GREEN (23/23): that file has only the two fixture filters and no
+//       symmetric counterpart, and app.css.test.ts's bare-:root/light pair is in the same shape.
+//       CPE-1962 is filed to give both of them the symmetric check dark already has. Until it
+//       lands, parity for a new token in bare :root, light, hc-light or hc-dark holds only where a
+//       test like this one asserts it by name.
 //   (b) --accent-text clears the text bar on every painted surface in every theme.
 //   (c) EVERY colour role the JSON preview paints — not just the string value that was reported —
 //       clears the text bar on every painted surface in every theme, with the role list DERIVED by
@@ -240,6 +255,17 @@ describe("--accent-text (CPE-1919): the accent's body-text role, split out of --
   // Deleting it from a theme block leaves the token perfectly RESOLVABLE — `tokenHex` finds the
   // bare :root value through the palette layer and hands back a valid hex — so the resolution
   // assertion below cannot see the omission at all. See this file's header, item (a).
+  //
+  // The strict half has one known hole, stated here rather than left to be rediscovered, because a
+  // check advertising itself as strict while the loose one covers its gap is exactly the shape this
+  // repo keeps finding. `--accent-text: ;` — a syntactically valid, semantically EMPTY declaration —
+  // SATISFIES this assertion: `extractDecls`'s `(--[a-zA-Z0-9-]+)\s*:\s*([^;]+);` backtracks, the
+  // `\s*` after the colon giving back its space so `[^;]+` can consume it, so the token is recorded
+  // with an empty value and `decls.has()` returns true. Measured: writing `--accent-text: ;` into the
+  // hc-dark block leaves THIS test green and turns three others red — the resolution assertion below
+  // reports `hc-dark -> (unresolved)`, and both ratio tests fail with it. So the loose half is what
+  // actually catches an empty value; defence-in-depth holds, but do not read a green DECLARED as
+  // proof the declaration says anything.
   it("is declared by every live theme selector's own block (not inherited through the palette layer)", () => {
     const undeclared = THEMES.filter((t) => !t.decls.has("--accent-text")).map((t) => t.label);
     expect(
