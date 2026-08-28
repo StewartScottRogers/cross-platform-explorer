@@ -37,6 +37,98 @@ describe("planBackup (CPE-796)", () => {
   });
 });
 
+describe("planBackup carries empty directories (CPE-1925)", () => {
+  // Before this ticket the plan model had no directory entry at all: a source folder with no files
+  // under it produced NOTHING, the run reported a clean `ok` for every file it did carry, and the
+  // folder was simply absent afterwards. Measured end to end on `main` over this exact shape — real
+  // `scan_tree`, real `planBackup`, real `apply_backup_plan` — `ok=3 fail=0`, 5 of 5 folders missing
+  // on disk, in the backup direction AND the restore direction.
+
+  it("plans an empty source directory that no file copy would create", () => {
+    const plan = planBackup([f("top.txt", 1, 1), d("logs")], []);
+    expect(plan.createDirs).toEqual(["logs"]);
+    expect(plan.copy).toEqual(["top.txt"]);
+  });
+
+  it("plans the deepest path only — creating a/b/c creates a and a/b on the way", () => {
+    const plan = planBackup([d("a", [d("b", [d("c")])])], []);
+    expect(plan.createDirs).toEqual(["a/b/c"]);
+  });
+
+  it("handles the ticket's awkward case: a directory whose only content is another empty directory", () => {
+    const plan = planBackup([d("outer", [d("inner"), f("side.txt", 1, 1)])], []);
+    // `outer` is created by the copy of `outer/side.txt`; only `outer/inner` needs an entry.
+    expect(plan.copy).toEqual(["outer/side.txt"]);
+    expect(plan.createDirs).toEqual(["outer/inner"]);
+  });
+
+  it("does NOT plan a directory a file copy already creates", () => {
+    const plan = planBackup([d("withfiles", [f("x", 1, 1)])], []);
+    expect(plan.createDirs).toEqual([]);
+    expect(plan.copy).toEqual(["withfiles/x"]);
+  });
+
+  it("does NOT plan a directory the destination already has", () => {
+    const tree = [d("logs"), f("a.txt", 1, 1)];
+    const plan = planBackup(tree, tree);
+    expect(plan.createDirs).toEqual([]);
+    expect(plan.unchanged).toBe(1);
+  });
+
+  it("plans an empty directory missing from a destination that has the rest", () => {
+    const plan = planBackup([f("a.txt", 1, 1), d("logs")], [f("a.txt", 1, 1)]);
+    expect(plan.createDirs).toEqual(["logs"]);
+    expect(plan.copy).toEqual([]); // nothing to copy; the whole run is the folder
+  });
+
+  it("plans the directory side of a file-to-directory type change, rather than dropping the name", () => {
+    // `diffTrees` emits this as `changed` with no children, so today the source subtree vanishes
+    // silently. An entry the engine will refuse (a file is standing in the way) is at least reported.
+    const plan = planBackup([d("x")], [f("x", 1, 1)]);
+    expect(plan.createDirs).toEqual(["x"]);
+  });
+});
+
+describe("planBackup tells an empty directory from an unseen one (CPE-1925)", () => {
+  // `scan_tree` reports a childless directory for three different reasons and only one of them means
+  // "empty". Creating a directory in the destination because the source one LOOKED childless would be
+  // asserting something the scan never established.
+  const unreadable = (name: string, children: CompareNode[] = []): CompareNode => ({ name, isDir: true, children, unreadable: true });
+  const truncated = (name: string, children: CompareNode[] = []): CompareNode => ({ name, isDir: true, children, truncated: true });
+
+  it("creates the one it could read", () => {
+    expect(planBackup([d("really-empty")], []).createDirs).toEqual(["really-empty"]);
+  });
+
+  it("refuses to create one it could not read, and says so", () => {
+    const plan = planBackup([unreadable("locked")], []);
+    expect(plan.createDirs).toEqual([]);
+    expect(plan.skippedDirs).toEqual([{ path: "locked", reason: "unreadable" }]);
+  });
+
+  it("refuses to create one the depth cap stopped at, and says so", () => {
+    const plan = planBackup([truncated("very/deep")], []);
+    expect(plan.createDirs).toEqual([]);
+    expect(plan.skippedDirs).toEqual([{ path: "very/deep", reason: "depth-limit" }]);
+  });
+
+  it("is silent about nothing — an ordinary plan reports an empty skip list", () => {
+    expect(planBackup([f("a.txt", 1, 1)], []).skippedDirs).toEqual([]);
+  });
+
+  it("never mirror-deletes the destination's copies under a source directory it could not read", () => {
+    // The destructive consequence of the same ambiguity, and the reason this is not cosmetic: an
+    // unreadable source directory comes back with NO children, so every file the destination holds
+    // under it diffs as "removed" and a mirror run would delete the very copies it exists to protect.
+    const dest = [d("locked", [f("precious.txt", 5, 5), f("also.txt", 6, 6)])];
+    const withAccess = planBackup([d("locked", [])], dest, true);
+    expect(withAccess.delete.sort()).toEqual(["locked/also.txt", "locked/precious.txt"]); // genuinely gone
+    const withoutAccess = planBackup([unreadable("locked")], dest, true);
+    expect(withoutAccess.delete).toEqual([]); // unknown, so untouched
+    expect(withoutAccess.skippedDirs).toEqual([{ path: "locked", reason: "unreadable" }]);
+  });
+});
+
 describe("BackupJob CRUD + parse (CPE-796)", () => {
   it("adds/updates/removes immutably", () => {
     let list = addJob([], "Photos", "/pics", "E:/backup", true);
@@ -89,7 +181,7 @@ describe("unattendedBackupArgs (CPE-1664)", () => {
   // THE pin for the unattended consent decision. It lives here, not in an App-level test, because
   // `driveScheduler` only ever delivers `autoRun: true` jobs — so nothing driving the real scheduler can
   // distinguish the decision from a constant. This function can be called with an unticked job directly.
-  const plan = { copy: ["a.txt"], update: ["b.txt"], delete: ["stale.txt"] };
+  const plan = { copy: ["a.txt"], update: ["b.txt"], delete: ["stale.txt"], createDirs: ["logs"] };
   const job = (autoRun?: boolean) => ({ source: "C:\\pics", dest: "D:\\backup", autoRun });
 
   it("carries consent for a job the user ticked auto-run for", () => {
@@ -110,6 +202,10 @@ describe("unattendedBackupArgs (CPE-1664)", () => {
       copy: ["a.txt"],
       update: ["b.txt"],
       deletePaths: ["stale.txt"], // renamed for the backend's argument name
+      // CPE-1925: the unattended run is the one nobody is watching, so the directory entries have to
+      // reach the backend from here too — a scheduled job that silently reshaped the tree would go
+      // unnoticed for as long as the backup went unread.
+      createDirs: ["logs"],
       verify: true,
       confirmed: true,
     });

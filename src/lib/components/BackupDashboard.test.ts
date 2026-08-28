@@ -87,6 +87,72 @@ describe("BackupDashboard consent (CPE-1664)", () => {
 });
 
 /**
+ * CPE-1925 — the dashboard's half of "empty folders are carried, and what is not carried is said out
+ * loud". The plan model gained a `createDirs` entry kind and a `skippedDirs` disclosure; neither is
+ * worth anything if the component drops them on the way to the backend or to the screen, and dropping
+ * them would be invisible — a run that quietly reshapes the tree still reports a clean `ok`.
+ */
+describe("BackupDashboard carries folder entries and discloses what it will not carry (CPE-1925)", () => {
+  /** A source holding one file and one empty folder; the destination is empty. */
+  const withEmptyFolder = () =>
+    scanTreeMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        path === job.source
+          ? [{ name: "a.txt", isDir: false, size: 1, modified: 1 }, { name: "logs", isDir: true, children: [] }]
+          : [],
+      ),
+    );
+
+  it("sends the folder entries to the backend — not just the files", async () => {
+    withEmptyFolder();
+    render(BackupDashboard, { jobs: [job], history: {} });
+
+    await fireEvent.click(screen.getByTestId("run-btn"));
+
+    await waitFor(() => expect(backupCalls()).toHaveLength(1));
+    const args = backupCalls()[0][1] as Record<string, unknown>;
+    expect(args.createDirs).toEqual(["logs"]);
+    expect(args.copy).toEqual(["a.txt"]);
+  });
+
+  it("counts the folders in the Dry-run summary, so the user sees them before the run", async () => {
+    withEmptyFolder();
+    render(BackupDashboard, { jobs: [job], history: {} });
+
+    await fireEvent.click(screen.getByTestId("dryrun-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("plan-summary")).toBeTruthy());
+    expect(screen.getByTestId("plan-summary").textContent).toContain("1 new folders");
+  });
+
+  it("names the folders it will NOT carry, with the reason — silence is the defect this ticket is about", async () => {
+    scanTreeMock.mockImplementation((path: string) =>
+      Promise.resolve(path === job.source ? [{ name: "locked", isDir: true, children: [], unreadable: true }] : []),
+    );
+    render(BackupDashboard, { jobs: [job], history: {} });
+
+    await fireEvent.click(screen.getByTestId("dryrun-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("plan-skipped")).toBeTruthy());
+    const text = screen.getByTestId("plan-skipped").textContent ?? "";
+    expect(text).toContain("locked");
+    expect(text).toContain("unreadable");
+    // And it did not quietly create it instead: nothing in the plan claims the folder is empty.
+    expect(screen.getByTestId("plan-summary").textContent).toContain("0 new folders");
+  });
+
+  it("shows no disclosure block at all when there is nothing to disclose", async () => {
+    withEmptyFolder();
+    render(BackupDashboard, { jobs: [job], history: {} });
+
+    await fireEvent.click(screen.getByTestId("dryrun-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("plan-summary")).toBeTruthy());
+    expect(screen.queryByTestId("plan-skipped")).toBeNull();
+  });
+});
+
+/**
  * CPE-1879 review, finding 3: a per-file refusal (the link-guard refusal CPE-1879 added, or any other
  * `OpResult` error) reached `apply_backup_plan_walk`'s caller as an honest `ok: false`, but nothing in
  * the dashboard ever rendered `OpResult.error` — a run with a refused hard-linked entry showed only

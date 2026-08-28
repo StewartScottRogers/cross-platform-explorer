@@ -203,4 +203,4 @@ fix for it is requiring up-to-date checks before merge, not backdating a licence
 
 | baseline | from → to | ticket | why this raise is right |
 |----------|-----------|--------|-------------------------|
-| _(none yet)_ | | | |
+| bidi-render-registry | 1553 → 1555 | CPE-1925 | Two new render sites in `BackupDashboard.svelte`: `plan.createDirs.length` and `plan.skippedDirs.length`. Both are `.length` **numbers** — no filesystem-derived text can reach either — and they exist to make the backup plan's own counts honest, which is the whole ticket: a run that recreates folders, or that declines to carry ones it could not read, previously showed neither. The one value in that block that IS a path, `sd.path`, goes through `displaySafePath` and therefore does not appear in the registry at all; the wording that could have lived in three more ternaries was moved into the surrounding static text instead, to keep this raise at two rather than seven. |

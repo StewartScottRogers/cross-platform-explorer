@@ -1650,9 +1650,9 @@ async hashFile(path: string) : Promise<Result<string, string>> {
  * set it. See `cpe_server::backup::apply_backup_plan_walk` for exactly what the flag does and does not
  * defend — it is UI discipline enforced in Rust, not an authorization boundary.
  */
-async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, confirmed: boolean) : Promise<Result<OpResult[], string>> {
+async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], createDirs: string[], verify: boolean, confirmed: boolean) : Promise<Result<OpResult[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, verify, confirmed }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, createDirs, verify, confirmed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1667,9 +1667,9 @@ async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], upda
  * enforce it — same treatment CPE-1611 gave `shred_paths`. An unconfirmed call is `Err` with nothing
  * deleted and **no** batch ever pushed down the channel.
  */
-async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, confirmed: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
+async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], createDirs: string[], verify: boolean, confirmed: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, verify, confirmed, onResult }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, createDirs, verify, confirmed, onResult }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -6409,8 +6409,31 @@ skipped: number }
 /**
  * One node of a scanned tree (CPE-779). Serialized camelCase to match the frontend `CompareNode`
  * (`isDir`).
+ * 
+ * # `children: Some([])` is THREE different facts, and CPE-1925 is what happens when they are one
+ * 
+ * Before this ticket a childless directory node meant *any* of: the directory is genuinely empty on
+ * disk; [`std::fs::read_dir`] failed on it so this scan never saw inside; or `max_depth` stopped the
+ * descent at it. A consumer that wants to carry empty directories — `planBackup`, which now does —
+ * cannot act on that: creating an empty directory in a backup destination because the source
+ * directory *looked* childless is a **fabrication** when the real reason was that the scan could not
+ * look. The two flags below carry the reason, so "empty" is a fact rather than an inference.
+ * 
+ * They are `Option<bool>` and skipped when `None` so a file node and an ordinary readable directory
+ * serialize exactly as before — a 100,000-entry listing gains no bytes for the overwhelmingly common
+ * case. `Some(true)` is the only value ever written; there is no `Some(false)`.
  */
-export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null }
+export type TreeNode = { name: string; isDir: boolean; size?: number | null; modified?: number | null; children?: TreeNode[] | null; 
+/**
+ * `Some(true)` when [`std::fs::read_dir`] on this directory failed, so `children` is empty because
+ * the scan could not look inside — not because there is nothing there. Never set on a file.
+ */
+unreadable?: boolean | null; 
+/**
+ * `Some(true)` when `max_depth` stopped the descent at this directory, so `children` is empty for
+ * the same reason: unknown, not absent. Never set on a file.
+ */
+truncated?: boolean | null }
 /**
  * A snapshot of a vault path's lifecycle state for the UI (CPE-1248). Carries no secret value.
  */

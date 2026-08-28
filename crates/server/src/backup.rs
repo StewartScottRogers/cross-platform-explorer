@@ -763,6 +763,46 @@ fn copy_one_verified(
 /// attempt to create it, the **whole plan** is refused up front: with no resolvable root there is no
 /// containment question that can be answered, and every write in the run would be unguarded. That is a
 /// loud, whole-run [`Err`] rather than a per-file skip, for the same reason the consent gate is.
+///
+/// # `create_dirs` — the directory entry kind (CPE-1925)
+///
+/// Until this ticket the plan carried **only files**, so a directory existed in a backup destination
+/// only as a side effect of writing a file into it. A source directory with no files under it — a
+/// scaffolded `logs/`, an output folder, a mount point, anything whose contents are gitignored —
+/// therefore had no entry of any kind, was never created, and the run still reported a clean `ok` for
+/// every file it did carry. Measured on `main` before the fix: a tree with five such directories
+/// backed up as `ok=3 fail=0` and **5 of 5 missing on disk** afterwards, in both the backup and the
+/// restore direction.
+///
+/// `create_dirs` is that missing entry kind. It holds plan-relative directory paths and is applied
+/// **first**, before the copy loop, so the run materialises the tree's *shape* and then its contents.
+/// Each entry emits its own [`OpResult`] exactly like a file does, so a directory that could not be
+/// created is a reported per-entry failure rather than a shape the user finds altered later.
+///
+/// **It is the minimal set, not every directory.** `planBackup` emits an entry only for a directory
+/// that no copy/update entry would create as a side effect, and only the deepest such path (creating
+/// `a/b/c` creates `a` and `a/b` on the way). A first full backup of a large tree therefore gains a
+/// handful of entries, not one per folder.
+///
+/// **It goes through [`crate::open_beneath::create_dir_beneath`], never `create_dir_all`** — the
+/// CPE-1925 acceptance criterion, and for CPE-1896's reason: `create_dir_all` resolves a path, walks a
+/// junction like any other directory, and would re-open exactly the race the handle-relative walk
+/// closed. `create_dir_beneath` opens each level relative to the level above it, inside the root
+/// handle this run already holds, and refuses a link at every one. It is the same primitive
+/// `archive::extract_zip_archive_stream` and `transfer::download_tree` use for the identical job, so
+/// the containment guarantee and the refusal wording are shared rather than re-derived.
+///
+/// **What a directory entry carries, and what it does not.** It carries *existence* and nothing else:
+/// the directory is created with the platform default mode (`0o777 & !umask` on Unix, the parent's
+/// inherited ACL on Windows). Its mode bits, owner, timestamps, and Windows attributes (hidden,
+/// system, compressed, encrypted) are **not** copied from the source, and neither are its extended
+/// attributes or alternate data streams. That is deliberately the same contract the file leg already
+/// has — [`copy_one_verified`] carries bytes and nothing else, not even the modification time — so
+/// this ticket does not invent a second, richer answer for directories than the one files get. Saying
+/// it here rather than implying it: a restored directory can have different permissions from the
+/// original, and for a directory whose whole purpose is a restrictive mode that is a real loss. It is
+/// a named gap, not a silent one, and it is the same gap as the file leg's; fixing both together is
+/// the honest shape for it.
 // One over clippy's threshold since CPE-1664 added `confirmed`. The list mirrors the plan the frontend
 // sends; bundling it into a struct would only move the same fields somewhere less readable, and the
 // consent flag in particular is deliberately a positional argument the caller cannot forget.
@@ -773,6 +813,7 @@ pub fn apply_backup_plan_walk(
     copy: &[String],
     update: &[String],
     delete: &[String],
+    create_dirs: &[String],
     verify: bool,
     confirmed: bool,
     mut emit: impl FnMut(OpResult),
@@ -819,6 +860,26 @@ pub fn apply_backup_plan_walk(
              Reconnect the drive or share and run the job again."
         )
     })?;
+
+    // CPE-1925: the tree's SHAPE first, then its contents. Applied before the copy loop so that a
+    // directory a later copy also needs is already there (a second `create_dir_beneath` for it would
+    // be a harmless re-open either way), and so the entries a user sees stream in the order the plan
+    // preview lists them. `safe_join` runs for the same two reasons it runs on the copy leg: the cheap
+    // textual filter, and the resolved path that `OpResult` reports — the containment guarantee itself
+    // is `create_dir_beneath`'s per-component walk against `root_handle`, never this join.
+    for rel in create_dirs {
+        let dst = match safe_join(&dst_root, rel, PlanEntry::Write) {
+            Ok(d) => d,
+            Err(e) => {
+                emit(OpResult::err(Path::new(rel), e));
+                continue;
+            }
+        };
+        match crate::open_beneath::create_dir_beneath(&root_handle, Path::new(rel)) {
+            Ok(()) => emit(OpResult::ok(&dst)),
+            Err(r) => emit(OpResult::err(&dst, r.why)),
+        }
+    }
 
     for rel in copy.iter().chain(update.iter()) {
         let joined = (
@@ -870,19 +931,29 @@ pub fn apply_backup_plan_walk(
 /// Collect-to-vec backup run: apply the plan and return one [`OpResult`] per attempted file. `confirmed`
 /// is the CPE-1664 consent gate — see [`apply_backup_plan_walk`]; an unconfirmed call is [`Err`] with
 /// nothing touched, not an empty result list.
+#[allow(clippy::too_many_arguments)] // mirrors `apply_backup_plan_walk`, one over the threshold.
 pub fn apply_backup_plan(
     source_root: &str,
     dest_root: &str,
     copy: &[String],
     update: &[String],
     delete: &[String],
+    create_dirs: &[String],
     verify: bool,
     confirmed: bool,
 ) -> Result<Vec<OpResult>, String> {
-    let mut out = Vec::with_capacity(copy.len() + update.len() + delete.len());
-    apply_backup_plan_walk(source_root, dest_root, copy, update, delete, verify, confirmed, |r| {
-        out.push(r)
-    })?;
+    let mut out = Vec::with_capacity(copy.len() + update.len() + delete.len() + create_dirs.len());
+    apply_backup_plan_walk(
+        source_root,
+        dest_root,
+        copy,
+        update,
+        delete,
+        create_dirs,
+        verify,
+        confirmed,
+        |r| out.push(r),
+    )?;
     Ok(out)
 }
 
@@ -961,6 +1032,7 @@ mod tests {
                 &[],
                 &[],
                 &delete,
+                &[],
                 false,
                 false, // confirmed
             );
@@ -989,6 +1061,7 @@ mod tests {
             &[],
             &[],
             &[".".to_string()],
+            &[],
             false,
             false, // confirmed
             |_| emitted += 1,
@@ -1086,6 +1159,7 @@ mod tests {
                 &[],
                 &[],
                 &[rel.to_string()],
+                &[],
                 false,
                 true, // fully consented
             )
@@ -1132,6 +1206,7 @@ mod tests {
             &src.to_string_lossy(),
             &dst.to_string_lossy(),
             &["notes.".to_string(), "My Report ".to_string()],
+            &[],
             &[],
             &[],
             false,
@@ -1195,6 +1270,7 @@ mod tests {
             &[],
             &[],
             &["notes.".to_string(), "My Report ".to_string()],
+            &[],
             false,
             true, // consented — this is about the NAME rule, not the gate
         )
@@ -1253,6 +1329,7 @@ mod tests {
             &["new.txt".into()],
             &["sub/edited.txt".into()],
             &[],
+            &[],
             true, // verify by checksum
             true, // confirmed (CPE-1664)
         )
@@ -1261,6 +1338,224 @@ mod tests {
         assert_eq!(fs::read(dst.join("new.txt")).unwrap(), b"brand new");
         assert_eq!(fs::read(dst.join("sub/edited.txt")).unwrap(), b"fresh contents"); // parent dir created
         assert!(dst.join("edited.txt.placeholder").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1925: the plan's `create_dirs` list reaches the disk, at every depth, including the case
+    /// the ticket singles out — a directory whose ONLY content is another empty directory.
+    ///
+    /// **The assertion is `is_dir()` on the destination, never the returned `OpResult`s.** That is the
+    /// whole point of the ticket: `main` reported `ok=3 fail=0` for this exact tree while five
+    /// directories were missing afterwards, so a verdict is precisely the thing that cannot be trusted
+    /// to answer "did the shape survive?".
+    ///
+    /// Red-proof, run by hand: emptying the `create_dirs` loop in `apply_backup_plan_walk` (the
+    /// pre-CPE-1925 behaviour) fails this test on the first `assert!` with the directory missing on
+    /// disk — measured, not assumed.
+    #[test]
+    fn apply_backup_plan_creates_the_planned_empty_directories_on_disk() {
+        let d = scratch("createdirs");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(src.join("a")).unwrap();
+        fs::write(src.join("a/keep.txt"), b"content").unwrap();
+
+        // The plan a `planBackup` over this tree produces: one file, and the directories no file
+        // creates on its way in. Only the DEEPEST path of a chain is listed, exactly as the planner
+        // emits it — `b/only-an-empty-dir/leaf-empty` is expected to bring its two ancestors with it.
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &["a/keep.txt".into()],
+            &[],
+            &[],
+            &[
+                "empty-at-depth-1".into(),
+                "a/empty-at-depth-2".into(),
+                "b/only-an-empty-dir/leaf-empty".into(),
+                "c/d/e/deep-empty".into(),
+            ],
+            true, // verify
+            true, // confirmed (CPE-1664)
+        )
+        .expect("a confirmed plan runs");
+
+        for dir in [
+            "empty-at-depth-1",
+            "a/empty-at-depth-2",
+            "b/only-an-empty-dir/leaf-empty",
+            "b/only-an-empty-dir", // the ancestor, created on the way to the leaf
+            "c/d/e/deep-empty",
+            "c/d/e",
+        ] {
+            assert!(
+                dst.join(dir).is_dir(),
+                "CPE-1925: {dir:?} is not a directory under the backup destination — the tree's shape \
+                 did not survive the run. Engine said: {results:?}"
+            );
+        }
+        // Every directory entry is reported like any other entry, so the count the dashboard shows is
+        // the count of things actually attempted: 1 file + 4 directory entries.
+        assert_eq!(results.len(), 5, "one OpResult per plan entry, directories included: {results:?}");
+        assert!(results.iter().all(|r| r.ok), "nothing should have failed: {results:?}");
+        assert_eq!(fs::read(dst.join("a/keep.txt")).unwrap(), b"content");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1925, the other half of the round trip: **restore** is the same engine with the roots
+    /// swapped (that is literally what `BackupDashboard`'s Restore button does), so a directory can be
+    /// lost at either end and the test has to check both. Measured on `main`, with the directories
+    /// planted in the backup destination first so the restore leg was a fair independent test: 5 of 5
+    /// missing after restore too, reported as `ok=3 fail=0`.
+    #[test]
+    fn a_restore_run_reproduces_the_directory_structure_not_just_the_files() {
+        let d = scratch("restore-dirs");
+        let (backup, live) = (d.join("backup"), d.join("live"));
+        fs::create_dir_all(&live).unwrap();
+        fs::create_dir_all(backup.join("logs")).unwrap();
+        fs::create_dir_all(backup.join("out/nested/leaf")).unwrap();
+        fs::write(backup.join("notes.txt"), b"n").unwrap();
+
+        let results = apply_backup_plan(
+            &backup.to_string_lossy(),
+            &live.to_string_lossy(),
+            &["notes.txt".into()],
+            &[],
+            &[],
+            &["logs".into(), "out/nested/leaf".into()],
+            true,
+            true,
+        )
+        .expect("a confirmed plan runs");
+
+        assert!(live.join("logs").is_dir(), "restore dropped an empty folder: {results:?}");
+        assert!(live.join("out/nested/leaf").is_dir(), "restore dropped a nested empty folder: {results:?}");
+        assert!(live.join("out/nested").is_dir(), "restore dropped an intermediate folder: {results:?}");
+        assert_eq!(fs::read(live.join("notes.txt")).unwrap(), b"n");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A directory entry that cannot be created is a **reported per-entry failure**, not a silent skip
+    /// and not a whole-run abort — the same contract every file entry has (CPE-1925). Driven with a
+    /// plain file standing where the directory should go, which is also what a file-to-directory type
+    /// change in the source produces.
+    #[test]
+    fn a_directory_entry_that_cannot_be_created_is_reported_per_entry() {
+        let d = scratch("createdirs-blocked");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("blocked"), b"a file is standing here").unwrap();
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &["blocked".into(), "fine".into()],
+            false,
+            true,
+        )
+        .expect("the run as a whole still succeeds");
+
+        assert_eq!(results.len(), 2, "one OpResult per directory entry: {results:?}");
+        assert!(!results[0].ok, "the blocked entry must be reported as a failure: {results:?}");
+        assert!(!results[0].error.is_empty(), "and it must say why: {results:?}");
+        assert!(results[1].ok, "the rest of the run continues: {results:?}");
+        assert!(dst.join("fine").is_dir());
+        assert!(dst.join("blocked").is_file(), "the file in the way is left alone");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A `create_dirs` entry goes through the same handle-relative walk every write does — CPE-1925's
+    /// acceptance criterion, and CPE-1896's reason for it: `create_dir_all` resolves a path and walks
+    /// a directory link like any other directory, so a new directory-creation path built on it would
+    /// re-open exactly the hole the atomic walk closed.
+    ///
+    /// **The shape is a link planted INSIDE the destination**, deliberately, and not `..`. A `..`
+    /// entry is refused by [`safe_join`]'s textual filter before `create_dir_beneath` is ever reached,
+    /// so a test built on one is **shadowed** (CPE-1929): it passes with the containment walk swapped
+    /// out for `create_dir_all`, and therefore reads as coverage while proving nothing. An earlier
+    /// revision of this test was exactly that, and the sabotage below is what caught it.
+    ///
+    /// Red-proof, run by hand and recorded here rather than asserted: replacing the
+    /// `create_dir_beneath` call with `std::fs::create_dir_all(&dst)` fails this test on the HARM
+    /// assertion — the directory appears outside the destination root. With the `..` version of this
+    /// test, that same sabotage stayed green.
+    #[test]
+    fn a_directory_entry_cannot_be_redirected_out_of_the_destination_by_a_planted_link() {
+        let d = scratch("createdirs-link");
+        let (src, dst, outside) = (d.join("src"), d.join("dst"), d.join("outside"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        if !crate::fsutil::make_dir_link(&outside, &dst.join("escape")) {
+            crate::skip_notice!(
+                "SKIPPING a_directory_entry_cannot_be_redirected_out_of_the_destination_by_a_planted_link: \
+                 could not stage a directory link. NOTHING on this run covered a directory entry meeting \
+                 a link at an interior component"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        // Liveness: the fixture must really redirect, or the test certifies nothing.
+        fs::write(dst.join("escape/liveness.txt"), b"through the link").unwrap();
+        assert_eq!(
+            fs::read(outside.join("liveness.txt")).ok().as_deref(),
+            Some(&b"through the link"[..]),
+            "fixture is inert: the planted link does not redirect out of the destination"
+        );
+        fs::remove_file(outside.join("liveness.txt")).unwrap();
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &["escape/planted".into()],
+            false,
+            true,
+        )
+        .expect("the run as a whole still succeeds");
+
+        // HARM FIRST, off the filesystem — never off the verdict.
+        assert!(
+            !outside.join("planted").exists(),
+            "HARM: a directory entry was created OUTSIDE the backup destination because a link at an \
+             interior component redirected it (CPE-1896/CPE-1925). Engine said: {results:?}"
+        );
+        assert_eq!(results.len(), 1, "one OpResult per directory entry: {results:?}");
+        assert!(!results[0].ok, "and the refusal is reported, not silent: {results:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The cheap textual filter still refuses the obvious spellings, and — as [`safe_join`]'s own doc
+    /// insists — it is a filter, not the guarantee. Kept separate from the test above precisely so
+    /// that neither is mistaken for the other's coverage.
+    #[test]
+    fn a_directory_entry_naming_the_root_or_walking_up_is_refused_by_the_textual_filter() {
+        let d = scratch("createdirs-textual");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &[],
+            &[],
+            &[],
+            &["../outside".into(), "".into()],
+            false,
+            true,
+        )
+        .expect("the run as a whole still succeeds");
+
+        assert!(results.iter().all(|r| !r.ok), "both spellings must be refused: {results:?}");
+        assert!(!d.join("outside").exists(), "nothing may be created outside the destination root");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1278,6 +1573,7 @@ mod tests {
             &[],
             &[],
             &["stale.txt".into(), "never-existed.txt".into()],
+            &[],
             false,
             true, // confirmed (CPE-1664)
         )
@@ -1428,6 +1724,7 @@ mod tests {
             &["ok.txt".into(), "linked.txt".into()],
             &[],
             &[],
+            &[],
             false,
             true, // confirmed
         )
@@ -1490,6 +1787,7 @@ mod tests {
             &src.to_string_lossy(),
             &dst.to_string_lossy(),
             &["sub/authorized_keys".into()],
+            &[],
             &[],
             &[],
             false,
@@ -1575,6 +1873,7 @@ mod tests {
             &["Photos/holiday.jpg".into()],
             &[],
             &[],
+            &[],
             false,
             true, // confirmed
         )
@@ -1629,6 +1928,7 @@ mod tests {
             &["sub/planted.txt".into()],
             &[],
             &[],
+            &[],
             false,
             true, // confirmed
         )
@@ -1670,6 +1970,7 @@ mod tests {
             &src.to_string_lossy(),
             &dst.to_string_lossy(),
             &["sub/deeper/x.txt".into()],
+            &[],
             &[],
             &[],
             false,
@@ -1716,6 +2017,7 @@ mod tests {
             &["sub/redirected.txt".into(), "ok.txt".into()],
             &[],
             &[],
+            &[],
             false,
             true, // confirmed
         )
@@ -1760,6 +2062,7 @@ mod tests {
             &src.to_string_lossy(),
             &dst.to_string_lossy(),
             &["a/b/c/deep.txt".into()],
+            &[],
             &[],
             &[],
             true, // verify
@@ -1844,6 +2147,7 @@ mod tests {
             &src.to_string_lossy(),
             &guarded_dst.to_string_lossy(),
             &rels,
+            &[],
             &[],
             &[],
             false,
@@ -2081,6 +2385,7 @@ mod tests {
                 &["a/b/fresh.txt".into()],
                 &["existing.txt".into()],
                 &[],
+                &[],
                 verify,
                 true, // confirmed
             )
@@ -2311,6 +2616,7 @@ mod tests {
                 // the two-phase swap-back land on a real, ordinary file.
                 &["sub/victim.txt".into()],
                 &[],
+                &[],
                 // Sweep BOTH verify modes: the finding measured the escape at 73/1200 with verification
                 // off and 68/1200 with it ON, and the second number is what this branch exists for.
                 trial % 2 == 1,
@@ -2395,6 +2701,7 @@ mod tests {
                 &src.to_string_lossy(),
                 &dst.to_string_lossy(),
                 &[esc.to_string()],
+                &[],
                 &[],
                 &[],
                 false,
