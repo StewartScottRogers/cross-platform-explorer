@@ -87,12 +87,61 @@ describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a groupe
       timeoutMsg: "expected the Organize dialog's rule picker to render",
     });
 
+    // CPE-1965 — WAIT FOR THE DEFAULT RULE'S PREVIEW TO LAND BEFORE CLICKING A RULE PILL, and do NOT
+    // replace this with a longer `waitForClickable`: clickability was never the problem.
+    //
+    // `OrganizeDialog.svelte`'s backdrop is `display:grid; place-items:center` (the app-wide dialog
+    // convention — dozens of components), and its `.preview` box goes from `min-height:120px` while the
+    // first `organize_plan` is in flight to as much as `max-height:45vh` once the plan renders. At the
+    // 1000x700 window this harness sets, that is a ~195px growth on a VERTICALLY CENTRED dialog, so the
+    // `.rules` row above it slides UP by ~98px about 120ms (the dialog's own debounce) after mount.
+    // The rule pills are 28px tall. Clicking inside that window is a coin flip: WebDriver computes the
+    // element's centre point, the reflow happens, and the synthesized click lands ~98px lower — inside
+    // `.preview`, whose ancestor `.dialog` has `on:click|stopPropagation`. So the click SUCCEEDS at the
+    // protocol level, nothing is intercepted, the dialog stays open, and `rule` is simply never set.
+    //
+    // MEASURED: 3 of 69 shard-4 jobs (4.3%) over 2026-08-27T12:24Z-2026-08-28T01:46Z, across BOTH
+    // webdriverio 9.30.0 (`added 479 packages`) and 9.31.4 (`added 489`) — so this is NOT CPE-1960's
+    // `scrollIntoView` wheel regression, which only exists on 9.31.4. Run 33131342785's
+    // `organize-dialog-fail.png` is the proof: "By kind" still highlighted, the by_kind plan rendered,
+    // `CPE-1143-photo.png` plainly present in the folder behind the dialog.
+    //
+    // The settled preview is exactly `summary` (a plan rendered) / `empty-state` (a plan of zero) /
+    // `error`; the loading placeholder carries no testid, so "one of these three exists" IS "the
+    // dialog has stopped resizing". Deliberately tolerant of all three: this wait must not become a
+    // second, silent assertion that a plan was produced — the named assertions below own that.
+    await browser.waitUntil(
+      async () =>
+        (await $$('[data-testid="summary"], [data-testid="empty-state"], [data-testid="error"]').length) > 0,
+      {
+        timeout: 15_000,
+        timeoutMsg:
+          "expected the Organize dialog's default (by_kind) preview to settle before picking a rule",
+      },
+    );
+
     // Select a rule (By extension) — an explicit user action, not just relying on the dialog's
     // default. Produces the most legible grouping for this fixture (PNG/ZIP/TXT/RS/MP3 subdirs),
     // which the next assertion checks by name.
     const byExtensionRule = await $('[data-testid="rule-by_extension"]');
     await byExtensionRule.waitForClickable({ timeout: 10_000 });
     await byExtensionRule.click();
+
+    // CPE-1965: assert the click actually LANDED, at the click site. Without this the swallowed click
+    // above surfaced 10s later as "expected a PNG group for the seeded CPE-1143-photo.png" — a message
+    // that reads like a broken `organize_plan` or a missing fixture and cost a day of mis-diagnosis
+    // (it was filed as an `element not interactable` failure, which was an unrelated line in the same
+    // log). `.rule.active` is bound to `rule === r.value` in OrganizeDialog.svelte, so this is a direct
+    // read of the state the click was supposed to change, not a proxy for it.
+    await browser.waitUntil(
+      async () => ((await byExtensionRule.getAttribute("class")) ?? "").split(/\s+/).includes("active"),
+      {
+        timeout: 10_000,
+        timeoutMsg:
+          'clicked [data-testid="rule-by_extension"] but it never became .active — the click was ' +
+          "swallowed (see the reflow note above), not rejected",
+      },
+    );
 
     // Core assertion (CPE-1143): the grouped preview (fed by the real `organize_plan` command)
     // actually renders proposal rows for the seeded tmpDir's mixed-kind files — the FALSIFIABLE

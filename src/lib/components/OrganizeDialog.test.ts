@@ -8,6 +8,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const invokeMock = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
 vi.mock("../invoke", () => ({
@@ -133,5 +135,71 @@ describe("OrganizeDialog (CPE-1142)", () => {
 
     await fireEvent.click(screen.getByTestId("undo-btn"));
     expect(undo).toHaveBeenCalled();
+  });
+});
+
+/**
+ * CPE-1965 — DERIVED, NOT CLAIMED (see CLAUDE.md "Derive provenance, don't claim it").
+ *
+ * `gui-smoke/specs/organize.smoke.ts` carries a comment explaining why it must wait for the default
+ * rule's preview to land before clicking a rule pill. That explanation asserts three facts about THIS
+ * component, and a comment asserting facts about another file is untested by construction. So the
+ * three are re-read out of `OrganizeDialog.svelte` here on every run instead:
+ *
+ *   1. the backdrop centres the dialog vertically, so a height change moves the `.rules` row UP;
+ *   2. `.preview` is SHORTER while the plan is in flight (`min-height`) than once it renders
+ *      (`max-height`), so there IS a height change ~120ms after mount;
+ *   3. `.dialog` swallows stray clicks (`on:click|stopPropagation`), so a mis-landed click is silent
+ *      rather than closing the dialog — which is why the failure surfaced 10s later as a missing
+ *      `group-PNG` instead of at the click.
+ *
+ * Together those are the mechanism. Change any of them and this reds, so the next reader is told the
+ * spec's wait may no longer be load-bearing rather than inheriting a stale story.
+ *
+ * WHAT THIS DOES NOT PROVE, stated plainly: it does not reproduce the swallowed click. jsdom has no
+ * layout, so the ~98px shift cannot be measured here, and the real reproduction rate was 3 of 69
+ * shard-4 CI jobs (4.3%) — no single local or CI run settles it either way. The empirical half of the
+ * red-proof is the enumerated CI record in CPE-1965, not this file.
+ */
+describe("CPE-1965 — the reflow the gui-smoke spec waits out (derived from the component)", () => {
+  const SRC = readFileSync(join(process.cwd(), "src", "lib", "components", "OrganizeDialog.svelte"), "utf8");
+
+  /** The one CSS declaration block for `.name`. Fails rather than guessing if it is not unique. */
+  function ruleBlock(name: string): string {
+    const matches = [...SRC.matchAll(new RegExp(`(?:^|\\n)\\s*\\.${name}\\s*\\{([^}]*)\\}`, "g"))];
+    expect(matches.length, `expected exactly one \`.${name}\` CSS block in OrganizeDialog.svelte`).to.equal(1);
+    return matches[0][1];
+  }
+
+  it("centres the dialog vertically, so the rules row moves when the dialog's height changes", () => {
+    expect(ruleBlock("backdrop")).toMatch(/place-items:\s*center/);
+  });
+
+  it("gives .preview a different height while loading than once the plan renders", () => {
+    const preview = ruleBlock("preview");
+    const min = /min-height:\s*([^;]+);/.exec(preview)?.[1]?.trim();
+    const max = /max-height:\s*([^;]+);/.exec(preview)?.[1]?.trim();
+    expect(min, "expected .preview to declare a min-height (its in-flight height)").toBeTruthy();
+    expect(max, "expected .preview to declare a max-height (its settled height)").toBeTruthy();
+    expect(
+      min,
+      "expected .preview's loading height to differ from its settled height — if these are now equal " +
+        "the dialog no longer reflows and organize.smoke.ts's CPE-1965 wait is belt-and-braces",
+    ).not.toEqual(max);
+  });
+
+  it("swallows a click that lands on the dialog body, so a mis-landed click is silent", () => {
+    expect(SRC).toMatch(/<div class="dialog"[^>]*on:click\|stopPropagation/);
+  });
+
+  it("still switches the rule when the pill is clicked — the defect is positional, not logical", async () => {
+    render(OrganizeDialog, { path: "/work/proj" });
+    await vi.advanceTimersByTimeAsync(150);
+
+    await fireEvent.click(screen.getByTestId("rule-by_extension"));
+    expect(
+      (screen.getByTestId("rule-by_extension") as HTMLElement).className.split(/\s+/),
+      "expected the clicked pill to become .active — the class organize.smoke.ts now asserts on",
+    ).toContain("active");
   });
 });
