@@ -397,7 +397,12 @@ const ALLOWLIST: AllowlistEntry[] = [
     // new line lands after `notice.autoBackupFirstFailure`, further down than this one, so it does not
     // shift it either -- the same shape as the CPE-1879 and CPE-1827 notes above. Same story,
     // re-anchored on `contains`.
-    line: 5389,
+    // 5389 -> 5399: CPE-1935 added `notice.archiveFailed{One,Many}` to every locale (2 lines apiece).
+    // en/es/de/fr/it's pairs sit above this Portuguese line; Portuguese's own pair lands in its own
+    // block, further down than this line, so only those 10 shift it. Landed in parallel with CPE-1925
+    // above, so this number is the two together, MEASURED after merging rather than added up: the
+    // arithmetic is narration and `contains` is what actually keeps the entry honest.
+    line: 5399,
     kind: "mojibake",
     reason:
       'Legitimate Portuguese "NÃO" (N + A-tilde + O) -- Ã followed by the ASCII letter "O", not a CP1252 ' +

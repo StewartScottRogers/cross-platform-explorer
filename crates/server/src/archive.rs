@@ -453,7 +453,7 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // [`entry_sink_action`] for a file entry, [`entry_dir_action`] for a directory one — and the check runs
 // *before* the `create_dir_all(parent)` so an escaping entry cannot create its intermediate folders
 // outside `dest` on the way to being refused. Pinned by
-// `rows_15_to_20_refuse_an_entry_addressed_through_a_symlinked_intermediate_directory`.
+// `rows_15_to_20_refuse_a_file_entry_addressed_through_a_symlinked_intermediate_directory`.
 //
 // **The two paths that already refused have now been adopted, not merely recorded — CPE-1759.** `tar`
 // and the zip crate's one-shot `extract` both aborted the whole run rather than skipping the entry:
@@ -464,15 +464,24 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // (`unpack_in`'s checks stay as the belt behind them). For zip, row 23 stopped being an extractor at all
 // and became a call into row 16's loop.
 //
-// **The line this table now draws, stated so it can be checked rather than assumed: a REFUSAL skips; a
-// FAILURE aborts.** A refusal is a per-entry decision this module makes and can repeat — an unsafe name,
-// a link at the slot, an escaping destination, an escaping link target, a link this platform will not
-// create. A failure is the write itself not working: `File::create`, `io::copy`, `fs::hard_link`, an
-// unreadable slot ([`EntrySlotAction::Abort`]). Failures abort at every row, including the ones this
-// ticket touched — measured and pinned rather than left implied: a tar hard link whose target is simply
-// missing still takes the run down (`cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails`),
-// and so does a slot whose `symlink_metadata` fails
-// (`cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`).
+// **The line this table draws, stated so it can be checked rather than assumed: a REFUSAL skips, a
+// FAILURE is recorded against its own entry, and only a RUN-scoped problem aborts.** A refusal is a
+// per-entry decision this module makes and can repeat — an unsafe name, a link at the slot, an escaping
+// destination, an escaping link target, a link this platform will not create. A failure is the write
+// itself not working: `File::create`, `io::copy`, `fs::hard_link`, an unreadable slot
+// ([`EntrySlotAction::Fail`]).
+//
+// **CPE-1935 rewrote the second half of that sentence, and this paragraph with it.** Through CPE-1759
+// the rule was *"a refusal skips; a failure aborts"*, and a failure at any row discarded the report
+// along with every entry already on disk. A leaf failure is now counted in [`ArchiveReport::failed`]
+// with its reason beside the skips and the run carries on — measured and pinned rather than left
+// implied: a tar hard link whose target is simply missing is one counted failure whose neighbours still
+// extract (`cpe1759_an_escaping_tar_hard_link_is_skipped_while_a_missing_target_still_fails` asserts
+// `Ok` with `failed == 1`, having previously asserted `Err`), and so is a slot whose `symlink_metadata`
+// fails (`cpe1935_an_unreadable_slot_is_a_recorded_entry_failure_on_both_tar_paths`).
+// [`EntrySlotAction::Abort`] keeps only what genuinely is the whole run's problem — the extraction
+// folder, a shared path component, the archive container — where recording it against one entry would
+// be a lie about scope.
 //
 // **CPE-1759's own review found the rule broken in two places by the commit that stated it**, which is
 // the argument for stating it as a testable line rather than a principle:
@@ -700,7 +709,43 @@ fn refuse_link_at_new_file(dest: &Path) -> Result<(), String> {
 /// them. Rows 15–16 *skip and keep going*, and the UAT for this ticket caught them treating the two
 /// refusal reasons as one: `if refuse_link_at_new_file(&out).is_err() { continue; }` dropped an entry
 /// **silently and returned `Ok`** when the slot merely could not be *read* — an I/O failure reported as a
-/// successful extraction with a file quietly missing. Every other I/O failure in those loops aborts.
+/// successful extraction with a file quietly missing.
+///
+/// # THE RULE (CPE-1935) — scope decides who dies, severity decides how it reads
+///
+/// This enum used to have three arms and carry two questions in two: `Skip` meant *"a verdict about one
+/// entry"* **and** *"the run continues"*; `Abort` meant *"an I/O failure"* **and** *"the run stops"*.
+/// Bundling them made every I/O failure a whole-run failure, which is CPE-1935: a read-only file or a
+/// plain directory sitting at one entry's name took the other 26 entries of a 27-entry archive down with
+/// it and left the 23 already on disk unrecorded. Measured before the split, six legs, two occupants,
+/// Windows **and** real ext4 — identical everywhere (`a.txt` written, `zc.txt` never written, one
+/// sentence naming only `blocked.txt`; see `cpe1935_a_blocked_entry_never_takes_the_run_down`).
+///
+/// The two questions are now separate and asked in this order:
+///
+/// 1. **Scope — what is this evidence ABOUT?** If it is about the **one name the archive asked for**,
+///    it is an *entry* verdict and the run carries on. If it is about the **extraction folder, or a
+///    path component more than one entry travels through, or the archive container itself**, it is a
+///    *run* verdict and the run stops. An entry is the archive's business; the destination and the
+///    container are the run's.
+/// 2. **Severity — did anyone CHOOSE not to write?** A guard saying *"this entry would escape the
+///    folder"* chose ([`Skip`](Self::Skip), counted in [`ArchiveReport::skipped`]). The filesystem
+///    saying *"you cannot write here"* chose nothing ([`Fail`](Self::Fail), counted in
+///    [`ArchiveReport::failed`]) — the user asked for a file and did not get it, which must never read
+///    as a policy decision, and never as a success.
+///
+/// **How this reconciles with CPE-1938's `Abort` arm rather than reversing it.** That ticket's Security
+/// Auditor flagged the same shape one door along — a transient `ENOENT` on a directory *component*
+/// promoted from a per-entry skip to total denial — and it was kept as an abort, argued at the site.
+/// Under the rule above that arm is **correct and unchanged**: a directory component is shared by every
+/// entry beneath it, and `create_dir_beneath` *creates* missing components, so a refusal there is
+/// evidence about the destination being mutated underneath a run in progress, not about one entry. The
+/// two positions were never in conflict; they were being told apart by *severity*, which cannot
+/// distinguish them, instead of by *scope*, which can. See [`entry_component_action`].
+///
+/// The one thing that is NOT reclassified: a **containment** refusal. "This entry would land outside the
+/// folder", "this name is a link", "this leaf has other names" are verdicts and stay
+/// [`Skip`](Self::Skip). Collapsing them into `Fail` would relabel a successful defence as a malfunction.
 #[derive(Debug, PartialEq, Eq)]
 enum EntrySlotAction {
     /// The slot is provably not a link: write it.
@@ -708,20 +753,125 @@ enum EntrySlotAction {
     /// A confirmed link. Policy skip — carry on with the rest of the archive, recording the reason where
     /// the caller has somewhere to put it.
     Skip(String),
-    /// The slot could not be read. Not the archive's fault and not a skippable condition: abort, the same
-    /// way `create_dir_all`/`File::create`/`io::copy` failures in these loops already do.
+    /// **The entry could not be delivered and nobody chose that** (CPE-1935) — an unwritable occupant, a
+    /// directory in the leaf's way, a slot whose safety could not be established. Scope is one entry, so
+    /// the run continues; severity is a failure, so it lands in [`ArchiveReport::failed`] and never in
+    /// `skipped`. Nothing is written for it either way — this arm changes what happens to the *other*
+    /// entries, never what happens to this one.
+    Fail(EntryFailure),
+    /// The **run** cannot go on: the extraction folder, a shared path component, or the archive
+    /// container itself. Not one entry's problem, so recording it per entry would be a lie about scope.
     Abort(String),
+}
+
+/// One entry that could not be delivered, plus **whether extracting again here could come out
+/// differently** (CPE-1935).
+///
+/// The retryable answer is carried **from the point of refusal**, never re-derived later from the
+/// sentence — the identical shape, and for the identical reason, as
+/// [`crate::revert_engine::Refused`]: the site that met the filesystem knows, and everywhere else is
+/// guessing. CPE-1845 shipped that guess once (a containment verdict labelled "temporary — run the
+/// revert again") and this module's standing rule against pattern-matching refusal wording
+/// ([`crate::open_beneath::Refusal`]) is the same lesson.
+#[derive(Debug, PartialEq, Eq)]
+struct EntryFailure {
+    /// The sentence naming what happened at this entry. The next-step clause is **not** part of it —
+    /// [`ArchiveReport::fail`] appends that from `retryable`, so the two cannot drift.
+    why: String,
+    /// `true` when the cause is something the user can clear and re-run into (a read-only file, a
+    /// directory in the way, a lock, a permission). `false` when re-running reaches the same answer (a
+    /// malformed or truncated archive).
+    retryable: bool,
+}
+
+impl EntryFailure {
+    /// The filesystem refused this one name for a reason the user can act on, then extract again.
+    fn retryable(why: impl Into<String>) -> Self {
+        Self { why: why.into(), retryable: true }
+    }
+
+    /// Classify a write failure by [`std::io::ErrorKind`] — **a structured field, not the message
+    /// text.** The three kinds below are the ones that mean *the bytes we were handed are wrong*
+    /// (a truncated member, a corrupt deflate stream, a name this filesystem will not accept); every
+    /// other kind is the destination saying no, which is the case the user can fix and re-run.
+    ///
+    /// Erring toward `retryable` is deliberate: telling someone "try again" when it will not help costs
+    /// them one re-run, while telling them "this will never work" about a file they could have unlocked
+    /// costs them the file.
+    ///
+    /// **CPE-1929 pair, run on this predicate (Windows `--lib`, `Compiling cpe-server` confirmed on
+    /// every run):**
+    ///
+    /// ```text
+    /// baseline                                   2434 passed /  0 failed
+    /// A  disable  (`true || !matches!(..)`)       2434 passed /  2 failed
+    /// B  lie      (`matches!(..)`, inverted)      2433 passed /  3 failed
+    /// ```
+    ///
+    /// A's *first* run — before `cpe1935_a_write_failure_says_whether_re_running_helps` and
+    /// `cpe1935_a_corrupt_entry_fails_permanently_while_its_neighbours_land` existed — came back **2434
+    /// passed / 0 failed**, i.e. the classifier was unreachable from any assertion and would have
+    /// shipped reading as covered. Those two tests are what the pair bought.
+    fn from_write_error(why: impl Into<String>, e: &std::io::Error) -> Self {
+        let retryable = !matches!(
+            e.kind(),
+            std::io::ErrorKind::InvalidData
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::InvalidInput
+        );
+        Self { why: why.into(), retryable }
+    }
+}
+
+/// The next-step clause [`ArchiveReport::fail`] appends to a retryable entry failure. Says what the user
+/// can do **and** that the rest of the archive is already on disk — the sentence CPE-1935 was filed for
+/// the absence of, since re-running was the only recourse and nothing said so.
+const RETRY_HELPS: &str =
+    "The rest of the archive was extracted; clear that and extract again to get this entry too.";
+/// The next-step clause for a failure re-running cannot change — see [`EntryFailure::from_write_error`].
+const RETRY_DOES_NOT_HELP: &str =
+    "The rest of the archive was extracted; extracting again will not change this entry.";
+
+/// Join a failure's own sentence to its next-step clause with a real sentence break.
+///
+/// [`EntryFailure::why`] arrives from wherever the write failed and only *some* of those sources end in
+/// punctuation: our own wrappers do not (``failed to unpack `…\blocked.txt` ``), and a bare OS string
+/// ends in its code (`Access is denied. (os error 5)`). Round 1 concatenated with a plain space, so both
+/// of those reached the operations panel as two sentences run together —
+/// ``…\blocked.txt` The rest of the archive was extracted…`` — which reads as one broken sentence rather
+/// than as advice. The full stop is added only when the text has not already ended itself, so a message
+/// that was already a sentence is untouched.
+fn join_failure_sentence(why: &str, next: &str) -> String {
+    let why = why.trim_end();
+    if why.is_empty() {
+        return next.to_string();
+    }
+    if why.ends_with(['.', '!', '?', ':', ';']) {
+        format!("{why} {next}")
+    } else {
+        format!("{why}. {next}")
+    }
 }
 
 /// The pure decision behind [`EntrySlotAction`], split from the filesystem probe for the reason
 /// `fsutil`'s classifiers are: **the `Unknown` arm cannot be staged on every platform** (it needs a slot
 /// whose `symlink_metadata` fails with something other than `NotFound`), so with the mapping inline the
 /// one arm this ticket got wrong would again be the one arm no test could reach.
+///
+/// **CPE-1935 moved the `Unknown` arm from [`EntrySlotAction::Abort`] to [`EntrySlotAction::Fail`], and
+/// that is not a weakening of the gate.** Nothing is written for the entry either way — the refusal is
+/// byte-for-byte the same sentence and the same non-write. What changed is the *other* entries: an
+/// unreadable slot at one name used to deny the whole archive, which is precisely the "one planted
+/// object = total denial" amplifier CPE-1938's Security Auditor named one door along, reachable here by
+/// anything that can make a single leaf unstattable. Under [`EntrySlotAction`]'s rule the evidence is
+/// about **one name**, so its scope is one entry; its severity is a failure, not a policy skip, so it
+/// lands in [`ArchiveReport::failed`] where it cannot be mistaken for a guard's decision. The property
+/// the two tests here have always defended — *a gate that cannot tell must not write* — is untouched.
 fn entry_slot_action(verdict: crate::fsutil::CreateSlotLink) -> EntrySlotAction {
     match verdict {
         crate::fsutil::CreateSlotLink::NotALink => EntrySlotAction::Write,
         crate::fsutil::CreateSlotLink::Link(m) => EntrySlotAction::Skip(m),
-        crate::fsutil::CreateSlotLink::Unknown(m) => EntrySlotAction::Abort(m),
+        crate::fsutil::CreateSlotLink::Unknown(m) => EntrySlotAction::Fail(EntryFailure::retryable(m)),
     }
 }
 
@@ -806,20 +956,24 @@ fn entry_sink_action(dest: &Path, out: &Path) -> EntrySlotAction {
     // **CPE-1857 Security-Auditor finding 1: this is a GATE, so `Unknown` must refuse.** The `bool` form
     // of this question folds "could not tell" into "no", which is right at the revert engine's refusal
     // *classifier* (the write is already settled there) and fails **open** here, where the bytes have
-    // not moved yet. `Unknown` therefore aborts, on exactly the terms `entry_slot_action`'s own
-    // `Unknown` arm already aborts an unreadable link verdict — same condition, same answer, and
-    // `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped` pins the shape.
+    // not moved yet. `Unknown` therefore refuses, on exactly the terms `entry_slot_action`'s own
+    // `Unknown` arm refuses an unreadable link verdict — same condition, same answer. **CPE-1935 changed
+    // only its blast radius**, from the whole archive to this entry (`Fail`, not `Abort`);
+    // `cpe1935_an_unreadable_slot_is_a_recorded_entry_failure_on_both_tar_paths` pins the shape.
     match crate::batch_media::name_links(out) {
         crate::batch_media::NameLinks::Many(names) => {
             return EntrySlotAction::Skip(multiply_linked_message(out, names));
         }
         crate::batch_media::NameLinks::Unknown(why) => {
-            return EntrySlotAction::Abort(format!(
+            // CPE-1935: `Fail`, not `Abort` — same non-write, same sentence, one entry instead of the
+            // whole archive. See `entry_slot_action`'s doc for why that is a scope correction and not a
+            // relaxation of the gate.
+            return EntrySlotAction::Fail(EntryFailure::retryable(format!(
                 "could not check how many names \"{}\" has, so nothing was written for it — refusing \
                  to guess rather than risk writing through a hard link into a file outside this \
                  folder: {why}",
                 out.display()
-            ));
+            )));
         }
         crate::batch_media::NameLinks::One | crate::batch_media::NameLinks::NoFileHere => {}
     }
@@ -1106,7 +1260,8 @@ const WINDOWS_NO_LINK_SUPPORT: &[i32] = &[1, 50, 120];
 /// POSIX `EPERM`, which `symlink(2)` documents as *"the filesystem containing linkpath does not support
 /// the creation of symbolic links"* — the FAT-stick case, on the other family.
 ///
-/// **`EACCES` (13) is the write-permission failure and is deliberately absent**: that one must abort.
+/// **`EACCES` (13) is the write-permission failure and is deliberately absent**: that one must be
+/// reported as a failure, not dressed up as a categorical refusal.
 /// The two are indistinguishable by `ErrorKind` (both `PermissionDenied`), which is the *genuine*
 /// same-kind collision review round 2 mistakenly attributed to the Windows pair.
 ///
@@ -1122,7 +1277,7 @@ const WINDOWS_NO_LINK_SUPPORT: &[i32] = &[1, 50, 120];
 /// stages it). Darwin's `unlink` answers `EPERM` for *"the named file is a directory"*, where Linux
 /// answers `EISDIR`. So without the direct return, the directory-occupant leg of
 /// `cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure` would flip from
-/// abort to refusal **on the macOS leg alone** — the sticky-bit case is the hypothetical one, and this
+/// failure to refusal **on the macOS leg alone** — the sticky-bit case is the hypothetical one, and this
 /// is the one already sitting in this PR's own test matrix.
 ///
 /// `EPERM` is 1 on Linux, macOS and every BSD (the original UNIX errno ordering); it is spelled out
@@ -1133,9 +1288,11 @@ const EPERM: i32 = 1;
 /// **The refusal/failure line for link creation** (CPE-1759, review rounds 2 and 3).
 ///
 /// `true` only for *categorical* refusals — this machine or volume does not do symbolic links at all,
-/// for anyone, until something about the machine changes. Everything else is a **failure** and aborts,
-/// with the same treatment `File::create` and `io::copy` get in the same loop: `EACCES` on the
-/// directory, `NotFound`, a full disk, `EIO`.
+/// for anyone, until something about the machine changes. Everything else is a **failure**, with the
+/// same treatment `File::create` and `io::copy` get in the same loop: `EACCES` on the directory,
+/// `NotFound`, a full disk, `EIO`. (That treatment was a whole-run abort until CPE-1935 and is one
+/// counted entry failure now; this function decides *which side of the line* an error falls on, which
+/// is unchanged.)
 ///
 /// **Round 3 fixed a promise the code was not keeping.** Round 2 matched `ErrorKind::Unsupported` plus
 /// Windows 1314 and told users, in the in-app help, that a link-less filesystem would skip the entry.
@@ -1218,7 +1375,12 @@ fn link_creation_refusal(target: &Path, e: &std::io::Error) -> String {
 }
 
 /// **What a link-creation error means, as a pure function**: `Ok(None)` unreachable here, `Ok(Some(m))`
-/// a **refusal** (skip this entry), `Err(m)` a **failure** (abort the run).
+/// a **refusal** (skip this entry), `Err(m)` a **failure**.
+///
+/// The two verdicts still mean what they always meant here; what CPE-1935 changed is what the *callers*
+/// do with `Err`. It used to leave via `?` and end the run; every call site now records it against this
+/// one entry ([`ArchiveReport::fail`]) and carries on. This function is unchanged and needs to be —
+/// misfiling a failure as a refusal is still the defect, whatever the failure then costs.
 ///
 /// Split out of [`materialise_entry_symlink`] in review round 3, for the reason `entry_slot_action` and
 /// `fsutil`'s classifiers are split out — and the review measured the cost of not having it: mutating
@@ -1377,8 +1539,9 @@ fn parse_os_error_code(text: &str) -> Option<i32> {
 ///
 /// When no such evidence is found, `e` is an ordinary write failure `unpack_in` hit somewhere else
 /// (parent-directory creation, containment validation, an mtime set on a link that already exists on
-/// disk) and this aborts with `e`'s own message, never routed through the classifier at all — the same
-/// "failures abort" treatment every other write failure in this module gets.
+/// disk) and this returns `Err` with `e`'s own message, never routed through the classifier at all —
+/// the same treatment every other write failure in this module gets, which since CPE-1935 means one
+/// recorded entry failure rather than a dead run.
 ///
 /// **CPE-1813 review round 1, minor 4 — the message shown for a refusal is the genuine syscall text,
 /// not a manufactured one.** [`recover_link_syscall_error`]'s reconstructed error is what gets
@@ -1401,7 +1564,8 @@ fn tar_link_creation_outcome(
 }
 
 /// Create the link a symlink entry asks for, classifying what happens into this module's two outcomes:
-/// `Ok(None)` created, `Ok(Some(reason))` **refused** (skip), `Err(e)` **failed** (abort).
+/// `Ok(None)` created, `Ok(Some(reason))` **refused** (skip), `Err(e)` **failed** (recorded against
+/// this entry since CPE-1935; a whole-run abort before it).
 ///
 /// # The `AlreadyExists` retry, and why it is not a new policy
 ///
@@ -1419,8 +1583,9 @@ fn tar_link_creation_outcome(
 /// staged an ordinary file in the slot and asserted the file survived. The behaviour was wrong, the
 /// message was untrue, and the test certified both.
 ///
-/// A `remove_file` that fails — because the occupant is a **directory**, most obviously — is a failure
-/// and aborts, exactly as `File::create` would on the same path. **Its error is returned directly and
+/// A `remove_file` that fails — because the occupant is a **directory**, most obviously — is a failure,
+/// treated exactly as `File::create` would be on the same path (one recorded entry failure since
+/// CPE-1935; before it, a whole-run abort). **Its error is returned directly and
 /// never handed to [`link_creation_outcome`]**, which is not tidiness: `remove_file` answers `EPERM` on
 /// a sticky-bit directory such as `/tmp`, and `EPERM` is one of the codes that classifier reads as (plain
 /// code text, not a link: `EPERM` only compiles under `cfg(unix)` and `materialise_entry_symlink` is not
@@ -1639,6 +1804,21 @@ fn entry_component_action(
         // `open_beneath::refuse`'s, shared by the archive, transfer and revert legs and pinned by
         // tests in all three, so re-wording it is its own change with its own blast radius rather than
         // a line in this ticket.
+        //
+        // **CPE-1935 re-examined this arm and KEPT it, on a better reason than the one above.** That
+        // ticket demoted every *leaf* I/O failure in this module from a whole-run abort to a per-entry
+        // `Fail`, which is the opposite move; the two are consistent because [`EntrySlotAction`]'s rule
+        // asks **scope** before severity, and this walk's scope is not one entry. `chain` here is the
+        // entry's *directory components* — for a file entry, `rel.parent()`, every level of which every
+        // sibling entry underneath it also travels through; for a directory entry, the directory it
+        // came to create, which is the same thing one level down. `create_dir_beneath` **creates**
+        // missing levels, so a refusal is never "not there yet": it is the destination answering that
+        // it cannot hold the tree the archive describes, and continuing to write into a destination
+        // that is being mutated underneath a run in progress is the worse failure. Per-entry recording
+        // would also be a lie about scope — it would name one entry for a fact about a directory.
+        //
+        // The line, stated once so a future arm can be placed by it rather than by feel: **the leaf is
+        // the archive's business and the chain is the run's.**
         Err(r) => EntrySlotAction::Abort(r.why),
     }
 }
@@ -2836,14 +3016,16 @@ fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> EntrySl
         // which is the whole reason this paragraph exists. Before this ticket the `Abort` arm here was
         // *dead*: the only producer was `link_target_action`, which never returns it. Adding
         // `entry_sink_action` above made it live, and mapping it to a skip meant an unreadable slot —
-        // classified as a **failure** by [`EntrySlotAction`]'s own doc, and aborted by all three zip
+        // classified as a **failure** by [`EntrySlotAction`]'s own doc, and refused by all three zip
         // sinks — dropped a tar entry silently while the run returned `Ok`. That is UAT finding 6
         // verbatim, reintroduced three functions from the comment warning about it.
         //
-        // The rule this module states is *refusals skip, failures abort*, and "`unpack_in` owns the
-        // write" is not an exception to it: the caller can abort just as easily as it can skip, and a
-        // slot we could not classify is not a refusal we chose — it is a question the filesystem would
-        // not answer.
+        // The rule this module states is that a refusal we *chose* is a skip and a failure the
+        // filesystem handed us is not, and "`unpack_in` owns the write" is not an exception to it: the
+        // caller can record a failure just as easily as a skip, and a slot we could not classify is not
+        // a refusal we chose — it is a question the filesystem would not answer. **CPE-1935 kept that
+        // distinction and separated it from a second one it had been carrying** (whether the *run*
+        // stops), so what arrives here as `Fail` is recorded per entry; see [`EntrySlotAction`].
         decided => return decided,
     }
     let (target, decision) = match kind {
@@ -2888,10 +3070,17 @@ fn tar_entry_refusal(dest: &Path, name: &str, kind: TarEntryKind<'_>) -> EntrySl
 /// refusal the user is told about, never a false permit.
 ///
 /// **What this does NOT convert**, because it is a failure rather than a refusal: a hard link whose
-/// target simply is not there (measured — `[HL nonexistent-inside]` aborts both paths, and it is the
+/// target simply is not there (measured — `[HL nonexistent-inside]` fails on both paths, and it is the
 /// same `Err` shape). `fs::hard_link` owns that write and there is no way to predict its outcome without
-/// attempting it, so it stays an abort, exactly like a `File::create` or `io::copy` failure at rows
-/// 15/16/19/20. The line this module draws is *refusals skip, failures abort* — not *nothing aborts*.
+/// attempting it, so it stays a failure, exactly like a `File::create` or `io::copy` failure at rows
+/// 15/16/19/20.
+///
+/// **CPE-1935 changed what a failure then costs, not which side of this line it falls on.** The rule
+/// used to read *refusals skip, failures abort*; it now reads *refusals skip, failures are counted
+/// against their own entry, and only a run-scoped problem aborts* — so `[HL nonexistent-inside]` lands
+/// as `failed == 1` with the rest of the archive extracted. Whether that entry is a **skip** or a
+/// **failure** is still this function's question and still answered the same way: the counts the user
+/// reads mean different things, so misfiling one as the other is as wrong as it ever was.
 fn hard_link_target_action(dest: &Path, target: &Path) -> EntrySlotAction {
     let normalized = target.to_string_lossy().replace('\\', "/");
     if crate::fsutil::confined_to(&dest.join(&normalized), dest) {
@@ -2989,8 +3178,11 @@ fn tar_entry_kind<'a>(entry_type: tar::EntryType, link_target: Option<&'a Path>)
 /// only answers the containment questions asked *before* the write; if the write itself fails because
 /// this volume cannot hold links at all, that is [`tar_link_creation_outcome`]'s question, asked here
 /// because it needs the `io::Error` `unpack_in` actually produced. A refusal is skipped exactly like
-/// [`EntrySlotAction::Skip`] above — silently, for the same "no `ArchiveReport` on this path" reason —
-/// and anything else still aborts via `?`, unchanged from before this ticket.
+/// [`EntrySlotAction::Skip`] above, and anything else is recorded as one entry failure.
+///
+/// (Two clauses of that sentence went stale and are corrected here. CPE-1837 gave this path an
+/// `ArchiveReport`, so the skip is no longer silent; CPE-1935 replaced the `?` with
+/// [`ArchiveReport::fail`], so the failure no longer ends the run.)
 ///
 /// A thin wrapper over [`tar_unpack_with`], which does the real work parameterised over how a single
 /// entry gets unpacked — see that function's doc for why (CPE-1813 review round 2, blocker 3).
@@ -3043,8 +3235,14 @@ fn tar_unpack_with<R: std::io::Read>(
                 report.skip(&name, &reason);
                 continue;
             }
-            // Not skippable: an unreadable slot is an I/O failure, and silently dropping the entry
-            // would report success about a file that is missing (UAT finding 6) — same as row 15.
+            // Not a skip: an unreadable slot is an I/O failure, and silently dropping the entry would
+            // report success about a file that is missing (UAT finding 6) — same as row 15. CPE-1935:
+            // recorded per entry rather than taking the archive down, because the evidence is about one
+            // name; see `EntrySlotAction`.
+            EntrySlotAction::Fail(f) => {
+                report.fail(&name, &f);
+                continue;
+            }
             EntrySlotAction::Abort(e) => return Err(e),
         }
         // CPE-1938, and deliberately AFTER the path questions above — see `entry_component_action`
@@ -3053,6 +3251,10 @@ fn tar_unpack_with<R: std::io::Read>(
             EntrySlotAction::Write => {}
             EntrySlotAction::Skip(reason) => {
                 report.skip(&name, &reason);
+                continue;
+            }
+            EntrySlotAction::Fail(f) => {
+                report.fail(&name, &f);
                 continue;
             }
             EntrySlotAction::Abort(e) => return Err(e),
@@ -3072,18 +3274,51 @@ fn tar_unpack_with<R: std::io::Read>(
                     Some(target) => {
                         let marker =
                             if entry_type.is_hard_link() { TAR_HARDLINK_MARKER } else { TAR_SYMLINK_MARKER };
-                        if let Some(reason) = tar_link_creation_outcome(target, &root.join(&name), &e, marker)? {
-                            report.skip(&name, &reason);
+                        match tar_link_creation_outcome(target, &root.join(&name), &e, marker) {
+                            Ok(Some(reason)) => report.skip(&name, &reason),
+                            Ok(None) => {}
+                            // CPE-1935: `?` stood here. A link this machine could not create for a
+                            // non-categorical reason is still one entry's problem.
+                            Err(why) => report.fail(&name, &EntryFailure::from_write_error(why, &e)),
                         }
                     }
-                    None => return Err(e.to_string()),
+                    // **CPE-1935 — the ticket's own shape on this leg.** `return Err(e.to_string())`
+                    // stood here: a read-only file or a plain directory at one entry's name ended the
+                    // archive, left everything already unpacked on disk unrecorded, and reported one
+                    // sentence naming the blocker. `unpack_in` has already been handed this entry, so
+                    // the evidence is about this name — an entry verdict. The tar iterator's own `Err`
+                    // (above, and on the next `entries()` step) is still the run verdict for a broken
+                    // stream, so a genuinely unreadable archive stops here as it always did.
+                    None => report.fail(
+                        &name,
+                        &EntryFailure::from_write_error(
+                            format!("could not be written into the extraction folder: {e}"),
+                            &e,
+                        ),
+                    ),
                 },
             }
         }
     }
     directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
     for mut dir in directories {
-        unpack_entry(&mut dir, &root).map_err(|e| e.to_string())?;
+        // **CPE-1935: a per-entry failure, and it does NOT contradict `entry_component_action`'s
+        // `Abort`.** This second pass runs over directory entries whose whole chain — leaf included —
+        // `create_dir_beneath` has already created and verified, so what is left for `unpack_in` to do
+        // is set that directory's mode and mtime. Nothing downstream depends on it: the directory
+        // exists, every file entry beneath it has already been written into it. So this is metadata on
+        // one entry, not the destination refusing to hold the tree, and the two answers differ because
+        // the *facts* differ, not because the rule bends.
+        let dir_name = dir.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        if let Err(e) = unpack_entry(&mut dir, &root) {
+            report.fail(
+                &dir_name,
+                &EntryFailure::from_write_error(
+                    format!("the folder was created, but its permissions and timestamp could not be set: {e}"),
+                    &e,
+                ),
+            );
+        }
     }
     Ok(report)
 }
@@ -3235,6 +3470,37 @@ fn sevenz_entry_slot_action(
     entry_sink_action(dest, entry_dest)
 }
 
+/// Turn `sevenz-rust`'s per-entry write error into one of **our** sentences plus a retryable answer
+/// (CPE-1935) — rows 19–20's half of the same job [`EntryFailure::from_write_error`] does everywhere
+/// else.
+///
+/// It cannot go through `e.to_string()`, for the reason already written up on
+/// [`sevenz_entry_slot_action`]: `sevenz-rust` 0.6.1 implements `Display for Error` as `Debug::fmt`
+/// (`src/error.rs:74-78`), so the whole thing arrives `Debug`-quoted with every `\` in a Windows path
+/// doubled and the OS message buried inside an `Io(Os { code: 5, kind: PermissionDenied, message:
+/// "Access is denied." }, "C:\\…")` wrapper. That is what CPE-1935's reproduction measured coming back
+/// as the run's single error string on both 7z legs, on Windows and on real ext4.
+///
+/// **`Error::Io` and `Error::FileOpen` are the same variant.** `Error::file_open` constructs
+/// `Self::Io(e, filename)` (`src/error.rs:60-63`), so matching `Io` covers both spellings; `FileOpen`
+/// exists in the enum but nothing in 0.6.1 builds it. `MaybeBadPassword` also carries an `io::Error` but
+/// is deliberately **not** unwrapped here — its whole meaning is "this may be the password rather than
+/// the disk", which the raw errno would hide.
+fn sevenz_entry_failure(e: &sevenz_rust::Error) -> EntryFailure {
+    match e {
+        sevenz_rust::Error::Io(io, _) => EntryFailure::from_write_error(
+            format!("could not be written into the extraction folder: {io}"),
+            io,
+        ),
+        // Everything else is the archive's own structure — a bad header, an unsupported method, a
+        // checksum. Re-running reads the same bytes and reaches the same answer.
+        other => EntryFailure {
+            why: format!("could not be extracted from this 7z archive: {other}"),
+            retryable: false,
+        },
+    }
+}
+
 /// Extract a `.7z` into `dest` **safely**: `sevenz-rust` 0.6 doesn't check path traversal, so validate
 /// each entry with [`entry_name_is_safe`] and skip any that isn't a plain relative path (CPE-628).
 ///
@@ -3265,6 +3531,11 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<ArchiveReport, String> {
                     report.skip(&name, &e);
                     return Ok(true); // skip this entry; keep extracting the rest
                 }
+                // CPE-1935: recorded and the run carries on — one entry's evidence, one entry's cost.
+                EntrySlotAction::Fail(f) => {
+                    report.fail(&name, &f);
+                    return Ok(true);
+                }
                 EntrySlotAction::Abort(e) => {
                     abort = Some(e);
                     return Ok(false);
@@ -3277,16 +3548,44 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<ArchiveReport, String> {
                     report.skip(&name, &e);
                     return Ok(true);
                 }
+                EntrySlotAction::Fail(f) => {
+                    report.fail(&name, &f);
+                    return Ok(true);
+                }
                 EntrySlotAction::Abort(e) => {
                     abort = Some(e);
                     return Ok(false);
                 }
             }
-            let outcome = sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest);
-            if outcome.is_ok() {
-                report.done += 1;
+            match sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest) {
+                Ok(carry_on) => {
+                    report.done += 1;
+                    Ok(carry_on)
+                }
+                // **CPE-1935 — the ticket's shape on this leg.** The `Err` was returned to
+                // `sevenz-rust`, which abandoned the archive and surfaced its own debug-quoted
+                // `Display` as the run's one error. `sevenz_entry_failure` builds our sentence from
+                // the io error underneath instead, and `Ok(true)` keeps the scan going — the same
+                // cooperative continue the `entry_name_is_safe` skip above already returns **without
+                // having read `reader` at all**, which is why leaving an entry's bytes unconsumed is
+                // this crate's normal case rather than a new risk.
+                //
+                // **CPE-1929 pair on this arm**, run on both 7z legs at once since they are twins
+                // (Windows `--lib`, `Compiling cpe-server` seen each run; baseline 2434/0):
+                //
+                // ```text
+                // A  disable (return `Err(e)` to sevenz-rust again)   2435 passed / 1 failed
+                // B  lie     (treat the Err as `Ok`: `report.done += 1`) 2435 passed / 1 failed
+                // ```
+                //
+                // A reds on `zc.txt=ABSENT` — the crate really does abandon the archive on an `Err`,
+                // which is the fact the whole arm turns on — and B reds on `(done, failed, skipped)`
+                // being `(3, 0, 0)` where `(2, 1, 0)` is required.
+                Err(e) => {
+                    report.fail(&name, &sevenz_entry_failure(&e));
+                    Ok(true)
+                }
             }
-            outcome
         })
         .map_err(|e| e.to_string())
     })?;
@@ -3421,9 +3720,15 @@ pub struct ArchiveProgress {
     pub current: String,
 }
 
-/// The final outcome of a compress/extract run. `done` counts entries actually written; `failed` stays
-/// 0 unless the whole run aborted with an error (compress/extract are otherwise all-or-nothing, same as
-/// the one-shot functions).
+/// The final outcome of a compress/extract run. `done` counts entries actually written.
+///
+/// **`failed` is a per-entry count as of CPE-1935.** It used to stay 0 always, because an extraction was
+/// all-or-nothing on any I/O failure: one unwritable entry returned `Err` and the report was discarded,
+/// so a 27-entry archive with a read-only file at entry 4 left 23 files on disk, reported nothing about
+/// them, and named only the file that stopped it. Entry-scoped failures are now counted here and
+/// recorded in `errors` beside the skips, so "what landed" is answerable from the report alone. A
+/// *run*-scoped abort (the extraction folder, a shared path component, the archive container) is still
+/// an `Err` and still carries no report — see [`EntrySlotAction`] for the rule that draws that line.
 ///
 /// **`skipped` is CPE-1775's addition, and it is the count the UI was missing.** An entry refused by a
 /// guard — an unsafe name, a link sitting at the destination, a destination that escapes the extraction
@@ -3434,10 +3739,25 @@ pub struct ArchiveProgress {
 /// distinguishable), so the honest shape is a third count, carried through `TransferReport` to the
 /// `transfer://done` event.
 ///
-/// **Invariant: every push to `errors` from a per-entry skip also increments `skipped`.** They are two
-/// halves of one record — the count is what the headline notice reads, the string is the reason behind
-/// it — and `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` fails if any skip
-/// site grows one without the other.
+/// **Invariant: every per-entry line in `errors` is pushed by [`ArchiveReport::skip`] or
+/// [`ArchiveReport::fail`], which also increment the matching count.** They are two halves of one record
+/// — the count is what the headline notice reads, the string is the reason behind it — and a site that
+/// grew one without the other would put a number and a list in front of the user that describe different
+/// things.
+///
+/// **That invariant was folklore until CPE-1935.** This paragraph named
+/// `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` as its enforcement for two
+/// tickets; **no commit in this repository has ever contained a test of that name** —
+/// `git log --all -S"fn skipped_count_matches_the_recorded_reasons"` returns nothing, which is the
+/// question worth asking (a `grep` of the working tree only says it is absent *today*, and every hit it
+/// does return is prose about the absence, this sentence included — the first draft of this paragraph
+/// quoted a hit count that was already wrong by the time it was reviewed).
+///
+/// It is now derived from the source rather than asserted about it —
+/// `archive_report_counts_and_reasons_can_only_be_grown_together` reads this file, masks comments and
+/// string literals, and fails if `skipped`/`failed` is incremented or `errors` pushed on **any**
+/// receiver anywhere but inside these two helpers. CPE-1933's rule, applied to the claim that was
+/// standing in for the check.
 ///
 /// **CPE-1837: also the report the one-shot extractors return, not only the streamed ones.**
 /// `Serialize`/`specta::Type` so it can cross the IPC boundary directly as an
@@ -3460,6 +3780,15 @@ impl ArchiveReport {
     fn skip(&mut self, name: &str, reason: &str) {
         self.skipped += 1;
         self.errors.push(format!("{name}: {reason}"));
+    }
+
+    /// Record one entry that could not be delivered (CPE-1935) — the same paired count-and-reason as
+    /// [`skip`](Self::skip), on the other side of [`EntrySlotAction`]'s severity question, plus the
+    /// next-step clause chosen from [`EntryFailure::retryable`] rather than from the sentence's wording.
+    fn fail(&mut self, name: &str, f: &EntryFailure) {
+        self.failed += 1;
+        let next = if f.retryable { RETRY_HELPS } else { RETRY_DOES_NOT_HELP };
+        self.errors.push(format!("{name}: {}", join_failure_sentence(&f.why, next)));
     }
 }
 
@@ -3900,10 +4229,20 @@ fn extract_zip_archive_stream(
         // re-derived per site.
         if entry.is_dir() {
             if let Err(r) = crate::open_beneath::create_dir_beneath(&root, rel) {
+                // CPE-1935: `return Err(r.why)` stood on the `!policy` branch. A zip DIRECTORY entry's
+                // walk is the one place in this loop where `entry_component_action`'s run-scoped
+                // reasoning would also apply — the chain includes the leaf, and files land inside it.
+                // It is nonetheless an entry failure here, because unlike the tar/7z legs this loop
+                // does not defer directory entries: every file entry carries its own full chain
+                // through `create_beneath` below, so a directory entry that could not be created stops
+                // exactly the entries that name it and nothing else. Whatever is wrong will be met
+                // again, per entry, by the file branch — and reported there, per entry, rather than
+                // once for the archive.
                 if !r.policy {
-                    return Err(r.why);
+                    report.fail(&name, &EntryFailure::retryable(r.why));
+                } else {
+                    report.skip(&name, &r.why);
                 }
-                report.skip(&name, &r.why);
                 prog.done_items += 1;
                 emit(&prog);
                 continue;
@@ -3939,7 +4278,22 @@ fn extract_zip_archive_stream(
             // streamed twin too, which the pre-pass never ran for.
             if entry.is_symlink() {
                 let mut target = Vec::new();
-                entry.read_to_end(&mut target).map_err(|e| e.to_string())?;
+                // CPE-1935: `?` stood here. `by_index` hands out an independent reader per entry, so a
+                // member whose stored bytes will not decompress is one entry's problem, not the
+                // container's — the container's own failures are still `by_index`/`ZipArchive::new`
+                // above, which stay `Err`.
+                if let Err(e) = entry.read_to_end(&mut target) {
+                    report.fail(
+                        &name,
+                        &EntryFailure::from_write_error(
+                            format!("this entry is a link, and its target could not be read out of the archive: {e}"),
+                            &e,
+                        ),
+                    );
+                    prog.done_items += 1;
+                    emit(&prog);
+                    continue;
+                }
                 let target = PathBuf::from(String::from_utf8_lossy(&target).into_owned());
                 let refusal = if target.as_os_str().is_empty() {
                     // `symlink("", …)` fails on every supported platform, so refusing costs no valid
@@ -3983,6 +4337,14 @@ fn extract_zip_archive_stream(
                     let chain = match entry_component_action(&root, &name, false) {
                         EntrySlotAction::Write => None,
                         EntrySlotAction::Skip(m) => Some(m),
+                        // CPE-1935: an entry-scoped failure on a link entry is recorded and the loop
+                        // moves on, exactly as on the file branch below. Nothing is created for it.
+                        EntrySlotAction::Fail(f) => {
+                            report.fail(&name, &f);
+                            prog.done_items += 1;
+                            emit(&prog);
+                            continue;
+                        }
                         EntrySlotAction::Abort(e) => return Err(e),
                     };
                     match chain {
@@ -3990,6 +4352,16 @@ fn extract_zip_archive_stream(
                         None => match link_target_action(dest, &out, &target) {
                             EntrySlotAction::Write => None,
                             EntrySlotAction::Skip(m) => Some(m),
+                            // Dead today for the same reason the `Abort` arm below is — CPE-1814's
+                            // argument, unchanged: matched explicitly so a future feeder cannot make
+                            // an entry silently skip where the rule says it must be recorded as a
+                            // failure.
+                            EntrySlotAction::Fail(f) => {
+                                report.fail(&name, &f);
+                                prog.done_items += 1;
+                                emit(&prog);
+                                continue;
+                            }
                             // Propagated, not collapsed with `Skip` — CPE-1814. This is the identical
                             // construct `tar_entry_refusal` collapsed before CPE-1759: dead today (only
                             // `link_target_action` feeds it, and that function returns `Write`/`Skip`
@@ -4006,9 +4378,18 @@ fn extract_zip_archive_stream(
                 let refusal = match refusal {
                     Some(m) => Some(m),
                     // A machine that categorically has no links refuses the ENTRY; anything else that
-                    // goes wrong is a failure and takes the run down, like every other write in this
-                    // loop. `materialise_entry_symlink` draws that line and owns the overwrite retry.
-                    None => materialise_entry_symlink(&out, &target)?,
+                    // goes wrong is a failure — recorded against this entry as of CPE-1935, where it
+                    // used to take the run down. `materialise_entry_symlink` draws that line and owns
+                    // the overwrite retry.
+                    None => match materialise_entry_symlink(&out, &target) {
+                        Ok(r) => r,
+                        Err(why) => {
+                            report.fail(&name, &EntryFailure::retryable(why));
+                            prog.done_items += 1;
+                            emit(&prog);
+                            continue;
+                        }
+                    },
                 };
                 match refusal {
                     Some(m) => report.skip(&name, &m),
@@ -4036,11 +4417,51 @@ fn extract_zip_archive_stream(
                     emit(&prog);
                     continue;
                 }
-                // Not skippable — see row 15 (UAT finding 6): an entry the filesystem refused for an
-                // I/O reason is a file the user asked for and did not get.
-                Err(r) => return Err(r.why),
+                // Not a skip — see row 15 (UAT finding 6): an entry the filesystem refused for an I/O
+                // reason is a file the user asked for and did not get.
+                //
+                // **CPE-1935 — THE site the ticket was filed from.** `return Err(r.why)` stood here,
+                // and it is the sentence PR #1050's UAT quoted: *"the path component \"existing.txt\"
+                // could not be opened for writing (Access is denied. (os error 5))"* over a 27-entry
+                // archive that had already put 23 files on disk. Reproduced for this ticket on both a
+                // read-only occupant and a plain-directory occupant, Windows and real ext4, identical
+                // on every leg: the entry before the blocker landed, the entry after it never did, and
+                // the one error named neither. The entry is still refused and still unwritten — only
+                // the other 26 entries stopped paying for it.
+                //
+                // **CPE-1929 pair on this arm** (Windows `--lib`, `Compiling cpe-server` seen each run;
+                // baseline 2434/0):
+                //
+                // ```text
+                // A  disable (put `return Err(r.why)` back)      2434 passed / 2 failed
+                // B  lie     (`Err(r) if true || r.policy`)      2434 passed / 2 failed
+                // ```
+                //
+                // A reds `cpe1935_a_blocked_entry_never_takes_the_run_down` on the *filesystem*
+                // (`zc.txt=ABSENT`) and B reds it on the *classification* (`skipped 1` where `failed 1`
+                // is required) — two different reds for the two different mistakes, which is what says
+                // this arm is reached on its own terms rather than shadowed by the guard in front of it.
+                Err(r) => {
+                    report.fail(&name, &EntryFailure::retryable(r.why));
+                    prog.done_items += 1;
+                    emit(&prog);
+                    continue;
+                }
             };
-            std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
+            // CPE-1935: `?` stood here. Same argument as the link branch's `read_to_end` above — the
+            // reader is this entry's own, so a failure decompressing or writing it is this entry's.
+            if let Err(e) = std::io::copy(&mut entry, &mut f) {
+                report.fail(
+                    &name,
+                    &EntryFailure::from_write_error(
+                        format!("could not be written into the extraction folder: {e}"),
+                        &e,
+                    ),
+                );
+                prog.done_items += 1;
+                emit(&prog);
+                continue;
+            }
             prog.done_bytes += entry.size();
             // **CPE-1938 F-B — the mode is set through the HANDLE the bytes went into, not by name.**
             //
@@ -4102,10 +4523,26 @@ fn extract_zip_archive_stream(
             // A second run over a 0o444 leaf fails with the component wording and `os error 13`; it
             // failed identically before, because the deferred drain still left the file 0o444 at the
             // end of the first run. Same on `main`, measured, so nothing here made it worse.
+            //
+            // **CPE-1935 — recorded, not fatal, and NOT counted as done.** `map_err(..)?` stood here.
+            // The bytes are on disk by this point, so the message says so and the entry is a `fail`
+            // rather than a `done`: the file the archive described had a mode this filesystem would not
+            // apply, and calling that success is the silent-partial shape one layer down.
             #[cfg(unix)]
             if let Some(mode) = entry.unix_mode() {
                 use std::os::unix::fs::PermissionsExt;
-                f.set_permissions(fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+                if let Err(e) = f.set_permissions(fs::Permissions::from_mode(mode)) {
+                    report.fail(
+                        &name,
+                        &EntryFailure::from_write_error(
+                            format!("its contents were written, but its permissions could not be set: {e}"),
+                            &e,
+                        ),
+                    );
+                    prog.done_items += 1;
+                    emit(&prog);
+                    continue;
+                }
             }
             report.done += 1; // only files count toward "done" — a dir is a placeholder, not content
         }
@@ -4161,8 +4598,9 @@ fn tar_totals(path: &str, gz: bool) -> (u64, u64) {
 ///
 /// **One behaviour change layered on top (CPE-1813): a link entry whose creation `unpack_in` refuses
 /// because this volume cannot hold links is a counted, recorded skip, not an abort** — see
-/// [`tar_link_creation_outcome`]. Everything else `unpack_in` can fail on is still a failure and still
-/// aborts via `?`, unchanged.
+/// [`tar_link_creation_outcome`]. Everything else `unpack_in` can fail on is still a **failure**, which
+/// since CPE-1935 means one recorded entry failure with the run carrying on, where it used to leave via
+/// `?` and end the extraction.
 ///
 /// A thin wrapper over [`extract_tar_stream_with`] — see that function's doc for why the real body is
 /// parameterised over how a single entry gets unpacked (CPE-1813 review round 2, blocker 3).
@@ -4230,8 +4668,17 @@ fn extract_tar_stream_with<R: std::io::Read>(
                 emit(&prog);
                 continue;
             }
-            // Not skippable — see row 16 (UAT finding 6). An unreadable slot is a failure, and this
-            // path having somewhere to *record* a skip is not a reason to reclassify one as a skip.
+            // Not a skip — see row 16 (UAT finding 6). An unreadable slot is a failure, and this path
+            // having somewhere to *record* a skip is not a reason to reclassify one as a skip. CPE-1935
+            // gave it its own count instead of the whole run; see `EntrySlotAction`.
+            EntrySlotAction::Fail(f) => {
+                report.fail(&name, &f);
+                if !is_dir {
+                    prog.done_items += 1;
+                }
+                emit(&prog);
+                continue;
+            }
             EntrySlotAction::Abort(e) => return Err(e),
         }
         // CPE-1938 — the component walk, after the path questions; see `entry_component_action`.
@@ -4239,6 +4686,14 @@ fn extract_tar_stream_with<R: std::io::Read>(
             EntrySlotAction::Write => {}
             EntrySlotAction::Skip(reason) => {
                 report.skip(&name, &reason);
+                if !is_dir {
+                    prog.done_items += 1;
+                }
+                emit(&prog);
+                continue;
+            }
+            EntrySlotAction::Fail(f) => {
+                report.fail(&name, &f);
                 if !is_dir {
                     prog.done_items += 1;
                 }
@@ -4267,15 +4722,37 @@ fn extract_tar_stream_with<R: std::io::Read>(
                 Some(target) => {
                     let marker =
                         if entry_type.is_hard_link() { TAR_HARDLINK_MARKER } else { TAR_SYMLINK_MARKER };
-                    let refusal = tar_link_creation_outcome(target, &dest.join(&name), &e, marker)?;
-                    if let Some(reason) = refusal {
-                        report.skip(&name, &reason);
-                        if !is_dir {
-                            prog.done_items += 1;
+                    match tar_link_creation_outcome(target, &dest.join(&name), &e, marker) {
+                        Ok(Some(reason)) => {
+                            report.skip(&name, &reason);
+                            if !is_dir {
+                                prog.done_items += 1;
+                            }
+                        }
+                        Ok(None) => {}
+                        // CPE-1935 — the streamed twin of `tar_unpack_with`'s arm; `?` stood here.
+                        Err(why) => {
+                            report.fail(&name, &EntryFailure::from_write_error(why, &e));
+                            if !is_dir {
+                                prog.done_items += 1;
+                            }
                         }
                     }
                 }
-                None => return Err(e.to_string()),
+                // CPE-1935 — the streamed twin of `tar_unpack_with`'s ticket shape; `return Err` stood
+                // here and took the archive down over one unwritable name.
+                None => {
+                    report.fail(
+                        &name,
+                        &EntryFailure::from_write_error(
+                            format!("could not be written into the extraction folder: {e}"),
+                            &e,
+                        ),
+                    );
+                    if !is_dir {
+                        prog.done_items += 1;
+                    }
+                }
             },
         }
         emit(&prog);
@@ -4342,8 +4819,15 @@ fn extract_7z_stream(
                     emit(&prog);
                     return Ok(true);
                 }
-                // Not skippable — see row 15 (CPE-1733 UAT finding 6). Carried out of the callback rather
-                // than raised as a `sevenz_rust::Error`; the reason is on `sevenz_entry_slot_action`.
+                // Not a skip — see row 15 (CPE-1733 UAT finding 6). CPE-1935: recorded per entry, the
+                // scan carries on. Never raised as a `sevenz_rust::Error`; the reason is on
+                // `sevenz_entry_slot_action`.
+                EntrySlotAction::Fail(f) => {
+                    report.fail(&name, &f);
+                    prog.done_items += 1;
+                    emit(&prog);
+                    return Ok(true);
+                }
                 EntrySlotAction::Abort(e) => {
                     abort = Some(e);
                     return Ok(false);
@@ -4358,19 +4842,34 @@ fn extract_7z_stream(
                     emit(&prog);
                     return Ok(true);
                 }
+                EntrySlotAction::Fail(f) => {
+                    report.fail(&name, &f);
+                    prog.done_items += 1;
+                    emit(&prog);
+                    return Ok(true);
+                }
                 EntrySlotAction::Abort(e) => {
                     abort = Some(e);
                     return Ok(false);
                 }
             }
-            let outcome = sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest);
-            if outcome.is_ok() {
-                prog.done_bytes += size;
-                prog.done_items += 1;
-                report.done += 1;
-                emit(&prog);
+            match sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest) {
+                Ok(carry_on) => {
+                    prog.done_bytes += size;
+                    prog.done_items += 1;
+                    report.done += 1;
+                    emit(&prog);
+                    Ok(carry_on)
+                }
+                // CPE-1935 — the streamed twin of `extract_7z_safe`'s arm, and the leg the UI actually
+                // takes. See there for why `Ok(true)` after an unread entry is this crate's normal case.
+                Err(e) => {
+                    report.fail(&name, &sevenz_entry_failure(&e));
+                    prog.done_items += 1;
+                    emit(&prog);
+                    Ok(true)
+                }
             }
-            outcome
         })
         .map_err(|e| e.to_string())
     })?;
@@ -4901,7 +5400,9 @@ mod tests {
     }
 
     /// **CPE-1913 round 2, the Reviewer's finding A, at the zip leg: an undescribable destination
-    /// handle ABORTS the extraction — it does not write.**
+    /// handle FAILS the entry — it does not write.** (The heading said ABORTS until CPE-1935 made this
+    /// a per-entry failure; the paragraph three below already described the new verdict while the
+    /// heading still announced the old one.)
     ///
     /// This is the property `cpe_1857_an_unreadable_probe_refuses_the_entry_rather_than_writing_it`
     /// held before round 1 deleted it, restored against the question the loop actually asks now. That
@@ -4909,18 +5410,24 @@ mod tests {
     /// asks the path anything, so the same fail-open moved to `handle_facts` returning `None` and round
     /// 1 let it fall through to the write.
     ///
-    /// **Abort, not skip, and the consistency argument is the reason.** `entry_sink_action`'s `Unknown`
-    /// arm still aborts for the tar and 7z legs — pinned by
-    /// `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`, which is still in
-    /// this file — so a zip entry that quietly skipped where a tar entry aborts would be a new
-    /// disagreement inside one module about one condition. The shared gate carries `policy: false` for
-    /// this case for exactly that reason.
+    /// **A failure, not a skip, and the consistency argument is the reason.** `entry_sink_action`'s
+    /// `Unknown` arm answers the same way for the tar and 7z legs — pinned by
+    /// `cpe1935_an_unreadable_slot_is_a_recorded_entry_failure_on_both_tar_paths`, which is still in
+    /// this file — so a zip entry that quietly skipped where a tar entry records a failure would be a
+    /// new disagreement inside one module about one condition. The shared gate carries `policy: false`
+    /// for this case for exactly that reason.
+    ///
+    /// **CPE-1935 changed what "not a skip" costs, not what it refuses.** This used to assert an `Err`
+    /// from the whole extraction; it now asserts a counted `failed` entry and a bystander that still
+    /// landed. The property under test is untouched — *a gate that cannot describe what it is about to
+    /// write through must not write* — and the harm assertion below still runs first and still reads
+    /// the slot's bytes.
     ///
     /// The fixture is an ordinary occupied slot, deliberately: nothing about it is a link or a hard
     /// link, so the *only* thing that can refuse it is the cannot-describe arm. If that arm goes, this
     /// test does not report a weaker refusal — it reports a successful overwrite.
     #[test]
-    fn cpe_1913_an_undescribable_destination_handle_aborts_the_zip_extraction() {
+    fn cpe_1913_an_undescribable_destination_handle_refuses_the_zip_entry() {
         let d = scratch("cpe1913-zip-blind-handle");
         let dest = d.join("out");
         fs::create_dir_all(&dest).unwrap();
@@ -4944,14 +5451,21 @@ mod tests {
              the entry anyway — a guard that answers \"no\" when it cannot tell is a guard that is not \
              there: {outcome:?}"
         );
-        let err = outcome.expect_err(
-            "an undescribable slot at a GATE is a refusal, not a silent pass — the same condition \
-             `entry_sink_action`'s `Unknown` arm still aborts on for the tar and 7z legs",
+        let report = outcome
+            .expect("CPE-1935: one refused entry is recorded, not raised as the whole run's error")
+            .report;
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (0, 1, 0),
+            "an undescribable slot at a GATE is a refusal, not a silent pass and not a policy skip — \
+             the same condition `entry_sink_action`'s `Unknown` arm answers for the tar and 7z legs: \
+             {report:?}"
         );
         assert!(
-            err.contains("could not check how many names"),
+            report.errors.iter().any(|e| e.contains("could not check how many names")),
             "and it must be THIS guard's wording, not an incidental failure from elsewhere in the run: \
-             {err}"
+             {:?}",
+            report.errors
         );
         let _ = fs::remove_dir_all(&d);
     }
@@ -4975,8 +5489,10 @@ mod tests {
     /// armed*. That is strictly stronger than what it replaced: an injection that no longer changes the
     /// outcome is evidence the outcome no longer depends on the thing injected.
     ///
-    /// `entry_sink_action`'s `Unknown`-aborts arm is untouched and still covered for the tar and 7z
-    /// legs by `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped`.
+    /// `entry_sink_action`'s `Unknown` arm is untouched and still covered for the tar and 7z legs by
+    /// `cpe1935_an_unreadable_slot_is_a_recorded_entry_failure_on_both_tar_paths`. (CPE-1935 changed
+    /// that arm's *verdict* from `Abort` to `Fail` — one recorded entry failure, the run continuing —
+    /// which is why the test carries a new name; the arm itself still refuses to write.)
     #[test]
     fn cpe_1913_the_path_probe_injections_can_no_longer_blind_the_zip_hard_link_gate() {
         for injection in [
@@ -5604,7 +6120,8 @@ mod tests {
     /// that decision through `refuse_link_at_new_file(..).is_err()`, which is `true` for **two** different
     /// verdicts: a confirmed link, and a slot whose `symlink_metadata` failed for some other reason. The
     /// second is an I/O failure, and treating it as a skip dropped a file **silently** and reported the
-    /// extraction as a success — while every other I/O failure in the same loop aborts.
+    /// extraction as a success — while every other I/O failure in the same loop was reported as a
+    /// failure (a whole-run abort when this was written; one counted entry failure since CPE-1935).
     ///
     /// **This test covers only half of that fix, and the half it does not cover is the half the finding
     /// was about** (PR #906 review, round 4). `entry_slot_action` re-labels a verdict that has *already
@@ -5617,8 +6134,14 @@ mod tests {
     /// Both are pure-input tests for the same reason: the `Unknown` arm needs a slot that fails to stat
     /// with something other than `NotFound`, which cannot be staged on every platform this ships to — so
     /// with either mapping inline, the one arm that was wrong would again be the one arm nothing reaches.
+    ///
+    /// **CPE-1935 re-aimed the third assertion without softening it.** The `Unknown` arm was
+    /// `EntrySlotAction::Abort`; it is now `Fail`. What this test has always been for — *an unreadable
+    /// slot must never be mistaken for a link the guard chose to skip* — is unchanged and still the
+    /// thing asserted: the two arms remain distinct, the entry is still not written, and the reason
+    /// still reaches the user. Only the blast radius moved, from the whole archive to this entry.
     #[test]
-    fn an_unreadable_entry_slot_aborts_rather_than_being_skipped_like_a_link() {
+    fn an_unreadable_entry_slot_is_a_failure_not_a_skip_like_a_link() {
         use crate::fsutil::CreateSlotLink;
         assert_eq!(entry_slot_action(CreateSlotLink::NotALink), EntrySlotAction::Write);
         assert_eq!(
@@ -5628,10 +6151,10 @@ mod tests {
         );
         assert_eq!(
             entry_slot_action(CreateSlotLink::Unknown("could not check".into())),
-            EntrySlotAction::Abort("could not check".into()),
-            "an unreadable slot must ABORT. Skipping it drops a file for a reason that has nothing to do \
-             with the archive and still returns Ok — the silent-success shape this whole ticket family is \
-             about"
+            EntrySlotAction::Fail(EntryFailure::retryable("could not check")),
+            "an unreadable slot must be a recorded FAILURE. Skipping it drops a file for a reason that \
+             has nothing to do with the archive and still returns a clean report — the silent-success \
+             shape this whole ticket family is about"
         );
     }
 
@@ -8190,7 +8713,10 @@ mod tests {
     /// `tar`'s own `remove_file`-and-retry for its links.
     ///
     /// The **directory** leg is the other side of the same call: `remove_file` cannot remove a
-    /// directory, that is the write failing rather than a guard refusing, and it aborts.
+    /// directory, that is the write failing rather than a guard refusing, and it is recorded as a
+    /// failure — a *counted* one as of CPE-1935, where it used to end the whole run. The distinction the
+    /// leg exists for is untouched: the message must be one of this module's two link-**write** failures
+    /// and must NOT read as a refusal, because a classifier that swallowed it would say "Skipped".
     #[test]
     fn cpe1759_a_link_entry_overwrites_an_ordinary_file_but_a_directory_is_a_failure() {
         let probe = scratch("cpe1759_linkprobe");
@@ -8230,10 +8756,19 @@ mod tests {
             );
 
             if occupant == "dir" {
-                let err = outcome.expect_err(
-                    "a link entry that cannot displace a DIRECTORY is the write failing, not a guard \
-                     refusing — it aborts, like `File::create` on the same path would",
+                let report = outcome.expect(
+                    "CPE-1935: one entry the write could not deliver is recorded, not raised as the \
+                     whole run's error",
                 );
+                assert_eq!(
+                    (report.done, report.failed, report.skipped),
+                    (1, 1, 0),
+                    "a link entry that cannot displace a DIRECTORY is the write failing, not a guard \
+                     refusing — it must be a counted FAILURE, the same class `File::create` on the same \
+                     path would produce, and the fixture's bystander `ok.txt` must still land: \
+                     {report:?}"
+                );
+                let err = report.errors.join(" | ");
                 // **Which of our two failure messages this is, is platform-dependent, and that was
                 // measured rather than assumed** (the first version of this assertion guessed, and went
                 // red on Windows). `symlink_file` over an existing *directory* answers
@@ -8282,9 +8817,12 @@ mod tests {
         }
     }
 
-    /// **CPE-1759 review round 2: an unreadable slot ABORTS the tar paths, it is not skipped.**
+    /// **CPE-1759 review round 2 / CPE-1935: an unreadable slot is a recorded FAILURE on the tar paths,
+    /// it is not skipped.** (Round 2 wrote "ABORTS"; CPE-1935 narrowed the verdict from a whole-run
+    /// abort to one counted entry failure — the run continues, and this test now asserts that. The
+    /// question the arm answers is unchanged: not a skip.)
     ///
-    /// The `Abort` arm of `tar_entry_refusal` was **dead** before this ticket — its only producer was
+    /// The `Abort` arm of `tar_entry_refusal` was **dead** before CPE-1759 — its only producer was
     /// `link_target_action`, which never returns it. Adding `entry_sink_action` made it live, and the
     /// first version of CPE-1759 wrote `Skip(m) | Abort(m) => Some(m)`, collapsing the two. That turned
     /// a slot whose `symlink_metadata` fails for a reason other than `NotFound` — a **failure**, per
@@ -8316,8 +8854,21 @@ mod tests {
     ///
     /// The new failure mode — an unopenable `dest` — is not lost: it is
     /// `cpe1938_an_unopenable_extraction_folder_aborts_the_tar_and_7z_runs`.
+    ///
+    /// # CPE-1935 — what this test asserts now, and what it deliberately still asserts
+    ///
+    /// It used to `expect_err`: an unreadable slot ended the whole tar run. Under
+    /// [`EntrySlotAction`]'s scope rule the evidence is about **one name**, so the entry is now a
+    /// counted `failed` and the archive's other entries still extract. The distinction this test was
+    /// written to defend — *an unreadable slot is not the same thing as a link the guard chose to skip*
+    /// — is the reason it still checks `skipped == 0` and still insists on the guard's own `"could not
+    /// check"` wording rather than any refusal: those two are the same red for opposite reasons.
+    ///
+    /// The bystander `ok.txt` (`craft_tar_with_entry_name` appends one, deliberately, *after* the
+    /// poisoned entry) is what makes the new half checkable at all: before this ticket it was never
+    /// written on either leg.
     #[test]
-    fn cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped() {
+    fn cpe1935_an_unreadable_slot_is_a_recorded_entry_failure_on_both_tar_paths() {
         for streamed in [false, true] {
             let d = scratch("cpe1759_tar_unreadable");
             let tgz = d.join("in.tar.gz");
@@ -8370,21 +8921,35 @@ mod tests {
                     &AtomicBool::new(false),
                     |_| {},
                 )
-                .map(|r| format!("{r:?}"))
             } else {
-                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|o| format!("{o:?}"))
+                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|o| o.report)
             };
 
-            let err = outcome.expect_err(
-                "an unreadable slot is an I/O FAILURE, not a policy refusal: skipping it drops an entry \
-                 for a reason that has nothing to do with the archive and still reports success. Every \
-                 zip sink aborts on it and tar must too",
+            // CPE-1935, evidence first and on the filesystem: the bystander AFTER the poisoned entry
+            // must be on disk. It never was before this ticket, on either leg.
+            assert_eq!(
+                fs::read(dest.join("ok.txt")).ok().as_deref(),
+                Some(&b"ORDINARY"[..]),
+                "(streamed={streamed}) an unreadable slot at ONE entry took the rest of the archive \
+                 down with it: {outcome:?}"
+            );
+            let report = outcome.unwrap_or_else(|e| {
+                panic!("(streamed={streamed}) one unreadable slot must not be the whole run's error: {e}")
+            });
+            assert_eq!(
+                (report.done, report.failed, report.skipped),
+                (1, 1, 0),
+                "an unreadable slot is an I/O FAILURE, not a policy refusal: counting it as a skip says \
+                 a guard chose to drop an entry for a reason that has nothing to do with the archive. \
+                 Every zip sink records it as a failure and tar must too. (streamed={streamed}) \
+                 {report:?}"
             );
             assert!(
-                err.contains("could not check"),
+                report.errors.iter().any(|e| e.contains("could not check")),
                 "and it must be the GUARD's `Unknown` wording, not an incidental read failure from \
                  somewhere else in the run — those are the same red for opposite reasons and only this \
-                 string tells them apart. Got: {err}"
+                 string tells them apart. Got: {:?}",
+                report.errors
             );
         }
     }
@@ -10095,10 +10660,13 @@ mod tests {
     /// reason — the exact shape CPE-1759 removed from the zip branch, hiding in the tar one.
     ///
     /// **The third leg pins the residual rather than leaving it to prose.** A hard link whose target is
-    /// simply not there still aborts, because that is `fs::hard_link` *failing*, not a guard *refusing* —
-    /// unpredictable without attempting it, and the same treatment a `File::create` or `io::copy` failure
+    /// simply not there is still a FAILURE — `fs::hard_link` *failing*, not a guard *refusing* — and
+    /// since CPE-1935 that means one counted `failed` entry with the rest of the archive extracted,
+    /// where it used to end the run (this leg `expect_err`'d until this ticket; see the arm below).
+    /// Unpredictable without attempting it, and the same treatment a `File::create` or `io::copy` failure
     /// gets at rows 15/16/19/20. If someone later converts that to a skip, this leg says so out loud
-    /// instead of letting "refusals skip, failures abort" quietly stop being the rule.
+    /// instead of letting "refusals skip, failures are counted against their own entry" quietly stop
+    /// being the rule.
     ///
     /// **CPE-1809: the failure-message assertion below pins OUR wrapper wording, not the bare word
     /// "hard".** The scratch directory this test used to run in was named `cpe1759_hardlink`, and every
@@ -10122,7 +10690,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("victim.txt"), b"SECRET").unwrap();
 
-        // (label, target, is this a REFUSAL — skip — or a FAILURE — abort?)
+        // (label, target, is this a REFUSAL — one skip — or a FAILURE — one counted `failed`?)
         //
         // The absolute leg uses a SHORT absolute path rather than the scratch directory's own: a GNU tar
         // header's link-name field is 100 bytes, and `set_link_name` on the real temp path failed with
@@ -10167,12 +10735,26 @@ mod tests {
                 );
 
                 if !refusal {
-                    let err = outcome.expect_err(
-                        "a hard link whose target does not exist is `fs::hard_link` FAILING, not a guard \
-                         refusing — it stays an abort, like every other I/O failure in these loops. An \
-                         Ok here means that line moved and the section comment's \"refusals skip, \
-                         failures abort\" needs rewriting with it",
+                    // **CPE-1935 moved this line, and moved it deliberately.** This used to
+                    // `expect_err`: a hard link whose target does not exist ended the archive. It is
+                    // still `fs::hard_link` FAILING rather than a guard refusing — which is the whole
+                    // point of this leg and is why `failed`, not `skipped`, is what must be 1 — but
+                    // under `EntrySlotAction`'s scope rule the evidence is about one entry, so the
+                    // other entries are no longer paid for it.
+                    let report = outcome
+                        .unwrap_or_else(|e| {
+                            panic!("{label} streamed={streamed}: one failing entry must not be the run's error: {e}")
+                        })
+                        .expect("both legs carry a report");
+                    assert_eq!(
+                        (report.failed, report.skipped),
+                        (1, 0),
+                        "{label} streamed={streamed}: a hard link whose target does not exist is \
+                         `fs::hard_link` FAILING, not a guard refusing. A `skipped` here means that \
+                         line moved and this module's refusal-versus-failure rule needs rewriting with \
+                         it: {report:?}"
                     );
+                    let err = report.errors.join(" | ");
                     assert!(
                         // CPE-1809: `err.contains("hard")` alone cannot fail — every path in this test
                         // lives under the `cpe1759_hardlink` scratch directory (renamed above), AND the
@@ -10528,8 +11110,10 @@ mod tests {
     /// be written but not opened for read now fails the run with a named reason instead of extracting.
     /// Rare and loud rather than silent — the same trade CPE-1896 recorded for the backup destination —
     /// and it is a test rather than a sentence because
-    /// `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped` used to stage
-    /// exactly this shape by accident and would otherwise have been the only thing covering it.
+    /// `cpe1935_an_unreadable_slot_is_a_recorded_entry_failure_on_both_tar_paths` (named
+    /// `cpe1759_an_unreadable_slot_aborts_both_tar_paths_rather_than_being_skipped` when this paragraph
+    /// was written) used to stage exactly this shape by accident and would otherwise have been the only
+    /// thing covering it.
     ///
     /// Staged with `deny_stat_of` on a file inside `dest`, which denies `dest` itself (list-directory on
     /// Windows, `chmod 0o000` on Unix) — the same mechanism, aimed one level up on purpose.
@@ -10951,5 +11535,788 @@ mod tests {
             outcome.report.errors
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ===================================================================================
+    // CPE-1935 — one unwritable entry must not take the run down.
+    // ===================================================================================
+
+    /// The three-entry fixture every leg below extracts: an entry **before** the blocker, the blocker's
+    /// own name, and an entry **after** it. `zc.txt` is the whole test — it is the file the old
+    /// all-or-nothing behaviour never wrote, and the one an assertion on the returned `Result` alone
+    /// would say nothing about.
+    const M1935_NAMES: [&str; 3] = ["a.txt", "blocked.txt", "zc.txt"];
+
+    fn m1935_zip(dest: &Path, names: &[&str]) -> PathBuf {
+        let p = dest.join("m.zip");
+        let file = fs::File::create(&p).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for n in names {
+            w.start_file(*n, opts).unwrap();
+            w.write_all(format!("PAYLOAD {n}").as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+        p
+    }
+
+    fn m1935_tar(dest: &Path, names: &[&str]) -> PathBuf {
+        let p = dest.join("m.tar");
+        let file = fs::File::create(&p).unwrap();
+        let mut b = tar::Builder::new(file);
+        for n in names {
+            let body = format!("PAYLOAD {n}");
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, n, body.as_bytes()).unwrap();
+        }
+        b.finish().unwrap();
+        p
+    }
+
+    /// The [`M1935_NAMES`] fixture as a STORED zip with **one byte of the middle entry's payload
+    /// flipped**, so that entry's recorded CRC no longer matches and `zip`'s own `Crc32Reader` fails the
+    /// read partway through `io::copy`. Corrupting the data rather than the checksum field keeps every
+    /// length in both headers correct, so the archive opens normally and only that one member is bad —
+    /// which is the shape being tested.
+    fn craft_zip_with_bad_crc_middle_entry() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<()> =
+                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for n in M1935_NAMES {
+                w.start_file(n, opts).unwrap();
+                w.write_all(format!("PAYLOAD {n}").as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let needle = b"PAYLOAD blocked.txt";
+        let at = buf
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("a STORED entry's payload is in the file verbatim");
+        buf[at + needle.len() - 1] ^= 0xFF;
+        buf
+    }
+
+    fn m1935_7z(dest: &Path, names: &[&str]) -> PathBuf {
+        let p = dest.join("m.7z");
+        let bodies: Vec<(String, Vec<u8>)> =
+            names.iter().map(|n| ((*n).to_string(), format!("PAYLOAD {n}").into_bytes())).collect();
+        let refs: Vec<(&str, &[u8])> =
+            bodies.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        write_7z_fixture(&p, &refs);
+        p
+    }
+
+    /// What is actually on disk, as a string, for the failure message — because the only thing this
+    /// family's history has proved is that a healthy-looking verdict says nothing about the folder.
+    fn m1935_state(dest: &Path, names: &[&str]) -> String {
+        names
+            .iter()
+            .map(|n| {
+                let p = dest.join(n);
+                match fs::read(&p) {
+                    Ok(b) => format!("{n}=FILE({})", String::from_utf8_lossy(&b)),
+                    Err(_) => match fs::symlink_metadata(&p) {
+                        Ok(m) if m.is_dir() => format!("{n}=DIR"),
+                        Ok(_) => format!("{n}=OTHER"),
+                        Err(_) => format!("{n}=ABSENT"),
+                    },
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    }
+
+    /// **CPE-1935: one entry that cannot be written must cost exactly that entry.**
+    ///
+    /// # What was measured, and why the assertions are on the filesystem
+    ///
+    /// The ticket was filed from PR #1050's UAT: a 27-entry archive over a read-only file returned one
+    /// sentence naming `existing.txt`, and 23 of the 27 entries were already on disk with no record of
+    /// which. Reproduced for this ticket across **six legs × two occupants**, on Windows and on real
+    /// ext4 (`TMPDIR` off tmpfs) — twelve cells, and every cell that failed did so identically:
+    ///
+    /// ```text
+    ///                          BEFORE                                          AFTER
+    /// dir  zip one-shot   Err(…"blocked.txt" could not be opened…)  a=FILE b=DIR  zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// dir  zip streamed   Err(…same…)                               a=FILE b=DIR  zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// dir  tar one-shot   Err("failed to unpack `…/blocked.txt`")   a=FILE b=DIR  zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// dir  tar streamed   Err("failed to unpack `…/blocked.txt`")   a=FILE b=DIR  zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// dir  7z  one-shot   Err(Io(Os { code: 5 / 21 }, …))           a=FILE b=DIR  zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// dir  7z  streamed   Err(Io(Os { code: 5 / 21 }, …))           a=FILE b=DIR  zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// ro   zip one-shot   Err(…could not be opened for writing…)    a=FILE b=USER zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// ro   zip streamed   Err(…same…)                               a=FILE b=USER zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// ro   tar one-shot   Ok(done 3)  <- OVERWRITES the read-only file, both OSes            | unchanged
+    /// ro   tar streamed   Ok(done 3)  <- ditto                                               | unchanged
+    /// ro   7z  one-shot   Err(Io(Os { code: 5 / 13 }, …))           a=FILE b=USER zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// ro   7z  streamed   Err(Io(Os { code: 5 / 13 }, …))           a=FILE b=USER zc=ABSENT | Ok(done 2, failed 1)  zc=FILE
+    /// ```
+    ///
+    /// `zc.txt` — the entry *after* the blocker — is the whole assertion. It was `ABSENT` in ten of
+    /// twelve cells before this ticket while the caller held one error string naming only `blocked.txt`;
+    /// nothing in the returned `Result` distinguished "wrote nothing" from "wrote everything up to
+    /// here", which is why this test reads the folder and not the verdict.
+    ///
+    /// # The two cells that behave differently, kept rather than smoothed over
+    ///
+    /// **tar over a read-only file does not fail at all — it replaces the file.** `unpack_in` unlinks
+    /// an existing name and recreates it (`tar-0.4.46/src/entry.rs:562-568`), and a read-only *file* is
+    /// no barrier to unlinking it from a writable directory on either platform. So those two cells read
+    /// `done 3` before and after. That is out of this ticket's scope (it is an overwrite policy
+    /// question, not a partial-extraction one) and is asserted here as the standing measurement rather
+    /// than hidden behind a uniform expectation — the legs were assumed to share behaviour once
+    /// already, in CPE-1938, and did not.
+    ///
+    /// **It is now written down where the user can read it, which round 2 caught it not being.**
+    /// `src/docs/explorer-archives.md` listed "a read-only file at the entry's name" under *Failed* —
+    /// true of zip and 7z, false here — so the one format that silently destroys the file was the one
+    /// the docs promised would refuse to. The exception is spelled out in that page's Refused/Failed
+    /// section. Keeping the behaviour undocumented was the part that was not defensible; keeping the
+    /// behaviour is.
+    ///
+    /// # What happens to what was already written: nothing, deliberately
+    ///
+    /// The alternative the ticket offered was abort-and-roll-back. It is refused here: the destination
+    /// is a folder the **user** chose and this very fixture proves it can already hold the user's own
+    /// files — `blocked.txt` is one. Nothing distinguishes a file this run wrote from a file that was
+    /// there, so "roll back" would mean deleting on a guess, which is CPE-1972's rule verbatim (*an
+    /// absence of information must never license a delete*). The mess was never the leftover files; it
+    /// was that nothing enumerated them. With `done`/`failed`/`errors` filled in, a half-extraction is
+    /// a described state instead of an unknown one, and the files the user asked for are still there.
+    #[test]
+    fn cpe1935_a_blocked_entry_never_takes_the_run_down() {
+        let names = M1935_NAMES;
+        let d = scratch("cpe1935-blocked");
+        let never = AtomicBool::new(false);
+        let mut cells = 0;
+
+        for (occ, leg) in ["dir", "ro"].iter().flat_map(|o| {
+            ["zip one-shot", "zip streamed", "tar one-shot", "tar streamed", "7z one-shot", "7z streamed"]
+                .into_iter()
+                .map(move |l| (*o, l))
+        }) {
+            let base = d.join(format!("{occ}-{}", leg.replace(' ', "_")));
+            fs::create_dir_all(&base).unwrap();
+            let dest = base.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            let blocker = dest.join("blocked.txt");
+            if occ == "dir" {
+                fs::create_dir_all(&blocker).unwrap(); // occupant: a plain DIRECTORY
+            } else {
+                // occupant: an existing READ-ONLY file — the ticket's headline case.
+                fs::write(&blocker, b"USER FILE").unwrap();
+                let mut perm = fs::metadata(&blocker).unwrap().permissions();
+                perm.set_readonly(true);
+                fs::set_permissions(&blocker, perm).unwrap();
+                // Is the deny real here? Running as root ignores it and a green cell would be vacuous —
+                // a loud skip, never a silent pass (Evidence Rules).
+                if fs::OpenOptions::new().write(true).open(&blocker).is_ok() {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "cpe1935_a_blocked_entry_never_takes_the_run_down: SKIPPED cell [ro {leg}] — a \
+                         read-only file is still writable here (running as root?)"
+                    );
+                    continue;
+                }
+            }
+            let ds = dest.to_string_lossy().to_string();
+
+            let outcome: Result<ArchiveReport, String> = match leg {
+                "zip one-shot" => {
+                    let a = m1935_zip(&base, &names);
+                    extract_archive(&a.to_string_lossy(), &ds).map(|o| o.report)
+                }
+                "zip streamed" => {
+                    let a = m1935_zip(&base, &names);
+                    extract_archive_streamed(&a.to_string_lossy(), &ds, &never, |_| {})
+                }
+                "tar one-shot" => {
+                    let a = m1935_tar(&base, &names);
+                    extract_archive(&a.to_string_lossy(), &ds).map(|o| o.report)
+                }
+                "tar streamed" => {
+                    let a = m1935_tar(&base, &names);
+                    extract_archive_streamed(&a.to_string_lossy(), &ds, &never, |_| {})
+                }
+                "7z one-shot" => {
+                    let a = m1935_7z(&base, &names);
+                    extract_archive(&a.to_string_lossy(), &ds).map(|o| o.report)
+                }
+                _ => {
+                    let a = m1935_7z(&base, &names);
+                    extract_archive_streamed(&a.to_string_lossy(), &ds, &never, |_| {})
+                }
+            };
+            let disk = m1935_state(&dest, &names);
+            let cell = format!("[{occ} {leg}]");
+
+            // EVIDENCE FIRST, and on the FILESYSTEM: the entry after the blocker must be there. This is
+            // the assertion the ticket asked for — a verdict-only check passes a half-extraction.
+            assert_eq!(
+                fs::read(dest.join("zc.txt")).ok().as_deref(),
+                Some(&b"PAYLOAD zc.txt"[..]),
+                "{cell} the entry AFTER the blocked one was never written — one unwritable entry took \
+                 the rest of the archive down with it. outcome={outcome:?} DISK: {disk}"
+            );
+            assert_eq!(
+                fs::read(dest.join("a.txt")).ok().as_deref(),
+                Some(&b"PAYLOAD a.txt"[..]),
+                "{cell} the entry BEFORE the blocked one is missing. DISK: {disk}"
+            );
+
+            let report = outcome.unwrap_or_else(|e| {
+                panic!("{cell} one unwritable entry must not make the whole run an error: {e}\nDISK: {disk}")
+            });
+
+            // `tar` over a read-only FILE replaces it rather than failing — see this test's doc. Every
+            // other cell must report the blocked entry as a failure, not a skip and not a success.
+            let tar_overwrites = occ == "ro" && leg.starts_with("tar");
+            if tar_overwrites {
+                assert_eq!(report.done, 3, "{cell} tar unlinks and recreates: DISK {disk}");
+                assert_eq!(report.failed, 0, "{cell} nothing failed on this leg: {report:?}");
+            } else {
+                assert_eq!(
+                    (report.done, report.failed, report.skipped),
+                    (2, 1, 0),
+                    "{cell} the blocked entry must be ONE counted failure — not a skip (nobody chose \
+                     it), not silence, not the whole run. DISK: {disk}"
+                );
+                let line = report
+                    .errors
+                    .iter()
+                    .find(|e| e.starts_with("blocked.txt:"))
+                    .unwrap_or_else(|| panic!("{cell} no reason names the entry: {:?}", report.errors));
+                assert!(
+                    line.contains(RETRY_HELPS),
+                    "{cell} an unwritable occupant clears when the user clears it, so the reason must \
+                     say re-running helps: {line}"
+                );
+                // The occupant is the user's, and nothing here may take it: not the write (it was
+                // refused) and not a roll-back (there is none — see this test's doc).
+                if occ == "dir" {
+                    assert!(
+                        fs::symlink_metadata(&blocker).map(|m| m.is_dir()).unwrap_or(false),
+                        "{cell} the directory occupying the entry's name was disturbed. DISK: {disk}"
+                    );
+                } else {
+                    assert_eq!(
+                        fs::read(&blocker).ok().as_deref(),
+                        Some(&b"USER FILE"[..]),
+                        "{cell} the user's read-only file was overwritten. DISK: {disk}"
+                    );
+                }
+            }
+            cells += 1;
+
+            // Clear the read-only bit so the scratch tree can actually be removed (CPE-1974: this
+            // machine already carries 2,127 stray reparse points from tests that did not tidy up).
+            if let Ok(m) = fs::metadata(&blocker) {
+                let mut perm = m.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perm.set_readonly(false);
+                let _ = fs::set_permissions(&blocker, perm);
+            }
+        }
+        assert!(cells >= 6, "only {cells} cells ran — the fixture staged nothing on most legs");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1935 — "will re-running help?" is decided by the error's KIND, and it reaches the user.**
+    ///
+    /// The ticket asked for revert's transient/permanent distinction on this leg, *"telling the user
+    /// which decides whether re-running is worth anything"*. Two halves, and this pins both: the
+    /// classification ([`EntryFailure::from_write_error`]) and the sentence
+    /// ([`ArchiveReport::fail`] appending [`RETRY_HELPS`] / [`RETRY_DOES_NOT_HELP`] from the flag rather
+    /// than from the message's wording).
+    ///
+    /// **This test exists because the CPE-1929 pair said it had to.** Sabotage A — forcing the predicate
+    /// open with `true || !matches!(..)`, so every failure claims to be retryable — left the whole
+    /// `--lib` suite at **2434 passed / 0 failed**, i.e. nothing could tell the two answers apart and
+    /// the classifier read as covered while being unreachable from any assertion. The end-to-end half is
+    /// `cpe1935_a_corrupt_entry_fails_permanently_while_its_neighbours_land`, which drives a real
+    /// `ErrorKind::InvalidInput` out of `zip`'s CRC check instead of constructing one.
+    #[test]
+    fn cpe1935_a_write_failure_says_whether_re_running_helps() {
+        use std::io::ErrorKind;
+        // The archive's own bytes are wrong — the same read produces the same answer next time.
+        for kind in [ErrorKind::InvalidData, ErrorKind::UnexpectedEof, ErrorKind::InvalidInput] {
+            assert!(
+                !EntryFailure::from_write_error("x", &std::io::Error::from(kind)).retryable,
+                "{kind:?} is the archive's fault, and telling the user to try again wastes their time"
+            );
+        }
+        // The destination said no — the user can change that and run it again.
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::AlreadyExists,
+            ErrorKind::NotFound,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                EntryFailure::from_write_error("x", &std::io::Error::from(kind)).retryable,
+                "{kind:?} is the destination refusing, and a user who is told it is hopeless loses a \
+                 file they could have had"
+            );
+        }
+        // ...and the two must READ differently, from the flag rather than from the sentence's wording.
+        let mut report = ArchiveReport::default();
+        report.fail("fixable.txt", &EntryFailure::from_write_error("no", &std::io::Error::from(ErrorKind::PermissionDenied)));
+        report.fail("broken.txt", &EntryFailure::from_write_error("no", &std::io::Error::from(ErrorKind::InvalidData)));
+        assert_eq!(report.failed, 2);
+        assert!(report.errors[0].contains(RETRY_HELPS), "{:?}", report.errors[0]);
+        assert!(report.errors[1].contains(RETRY_DOES_NOT_HELP), "{:?}", report.errors[1]);
+        assert!(
+            !report.errors[0].contains(RETRY_DOES_NOT_HELP) && !report.errors[1].contains(RETRY_HELPS),
+            "the two next-step sentences must be distinguishable, not one a substring of the other: {:?}",
+            report.errors
+        );
+    }
+
+    /// **The failure's own sentence and its next-step clause do not run together** (round 2 nit).
+    ///
+    /// Round 1 joined the two with a bare space, and neither of the two commonest `why` strings ends in
+    /// a terminator, so the panel showed ``…\blocked.txt` The rest of the archive was extracted…`` and
+    /// `…(os error 5) The rest of the archive…`. Both of those exact shapes are cases here, taken from
+    /// the messages the tar and zip legs actually produce rather than invented.
+    #[test]
+    fn cpe1935_a_failure_reason_and_its_next_step_are_two_sentences() {
+        // `unpack_in`'s wrapper — a backtick-terminated path, the shape the tar legs hand up.
+        let tar_ish = "failed to unpack `C:\\out\\blocked.txt`";
+        assert_eq!(
+            join_failure_sentence(tar_ish, RETRY_HELPS),
+            format!("{tar_ish}. {RETRY_HELPS}"),
+            "a reason that does not end itself must be given a full stop"
+        );
+        // A bare OS string — ends in its error code, not in punctuation.
+        let os_ish = "Access is denied. (os error 5)";
+        assert!(
+            join_failure_sentence(os_ish, RETRY_HELPS).starts_with(&format!("{os_ish}. ")),
+            "got {}",
+            join_failure_sentence(os_ish, RETRY_HELPS)
+        );
+        // A reason that IS already a sentence keeps its own punctuation and gains no second stop.
+        for ended in ["the disk is full.", "is it mounted?", "no space left!", "the cause:"] {
+            let joined = join_failure_sentence(ended, RETRY_DOES_NOT_HELP);
+            assert_eq!(joined, format!("{ended} {RETRY_DOES_NOT_HELP}"), "over-punctuated {ended:?}");
+        }
+        // Trailing whitespace is not a terminator, and an empty reason contributes nothing.
+        assert_eq!(join_failure_sentence("boom  ", RETRY_HELPS), format!("boom. {RETRY_HELPS}"));
+        assert_eq!(join_failure_sentence("", RETRY_HELPS), RETRY_HELPS);
+
+        // And the whole way through `fail`, which is what the panel actually reads.
+        let mut report = ArchiveReport::default();
+        report.fail("blocked.txt", &EntryFailure::retryable(tar_ish.to_string()));
+        assert!(
+            report.errors[0].contains("`. The rest of the archive"),
+            "the recorded line still runs the two sentences together: {:?}",
+            report.errors[0]
+        );
+    }
+
+    /// **CPE-1935 — a corrupt entry is a PERMANENT per-entry failure, and its neighbours still land.**
+    ///
+    /// The end-to-end half of the classifier above, and the one that proves the `io::copy` conversion in
+    /// [`extract_zip_archive_stream`] is real rather than constructed: the fixture is a STORED zip whose
+    /// middle entry carries a deliberately wrong CRC, so `zip`'s own checksum check fails the read with
+    /// a genuine [`std::io::ErrorKind::InvalidInput`] partway through the copy. Before this ticket that
+    /// `?` ended the archive; the entry after it was never written.
+    ///
+    /// It is also the one shape where "extract it again" would be a lie, which is why the assertion is
+    /// on [`RETRY_DOES_NOT_HELP`] specifically and not merely on `failed == 1`.
+    #[test]
+    fn cpe1935_a_corrupt_entry_fails_permanently_while_its_neighbours_land() {
+        let d = scratch("cpe1935-corrupt");
+        let ap = d.join("corrupt.zip");
+        // `craft_zip_with_entry_name` builds one STORED entry with a correct CRC; the helper below
+        // rebuilds the same bytes for three entries and poisons the middle one's checksum.
+        fs::write(&ap, craft_zip_with_bad_crc_middle_entry()).unwrap();
+        let dest = d.join("out");
+
+        let report = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("a corrupt ENTRY is not a corrupt archive — the other entries are still readable");
+
+        // Filesystem first: the entry after the corrupt one.
+        assert_eq!(
+            fs::read(dest.join("zc.txt")).ok().as_deref(),
+            Some(&b"PAYLOAD zc.txt"[..]),
+            "one entry with a bad checksum took the rest of the archive down: {report:?}"
+        );
+        assert_eq!(
+            (report.done, report.failed, report.skipped),
+            (2, 1, 0),
+            "the corrupt entry must be one counted failure: {report:?}"
+        );
+        let line = report
+            .errors
+            .iter()
+            .find(|e| e.starts_with("blocked.txt:"))
+            .unwrap_or_else(|| panic!("no reason names the corrupt entry: {:?}", report.errors));
+        assert!(
+            line.contains(RETRY_DOES_NOT_HELP),
+            "a bad checksum is in the archive, not on the disk — telling the user to try again would be \
+             a lie: {line}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Overwrite every byte Rust's lexer would read as a comment or as a string/char literal with a
+    /// space, keeping newlines **and the exact byte length**, so offsets into the result still index
+    /// the original file. Returns the masked copy.
+    ///
+    /// `crates/server` had no Rust source stripper — `src/lib/rustSource.ts` is the TypeScript one, and
+    /// CPE-1933 rule 2 says not to grow a fresh copy of the rules per scanner — so this is the crate's
+    /// one shared masker. **Masking rather than deleting is load-bearing:** the guard below needs two
+    /// byte *ranges* out of the same text it scans, and a stripper that removes bytes would force every
+    /// offset to be mapped back.
+    ///
+    /// Three shapes it exists to survive, all present in this file:
+    /// - a `/*` **inside** a `///` doc comment (line 2326's `*.rs` / `*.ts`). Line comments are consumed
+    ///   before block comments, so it cannot open a phantom block comment — the exact CPE-1950 shape
+    ///   where a `<<` inside a quoted string opened a phantom heredoc in two scanners at once.
+    /// - a `'` that opens a **lifetime** (`&'a`), not a char literal. A `'` is treated as a literal only
+    ///   when a closing `'` is actually there.
+    /// - a code fragment quoted inside a **string literal** — which is what the guard below trips over
+    ///   if only comments are stripped, because its own pattern list quotes the fragments it hunts.
+    fn mask_rust_comments_and_literals(src: &str) -> String {
+        fn blank(out: &mut [u8], from: usize, to: usize) {
+            for byte in &mut out[from..to] {
+                if *byte != b'\n' && *byte != b'\r' {
+                    *byte = b' ';
+                }
+            }
+        }
+        fn is_ident(c: u8) -> bool {
+            c.is_ascii_alphanumeric() || c == b'_'
+        }
+        let b = src.as_bytes();
+        let n = b.len();
+        let mut out = b.to_vec();
+        let mut i = 0usize;
+        while i < n {
+            // Raw strings (`r"..."`, `r#"..."#`, `br##"..."##`) first: their embedded quotes and
+            // backslashes are not escapes, so the plain-string arm would end them in the wrong place.
+            // This file has none today; the arm is here so the first one added does not silently
+            // corrupt the mask.
+            let raw = if b[i] == b'r'
+                && (i == 0 || !is_ident(b[i - 1]) || (b[i - 1] == b'b' && (i < 2 || !is_ident(b[i - 2]))))
+            {
+                let mut h = i + 1;
+                while h < n && b[h] == b'#' {
+                    h += 1;
+                }
+                (h < n && b[h] == b'"').then_some((h - i - 1, h + 1))
+            } else {
+                None
+            };
+            if let Some((hashes, body)) = raw {
+                let start = i;
+                let mut j = body;
+                loop {
+                    assert!(j < n, "unterminated raw string at byte {start} of archive.rs");
+                    if b[j] == b'"' {
+                        let mut k = j + 1;
+                        let mut seen = 0usize;
+                        while k < n && seen < hashes && b[k] == b'#' {
+                            k += 1;
+                            seen += 1;
+                        }
+                        if seen == hashes {
+                            j = k;
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                blank(&mut out, start, j);
+                i = j;
+                continue;
+            }
+            match b[i] {
+                b'/' if i + 1 < n && b[i + 1] == b'/' => {
+                    let start = i;
+                    while i < n && b[i] != b'\n' {
+                        i += 1;
+                    }
+                    blank(&mut out, start, i);
+                }
+                b'/' if i + 1 < n && b[i + 1] == b'*' => {
+                    let start = i;
+                    let mut depth = 1usize;
+                    i += 2;
+                    while i < n && depth > 0 {
+                        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+                            depth += 1;
+                            i += 2;
+                        } else if b[i] == b'*' && i + 1 < n && b[i + 1] == b'/' {
+                            depth -= 1;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    assert_eq!(depth, 0, "unterminated block comment at byte {start} of archive.rs");
+                    blank(&mut out, start, i);
+                }
+                b'"' => {
+                    let start = i;
+                    i += 1;
+                    loop {
+                        assert!(i < n, "unterminated string literal at byte {start} of archive.rs");
+                        match b[i] {
+                            b'\\' => i = (i + 2).min(n),
+                            b'"' => {
+                                i += 1;
+                                break;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    blank(&mut out, start, i);
+                }
+                b'\'' => {
+                    // Char literal only if a closing quote is really there; otherwise it is a lifetime,
+                    // which is ordinary code and has to stay visible to the scan.
+                    let close = if i + 1 < n && b[i + 1] == b'\\' {
+                        // Step over exactly the escape, then expect the close. Scanning for "the next
+                        // `'`" instead would stop on the *escaped* quote of `'\''` and leave the real
+                        // closing quote unmasked — caught by the masker's own test, not by review.
+                        let mut k = i + 2;
+                        if k + 1 < n && b[k] == b'u' && b[k + 1] == b'{' {
+                            while k < n && b[k] != b'}' {
+                                k += 1;
+                            }
+                            k += 1;
+                        } else if b.get(k) == Some(&b'x') {
+                            k += 3;
+                        } else {
+                            k += 1;
+                        }
+                        (k < n && b[k] == b'\'').then_some(k)
+                    } else {
+                        // One char, which may be several UTF-8 bytes.
+                        let mut k = i + 1;
+                        while k < n && b[k] >= 0x80 {
+                            k += 1;
+                        }
+                        if k == i + 1 {
+                            k += 1;
+                        }
+                        (k < n && b[k] == b'\'').then_some(k)
+                    };
+                    match close {
+                        Some(end) => {
+                            blank(&mut out, i, end + 1);
+                            i = end + 1;
+                        }
+                        None => i += 1,
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        String::from_utf8(out).expect("the mask only writes ASCII spaces, and only over whole tokens")
+    }
+
+    /// True when `tokens` appear at `at`, in order, separated by nothing but ASCII whitespace.
+    fn tokens_at(b: &[u8], at: usize, tokens: &[&str]) -> bool {
+        let mut i = at;
+        for t in tokens {
+            while i < b.len() && b[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i > b.len() || !b[i..].starts_with(t.as_bytes()) {
+                return false;
+            }
+            i += t.len();
+        }
+        true
+    }
+
+    /// The masker keeps offsets, hides comments and literals, and leaves code alone.
+    ///
+    /// Without this leg the guard below could pass **vacuously** by masking the whole file — the failure
+    /// mode a source-scanning test is most prone to and least likely to notice. Every case is a shape
+    /// that actually occurs in `archive.rs`.
+    ///
+    /// Each expectation is a **template of the same byte length as its input**: `#` means "this byte
+    /// must come back a space", anything else means "this byte must come back unchanged". Hand-counting
+    /// runs of spaces in a quoted string is how the first draft of this test failed on three of its own
+    /// seven cases; a template makes the length a checked property instead of an eyeballed one.
+    #[test]
+    fn the_rust_masker_hides_comments_and_literals_while_keeping_offsets() {
+        let cases: [(&str, &str); 8] = [
+            // A trailing comment — the shape a whole-line-comment filter walks straight past, and the
+            // one CPE-1933 rule 2 calls out by name.
+            ("let x = 1; // a.errors.push(", "===========#################"),
+            // A `/*` inside a line comment must not open a block comment. This is archive.rs's own
+            // line 2326 (`src-tauri/**/*.rs`) in miniature: a naive strip-comments-then-scan would
+            // swallow everything to the next `*/`, which in this file is nowhere.
+            ("// see src/**/*.rs\nlet y = 2;\n", "##################\n==========\n"),
+            // A real block comment, nested.
+            ("a /* b /* c */ d */ e", "==#################=="),
+            // A code fragment quoted in a string literal — the defect that reddened CI, in miniature.
+            ("let s = \".errors.push(\";", "========###############="),
+            // An escaped quote inside a string does not end it.
+            ("let s = \"a\\\"b\"; z", "========######==="),
+            // Char literal masked, lifetime left visible — and the escaped-quote char literal, whose
+            // closing quote is the SECOND `'` after the backslash.
+            ("fn f<'a>(c: char) { let q = '\\''; }", "============================####==="),
+            // A unicode escape runs past its own braces.
+            ("let u = '\\u{2014}'; ok", "========##########===="),
+            // A multi-byte char literal: all five of its bytes blanked, neither neighbour touched.
+            ("let e = '—'; ok", "========#####===="),
+        ];
+        for (input, template) in cases {
+            assert_eq!(
+                template.len(),
+                input.len(),
+                "the template for {input:?} is {} bytes against the input's {}",
+                template.len(),
+                input.len()
+            );
+            let want = String::from_utf8(
+                input
+                    .bytes()
+                    .zip(template.bytes())
+                    .map(|(c, t)| if t == b'#' { b' ' } else { c })
+                    .collect::<Vec<u8>>(),
+            )
+            .expect("every kept byte in these cases is ASCII");
+            let got = mask_rust_comments_and_literals(input);
+            assert_eq!(got.len(), input.len(), "the mask changed the byte length of {input:?}");
+            assert_eq!(got, want, "masking {input:?}");
+        }
+    }
+
+    /// **CPE-1935 — the count and the reason can only be grown together, derived from the source.**
+    ///
+    /// [`ArchiveReport`]'s doc claimed from CPE-1775 to CPE-1935 that a test named
+    /// `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` enforced this.
+    /// **No commit in this repository has ever contained a test of that name**
+    /// (`git log --all -S` on the function signature returns nothing). A green suite standing next to a
+    /// claim about a test that is not there is CPE-1933's defect class, and this ticket added a second
+    /// count (`failed`) to the same invariant, so the claim is replaced by a derivation.
+    ///
+    /// It reads **this file** and requires that `.skipped +=`, `.failed +=` and `.errors.push(` —
+    /// **on any receiver** — appear only inside [`ArchiveReport::skip`] and [`ArchiveReport::fail`],
+    /// which is what makes "the number and the list describe the same thing" a property of the code
+    /// rather than a habit.
+    ///
+    /// **Round 2 fixed three defects in the first version of this guard, all three of the
+    /// "did-not-run reads as found-nothing" family CLAUDE.md names.**
+    /// - It matched `self.skipped +=` and friends *with the receiver spelled out*. Every extractor leg
+    ///   holds a local `report`, not a `self`, so the mutation the guard existed to catch —
+    ///   `report.failed += 1;` in `extract_zip_archive_stream` — could not be expressed in the shape it
+    ///   scanned for. The Reviewer planted exactly that, plus a `report.errors.push(...)`, and the test
+    ///   stayed **green**. The patterns are receiver-agnostic now.
+    /// - It ended each helper span at `"\n    }\n"`, which occurs **0 times** in a CRLF checkout (the
+    ///   CRLF spelling occurs 230), and fell back to `src.len()` — so on Windows every byte after
+    ///   `fn skip` counted as "inside the helper" and roughly two thirds of the file, all four
+    ///   extractors included, was silently exempt. Spans are now brace-matched over the mask, and a span
+    ///   that cannot be located is a **panic**, never a fallback.
+    /// - Stripping only `//` left its own pattern list — a string literal quoting the fragments — being
+    ///   read as code, so the guard reported *itself* as the offender on any LF checkout. That is what
+    ///   reddened this PR's Linux and macOS CI jobs. [`mask_rust_comments_and_literals`] hides literals
+    ///   as well as comments.
+    ///
+    /// **Red-proofed after the rewrite**, both directions, on a real LF checkout and on the CRLF
+    /// working tree:
+    /// - the Reviewer's sabotage — `report.failed += 1;` and `report.errors.push("…".to_string());`
+    ///   inside [`extract_zip_archive_stream`] — now **fails with 2 offenders**, naming both lines.
+    /// - unsabotaged, the scan finds the four legitimate sites and no offenders. The `inside` count is
+    ///   asserted too, so an over-eager mask cannot make this pass by finding nothing anywhere.
+    #[test]
+    fn archive_report_counts_and_reasons_can_only_be_grown_together() {
+        let src = include_str!("archive.rs");
+        let masked = mask_rust_comments_and_literals(src);
+        assert_eq!(masked.len(), src.len(), "the mask must keep byte offsets usable");
+        let mb = masked.as_bytes();
+
+        // Each helper's body, brace-matched over the MASK (so a brace inside a string or a comment does
+        // not count) and located by signature rather than by line number or by a line-ending-dependent
+        // pattern. A span that cannot be found is fatal: exempting the rest of the file by falling back
+        // to `src.len()` is precisely how this guard went blind on Windows the first time round.
+        let body_span = |sig: &str| -> (usize, usize) {
+            let at = masked.find(sig).unwrap_or_else(|| {
+                panic!("`{sig}` is gone from archive.rs — this guard cannot say what is inside a helper \
+                        that no longer exists, so it fails rather than exempting nothing")
+            });
+            let open = masked[at..]
+                .find('{')
+                .map(|o| at + o)
+                .unwrap_or_else(|| panic!("no `{{` after `{sig}` — cannot locate its body"));
+            let mut depth = 0usize;
+            for (k, byte) in mb.iter().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return (open, k);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("`{sig}`'s body has no matching `}}` — the span is unknown, so this guard fails \
+                    rather than guessing at what it covers")
+        };
+        let skip = body_span("fn skip(&mut self, name: &str, reason: &str)");
+        let fail = body_span("fn fail(&mut self, name: &str, f: &EntryFailure)");
+
+        // Receiver-agnostic: `self.`, `report.`, `r.`, a field, a deref — anything ending in one of
+        // these mutations counts. Whitespace between the tokens is allowed so a rustfmt line break
+        // cannot hide a site.
+        let patterns: [&[&str]; 3] = [&[".skipped", "+="], &[".failed", "+="], &[".errors", ".push", "("]];
+
+        // Line starts, for a message that names a place a human can open.
+        let line_of = |off: usize| src[..off].matches('\n').count() + 1;
+
+        let (mut offenders, mut inside_skip, mut inside_fail) = (Vec::<String>::new(), 0usize, 0usize);
+        for at in 0..mb.len() {
+            // Every pattern starts with `.`; skipping the rest turns a 700 KB × 3-pattern sweep from
+            // ten seconds of debug-build CI time into a fraction of one.
+            if mb[at] != b'.' {
+                continue;
+            }
+            let Some(pattern) = patterns.iter().find(|p| tokens_at(mb, at, p)) else { continue };
+            if at >= skip.0 && at <= skip.1 {
+                inside_skip += 1;
+            } else if at >= fail.0 && at <= fail.1 {
+                inside_fail += 1;
+            } else {
+                let line = line_of(at);
+                let text = src.lines().nth(line - 1).unwrap_or("").trim();
+                offenders.push(format!("  archive.rs:{line}  {}  in: {text}", pattern.concat()));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "an ArchiveReport count or reason is grown outside `ArchiveReport::skip`/`fail`, so the \
+             count the user reads and the list of reasons behind it can disagree. Route it through the \
+             helper:\n{}",
+            offenders.join("\n")
+        );
+        // Anti-vacuity (CPE-1932): a mask that blanked too much, or spans that swallowed the file,
+        // would make the sweep above find nothing anywhere and pass. Both helpers must still be seen
+        // doing both halves of the record.
+        assert!(
+            inside_skip >= 2 && inside_fail >= 2,
+            "this guard scanned itself into silence: `skip` matched {inside_skip} of its 2 sites and \
+             `fail` {inside_fail} of its 2. Something is wrong with the mask or the spans, not with the \
+             code being guarded"
+        );
     }
 }

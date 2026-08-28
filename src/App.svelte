@@ -126,7 +126,7 @@
   import { initDropStack, addToDropStack, dropStackEntries, removeFromDropStack } from "./lib/dropStack";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
-  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, archiveSkipNotice, type TransferReport, type ConflictPolicy } from "./lib/transfers";
+  import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, archiveOutcomeNotice, archiveRunLandedNothing, type TransferReport, type ConflictPolicy } from "./lib/transfers";
   import DuplicatesDialog from "./lib/components/DuplicatesDialog.svelte";
   import SimilarImagesDialog from "./lib/components/SimilarImagesDialog.svelte";
   import NearDuplicatesDialog from "./lib/components/NearDuplicatesDialog.svelte";
@@ -179,7 +179,7 @@
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { NEW_FILE_TYPE_BY_EXT, type NewFileType } from "./lib/newFileTypes";
-  import { validateFileName, displaySafeName } from "./lib/filename";
+  import { validateFileName, displaySafeName, displaySafePath } from "./lib/filename";
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
@@ -6283,27 +6283,54 @@
           // — a rare, pre-existing limitation, not a wrong-pane action against a specific op). On a clean
           // finish, still refresh pane A's folder so the entry shows up there; fall back to a generic
           // notice since the call site's specific wording isn't available here.
-          if (!r.cancelled && r.failed === 0) {
+          // CPE-1935: `r.failed === 0` gated this. An extraction can now finish with SOME entries
+          // failed and the rest on disk, and a run that wrote 23 of 27 files must still refresh the
+          // pane — otherwise the fix stops at the engine and the user still cannot see what landed.
+          //
+          // Round 2: the replacement was `(r.transferred > 0 || r.skipped > 0)`, which dropped the
+          // `done === 0` **success** — the empty-folder archive — along with its refresh, where the old
+          // `r.failed === 0` had kept it. `archiveRunLandedNothing` asks the question both these sites
+          // actually mean; see its doc for the two user actions that produce a clean zero.
+          if (!r.cancelled && !archiveRunLandedNothing(r)) {
             const ONE = r.op === "compress" ? "notice.archiveCompressedOne" : "notice.archiveExtractedOne";
             const MANY = r.op === "compress" ? "notice.archiveCompressedMany" : "notice.archiveExtractedMany";
-            // CPE-1775: a refused entry has to reach the headline, not only the panel. `archiveSkipNotice`
-            // returns null when nothing was skipped, so the ordinary case is byte-identical to before.
-            const skipped = archiveSkipNotice(r, $t);
-            if (skipped) showNotice(skipped, true);
+            // CPE-1775: a refused entry has to reach the headline, not only the panel.
+            // `archiveOutcomeNotice` returns null when nothing was skipped and nothing failed, so the
+            // ordinary case is byte-identical to before.
+            const outcome = archiveOutcomeNotice(r, $t);
+            if (outcome) showNotice(outcome, true);
             else showNotice($t(r.transferred === 1 ? ONE : MANY, { count: r.transferred }));
             loadPath(currentPath).catch(() => {});
           }
           return;
         }
         if (r.cancelled) { showNotice(pending.cancelledNotice); return; }
-        if (r.failed > 0) { showNotice(r.errors[0] || pending.failedNotice, true); return; }
+        // **CPE-1935.** `if (r.failed > 0) { showNotice(r.errors[0] ...); return; }` stood here, and it
+        // returned BEFORE `onSuccess`/`refreshBatchApplyTarget` — so an extraction that wrote 23 of 27
+        // files showed one sentence naming the one that did not, and never refreshed the pane the 23
+        // had just landed in. `failed` used to mean only "the whole run died", which is why that was
+        // once right; it is a per-entry count now.
+        //
+        // Nothing landed at all ⇒ there is nothing to reveal and the single error IS the whole story,
+        // so it is still the headline — routed through `displaySafePath` now, because it can carry an
+        // archive-controlled entry name and the panel has always escaped it while this toast did not.
+        //
+        // Round 2: this read `r.transferred === 0 && r.skipped === 0`, which is not a test for failure.
+        // A successful run over an archive of empty folders reports a clean `done: 0` (directories never
+        // count toward `done`), so it took this branch: a failure toast, no `onSuccess`, no refresh, and
+        // the folders it had just created stayed invisible — this ticket's own defect, moved onto a
+        // different input. `archiveRunLandedNothing` requires `failed > 0`.
+        if (archiveRunLandedNothing(r)) {
+          showNotice(r.errors[0] ? displaySafePath(r.errors[0]) : pending.failedNotice, true);
+          return;
+        }
         // `onSuccess` runs synchronously inside this `Promise.resolve(...)` and shows the call site's own
-        // "Extracted X to Y" notice; the skip notice deliberately REPLACES it (CPE-1775), because a
-        // headline that says only "extracted" about a run that refused an entry is the whole bug. The
-        // refresh in `.then()` is unaffected either way.
+        // "Extracted X to Y" notice; the outcome notice deliberately REPLACES it (CPE-1775), because a
+        // headline that says only "extracted" about a run that refused or failed an entry is the whole
+        // bug. The refresh in `.then()` is unaffected either way.
         Promise.resolve(pending.onSuccess()).then(() => refreshBatchApplyTarget(pending.dir)).catch(() => {});
-        const skipped = archiveSkipNotice(r, $t);
-        if (skipped) showNotice(skipped, true);
+        const outcome = archiveOutcomeNotice(r, $t);
+        if (outcome) showNotice(outcome, true);
         return;
       }
       // CPE-1533: a Drop-Stack "Copy all here" is tagged in `dropStackTransferOps` with the exact paths

@@ -65,9 +65,25 @@ export interface TransferState extends TransferProgress {
  * `displaySafePath` behind a one-click disclosure — not spliced into a five-second toast. The headline's
  * job is to make the user *look*, and a count does that without giving an attacker a sentence in it.
  *
- * Returns `null` for a cancelled run (its own notice already says what happened), for a failed one (the
- * failure is the headline, and a skip must never be mistaken for a failure or vice versa), and for the
- * ordinary case of nothing skipped — so an unremarkable extraction gains no new noise.
+ * Returns `null` for a cancelled run (its own notice already says what happened) and for the ordinary
+ * case of nothing skipped and nothing failed — so an unremarkable extraction gains no new noise.
+ *
+ * ## CPE-1935 — it now covers FAILED entries too, and that is the point
+ *
+ * This used to return `null` the moment `failed > 0`, on the reasoning that *"the failure is the
+ * headline"*. That was true while `failed` could only mean the whole run had died: an extraction was
+ * all-or-nothing on any I/O failure, so there was never a partial outcome to describe. There is now —
+ * a read-only file at one entry's name leaves the other 26 entries of a 27-entry archive extracted and
+ * that one recorded as `failed` — and the old branch would have shown `errors[0]`, a single sentence
+ * naming the one entry that did *not* land and nothing about the 26 that did. That is the exact shape
+ * the ticket was filed for, arriving through the UI instead of through the engine.
+ *
+ * So the headline states every count that is not zero, in one sentence, and still carries **counts
+ * only**: the reason strings embed the archive-controlled entry name and belong in the panel, escaped
+ * through `displaySafePath`, not spliced into a five-second toast.
+ *
+ * Failures are named **before** skips deliberately — a skip is a guard working as intended, a failure
+ * is a file the user asked for and did not get, and the more actionable half goes first.
  */
 /**
  * The operations panel's disclosure-button text for a finished row (CPE-1775) — `null` when there is
@@ -93,11 +109,11 @@ export function transferReasonsLabel(
   return `· ${n} problem${n === 1 ? "" : "s"} — why?`;
 }
 
-export function archiveSkipNotice(
+export function archiveOutcomeNotice(
   r: Pick<TransferReport, "op" | "transferred" | "skipped" | "failed" | "cancelled">,
   t: (key: string, params?: Record<string, string | number>) => string,
 ): string | null {
-  if (r.cancelled || r.failed > 0 || r.skipped <= 0) return null;
+  if (r.cancelled || (r.skipped <= 0 && r.failed <= 0)) return null;
   const compress = r.op === "compress";
   const doneKey = compress
     ? r.transferred === 1
@@ -106,8 +122,44 @@ export function archiveSkipNotice(
     : r.transferred === 1
       ? "notice.archiveExtractedOne"
       : "notice.archiveExtractedMany";
-  const skipKey = r.skipped === 1 ? "notice.archiveSkippedOne" : "notice.archiveSkippedMany";
-  return `${t(doneKey, { count: r.transferred })} ${t(skipKey, { count: r.skipped })}`;
+  const parts = [t(doneKey, { count: r.transferred })];
+  if (r.failed > 0) {
+    parts.push(
+      t(r.failed === 1 ? "notice.archiveFailedOne" : "notice.archiveFailedMany", { count: r.failed }),
+    );
+  }
+  if (r.skipped > 0) {
+    parts.push(
+      t(r.skipped === 1 ? "notice.archiveSkippedOne" : "notice.archiveSkippedMany", { count: r.skipped }),
+    );
+  }
+  return parts.join(" ");
+}
+
+/**
+ * **CPE-1935 — did this archive run deliver nothing at all?** True only when something actually failed
+ * *and* nothing was written and nothing refused, i.e. the single error line is the whole story: there is
+ * no pane to refresh and nothing for the user to go and look at.
+ *
+ * It exists because `transferred === 0 && skipped === 0` is **not** that question, and reading it as
+ * though it were re-introduces this ticket's own defect on a different input. `done` counts *files*:
+ * `// only files count toward "done"` in `extract_zip_archive_stream`, and `compress_to_zip_streamed`
+ * likewise counts only non-directory entries. So a perfectly successful run over an archive that holds
+ * nothing but folders returns `{ done: 0, failed: 0, skipped: 0, errors: [] }` — measured at the engine
+ * on both this branch and its merge base. Two real user actions hit it:
+ *
+ * - **Extract an archive of empty folders.** The folders are created; the round trip reported a failure
+ *   toast, skipped `onSuccess` and skipped the refresh, so the new folders never appeared in the pane.
+ * - **Right-click an empty folder → Compress.** The `.zip` is written correctly, `done` is 0, and the
+ *   user saw `notice.compressFailedTo` while the new archive never showed up.
+ *
+ * Both are the exact shape this ticket set out to remove — a report returning *before* `onSuccess` — so
+ * the predicate names the failure explicitly rather than inferring it from an empty delivery.
+ */
+export function archiveRunLandedNothing(
+  r: Pick<TransferReport, "transferred" | "skipped" | "failed">,
+): boolean {
+  return r.failed > 0 && r.transferred === 0 && r.skipped === 0;
 }
 
 /** Whole-batch completion percentage (0–100), by bytes; a finished transfer is always 100. */

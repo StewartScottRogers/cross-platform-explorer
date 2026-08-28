@@ -3781,9 +3781,15 @@ export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
  */
 export type ArchiveExtractOutcome = { dest: string; report: ArchiveReport }
 /**
- * The final outcome of a compress/extract run. `done` counts entries actually written; `failed` stays
- * 0 unless the whole run aborted with an error (compress/extract are otherwise all-or-nothing, same as
- * the one-shot functions).
+ * The final outcome of a compress/extract run. `done` counts entries actually written.
+ * 
+ * **`failed` is a per-entry count as of CPE-1935.** It used to stay 0 always, because an extraction was
+ * all-or-nothing on any I/O failure: one unwritable entry returned `Err` and the report was discarded,
+ * so a 27-entry archive with a read-only file at entry 4 left 23 files on disk, reported nothing about
+ * them, and named only the file that stopped it. Entry-scoped failures are now counted here and
+ * recorded in `errors` beside the skips, so "what landed" is answerable from the report alone. A
+ * *run*-scoped abort (the extraction folder, a shared path component, the archive container) is still
+ * an `Err` and still carries no report — see [`EntrySlotAction`] for the rule that draws that line.
  * 
  * **`skipped` is CPE-1775's addition, and it is the count the UI was missing.** An entry refused by a
  * guard — an unsafe name, a link sitting at the destination, a destination that escapes the extraction
@@ -3794,10 +3800,25 @@ export type ArchiveExtractOutcome = { dest: string; report: ArchiveReport }
  * distinguishable), so the honest shape is a third count, carried through `TransferReport` to the
  * `transfer://done` event.
  * 
- * **Invariant: every push to `errors` from a per-entry skip also increments `skipped`.** They are two
- * halves of one record — the count is what the headline notice reads, the string is the reason behind
- * it — and `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` fails if any skip
- * site grows one without the other.
+ * **Invariant: every per-entry line in `errors` is pushed by [`ArchiveReport::skip`] or
+ * [`ArchiveReport::fail`], which also increment the matching count.** They are two halves of one record
+ * — the count is what the headline notice reads, the string is the reason behind it — and a site that
+ * grew one without the other would put a number and a list in front of the user that describe different
+ * things.
+ * 
+ * **That invariant was folklore until CPE-1935.** This paragraph named
+ * `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path` as its enforcement for two
+ * tickets; **no commit in this repository has ever contained a test of that name** —
+ * `git log --all -S"fn skipped_count_matches_the_recorded_reasons"` returns nothing, which is the
+ * question worth asking (a `grep` of the working tree only says it is absent *today*, and every hit it
+ * does return is prose about the absence, this sentence included — the first draft of this paragraph
+ * quoted a hit count that was already wrong by the time it was reviewed).
+ * 
+ * It is now derived from the source rather than asserted about it —
+ * `archive_report_counts_and_reasons_can_only_be_grown_together` reads this file, masks comments and
+ * string literals, and fails if `skipped`/`failed` is incremented or `errors` pushed on **any**
+ * receiver anywhere but inside these two helpers. CPE-1933's rule, applied to the claim that was
+ * standing in for the check.
  * 
  * **CPE-1837: also the report the one-shot extractors return, not only the streamed ones.**
  * `Serialize`/`specta::Type` so it can cross the IPC boundary directly as an
