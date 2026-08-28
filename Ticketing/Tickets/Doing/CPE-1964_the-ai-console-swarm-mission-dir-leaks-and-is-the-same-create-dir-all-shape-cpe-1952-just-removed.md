@@ -3,7 +3,7 @@ id: CPE-1964
 title: the AI Console's `cpe-swarm-<millis>` mission directory leaks — 55 on one machine — and is the same predictable-`create_dir_all` shape CPE-1952 just removed
 type: bug
 priority: Medium
-status: Open
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -95,3 +95,80 @@ the same moment, from a worktree that could not see this one. Theirs is referenc
 comments, its PR body and CPE-1961; this one was referenced only by itself, so this is the cheaper
 side to move. Standing hazard: two agents allocating the next free ID from different checkouts will
 collide, and the tell is that neither can see the other's file.
+
+## Work Log — 2026-08-27
+
+### Reproduction, before the fix, on both platforms, asserted on the filesystem
+
+`sidecar/ai-console/tests/swarm_mission_dir_containment.rs` plants a real directory link (junction on
+Windows via `junction::create`, `symlink(2)` on Unix) at a real `<temp>/cpe-swarm-<n>` path and runs the
+pre-fix primitive verbatim.
+
+* **Windows** (`%LOCALAPPDATA%\Temp`): the control's first run, with a deliberately wrong expectation,
+  printed the escape as an on-disk listing — *"the mission scaffolding landed inside the attacker's
+  directory at `C:\Users\Stewart Rogers\AppData\Local\Temp\.tmpeksRPN\victim`"*, `left:
+  ["mcp-claude-builder1.json", "members.json"]`.
+* **Linux, real ext4** (`/dev/sdd`, with `TMPDIR` overridden to `$HOME/cpe-1964-tmp` — WSL's `/tmp` is
+  tmpfs): a standalone repro of the same two primitives printed
+  `victim after create_dir_all = ["mcp-claude-builder1.json", "members.json"]`,
+  `escaped bytes at .../cpe-1964-victim/members.json: "MISSION-ROSTER"`, then
+  `create_dir on the same planted path -> AlreadyExists (File exists (os error 17))`,
+  `victim after create_dir = []`. The committed suite also runs green there (4/4).
+
+### The fix
+
+New module `sidecar/ai-console/src/swarm_mission_dir.rs`.
+
+CPE-1952's shape — *delete the directory* — is **unavailable** here, and the module says why at the
+top: the mission directory **is** the swarm's shared substrate. Each agent spawns its own
+`ai-console --swarm-mcp --dir <mission>` host in a separate process, and they coordinate through
+`members.json` / `mailbox.jsonl` / `memory/*.md` / `mcp-<agent>.json` / `task-*.txt`. So the two
+defects get two answers:
+
+* **Escape** — `create_mission_dir_at` uses `std::fs::create_dir` (one `mkdir(2)` /
+  `CreateDirectoryW`), which fails `AlreadyExists` on *anything* already at the path including a
+  reparse point, atomically with the create. The name became 32 hex characters of `RandomState`
+  entropy instead of `now_millis()`. **No `exists()` pre-check** — that would be a shadowed guard
+  (CPE-1929), and it is refused at the site with the reason.
+* **Leak** — `sweep_stale_mission_dirs`, run once at console startup on a background thread with a
+  **24-hour retention**. An RAII guard on the mission thread was designed first and rejected: the live
+  coordination panel (CPE-592) reads that directory, and the moment you most want it is right after
+  the mission ends.
+
+### The 55 existing directories
+
+Measured on this machine: **55** `cpe-swarm-*`, **0** reparse points, **54** carrying `members.json`,
+**55** older than 24h (17 Jul to 26 Jul 2026). The sweep removes **54** and leaves **1** — the one
+without a roster, which is `console.rs`'s own unit-test leftover. Every condition fails closed
+(CPE-1972): wrong name, not a plain directory, no roster, unreadable mtime, future mtime are all
+skips, never deletes. Another user's directory under `/tmp`'s sticky bit fails at `remove_dir_all` and
+is counted, not hidden.
+
+### CPE-1929 pairs, measured on Windows against `swarm_mission_dir_containment`
+
+| refusal | disabled | predicate made to lie | verdict |
+|---|---|---|---|
+| `create_dir`'s `AlreadyExists` | `create_dir_all` = **RED** (1 failed) | `remove_dir_all` first = **RED** (1 failed) | live |
+| sweep: `!meta.is_dir()` on a `symlink_metadata` | `if false && ...` = **RED** | `metadata()`, i.e. the following stat = **RED** | live |
+| sweep: `meta.file_type().is_symlink()` | (with the above) RED | forced to lie = **GREEN** (4 passed) | **shadowed, deleted** |
+
+The `is_symlink()` arm was written, its pair run, and then **deleted**: `!meta.is_dir()` answers the
+same fact first on both platforms, because std reports a name-surrogate reparse point as a symlink and
+never as a directory. Both numbers are recorded at the site.
+
+### Re-derived `temp_dir()` enumeration
+
+`src/lib/tempDirSites.test.ts` carries the corrected recipe as code: `git ls-files '*.rs'`, minus a
+`tests/` path segment, comments stripped with the shared `stripRustComments`, then cut at the first
+**column-0** `#[cfg(test)]`. Measured at `origin/main`: **naive 10, corrected 14**, and the sites the
+naive rule drops include **both swarm sites** (`console.rs:733`, `console.rs:796`). The ticket's figure
+was 15; the extra is `crates/server/src/archive.rs:2088`, which is a **comment**, so the corrected
+recipe is right to drop it.
+
+A new finding worth its own ticket: `session_diag.rs:33`, `session_supervisor.rs:151` and
+`sidecar/host/src/reaper.rs:61` all build the **fixed** path `<temp>/cpe-ai-console/...` and create it
+with `create_dir_all` — the same shape as this ticket, and it holds the session-daemon **port file**.
+
+CPE-1952's two fallbacks re-checked and unchanged: `catalog_dir`'s `cpe-ai-console-catalog`
+(`src-tauri/src/lib.rs:10155`) and `cpe-sidecar-storage` (`:11899`), both reached only when
+`app_data_dir()` fails, both still zero on disk.
