@@ -86,6 +86,20 @@ assertions; declaration-shaped `const *ALLOW|EXEMPT|KNOWN|LEGACY|WAIV|BASELINE*`
 Rust; and prose markers like "only ever shrink" / "one-way"), **not** from memory — CPE-1932 lost an
 hour to a rule followed from recall when seventeen instances existed.
 
+**The `today` column is asserted, not maintained (CPE-1948).** `src/lib/ratchetsDoc.test.ts` parses
+this table structurally — the header row above pins it, and each `today` cell must be a bare integer
+(optionally plus the not-gated marker, which is itself derived from `unenforced`) so nothing here can
+be a number that went unchecked. It then measures every baseline in `REGISTRY` and fails naming the
+row, the stored value and the measured one. The `id` list is compared to the registry as an ordered
+whole, so a baseline added to `scripts/ratchet-baselines.mjs` and not to this table is also a red.
+Update the table when a baseline legitimately moves; the test will tell you it needs it.
+
+Why this table keeps its numbers at all, rather than deleting them and pointing at
+`node scripts/ratchet-baselines.mjs print`: the numbers are the reason anyone opens this page — the
+*scale* of each debt is what tells you whether an allowlist is a rounding error or a project. A page
+without them is honest and useless. Asserting them costs one guard test, which is the trade this repo
+already makes for `sectionDocs.test.ts` and `keymap.test.ts`.
+
 | id | file | what the number counts | today |
 |----|------|------------------------|-------|
 | `hex-files` | `src/app.css.test.ts` | `.svelte` files with a hard-coded hex in a style position (CPE-1534) | 85 |
@@ -96,15 +110,17 @@ hour to a rule followed from recall when seventeen instances existed.
 | `invoke-optout-allowlist` | `src/lib/invoke.guard.test.ts` | modules bypassing the busy-cursor `invoke` wrapper | 0 |
 | `mojibake-allowlist` | `src/lib/mojibakeGuard.test.ts` | lines allowed to look like mojibake (CPE-1723) | 5 |
 | `pwsh-encoding-allowed-lines` | `src/lib/workflowPwshFileEncoding.test.ts` | workflow pwsh writes with no explicit encoding (CPE-1842) | 1 |
-| `bidi-render-registry` | `src/lib/bidiEscape.guard.test.ts` | component render sites showing a raw filesystem name (CPE-1757/1885) | 1552 |
+| `bidi-render-registry` | `src/lib/bidiEscape.guard.test.ts` | component render sites showing a raw filesystem name (CPE-1757/1885) | 1553 |
 | `bidi-app-markup-offenders` | `src/lib/bidiEscape.guard.test.ts` | the same, in `App.svelte`'s markup | 31 |
 | `bidi-app-script-basename-allowlist` | `src/lib/bidiEscape.guard.test.ts` | `App.svelte` `<script>` `baseName()` calls skipping `displaySafeName` | 2 |
-| `manual-test-mvd` | `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` | still-manual verification surfaces (MVD) | 14 — **enumerated, not gated** (13 → 14 on 2026-08-27, CPE-1946) |
+| `manual-test-mvd` | `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` | still-manual verification surfaces (MVD) | 14 — **enumerated, not gated** |
 
 `manual-test-mvd` is enumerated but deliberately **not** gated: the MVD legitimately *rises* whenever
-a QA-Architect audit discovers pre-existing unlogged debt (the ledger records a +5 shift on
-2026-08-11), and that discovery is the behaviour we want. Gating it would push audits toward not
-logging what they find. Its stored-vs-real drift is CPE-1922's.
+a QA-Architect audit discovers pre-existing unlogged debt (the burndown's own ledger records a +5
+shift on 2026-08-11), and that discovery is the behaviour we want. Gating it would push audits toward
+not logging what they find. Ungated is not unwatched, though — its `today` value is asserted here like
+every other row, which matters most for this one, because being ungated is exactly why it was the
+first row to go stale (CPE-1922, then CPE-1946).
 
 ### Recount, 2026-08-27 (CPE-1934)
 
@@ -112,13 +128,32 @@ Every baseline was recomputed from scratch rather than trusted, to catch a raise
 happened quietly. **None was inflated.**
 
 - `hex-files` / `hex-occurrences`: baselines temporarily set to `0` and the ratchet re-run, so its own
-  matcher reported the truth — 85 files, 277 occurrences. Exactly the stored values, zero slack.
+  matcher reported the truth. Exactly the stored values, zero slack. (The figures are deliberately not
+  repeated here — the table above is the one asserted site, and a second copy in prose is the defect
+  CPE-1948 was filed about.)
 - The eight allowlists: each carries its own "no stale entries" test, and all eight are green — every
   entry still points at debt that is really there. `bidi-render-registry` asserts exact equality with
   the tree, so it cannot be inflated by construction.
 - `gui-smoke-known-failing` cannot be recounted off-CI (it needs a built app on the Linux leg), but
   the ratchet's clause 2 fails the job the moment a listed case starts passing, so an entry that is no
   longer needed reds every run rather than sitting there.
+
+### Recount, 2026-08-27, later the same day (CPE-1948)
+
+Recounted again from `REGISTRY` rather than from the table, because the table being wrong is the
+premise of CPE-1948 and it therefore cannot also be the list of what to recount. **One row was
+already stale**: `bidi-render-registry` read `1552` against a measured `1553`. Every other row
+matched, `manual-test-mvd` included.
+
+The movement was real and legitimate — PR #1056 (CPE-1928) recorded one new render site,
+`text:blockedRemedy` in `MacroRunConfirm.svelte`. Two things are worth writing down about how it got
+past the guard, because neither is a bug in the guard:
+
+- **The `ratchet-guard` job never saw it.** #1056's last CI run was 16:29Z; the guard landed on `main`
+  at 17:42Z; #1056 merged at 18:36Z on those stale checks. A guard is only as live as the newest run
+  of the PR it is meant to judge — a merge on checks older than the guard is a merge the guard did not
+  make. Nothing here can fix that; branch protection with required, up-to-date checks can.
+- **The doc had no such excuse.** Nothing was watching it at all, which is what this ticket changed.
 
 ## What this guard does *not* catch
 
