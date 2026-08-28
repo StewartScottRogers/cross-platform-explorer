@@ -1032,7 +1032,7 @@ describe("ci-poll: the required-job set is DERIVED from real workflows, not from
 // -------------------------------------------------------------------------------------------------
 // CPE-1967 — a job STOPPED at its `timeout-minutes` cap is red, named, and countable.
 //
-// That ticket gave every job in every workflow a cap (0 of `ci.yml`'s 10 had one, so a wedged job ran
+// That ticket gave every job in every workflow a cap (10 of `ci.yml`'s 11 had none, so a wedged job ran
 // to the 360-minute Actions default). A cap that fires creates a board state this poller had never
 // seen, and the ticket's requirement is that it "must not read as any other failure and must not read
 // as a skip".

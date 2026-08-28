@@ -77,9 +77,22 @@ don't recall), **CPE-1171** (the gui-smoke harness, which already caps its jobs)
 
 Derived at run time from `git ls-files '.github/workflows/*.yml'` (8 files), parsed with the repo's own
 `parseYaml` via `discoverWorkflows`/`parseWorkflowFile` in `src/lib/workflowShellSources.ts` — never a
-list of the jobs someone remembered. **28 jobs. 17 of them had no `timeout-minutes` at all**, which is
-7 more than the ten the ticket named: `ci.yml`'s 10, plus `model-snapshot.yml`'s 1, `release.yml`'s 3
-and `release-sidecar.yml`'s 4.
+list of the jobs someone remembered. **28 jobs. 18 of them had no `timeout-minutes` at all**, which is
+**8** more than the ten the ticket named: `ci.yml`'s 10, plus `model-snapshot.yml`'s 1,
+`release.yml`'s 3 and `release-sidecar.yml`'s 4. Job-level caps go from 10 to 28.
+
+**CORRECTION — this line first said "17 … 7 more", and the table immediately below it already had
+eighteen `**none**` rows.** It is worth stating plainly rather than silently swapping the digit,
+because it is this ticket's own defect, one level out: the "17" came from carrying the ticket's
+premise (`ci.yml` has ten jobs, none capped) forward as a baseline instead of re-deriving it from the
+merge base. `ci.yml` has **eleven** jobs, and `ci-verdict` **already carried `timeout-minutes: 10`**
+— verifiable in one command,
+`git show 337ac334:.github/workflows/ci.yml | grep -nE '^    timeout-minutes:'`, which returns
+exactly one line (`2042`). Recall lost to enumeration inside the PR arguing that enumeration beats
+recall. The counts are no longer written down anywhere unguarded: `src/lib/workflowJobTimeouts.test.ts`
+now derives `ci.yml`'s job count, its job-level cap count, its step-level cap count and its comment
+mentions at run time and reds if the prose and the file disagree (red-proofed: adding a twelfth job
+reds two of the three legs).
 
 | workflow | job | before | after |
 |---|---|---|---|
@@ -144,19 +157,38 @@ the next release cuts.
 `src/lib/workflowJobTimeouts.test.ts`: every job in every workflow declares a cap, every cap is a
 positive whole number, no cap is at or above 360 (a cap that does not bound below the default is the
 status quo with a number next to it). The job list is derived from the PARSED YAML — never text. That
-matters concretely and is measured, not asserted: `timeout-minutes` occurs **30** times in today's
-`ci.yml`, of which **22** are real keys (10 of them STEP-level, which must not count as a job cap) and
-**8** are comment prose, including a fully-indented `#   timeout-minutes: 6` inside a worked example.
+matters concretely: `timeout-minutes` appears in today's `ci.yml` far more often than there are job
+caps, split three ways — job-level keys, an equal number of STEP-level keys (which a text scan must
+not count as a job cap), and comment prose, including a fully-indented `#   timeout-minutes: 6` inside
+a worked example that a naive line filter reads as a key.
+
+**Those counts are no longer written down in prose anywhere.** A first draft of this Work Log and of
+the test's own docblock quoted them as digits and got two of them wrong (see the CORRECTION above,
+and "22 real keys, 10 of them step-level" — it is eleven). So the test now DERIVES every one of them:
+`describe("the counts this file's rationale quotes are DERIVED from ci.yml, not recalled")` measures
+`ci.yml`'s parsed job count, its job-level cap count, its step-level cap count and its comment
+mentions at run time, cross-checks the text scan against the parser, and reds if the prose and the
+file disagree. That is CPE-1948's rule — do not keep an unguarded second copy of a measurement —
+applied to the file that was breaking it.
+
+The one claim that cannot be derived at run time is the pre-CPE-1967 state, and it is made
+REPRODUCIBLE rather than asserted: `git show 337ac334:.github/workflows/ci.yml | grep -nE '^
+timeout-minutes:'` returns exactly one line. Deriving it inside the test was considered and rejected
+on a measured reason — this suite runs in `ci.yml`'s `frontend` job, whose `actions/checkout@v4` has
+no `fetch-depth: 0` (only `ratchet-guard` sets it), so a shallow clone has no object for that
+revision and the leg would either red on every run or be written to tolerate the miss and pass
+vacuously.
 
 No allowlist and no stored count of offenders: the invariant is total today, so a ratchet would be a
 standing licence to add an uncapped job. `MIN_EXPECTED_JOBS = 20` is an enumeration sanity floor, not a
 ratchet — it can only cause a failure, never excuse one. The full suite (360 files / 5,385 tests) stays
 green, `ratchetBaselines.test.ts` and `ratchetsDoc.test.ts` included, so nothing ratchet-shaped landed.
 
-**Red-proofed, three sabotages, results recorded in the test file itself:** deleting `crates`' cap →
+**Red-proofed, four sabotages, results recorded in the test file itself:** deleting `crates`' cap →
 the presence test reds naming `.github/workflows/ci.yml [crates]`; `timeout-minutes: 400` → the
 above-the-default test reds naming the job, 400 and 360; `timeout-minutes: "30"` → the type test reds
-naming the string.
+naming the string; inserting a twelfth job → two of the three derived-count legs red, one naming the
+full job list and `expected 12 to be 11`.
 
 ### 2026-08-28 — the untimed spawns
 
@@ -195,7 +227,7 @@ ticket named.
 | script | wraps | verdict |
 |---|---|---|
 | `scripts/gen_samples.py` | `subprocess.run` x2 (ffmpeg) | **GAP, FIXED.** Both were `check=True, capture_output=True` with no `timeout=`, so a wedged ffmpeg blocked forever with its output swallowed. `FFMPEG_TIMEOUT_S = 120` on both; `TimeoutExpired` is already caught by the existing `except Exception`, so it reaches the same `note()` + stub fallback as any other ffmpeg failure. No new failure path. |
-| `scripts/release.ps1` | `git` x5 via `Invoke-Git` | **GAP, DELIBERATELY NOT CAPPED — reasoning recorded at the site.** `add`/`commit`/`tag` are local; `push` genuinely can hang. But this script is attended by construction (a human cutting a release; no scheduled task or workflow invokes it), so there is no 360-minute default underneath it, and PowerShell has no `timeout` for a native command — bounding one means `Start-Process` + kill, which would abort a push mid-transfer on a merely slow link and leave a tagged-but-unpushed tree. The comment says what expires the reasoning (an unattended caller) and names the right mechanism then (`http.lowSpeedLimit`). |
+| `scripts/release.ps1` | `git` x5 via `Invoke-Git` | **GAP, DELIBERATELY NOT CAPPED — reasoning DERIVED and recorded at the site.** `add`/`commit`/`tag` are local; `push` genuinely can hang. But the git section is attended by construction, and that load-bearing claim is derived rather than asserted (CPE-1933): `git grep -i 'release\.ps1'` returns every tracked reference, and each is a human instruction (RELEASING.md, `run.md`), prose (CLAUDE.md), a **comment** in `release.yml:139` / `release-sidecar.yml:592` / `catalog-version.sh:84` (no `run:` invokes it), history, or the test harness — and that harness, the one genuinely unattended caller, runs the real script only with `-BumpOnly`, which `exit 0`s at line ~492, **above** `Invoke-Git`'s definition. No CI path reaches a `git` call in this file. Meanwhile PowerShell has no `timeout` for a native command, so bounding one means `Start-Process` + kill, which would abort a push mid-transfer on a merely slow link and leave a tagged-but-unpushed tree. The comment names what expires the reasoning (a caller reaching past the `-BumpOnly` exit) and the right mechanism then (`http.lowSpeedLimit`). |
 | `scripts/new-sample-sandbox.ps1` | nothing | **CLEAN.** `Get-Date`, `New-Item`, `Copy-Item`, `Remove-Item` — cmdlets, no external process. |
 | `scripts/new-sample-sandbox.sh` | `date`, `mkdir`, `cp`, `rm` | **CLEAN.** Local coreutils on a local tree; nothing network-bound and nothing that can block indefinitely. |
 | `.github/workflows/scripts/catalog-freshness-check.sh` | `date` (x3) | **CLEAN.** Local coreutils, epoch arithmetic only. Runs inside a job that now carries a cap. |

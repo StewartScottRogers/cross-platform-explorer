@@ -119,8 +119,11 @@ export const MIN_EXPECTED_NPM_PROJECTS = 2;
  *     answering`. Note `--report` mode, which exits 0 on every advisory count, still fails here: that
  *     is the point — "did not run" is not a finding to report, it is a broken sweep.
  *   · the `npm audit fix` call's own `timeout:` set to 1ms → the same non-zero exit, naming
- *     `npm audit fix --package-lock-only for <root> was KILLED … whether a non-major fix is available
- *     is UNKNOWN, not "none"`.
+ *     `npm audit fix --package-lock-only for <root> was KILLED after 1ms without answering, so
+ *     whether a non-major fix is available is UNKNOWN, not "none"`. Re-run after review round 2
+ *     threaded `timeoutMs` through `unappliedNonMajorFix`: the first version interpolated the module
+ *     constant and printed "KILLED after 120000ms" at a 1ms cap — right verdict, wrong number, which
+ *     is a diagnostic reporting a value the run did not use.
  *   · CPE-1929's second sabotage on that same branch, because a new refusal is exactly where a
  *     shadowed guard hides: with the 1ms cap still in place and the branch disabled
  *     (`if (false && killedByTimeout(err))`), the sweep printed
@@ -293,7 +296,7 @@ function npmAuditJson(cwd, label, { timeoutMs = NPM_CALL_TIMEOUT_MS } = {}) {
  * Non-destructive: works on a copy, and `--package-lock-only` never installs. Returns the names the
  * fix would clear (empty when `npm audit fix` would change nothing).
  */
-function unappliedNonMajorFix(/** @type {string} */ dir) {
+function unappliedNonMajorFix(/** @type {string} */ dir, { timeoutMs = NPM_CALL_TIMEOUT_MS } = {}) {
   const src = join(REPO_ROOT, dir);
   const probe = join(PROBE_ROOT, dir === "" ? "root" : dir.replace(/[\\/]/g, "_"));
   try {
@@ -332,7 +335,7 @@ function unappliedNonMajorFix(/** @type {string} */ dir) {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
         shell: process.platform === "win32",
-        timeout: NPM_CALL_TIMEOUT_MS,
+        timeout: timeoutMs,
       });
     } catch (err) {
       // CPE-1967: checked BEFORE the stderr sniff below, and that order is the whole fix. A call we
@@ -340,9 +343,16 @@ function unappliedNonMajorFix(/** @type {string} */ dir) {
       // would sail through the `/npm error/i` test and be recorded as "no unapplied fix available",
       // an understatement in precisely the direction this probe exists to prevent.
       if (killedByTimeout(err)) {
+        // `timeoutMs`, not the module constant — the message has to report the cap that ACTUALLY
+        // killed this call. Production cannot diverge (the caller passes nothing), but the two
+        // cannot differ silently either: the first version interpolated `NPM_CALL_TIMEOUT_MS` and,
+        // during the red-proof that set this one call to 1ms, cheerfully printed "KILLED after
+        // 120000ms". A diagnostic that reports a number the run did not use is the same defect class
+        // as the rest of this file, in the sentence explaining it. `npmAuditJson` above already got
+        // this right from its own parameter; this now matches it.
         throw new Error(
           `npm audit fix --package-lock-only for ${projectLabel(dir)} was KILLED after ` +
-            `${NPM_CALL_TIMEOUT_MS}ms without answering, so whether a non-major fix is available is ` +
+            `${timeoutMs}ms without answering, so whether a non-major fix is available is ` +
             `UNKNOWN, not "none". Retry, or raise NPM_CALL_TIMEOUT_MS in this file (and ` +
             `\`npm-audit-sweep\`'s \`timeout-minutes:\` with it).`,
         );

@@ -158,8 +158,16 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # ─── Job timeouts (CPE-1967) ─────────────────────────────────────────────────────────────────────
-# Every job below carries a job-level `timeout-minutes:`. Before CPE-1967 not one of them did — only
-# individual STEPS had caps — so a wedged job ran to the GitHub Actions default of **360 minutes**.
+# All ELEVEN jobs below carry a job-level `timeout-minutes:`. Before CPE-1967 only `ci-verdict` did —
+# the other ten had step-level caps at best, which bound a step and say nothing about a job wedged
+# BETWEEN steps, in `actions/cache`, or on a runner that stopped answering. Those ten therefore ran
+# under the GitHub Actions default of **360 minutes**.
+#
+# (An earlier draft of this very block said "not one of them did" and counted ten jobs. Both were
+# wrong, and wrong in the direction this ticket is about — the number was carried forward from the
+# ticket text instead of re-derived from the file. Corrected here and asserted in
+# `src/lib/workflowJobTimeouts.test.ts`, which now measures the counts rather than restating them.)
+#
 # "Still running" is the one state no verdict can classify: a process that never finishes never
 # reports. This sprint spent over an hour unable to tell a slow `Server crates (windows-latest)` from
 # a hung one, with two approved PRs stuck behind it, and settled it by comparing start timestamps
@@ -2123,7 +2131,8 @@ jobs:
     if: always()
     # Plain `node` on the runner, no `npm ci`, no toolchain — same shape as `ratchet-guard` above.
     # Seconds of work; 10 is the "something is genuinely wedged" backstop.
-    # Measured under CPE-1967's rule and left unchanged: n=36, min 0.1 / p50 0.1 / p90 0.1 /
+    # THE ONE job in this file that already had a job-level cap before CPE-1967 — the other ten had
+    # none. Measured under CPE-1967's rule and left unchanged: n=36, min 0.1 / p50 0.1 / p90 0.1 /
     # max 0.2 min. 1.5 x 0.2 = 0.3, under the 10-minute floor -> 10, which is what was already here.
     timeout-minutes: 10
     steps:
