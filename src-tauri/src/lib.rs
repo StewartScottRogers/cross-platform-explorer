@@ -7160,9 +7160,12 @@ fn macro_preflight_collisions(run: &ResolvedRun) -> Vec<MacroCollision> {
 /// occupied destination, the file that occupied it was replaced by `fs::rename`'s own atomic
 /// replace-on-rename with nothing preserved anywhere; undo restores the NAME `from` pointed to but
 /// cannot conjure back content that was never kept. A confirmed Convert is the same shape: the plain
-/// pre-existing file at `to` is truncated and overwritten in place (`overwrite_confirmed_no_follow`),
-/// not trashed the way the pre-convert original is, so undoing a confirmed convert restores the
-/// pre-convert original but does not restore whatever the confirmed write replaced. This is the
+/// pre-existing file at `to` is **replaced by name** (`overwrite_confirmed_no_follow`, which since
+/// CPE-1958 stages the new bytes in a sibling and commits with a rename rather than truncating the
+/// destination in place), not trashed the way the pre-convert original is, so undoing a confirmed
+/// convert restores the pre-convert original but does not restore whatever the confirmed write
+/// replaced. The mechanism changed and the consequence for undo did not: nothing anywhere holds the
+/// replaced file's content. This is the
 /// documented, deliberate minimum for this ticket (see the ticket's Work Log for the reasoning against
 /// building a pre-overwrite checkpoint instead) — `MacroRunConfirm.svelte`'s confirm panel warns about
 /// it before the run, and `src/docs/organizing-macros.md`'s Undo section says so explicitly.
@@ -7219,8 +7222,10 @@ fn macro_apply_run(ctx: &dyn ServerCtx, mut run: ResolvedRun, confirmed: &[Strin
             // **PR #1044 review round 2, Blocker 3 (the "rolled back" wording half).** A rollback
             // restores the NAME each already-applied op moved — it does not, and cannot, restore bytes
             // a CONFIRMED overwrite among them already destroyed: `rename_into_confirmed_slot`'s
-            // `fs::rename` and `overwrite_confirmed_no_follow`'s truncate-and-write both replace the
-            // occupant's content the instant the forward op runs, with nothing preserved anywhere —
+            // `fs::rename` and `overwrite_confirmed_no_follow`'s stage-and-rename (CPE-1958 replaced
+            // its truncate-and-write; the occupant is displaced by name now rather than emptied in
+            // place) both replace what was at the name the instant the forward op runs, with nothing
+            // preserved anywhere —
             // whether the run later succeeds or is rolled back makes no difference to that file. Saying
             // plain "(rolled back)" when one of the steps just rolled back was a confirmed overwrite
             // would be true about the name and false about what the user actually lost.

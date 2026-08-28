@@ -1076,9 +1076,12 @@ async macroRun(macro: ActionMacro, inputs: string[], root: string, confirmedOver
  * occupied destination, the file that occupied it was replaced by `fs::rename`'s own atomic
  * replace-on-rename with nothing preserved anywhere; undo restores the NAME `from` pointed to but
  * cannot conjure back content that was never kept. A confirmed Convert is the same shape: the plain
- * pre-existing file at `to` is truncated and overwritten in place (`overwrite_confirmed_no_follow`),
- * not trashed the way the pre-convert original is, so undoing a confirmed convert restores the
- * pre-convert original but does not restore whatever the confirmed write replaced. This is the
+ * pre-existing file at `to` is **replaced by name** (`overwrite_confirmed_no_follow`, which since
+ * CPE-1958 stages the new bytes in a sibling and commits with a rename rather than truncating the
+ * destination in place), not trashed the way the pre-convert original is, so undoing a confirmed
+ * convert restores the pre-convert original but does not restore whatever the confirmed write
+ * replaced. The mechanism changed and the consequence for undo did not: nothing anywhere holds the
+ * replaced file's content. This is the
  * documented, deliberate minimum for this ticket (see the ticket's Work Log for the reasoning against
  * building a pre-overwrite checkpoint instead) — `MacroRunConfirm.svelte`'s confirm panel warns about
  * it before the run, and `src/docs/organizing-macros.md`'s Undo section says so explicitly.
