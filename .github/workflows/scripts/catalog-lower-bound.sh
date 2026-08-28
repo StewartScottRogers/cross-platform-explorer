@@ -30,10 +30,38 @@
 #      stale counter degrades into **exactly the static ratchet CATALOG_VERSION_FLOOR already is** —
 #      i.e. into this bug.
 #   2. This is NOT the trust dependency CPE-1924 rejected. That objection was about *trusting*
-#      fetched content to decide what to publish. This uses the fetch only as a **lower bound that
-#      fails the build**: a hostile or garbage response can cause a false FAILURE, never a false
-#      success. It fails closed, so it needs no signature verification to be safe, and the job
-#      already runs `gh release upload` against the same host, so it is not a new egress class.
+#      fetched content to decide WHAT to publish. This uses the fetch only as a lower bound on
+#      whether to publish at all, and the job already runs `gh release upload` against the same
+#      host, so it is not a new egress class.
+#
+#      **What this is NOT safe against, stated precisely — because the sentence that used to sit
+#      here was measurably false.** Round 1 of #1091 claimed: *"a hostile or garbage response can
+#      cause a false FAILURE, never a false success. It fails closed, so it needs no signature
+#      verification to be safe."* Two independent review gates each produced parseable responses
+#      that reach **exit 0**, so the claim is withdrawn rather than reworded — it is exactly the
+#      CPE-1933 shape, a provenance claim standing next to a green suite, and it is the sentence
+#      that licensed shipping an unverified fetch on the release path.
+#
+#      Routes to exit 0 that are NOT a real bound, all of them by design and none of them fixable
+#      by failing closed harder:
+#        * the positively-enumerated empty-release branch — an API answer listing a release with no
+#          `catalog-index.json` asset yields `none` and no lower bound. That is branch (A) below,
+#          it is the state of the world today (#1062), and it must stay reachable.
+#        * an index that simply reports a LOWER version than the truth. A bound you fetched is a
+#          bound the server chose; nothing here can tell a truthful small number from a forged one.
+#      Two more were live until round 2 of #1091 and are FIXED below rather than documented as
+#      limits: a bound above 2^63-1 made `[ -le ]` **error** rather than compare, and the fall-
+#      through printed "strictly newer" at exit 0 (see `catalog_lb_num_le`); and jq's `max` sorts
+#      numbers below strings, so ONE string-typed `version` anywhere in the index masked every
+#      numeric one (see the `numbers` filter on the extraction).
+#
+#      So the correct, narrow claim — and the one the enumerated exit codes below and
+#      `src/lib/catalogPublishLowerBound.test.ts` actually assert — is: **every route where the
+#      fetch did not produce a usable answer is fatal.** Defeating this guard reverts to
+#      pre-CPE-1951 behaviour. It does not forge a catalog: the bundle is still signed with a key
+#      this step cannot reach (the `lb` step's env is `GH_TOKEN`/`VERSION`/`REPO` only). Verifying
+#      the fetched index's signature would close the second bullet and is deliberately out of scope
+#      here — but it is not true that none is needed.
 #   3. It also closes the legacy window forward: if a pre-CPE-1941 tag's re-run ever stamps a large
 #      `date +%s` on the live catalog, the next real release fails LOUDLY here instead of being
 #      silently refused on every client.
@@ -108,6 +136,119 @@
 CATALOG_LB_CONNECT_TIMEOUT="${CATALOG_LB_CONNECT_TIMEOUT:-15}"
 CATALOG_LB_MAX_TIME="${CATALOG_LB_MAX_TIME:-60}"
 
+# The largest value a catalog entry's `version` can legally hold. `CatalogEntry.version` is a `u64`
+# (sidecar/host/src/catalog.rs), so this is `2^64 - 1`. Anything above it is not a version this
+# repo's own client type can even hold, so it is a broken index rather than a big one.
+# NOT a claim: src/lib/catalogPublishLowerBound.test.ts reads that field's declared Rust type out of
+# catalog.rs at run time and asserts this literal is that type's max. Change the field to u32 or
+# i64 and the test reds naming both numbers.
+CATALOG_LB_U64_MAX='18446744073709551615'
+
+# catalog_lb_log_safe <text>
+#   Prints <text> with every line that could be parsed as a GitHub Actions workflow command
+#   defanged, and CRs stripped.
+#
+#   Why: this script echoes REMOTE bytes back into the job log — the `gh api` body on exits 4/5,
+#   curl's and jq's stderr, the release tag on the exit-0 permissive path. Actions reads workflow
+#   commands out of a step's stdout/stderr, so a forged `tag_name` containing
+#   `\n::stop-commands::<token>` DISABLES workflow-command processing for the rest of the job —
+#   inside the job whose entire purpose (CPE-1953) is to be loud when it does not publish, and
+#   which relies on `::error::`/`::warning::` to be so. Reproduced on #1091 round 2 before this
+#   existed: a forged tag emitted `::error::FORGED-ANNOTATION` and `::stop-commands::deadbeef` as
+#   real annotations at exit 0.
+#
+#   Any line CONTAINING `::` is prefixed with `  |`, not merely indented: the runner trims leading
+#   whitespace before looking for the `::` prefix, so indentation alone is not a mitigation. `|` is
+#   never the start of a workflow command. Pure bash on purpose — no `sed`/`tr` — so the sanitiser
+#   itself adds no tool to catalog_lower_bound_tools's list.
+#   No trailing newline is added: some callers embed the result mid-sentence (the release tag in the
+#   `::warning::`), so the caller owns its own line breaks.
+catalog_lb_log_safe() {
+  local text="${1-}" line out="" sep=""
+  text="${text//$'\r'/}"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *::*) out="${out}${sep}  |${line}" ;;
+      *) out="${out}${sep}${line}" ;;
+    esac
+    sep=$'\n'
+  done <<< "$text"
+  printf '%s' "$out"
+}
+
+# catalog_lb_num_le <a> <b>
+#   0 when a <= b, 1 when a > b. EXACT for arbitrary-length non-negative decimal integers with no
+#   leading zeros, and it performs no integer conversion at all.
+#
+#   ### Read this before "modernising" the comparison. It is the highest-value note in this file.
+#
+#   The obvious spelling is `[ "$a" -le "$b" ]`, and that is what round 1 of #1091 shipped. It is
+#   fail-OPEN above 2^63-1. Bash's `test` builtin parses `-le` operands with `strtoimax`, and on
+#   overflow it prints `integer expected` to stderr and returns **2**. A non-zero `[` is falsy, so
+#   the refusal branch is skipped, execution falls through to the success `printf`, and — because
+#   this script deliberately runs under `set -uo pipefail` with no `-e` — the step sees exit 0.
+#   Measured 2026-08-28 on bash 5.3:
+#       $ IDX_BODY='{"entries":[{"version":9223372036854775808}]}' bash catalog-lower-bound.sh \
+#             1787200000 owner/repo
+#       …: [: 9223372036854775808: integer expected
+#       catalog lower-bound: 1787200000 > 9223372036854775808 … — strictly newer …   exit=0
+#   At 9223372036854775807 the same input correctly exits 3. `CatalogEntry.version` is a `u64`, so
+#   EVERY value in [2^63, 2^64-1] is a legal published version the old line read as "we are newer".
+#   **A comparison that ERRORS is not a comparison that is FALSE** — but `[` returns non-zero for
+#   both and an `if` cannot tell them apart.
+#
+#   `[[ a -le b ]]` is NOT the fix and is strictly worse, both halves measured here on bash 5.3:
+#     * It does not error on overflow, it WRAPS. `[[ 9223372036854775808 -le 5 ]]` returns **0** —
+#       it silently answers "true". The old `[` at least left a message in the log.
+#     * `[[ ]]` ARITHMETIC-EVALUATES its operands, and arithmetic evaluation performs command
+#       substitution. With `v='a[$(touch PWNED)]'`, `[[ $v -le 1 ]]` returns 0 and CREATES `PWNED`;
+#       the same operand under `[ "$v" -le 1 ]` errors with `integer expected` and creates nothing.
+#       Both operands here are remote-influenced (the bound comes off the network). Rewriting this
+#       comparison as `[[ ]]` would turn a fail-open into command execution.
+#   So neither builtin can be trusted with these operands, and this compares by length, then byte
+#   by byte — which for equal-length digit strings with no leading zeros IS numeric order, with no
+#   locale collation and no subshell. The only `-le`/`-lt` below is on string LENGTHS (≤ 20), which
+#   cannot overflow.
+catalog_lb_num_le() {
+  local a="${1-}" b="${2-}" i=0 ca cb ra rb
+  local digits='0123456789'
+  if [ "${#a}" -ne "${#b}" ]; then
+    [ "${#a}" -lt "${#b}" ]
+    return
+  fi
+  while [ "$i" -lt "${#a}" ]; do
+    ca="${a:i:1}"
+    cb="${b:i:1}"
+    if [ "$ca" != "$cb" ]; then
+      # Rank each digit by how much of `digits` precedes it — a length comparison, never an
+      # arithmetic one, so a non-digit that slipped past validation cannot be evaluated.
+      ra="${digits%%"$ca"*}"
+      rb="${digits%%"$cb"*}"
+      [ "${#ra}" -lt "${#rb}" ]
+      return
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# catalog_lb_plain_u64 <value>
+#   0 when <value> is a plain decimal non-negative integer, with no leading zero (except the bare
+#   `0`), that fits in the `u64` a CatalogEntry.version actually is. Otherwise 1.
+#
+#   The leading-zero rule is not pedantry: `[ 010 -eq 8 ]` is FALSE (bash's `test` reads base 10)
+#   while `[[ 010 -eq 8 ]]` is TRUE (arithmetic evaluation reads `010` as octal) — both measured
+#   here. An input whose value depends on which comparison spelling you picked is refused instead.
+catalog_lb_plain_u64() {
+  local v="${1-}"
+  case "$v" in
+    '' | *[!0-9]*) return 1 ;;
+    0) return 0 ;;
+    0*) return 1 ;;
+  esac
+  catalog_lb_num_le "$v" "$CATALOG_LB_U64_MAX"
+}
+
 # catalog_lower_bound_url <owner/repo>
 #   The EXACT URL a default client fetches. Kept as a function with no override hook so nothing can
 #   quietly point this check at a different origin than the one clients read. Pinned against
@@ -148,8 +289,11 @@ catalog_lower_bound_tools() {
 #     12 = an unexpected HTTP status on the index URL
 #     13 = HTTP 200 with an EMPTY body
 #     14 = HTTP 200 with a body that is not parseable JSON (corrupt or truncated)
-#     15 = parsed, but carries no usable entries[].version
+#     15 = parsed, but carries NO usable entries[].version at all (none numeric / non-negative /
+#          integral)
 #     16 = a required tool is missing (see catalog_lower_bound_tools)
+#     17 = parsed, but the largest usable entries[].version is outside the u64 range a
+#          CatalogEntry.version can hold — a broken index, not a big one
 catalog_published_lower_bound() {
   local repo="${1-}"
   if [ -z "$repo" ]; then
@@ -159,37 +303,55 @@ catalog_published_lower_bound() {
   catalog_lower_bound_tools || return $?
 
   # ── Step 1: enumerate. This is the ONLY thing that can tell the two 404s apart. ────────────────
-  local api_out
-  api_out=$(gh api "repos/${repo}/releases/latest" 2>&1) || {
+  # gh's stderr is kept OUT of the body. `2>&1` would splice any gh chatter into the JSON about to
+  # be parsed, turning a working call into exit 5; gh suppresses its update notifier under `CI` so
+  # that is theoretical, but merging stderr into a payload you are about to parse is a coupling
+  # with no upside.
+  local api_out api_err gh_err
+  api_err=$(mktemp) || return 9
+  api_out=$(gh api "repos/${repo}/releases/latest" 2>"$api_err") || {
+    gh_err=$(cat "$api_err" 2>/dev/null) || gh_err=""
+    rm -f "$api_err"
+    [ -n "$gh_err" ] || gh_err="$api_out"
     printf 'catalog lower-bound check: could not resolve the latest published release of %s. `gh api repos/%s/releases/latest` failed:\n%s\nThis is NOT evidence that nothing is published — it is evidence that we do not know. Refusing to publish a catalog version we cannot compare against anything (CPE-1951).\n' \
-      "$repo" "$repo" "$api_out" >&2
+      "$repo" "$repo" "$(catalog_lb_log_safe "$gh_err")" >&2
     return 4
   }
+  rm -f "$api_err"
 
   local tag assets
   tag=$(printf '%s' "$api_out" | jq -r '.tag_name // empty' 2>/dev/null) || tag=""
   if [ -z "$tag" ]; then
     printf 'catalog lower-bound check: the releases API answered for %s but carried no tag_name — the payload is not a release object this can read. Refusing to guess:\n%s\n' \
-      "$repo" "$api_out" >&2
+      "$repo" "$(catalog_lb_log_safe "$api_out")" >&2
     return 5
   fi
   # `.assets` must be an ARRAY. `// empty` on a missing key would be indistinguishable from a
-  # release with no assets, and those are different facts.
-  if ! assets=$(printf '%s' "$api_out" | jq -er 'if (.assets | type) == "array" then (.assets | map(.name) | join("\n")) else error("assets is not an array") end' 2>&1); then
+  # release with no assets, and those are different facts. `.name // "<unnamed>"` so a nameless
+  # asset still occupies a line — see the `count` note below.
+  if ! assets=$(printf '%s' "$api_out" | jq -er 'if (.assets | type) == "array" then (.assets | map(.name // "<unnamed>") | join("\n")) else error("assets is not an array") end' 2>&1); then
     printf 'catalog lower-bound check: the latest release of %s (%s) has no readable assets[] array, so its contents could not be enumerated. Refusing to read an unenumerable release as "publishes no catalog":\n%s\n' \
-      "$repo" "$tag" "$assets" >&2
+      "$repo" "$(catalog_lb_log_safe "$tag")" "$(catalog_lb_log_safe "$assets")" >&2
     return 5
   fi
 
-  local count=0
-  if [ -n "$assets" ]; then
-    count=$(printf '%s\n' "$assets" | grep -c '') || count=0
-  fi
+  # `.assets | length`, NOT a line count over the joined names. Round 1 derived the count from the
+  # joined string, so a release whose assets are all nameless objects reported "0 asset(s)
+  # enumerated" while the enumeration had in fact found several — a count that lies, printed inside
+  # the one message that licenses proceeding with no lower bound.
+  local count
+  count=$(printf '%s' "$api_out" | jq -r '.assets | length' 2>/dev/null) || count=""
+  case "$count" in
+    '' | *[!0-9]*) count='an unreportable number of' ;;
+  esac
   if ! grep -Fxq 'catalog-index.json' <<< "$assets"; then
     # (A) above, POSITIVELY established: the release exists, its assets were enumerated, and
     # catalog-index.json is not among them. There is nothing published to be newer than.
+    # `$tag` is remote-controlled and this line is a workflow command, so the tag goes through the
+    # sanitiser: a forged `tag_name` carrying `\n::stop-commands::<token>` would otherwise turn off
+    # workflow-command processing for the rest of this job, from inside its ONE exit-0 log line.
     printf '::warning::catalog lower-bound: the latest published release of %s is %s and it carries NO catalog-index.json (%s asset(s) enumerated), so no published catalog version exists to compare against. Proceeding with no lower bound. This is the state CPE-1953/#1062 describes — the last release that published a catalog index was v0.57.33 on 2026-07-25. It is accepted here ONLY because the release was found and its assets were listed; a fetch that merely failed is fatal, not this.\n' \
-      "$repo" "$tag" "$count" >&2
+      "$repo" "$(catalog_lb_log_safe "$tag")" "$count" >&2
     printf 'none\n'
     return 0
   fi
@@ -207,8 +369,11 @@ catalog_published_lower_bound() {
     --retry 3 --retry-max-time 20 --retry-delay 2 --retry-connrefused \
     -o "$body" -w '%{http_code}' "$url" 2>"$err") || rc=$?
 
+  # curl's stderr is remote-influenced too (it quotes the host, and on some failures the server's
+  # own text), so it goes through the same workflow-command sanitiser as the API body.
   local curl_err
   curl_err=$(cat "$err" 2>/dev/null) || curl_err=""
+  curl_err=$(catalog_lb_log_safe "$curl_err")
   rm -f "$err"
 
   if [ "$rc" -ne 0 ]; then
@@ -266,23 +431,46 @@ catalog_published_lower_bound() {
     return 13
   fi
 
+  # `numbers | select(. >= 0 and . == floor)` and NOT a bare `[.entries[]?.version] | max`.
+  #
+  # jq has a TOTAL ordering across types and it sorts numbers BELOW strings, so `max` over a mixed
+  # array returns the string. Round 1 of #1091 took the bare max, and one string-typed `version`
+  # anywhere in the index therefore masked every numeric one — the whole index, not just its own
+  # entry. Measured 2026-08-28:
+  #   $ IDX_BODY='{"entries":[{"version":1787999999999},{"version":"1"}]}' …
+  #   catalog lower-bound: 1787200000 > 1 … — strictly newer …   exit=0
+  # The real maximum was 1787999999999; the guard bounded against 1 and passed.
+  #
+  # Filtering rather than erroring on a non-number is deliberate and is the safe direction: a
+  # string/null/object/float/negative entry is DISCARDED, so it can only make the bound HIGHER (or
+  # leave nothing, which is exit 15) — never lower. `. == floor` drops floats, `. >= 0` drops
+  # negatives; a client's `u64` could hold neither, so neither is a version to be newer than.
   local bound jq_err
   jq_err=$(mktemp)
-  if ! bound=$(jq -r '[.entries[]?.version] | max // empty' "$body" 2>"$jq_err"); then
+  if ! bound=$(jq -r '[.entries[]?.version | numbers | select(. >= 0 and . == floor)] | max // empty' "$body" 2>"$jq_err"); then
     printf 'catalog lower-bound check: %s returned HTTP 200 but the body is NOT PARSEABLE JSON — corrupt or truncated. jq said: %s\n' \
-      "$url" "$(cat "$jq_err")" >&2
+      "$url" "$(catalog_lb_log_safe "$(cat "$jq_err")")" >&2
     rm -f "$body" "$jq_err"
     return 14
   fi
   rm -f "$body" "$jq_err"
 
-  case "$bound" in
-    '' | *[!0-9]*)
-      printf 'catalog lower-bound check: %s parsed, but [.entries[].version] | max yielded [%s], which is not a plain non-negative integer. A published index with no usable version is a broken index, not an absent one.\n' \
-        "$url" "${bound:-<empty>}" >&2
-      return 15
-      ;;
-  esac
+  # Nothing numeric, non-negative and integral anywhere in entries[].version.
+  if [ -z "$bound" ]; then
+    printf 'catalog lower-bound check: %s parsed, but it carries no usable entries[].version at all — every entry is missing one, or is a string, null, object, float or negative. A published index with no usable version is a BROKEN index, not an absent one, so this is fatal rather than "no lower bound".\n' \
+      "$url" >&2
+    return 15
+  fi
+
+  # `catalog_lb_plain_u64`, not a digits-only `case`. A digits-only test accepts a bound of ANY
+  # length, and every value above 2^63-1 then made `[ -le ]` error rather than compare — see the
+  # long note on `catalog_lb_num_le`. This also refuses a leading zero, whose meaning differs
+  # between `[` and `[[ ]]`, and jq's `1E+20` spelling for a large literal.
+  if ! catalog_lb_plain_u64 "$bound"; then
+    printf 'catalog lower-bound check: %s parsed, and its largest usable entries[].version is [%s] — outside the range a CatalogEntry.version can hold (a u64: 0 to %s), or not a plain decimal spelling of it. No client could hold this number, so the index is BROKEN rather than merely ahead, and it is refused rather than compared.\n' \
+      "$url" "$(catalog_lb_log_safe "$bound")" "$CATALOG_LB_U64_MAX" >&2
+    return 17
+  fi
 
   printf '%s\n' "$bound"
 }
@@ -290,18 +478,19 @@ catalog_published_lower_bound() {
 # catalog_lower_bound_check <candidate> <owner/repo>
 #   The fatal gate the release job calls. Returns 0 only when <candidate> is strictly greater than
 #   the published bound, or when there is positively no published catalog to be newer than.
-#     2 = <candidate> is not a plain decimal integer
+#     2 = <candidate> is not a plain decimal integer that fits a u64
 #     3 = <candidate> is NOT STRICTLY NEWER than the published catalog version — the bug
 #     (every other code is passed straight through from catalog_published_lower_bound)
 catalog_lower_bound_check() {
   local candidate="${1-}" repo="${2-}"
-  case "$candidate" in
-    '' | *[!0-9]*)
-      printf 'catalog lower-bound check needs a plain decimal candidate version, got: %s\n' \
-        "${candidate:-<empty>}" >&2
-      return 2
-      ;;
-  esac
+  # Same discipline as the bound side, and for the same reason: the candidate operand overflows
+  # `[ -le ]` identically. Measured on round 1 of #1091 —
+  #   candidate 9223372036854775808 vs bound 1787200000 -> `[: integer expected` and exit 0.
+  if ! catalog_lb_plain_u64 "$candidate"; then
+    printf 'catalog lower-bound check needs a plain decimal candidate version with no leading zero, no greater than %s (the u64 a CatalogEntry.version is), got: %s\n' \
+      "$CATALOG_LB_U64_MAX" "${candidate:-<empty>}" >&2
+    return 2
+  fi
   if [ -z "$repo" ]; then
     printf 'catalog lower-bound check needs an owner/repo\n' >&2
     return 2
@@ -316,15 +505,30 @@ catalog_lower_bound_check() {
     return 0
   fi
 
-  # `-le`, not `-lt`. At EQUALITY a client answers `AlreadyCurrent` and writes nothing, so a `-lt`
-  # comparison would let a release publish that reaches no user — measured through the real engine in
-  # sidecar/host/tests/catalog_offtip_release_lower_bound.rs
+  # `<=`, not `<`. At EQUALITY a client answers `AlreadyCurrent` and writes nothing, so a
+  # strictly-less comparison would let a release publish that reaches no user — measured through the
+  # real engine in sidecar/host/tests/catalog_offtip_release_lower_bound.rs
   # (`the_clients_acceptance_boundary_is_strictly_greater_than_the_installed_version`).
-  # Red-proofed 2026-08-28: switching this to `-lt` reds "a version EQUAL to the published one is
-  # refused too" in src/lib/catalogPublishLowerBound.test.ts.
-  if [ "$candidate" -le "$bound" ]; then
-    printf '::error::catalog version %s is NOT NEWER than the version %s already published on %s'"'"'s latest release. Publishing it would be fully green here and then be refused by EVERY client as a rollback (ApplyOutcome::Rollback), silently, forever — nobody'"'"'s agent roster would ever update again and nothing would be logged as a release failure. This is what a release cut from an OLDER commit looks like: a hotfix off a maintenance branch, a revert branch, or `git tag` on a non-tip commit (CPE-1951). Re-cut the tag from a commit newer than the one already released.\n' \
-      "$candidate" "$bound" "$repo" >&2
+  # Red-proofed 2026-08-28: changing this call to `catalog_lb_num_le "$bound" "$candidate" ||` (the
+  # strictly-less spelling) reds "a version EQUAL to the published one is refused too" in
+  # src/lib/catalogPublishLowerBound.test.ts.
+  #
+  # `catalog_lb_num_le`, NOT `[ "$candidate" -le "$bound" ]` and NOT `[[ ]]`. Read that function's
+  # header before touching this line: the `[` spelling is fail-OPEN above 2^63-1 (it ERRORS, and an
+  # `if` cannot tell an error from a false), and the `[[ ]]` spelling both wraps silently AND
+  # arithmetic-evaluates these remote-influenced operands, which is command execution.
+  if catalog_lb_num_le "$candidate" "$bound"; then
+    local remedy='This is what a release cut from an OLDER commit looks like: a hotfix off a maintenance branch, a revert branch, or `git tag` on a non-tip commit (CPE-1951). Re-cut the tag from a commit newer than the one already released.'
+    if [ "$candidate" = "$bound" ]; then
+      # Equality has a second, much more likely cause than an off-tip tag, and the off-tip advice is
+      # actively wrong for it: RE-RUNNING the catalog job against a release that has already been
+      # published. `latest` then resolves to that same release, so the candidate is comparing
+      # against itself and can never be strictly newer. That is exactly the repair path #1062 needs,
+      # so it gets its own sentence rather than being told to re-cut a tag that is fine.
+      remedy='The two numbers are EQUAL, which most often means this job is being RE-RUN against a release that is already published — `latest` then resolves to that same release, so the candidate is being compared with itself and can never be strictly newer. If you are repairing an upload on an already-published release (the #1062 case), do NOT re-cut the tag: run `catalog-sign` and `gh release upload` against that release directly, or publish the repair as a new release. If this is a genuinely new release, its tag was cut from a commit no newer than the released one — re-cut it from a newer commit.'
+    fi
+    printf '::error::catalog version %s is NOT NEWER than the version %s already published on %s'"'"'s latest release. Publishing it would be fully green here and then be refused by EVERY client as a rollback (ApplyOutcome::Rollback), silently, forever — nobody'"'"'s agent roster would ever update again and nothing would be logged as a release failure. %s\n' \
+      "$candidate" "$bound" "$repo" "$remedy" >&2
     return 3
   fi
 

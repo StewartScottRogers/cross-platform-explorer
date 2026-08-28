@@ -117,6 +117,8 @@ interface ExecOptions {
   files?: Record<string, string>;
   /** Shell-script stubs to place first on PATH, as command name -> script body (no shebang). */
   stubs?: Record<string, string>;
+  /** Internal: set only by `stubWins` itself, so its own probe does not recurse into the check. */
+  probingStub?: boolean;
 }
 
 /** Runs a workflow step's own `run:` body in a throwaway directory, exactly as `bash -e`-less
@@ -124,6 +126,19 @@ interface ExecOptions {
  *  which is why the bodies below carry their own). Returns the exit code plus whatever the step
  *  wrote to $GITHUB_OUTPUT, which is what the workflow's downstream `if:` conditions read. */
 function execStep(body: string, options: ExecOptions = {}): ExecResult {
+  // EVERY declared stub must actually win on PATH, not just the one someone remembered to probe.
+  // See `stubWins` for why this is checked here rather than per test.
+  if (!options.probingStub) {
+    for (const cmd of Object.keys(options.stubs ?? {})) {
+      if (!stubWins(cmd)) {
+        throw new Error(
+          `the \`${cmd}\` stub does not win on PATH in this environment, so this test would ` +
+            `silently exercise the REAL ${cmd}. Refusing to run it and report the result as ` +
+            `evidence. (Gate the test on \`stubWins("${cmd}")\` if it should be skipped here.)`,
+        );
+      }
+    }
+  }
   const dir = mkdtempSync(join(tmpdir(), "cpe-1953-catalog-"));
   try {
     const outputFile = join(dir, "github_output");
@@ -169,12 +184,34 @@ function execStep(body: string, options: ExecOptions = {}): ExecResult {
   }
 }
 
-/** A stub `gh` whose PATH entry is an extensionless bash script. On Windows a real `gh.exe` may sit
- *  further along PATH; prepending the stub dir wins, but this probe confirms it rather than
- *  assuming, so a stubbed test can never quietly exercise the REAL gh against a live repo. */
-function stubGhWorks(): boolean {
-  const r = execStep('gh --stub-probe\n', { stubs: { gh: 'echo "STUB-GH"; exit 0' } });
-  return r.status === 0 && r.stdout.includes("STUB-GH");
+const stubWinCache = new Map<string, boolean>();
+
+/**
+ * Does an extensionless bash stub named `cmd`, placed first on PATH exactly the way `execStep`
+ * places it, actually WIN over any real `cmd` further along PATH?
+ *
+ * `execStep` hands a spawned **bash** an `env.PATH` it built — the shape that does not always win,
+ * because MSYS2's bash re-prepends `/mingw64/bin` and `/usr/bin` at startup. A stub that loses does
+ * not fail: the test runs the REAL tool and passes for the wrong reason.
+ *
+ * CPE-1951 #1091 round 2. This used to be `stubGhWorks()`, hardcoded to `gh` — while this file
+ * stubs **two** tools and six tests (the `jq` ones) were gated on `!hasBash` alone. Latent rather
+ * than live here (this box has no `jq.exe` on PATH at all, so the stub wins by default, and jq is
+ * an offline read-only tool so the failure mode was "agreed with a real jq" rather than "hit the
+ * network") — but it is the same defect the sibling file spent an hour on, so it is closed as a
+ * CLASS: `execStep` now probes **every key of `options.stubs`** and throws, rather than any one
+ * tool being remembered. Memoised — one spawn per tool per run, not one per call.
+ */
+function stubWins(cmd: string): boolean {
+  const cached = stubWinCache.get(cmd);
+  if (cached !== undefined) return cached;
+  const r = execStep(`${cmd} --stub-probe\n`, {
+    stubs: { [cmd]: `echo "STUB-${cmd.toUpperCase()}"; exit 0` },
+    probingStub: true,
+  });
+  const ok = r.status === 0 && r.stdout.includes(`STUB-${cmd.toUpperCase()}`);
+  stubWinCache.set(cmd, ok);
+  return ok;
 }
 
 // CPE-1953 review, non-blocking finding 4: these probes used to run in `beforeAll` and each test
@@ -187,9 +224,52 @@ function stubGhWorks(): boolean {
 // reporter, where they are visibly not-run rather than indistinguishable from a pass.
 const hasBash = bashAvailable();
 const hasJq = hasBash && toolAvailable("jq");
-const ghStubWorks = hasBash && stubGhWorks();
+const ghStubWorks = hasBash && stubWins("gh");
+/** The other tool this file stubs. Probed for the same reason, and gated on for the same reason —
+ *  `execStep` would now THROW rather than run the real jq, and a throw is a red, not a skip. */
+const jqStubWorks = hasBash && stubWins("jq");
 
 const VALID_INDEX = JSON.stringify({ entries: [{ id: "demo", version: 1_800_000_000 }] });
+
+// ── 0. The harness's own guard, added by CPE-1951 #1091 round 2 ─────────────────────────────────
+
+describe("the stub harness cannot silently lose to a real tool (CPE-1951 #1091 round 2)", () => {
+  it("a stub that would lose on PATH THROWS, instead of running the real tool and passing", () => {
+    // The sabotage, run for real rather than argued: poison one tool's memoised probe result to
+    // say "the stub loses here", and confirm `execStep` refuses rather than spawning. Without the
+    // per-stub check in `execStep` this call runs the real `curl` and returns a result.
+    stubWinCache.set("curl", false);
+    try {
+      expect(() =>
+        execStep("curl --version\n", { stubs: { curl: 'echo "STUB-CURL"; exit 0' } }),
+      ).toThrow(/does not win on PATH/);
+    } finally {
+      stubWinCache.delete("curl");
+    }
+  });
+
+  it("every tool this file stubs anywhere is covered, derived from this file rather than listed", () => {
+    // Enumerate, don't recall (CLAUDE.md). The old harness hardcoded `gh` while the file stubbed
+    // two tools; reading the stub keys out of the source means an eighth test stubbing a third tool
+    // is covered on the day it lands. What this CANNOT catch: a stub introduced by some spelling
+    // this regex does not match — which is why `execStep` throws as well, on the object it is
+    // actually handed, rather than relying on this scan.
+    const src = readFileSync(join(process.cwd(), "src", "lib", "catalogPublishLoudFailure.test.ts"), "utf8");
+    const tools = new Set(
+      [...src.matchAll(/stubs:\s*\{\s*([A-Za-z][\w-]*)\s*:/g)].map((m) => m[1]),
+    );
+    // No expected-name list here on purpose: a literal list of the tools someone remembered is the
+    // defect being fixed, and it would also read as a ratchet allowlist (CPE-1934). The near-empty
+    // check is what fails loudly if the scan stops matching. It also only sees the FIRST key of a
+    // `stubs: {...}` literal, which is all this file ever writes.
+    expect(tools.size, "the scan found no stubbed tools — it has stopped matching").toBeGreaterThanOrEqual(2);
+    for (const t of tools) {
+      // Calling the memoised probe is the coverage: it is exactly what `execStep` consults.
+      expect(typeof stubWins(t), `${t} has no probe`).toBe("boolean");
+      expect(stubWinCache.has(t)).toBe(true);
+    }
+  });
+});
 
 // ── 1. The vacuous-success hole: a tag build with no signing key ────────────────────────────────
 // Every real step in the catalog job is `if: steps.k.outputs.has == 'true'`. Before this ticket the
@@ -315,7 +395,7 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
   const jqStub = (stdout: string, code = 0) =>
     code === 0 ? `printf '%s\\n' "${stdout}"; exit 0` : `echo "jq: parse error" >&2; exit ${code}`;
 
-  it.skipIf(!hasBash)("index + sig with zero entries[] -> fails as the 'succeeding at zero work' shape", () => {
+  it.skipIf(!hasBash || !jqStubWorks)("index + sig with zero entries[] -> fails as the 'succeeding at zero work' shape", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": JSON.stringify({ entries: [] }),
@@ -327,7 +407,7 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
     expect(r.all).toContain("zero entries");
   });
 
-  it.skipIf(!hasBash)("index + sig that is not JSON at all -> fails as corrupt, not as a silent abort", () => {
+  it.skipIf(!hasBash || !jqStubWorks)("index + sig that is not JSON at all -> fails as corrupt, not as a silent abort", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": "{ truncated",
@@ -341,7 +421,7 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
     expect(r.all).toContain("not parseable JSON");
   });
 
-  it.skipIf(!hasBash)("a one-entry bundle -> exit 0 and entries=1 published to $GITHUB_OUTPUT", () => {
+  it.skipIf(!hasBash || !jqStubWorks)("a one-entry bundle -> exit 0 and entries=1 published to $GITHUB_OUTPUT", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": VALID_INDEX,
@@ -408,7 +488,7 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
 
   const CONCATENATED_STREAM = '{"entries":[]}{"entries":[{"id":"demo","version":1800000000}]}';
 
-  it.skipIf(!hasBash)("a multi-line count -- the step must REFUSE it, not upload", () => {
+  it.skipIf(!hasBash || !jqStubWorks)("a multi-line count -- the step must REFUSE it, not upload", () => {
     // Two JSON documents back to back. Real jq prints one length per document and exits 0, so
     // `entries` arrives as "0\n1" -- an honest reading failure that the old comparison turned into a
     // pass. Driven by the stub so this runs everywhere; the real-jq version follows.
@@ -428,7 +508,7 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
     expect(r.output).not.toContain("entries=");
   });
 
-  it.skipIf(!hasBash)("a count that is not a number at all is refused with the same diagnostic", () => {
+  it.skipIf(!hasBash || !jqStubWorks)("a count that is not a number at all is refused with the same diagnostic", () => {
     const r = execStep(body(), {
       files: {
         "catalog-out/catalog-index.json": VALID_INDEX,
@@ -452,7 +532,7 @@ describe('"Verify the signed bundle before uploading it" catches a zero-work sig
     expect(r.stdout.trim().split(/\r?\n/)).toEqual(["0", "1"]);
   });
 
-  it.skipIf(!hasBash)("REGRESSION DEMO: the pre-review comparison accepted that same multi-line count and passed", () => {
+  it.skipIf(!hasBash || !jqStubWorks)("REGRESSION DEMO: the pre-review comparison accepted that same multi-line count and passed", () => {
     // The shipped body with only the shape-validation `case` removed -- i.e. exactly what this PR
     // originally proposed. It exits 0 and would have gone on to upload.
     const withoutShapeCheck = body().replace(/\s*case "\$entries" in[\s\S]*?esac\n/, "\n");

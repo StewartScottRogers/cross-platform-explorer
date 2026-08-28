@@ -246,6 +246,17 @@ const hasBash = (() => {
 })();
 const hasJq = hasBash && toolAvailable("jq");
 
+/**
+ * Every test gated on `jq`, counted at COLLECTION time so `afterAll` can name the exact number that
+ * was skipped instead of a hand-kept figure that rots. Loop-generated tests increment once per
+ * iteration, which is what a reader needs to know. See the "reporting the skip" block below.
+ */
+let jqGatedCount = 0;
+function itJq(name: string, fn: () => void) {
+  jqGatedCount += 1;
+  return it.skipIf(!hasJq)(name, fn);
+}
+
 /** Kept inside the repo's gitignored `.claude/worktrees/` per house rule, created because a fresh CI
  *  checkout does not have it. Removed in afterAll. */
 function scratch(prefix: string): string {
@@ -265,6 +276,10 @@ case "\${GH_MODE:-ok}" in
   no_assets_array) echo '{"tag_name":"v9.9.9"}'; exit 0 ;;
   no_index) echo '{"tag_name":"v0.57.69-sidecar","assets":[{"name":"app.msi"},{"name":"latest.json"}]}'; exit 0 ;;
   probe) echo "STUB-GH"; exit 0 ;;
+  # Answer with an arbitrary releases-API body, verbatim. Added in #1091 round 2 for the
+  # workflow-command-injection cases, which need control of \`tag_name\` itself.
+  raw) printf '%s\\n' "\${GH_BODY:-}"; exit 0 ;;
+  fail) printf 'gh: the remote said\\n::error::FORGED-VIA-GH-STDERR\\n' >&2; exit 1 ;;
   *) echo '{"tag_name":"v0.57.33","assets":[{"name":"app.msi"},{"name":"catalog-index.json"},{"name":"catalog-index.json.sig"}]}'; exit 0 ;;
 esac
 `;
@@ -287,6 +302,10 @@ case "\${CURL_MODE:-ok}" in
   empty) : > "\$out"; printf '200'; exit 0 ;;
   truncated) printf '{"entries":[{"id":"claude","version":178' > "\$out"; printf '200'; exit 0 ;;
   no_version) printf '{"entries":[]}' > "\$out"; printf '200'; exit 0 ;;
+  # Serve an arbitrary index body verbatim. Added in #1091 round 2 so a case can be written as the
+  # JSON a hostile or broken publisher would actually serve, rather than as a new stub mode each
+  # time — both fail-open bugs that round found were shapes no existing mode could express.
+  raw) printf '%s' "\${IDX_BODY:-}" > "\$out"; printf '200'; exit 0 ;;
   *) printf '{"entries":[{"id":"claude","version":%s}]}' "\${PUBLISHED:-1787200000}" > "\$out"; printf '200'; exit 0 ;;
 esac
 `;
@@ -307,6 +326,15 @@ let scratchRoot = "";
  *
  * So: convert to the POSIX form with `cygpath` where it exists, and prepend inside the shell. On
  * Linux/macOS `cygpath` is absent and the path is already POSIX, so this is a no-op there.
+ *
+ * WHICH MECHANISM WAS MEASURED WHERE (#1091 round 2). Two bashes on one Windows box do not agree
+ * here, so the reader on a third should not conclude either note is wrong:
+ *   * the `/mingw64/bin` re-prepend was measured under **MSYS2's** bash (the Git-for-Windows one),
+ *     where an `env.PATH` prepend handed to a spawned bash genuinely lost to the real `curl.exe`.
+ *   * a reviewer on **cygwin's** `/usr/bin/bash` could NOT reproduce that half — there the
+ *     `env.PATH` prepend wins — and reproduced the colon-split half instead.
+ * Both hazards are real on some shell here, the fix covers both, and the `beforeAll` probe below
+ * is what actually decides: it refuses to run rather than trusting either analysis.
  */
 function posixPath(p: string): string {
   const fwd = p.replace(/\\/g, "/");
@@ -376,6 +404,44 @@ afterAll(() => {
   } catch {
     /* gitignored scratch under .claude/worktrees/ */
   }
+  // See `jqGatedCount`. `it.skipIf` is honest to a reporter and silent to a human reading a total.
+  if (!hasJq && jqGatedCount > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `\n[catalogPublishLowerBound] jq was NOT found on this machine, so ${jqGatedCount} of this ` +
+        `file's tests were SKIPPED, not passed — and they are the entire EXECUTED half: every ` +
+        `failure path, both directions, and the whole content-comparison block. What ran was the ` +
+        `structural and derived-from-source legs only. Do not quote this file's total as a pass ` +
+        `count. Install jq (CI's ubuntu-latest ships it) to run the full set.\n`,
+    );
+  }
+});
+
+// ── 2b. Reporting the skip, not hiding it (CPE-1951, #1091 round 2 finding NEW 1) ───────────────
+//
+// On a machine without `jq` this file gave 11 passed / 22 skipped. `it.skipIf` is honest to the
+// REPORTER — they show as skipped — but a human quoting "33 tests" from a Windows box is quoting 11
+// and sounding like 33, which is what happened in round 1's report. Two changes, and deliberately
+// NOT removing the skip (a developer without jq should still get the structural half):
+//   * `afterAll` prints a loud line naming the exact number gated and why (counted at collection
+//     time by `itJq`, so it cannot drift from the real number).
+//   * the test below FAILS, rather than skipping, when jq is missing **and** `CI` is set — so CI
+//     can never silently run the reduced set and report it as this file passing.
+
+describe("this file cannot report a reduced run as a full one (CPE-1951)", () => {
+  it("in CI, jq must be present — the jq-gated tests ARE the executed half", () => {
+    if (!process.env.CI) {
+      // Locally jq is optional; afterAll says exactly what was skipped.
+      expect(hasJq || !process.env.CI).toBe(true);
+      return;
+    }
+    expect(
+      hasJq,
+      "CI is set but `jq` is not on PATH. Every executed leg of this guard would be SKIPPED and " +
+        "the file would report as passing. ubuntu-latest ships jq; if this runner does not, " +
+        "install it in the job rather than letting the run be silently partial.",
+    ).toBe(true);
+  });
 });
 
 describe("the guard fetches exactly what a client fetches (CPE-1951)", () => {
@@ -415,7 +481,7 @@ describe("the guard fetches exactly what a client fetches (CPE-1951)", () => {
 describe("both directions, executed (CPE-1951)", () => {
   const PUBLISHED = "1787200000";
 
-  it.skipIf(!hasJq)("a version BELOW the published one is refused (exit 3) and says why", () => {
+  itJq("a version BELOW the published one is refused (exit 3) and says why", () => {
     const r = runGuard(["1787150000", "owner/repo"], { PUBLISHED });
     expect(r.status).toBe(3);
     expect(r.all).toContain("::error::");
@@ -424,7 +490,7 @@ describe("both directions, executed (CPE-1951)", () => {
     expect(r.all).toContain(PUBLISHED);
   });
 
-  it.skipIf(!hasJq)("a version EQUAL to the published one is refused too", () => {
+  itJq("a version EQUAL to the published one is refused too", () => {
     // `>=` would let a release publish that reaches no client (AlreadyCurrent). Strictly greater is
     // the boundary the engine actually uses — measured in the Rust sibling.
     const r = runGuard([PUBLISHED, "owner/repo"], { PUBLISHED });
@@ -432,14 +498,14 @@ describe("both directions, executed (CPE-1951)", () => {
     expect(r.all).toContain("NOT NEWER");
   });
 
-  it.skipIf(!hasJq)("a legitimately NEWER version is accepted (exit 0)", () => {
+  itJq("a legitimately NEWER version is accepted (exit 0)", () => {
     const r = runGuard(["1787300000", "owner/repo"], { PUBLISHED });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("strictly newer");
     expect(r.all).not.toContain("::error::");
   });
 
-  it.skipIf(!hasJq)("a non-integer candidate is refused before anything is fetched (exit 2)", () => {
+  itJq("a non-integer candidate is refused before anything is fetched (exit 2)", () => {
     const r = runGuard(["not-a-number", "owner/repo"]);
     expect(r.status).toBe(2);
   });
@@ -448,7 +514,7 @@ describe("both directions, executed (CPE-1951)", () => {
 // ── 4. The 404 / draft distinction, which is the whole of the design decision ───────────────────
 
 describe("the two different 404s are told apart (CPE-1951)", () => {
-  it.skipIf(!hasJq)(
+  itJq(
     "latest release EXISTS but carries no catalog-index.json -> accepted, loudly, with no lower bound",
     () => {
       // This is the state of the world TODAY (CPE-1953 / issue #1062): /releases/latest/ resolves to
@@ -463,7 +529,7 @@ describe("the two different 404s are told apart (CPE-1951)", () => {
     },
   );
 
-  it.skipIf(!hasJq)(
+  itJq(
     "a 404 on the index URL while the asset list SAYS it is there is a contradiction, and fatal (exit 10)",
     () => {
       const r = runGuard(["1787300000", "owner/repo"], { CURL_MODE: "http404" });
@@ -476,7 +542,7 @@ describe("the two different 404s are told apart (CPE-1951)", () => {
     },
   );
 
-  it.skipIf(!hasJq)(
+  itJq(
     "a releases-API failure is NOT read as 'nothing is published' — it is fatal (exit 4)",
     () => {
       // The defect class CLAUDE.md names: a wrapper that cannot tell "ran and found nothing" from
@@ -488,14 +554,14 @@ describe("the two different 404s are told apart (CPE-1951)", () => {
     },
   );
 
-  it.skipIf(!hasJq)("an unreadable releases-API payload is fatal, not a pass (exit 5)", () => {
+  itJq("an unreadable releases-API payload is fatal, not a pass (exit 5)", () => {
     for (const mode of ["garbage", "no_assets_array"]) {
       const r = runGuard(["1787300000", "owner/repo"], { GH_MODE: mode });
       expect(r.status, `GH_MODE=${mode}`).toBe(5);
     }
   });
 
-  it.skipIf(!hasJq)("a missing tool is 'did not run', and is refused (exit 16)", () => {
+  itJq("a missing tool is 'did not run', and is refused (exit 16)", () => {
     // PATH stripped down to the stub dir only, so `jq` cannot be found. The outer bash keeps the
     // real PATH (node has to be able to spawn it at all, and on Windows bash lives well outside the
     // stub dir); it resolves its own absolute path first and re-execs itself under the stripped one.
@@ -525,11 +591,20 @@ describe("every fetch failure is fatal with its own message (CPE-1951)", () => {
     { label: "unexpected status", env: { CURL_MODE: "http418" }, exit: 12, says: "unexpected HTTP status 418" },
     { label: "empty body", env: { CURL_MODE: "empty" }, exit: 13, says: "EMPTY body" },
     { label: "unparseable body", env: { CURL_MODE: "truncated" }, exit: 14, says: "NOT PARSEABLE JSON" },
-    { label: "no usable version", env: { CURL_MODE: "no_version" }, exit: 15, says: "not a plain non-negative integer" },
+    { label: "no usable version", env: { CURL_MODE: "no_version" }, exit: 15, says: "no usable entries[].version at all" },
+    // #1091 round 2. A bound above the u64 a CatalogEntry.version is gets its OWN code rather than
+    // sharing 15, because "no numeric version anywhere" and "the biggest one will not fit" are
+    // different facts about the index — and because this table asserts one code per cause.
+    {
+      label: "bound out of u64 range",
+      env: { CURL_MODE: "raw", IDX_BODY: '{"entries":[{"version":18446744073709551616}]}' },
+      exit: 17,
+      says: "outside the range a CatalogEntry.version",
+    },
   ];
 
   for (const c of CASES) {
-    it.skipIf(!hasJq)(`${c.label} -> fatal, exit ${c.exit}, and never a pass`, () => {
+    itJq(`${c.label} -> fatal, exit ${c.exit}, and never a pass`, () => {
       const r = runGuard(["1787300000", "owner/repo"], c.env);
       expect(r.status, `${c.label} must be fatal`).toBe(c.exit);
       expect(r.all).toContain(c.says);
@@ -539,7 +614,7 @@ describe("every fetch failure is fatal with its own message (CPE-1951)", () => {
     });
   }
 
-  it.skipIf(!hasJq)("no two failure causes share an exit code or a message", () => {
+  itJq("no two failure causes share an exit code or a message", () => {
     const codes = new Set(CASES.map((c) => c.exit));
     expect(codes.size, "each cause needs its own exit code").toBe(CASES.length);
     const firstLines = CASES.map((c) => {
@@ -549,6 +624,336 @@ describe("every fetch failure is fatal with its own message (CPE-1951)", () => {
     expect(new Set(firstLines).size, `messages collapsed: ${firstLines.join(" | ")}`).toBe(
       CASES.length,
     );
+  });
+});
+
+// ── 5b. The comparison itself cannot fail OPEN (CPE-1951, #1091 round 2) ────────────────────────
+//
+// Two reviewers found the same class independently: a comparison that ERRORS is not a comparison
+// that is FALSE, and `[`/`jq` both answer "not true" for both. Round 1 shipped two instances, each
+// reaching **exit 0 while printing "strictly newer"**. These are NOT rows in `CASES` above: that
+// table is fetch failures, and asserts one distinct exit code per cause. These are content
+// failures, and several of them legitimately share exit 3 — the guard's *correct* verdict.
+//
+// Each case below carries the round-1 behaviour it replaces, so reverting the fix reds it.
+// RED-PROOFED 2026-08-28 by putting each round-1 line back in the shipped script and re-running
+// this file (58 tests, all executed — jq present):
+//   * `catalog_lb_num_le "$candidate" "$bound"` -> `[ "$candidate" -le "$bound" ]`
+//       3 failed / 55 passed. Named: "a bound of exactly 2^63", "a bound of 2^64-1", and the
+//       set-property test "no path anywhere in this file leaves bash's `integer expected` in the
+//       log". The 2^63-1 row stayed green, which is the point — it is the neighbour that was fine.
+//   * the jq extraction -> `[.entries[]?.version] | max` (no `numbers | select(…)`)
+//       5 failed / 53 passed: "one string-typed version…", "an object version…", "a float…",
+//       "every version is a string…", "a negative version…".
+// A third sabotage covers the log sanitiser and is recorded in the 5c block below.
+
+describe("the comparison cannot fail open on a value it cannot represent (CPE-1951)", () => {
+  interface ContentCase {
+    label: string;
+    /** The index body the server serves, verbatim. */
+    index?: string;
+    candidate?: string;
+    exit: number;
+    says?: string;
+    /** What round 1 did with this exact input, for the reverting reader. */
+    wasRound1: string;
+  }
+
+  const PUBLISHED_LOW = '{"entries":[{"id":"claude","version":1787200000}]}';
+
+  const CONTENT: ContentCase[] = [
+    {
+      // The Security Auditor's first reproduction, verbatim.
+      label: "a bound of exactly 2^63 (the first value `[ -le ]` cannot parse)",
+      index: '{"entries":[{"version":9223372036854775808}]}',
+      exit: 3,
+      says: "NOT NEWER",
+      wasRound1: "`[: 9223372036854775808: integer expected` on stderr, then exit 0, 'strictly newer'",
+    },
+    {
+      label: "a bound of 2^63-1 — the control that always worked",
+      index: '{"entries":[{"version":9223372036854775807}]}',
+      exit: 3,
+      says: "NOT NEWER",
+      wasRound1: "exit 3 (this one was always correct; it is the neighbour that was not)",
+    },
+    {
+      // `CatalogEntry.version` is a u64, so this is a LEGAL published version, not a hostile one.
+      label: "a bound of 2^64-1 — the largest a CatalogEntry.version can legally hold",
+      index: '{"entries":[{"version":18446744073709551615}]}',
+      exit: 3,
+      says: "NOT NEWER",
+      wasRound1: "exit 0, 'strictly newer' — every value in [2^63, 2^64-1] read as 'we are newer'",
+    },
+    {
+      label: "a bound of 2^64 — beyond the type, so a broken index rather than a big one",
+      index: '{"entries":[{"version":18446744073709551616}]}',
+      exit: 17,
+      says: "outside the range a CatalogEntry.version",
+      wasRound1: "exit 0, 'strictly newer'",
+    },
+    {
+      // The Security Auditor's second reproduction, verbatim. jq's total ordering sorts numbers
+      // BELOW strings, so `max` over a mixed array returns the string — ONE string-typed entry
+      // defeated the check for the whole index.
+      label: "one string-typed version alongside a much larger numeric one",
+      index: '{"entries":[{"version":1787999999999},{"version":"1"}]}',
+      exit: 3,
+      says: "1787999999999",
+      wasRound1: "bounded against 1 instead of 1787999999999, exit 0, 'strictly newer'",
+    },
+    {
+      label: "a null version alongside a numeric one",
+      index: '{"entries":[{"version":1787999999999},{"version":null}]}',
+      exit: 3,
+      says: "1787999999999",
+      wasRound1: "exit 3 — null sorts BELOW numbers, so this one happened to be safe",
+    },
+    {
+      label: "an object version alongside a numeric one",
+      index: '{"entries":[{"version":1787999999999},{"version":{"a":1}}]}',
+      exit: 3,
+      says: "1787999999999",
+      wasRound1: "exit 15 — the object won `max` and then failed the digits test",
+    },
+    {
+      label: "a float alongside a numeric one — dropped, never rounded into the bound",
+      index: '{"entries":[{"version":1787999999999},{"version":1787999999999.9}]}',
+      exit: 3,
+      says: "1787999999999",
+      wasRound1: "exit 15 — the float won `max` and then failed the digits test",
+    },
+    {
+      label: "every version is a string — nothing usable, and that is fatal, not 'no bound'",
+      index: '{"entries":[{"version":"9999999999999"}]}',
+      exit: 15,
+      says: "no usable entries[].version at all",
+      wasRound1: "exit 0, bounded against the string",
+    },
+    {
+      label: "a negative version is discarded, not compared",
+      index: '{"entries":[{"version":-5}]}',
+      exit: 15,
+      says: "no usable entries[].version at all",
+      wasRound1: "exit 15 (via the digits test)",
+    },
+    {
+      // 1e20 IS integral and non-negative, so it survives the `numbers` filter — and jq renders it
+      // back as `1E+20`, which is neither a plain decimal nor inside u64. It lands on 17, not 15:
+      // the fact is "the largest usable version will not fit", not "there were none".
+      label: "an exponent-spelled version (jq renders it 1E+20) is refused, not compared",
+      index: '{"entries":[{"version":1e20}]}',
+      exit: 17,
+      says: "outside the range a CatalogEntry.version",
+      wasRound1: "exit 15 (via the digits test) — right direction, wrong reason",
+    },
+    {
+      // MEASURED, and not what was assumed when this case was written: jq 1.7 preserves a number's
+      // ORIGINAL literal spelling when it is not arithmetically modified, so `1e10` comes back as
+      // `1E+10` even though 10^10 fits a u64 comfortably. So 17 is about the spelling as well as
+      // the value, and the message says so ("…or not a plain decimal spelling of it").
+      //
+      // Refusing it is the right trade rather than a gap. Forcing jq to canonicalise (`. + 0`)
+      // would round every version above 2^53 through a double — corrupting exactly the large u64s
+      // this whole block exists to compare correctly — and our own publisher never emits an
+      // exponent: `catalog-sign` serialises `version: u64` through serde as plain digits. An
+      // exponent-spelled version in a published index means something other than this repo wrote
+      // it, which is a broken index.
+      label: "an exponent spelling is refused even when the VALUE fits (jq keeps the literal)",
+      index: '{"entries":[{"version":1e10}]}',
+      exit: 17,
+      says: "not a plain decimal spelling",
+      wasRound1: "exit 15 (via the digits test) — right direction, wrong reason",
+    },
+    {
+      label: "a legitimate version of 0 still compares",
+      index: '{"entries":[{"version":0}]}',
+      candidate: "1787300000",
+      exit: 0,
+      says: "strictly newer",
+      wasRound1: "exit 0 — unchanged; 0 is a plain non-negative integer and must stay usable",
+    },
+    {
+      // The CANDIDATE operand overflows `[ -le ]` identically, and round 1 validated it with the
+      // same digits-only regex. It is refused up front now rather than reaching the comparison.
+      label: "a candidate above the u64 range is refused before anything is fetched",
+      index: PUBLISHED_LOW,
+      candidate: "18446744073709551616",
+      exit: 2,
+      says: "no greater than 18446744073709551615",
+      wasRound1: "exit 0 via `[: integer expected` — the candidate side had the same hole",
+    },
+    {
+      label: "a candidate of exactly 2^64-1 is legal and is accepted",
+      index: PUBLISHED_LOW,
+      candidate: "18446744073709551615",
+      exit: 0,
+      says: "strictly newer",
+      wasRound1: "exit 0 by accident (`[: integer expected`), not by comparison",
+    },
+    {
+      // `[ 010 -eq 8 ]` is FALSE, `[[ 010 -eq 8 ]]` is TRUE. A value whose meaning depends on which
+      // comparison spelling someone picked is refused rather than silently octal.
+      label: "a candidate with a leading zero is refused (its value differs between [ and [[ )",
+      index: PUBLISHED_LOW,
+      candidate: "010",
+      exit: 2,
+      says: "no leading zero",
+      wasRound1: "accepted — the digits-only regex had no opinion on leading zeros",
+    },
+  ];
+
+  for (const c of CONTENT) {
+    itJq(`${c.label} -> exit ${c.exit}`, () => {
+      const env: Record<string, string> = c.index
+        ? { CURL_MODE: "raw", IDX_BODY: c.index }
+        : { CURL_MODE: "raw", IDX_BODY: PUBLISHED_LOW };
+      const r = runGuard([c.candidate ?? "1787200000", "owner/repo"], env);
+      expect(r.status, `${c.label}\nround 1 did: ${c.wasRound1}\ngot:\n${r.all}`).toBe(c.exit);
+      if (c.says) expect(r.all).toContain(c.says);
+      if (c.exit !== 0) {
+        // The failure this whole block exists for: a comparison that could not be made, printed as
+        // a comparison that succeeded.
+        expect(r.stdout).not.toContain("strictly newer");
+        // `[: … integer expected` on stderr means the `test` builtin was handed a value it could
+        // not parse — the exact tell for BLOCKER 1, and it must not appear on ANY path now.
+        expect(r.stderr).not.toContain("integer expected");
+      }
+    });
+  }
+
+  itJq("no path anywhere in this file leaves bash's `integer expected` in the log", () => {
+    // A property over the whole executed set rather than per case: `[ -le ]` erroring is the
+    // signature of the bug, and it is asserted absent everywhere, not just where it was found.
+    const seen: string[] = [];
+    for (const c of CONTENT) {
+      const r = runGuard([c.candidate ?? "1787200000", "owner/repo"], {
+        CURL_MODE: "raw",
+        IDX_BODY: c.index ?? PUBLISHED_LOW,
+      });
+      if (r.stderr.includes("integer expected")) seen.push(c.label);
+    }
+    expect(seen, `these inputs still reach a \`test\` builtin that cannot parse them`).toEqual([]);
+  });
+
+  itJq("EQUALITY gets the re-run advice, not 're-cut the tag' — the #1062 repair path", () => {
+    // If a draft has been published and someone re-runs the catalog job to repair an upload,
+    // `latest` IS that release, candidate == published, exit 3. Round 1's single message told them
+    // to "re-cut the tag from a commit newer than the one already released", which is wrong advice
+    // for exactly the path this repo needs right now.
+    const equal = runGuard(["1787200000", "owner/repo"], {
+      CURL_MODE: "raw",
+      IDX_BODY: PUBLISHED_LOW,
+    });
+    expect(equal.status).toBe(3);
+    expect(equal.all).toContain("RE-RUN");
+    expect(equal.all).toContain("#1062");
+    expect(equal.all).toContain("do NOT re-cut the tag");
+
+    // …and the genuinely-off-tip case still gets the off-tip advice, so this did not just replace
+    // one wrong message with another.
+    const below = runGuard(["1787100000", "owner/repo"], {
+      CURL_MODE: "raw",
+      IDX_BODY: PUBLISHED_LOW,
+    });
+    expect(below.status).toBe(3);
+    expect(below.all).toContain("Re-cut the tag from a commit newer");
+    expect(below.all).not.toContain("RE-RUN");
+  });
+
+  it("the script's u64 ceiling is READ from CatalogEntry.version's declared Rust type", () => {
+    // Derived, not claimed (CLAUDE.md). RED-PROOFED 2026-08-28 by editing catalog.rs to
+    // `pub version: u32` and re-running: 1 failed, with
+    //   "catalog.rs declares CatalogEntry.version as u32 (max 4294967295), but the guard caps at
+    //    18446744073709551615".
+    // It re-reads the Rust source on every run; it is not a comment asserting the two agree.
+    const rust = stripRustComments(
+      readFileSync(join(ROOT, "sidecar", "host", "src", "catalog.rs"), "utf8"),
+    );
+    const m = /pub\s+version\s*:\s*(u8|u16|u32|u64|u128|i8|i16|i32|i64|i128|usize)\s*,/.exec(rust);
+    expect(m, "CatalogEntry.version's declaration was not found in catalog.rs").toBeTruthy();
+    const rustType = (m as RegExpExecArray)[1];
+    const bits = Number(rustType.replace(/^[ui]/, ""));
+    expect(rustType.startsWith("u"), `version is ${rustType}; a signed version changes this guard`).toBe(true);
+    const max = (2n ** BigInt(bits) - 1n).toString();
+    const shell = readFileSync(SCRIPT, "utf8");
+    const decl = /^CATALOG_LB_U64_MAX='(\d+)'$/m.exec(shell);
+    expect(decl, "CATALOG_LB_U64_MAX must be a single plain literal in the guard script").toBeTruthy();
+    expect(
+      (decl as RegExpExecArray)[1],
+      `catalog.rs declares CatalogEntry.version as ${rustType} (max ${max}), but the guard caps at ` +
+        `${(decl as RegExpExecArray)[1]}`,
+    ).toBe(max);
+  });
+});
+
+// ── 5c. Remote bytes reaching the Actions log cannot become Actions commands ────────────────────
+//
+// #1091 round 2, MEDIUM. This step echoes REMOTE bytes back into the job log — the API body on
+// exits 4 and 5, curl's and jq's stderr, and `$tag` on the exit-0 permissive path. Actions parses
+// workflow commands out of a step's stdout/stderr, and `::stop-commands::<token>` DISABLES that
+// parsing for the rest of the job — inside the job whose entire purpose (CPE-1953) is to be loud
+// when it does not publish. Reproduced before the fix, at exit 0:
+//     ::warning::catalog lower-bound: the latest published release of owner/repo is v1
+//     ::error::FORGED-ANNOTATION
+//     ::stop-commands::deadbeef and it carries NO catalog-index.json …
+// A git refname forbids control characters, so this needs a forged API response — but the
+// mitigation is a prefix, so it is taken.
+//
+// RED-PROOFED 2026-08-28: dropping `catalog_lb_log_safe` from the `$tag` interpolation on that one
+// `::warning::` line (leaving every other call in place) reds exactly "a forged tag on the exit-0
+// permissive path emits no extra workflow command" — 1 failed / 3 passed in this block.
+
+describe("nothing fetched can become a workflow command in the job log (CPE-1951)", () => {
+  /** Every line that a runner would read as a workflow command, i.e. `::…` after leading blanks. */
+  function commandLines(text: string): string[] {
+    return text.split("\n").filter((l) => /^\s*::/.test(l));
+  }
+  /** The workflow commands this step is ENTITLED to emit. Everything else is smuggled. */
+  const OURS = /^::(error|warning|notice)::catalog /;
+
+  const FORGED_TAG =
+    '{"tag_name":"v1\\n::error::FORGED-ANNOTATION\\n::stop-commands::deadbeef",' +
+    '"assets":[{"name":"other.txt"}]}';
+
+  itJq("a forged tag on the exit-0 permissive path emits no extra workflow command", () => {
+    const r = runGuard(["1787200000", "owner/repo"], { GH_MODE: "raw", GH_BODY: FORGED_TAG });
+    expect(r.status).toBe(0);
+    // The forged text is still SHOWN — defanging is not hiding — but no longer at line start.
+    expect(r.all).toContain("FORGED-ANNOTATION");
+    expect(r.all).toContain("stop-commands");
+    const smuggled = commandLines(r.all).filter((l) => !OURS.test(l));
+    expect(smuggled, `these lines would be parsed as workflow commands: ${smuggled.join(" | ")}`).toEqual([]);
+  });
+
+  itJq("a forged API body echoed at exit 5 emits no workflow command", () => {
+    const r = runGuard(["1787200000", "owner/repo"], {
+      GH_MODE: "raw",
+      GH_BODY: '{"assets":[{"name":"x"}],"note":"\\n::error::FORGED-5\\n::stop-commands::beef"}',
+    });
+    expect(r.status).toBe(5);
+    expect(r.all).toContain("FORGED-5");
+    expect(commandLines(r.all).filter((l) => !OURS.test(l))).toEqual([]);
+  });
+
+  itJq("gh's own stderr echoed at exit 4 emits no workflow command", () => {
+    const r = runGuard(["1787200000", "owner/repo"], { GH_MODE: "fail" });
+    expect(r.status).toBe(4);
+    expect(r.all).toContain("FORGED-VIA-GH-STDERR");
+    expect(commandLines(r.all).filter((l) => !OURS.test(l))).toEqual([]);
+  });
+
+  itJq("the asset count is the array's length, not a line count over the joined names", () => {
+    // #1091 round 2, LOW. Round 1 derived `count` from the joined name string, so a release whose
+    // assets are all NAMELESS reported "0 asset(s) enumerated" — a count that lies, printed inside
+    // the one message that licenses proceeding with no lower bound.
+    const r = runGuard(["1787200000", "owner/repo"], {
+      GH_MODE: "raw",
+      GH_BODY: '{"tag_name":"v1","assets":[{"x":1},{"y":2},{"z":3}]}',
+    });
+    expect(r.status).toBe(0);
+    expect(r.all).toContain("(3 asset(s) enumerated)");
+    expect(r.all).not.toContain("(0 asset(s) enumerated)");
   });
 });
 
@@ -630,7 +1035,7 @@ describe("an off-tip release, end to end on the publish side (CPE-1951)", () => 
     expect(hotfix.version).toBe(String(HOTFIX_OFF_OLDER_BASE));
   });
 
-  it.skipIf(!hasJq)("...and the lower-bound guard REFUSES it, using those real derived numbers", () => {
+  itJq("...and the lower-bound guard REFUSES it, using those real derived numbers", () => {
     expect(ok).toBe(true);
     const published = derive("v2").version;
     const candidate = derive("hotfix").version;
@@ -639,7 +1044,7 @@ describe("an off-tip release, end to end on the publish side (CPE-1951)", () => 
     expect(r.all).toContain("NOT NEWER");
   });
 
-  it.skipIf(!hasJq)("...while the re-cut tag is accepted, so the fix does not refuse everything", () => {
+  itJq("...while the re-cut tag is accepted, so the fix does not refuse everything", () => {
     expect(ok).toBe(true);
     const published = derive("v2").version;
     const reCut = derive("hotfix-re-cut");

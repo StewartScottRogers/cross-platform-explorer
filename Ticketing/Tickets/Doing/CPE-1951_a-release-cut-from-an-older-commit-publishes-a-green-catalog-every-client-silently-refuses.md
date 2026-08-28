@@ -61,9 +61,22 @@ notice a silent client-side refusal.
    into exactly the static ratchet we already have.**
 2. **The fetch is not the trust dependency CPE-1924 rejected.** That objection was about *trusting*
    fetched content to decide what to publish. This uses it only as a **lower bound that fails the
-   build** — a hostile or garbage response can cause a false *failure*, never a false success. It
-   fails closed, so it needs no signature verification to be safe, and the job already runs
-   `gh release upload` against the same host, so it is not even a new egress class.
+   build**, and the job already runs `gh release upload` against the same host, so it is not even a
+   new egress class.
+
+   > **Corrected in #1091 round 2 — this bullet used to end "a hostile or garbage response can cause
+   > a false *failure*, never a false success. It fails closed, so it needs no signature
+   > verification to be safe." That is measurably false**, and it is the sentence that licensed
+   > shipping an unverified fetch on the release path. Two review gates independently produced
+   > parseable responses reaching **exit 0**. Two were bugs and are fixed: a bound above 2^63-1 made
+   > `[ -le ]` *error* rather than compare false (bash's `test` prints `integer expected` and
+   > returns 2, the refusal branch is skipped, and the success `printf` runs), and jq's `max` sorts
+   > numbers below strings, so **one** string-typed `version` masked every numeric one in the whole
+   > index. Two remain **by design**: the positively-enumerated empty-release branch, and an index
+   > that simply reports a lower version than the truth — a bound you fetched is a bound the server
+   > chose. The claim that holds is the narrow one: *every route where the fetch did not produce a
+   > usable answer is fatal.* Defeating the guard reverts to pre-CPE-1951 behaviour; it does not
+   > forge a catalog, because the signing key is not in this step's env.
 3. It closes the legacy window in the forward direction too: if an old-tag re-run ever stamped a
    large `date +%s`, the next real release would fail **loudly** instead of being silently refused
    everywhere.

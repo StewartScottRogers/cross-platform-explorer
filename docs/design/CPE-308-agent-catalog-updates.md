@@ -132,8 +132,19 @@ primitive) — same principle as `host.verify_key`.
     - **A counter was rejected** for the second time here: it must be bumped by something, and
       auto-bumping means the release job committing back to the repo from a detached tag checkout
       while manual bumping rots — a stale counter *is* the static ratchet again. And this is not the
-      trust dependency CPE-1924 declined: the fetch is only a lower bound that **fails the build**,
-      so a hostile or garbage response can cause a false failure, never a false success.
+      trust dependency CPE-1924 declined: the fetch is only a lower bound that **fails the build**.
+    - **The safety claim, narrowed to the true one (#1091 round 2).** This page and the script both
+      used to say "a hostile or garbage response can cause a false failure, never a false success —
+      it fails closed, so it needs no signature verification to be safe." That is **false as
+      stated**: two review gates each produced parseable responses reaching exit 0. Two of those
+      were bugs and are fixed (a bound above 2^63-1 made `[ -le ]` *error* rather than compare, and
+      the check then printed "strictly newer"; and jq's `max` sorts numbers below strings, so one
+      string-typed `version` masked every numeric one). Two are **by design and remain**: the
+      positively-enumerated empty-release branch, and an index that simply reports a lower version
+      than the truth — a bound you fetched is a bound the server chose. The claim that holds is the
+      narrow one: **every route where the fetch did not produce a usable answer is fatal.**
+      Defeating the guard reverts to pre-CPE-1951 behaviour; it cannot forge a catalog, because the
+      bundle is still signed with a key this step's env (`GH_TOKEN`/`VERSION`/`REPO`) cannot reach.
     - **`CATALOG_VERSION_FLOOR` stays.** The floor asks "is this above what the installed base already
       holds" — unobservable by any fetch, since a client can sit on an old catalog for months — and
       the bound asks "is this above what is published right now". Neither implies the other.
