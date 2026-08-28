@@ -10146,13 +10146,21 @@ mod tests {
         /// the victim is at is not part of the commit", and it is the one that reaches
         /// `prevented` on Windows.
         ///
-        /// **Two other spellings were tried first and both collapse into
-        /// [`Cpe1963Attack::UnlinkThenRelink`] on Windows, measured rather than reasoned:**
-        /// `unlink(tmp)` obviously, and `rename(aside, tmp)` — replacing the staging name — because
-        /// `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` sets a delete disposition on the file it
-        /// replaces. Both printed `reported — aliased=false, refusal=… Access is denied. (os error 5)`,
-        /// which is the rename being refused, not the handle-source property working. Moving the object
-        /// to a **free** name is the only one of the three that leaves it unmarked.
+        /// **This shape is the round-2 Reviewer's, not this author's** — they proposed it and measured
+        /// `prevented` from it before it was written here. Recorded because the alternative is a reader
+        /// inferring from the paragraph below that all three spellings were tried here and that the
+        /// working one was found rather than handed over; a provenance left implicit is one that gets
+        /// re-attributed by the next person to summarise this file (CPE-1933, one scope out from code).
+        ///
+        /// **Two other spellings do collapse into [`Cpe1963Attack::UnlinkThenRelink`] on Windows,
+        /// measured rather than reasoned:** `unlink(tmp)` obviously, and `rename(aside, tmp)` —
+        /// replacing the staging name — because `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` sets a
+        /// delete disposition on the file it *replaces*. Both printed `reported — aliased=false,
+        /// refusal=… Access is denied. (os error 5)`, which is the rename being refused, not the
+        /// handle-source property working. **`rename(aside, tmp)` was nobody's suggestion** — it is a
+        /// third variant tried here on the way to understanding the mechanism, and it is written down
+        /// because knowing *which* rename spellings mark the object is the whole finding. Moving the
+        /// object to a **free** name is the only one of the three that leaves it unmarked.
         MoveAsideThenRelink,
     }
 

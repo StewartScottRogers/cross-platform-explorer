@@ -301,11 +301,18 @@ Round 1's doc mapped *prevented → Windows* / *reported → Unix*. On Windows t
 rename refuses before the operand question is reached. So it proved *"a delete-pending handle cannot be
 renamed"* — CPE-1929's reads-as-coverage shape, in this file's flagship guard.
 
-A second case now covers the handle-source property. **Three spellings were tried and the first two
-collapse into the same delete-disposition path, measured rather than reasoned:** `unlink(tmp)`;
-`rename(aside, tmp)` — which also fails, because `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` sets a
-delete disposition on the file it *replaces*; and `rename(tmp, stolen)` then `link(victim, tmp)`, which
-moves the staged object to a **free** name and marks nothing. Only the third reaches the property:
+A second case now covers the handle-source property, **and the shape that works is the Reviewer's** —
+`rename(tmp, stolen)` then `link(victim, tmp)`, which they proposed and measured `prevented` from before
+it was written here. Saying so matters more than usual on this ticket: two rounds went on false
+attribution in the record, and "three spellings were tried" reads as three of mine unless the
+provenance is stated.
+
+The other two collapse into the same delete-disposition path, measured rather than reasoned:
+`unlink(tmp)`; and `rename(aside, tmp)` — replacing the staging name — which also fails, because
+`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` sets a delete disposition on the file it *replaces*.
+**That second one was nobody's suggestion**: it is a third variant tried here on the way to
+understanding the mechanism, and it is recorded because knowing which rename spellings mark the object
+is the finding. Only the Reviewer's shape reaches the property:
 
 | attack shape | Windows outcome | why |
 |---|---|---|
@@ -358,11 +365,19 @@ half remains a prediction.
 
 ### The `npm test` figure — corrected, with the cause
 
-The reviewer measured **0 failed / 5,376 passed / 2 skipped** and could not reproduce mine. Re-measured
-here three consecutive times on the round-2 head: **19 failed / 5,316 passed**, and the same command
-with round 2 stashed gives **exactly the same 19 / 5,316** — so it is not this change. One run under
-heavy load gave 44 failed / 5,325 passed / 9 skipped over the identical four files; the three settled
-runs did not.
+Round 2's review reported **0 failed / 5,376 passed / 2 skipped** and could not reproduce mine.
+Re-measured here three consecutive times on the round-2 head: **19 failed / 5,316 passed**, and the same
+command with round 2 stashed gives **exactly the same 19 / 5,316** — so it is not this change. One run
+under heavy load gave 44 failed / 5,325 passed / 9 skipped over the identical four files; the three
+settled runs did not.
+
+**That 0 / 5,376 figure was subsequently withdrawn** (round 3): the Reviewer's own direct run gives
+**19 failed / 5,316 passed** across the same four files, with `jq` absent from both their PowerShell and
+Git-Bash paths exactly as here — the original number came from a subagent report that was wrong. Left in
+rather than deleted, because "a figure that disagreed and was withdrawn" is a different and more useful
+record than a figure that was never mentioned. The "identical to `main`" half is also sound by
+construction and not only by measurement: this diff contains **no `.ts` / `.js` / `.mjs` / `.svelte`
+file at all**.
 
 **Round 1's rationale was "pre-existing, untouched", which is true but explains nothing. The cause is
 now measured:** the shell scripts under test exit **127** (`expected 127 to be 3`, `to be 4`, …) because

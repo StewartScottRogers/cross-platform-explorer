@@ -1453,15 +1453,6 @@ mod sys {
         let total = header + wide.len().saturating_mul(2);
         let mut buf: Vec<u64> = vec![0; total.div_ceil(8).max(1)];
         let ptr = buf.as_mut_ptr().cast::<u8>();
-        // **`NtSetInformationFile`, not `SetFileInformationByHandle`, and the difference is not
-        // stylistic — it is measured.** The Win32 wrapper takes the same `FILE_RENAME_INFO` buffer and
-        // refuses it with `ERROR_INVALID_PARAMETER (0x80070057)` the moment `RootDirectory` is
-        // non-null: the entire `transfer` and `archive` suites reddened on it, every entry, before the
-        // call was moved down one layer. The NT form is the one that has always honoured a
-        // directory-relative rename, and it is the same layer `nt_child` above already opens through,
-        // so this module talks to one API rather than two. If a future reader "simplifies" this back to
-        // the Win32 call, every commit on the `Beneath` arm fails; the wrapper is not a superset.
-        //
         // **`FileRenameInformationEx` with POSIX semantics FIRST, the plain form as a fallback — and
         // the `Ex` form is not an optimisation, it is what stops this commit from breaking ordinary
         // saves on Windows** (CPE-1963 round 2, Reviewer MAJOR-1).
