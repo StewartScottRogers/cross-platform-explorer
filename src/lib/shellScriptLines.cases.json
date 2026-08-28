@@ -78,5 +78,88 @@
     "name": "a here-string and a real heredoc on one line: only the heredoc opens a body",
     "input": "echo a <<<\"lit\" && cat <<EOF\nbody\nEOF\necho after",
     "expected": ["echo a <<<\"lit\" && cat <<EOF", "echo after"]
+  },
+  {
+    "name": "CPE-1936 N8: a heredoc token inside a DOUBLE-quoted string opens no body",
+    "input": "echo \"use <<EOF to start a heredoc\"\ncargo run --bin verify-release-artifacts -- --expect-channel sidecar\necho tail",
+    "expected": [
+      "echo \"use <<EOF to start a heredoc\"",
+      "cargo run --bin verify-release-artifacts -- --expect-channel sidecar",
+      "echo tail"
+    ]
+  },
+  {
+    "name": "CPE-1936 N7: an indented terminator does NOT close a plain <<EOF",
+    "input": "cat <<EOF\n  EOF\ncargo run --bin verify-release-artifacts -- --expect-channel sidecar\nEOF\necho after",
+    "expected": ["cat <<EOF", "echo after"]
+  },
+  {
+    "name": "CPE-1936 N8: a heredoc token inside a SINGLE-quoted string opens no body either",
+    "input": "echo 'see <<EOF for details'\ncargo run --bin x -- --expect-channel sidecar",
+    "expected": ["echo 'see <<EOF for details'", "cargo run --bin x -- --expect-channel sidecar"]
+  },
+  {
+    "name": "CPE-1936 N8 live shape: the GitHub multi-line output idiom is not a heredoc",
+    "input": "echo \"failures<<PINFAIL_EOF\" >> \"$GITHUB_OUTPUT\"\ncurl --fail --retry 3 --max-time 20 https://x\necho \"PINFAIL_EOF\" >> \"$GITHUB_OUTPUT\"",
+    "expected": [
+      "echo \"failures<<PINFAIL_EOF\" >> \"$GITHUB_OUTPUT\"",
+      "curl --fail --retry 3 --max-time 20 https://x",
+      "echo \"PINFAIL_EOF\" >> \"$GITHUB_OUTPUT\""
+    ]
+  },
+  {
+    "name": "CPE-1936: a quoted <<TOKEN does not stop a REAL heredoc later on the same line",
+    "input": "echo \"a <<NOPE\" && cat <<EOF\ncargo run -- --expect-channel sidecar\nEOF\necho after",
+    "expected": ["echo \"a <<NOPE\" && cat <<EOF", "echo after"]
+  },
+  {
+    "name": "CPE-1936 KNOWN GAP (partially-quoted-delimiter family): a backslash-escaped quote leaves the << UNquoted, so a body IS opened -- but bash's delimiter is EOF-plus-quote, not bare EOF, so closing on bare EOF resumes scanning a body line as code",
+    "input": "echo \\\"<<EOF\\\"\nbody\nEOF\necho after",
+    "expected": ["echo \\\"<<EOF\\\"", "echo after"]
+  },
+  {
+    "name": "CPE-1936 N7: <<- DOES tolerate an indented terminator",
+    "input": "cat <<-END\n\tbody\n\tEND\necho after",
+    "expected": ["cat <<-END", "echo after"]
+  },
+  {
+    "name": "CPE-1936 N7: a uniformly indented block (a heredoc read out of raw YAML) still closes",
+    "input": "          notes=\"$(mktemp)\"\n          cat > \"$notes\" <<'EOF'\n          release notes\n          EOF\n          gh release create \"$TAG\"",
+    "expected": ["notes=\"$(mktemp)\"", "cat > \"$notes\" <<'EOF'", "gh release create \"$TAG\""]
+  },
+  {
+    "name": "CPE-1936 N7: a terminator carrying a trailing comment is body, not a terminator (bash)",
+    "input": "cat <<EOF\nEOF # still body\nEOF\necho after",
+    "expected": ["cat <<EOF", "echo after"]
+  },
+  {
+    "name": "CPE-1936: the delimiter as a SUBSTRING of a body line does not close the body",
+    "input": "cat <<EOF\nEOFX\nnot EOF here\nEOF\necho after",
+    "expected": ["cat <<EOF", "echo after"]
+  },
+  {
+    "name": "CPE-1936: a double-quoted delimiter (<<\"EOF\") opens a body",
+    "input": "cat <<\"EOF\"\nbody\nEOF\necho after",
+    "expected": ["cat <<\"EOF\"", "echo after"]
+  },
+  {
+    "name": "CPE-1936: a delimiter whose quotes do not match opens no body",
+    "input": "cat <<'EOF\"\necho after",
+    "expected": ["cat <<'EOF\"", "echo after"]
+  },
+  {
+    "name": "CPE-1936: a trailing comment after the opener does not change the delimiter",
+    "input": "cat <<EOF   # writes the notes\nbody\nEOF\necho after",
+    "expected": ["cat <<EOF", "echo after"]
+  },
+  {
+    "name": "an UNQUOTED here-string word opens no body either (the wider class CPE-1933's fix closed)",
+    "input": "done <<< names\necho after",
+    "expected": ["done <<< names", "echo after"]
+  },
+  {
+    "name": "KNOWN GAP N9 (CPE-1936, documented not fixed): an unterminated quote leaves a trailing comment unstripped",
+    "input": "echo \"oops # not stripped\necho after",
+    "expected": ["echo \"oops # not stripped", "echo after"]
   }
 ]

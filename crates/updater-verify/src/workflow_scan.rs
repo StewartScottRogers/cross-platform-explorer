@@ -47,6 +47,13 @@
 /// next character, so `"a \" b"` is not misread as closing early — which would leave a real trailing
 /// comment stuck inside a phantom quote and never stripped.
 ///
+/// KNOWN GAP N9 (CPE-1936, documented rather than fixed): a line whose quote is never closed comes
+/// back unchanged, trailing comment included — `echo "oops # not stripped`. Pinned as a case in the
+/// shared file so both languages answer it identically. The obvious fix (treat an unterminated quote
+/// as a literal) would truncate the first line of a legal multi-line quoted string, which is the
+/// unsafe direction; the real fix is cross-line quote state. See the reference implementation's
+/// comment for the full reasoning.
+///
 /// Ported from `stripShellComment` in `src/lib/shellScriptLines.ts`; see this module's header.
 pub fn strip_shell_comment(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
@@ -88,25 +95,70 @@ pub fn strip_shell_comment(line: &str) -> String {
     line.to_string()
 }
 
-/// The delimiter of a heredoc redirection that STARTS a body (`<<DELIM`, `<<'DELIM'`, `<<"DELIM"`,
-/// `<<-DELIM`) — never a here-string (`<<<`), which feeds one line and opens no body.
+/// One heredoc redirection found on a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeredocOpener {
+    /// The word a terminator line must equal to close the body.
+    delim: String,
+    /// True for the `<<-` form, whose terminator may be indented. Bash strips leading TABS ONLY —
+    /// measured 2026-08-27, a SPACE-indented `END` stays BODY for `<<-` — whereas this (like the
+    /// reference) accepts ANY indent. Unreachable: no `<<-` exists in any workflow or `.sh` here.
+    dashed: bool,
+}
+
+/// The first heredoc redirection on a line that STARTS a body (`<<DELIM`, `<<'DELIM'`, `<<"DELIM"`,
+/// `<<-DELIM`) — never a here-string (`<<<`), and never a `<<` that is **inside a quoted string**.
 ///
 /// Hand-scanned rather than regex-matched: this crate deliberately carries no `regex` dependency.
-/// Mirrors `HEREDOC_START` in `src/lib/shellScriptLines.ts`.
-fn heredoc_delimiter(line: &str) -> Option<String> {
+/// Ported from `heredocOpener` in `src/lib/shellScriptLines.ts`, whose comment carries the measured
+/// before/after for CPE-1936's N8 (`echo "use <<EOF to start a heredoc"` swallowing the rest of the
+/// step) and the three shapes left deliberately open (`$(( a << b ))`, two heredocs on one line, a
+/// partially quoted delimiter). The quote tracking here uses exactly the rules `strip_shell_comment`
+/// above uses, so the two agree on where a quoted region begins and ends.
+fn heredoc_opener(line: &str) -> Option<HeredocOpener> {
     let chars: Vec<char> = line.chars().collect();
+    let mut quote: Option<char> = None;
     let mut i = 0usize;
-    while i + 1 < chars.len() {
-        if chars[i] != '<' || chars[i + 1] != '<' {
+    while i < chars.len() {
+        let ch = chars[i];
+        if let Some(q) = quote {
+            if ch == '\\' && q == '"' && i + 1 < chars.len() {
+                i += 2; // an escaped char inside a double-quoted string does not end the quote
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\\' && i + 1 < chars.len() {
+            i += 2; // a backslash-escaped quote outside any quote is a literal char, not an opener
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            let opens_here = match i.checked_sub(1).map(|p| chars[p]) {
+                None => true,
+                Some(prev) => !(prev.is_ascii_alphanumeric() || prev == '_'),
+            };
+            if opens_here {
+                quote = Some(ch);
+            }
+            i += 1;
+            continue;
+        }
+        if ch != '<' || chars.get(i + 1) != Some(&'<') {
             i += 1;
             continue;
         }
         let mut j = i + 2;
         if chars.get(j) == Some(&'<') {
-            i = j + 1; // `<<<` is a here-STRING: no body, keep scanning past it
+            i = j + 1; // `<<<` is a here-STRING: no body, keep scanning past ALL THREE `<`
             continue;
         }
+        let mut dashed = false;
         if chars.get(j) == Some(&'-') {
+            dashed = true;
             j += 1;
         }
         while chars.get(j).is_some_and(|c| c.is_whitespace()) {
@@ -126,19 +178,41 @@ fn heredoc_delimiter(line: &str) -> Option<String> {
                 j += 1;
             }
             let ident: String = chars[start..j].iter().collect();
-            // A quoted delimiter must be closed by the same quote, exactly as the reference regex's
-            // `\1` backreference requires.
+            // A quoted delimiter must be closed by the same quote, exactly as the reference's old
+            // `\1` backreference required.
             let closed = match opener {
                 None => true,
                 Some(q) => chars.get(j) == Some(&q),
             };
             if closed {
-                return Some(ident);
+                return Some(HeredocOpener { delim: ident, dashed });
             }
         }
         i += 2;
     }
     None
+}
+
+/// The count of leading spaces/tabs on a physical line.
+fn leading_indent(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+}
+
+/// True when `raw` is the terminator line for an open heredoc.
+///
+/// Ported from `closesHeredoc` in `src/lib/shellScriptLines.ts`; that comment carries CPE-1936's N7
+/// measurement (an INDENTED line closing a plain `<<EOF` early, so heredoc BODY lines were scanned as
+/// live code) and the reason the indentation rule is bash's *relative to the opener's own indent*
+/// rather than to column 0: this module is handed whole `.yml` FILES, where `release-sidecar.yml`'s
+/// `cat > "$notes_file" <<'EOF'` and its `EOF` both sit ten spaces in, and a column-0 rule would leave
+/// that heredoc open for the rest of the file and empty the scan.
+fn closes_heredoc(raw: &str, opener: &HeredocOpener, opener_indent: usize) -> bool {
+    let body = raw.strip_suffix('\r').unwrap_or(raw);
+    let content = body.trim_start_matches([' ', '\t']);
+    if content.trim_end() != opener.delim {
+        return false;
+    }
+    opener.dashed || leading_indent(body) <= opener_indent
 }
 
 /// Splits a workflow (or a single `run:` script) into LOGICAL shell lines: backslash continuations
@@ -153,17 +227,19 @@ fn heredoc_delimiter(line: &str) -> Option<String> {
 pub fn logical_lines(run: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut pending = String::new();
-    let mut heredoc_delim: Option<String> = None;
+    let mut heredoc: Option<(HeredocOpener, usize)> = None;
     for raw in run.split('\n') {
-        if let Some(delim) = &heredoc_delim {
-            if raw.trim() == delim.as_str() {
-                heredoc_delim = None;
+        if let Some((opener, indent)) = &heredoc {
+            if closes_heredoc(raw, opener, *indent) {
+                heredoc = None;
             }
             continue; // heredoc body (and its terminator) -- data, not a shell statement
         }
         let line = strip_shell_comment(raw).trim().to_string();
-        if let Some(delim) = heredoc_delimiter(&line) {
-            heredoc_delim = Some(delim);
+        // The opener's OWN indentation is measured on the raw physical line, not the trimmed one --
+        // `closes_heredoc` compares the terminator's indent against it.
+        if let Some(opener) = heredoc_opener(&line) {
+            heredoc = Some((opener, leading_indent(raw)));
         }
         if let Some(head) = line.strip_suffix('\\') {
             pending.push_str(head.trim());
@@ -251,13 +327,45 @@ mod tests {
         assert_eq!(strip_shell_comment(unquoted), unquoted, "a # mid-word does not start a comment");
     }
 
+    fn opener(delim: &str, dashed: bool) -> Option<HeredocOpener> {
+        Some(HeredocOpener { delim: delim.to_string(), dashed })
+    }
+
     #[test]
     fn a_here_string_does_not_open_a_heredoc_body() {
         // `done <<< "$names"` in release-sidecar.yml: a here-STRING. Treating it as a heredoc would
         // swallow every following line, silently emptying the scan.
-        assert_eq!(heredoc_delimiter(r#"done <<< "$names""#), None);
-        assert_eq!(heredoc_delimiter(r#"cat > "$f" <<'EOF'"#), Some("EOF".to_string()));
-        assert_eq!(heredoc_delimiter("cat <<-END"), Some("END".to_string()));
+        assert_eq!(heredoc_opener(r#"done <<< "$names""#), None);
+        assert_eq!(heredoc_opener(r#"cat > "$f" <<'EOF'"#), opener("EOF", false));
+        assert_eq!(heredoc_opener("cat <<-END"), opener("END", true));
+    }
+
+    /// CPE-1936 N8. `ffmpeg-pin-freshness.yml` really does write GitHub multi-line outputs this way,
+    /// and the whole-file consumers scan that workflow, so this is a live shape rather than a latent
+    /// one: before the fix everything after such a line dropped out of the scan entirely.
+    #[test]
+    fn a_heredoc_token_inside_a_quoted_string_opens_no_body() {
+        assert_eq!(heredoc_opener(r#"echo "use <<EOF to start a heredoc""#), None);
+        assert_eq!(heredoc_opener(r#"echo 'see <<EOF for details'"#), None);
+        assert_eq!(heredoc_opener(r#"echo "failures<<PINFAIL_EOF" >> "$GITHUB_OUTPUT""#), None);
+        // ...but a REAL heredoc later on the same line still opens.
+        assert_eq!(heredoc_opener(r#"echo "a <<NOPE" && cat <<EOF"#), opener("EOF", false));
+    }
+
+    /// CPE-1936 N7. Real bash wants the delimiter alone on its own line; only `<<-` tolerates
+    /// indentation. Before the fix an indented `EOF` closed a plain `<<EOF`, and the heredoc BODY was
+    /// then scanned as live code.
+    #[test]
+    fn an_indented_terminator_closes_only_the_dash_form() {
+        let plain = HeredocOpener { delim: "EOF".to_string(), dashed: false };
+        assert!(closes_heredoc("EOF", &plain, 0));
+        assert!(!closes_heredoc("  EOF", &plain, 0));
+        assert!(!closes_heredoc("EOF # still body", &plain, 0));
+        // Relative, not column 0: a whole `.yml` file indents the entire script.
+        assert!(closes_heredoc("          EOF", &plain, 10));
+        assert!(!closes_heredoc("            EOF", &plain, 10));
+        let dashed = HeredocOpener { delim: "END".to_string(), dashed: true };
+        assert!(closes_heredoc("\t\tEND", &dashed, 0));
     }
 
     #[test]

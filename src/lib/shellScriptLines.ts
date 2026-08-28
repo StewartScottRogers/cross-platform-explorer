@@ -56,7 +56,21 @@
  *  the physical line — including a REAL trailing `# --expect-channel sidecar` comment — stuck "inside"
  *  a phantom unterminated quote and never stripped. That under-stripping is exactly the direction
  *  R2-2 needed closed: a comment that reads as live code is what let a disabled flag still count as
- *  "coverage". */
+ *  "coverage".
+ *
+ *  KNOWN GAP N9 (CPE-1936, measured 2026-08-27, documented rather than fixed). A line whose quote is
+ *  never closed comes back **unchanged**, comment and all: `echo "oops # not stripped` -> itself.
+ *  Pinned as a case in `shellScriptLines.cases.json` so both implementations answer it the same way
+ *  and a future fix has to update the case deliberately.
+ *
+ *  Not fixed because the obvious fix is worse than the gap. "Treat an unterminated quote as if the
+ *  opener were a literal" would strip a `#` out of the FIRST line of a genuinely multi-line quoted
+ *  string — legal bash, and this splitter is line-at-a-time, so every such string's opening line
+ *  looks exactly like this. That is truncating live code, the direction the module header calls
+ *  unsafe. The gap's own direction is under-stripping (a comment reading as live code), which is
+ *  bounded here: an unterminated quote is a shell syntax error in its own right, the consumers match
+ *  their anchors per logical line rather than over a joined step, and nothing in the tree has the
+ *  shape. If it ever bites, the fix is to track quote state ACROSS lines, not to guess per line. */
 export function stripShellComment(line: string): string {
   let quote: string | null = null;
   for (let i = 0; i < line.length; i += 1) {
@@ -105,8 +119,166 @@ export function stripShellComment(line: string): string {
  *  the whole `<<<` correctly, so the two halves disagreed and the case file said so. Belongs to
  *  CPE-1936's family (heredoc gaps in this module) -- that ticket's owner can treat this shape as
  *  already closed.
+ *
+ *  CPE-1936 replaced the regex with the scanner below. A regex cannot be told about QUOTE STATE, and
+ *  that was N8: `echo "use <<EOF to start a heredoc"` opened a phantom heredoc named `EOF` and every
+ *  following line of the step vanished from the scan. Measured before the fix (this exact input is
+ *  case "CPE-1936 N8" in the shared case file):
+ *
+ *      echo "use <<EOF to start a heredoc"
+ *      cargo run --bin verify-release-artifacts -- --expect-channel sidecar
+ *      echo tail
+ *      -> ["echo \"use <<EOF to start a heredoc\""]          <- two real lines gone
+ *
+ *  That is the FALSE-NEGATIVE direction — `releaseHangHardening.test.ts`'s "no `apt`/`curl` left
+ *  unhardened" scan simply stops seeing the unhardened command. Unlike the `<<<` shape above this one
+ *  was not latent but LIVE: `ffmpeg-pin-freshness.yml` writes GitHub multi-line outputs with
+ *  `echo "failures<<PINFAIL_EOF" >> "$GITHUB_OUTPUT"` in three places, and
+ *  `releaseHangHardening.test.ts`'s header records that CPE-1849 folded that very workflow into
+ *  `GUARDED`. So the hardening scan really was BLIND to 24 per-step logical lines of a file it
+ *  believed it covered (31 -> 39 and 35 -> 51 across the two `check-pins` steps; 142 -> 302
+ *  whole-file), and no other workflow moved by a line. Nothing answered wrongly only because the blind
+ *  window happened to contain no `curl`, no `apt`, no `--expect-channel` and no `--locked` — which is
+ *  established by READING the newly visible lines, not inferred from the guards staying green. A
+ *  `curl` added after one of those `echo` lines would simply have dropped out of the scan.
  */
-const HEREDOC_START = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
+interface HeredocOpener {
+  /** The word a terminator line must equal to close the body. */
+  delim: string;
+  /** True for the `<<-` form, whose terminator may be indented. Bash strips leading TABS ONLY —
+   *  measured 2026-08-27, a SPACE-indented `END` stays BODY for `<<-` while a tab-indented one closes
+   *  — whereas this accepts ANY indent, the over-acceptance direction. Unreachable: `git grep -- '<<-'`
+   *  finds no `<<-` in any workflow or `.sh` in the tree, only comments, docs and the shared cases. */
+  dashed: boolean;
+}
+
+/** Finds the first heredoc redirection on a line that STARTS a body (`<<DELIM`, `<<'DELIM'`,
+ *  `<<"DELIM"`, `<<-DELIM`) — never a here-string (`<<<`), and never a `<<` that is inside a quoted
+ *  string. Character-by-character with the SAME quote/escape rules as `stripShellComment` above, so
+ *  the two agree on where a quoted region starts and ends; a regex was tried first and could not
+ *  express the quote-state part (see `HEREDOC_START`'s history in the comment above).
+ *
+ *  Deliberately NOT closed, measured 2026-08-27, each documented rather than fixed because none
+ *  exists in the tree today and every fix here has a failure direction of its own:
+ *
+ *   - **Arithmetic left-shift**: `$(( a << b ))` reads as a heredoc named `b` (`x << 2` does not —
+ *     `2` is not an identifier start). Suppressing `<<` inside `$(( … ))` needs depth tracking that
+ *     a plain `( (cmd) )` subshell would false-trigger, trading a false negative for a false
+ *     positive. No arithmetic `<<` in any workflow today.
+ *   - **Two heredocs on one line**: `cat <<A <<B` opens both bodies in bash; only `A` is tracked
+ *     here, so `B`'s body is scanned as live code after `A` closes. Same as the pre-CPE-1936
+ *     behaviour, not a regression.
+ *   - **A partially quoted delimiter**: bash reads `<<E"OF"` as `EOF`; this reads it as `E`. The
+ *     backslash-escaped shape belongs to the same family, measured 2026-08-27: in `echo \"<<EOF\"`
+ *     the `<<` genuinely IS unquoted and bash does open a body — but it wants the delimiter `EOF"`
+ *     (`bash -n` reports `wanted 'EOF"'`, and a literal `EOF"` line does close it), while this closes
+ *     on bare `EOF` and resumes scanning. That is the false-POSITIVE direction, a body line read as
+ *     code. The shared case file carries it as a KNOWN GAP, NOT as agreement with bash.
+ *
+ *  Enumerated rather than recalled (CPE-1932), so "none exists in the tree" is a measurement:
+ *  `git grep -- '<<' .github/workflows` returns nine lines — three real openers (`ci.yml:367`,
+ *  `ci.yml:386`, `release-sidecar.yml:71`, all `<<'EOF'` at column >= 10), the three
+ *  `echo "…<<…_EOF"` N8 shapes in `ffmpeg-pin-freshness.yml`, and three `<<<` here-strings — and
+ *  `git grep -- '<<' -- '*.sh'` returns none at all. No arithmetic `<<`, no two heredocs on one line,
+ *  no partially quoted delimiter, no `<<-` anywhere.
+ *
+ *  Ported to `heredoc_delimiter()` in `crates/updater-verify/src/workflow_scan.rs`; both are run
+ *  against `shellScriptLines.cases.json`, so a change on one side alone turns the other side red. */
+function heredocOpener(line: string): HeredocOpener | null {
+  let quote: string | null = null;
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    if (quote !== null) {
+      if (ch === "\\" && quote === '"' && i + 1 < line.length) {
+        i += 2; // an escaped char inside a double-quoted string does not end the quote
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < line.length) {
+      i += 2; // a backslash-escaped quote outside any quote is a literal char, not an opener
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const prev = i > 0 ? line[i - 1] : undefined;
+      if (prev === undefined || !/[A-Za-z0-9_]/.test(prev)) quote = ch;
+      i += 1;
+      continue;
+    }
+    if (ch !== "<" || line[i + 1] !== "<") {
+      i += 1;
+      continue;
+    }
+    let j = i + 2;
+    if (line[j] === "<") {
+      // A here-STRING feeds one word to stdin and opens no body. Skipping past ALL THREE `<` is the
+      // scanner's equivalent of the `(?<!<)` half of the old regex's exclusion pair: without it the
+      // walk would resume at the second `<` and read `<< "names"` as a heredoc opener (CPE-1933).
+      i = j + 1;
+      continue;
+    }
+    let dashed = false;
+    if (line[j] === "-") {
+      dashed = true;
+      j += 1;
+    }
+    while (j < line.length && /\s/.test(line[j])) j += 1;
+    let opener: string | null = null;
+    if (line[j] === "'" || line[j] === '"') {
+      opener = line[j];
+      j += 1;
+    }
+    const start = j;
+    if (j < line.length && /[A-Za-z_]/.test(line[j])) {
+      j += 1;
+      while (j < line.length && /[A-Za-z0-9_]/.test(line[j])) j += 1;
+      // A quoted delimiter must be closed by the same quote, exactly as the old regex's `\1`
+      // backreference required.
+      if (opener === null || line[j] === opener) return { delim: line.slice(start, j), dashed };
+    }
+    i += 2;
+  }
+  return null;
+}
+
+/** True when `raw` is the terminator line for the open heredoc `h`.
+ *
+ *  CPE-1936 N7: the old test was `raw.trim() === delim`, which let an INDENTED line close a plain
+ *  `<<EOF`. Real bash only accepts the delimiter alone on the line; only `<<-` tolerates indentation
+ *  (and only leading tabs). Measured before the fix (case "CPE-1936 N7"):
+ *
+ *      cat <<EOF
+ *        EOF                                                   <- body in bash, terminator here
+ *      cargo run --bin verify-release-artifacts -- --expect-channel sidecar
+ *      EOF
+ *      echo after
+ *      -> ["cat <<EOF", "cargo run … --expect-channel sidecar", "EOF", "echo after"]
+ *
+ *  — a heredoc BODY line read as a live invocation, the false-POSITIVE direction that lets a ratchet
+ *  believe a channel is covered when it structurally is not.
+ *
+ *  The rule is bash's, RELATIVE to the opener's own indentation rather than to column 0, because this
+ *  splitter is also handed text that is uniformly indented: `release_workflow_wiring.rs` runs it over
+ *  a whole `.yml` FILE, where `release-sidecar.yml`'s `cat > "$notes_file" <<'EOF'` and its `EOF` both
+ *  sit ten spaces in. Requiring column 0 there would leave that heredoc open for the rest of the file
+ *  and empty the scan — the worst possible direction. So: the terminator must be the delimiter alone,
+ *  indented no more than the line that opened it. For a genuine shell script (opener at column 0) that
+ *  IS bash's rule exactly. The one shape it still accepts that bash would not is a terminator indented
+ *  NO MORE THAN an already-indented opener — `<=`, not `<`, and the equal case is the easy one to
+ *  misstate. Measured 2026-08-27: `cat <<EOF` at column 2 inside `if true; then`, with its `EOF` also
+ *  at column 2, is BODY to bash (`bash -n` warns that the here-document is delimited by end-of-file,
+ *  and the `if` then hits an unexpected EOF), while this closes it. Closing early there is the
+ *  pre-existing behaviour and is unreachable in this tree: no workflow and no `.sh` file has a
+ *  non-uniformly indented heredoc (the enumeration is in `heredocOpener`'s comment above). */
+function closesHeredoc(raw: string, h: HeredocOpener & { indent: number }): boolean {
+  const body = raw.replace(/\r$/, "");
+  const indent = /^[ \t]*/.exec(body)![0];
+  if (body.slice(indent.length).replace(/\s+$/, "") !== h.delim) return false;
+  return h.dashed || indent.length <= h.indent;
+}
 
 /** Splits a `run` script into LOGICAL shell lines: backslash continuations joined, `#` comments
  *  stripped, HEREDOC BODIES skipped entirely, before anything looks for a flag or a value. Without
@@ -122,15 +294,17 @@ const HEREDOC_START = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
 export function logicalLines(run: string | undefined): string[] {
   const out: string[] = [];
   let pending = "";
-  let heredocDelim: string | null = null;
+  let heredoc: (HeredocOpener & { indent: number }) | null = null;
   for (const raw of (run ?? "").split("\n")) {
-    if (heredocDelim !== null) {
-      if (raw.trim() === heredocDelim) heredocDelim = null;
+    if (heredoc !== null) {
+      if (closesHeredoc(raw, heredoc)) heredoc = null;
       continue; // heredoc body (and its terminator line) -- data, not a shell statement
     }
     const line = stripShellComment(raw).trim();
-    const heredocMatch = line.match(HEREDOC_START);
-    if (heredocMatch) heredocDelim = heredocMatch[2];
+    const opener = heredocOpener(line);
+    // The opener's OWN indentation is measured on the raw physical line, not on the trimmed one --
+    // `closesHeredoc` compares the terminator's indent against it (see its comment for why relative).
+    if (opener) heredoc = { ...opener, indent: /^[ \t]*/.exec(raw)![0].length };
     if (line.endsWith("\\")) {
       pending += `${line.slice(0, -1).trim()} `;
       continue;
