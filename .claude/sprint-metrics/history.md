@@ -2355,3 +2355,44 @@ quote. Derive **both sides**, and report **what moved in each direction**, not t
 This is the fourth stale-number finding of the shift and the first where the number was arguably
 *right* while the thing it described was wrong. The earlier three were plain staleness; this one
 survived a correction, because correcting a net to a different net does not test the decomposition.
+
+## 2026-08-28 — the anchor validator validated a copy
+
+CPE-1966 built a contrast-sweep harness whose best feature was that it **refuses to run** unless it
+reproduces five known WCAG anchors — `#000/#fff = 21.00`, `#767676/#fff = 4.54`, and two compositing
+values. That validator fired for real during development: the author's first draft had **3.95 from
+memory** where 50% black over white is **3.98**. A measurement tool that will not start until it can
+prove it measures correctly. It is the right idea.
+
+Its Reviewer then multiplied the **probe's** `ratio()` by 1.6 and got:
+
+```
+  #000/#fff  21    50% black/white  3.98    #767676/#fff  4.54
+  1306 raw readings -> 786 distinct sites, 384 enforced
+  light: pixel cross-check — 59 grounds screenshot-verified, 0 disagreeing by more than 1/255
+PASS — every enforced site clears its bar in both schemes.          EXIT=0
+```
+
+**All five anchors green. Both independent cross-checks clean. PASS, exit 0. Every number 60% wrong.**
+
+The validator exercises the **module-level** maths in `engine.mjs`. Every site ratio is computed by a
+**second, independent implementation inside the probe source** that runs in the page — and no anchor
+ever touches it. The harness had two copies of the same arithmetic and validated the one that does not
+produce the answers.
+
+**Two more safeguards failed the same way in the same PR.** `--verify-pixels` — the second independent
+path, and the PR's strongest claim — reported *"59 disagreeing by more than 1/255"* and **exited 0**,
+because the exit condition never consulted it. And the fixture-provenance check, which exists so the
+harness cannot measure a DOM the app no longer renders, is a raw `includes` over unstripped script
+text: **a comment mentioning the old class name satisfies it** — CPE-1933 rule 2, in the file that
+cites CPE-1933.
+
+**The pattern, stated once:** a safeguard is not validated by the fact that it *can* fire. All three of
+these fire correctly on the input their author had in mind. What none of them had was a test that the
+safeguard is **wired to the thing it is guarding** — the validator to the code that computes, the
+cross-check to the exit code, the provenance check to code rather than prose.
+
+**The cheap discipline that would have caught all three: sabotage the thing being guarded, not the
+guard.** Breaking the guard proves it can fail. Breaking the *subject* and watching the guard stay
+green is what proves the wire exists — and it is the same "force the predicate to lie" half of
+CPE-1929's pair, applied one level out.
