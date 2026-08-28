@@ -3,7 +3,7 @@ id: CPE-1958
 title: `overwrite_confirmed_no_follow`'s `links > 1` hard-link guard is TOCTOU-racy — measured destroying a file outside the root
 type: bug
 priority: High
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -635,3 +635,78 @@ Rust edit line for line.
 No test count moved: the ACL test was rebuilt, not added to, and every other change is a comment or a
 regenerated JSDoc block. The Windows count holding at 2,428 is the meaningful number here — the test
 that was failing on CI now passes on a fixture whose starting ACE count this repo controls.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1070, **fully green (25/25)**, after **four rounds**, one Reviewer, one Security Auditor
+and one independent security re-audit. The longest gauntlet of the shift, and every round found
+something.
+
+**The fix.** Stop writing through a handle whose object an attacker can substitute: stage the bytes into
+a `create_new` sibling and commit with a rename, so **the only object written is one created a moment
+ago that has never had another name.** Re-checking `nNumberOfLinks` harder was correctly rejected — a
+property read at a moment can be true and stale any number of times.
+
+**Measured, and re-measured after the rebase**, because #1066 moved the `links > 1` guard ahead of the
+path check and changed the very window this closed — **the pre-rebase numbers were deleted rather than
+restated.** Windows 2,000 trials: control 97/812, pre-fix 51/356, **arm C 0/0**. Linux ext4 10,000:
+control 1,580/2,902, pre-fix 507/188, **arm C 0/10,000 both shapes**. The independent re-audit got
+**0/10,000** again on its own harness, with arm C facing **4,877 planted trials against arm B's 2,885**
+— the *harder* attacker, for a zero.
+
+**The methodological trap, and how it was avoided.** The fix made the original attacker land **2,825**
+hard links where it had landed ~250, so a merely *narrowed* window could have read as a *closed* one. It
+solved that with a **planted** shape where the harness plants the link and the attacker only unlinks.
+
+**A round-1 claim was retracted as false, at the site, not quietly dropped.** *"The fixed arm always got
+the harder attacker"* is false on Windows — 617 planted vs the pre-fix body's 838 — so the Windows result
+rests on the unplanted shape plus the structural argument. The re-audit then found the retraction was
+complete **in the code** and still standing in **two** other places, and both were marked.
+
+**Round 1 shipped a HIGH, and measuring is the only reason anyone knew.** The rename commit **stripped
+the destination's ACL and alternate data streams**: a file with inheritance broken and one owner-only
+ACE came back `AreAccessRulesProtected=False` with **four inherited ACEs including `Authenticated Users:
+Modify`**, and its `Zone.Identifier` gone — **Mark-of-the-Web lost**, so a downloaded file put through a
+confirmed Convert loses SmartScreen gating. That is **precisely the downgrade CPE-1739 fails the save to
+prevent**, and it happened because `carry_protections`' Windows arm was a no-op that delegated to
+`ReplaceFileW`, which the new commit path never calls. **The guard did not fail — it was routed around
+by a change in a different file.** The PR had recorded it as a *"preservation cost"*, which is the
+framing that would have let it through.
+
+**Round 2's fix and its near-miss.** `HandleCarryover` reads the DACL, named streams and attributes
+**off the destination handle** (`GetKernelObjectSecurity`, `ReOpenFile` + `BackupRead`) and applies them
+to the staged file while it is still empty; `ReplaceFileW` was rejected because it re-resolves the path
+at commit time — the window this PR closed. **`ReOpenFile` does not inherit the original open's flags**,
+so without `FILE_FLAG_OPEN_REPARSE_POINT` it *resolved* the reparse point and would have taken **every
+dehydrated cloud file** back to "failed operation" — the exact CPE-1896 regression. The suite caught it.
+
+**Sabotages that stayed GREEN were recorded rather than claimed.** Forcing
+`PROTECTED_DACL_SECURITY_INFORMATION` off changed nothing — the descriptor's own `SE_DACL_PROTECTED`
+control bit is what Windows reads. Round 4 confirmed the same fact **from the staging side**.
+
+**Round 3 argued its way out of two code changes, correctly.** The DACL and streams branches are
+asymmetric **on purpose**: *"this volume has no ACLs"* is something a filesystem can say truthfully;
+*"no named streams"* is indistinguishable from *"this redirector will not tell you"*, and swallowing it
+silently drops a `Zone.Identifier`. And a name-allocation cap **could not be red-proofed through any seam
+the crate can build**, so by CPE-1929's own rule it would be an untestable refusal that reads as
+coverage — the comment was narrowed instead.
+
+**Round 4 fixed a fixture, not a guard.** The ACL test's **inertness guard** — which refuses to run
+against a fixture whose assertions would pass vacuously — fired on CI: `got protected=true aces=3`
+where the dev box gives 1, because the runner account's SID set survives `/inheritance:r`. The fixture
+now **builds** the descriptor (owner SID read off the object, one explicit ACE, protection on the
+descriptor's own control word) **and** creates an untouched sibling as a run-time **control**, requiring
+the staged file to differ in **both** protectedness and ACE count. The guard stayed exactly as strict.
+
+**And a house rule turned out too narrow.** The bindings drift was **not** a `specta::Type` struct — it
+was the doc comment on **`macro_undo`**, a `#[tauri::command]` carrying `specta::specta`, because
+`tauri-specta` emits a command's doc comment into the client as **JSDoc**. Round 3 had read the rule as
+struct-only, checked a file with no specta types at all, and skipped the regen. The memory is widened:
+**any specta-annotated item's fields or doc.**
+
+**What it left behind, deliberately and with numbers:** **CPE-1963** (the rename's *source* is an
+enumerable `*.cpe-tmp` in the same attacker-writable folder — **2,834/3,000 Linux** lying `Ok(())` with
+the destination aliased outside the scope root, **victim content unchanged in all 24,000 trials**, and
+the fix needs a handle-relative `renameat` `std` does not provide), **CPE-1961** (two more live sites,
+whose rates the re-audit measured **3× to 26× higher** than round 2's, so the ticket now carries a range
+and a *"do not quote at the low figures"* note), **CPE-1957**, and **CPE-1959**.
