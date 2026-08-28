@@ -3454,3 +3454,45 @@ is the instruction landing exactly. And registering the exemption list as a ratc
 standing sentence in `RATCHETS.md`** — *"No registered baseline contains a regex today"* — which it
 corrected rather than quietly working around. **A new registration that invalidates the registry's own
 prose is the kind of thing that gets left, because fixing it is somebody else's file.**
+
+## 2026-08-28 — 16 merges of 186 were never judged by a guard main already required, and 14 are ours
+
+CPE-1970 measured the Foreman's own merge procedure. Window 14 days, denominator **186** — every PR
+merged into `main`. **168 clean, 16 exposed, 2 unreadable and counted fail-closed.** By guard:
+`ratchet-guard` ×5, `ci-verdict` ×5, `lockfile-preflight` ×2, `msrv` ×2, `ffmpeg-pin-guard` ×1,
+`gui-smoke-linux` ×1.
+
+**Fourteen of the sixteen fall in the window's last 36 hours.** That is this shift. Every one of them
+merged on a `ci-poll` verdict I read as green, and every one was green — of the checks that ran. The
+verdict was true and the question was wrong.
+
+**The worker replaced my definition with a better one, and that is the methodological point.** The
+ticket proposed "compare the PR's newest check timestamp against a guard-adding commit". It shipped
+instead: **did a job `main` already required produce any check at all on this PR's board?** Both sides
+derived at run time — the board from the rollup, the required set parsed out of the merged commit's own
+workflows. No inference from timestamps, no guessing what counts as a guard-adding commit. And it
+rejected the timestamp instrument with a measurement: **#1056 finished 67 seconds before its merge**, so
+"the run predates the guard" would have called it clean.
+
+**It also kept a wrong instrument in the write-up rather than deleting it.** A cheaper git-tree check
+missed one PR and wrongly flagged another, because **GitHub builds `pull_request` checks from the merge
+ref, not the head tree.** Recording the instrument that failed, and why, is worth as much as the one that
+worked — the next person will reach for the cheap one first.
+
+**Two details in the fix are better than the fix.** The required set is read from **`origin/main`**, not
+the working tree, because *"a Worker's worktree IS the PR branch — reading it reproduces the defect
+inside the guard."* And since it does not fetch, it **prints the ref and SHA it used** rather than
+pretending currency it cannot have. A staleness guard that could itself be stale, saying out loud which
+`main` it consulted.
+
+**And the cost measurement changed the recommendation.** Branch protection with *require up to date* was
+the obvious answer. Measured: **13.0 merges/day**, `ci.yml` **median 65.9 min, p90 108.2**. Serialised,
+that ceiling is **~21/day at median and 13 at p90** — *the crew's current throughput is already the
+ceiling*. So the recommendation became protection **plus a merge queue**, and §2d flags a trap that would
+have bitten on day one: `paths-ignore` leaves a required check **pending forever** on ticket-only PRs,
+making them unmergeable the moment it is switched on. **An obvious remedy costed honestly turned into a
+different remedy.**
+
+The stated miss is honest and worth carrying: a guard added *inside* an existing job — a new test file
+under `Frontend`, a new ratchet under `Ratchet guard` — is invisible to any name-based instrument. Only
+the settings change closes that, and that needs the user.
