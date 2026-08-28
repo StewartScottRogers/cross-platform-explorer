@@ -3650,3 +3650,39 @@ And one more instance of a habit that has served well tonight: the fix for the l
 widened an existing helper to cover two pre-existing arms, and the write-up says the newly-capped arm is
 **"unreachable from any constructible input"** — *at the site, not implied by a green run.* On this PR,
 which has spent four rounds on over-reaching claims, that is the sentence written the right way round.
+
+## 2026-08-28 — a blind-spot list is a claim of the same kind as the claim it qualifies
+
+Round 7 of #1087 said its scan *"closes the class"* and covered one declaration spelling. Round 8 widened
+it to six — the right fix — and then wrote **"what this scan still CANNOT see"** followed by exactly three
+bullets, a failure message naming *"the three spellings it cannot see"*, and a CLAUDE.md line saying those
+three *"all still escape any regex."*
+
+Three more sabotages, each a real table mentioned nowhere: **`Array<Case>`** (the other canonical spelling
+of the identical type, with no linter in this repo to steer anyone away from it), **a non-SCREAMING name**
+(a second axis the docblock never mentions), and **`satisfies Case[]`**. All three invisible, 75 passed.
+And two of the three *stated* blind spots turned out to be **not caught rather than uncatchable** — one
+`[ \t]` → `\s` and one small alternation catch them, and the file still returns exactly 10 names.
+
+**This is the eighth consecutive narrow review of this PR and the eighth claim-scope finding. Not one has
+been a code defect.** Round 7 over-claimed the scan; round 8 fixed the scan and over-claimed **the list of
+what the scan misses.** That is the finding worth keeping: **writing down your blind spots is the same
+epistemic act as writing down your coverage, and it fails identically — it enumerates what the author
+thought of.** A limitations section feels like humility and is structurally a claim.
+
+**The fix is one word.** *"At least these"* instead of *"these three"*. It costs nothing, cannot be
+falsified by a shape nobody imagined, and is the difference between eight rounds of this and none.
+
+**Two smaller things from the same review, both instructive.**
+
+The docblock named a **backstop that cannot fire**: *"the backstop for that is not this scan, it is the
+`vm.Script` oracle, which speaks for shapes nobody enumerated."* The oracle iterates the swept tables — a
+table invisible to the scan is by construction absent from them too, so the oracle never sees it.
+**Naming a backstop that structurally cannot cover the case is worse than naming none**, because it ends
+the search.
+
+And the anchor rationale went stale **inside its own commit**. Round 8 recorded, correctly, that the
+column-0 anchor *"bought nothing"* — dropping it returned the identical 10 names. True of round 7's file.
+Round 8's own red-proof sentence then quoted a literal declaration into the docblock, so in the file it
+ships in, dropping the anchor returns **11**. No silent consequence — it would red loudly — but **a
+measurement recorded about the file as it was, in a commit that changed the file, is stale on arrival.**
