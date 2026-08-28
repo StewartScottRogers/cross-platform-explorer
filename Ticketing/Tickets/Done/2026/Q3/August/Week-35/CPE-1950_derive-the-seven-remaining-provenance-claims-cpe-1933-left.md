@@ -3,7 +3,7 @@ id: CPE-1950
 title: derive the remaining cross-file provenance claims CPE-1933 classified but did not derive
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -234,3 +234,26 @@ Not "ran out of time" in every case; several are judgement calls worth restating
 
 Scope control was the instruction and it was followed: seven real derivations, each red-proofed,
 rather than sixteen shallow ones.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1067.
+
+**The sweep that found the work was itself the first lesson.** CPE-1933's original pass ran `grep`
+without `-i` and missed **57 candidates across 56 files** — one of them a *fourth* copy of the very
+claim it was killing, in the same crate. Comments start sentences: "Mirrors…", "Must match…",
+"Verbatim from…". A capital letter is not a hiding place.
+
+**A commented-out decoy beat the scanner.** `rustSource.ts` leaked **142** `///` lines in
+`src-tauri/src/lib.rs` and **31** in `fsutil.rs`, and a demonstrated commented-out decoy won against
+the updater root-of-trust guard — the single highest-blast-radius derivation in the set. Anchoring on
+prose rather than code is not a style preference here; it is how a guard passes while reading a
+comment that quotes the old value. The stripper now enforces an invariant that makes any desync
+loud: after stripping, **no line may begin with `//`**, or it throws.
+
+**Three corrections landed during review**, all of the same species the ticket exists to eliminate: a
+claim that reads as derived and is not. The gates found them by *running* the derivations against
+changed sources rather than reading them.
+
+**Merged past a known red.** GUI smoke shard 2 and its verdict job were failing on CPE-1960, verified
+by reading job `98714294044` directly rather than trusting the job name.
