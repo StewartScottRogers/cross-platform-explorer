@@ -3,7 +3,7 @@ id: CPE-1927
 title: two `archive.rs` tests race each other on a process-global counter and shared session root — an intermittent failure that passes on rerun
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -306,3 +306,62 @@ suite size delta is **zero**, one test in and one test out), `--features index`,
 `--features pdf-thumb,video-thumb,waveform,dicom-thumb` (2465 passed). Plus `archive::` 60× at default
 parallelism and 15× at `--test-threads=1`, all green, and a Windows-native `cargo test --lib
 archive::tests::` (102 passed) since CI runs a 3-OS matrix.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1073, after two rounds.
+
+**The ticket's premise was wrong, and disproving it was the work.** It predicted an intermittent
+**red** from two shared process-global test fixtures. The worker got **0 reds in 290 runs**, stopped
+guessing, instrumented the test's own counters, and reproduced the race on the first try: a sibling
+stole a name in **4 of 40** parallel runs, and one whole-suite run armed only **62 of its 64** links.
+Its Reviewer, running a harder shape (124 attempts under 24 CPU hogs), measured a partly-armed block in
+**13 of 124 (~10%)** — *more* frequent than the worker's own figures.
+
+**The correction: this race cannot go red.** `EXTRACT_SEQ` is monotonic and `temp_extract_target`'s
+walk is a **draw, not a scan** — every candidate comes from `fetch_add` inside the loop — so a name a
+sibling draws can never be handed to this test, and the predicted assertion is unreachable. What it
+actually cost was **coverage, silently**: unarmed names with no signal, and raced-out attempts ending
+in `skip_notice!`, i.e. a **passing** test. The same disease as the rest of the day's docket, from the
+other end.
+
+**The worker did not overclaim.** It explicitly declined to say it had diagnosed CPE-1896's one-off
+failure, and said so.
+
+**Why a mutex was wrong rather than merely worse** — and this survived independent scrutiny.
+Production genuinely shares both globals, and correctly: concurrent extractions go through
+`temp_extract_target` whenever a user opens two files in an archive, and the atomic `fetch_add` plus
+exclusive `create_dir` walk is the mechanism built to survive that. A lock scoped to one test would not
+make the prediction likelier (it contends with ~35 other extraction tests); a lock taken by all of them
+would serialise a third of the archive suite and remove the concurrency the code exists to handle.
+
+**Round 2 corrected a claim I had repeated.** The PR reported the `create_dir` → `create_dir_all`
+sabotage (the real CWE-377/CWE-59 bug) as **30/30 red** against PR #906's *"green in 2 of 3 runs"* — and
+I quoted that as this PR's delta in a status report. The Reviewer ran the same sabotage against
+`main`'s **current** test: **30/30 red** there too. The 2-of-3 figure was against **v1**, which `main`
+has not carried for a long time. So the 30/30 is a **floor check, not a gain**; the genuine delta is
+determinism and coverage. The correction is at the site, and **attributed to the Reviewer** rather than
+absorbed — writing it unattributed *"would have committed the same measured-elsewhere-reads-as-measured-here
+sin from the other side."*
+
+**A judgement call worth keeping.** Round 2 declined to reorder `session_root()?` ahead of the
+`file_name()` validation, even though it is two lines, because the ordering is **not pinnable by any
+test in this suite** — its only observable is a once-per-process `OnceLock` side effect every sibling
+races to initialise, so a test asserting it would be the shared-mutable-fixture shape this very ticket
+deletes. *"Shipping an unpinnable edit and shipping an unpinnable guard are the same mistake."*
+
+**The sweep's own criteria had the defect the sweep was for.** It enumerated "every `static`" **and**
+"every `.load(Ordering::…)` in test code" — and a `Mutex` global has no `.load`, so the `and` silently
+excluded `LIVE_EXTRACTIONS`, the one remaining instance. Found by the Reviewer, corrected, and the
+instance verified safe for a sharper reason than first offered: `note_extraction_dir` samples
+`Instant::now()` **inside** the same critical section as the `push_back`, so the lock — not luck —
+enforces the ordering the test asserts.
+
+**Assertions ended up strictly stronger**: all 64 `create_dir`s now `unwrap()`, `stage_live_link`
+asserted rather than discarded, landing tightened `>=` → `==`, and the retry loop, `ours` bookkeeping
+and `skip_notice!` deleted. **Suite delta zero**, confirmed by the Reviewer running both revisions.
+
+**Merged past two verified reds** — shard 2 (CPE-1960) and its downstream verdict job — after
+establishing decisively that this branch **predates** that fix rather than defeating it:
+`git cat-file -e 4603f365:gui-smoke/lib/scrollIntoView.ts` is not-found on the branch and found on
+`main`.
