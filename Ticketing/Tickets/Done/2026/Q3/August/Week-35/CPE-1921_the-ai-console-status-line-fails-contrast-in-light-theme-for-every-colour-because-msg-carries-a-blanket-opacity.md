@@ -3,7 +3,7 @@ id: CPE-1921
 title: the AI Console status line fails contrast in light theme for **every** colour, because `#msg` carries a blanket `opacity: .85`
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-27
@@ -238,3 +238,56 @@ launcher site. Rebased onto current `origin/main`; the rebase was clean.
 `#d08a1a` to dark olive-brown `#8a5a00`. That is an **appearance** change, not only a contrast one —
 the warn state will read as brown rather than amber in light theme. Deliberate (the amber could not
 clear 4.5:1 on white at any usable saturation), but it should be looked at rather than assumed.
+
+## Closed 2026-08-27 — what the gauntlet actually proved
+
+Merged as PR #1076, after two rounds.
+
+**It applied every lesson from CPE-1919's four rounds, and that showed.** It established the ground
+**at run time** — walking up from `#msg` in headless Chrome to `body`, whose `background: Canvas` the
+engine resolves to `rgb(255,255,255)` / `rgb(18,18,18)`, cross-checked against the painted pixel in the
+same screenshot — rather than reading the nearest CSS rule. Its Reviewer, using a **from-scratch PNG
+decoder and its own WCAG 2.1 implementation**, reproduced **all twelve ratio cells exactly**.
+
+**Its harness validated itself before it was trusted**, reproducing the ticket's own numbers (2.44 /
+2.83 light, 5.01 / 4.23 dark). That is what earned the new figure: **the `err` red state, which the
+ticket never measured, fails in BOTH schemes** — 3.30 light and 3.59 dark. All six states now clear
+4.5:1 (5.08 – 7.46).
+
+**A structural finding worth keeping: the launcher is not themed by the app's palette at all.** It
+declares `color-scheme: light dark` and paints on CSS **system** colours, and `console.rs::launcher_html()`
+substitutes only the xterm CSS — so `hc-light`/`hc-dark` never reach it and the split comes from
+`prefers-color-scheme`. The four-theme analysis simply does not apply here.
+
+**The multi-role `--accent` trap, caught a second time.** `#2f6fed` reads **4.12** as `#help-body h3`
+text on the dark ground but **4.55** filling `button.primary` under white. The foreground role was
+split into a launcher-side `--accent-text` rather than pinning both at the looser bar — the same fix
+CPE-1919 made one stylesheet over.
+
+**Round 2 corrected three claims, and the pattern is the ticket's own defect class.** *"Post-fix the
+sweep reports zero failures"* was **false**, in three places. The sweep loaded only the **static default
+state**, where `#view-bar` is `display:none` and a `position:fixed; inset:0; z-index:9999` boot overlay
+covers everything — so four pre-existing defects were structurally unreachable, each for a different
+reason: a **non-text** role, a `display:none` panel, an **animated** opacity sampled at one frame, and
+a `:hover` state in a literal hex (invisible twice over). Worst of them: `select:focus` /
+`input:focus` / `textarea:focus` at **2.46:1** in dark — and since `outline: none` is set, that border
+is **the only focus indicator in the AI Console**. Filed as **CPE-1966**, where the deliverable is a
+sweep that reaches states, not four colour changes.
+
+**A comment that vouched for a failing role.** The PR's new `:root` comment asserted `--accent` backs
+the focus-ring border safely — beside a green test. That is the CPE-1933 pattern; corrected to state
+the failure and name the follow-up, with *"No test asserts this pairing today."*
+
+**Round 2 also caught an error in its own harness.** Its first re-derivation reported one site at 3.81
+and was wrong: an element with `opacity` composites its own background **together with** its text, so a
+dimmed button's ratio is not its undimmed one. With the right model it matched the Reviewer to the last
+digit — and it then went back and **corrected two figures in CPE-1966**: that site fails in **dark too**
+(4.13), and its light figure is **3.65, not 4.08**, because it sits on `#tabs`'s `rgba(128,128,128,0.10)`
+fill rather than bare Canvas.
+
+**Recorded, not fixed:** `--accent-text` now names two different tokens with different values in two
+stylesheets that never load together. No CSS hazard; a **reader** hazard, since one grep returns both
+and each guard reads only its own file. Said at the site.
+
+**For the Visual Critic on the next sidecar-host build:** light `warn` moves from bright amber
+`#d08a1a` to dark olive-brown `#8a5a00` — an **appearance** change, not only a contrast one.
