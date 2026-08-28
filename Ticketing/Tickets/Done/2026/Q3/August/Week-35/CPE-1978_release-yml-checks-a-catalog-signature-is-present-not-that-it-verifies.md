@@ -3,7 +3,7 @@ id: CPE-1978
 title: `release.yml`'s "Verify the signed bundle" step checks a `.sig` is **present**, not that it **verifies** — and its own comment names CPE-1954 as the enabler
 type: bug
 priority: Medium
-status: Open
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-28
@@ -205,3 +205,139 @@ Related: **CPE-1954** (PR #1088 — the verifier this unblocks, and the definiti
 checks), **CPE-1940** (`VerifiedIndex`, the fail-closed baseline), **CPE-1951** (the catalog's monotonic
 version bound — the other half of release-time catalog correctness), **CPE-1933** (a claim about a
 workflow that nobody executes is untested by construction), **CPE-1932** (enumerate, don't recall).
+
+## Closing record — merged as PR #1095 (`16fd3282`), 2026-08-28
+
+### The gap, demonstrated on exit status rather than argued
+
+A `.sig` file containing the ASCII text `not a signature` made the step named **"Verify the signed bundle
+before uploading it"** exit **0**, and the job would have uploaded the bundle. The same bundle through the
+real binary: `FAIL: index signature does not verify under the key`, exit **1**.
+
+A new step (`id: sigverify`) now runs `catalog-sign verify catalog-out "$CATALOG_PUBKEY"` **before** the
+upload, and the terminal outcome gate reads its outcome.
+
+### The pubkey decision — argued, not defaulted
+
+The public half is a **literal in `release.yml`**, not a repository secret:
+
+- It is public by construction — the identical value is already committed as `CATALOG_TRUSTED_KEYS` in
+  `src-tauri/src/lib.rs` and ships in every installed binary, where it is fed to `VerifyingKey::from_bytes`.
+- A secret buys **no confidentiality** and costs two things: a second copy **no diff or guard can see** (a
+  rotation could silently diverge from what clients trust — the exact failure this step catches), and an
+  **unset secret expands to `""`**, i.e. it fails **open**.
+- Verification is under the **clients'** key deliberately. The signing key could only prove
+  self-consistency; only the clients' key catches a rotated `CPE_CATALOG_SIGNING_KEY` nobody mirrored.
+
+Both values were confirmed byte-identical, and the guard reds in **both** directions (proved by moving
+each). No signing key was created in-repo or committed; `tauri.conf.json` untouched.
+
+### Fail-closed, including the case an exit code cannot cover
+
+`set -euo pipefail` covers missing cargo, build failure and an unreadable bundle; an unusable
+`CATALOG_PUBKEY` is refused **before cargo is invoked at all**. The remaining case — **a verifier that says
+yes to everything** — is covered by running the check a **second time under a key that did not sign the
+bundle and requiring a refusal.**
+
+**That control was audited harder than it was written.** The Reviewer computed ed25519 point decompression
+and confirmed the decoy `0b18…` **is a valid curve point**, so `VerifyingKey::from_bytes` succeeds and the
+refusal comes from `verify_strict` — the control genuinely exercises the signature path and cannot be
+satisfied by the same trivial success as the positive run. `trust.rs:41-53` returns `false` rather than
+panicking on an unparsable key, so it fails closed either way. Recorded at the site: this is
+**key-dependent** — a future rotated key's decoy may be off-curve (measured on a throwaway `d21f…`, whose
+decoy `021f…` is not a valid point), in which case the control no longer proves the signature path ran.
+The note says to switch to flipping a `.sig` byte on rotation.
+
+### What the three rounds actually cost, and what they bought
+
+The code was right in round 1. **Every round after it was about the sentences around the code** — the shift's
+dominant finding, in miniature:
+
+- **Round 1** shipped a guard that failed **open**, with a docblock claiming the opposite direction: *"a
+  verify path spelled another way reads as absent here. That fails toward reporting a gap that is already
+  closed — loud, not silent — which is the safe direction."* Backwards. A `false` from the detector
+  **excuses** the signer. Measured: a real verify path spelled `args[1] == "check"` gave **62 passed, 0
+  red**; the same sabotage spelled `"verify"` gave **2 red**. The declared backstop worked for exactly one
+  spelling.
+- **Round 2** widened it — and correctly refused to lean on the pin, because **the pin calls the same
+  detector**, so it is the excuse written down rather than a second opinion (CPE-1950 shared blindness).
+  `hasVerifySubcommand` became **`couldHostAVerifyPath`**, a question with **no verb in it**: a binary is
+  excused only when it reads argv in that file, has no `== "…"`, no match arm on a string, no
+  `--`-prefixed literal and no arg-parser crate. But it shipped a **closed** claim — *"structurally cannot
+  host a verify path of any spelling"* — and **three real shapes falsified it**, each a working dispatch on
+  a live CLI surface: `starts_with("verif")`, a `match` on `args.len()`, and — the damning one — a `const`
+  holding the literal compared with `==`, which is *literally* the comparison the clause exists to catch,
+  **defeated by hoisting the literal into a `const`**, a refactor any reviewer would suggest.
+- **Round 3** widened the clauses (method spellings, `matches!(`, and `const`/`static` string declarations
+  — verified free, zero hits in the target file) **and demoted the claim to what was measured**. Blind spots
+  split into **not caught today but reachable** (argv-arity branching; indirect tokens via
+  `format!`/tables/helpers; any comparison spelling nobody has written down) vs **cannot be caught by
+  scanning** (env var, `argv[0]`, build feature), written as **"at least these"**, no count. The
+  `match args.len()` case was **re-measured and left open on purpose**: a general arity clause would
+  over-report on the target binary's own legitimate arity guard, i.e. it would break the one binary the
+  sweep excuses.
+
+Final sabotage table, reproduced independently by the Reviewer:
+
+| shape in `model_snapshot_sign.rs` | round 1 | final |
+|---|---|---|
+| `starts_with("verif")` | 0 red | **2 red** |
+| `const` literal compared with `==` | 0 red | **2 red** |
+| `match` on `args.len()` | 0 red | **0 red — deliberately open, measured** |
+
+A second finding of the same family: the pin-title test's docblock claimed it was *"anchored on a real call,
+not prose in a comment"* and that *"nothing in this file does it today"*. Both false — the regex over raw
+source returns 57 entries, **one of them a non-call occurrence inside this test's own assertion message**. It
+did not self-satisfy only because the string carried an interpolation rather than a literal name, **so the
+guard was one "make this message concrete" edit from certifying its own excuse.** Fixed with an
+interpolation filter and the residual stated.
+
+### The sibling sweep — enumerated, and one half left open on purpose
+
+Derived at run time via `allShellUnits()` over every workflow and script:
+
+- **`release-sidecar.yml`** — no catalog job and no `--bin *-sign` invocation, so nothing in the sign family
+  to diverge. (It **does** sign — Authenticode via `cpe-sign.pfx` at `:562`, plus tauri-action's updater
+  signatures — which an earlier draft got wrong in all three places it appeared. Corrected, with the other
+  subsystems and their gates named so the short form cannot be re-derived.)
+- **`model-snapshot.yml`** — signs `models-index.json` with the same key and publishes it to the
+  `model-catalog` release with **no verification at all**, not even the presence check. Left open because
+  `model-snapshot-sign` has **no `verify` subcommand** — derived from the `[[bin]]` its own
+  `--manifest-path` declares, comments stripped. Filed as **CPE-1981**, whose Foreman-written claim that
+  "the guard reds the day a verify subcommand appears" was itself corrected the same day: it pins **one
+  spelling** and fails open.
+
+### Red-proofs, all reproduced by the Reviewer at their stated counts
+
+Workflow literal moved → **1 red**, names both values. Rust const moved → **1 red**, same message. The real
+verify invocation replaced by a shell **comment carrying identical text** → **6 red** — the CPE-1933 rule-2
+proof that comment text is counted by nothing.
+
+### Measured vs not — stated plainly
+
+Locally, with real `cargo` and real `catalog-sign` over a throwaway-signed bundle, running the step body
+**extracted from `release.yml` at run time** (and independently re-extracted by the Reviewer with its own
+structural extractor): good bundle → **0**; corrupted `.sig` → **1**; wrong key → **1**; cargo absent → **1**.
+
+**Not measured:** no release was cut and **no workflow run was triggered — the step has never executed on a
+GitHub runner**; and that the runner's `CPE_CATALOG_SIGNING_KEY` is the private half of
+`CATALOG_TRUSTED_KEYS` **remains inferred**.
+
+**Operational note:** if the runner's signing key is not the private half of `5b18…`, the next release's
+catalog job **goes red** rather than publishing a dead catalog. That is the correct direction.
+
+**Security scope, so it is not misread later:** this closes the **publish-time availability** half — a bundle
+clients would reject can no longer publish green. It is **not** integrity protection against a compromised
+signing key that is still the private half of `5b18…`. `docs/security/threat-model.md` says so.
+
+### Gates at merge
+
+`npm run check` 0/0 · `npx vitest run` **359 files / 5,398 passed / 2 skipped** (the 2 are the pre-existing
+jq-dependent skips, byte-identical on `origin/main`) · `cargo clippy --all-targets -D warnings` on
+`sidecar/host` clean · **no Rust source changed** (verified from the diff), so the `src-tauri` two-mode
+clippy was justifiably not re-run · CI `completed success — total_count=26 pending=0 skipped=1 coverage=ok`.
+
+**Family:** CPE-1954 (PR #1088 — the verifier this unblocks, and what it actually checks, established by
+running it), CPE-1981 (the `model-snapshot.yml` half), CPE-1940 (`VerifiedIndex`, the fail-closed baseline),
+CPE-1951 (the catalog's monotonic version bound), CPE-1933 (derive provenance, don't claim it), CPE-1932
+(enumerate, don't recall), CPE-1950 (a shared oracle catches divergence, not shared blindness).
