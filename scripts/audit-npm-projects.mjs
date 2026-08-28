@@ -89,13 +89,77 @@ const PROBE_ROOT = join(REPO_ROOT, ".claude", "tmp", "npm-audit-sweep");
 export const MIN_EXPECTED_NPM_PROJECTS = 2;
 
 /**
+ * CPE-1967 — per-call cap on every `npm` this script spawns. Before this, none of them had one, so a
+ * registry that ACCEPTED the connection and then stopped answering (the classic stalled-CDN shape,
+ * which no amount of npm's own retry logic covers, because a retry only fires once a request reaches
+ * a terminal state) hung the sweep forever. The `npm-audit-sweep` job had no cap either, so that hang
+ * rode all the way to the GitHub Actions 360-minute default.
+ *
+ * Deliberately the same shape as `CDP_CALL_TIMEOUT_MS` in `scripts/dev-harness/layout-guard/engine.mjs`
+ * rather than a second idiom: ONE named module-level constant, a per-call `{ timeoutMs }` override for
+ * a call with a genuinely different cost, and a failure that names the call rather than dying
+ * anonymously.
+ *
+ * MEASURED, on this machine on 2026-08-28, warm npm cache, four real invocations:
+ *   `npm audit --json`                                root 2.9 / 2.1 / 1.9 s, gui-smoke 3.3 / 1.5 s
+ *   `npm audit fix --package-lock-only --no-fund …`   root 7.5 s, gui-smoke 5.1 s
+ * Slowest of the six: 7.5 s. 120 s is ~16x that, so a cold npm cache, a slow CI runner and a
+ * retried request all fit comfortably inside it, while a genuine wedge is named in two minutes
+ * instead of ten (the job's own cap) or 360 (the Actions default).
+ *
+ * The cap is PER CALL, and this script makes up to four of them, so the arithmetic against the job's
+ * 10-minute cap matters: four independent 2-minute stalls is 8 minutes, still inside it. Raising
+ * this number without raising `npm-audit-sweep`'s `timeout-minutes:` in `.github/workflows/ci.yml`
+ * would put the job's cap back in front of this one and make the named failure unreachable.
+ *
+ * RED-PROOFED by hand on 2026-08-28, both branches, results recorded here rather than only in a PR
+ * body — a cap nobody has watched fire is a claim, not a guard:
+ *   · this constant set to 200ms → `node scripts/audit-npm-projects.mjs --report` exits NON-ZERO with
+ *     `::error::npm audit sweep FAILED … npm audit for <root> was KILLED after 200ms without
+ *     answering`. Note `--report` mode, which exits 0 on every advisory count, still fails here: that
+ *     is the point — "did not run" is not a finding to report, it is a broken sweep.
+ *   · the `npm audit fix` call's own `timeout:` set to 1ms → the same non-zero exit, naming
+ *     `npm audit fix --package-lock-only for <root> was KILLED … whether a non-major fix is available
+ *     is UNKNOWN, not "none"`.
+ *   · CPE-1929's second sabotage on that same branch, because a new refusal is exactly where a
+ *     shadowed guard hides: with the 1ms cap still in place and the branch disabled
+ *     (`if (false && killedByTimeout(err))`), the sweep printed
+ *     `UNAPPLIED non-major fix, measured (0): (none -- npm audit fix is a no-op here)` and exited
+ *     **0, green**. So the branch is reached, nothing in front of it answers first, and the
+ *     understatement it prevents is real rather than theoretical — a probe killed before it started
+ *     read as "there is nothing to fix here". That is also why it is checked BEFORE the
+ *     `/npm error/i` stderr sniff below: a child killed at the cap writes no `npm error` marker, so
+ *     the sniff cannot see it.
+ */
+const NPM_CALL_TIMEOUT_MS = 120_000;
+
+/**
+ * True when `execFileSync` threw because IT killed the child at `timeoutMs`, rather than because the
+ * child exited non-zero on its own. Node signals this with `killed` + a SIGTERM, and the distinction
+ * is the whole point: `npm audit` exiting non-zero is the NORMAL case here (it found something), so a
+ * caller that cannot tell the two apart reads "did not run" as "ran and found nothing" — the exact
+ * fail-open this file's `isUsableAuditReport` exists to close, one layer down.
+ *
+ * @param {any} err
+ */
+function killedByTimeout(err) {
+  return !!err && (err.killed === true || err.signal === "SIGTERM" || err.code === "ETIMEDOUT");
+}
+
+/**
  * Every npm project in the repo, as a directory path relative to the repo root ("" = the root
  * project), sorted. Discovered from git, never hardcoded.
  */
 export function discoverNpmProjects(repoRoot = REPO_ROOT) {
+  // CPE-1967: capped too. `git ls-files` is local and finishes in milliseconds, but an unbounded
+  // spawn is an unbounded spawn, and a wedge HERE is the worst one in the file — it stalls before a
+  // single project has been named, so the run has nothing at all to report. Reuses
+  // NPM_CALL_TIMEOUT_MS rather than inventing a second number for the same "a child process stopped
+  // answering" cause; the throw is Node's own and already names the command.
   const out = execFileSync("git", ["ls-files", "*package-lock.json"], {
     cwd: repoRoot,
     encoding: "utf8",
+    timeout: NPM_CALL_TIMEOUT_MS,
   });
   return out
     .split("\n")
@@ -153,7 +217,7 @@ export function isUsableAuditReport(report) {
  * @param {string} label
  * @returns {any}
  */
-function npmAuditJson(cwd, label) {
+function npmAuditJson(cwd, label, { timeoutMs = NPM_CALL_TIMEOUT_MS } = {}) {
   let stdout;
   try {
     // `npm audit` exits non-zero when it FINDS vulnerabilities, which is the normal case here — the
@@ -164,8 +228,23 @@ function npmAuditJson(cwd, label) {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
       shell: process.platform === "win32",
+      timeout: timeoutMs,
     });
   } catch (err) {
+    // CPE-1967: a call WE killed is a different fact from a call that exited non-zero, and it has to
+    // be said in its own words. Falling through to the `isUsableAuditReport` refusal below would
+    // still fail closed — correct, and not enough: that message blames the registry or the lockfile
+    // and prints the first 500 characters of a partial audit, which is exactly the wrong place to
+    // look when the truth is "npm never came back".
+    if (killedByTimeout(err)) {
+      throw new Error(
+        `npm audit for ${label} was KILLED after ${timeoutMs}ms without answering — it did not run to ` +
+          `completion, so this project's vulnerability count is UNKNOWN, not zero. Summing an unknown ` +
+          `into a repo-wide total would misreport one project's number as the repo's (CPE-1945). ` +
+          `Most likely a registry that accepted the connection and stopped answering; retry, or raise ` +
+          `NPM_CALL_TIMEOUT_MS in this file (and \`npm-audit-sweep\`'s \`timeout-minutes:\` with it).`,
+      );
+    }
     stdout = /** @type {any} */ (err).stdout ?? "";
   }
 
@@ -253,8 +332,21 @@ function unappliedNonMajorFix(/** @type {string} */ dir) {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
         shell: process.platform === "win32",
+        timeout: NPM_CALL_TIMEOUT_MS,
       });
     } catch (err) {
+      // CPE-1967: checked BEFORE the stderr sniff below, and that order is the whole fix. A call we
+      // killed at the cap has typically written NOTHING to stderr — no `npm error` marker — so it
+      // would sail through the `/npm error/i` test and be recorded as "no unapplied fix available",
+      // an understatement in precisely the direction this probe exists to prevent.
+      if (killedByTimeout(err)) {
+        throw new Error(
+          `npm audit fix --package-lock-only for ${projectLabel(dir)} was KILLED after ` +
+            `${NPM_CALL_TIMEOUT_MS}ms without answering, so whether a non-major fix is available is ` +
+            `UNKNOWN, not "none". Retry, or raise NPM_CALL_TIMEOUT_MS in this file (and ` +
+            `\`npm-audit-sweep\`'s \`timeout-minutes:\` with it).`,
+        );
+      }
       // `npm audit fix` exits non-zero merely because vulnerabilities REMAIN, which is the normal
       // case here — measured, that path writes nothing at all to stderr. A genuine failure (registry
       // unreachable, unresolvable tree) is what puts npm's own `npm error` marker there. Swallowing

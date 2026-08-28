@@ -41,6 +41,17 @@ permissions:
 
 jobs:
   release:
+    # CPE-1967 — every job in this file now carries a cap; none did before, so a wedged release build
+    # rode to the 360-minute Actions default. That is worse here than in `ci.yml`: nobody watches a
+    # release build the way someone waits on a PR, so the first symptom is a draft release with no
+    # installer assets, hours later. Same sizing rule as `ci.yml` (see that file's `jobs:` header):
+    # cap = max(10, ceil_to_5(1.5 x measured max)), measured max = slowest successful run, slowest
+    # matrix leg. Sample: the 100 most recent completed `release.yml` runs as of 2026-08-28.
+    #   macos-latest (universal)  n=73, min 8.4 / p50 12.2 / p90 14.5 / max 16.3 min
+    #   windows-latest            n=75, min 8.9 / p50 12.2 / p90 13.1 / max 13.6 min
+    #   ubuntu-22.04              n=73, min 7.5 / p50  9.2 / p90 10.0 / max 12.0 min
+    # 1.5 x 16.3 = 24.5 -> 25.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -261,6 +272,17 @@ jobs:
     needs: release
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    # CPE-1967 — UNMEASURED, and the number below is therefore an ANALOGUE, not a measurement. Say so
+    # rather than let the sample sizes on the other jobs in this file imply one exists: this job was
+    # added by CPE-1872 on 2026-08-23 (f97aef8a) and the most recent `release.yml` run is
+    # 2026-08-23T14:35Z, so it has never executed. Across the 100 most recent completed runs it
+    # appears zero times, in any conclusion — not even as a skip.
+    # The analogue is `ci.yml`'s `msrv` job, which is the same shape (ubuntu-latest, checkout,
+    # dtolnay/rust-toolchain, swatinem/rust-cache, then a cargo build off a cache nothing else warms)
+    # and measured max 17.1 min over n=75. This job compiles strictly less (one crate,
+    # `crates/updater-verify`) but additionally downloads every published asset, so the same 1.5x of
+    # 17.1 = 25.7 -> 30 is used. REPLACE THIS WITH A REAL MEASUREMENT after the next release cuts.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -433,6 +455,9 @@ jobs:
     needs: release
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    # CPE-1967 — n=66, min 0.5 / p50 0.8 / p90 1.1 / max 2.5 min over the 100 most recent completed
+    # `release.yml` runs as of 2026-08-28. 1.5 x 2.5 = 3.8, under the 10-minute floor -> 10.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

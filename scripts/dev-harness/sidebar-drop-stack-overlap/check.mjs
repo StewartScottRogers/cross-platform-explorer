@@ -54,6 +54,25 @@ async function waitForHttp(url, timeoutMs) {
   return false;
 }
 
+/** CPE-1967: every CDP call here used to be UNBOUNDED — `send()` returned a promise that only ever
+ *  settled if Chrome answered, so one call that never got a response (a GC pause, a stalled internal
+ *  navigation, a briefly unresponsive renderer) blocked the whole run silently and forever, with no
+ *  information about where it was stuck. That is the same hole CPE-1882 found and fixed in
+ *  `scripts/dev-harness/layout-guard/engine.mjs`, and this file was written as that engine's
+ *  prototype, so it kept the pre-fix shape.
+ *
+ *  This is deliberately the SAME shape and the SAME 15000ms as `CDP_CALL_TIMEOUT_MS` in
+ *  `layout-guard/engine.mjs` — one named constant, a per-call `{ timeoutMs }` override, and a
+ *  rejection naming the method and the id — rather than a second idiom for the same problem. Keep it
+ *  TIGHT: `Runtime.evaluate`/`Emulation.setDeviceMetricsOverride` taking anywhere near 15 seconds
+ *  means something is genuinely wrong, and a loud named failure beats a silent wrong measurement.
+ *
+ *  Note what is NOT copied over. `engine.mjs` also carries `CDP_NAVIGATE_TIMEOUT_MS` (40s) for
+ *  `Page.navigate`'s ack against a cold vite dev server; this script's own navigate is passed that
+ *  same 40s explicitly at the call site rather than by importing a constant across two harnesses that
+ *  are not otherwise coupled. See the call site for the measurement that number came from. */
+const CDP_CALL_TIMEOUT_MS = 15000;
+
 let nextId = 1;
 function makeCdpClient(ws) {
   const pending = new Map();
@@ -67,10 +86,23 @@ function makeCdpClient(ws) {
     }
   });
   return {
-    send(method, params = {}) {
+    send(method, params = {}, { timeoutMs = CDP_CALL_TIMEOUT_MS } = {}) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`CDP call "${method}" got no response within ${timeoutMs}ms (id=${id})`));
+        }, timeoutMs);
+        pending.set(id, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
         ws.send(JSON.stringify({ id, method, params }));
       });
     },
@@ -171,7 +203,14 @@ async function checkOneHeight(height, cdpPort) {
       deviceScaleFactor: 1,
       mobile: false,
     });
-    await client.send("Page.navigate", { url: `http://localhost:${DEV_PORT}/` });
+    // 40s rather than the default 15s, and it is the SAME exception `layout-guard/engine.mjs` makes
+    // for the same call (`CDP_NAVIGATE_TIMEOUT_MS`, CPE-1914): the first `Page.navigate` of a run
+    // lands on a freshly-launched Chrome talking to a cold vite dev server, and that ACK alone was
+    // measured at ~18.65s on a loaded Windows dev machine — over the tight per-call cap, with nothing
+    // actually wrong (that figure is CPE-1914's, recorded in `engine.mjs` beside its own constant;
+    // quoted here as history, not re-measured for this file). It matches the 40s the poll below budgets
+    // for the same cold-compile cause, rather than introducing a third number.
+    await client.send("Page.navigate", { url: `http://localhost:${DEV_PORT}/` }, { timeoutMs: 40000 });
 
     let ready = false;
     // 40s, not 15s: on the very FIRST navigation of a freshly-started dev server, vite is compiling

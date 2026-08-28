@@ -34,6 +34,12 @@ env:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
+    # CPE-1967 — the only job in this file, and it had no cap, so a wedged network call here rode to
+    # the 360-minute Actions default on a schedule nobody watches. Same sizing rule as `ci.yml`
+    # (see that file's `jobs:` header): cap = max(10, ceil_to_5(1.5 x measured max)).
+    # Measured over the 7 most recent completed runs as of 2026-08-28, successful only:
+    # n=7, min 0.6 / p50 0.7 / p90 0.8 / max 0.8 min. 1.5 x 0.8 = 1.2, under the floor -> 10.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

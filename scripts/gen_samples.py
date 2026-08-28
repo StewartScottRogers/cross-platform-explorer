@@ -64,6 +64,22 @@ COMMENT = "Pristine CPE sample - do not edit in place"
 
 FFMPEG = shutil.which("ffmpeg")
 
+# CPE-1967 — per-call cap on every ffmpeg spawn below. Both `subprocess.run` calls in this file were
+# unbounded: `check=True, capture_output=True` and no `timeout=`, so an ffmpeg that wedged (a bad
+# filter graph, a codec spinning on a pathological input) blocked this script forever with no output
+# at all, because `capture_output=True` also swallows the progress it would otherwise have printed.
+#
+# 120 seconds. The longest thing generated here is a 4-second 320x240 libx264 clip at `-preset
+# veryfast`, which is a second or two of work; the audio encodes are shorter still. Two minutes is
+# therefore two orders of magnitude of headroom over the real cost, chosen so a slow or contended
+# machine never trips it and a genuine wedge is still bounded.
+#
+# `subprocess.TimeoutExpired` is a subclass of `SubprocessError`, so both call sites' existing
+# `except Exception` already handles it: the run is reported through `note()` and the caller falls
+# back to writing a stub, exactly as it does for any other ffmpeg failure. No new failure path — what
+# changes is that "ffmpeg never returned" now reaches that path instead of never reaching anything.
+FFMPEG_TIMEOUT_S = 120
+
 try:
     from PIL import Image, ImageDraw  # type: ignore
 
@@ -135,7 +151,7 @@ def _ffmpeg_encode(wav_bytes: bytes, out_name: str, args: list[str]) -> bytes | 
             f.write(wav_bytes)
         cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", wav_path] + args + [out_path]
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
         except Exception as e:  # pragma: no cover
             note(f"ffmpeg failed for {out_name} ({e}); wrote a stub instead")
             return None
@@ -202,7 +218,7 @@ def make_mp4() -> bytes:
                 out_path,
             ]
             try:
-                subprocess.run(cmd, check=True, capture_output=True)
+                subprocess.run(cmd, check=True, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
                 with open(out_path, "rb") as f:
                     return f.read()
             except Exception as e:  # pragma: no cover

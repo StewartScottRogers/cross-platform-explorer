@@ -498,6 +498,26 @@ if ($BumpOnly) {
 # So: relax the preference around git, and check $LASTEXITCODE explicitly instead.
 $ErrorActionPreference = "Continue"
 
+# CPE-1967 swept every external-tool wrapper in the repo, not only `scripts/*.mjs`, and this is the
+# one place it found a real UNTIMED spawn that it deliberately did NOT cap. Recorded here rather than
+# only in a PR body, so the next reader knows it was looked at and decided, not missed:
+#
+#   · Four of the five calls below (`add`, `commit`, `tag`, and the `git` reads earlier in this file)
+#     are local and cannot stall on anything but a wedged filesystem.
+#   · `push` is network-bound and genuinely can hang — the same stalled-transport shape the rest of
+#     CPE-1967 is about.
+#   · What makes it different: this script is ATTENDED BY CONSTRUCTION. It is run by a human cutting a
+#     release from a terminal (see RELEASING.md), and no scheduled task or workflow invokes it — so
+#     there is no 360-minute Actions default underneath it and no silent budget to blow through. The
+#     operator IS the timeout, and they can see exactly which command is stuck.
+#   · And the cost of getting a cap wrong here is asymmetric. PowerShell has no `timeout` parameter
+#     for a native command; bounding one means `Start-Process` + `WaitForExit(ms)` + a kill, which
+#     would abort a push mid-transfer on a merely slow connection and leave a tagged-but-unpushed
+#     tree. A hang a human can Ctrl-C is a better failure than that.
+#
+# If this script ever gains an unattended caller (a scheduled task, a workflow), this reasoning
+# expires and the push needs a bound — git's own `http.lowSpeedLimit`/`http.lowSpeedTime` is the
+# right mechanism there, not process-killing.
 function Invoke-Git {
   param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
   & git @Args 2>&1 | ForEach-Object { Write-Host $_ }
