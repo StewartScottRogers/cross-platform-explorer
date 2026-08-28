@@ -140,12 +140,15 @@ Four independent protections apply automatically — you don't opt into any of t
   These are the entries this app *refuses*. One neighbouring case — a shortcut inside the archive that
   the system cannot create at all, such as extracting onto a FAT-formatted USB stick — used to be a
   refusal in a ZIP but a failure in a TAR; both now refuse. See *A refused entry is skipped* below.
-- **A refused entry is never silent.** Whenever any guard below turns an entry away, the finishing notice
-  says so — *"3 items extracted. 2 entries were skipped — they couldn't be written safely. Open the
-  operations panel to see which."* — instead of a plain success message with a quietly lower count. The
-  operations panel then carries a **"· N skipped — why?"** button; one click lists each refused entry with
-  the reason in full. A skip and a genuine failure are reported differently, and an extraction with
-  nothing skipped looks exactly as it always did — no new noise on the normal path.
+- **A refused entry is never silent, and neither is a failed one.** Whenever any guard below turns an
+  entry away, the finishing notice says so — *"3 items extracted. 2 entries were skipped — they couldn't
+  be written safely. Open the operations panel to see which."* — instead of a plain success message with
+  a quietly lower count. An entry the disk simply would not accept gets its own half of the same
+  sentence: *"23 items extracted. 4 entries couldn't be written — the rest of the archive was extracted."*
+  The operations panel then carries a **"· N skipped — why?"** (or **"· N problems — why?"**) button; one
+  click lists each entry with the reason in full. A skip and a genuine failure are reported differently,
+  and an extraction with nothing skipped and nothing failed looks exactly as it always did — no new noise
+  on the normal path.
   (Earlier versions of this page described these skips as *silent*. They were, and that was the bug: an
   archive could contain a hostile entry, have it correctly refused, and still report plain success.)
 - **Zip-slip (path traversal) protection.** An archive entry whose name would escape the destination
@@ -183,13 +186,32 @@ Four independent protections apply automatically — you don't opt into any of t
   rather than extracted. It is deliberate: the check treats a backslash as a separator everywhere so a
   Windows-authored archive cannot slip a traversal past a Linux or macOS extraction by spelling it the
   other way, and being too strict here costs a pathological filename while being too lax costs your files.
-- **A refused entry is skipped; a genuine failure still stops the extraction.** That is the whole rule.
-  "Refused" means this app decided not to write that entry — an unusable name, a shortcut already
+- **One entry's problem costs you that entry — never the rest of the archive.** That is the whole rule,
+  and there are two kinds of problem it covers.
+
+  "**Refused**" means this app decided not to write that entry — an unusable name, a shortcut already
   sitting at the name, a destination that would land outside your folder, or a shortcut pointing out of
-  it. Those four are refused in **every** format. "Failed" means the write itself did not work — a full
-  disk, a permission error on the folder, a TAR hard link whose target is not in the archive. Refusals
-  cost you one entry and are listed in the operations panel; failures stop the run and say so. The
-  difference is whether trying the next entry could plausibly work.
+  it. Those four are refused in **every** format, and they are counted as *skipped*.
+
+  "**Failed**" means the write itself did not work — a read-only file or a folder already sitting at the
+  entry's name, a permission problem, a full disk, a damaged entry inside the archive, a TAR hard link
+  whose target is not in the archive. Nobody chose that, so it is counted as *failed* rather than
+  skipped, and the two are always reported as different things.
+
+  Either way the extraction keeps going and the finishing notice tells you both numbers — *"23 items
+  extracted. 4 entries couldn't be written — the rest of the archive was extracted. Open the operations
+  panel to see which."* Each line in the panel names the entry, says what went wrong, and says whether
+  running the extraction again would help: a read-only file or a locked file clears once you clear it,
+  while a damaged entry inside the archive will fail the same way every time.
+
+  Only the **whole destination** can stop a run: the extraction folder itself cannot be opened, a folder
+  on the way to an entry cannot be created, or the archive file cannot be read past a certain point.
+  Those are facts about where you are extracting to (or about the archive as a file), not about one
+  entry, so the run stops and says so.
+
+  (Until recently one unwritable file ended the entire extraction. You were left with a half-extracted
+  folder, a single error message naming only the file that stopped it, and no way to tell which of the
+  others had landed. That is fixed: the run finishes, and every entry that did not make it is listed.)
   **A shortcut this system cannot create at all — on Windows without administrator rights or Developer
   Mode, or on a drive whose filesystem has no shortcuts, such as a FAT-formatted USB stick — is a
   *refusal*, for ZIP and TAR alike, so the rest of the archive still extracts.** This app creates a ZIP

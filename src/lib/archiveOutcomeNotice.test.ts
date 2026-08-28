@@ -13,7 +13,7 @@
  * `skipped` fails here.
  */
 import { describe, it, expect } from "vitest";
-import { archiveSkipNotice, transferReasonsLabel, type TransferReport } from "./transfers";
+import { archiveOutcomeNotice, transferReasonsLabel, type TransferReport } from "./transfers";
 import { translate } from "./i18n";
 
 const t = (key: string, params?: Record<string, string | number>) => translate("en", key, params);
@@ -23,9 +23,9 @@ function report(over: Partial<TransferReport> = {}): TransferReport {
   return { id: 1, op: "extract", transferred: 2, skipped: 0, failed: 0, cancelled: false, errors: [], ...over };
 }
 
-describe("CPE-1775 archiveSkipNotice", () => {
+describe("CPE-1775 / CPE-1935 archiveOutcomeNotice", () => {
   it("says how many entries were skipped, in the headline, without hovering anything", () => {
-    const msg = archiveSkipNotice(report({ transferred: 3, skipped: 2, errors: ["a: x", "b: y"] }), t);
+    const msg = archiveOutcomeNotice(report({ transferred: 3, skipped: 2, errors: ["a: x", "b: y"] }), t);
     expect(msg).not.toBeNull();
     // Both halves: what landed, and what did not.
     expect(msg).toContain("3 items extracted");
@@ -38,41 +38,67 @@ describe("CPE-1775 archiveSkipNotice", () => {
   });
 
   it("uses the singular for exactly one skipped entry", () => {
-    const msg = archiveSkipNotice(report({ transferred: 1, skipped: 1 }), t);
+    const msg = archiveOutcomeNotice(report({ transferred: 1, skipped: 1 }), t);
     expect(msg).toContain("1 item extracted");
     expect(msg).toContain("1 entry was skipped");
     expect(msg).not.toContain("entries");
   });
 
   it("says COMPRESSED for a compress op, not extracted", () => {
-    const msg = archiveSkipNotice(report({ op: "compress", transferred: 4, skipped: 1 }), t);
+    const msg = archiveOutcomeNotice(report({ op: "compress", transferred: 4, skipped: 1 }), t);
     expect(msg).toContain("4 items compressed");
     expect(msg).not.toContain("extracted");
   });
 
-  it("adds NOTHING when nothing was skipped — the normal path gains no new noise", () => {
-    expect(archiveSkipNotice(report(), t)).toBeNull();
-    expect(archiveSkipNotice(report({ transferred: 1 }), t)).toBeNull();
+  it("adds NOTHING when nothing was skipped or failed — the normal path gains no new noise", () => {
+    expect(archiveOutcomeNotice(report(), t)).toBeNull();
+    expect(archiveOutcomeNotice(report({ transferred: 1 }), t)).toBeNull();
   });
 
   it("keeps a genuine FAILURE distinguishable from a skip", () => {
-    // A failure has its own headline (the first error), and reporting it as "N skipped" would be the
-    // mirror of the defect this ticket fixes. `failed` is also why `skipped` had to be a NEW field
-    // rather than a reuse.
-    expect(archiveSkipNotice(report({ skipped: 1, failed: 1 }), t)).toBeNull();
+    // Reporting a failure as "N skipped" would be the mirror of the defect CPE-1775 fixed — a guard
+    // choosing not to write is not the same event as the filesystem refusing to. `failed` is why
+    // `skipped` had to be a NEW field rather than a reuse, and the two nouns must stay apart.
+    const msg = archiveOutcomeNotice(report({ transferred: 3, skipped: 1, failed: 1 }), t)!;
+    expect(msg).toContain("1 entry couldn't be written");
+    expect(msg).toContain("1 entry was skipped");
+    // The more actionable half first: a file the user asked for and did not get.
+    expect(msg.indexOf("couldn't be written")).toBeLessThan(msg.indexOf("was skipped"));
+  });
+
+  it("CPE-1935: a partly-failed extraction still says what LANDED", () => {
+    // The ticket's own shape, at the UI. `failed > 0` used to make this function return null, and
+    // `App.svelte` then showed `errors[0]` — one sentence naming the single entry that did NOT land,
+    // about a run that had written 23 of 27 files. The headline must carry both numbers.
+    const msg = archiveOutcomeNotice(report({ transferred: 23, failed: 4 }), t)!;
+    expect(msg).toContain("23 items extracted");
+    expect(msg).toContain("4 entries couldn't be written");
+    // ...and say the rest of the archive is there, so "re-run" is an informed choice, not a guess.
+    expect(msg.toLowerCase()).toContain("the rest of the archive was extracted");
+    expect(msg.toLowerCase()).toContain("operations panel");
+  });
+
+  it("CPE-1935: uses the singular for exactly one failed entry", () => {
+    const msg = archiveOutcomeNotice(report({ transferred: 1, failed: 1 }), t)!;
+    expect(msg).toContain("1 entry couldn't be written");
+    expect(msg).not.toContain("entries");
   });
 
   it("defers to the cancellation notice for a cancelled run", () => {
-    expect(archiveSkipNotice(report({ skipped: 2, cancelled: true }), t)).toBeNull();
+    expect(archiveOutcomeNotice(report({ skipped: 2, cancelled: true }), t)).toBeNull();
   });
 
   it("carries no attacker-controlled text — only counts", () => {
     // The reason strings embed the ARCHIVE's entry name. They belong in the panel, where they are
     // escaped through `displaySafePath` and can be read at leisure, not spliced into a 5-second toast.
     const hostile = "‮gnp.txt: unsafe entry name, skipped";
-    const msg = archiveSkipNotice(report({ skipped: 1, errors: [hostile] }), t);
-    expect(msg).not.toContain("gnp.txt");
-    expect(msg).not.toContain("‮");
+    for (const over of [{ skipped: 1 }, { failed: 1 }] as const) {
+      // CPE-1935 added the `failed` branch, so it gets the same check rather than inheriting the
+      // property by assumption.
+      const msg = archiveOutcomeNotice(report({ ...over, errors: [hostile] }), t);
+      expect(msg).not.toContain("gnp.txt");
+      expect(msg).not.toContain("‮");
+    }
   });
 
   it("labels the panel's disclosure button with a count and noun that agree", () => {
@@ -96,12 +122,12 @@ describe("CPE-1775 archiveSkipNotice", () => {
 
   it("is translated, not English-only, in every locale the app ships as complete", () => {
     for (const loc of ["de", "es", "ja", "ru"] as const) {
-      const msg = archiveSkipNotice(
+      const msg = archiveOutcomeNotice(
         report({ transferred: 3, skipped: 2 }),
         (key, params) => translate(loc, key, params),
       );
       expect(msg, `${loc} must not fall back to English`).not.toBe(
-        archiveSkipNotice(report({ transferred: 3, skipped: 2 }), t),
+        archiveOutcomeNotice(report({ transferred: 3, skipped: 2 }), t),
       );
       expect(msg, `${loc} left a placeholder unsubstituted: ${msg}`).not.toMatch(/\{\w+\}/);
       expect(msg, `${loc} lost the skipped count`).toContain("2");
