@@ -49,6 +49,12 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+// CPE-1936 moved these into `markdownFences.ts` so `publishRunTitleBinding.test.ts` could reuse the
+// same fence parser rather than hand-roll a second one. Re-exported here because this file's own
+// property tests for `fencedBlocks` (below) stay where they were reviewed.
+import { fencedBlocks, POWERSHELL_LANGS, POSIX_SHELL_LANGS, type Block } from "./markdownFences";
+
+export { fencedBlocks, POWERSHELL_LANGS, POSIX_SHELL_LANGS, type Block };
 
 const ROOT = process.cwd();
 
@@ -73,56 +79,6 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-export type Block = { lang: string; lines: string[]; startLine: number };
-
-/**
- * Every fenced block in `md`, with its info string ("" when untagged) and the 1-based line number of
- * its first content line.
- *
- * Handles **indented** fences (a fence inside a list item — `run.md` is a numbered-step document, and
- * re-parsing the real files found SEVEN such blocks the column-0-only version had never seen), fences
- * of **more than three** markers (a closing fence must be at least as long as its opener, which is how
- * a block can contain a ``` line of its own), and **tilde** fences. A block closes only on the same
- * marker character it opened with, so a `~~~` block is not terminated by a ``` line.
- */
-export function fencedBlocks(md: string): Block[] {
-  const lines = md.replace(/^﻿/, "").split(/\r?\n/);
-  const blocks: Block[] = [];
-  let open: (Block & { ticks: number; char: string }) | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const fence = /^\s*(([`~])\2{2,})\s*(\S*)\s*$/.exec(lines[i]);
-    if (open) {
-      // A closing fence is bare and at least as long as the opener; anything else is content.
-      if (fence && fence[3] === "" && fence[2] === open.char && fence[1].length >= open.ticks) {
-        const { ticks: _ticks, char: _char, ...block } = open;
-        blocks.push(block);
-        open = null;
-      } else {
-        open.lines.push(lines[i]);
-      }
-      continue;
-    }
-    if (fence) {
-      open = {
-        lang: fence[3].toLowerCase(),
-        lines: [],
-        startLine: i + 2,
-        ticks: fence[1].length,
-        char: fence[2],
-      };
-    }
-  }
-  if (open) {
-    const { ticks: _ticks, char: _char, ...block } = open;
-    blocks.push(block);
-  }
-  return blocks;
-}
-
-/** Info strings that mean "Windows PowerShell". */
-export const POWERSHELL_LANGS = new Set(["powershell", "pwsh", "ps1", "ps"]);
-/** Info strings that name a POSIX shell. */
-export const POSIX_SHELL_LANGS = new Set(["bash", "sh", "zsh"]);
 /** The tags that actually name a shell. `console`, `text`, `shell` and "" do not. */
 const SHELL_LANGS = new Set([...POWERSHELL_LANGS, ...POSIX_SHELL_LANGS]);
 
