@@ -737,8 +737,8 @@ describe("Agent Deck launcher — catalog controls", () => {
     expect(msg.textContent).not.toMatch(/may not include this agent/i);
     expect(msg.textContent).not.toMatch(/rolled back to/i);
     // …and not in the success colour, which is what `applied: 0` used to render as here.
-    expect(msg.style.color).toBe("rgb(208, 138, 26)"); // amber #d08a1a
-    expect(msg.style.color).not.toBe("rgb(58, 157, 74)"); // not green #3a9d4a
+    expect(msg.className).toBe("warn"); // amber — var(--msg-warn)
+    expect(msg.className).not.toBe("ok"); // not the success green — var(--msg-ok)
   });
 
   it("version rollback with no published versions shows a message and no overlay", async () => {
@@ -758,10 +758,14 @@ describe("Agent Deck launcher — catalog controls", () => {
   describe("refreshCatalog honesty (CPE-1911, split by CPE-1924)", () => {
     // Round-2 review: the genuine-success colour (green) vs. an actionable-error colour (red) vs.
     // the "nothing changed, nothing you need to do" colour (amber) must all be distinguishable —
-    // pin the actual rendered colours, not just the text, so a colour regression goes red too.
-    const GREEN = "rgb(58, 157, 74)"; // #3a9d4a
-    const RED = "rgb(208, 86, 86)"; // #d05656
-    const AMBER = "rgb(208, 138, 26)"; // #d08a1a
+    // pin the actual rendered state, not just the text, so a colour regression goes red too.
+    // CPE-1921 moved setMsg off inline hex onto a state CLASS backed by a per-scheme token (an
+    // inline hex can carry only one value and so can never be right in both themes), so the state
+    // is pinned here and the token VALUES are measured against the real ground by
+    // src/lib/aiConsoleLauncher.contrast.test.ts.
+    const GREEN = "ok"; // #msg.ok -> var(--msg-ok)
+    const RED = "err"; // #msg.err -> var(--msg-err)
+    const AMBER = "warn"; // #msg.warn -> var(--msg-warn)
 
     it("genuinely current — nothing new, nothing rejected — says so plainly, in green", async () => {
       const { w } = await mountLauncher((path) =>
@@ -779,7 +783,7 @@ describe("Agent Deck launcher — catalog controls", () => {
       await w.refreshCatalog();
       const msg = w.document.getElementById("msg");
       expect(msg.textContent).toBe("Agents are already up to date.");
-      expect(msg.style.color).toBe(GREEN);
+      expect(msg.className).toBe(GREEN);
     });
 
     // CPE-1924: anti-rollback used to collapse "you already have the latest" (==) and "the index
@@ -806,9 +810,9 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).not.toMatch(/gone backwards/i); // must NOT read as a regression
       expect(msg.textContent).not.toMatch(/may be stuck/i); // the retracted round-2 wording
       expect(msg.textContent).not.toMatch(/heads up/i);
-      expect(msg.style.color).toBe(GREEN);
-      expect(msg.style.color).not.toBe(AMBER);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(GREEN);
+      expect(msg.className).not.toBe(AMBER);
+      expect(msg.className).not.toBe(RED);
     });
 
     // The other half: the published index actually went BACKWARDS. This is the one version
@@ -838,9 +842,9 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).toMatch(/clears itself once a newer catalog is published/i);
       expect(msg.textContent).not.toMatch(/you already have the latest published agents/i);
       expect(msg.textContent).not.toBe("Agents are already up to date.");
-      expect(msg.style.color).toBe(AMBER);
-      expect(msg.style.color).not.toBe(GREEN);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(GREEN);
+      expect(msg.className).not.toBe(RED);
     });
 
     // A mixed publish (some entries current, one regressed) must surface the regression, not the
@@ -868,7 +872,7 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).toMatch(/1 of the 4 published agent entries is older than the version you already have/i);
       expect(msg.textContent).not.toMatch(/1 of the 1 /);
       expect(msg.textContent).toMatch(/nothing to do on your end/i);
-      expect(msg.style.color).toBe(AMBER);
+      expect(msg.className).toBe(AMBER);
     });
 
     // CPE-1911 review round 2 (F1): the index can verify fine while every LISTED entry fails its
@@ -894,8 +898,8 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).toMatch(/corrupted or mis-signed/i);
       expect(msg.textContent).toMatch(/existing agents are untouched/i);
       expect(msg.textContent).not.toBe("Agents are already up to date.");
-      expect(msg.style.color).toBe(AMBER);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(RED);
     });
 
     // CPE-1940: a damaged LOCAL versions.json makes the host refuse the apply (fail-closed). It
@@ -927,8 +931,8 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).not.toMatch(/try again later/i);
       expect(msg.textContent).not.toBe("Agents are already up to date.");
       // Nothing was broken by this — amber, not red.
-      expect(msg.style.color).toBe(AMBER);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(RED);
     });
 
     it("the fetch itself failed (e.g. a 404 from a dead pipeline) — surfaces the real reason in amber, not a generic 'no update' line in red", async () => {
@@ -943,8 +947,8 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).toMatch(/404/);
       expect(msg.textContent).not.toBe("Agents are already up to date.");
       expect(msg.textContent).not.toMatch(/^No agent update available/);
-      expect(msg.style.color).toBe(AMBER);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(RED);
     });
 
     it("offline is reported distinctly from a failed fetch, in amber not red", async () => {
@@ -956,8 +960,8 @@ describe("Agent Deck launcher — catalog controls", () => {
       await w.refreshCatalog();
       const msg = w.document.getElementById("msg");
       expect(msg.textContent).toMatch(/you're offline/i);
-      expect(msg.style.color).toBe(AMBER);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(RED);
     });
 
     // CPE-1949: the FINAL else — `indexOk:false` with no error, no offline flag and no damaged
@@ -994,8 +998,8 @@ describe("Agent Deck launcher — catalog controls", () => {
       expect(msg.textContent).not.toMatch(/you're offline/i);
       expect(msg.textContent).not.toBe("Agents are already up to date.");
       // Nothing on the user's machine broke — amber, not red.
-      expect(msg.style.color).toBe(AMBER);
-      expect(msg.style.color).not.toBe(RED);
+      expect(msg.className).toBe(AMBER);
+      expect(msg.className).not.toBe(RED);
     });
   });
 });

@@ -83,3 +83,17 @@ because a green test sits beside it).
 
 **Sidecar caveat:** the launcher is `include_str!`'d into the host, so a real-app check needs the
 **host rebuilt with sidecar config** — a launcher swap is not a host swap.
+
+## Two corrections to site 4, measured on PR #1076 round 2
+
+Re-derived independently while correcting #1076's claims (headless Chrome `--dump-dom` over the real
+`<style>` blocks and `<body>` markup, `:hover`/`:focus` forced on by stripping those pseudo-classes
+from a second copy of the sheet, and the JS-built `.close-all-btn` injected into the real `#tabs`):
+
+- **Site 4 fails in dark too — 4.13:1** — not only in light. The row above reads as light-only.
+- **Its light figure is 3.65:1, not 4.08.** 4.08 is `#d05656` on bare white; the button actually sits
+  inside `#tabs`, which paints `rgba(128,128,128,0.10)` → `rgb(242,242,242)` in light. Worse, not
+  better, and the same class of mistake the ticket is about: a colour measured against a ground it
+  does not land on.
+
+Sites 1, 2 and 3 re-measured to **2.46 / 4.24 / 4.28 / 3.35** exactly as recorded.
