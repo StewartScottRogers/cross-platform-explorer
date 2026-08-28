@@ -389,7 +389,36 @@
   .x:hover { color: var(--text); }
   .hint { color: var(--text-dim); font-size: 12.5px; margin-bottom: 12px; line-height: 1.5; }
   code { background: var(--surface-alt); padding: 0 4px; border-radius: 4px; font-size: 12px; }
-  .list { max-height: 30vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin: 6px 0; }
+  /*
+   * CPE-1968 — same defect as `OrganizeDialog.svelte`'s `.preview`, fixed the same way, and fixed
+   * here BEFORE anyone hits it. Read that file's `.preview` comment for the full mechanism and for
+   * why a stable height beat the two alternatives.
+   *
+   * The shape: `+ New macro` is a control in the dialog's HEADER, above a body that grows when an
+   * async load lands (`onMount(refresh)` -> `commands.macroList()`), on a backdrop that centres the
+   * dialog vertically. `.list` used to be `max-height: 30vh` with no floor, so it went from the
+   * ~42px of its empty state to as much as 30vh the moment the list resolved, sliding the header up
+   * by half of that under whatever the pointer was aiming at — and `.dialog` here also carries
+   * `on:click|stopPropagation`, so the stray click would be swallowed in silence exactly as it was
+   * in the Organize dialog.
+   *
+   * It did not bite in CI only because `gui-smoke/specs/macro-in-menu.smoke.ts:95` clicks
+   * `[data-testid="new-macro-btn"]` against an EMPTY macro catalog: the load resolves to `[]` and
+   * nothing changes height. That is the harness's case, not the ordinary user's — a user who has
+   * ever saved a macro gets the growth every time this dialog opens.
+   *
+   * Same invariant: the height must not depend on the CONTENT (viewport is fine). 30vh is 210px at
+   * gui-smoke's 700px window, about five ~40px rows; the clamp keeps it from being an absurd empty
+   * box on a tall screen or from pushing the dialog past `max-height: 88vh` on a short one.
+   * `flex: 0 0 auto` because `.dialog` is a flex column and would otherwise shrink this item back
+   * to content height, reintroducing exactly what the fixed height removes.
+   *
+   * NOT COVERED, deliberately: the `{#if editingName !== null}` editor block also changes the
+   * dialog's height, and `startEdit` reaches `commands.macroLoad` before it renders. That growth is
+   * USER-INITIATED (it follows the user's own click on Edit / + New macro) rather than arriving
+   * unbidden 120ms after the dialog appears, so it is not the swallowed-click shape.
+   */
+  .list { height: clamp(140px, 30vh, 260px); flex: 0 0 auto; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin: 6px 0; }
   .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--border); }
   .row-name { flex: 1 1 auto; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 90px; }
   .pill { flex: 0 0 auto; white-space: nowrap; font-size: 11px; color: var(--text-dim); background: var(--surface-alt); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }

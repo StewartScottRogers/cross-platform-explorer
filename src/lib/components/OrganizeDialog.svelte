@@ -168,7 +168,59 @@
   .rule { height: 28px; padding: 0 12px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text); font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
   .rule.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
-  .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; min-height: 120px; max-height: 45vh; overflow: auto; margin-bottom: 12px; }
+  /*
+   * CPE-1968 — .preview's height MUST NOT depend on the plan. This is the fix for a silently
+   * swallowed click, and the reasoning is recorded here because the shape of the CSS is the fix.
+   *
+   * THE DEFECT. This box used to be `min-height: 120px; max-height: 45vh`, i.e. its height was a
+   * function of its CONTENT. While the first `organize_plan` is in flight the box sits at its 120px
+   * floor; when the plan lands (120ms later — `scheduleLoad`'s debounce, in the script above) it
+   * grows to as much as 45vh. `.backdrop` centres the dialog VERTICALLY (`place-items: center`, the
+   * app-wide convention — 28 components declare it), so the dialog's growth is split evenly above
+   * and below: at the 1000x700 window gui-smoke uses, 45vh - 120px = 195px of growth moved the
+   * `.rules` row — and the four 28px rule pills in it — UP by ~98px, an eighth of a second after the
+   * dialog appeared. A pointer resting on "By extension" then found itself inside `.preview`, whose
+   * ancestor `.dialog` carries `on:click|stopPropagation`, so the click was swallowed in SILENCE: no
+   * rule change, no error, no feedback. Same jump on every rule switch, since a by_kind plan and a
+   * by_extension plan are different heights. Diagnosed in CPE-1965 (3 of 69 shard-4 CI jobs, 4.3%).
+   *
+   * WHY THIS FIX AND NOT THE OTHER TWO (decision made by the Foreman on CPE-1968; recorded here so
+   * it is not silently re-litigated by the next person who finds this box roomy):
+   *   - "Stop centring the backdrop" (`place-items: start center` + a top offset) fixes it completely
+   *     and is the cleanest in isolation — but 28 components share the centred-backdrop rule.
+   *     Changing this one dialog makes it visibly inconsistent with the other 27, and changing all 28
+   *     is a different and much larger ticket. Not this one.
+   *   - "Freeze the measured height while `loading`" keeps a short plan's box small, but needs JS
+   *     measurement AND has a first-load case with no previous height to hold — a special case on
+   *     the exact code path that is broken today.
+   *   - A single stable height removes the jump on open AND on every rule switch, with no JS, no
+   *     measurement and no first-load exception. Its cost is a mostly-empty box for a two-file plan.
+   *     That cost is PREDICTABLE, and PURPOSE.md's tiebreaker is fast / small / predictable — a
+   *     stable dialog that is sometimes roomy beats one that moves under the pointer.
+   *
+   * THE INVARIANT, which is what `OrganizeDialog.test.ts` asserts: the height must not depend on the
+   * PLAN. Depending on the viewport is fine — the viewport does not change while a plan loads. So a
+   * `clamp()` of vh between two px bounds is allowed; a `min-height`/`max-height` pair is not,
+   * because that is content-driven by definition. Do not reintroduce one.
+   *
+   * WHY 200/40vh/340, measured rather than picked. Content height derives from the declarations
+   * below: 22px of padding+border, `.summary` ~15px + 10px margin, then per group `.pill` 22px +
+   * 4px margin, per item ~16px, 2px between items, 10px between groups. That puts a two-file /
+   * two-group plan at ~141px and a 4-group / 20-file plan (an ordinary Downloads folder) at ~533px,
+   * i.e. real plans are usually TALLER than any box we would want in a 620px dialog — this is a
+   * scroll viewport, and the useful question is only how many rows it shows before scrolling. 40vh
+   * is 280px at gui-smoke's 700px window (~14 file rows) and the clamp stops it being absurd at the
+   * extremes: 340px caps it on a 1080px screen (45vh there would be 486px of mostly-empty box for a
+   * two-file plan) and 200px floors it on a short window, where it still keeps the whole dialog
+   * (~360px) inside `max-height: 85vh`. (`app.css` sets `* { box-sizing: border-box }` globally, so
+   * that height INCLUDES the 10px padding and the 1px borders — hence the 22px term above.)
+   *
+   * NOT FIXED HERE, stated so it is not mistaken for covered: `.err` renders ABOVE this box, so a
+   * rule whose plan ERRORS still moves the pills relative to one that succeeds. That is a failure
+   * path, not the load path this ticket is about, and reserving permanent empty space for an error
+   * that almost never appears is a worse trade than the jump it would prevent.
+   */
+  .preview { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; height: clamp(200px, 40vh, 340px); overflow: auto; margin-bottom: 12px; }
   .empty { color: var(--text-dim); font-size: 12.5px; padding: 8px 2px; }
   .summary { font-size: 12.5px; color: var(--text-dim); margin-bottom: 10px; }
   .groups { display: flex; flex-direction: column; gap: 10px; }

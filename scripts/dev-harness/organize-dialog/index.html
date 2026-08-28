@@ -1,0 +1,84 @@
+<!doctype html>
+<!--
+  CPE-1968 real-browser page for the Organize dialog's reflow. Mounts the REAL
+  src/lib/components/OrganizeDialog.svelte (not a stand-in) off the shared layout-guard dev server
+  (vite.harness.layout-guard.config.ts), which already aliases `../invoke` and `../bindings.gen` to
+  the shared pluggable mocks — so this case needed no change to that config.
+
+  It exists because the thing CPE-1968 fixed is a LAYOUT fact, and jsdom has no layout engine: the
+  vitest guard in src/lib/components/OrganizeDialog.test.ts can only MODEL the vertical stack from
+  the component's CSS. This page is the same question asked of a real layout engine, at the same
+  1000x700 viewport gui-smoke uses, with the real component doing the real reflow — and it is what
+  the before/after screenshots for the Visual Critic are taken from
+  (`node scripts/dev-harness/organize-dialog/shots.mjs`).
+
+  Query parameters:
+    plan=none|two|large   what `organize_plan` resolves to (default `two`)
+    delay=<ms>            how long it takes to resolve (default 120; use a large value to hold the
+                          dialog in its loading state for a screenshot)
+    legacy=1              re-apply the PRE-CPE-1968 `.preview` height (`min-height:120px;
+                          max-height:45vh`) over the shipped one, so the "before" shots come out of
+                          the SAME tree as the "after" ones rather than out of a stashed revert. The
+                          override is written as its own declaration below, next to the live one, so
+                          a reader can see both.
+    theme=light|dark      default light
+
+  The badge in the top-left reports the measured screen position of the `.rules` row, so each
+  screenshot carries its own measurement instead of asking the viewer to eyeball a diff. It is
+  `pointer-events: none` and 8px from the corner, per this repo's automation-indicator convention.
+
+  WHY THIS IS NOT A ../layout-guard/cases.mjs CASE, i.e. why it is not in CI. Every check kind that
+  engine.mjs offers (siblingOverlap, clipProbe, textOverflow, selfPaint, clickReaches) measures ONE
+  rendered moment. CPE-1968's defect is a difference BETWEEN two moments — the same element in the
+  same place before and after an async load — which none of them can express, and adding a temporal
+  check kind for one bug would be a bigger change than the bug. The CI guard for this invariant is
+  therefore src/lib/components/OrganizeDialog.test.ts, which derives it from the CSS on every run;
+  this page is the real-browser cross-check of that model and the source of the review screenshots.
+
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1968 — Organize dialog reflow</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg, #fff);
+      }
+      /* Something behind the backdrop, so the shots show the dialog over a page rather than over
+         nothing — the backdrop's own 25% scrim is part of what the Visual Critic is judging. */
+      #behind {
+        padding: 24px;
+        font: 13px/1.6 system-ui, sans-serif;
+        color: var(--text-dim, #666);
+      }
+      #probe {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        z-index: 9999;
+        pointer-events: none;
+        font: 11px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace;
+        white-space: pre;
+        padding: 6px 8px;
+        border-radius: 4px;
+        border: 1px solid var(--border-strong, #999);
+        background: var(--surface, #fff);
+        color: var(--text, #111);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="behind">
+      CPE-1968 harness page — the real OrganizeDialog.svelte over a stand-in folder view.
+    </div>
+    <div id="mount"></div>
+    <div id="probe">measuring…</div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -20,6 +20,7 @@
     "harness:macro-collision": "vite --config vite.harness.macro-collision.config.ts",
     "harness:layout-guard-server": "vite --config vite.harness.layout-guard.config.ts",
     "harness:layout-guard": "node scripts/dev-harness/layout-guard/run.mjs",
+    "harness:organize-dialog-shots": "node scripts/dev-harness/organize-dialog/shots.mjs",
     "harness:launcher-contrast": "node scripts/dev-harness/launcher-contrast/run.mjs",
     "tauri": "tauri"
   },
