@@ -202,6 +202,30 @@ establishing CI outcomes, the Foreman must actually pick them up:
   supervisor. Sweep the open PRs at 45 s apiece, dispatch in between, and come back round. Re-check the
   current head by **SHA**, not PR number alone: a stale PR-number check can pass against a superseded
   head, and `--watch` exits 0 when the branch moves under it rather than only when checks pass.
+- **Read the exit code, not just the line (CPE-1906).** `ci-poll.mjs` has five outcomes and only one of
+  them means merge:
+  `0` green · `1` a check FAILED · `2` still pending — the normal outcome, re-invoke or come back round ·
+  **`3` COULD NOT ASK** — `gh` errored, hung, returned garbage, **or answered 200 with JSON that is not
+  a board** (a REST `{"message":"Not Found"}`, a GraphQL partial with a null `statusCheckRollup`).
+  Nothing was read. This is neither pending nor green: do **not** merge and do **not** wait. Check
+  `gh auth status`, the PR number and the network, then re-invoke. ·
+  **`4` a check DID NOT RUN** — one or more checks came back `SKIPPED` with no job-level `if:` to explain
+  it, i.e. a `needs:` cascade off an earlier failure. `ci.yml`'s five Rust test jobs sit behind
+  `needs: lockfile-preflight`, so a preflight failure skips the entire Rust suite; before CPE-1906 that
+  reported as `completed success`. Exit 4 also covers a board where **nothing ran at all** (every
+  finished check was a by-design skip) and one that finished in a shape the poll cannot call. Not red,
+  not green — do not merge; find out why.
+  **The prefix and the code agree, one-to-one** — `completed success`→0, `completed failure`→1,
+  `pending`→2, `unknown`→3, `completed did-not-run` / `completed unclear`→4. Grep either; they cannot
+  disagree, which they used to: a board of nothing but by-design skips printed `completed skipped` and
+  exited **1** ("a check FAILED") with zero failures, and `completed skipped` was simultaneously the
+  exit-4 prefix.
+  A `pending` line also carries **`gh_failures=N`** — reads that failed without reaching the bail
+  threshold. `pending` with a non-zero count there means the board is stale as well as unfinished.
+  The pending line also now carries **`oldest_pending_min`** and the name of the longest-running
+  unfinished check. That is the number to compare against the same job on a sibling PR when deciding
+  whether a job is slow or hung — a judgement this crew previously made by hand-reading timestamps, once
+  for over an hour with two approved PRs blocked behind it.
 - **Run the arrival check on every returned sub-agent report:** `node scripts/stall-check.mjs
   report.txt --prior <n>`, where `<n>` is how many stall-shaped reports that same agent has already
   returned. It exits `0` accept, `3` re-invoke, `4` take-over. This is mechanical on purpose — "a monitor

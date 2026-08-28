@@ -27,7 +27,8 @@
 //      the product's own "watcher" vocabulary) is not; and a second stall from the same agent escalates
 //      to take-over rather than a third re-invoke, which is the loop bound the ticket asks for.
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   HARNESS_TOOL_TIMEOUT_MS,
@@ -44,6 +45,14 @@ import {
   readFromRunJson,
   readFromPrJson,
   shouldSleepAgain,
+  ghCallTimeoutMs,
+  boundedWallClockMs,
+  classifyGhFailure,
+  formatErrorVerdict,
+  verdictClass,
+  assertReadableShape,
+  GH_CALL_TIMEOUT_MS,
+  GH_MIN_CALL_TIMEOUT_MS,
 } from "../../scripts/ci-poll.mjs";
 import { classifyReport, stripQuoted, STALL_PATTERNS } from "../../scripts/stall-check.mjs";
 
@@ -209,7 +218,41 @@ describe("ci-poll mechanises the poll traps sprint.md states in prose (CPE-1880)
       { ticks: 3, elapsedMs: 96_000, target: "32672218824" },
     );
     expect(done).toMatch(/^CI VERDICT: completed success/);
-    expect(done).toMatch(/total_count=19 pending=0 mergeable=MERGEABLE sha=84d20517/);
+    // CPE-1906 ADDED to this line and did not reorder it: `oldest_pending_min`, `skipped` and `neutral`
+    // now sit between `pending` and `mergeable`. The keys the sprint runbooks quote are all still
+    // present and still in their original relative order, so a caller grepping any one of them is
+    // unaffected — which is the compatibility promise, asserted rather than asserted-to.
+    for (const key of ["total_count=19", "pending=0", "mergeable=MERGEABLE", "sha=84d20517"]) {
+      expect(done).toContain(key);
+    }
+    // CPE-1906 round 2 appended `gh_failures=` AFTER `sha=` for the same reason and under the same rule:
+    // new keys go on the end, so every existing position is untouched.
+    const order = [
+      "total_count=",
+      "pending=",
+      "oldest_pending_min=",
+      "skipped=",
+      "neutral=",
+      "mergeable=",
+      "sha=",
+      "gh_failures=",
+    ];
+    let at = -1;
+    for (const key of order) {
+      const next = done.indexOf(key, at + 1);
+      expect(next, `${key} missing from the verdict line`).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
+  it("reports how many `gh` reads failed, so a pending verdict is not silent about them", () => {
+    const line = formatVerdict(
+      { done: false, reason: "1 of 1 checks still pending" },
+      read({ pending: 1, totalCount: 1 }) as never,
+      { ticks: 8, elapsedMs: 8_000, target: "1078" },
+      { ghFailures: 5 },
+    );
+    expect(line).toContain("gh_failures=5");
   });
 
   it("a budget-exhausted verdict is a real report — it carries the prescribed handoff line, not a promise", () => {
@@ -505,27 +548,54 @@ describe("the harness scripts stay importable from vitest (CPE-1880)", () => {
   // case: a script in `scripts/` that nobody imports yet (a future one, or `organize-done.mjs`) sitting
   // unpinned, where this names the file and points at `.gitattributes` instead of leaving the next
   // author to rediscover the whole thing. So it scans the directory rather than a hard-coded pair.
-  it("every scripts/**/*.mjs is checked out LF, not CRLF", () => {
+  it("every tracked *.mjs is checked out LF, not CRLF — enumerated, not remembered", () => {
     // RECURSIVE, and `.gitattributes` matches `scripts/**/*.mjs`, not `scripts/*.mjs`: the first
     // version of both missed `scripts/dev-harness/sidebar-drop-stack-overlap/check.mjs`, which was
     // sitting unpinned and unseen. A guard that cannot see the file it guards is the failure mode this
     // whole ticket is about.
-    const dir = join(process.cwd(), "scripts");
-    const mjs = readdirSync(dir, { recursive: true })
-      .map((f) => String(f).split("\\").join("/"))
-      .filter((f) => f.endsWith(".mjs"));
-    expect(mjs.length).toBeGreaterThanOrEqual(4); // ci-poll, stall-check, organize-done, dev-harness/check
-    expect(mjs.some((f) => f.includes("/"))).toBe(true); // the recursion actually reaches a subdirectory
+    //
+    // CPE-1906 round 2 widened the ROOT for the same reason, one directory over. This scanned
+    // `scripts/` only, and `.gitattributes` pinned `scripts/**/*.mjs` only, so
+    // `src/lib/fixtures/ghStub.mjs` — a .mjs under `src/` — was unpinned AND unseen, and checked out
+    // CRLF (measured: 131 CRLF in the worktree against an LF blob). It survived only because it is
+    // spawned as a child process rather than imported through Vite's transform. That is luck, not
+    // design, and it is exactly CPE-1932: enumerate the whole class at run time, do not list the
+    // instances someone remembered. `git ls-files` is the enumeration; the near-empty check is the
+    // guard against the enumeration silently returning nothing.
+    const listed = execFileSync("git", ["ls-files", "*.mjs"], { cwd: process.cwd(), encoding: "utf8" });
+    const mjs = listed
+      .split("\n")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    expect(mjs.length, "git ls-files returned no .mjs at all — the enumeration itself is broken").toBeGreaterThanOrEqual(5);
+    expect(mjs.some((f) => f.startsWith("scripts/"))).toBe(true);
+    expect(mjs.some((f) => !f.startsWith("scripts/")), "the scan no longer reaches outside scripts/").toBe(true);
     for (const rel of mjs) {
-      const bytes = readFileSync(join(dir, rel));
+      const bytes = readFileSync(join(process.cwd(), rel));
       expect(
         bytes.includes("\r\n"),
-        `scripts/${rel} is checked out with CRLF, which makes Vite's transform of it throw an ` +
-          `unlocatable SyntaxError. .gitattributes pins scripts/**/*.mjs to LF, but git does not ` +
-          `rewrite a working tree it is not otherwise touching, so an existing checkout keeps its CRLF ` +
-          `copy. Fix this checkout with:  rm scripts/${rel} && git checkout -- scripts/${rel}  ` +
-          `(the index bytes are already LF, so the checkout re-materialises it with the pin applied).`,
+        `${rel} is checked out with CRLF, which makes Vite's transform of it throw an unlocatable ` +
+          `SyntaxError. .gitattributes pins it to LF, but git does not rewrite a working tree it is not ` +
+          `otherwise touching, so an existing checkout keeps its CRLF copy. Fix this checkout with:  ` +
+          `rm ${rel} && git checkout -- ${rel}  (the index bytes are already LF, so the checkout ` +
+          `re-materialises it with the pin applied).`,
       ).toBe(false);
+    }
+  });
+
+  it("and .gitattributes actually pins every one of them — the guard above only sees THIS checkout", () => {
+    // Red-proofing the pin rather than the symptom: the CRLF test passes on a Linux CI runner whatever
+    // `.gitattributes` says, because that checkout is LF regardless. Ask git what attributes it will
+    // apply, which is the thing that has to be true for a Windows checkout to come out right.
+    const listed = execFileSync("git", ["ls-files", "*.mjs"], { cwd: process.cwd(), encoding: "utf8" });
+    const mjs = listed
+      .split("\n")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    expect(mjs.length).toBeGreaterThanOrEqual(5);
+    const attrs = execFileSync("git", ["check-attr", "eol", "--", ...mjs], { cwd: process.cwd(), encoding: "utf8" });
+    for (const line of attrs.split("\n").filter(Boolean)) {
+      expect(line, `${line} — add a matching rule to .gitattributes`).toMatch(/: eol: lf$/);
     }
   });
 });
@@ -576,6 +646,214 @@ describe("S4 RED-PROOF: the no-backgrounding bound is ENFORCED at runtime, not m
     expect(src).toMatch(/const deadline = started \+ opts\.budgetMs;/);
     expect(src).toMatch(/Clamping the\s*\n?\s*\* BUDGET does not by itself bound the WALL CLOCK/);
   });
+
+  // ── CPE-1906: the matrix re-run the ticket asks for, plus the leg it was missing ────────────────────
+  it("re-runs CPE-1880's interval × gh-cost matrix and every combination still lands under the cap", () => {
+    const intervals = [5, 10, 15, 17, 20, 30, 45, 60, 90, 120].map((s) => s * 1000);
+    const ghCosts = [1_000, 5_000, 15_000, 30_000, 60_000];
+    const budgets = [30_000, 90_000, 300_000, MAX_BUDGET_MS];
+    let combinations = 0;
+    for (const budgetMs of budgets) {
+      for (const intervalMs of intervals) {
+        for (const ghCostMs of ghCosts) {
+          combinations += 1;
+          // THE BOUND is what must be under the cap for every combination — and note what it is NOT a
+          // function of: `ghCostMs` and `intervalMs` do not appear in it at all. That independence IS
+          // gap 1's fix. The per-call timeout means a slow or hung `gh` can no longer buy itself extra
+          // wall clock, so the guarantee stops being a guess about how fast the network is.
+          const bound = boundedWallClockMs(budgetMs);
+          expect(bound, `budget=${budgetMs} interval=${intervalMs} ghCost=${ghCostMs}`).toBeLessThan(
+            HARNESS_TOOL_TIMEOUT_MS,
+          );
+          // The model is still computed and still reported to the operator, but it is no longer load
+          // bearing.
+          expect(Number.isFinite(worstCaseWallClockMs(budgetMs, intervalMs, ghCostMs))).toBe(true);
+        }
+      }
+    }
+    expect(combinations).toBe(budgets.length * intervals.length * ghCosts.length);
+    // Sanity that the matrix is not vacuous: the old MODEL does cross the cap at a 60 s `gh` call on
+    // the shipped defaults, which is precisely the hole the structural bound closes.
+    expect(worstCaseWallClockMs(MAX_BUDGET_MS, DEFAULT_INTERVAL_MS, 60_000)).toBeGreaterThan(
+      HARNESS_TOOL_TIMEOUT_MS,
+    );
+  });
+
+  it("bounds ONE gh call by the smaller of its ceiling and the time left, never below the floor", () => {
+    const deadline = 1_000_000;
+    // Plenty of time left → the ceiling applies.
+    expect(ghCallTimeoutMs(deadline - 300_000, deadline)).toBe(GH_CALL_TIMEOUT_MS);
+    // Less than the ceiling left → the remaining time applies, so the call cannot cross the deadline.
+    expect(ghCallTimeoutMs(deadline - 20_000, deadline)).toBe(20_000);
+    // Past the deadline → the floor, which is the ONLY term by which the process can outlive its budget
+    // and therefore the only term `boundedWallClockMs` has to add.
+    expect(ghCallTimeoutMs(deadline + 5_000, deadline)).toBe(GH_MIN_CALL_TIMEOUT_MS);
+    expect(boundedWallClockMs(MAX_BUDGET_MS)).toBe(MAX_BUDGET_MS + GH_MIN_CALL_TIMEOUT_MS);
+  });
+
+  it("classifies a gh failure by what it means for the caller, not by its stack", () => {
+    const timedOut = Object.assign(new Error("Command failed"), { killed: true, signal: "SIGKILL" });
+    expect(classifyGhFailure(timedOut).kind).toBe("timed out");
+    const nonZero = Object.assign(new Error("Command failed"), { status: 1, stderr: "gh: not found\n" });
+    expect(classifyGhFailure(nonZero).kind).toBe("gh exited non-zero");
+    expect(classifyGhFailure(nonZero).message).toBe("gh: not found");
+    expect(classifyGhFailure(new SyntaxError("Unexpected token < in JSON")).kind).toBe("unparseable output");
+    expect(classifyGhFailure(Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" })).kind).toBe("gh not found");
+  });
+
+  it("the could-not-ask verdict never uses the vocabulary that tells a caller to wait", () => {
+    const line = formatErrorVerdict(
+      { kind: "timed out", message: "gh exceeded its per-call timeout", count: 3 },
+      null,
+      { ticks: 3, elapsedMs: 15_000, target: "1031" },
+    );
+    expect(line).toMatch(/^CI VERDICT: unknown —/);
+    // The two sentences that made an error read as "keep waiting". Neither may survive on this path.
+    expect(line).not.toMatch(/CI VERDICT: pending/);
+    expect(line).not.toMatch(/CI still pending on/);
+    expect(line).toContain("do not merge and do not wait on it");
+  });
+
+  it("a SKIPPED check is never folded into success, and the other three tokens keep their meaning", () => {
+    const rollup = (entries: unknown[]) => ({ statusCheckRollup: entries, mergeable: "MERGEABLE", headRefOid: "abc" });
+    const check = (name: string, conclusion: string) => ({
+      __typename: "CheckRun",
+      name,
+      status: "COMPLETED",
+      conclusion,
+    });
+    const read = readFromPrJson(rollup([check("Frontend", "SUCCESS"), check("MSRV check", "SKIPPED")]));
+    // The skip is visible as a NAME, which is what lets `classifySkips` adjudicate it. The old code
+    // discarded it entirely by matching `SKIPPED` inside the success test.
+    expect(read.skippedNames).toEqual(["MSRV check"]);
+    expect(read.failedNames).toEqual([]);
+    // NEUTRAL is kept as a pass — it RAN and GitHub treats it as non-blocking — but it is counted, so
+    // "how many checks declined to judge" is never invisible either.
+    const neutral = readFromPrJson(rollup([check("Frontend", "NEUTRAL")]));
+    expect(neutral.conclusion).toBe("success");
+    expect(neutral.neutralCount).toBe(1);
+    // CANCELLED / TIMED_OUT / a shape nobody has seen all fall through to failure. Fail closed.
+    for (const c of ["CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "SOMETHING_NEW"]) {
+      expect(readFromPrJson(rollup([check("X", c)])).conclusion, c).toBe("failure");
+    }
+    // The StatusContext arm is now gated on there being no `conclusion`, so it can never paper over a
+    // CheckRun after a `gh` upgrade that starts emitting both fields.
+    const ctx = readFromPrJson(rollup([{ __typename: "StatusContext", context: "vercel", state: "SUCCESS" }]));
+    expect(ctx.conclusion).toBe("success");
+    const both = readFromPrJson(
+      rollup([{ __typename: "CheckRun", name: "X", status: "COMPLETED", conclusion: "FAILURE", state: "SUCCESS" }]),
+    );
+    expect(both.conclusion).toBe("failure");
+  });
+
+  it("a run GitHub calls `success` with skipped jobs is downgraded, not believed", () => {
+    // `gh run view` reports a run whose jobs were skipped by a `needs:` cascade as `success`. Trusting
+    // that field is the same defect one level up from the rollup.
+    const read = readFromRunJson({
+      status: "completed",
+      conclusion: "success",
+      headSha: "deadbeef",
+      jobs: [
+        { name: "Lockfile pre-flight", status: "completed", conclusion: "success" },
+        { name: "Server crates (windows-latest)", status: "completed", conclusion: "skipped" },
+      ],
+    });
+    expect(read.conclusion).toBe("skipped");
+    expect(read.skippedNames).toEqual(["Server crates (windows-latest)"]);
+  });
+
+  it("refuses a gh payload that did not answer the question we asked (CPE-1906 round 2)", () => {
+    // `gh` exits 0 on all of these. The readers are written defensively so a formatter can never crash,
+    // which is exactly why an API error body became `total_count=0` — "no checks scheduled yet".
+    for (const bad of [
+      { message: "Not Found", documentation_url: "https://docs.github.com/rest" },
+      { data: null, errors: [{ message: "Could not resolve" }] },
+      { mergeable: "MERGEABLE", headRefOid: "abc", statusCheckRollup: null },
+      null,
+      "nope",
+      [1, 2, 3],
+    ]) {
+      expect(() => assertReadableShape(bad, "pr"), JSON.stringify(bad)).toThrow(/gh returned JSON/);
+      // …and it is classified as its own kind, because "the id or the token is wrong" is a different
+      // next move from "a proxy printed HTML at me".
+      let kind = "";
+      try {
+        assertReadableShape(bad, "pr");
+      } catch (err) {
+        kind = classifyGhFailure(err).kind;
+      }
+      expect(kind).toBe("unexpected payload shape");
+    }
+    // A REAL PR with nothing scheduled yet has the rollup ARRAY and a real SHA. It must pass, or the
+    // guard reds a legitimate board — the whole risk of doing this at all.
+    expect(() => assertReadableShape({ mergeable: "MERGEABLE", headRefOid: "abc", statusCheckRollup: [] }, "pr")).not.toThrow();
+    // `--run` demands BOTH `jobs` and `status`, not "neither of them": a payload with `status` and no
+    // `jobs` read as terminal + conclusion success + total_count 0 and exited 0, GREEN.
+    expect(() => assertReadableShape({ status: "completed", conclusion: "success" }, "run")).toThrow();
+    expect(() => assertReadableShape({ jobs: [] }, "run")).toThrow();
+    expect(() => assertReadableShape({ status: "completed", jobs: [] }, "run")).not.toThrow();
+  });
+
+  it("the verdict prefix and the exit code come from ONE predicate, and it fails closed", () => {
+    const done = { done: true, reason: "pending=0 with total_count stable" };
+    const base = { totalCount: 1, failedNames: [], ranCount: 1 };
+    // Red, both ways in — a named failing check, or a run-level `failure` with no failing job. The
+    // second one is where the two old predicates disagreed.
+    expect(verdictClass(done, { ...base, failedNames: ["MSRV check"], conclusion: null } as never)).toMatchObject({
+      kind: "failure",
+      code: 1,
+    });
+    expect(verdictClass(done, { ...base, conclusion: "failure" } as never)).toMatchObject({ kind: "failure", code: 1 });
+    // Red outranks a skip: same board, plus an unexplained skip, is still exit 1.
+    expect(verdictClass(done, { ...base, conclusion: "failure" } as never, ["MSRV check"])).toMatchObject({ code: 1 });
+    // Did not run: an unexplained skip, OR nothing that finished actually ran, OR an empty board.
+    expect(verdictClass(done, { ...base, conclusion: "success" } as never, ["MSRV check"])).toMatchObject({
+      kind: "did-not-run",
+      code: 4,
+    });
+    expect(verdictClass(done, { ...base, ranCount: 0, conclusion: "skipped" } as never)).toMatchObject({
+      kind: "did-not-run",
+      code: 4,
+    });
+    expect(verdictClass(done, { ...base, totalCount: 0, conclusion: "success" } as never)).toMatchObject({ code: 4 });
+    // Green needs a positive conclusion AND something to have run. `--run` says `skipped` when GitHub
+    // said success and a job skipped; by here the skips are adjudicated and `ranCount > 0`.
+    expect(verdictClass(done, { ...base, conclusion: "success" } as never)).toMatchObject({ kind: "success", code: 0 });
+    expect(verdictClass(done, { ...base, conclusion: "skipped" } as never)).toMatchObject({ kind: "success", code: 0 });
+    // Anything else is NOT a pass, and says so under its own prefix rather than borrowing "failure".
+    expect(verdictClass(done, { ...base, conclusion: "cancelled" } as never)).toMatchObject({
+      kind: "unclear",
+      code: 4,
+    });
+    expect(verdictClass({ done: false, reason: "budget" }, { ...base } as never)).toMatchObject({
+      kind: "pending",
+      code: 2,
+    });
+  });
+
+  it("reports the age and name of the longest-running pending check", () => {
+    const now = Date.parse("2026-08-27T12:00:00Z");
+    const read = readFromPrJson(
+      {
+        statusCheckRollup: [
+          { __typename: "CheckRun", name: "fast", status: "IN_PROGRESS", startedAt: "2026-08-27T11:55:00Z" },
+          {
+            __typename: "CheckRun",
+            name: "Server crates (windows-latest)",
+            status: "IN_PROGRESS",
+            startedAt: "2026-08-27T10:57:00Z",
+          },
+        ],
+      },
+      now,
+    );
+    expect(read.oldestPendingName).toBe("Server crates (windows-latest)");
+    expect(Math.round((read.oldestPendingAgeMs ?? 0) / 60_000)).toBe(63);
+    // A missing or unparseable timestamp degrades to null rather than to 0, which would read as "just
+    // started" — the wrong direction for a signal whose whole job is spotting a job that is stuck.
+    const undated = readFromPrJson({ statusCheckRollup: [{ __typename: "CheckRun", name: "x", status: "QUEUED" }] }, now);
+    expect(undated.oldestPendingAgeMs).toBeNull();
+  });
 });
 
 describe("the pattern table stays honest (CPE-1880)", () => {
@@ -590,6 +868,21 @@ describe("the pattern table stays honest (CPE-1880)", () => {
 
   it("at least one HARD pattern exists — otherwise a handoff line would excuse every stall", () => {
     expect(STALL_PATTERNS.some((p) => p.severity === "hard")).toBe(true);
+  });
+
+  // CPE-1906 item 4 — the `no-further-action` comment cited "the lockfile already matches, so no
+  // further action is needed" as a SAFE example. Bare, it is not: it trips the pattern. It classifies
+  // `accept` only because the pattern is soft and the mandated handoff tail excuses it. Both halves are
+  // asserted here, so the corrected comment is checked rather than taken on trust.
+  it("the `no-further-action` example is clean in context and NOT in isolation, exactly as documented", () => {
+    const bare = "The lockfile already matches, so no further action is needed.";
+    expect(classifyReport(bare).matches.map((m) => m.id)).toContain("no-further-action");
+    expect(classifyReport(bare).action).toBe("re-invoke");
+    const withHandoff = `${bare} CI VERDICT: completed success — total_count=19 pending=0.`;
+    expect(classifyReport(withHandoff).action).toBe("accept");
+    // …and the file must say so, rather than repeating the claim the review found overstated.
+    const src = readFileSync(join(process.cwd(), "scripts", "stall-check.mjs"), "utf8");
+    expect(src).toMatch(/clean \*in context\*, not in isolation/);
   });
 
   it("an empty or absent report is not silently accepted as a real one", () => {
