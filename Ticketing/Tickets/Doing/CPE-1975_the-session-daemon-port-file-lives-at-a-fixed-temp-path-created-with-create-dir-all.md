@@ -531,3 +531,75 @@ correction. Now corrected in place, marked false, and pointed at the constants.
 - The recorded `console_dir_is_real` sabotage figure was **spot-checked rather than assumed** after
   these edits — 421/2, unchanged, same two tests. Baseline is still 423.
 - Still unmeasured here, still marked so: every Linux and macOS leg.
+
+---
+
+## Round 5 — review response (SEC PASS re-affirmed, one finding)
+
+Everything functional verified right and every number reproduced by the Reviewer, including that the
+token-content fix genuinely closes the vacuity (checked against the real log) and that the two legs
+of round 4's repaired pair are **not shadowed** — each has a sabotage reaching only it.
+
+The finding was the claim I had specifically asked to be verified, and it was **false, measured in
+both directions**.
+
+### The defect: the strip I called load-bearing was inert
+
+Round 4 said comment-stripping was *"load-bearing rather than ceremonial ... the exact silent-pass
+shape CPE-1933 documents, reproduced here by construction"*. Measured with the strip disabled: **the
+strip changed nothing, in either direction.** The structural reason is the anchor —
+
+```
+108:  // … `writeln!(std::io::stderr(), …)` notices      ← the quoting comment
+111:  if let Err(e) = write_port_file(…) {               ← slice STARTED here
+125:      let _ = writeln!(std::io::stderr(), "…");
+128:  Ok(handle)                                          ← slice ended here
+```
+
+— so the ~30-line block quoting the call sat **before** the scanned region and was never read.
+
+**This was the third time in one PR that a sentence reached further than its measurement**: the report
+went to a channel that was off; the guard could not see what it named; then the guard's justification
+described a mechanism that was not operating. Each underlying fix was right each time, which is
+exactly what made the next sentence easy to overstate.
+
+### Took (a): fixed the mechanism, so the sentence became a measurement
+
+`reportRegion` now starts at `let handle = Self::spawn_detached`, putting the quoting block **inside**
+the scanned region. All four cells run, and then **re-run after the call-site comment was edited**,
+because that comment now lives inside the scanned region and editing it could have moved every cell:
+
+| | strip ON | strip OFF (raw source) |
+|---|---|---|
+| **real code** | 3 passed — green | **1 failed** — the `enabled()` leg reds on the comment |
+| **`writeln!` deleted** | **1 failed** — the stderr leg reds, naming the missing call | **the stderr leg PASSES** — matched the comment's quotation; only the `enabled()` leg reds, for the wrong reason |
+
+The bottom-right cell is the point: with the strip off, **the leg that guards the deletion goes green
+on a comment.** CPE-1933's silent-pass shape, now actually reproduced rather than asserted. The
+scanner also stops being defeatable by someone moving the explanation into the arm.
+
+The two assertions were **split into separate `it()` blocks** so each cell is unambiguous rather than
+inferred from a combined pass/fail. `session_supervisor.rs`'s call-site comment now states the
+measured version.
+
+### Both additions taken
+
+- **Blind-spot bucket**, kept as an open list ("at least these", never a count): the scan is anchored
+  on **literal substrings**, so a semantically-equivalent respelling reds (safe direction) but **a
+  rename of the `Ok(handle)` tail silently moves the slice boundary** — noted with the asymmetry that
+  a renamed *start* anchor throws loudly while a changed *tail* quietly resizes the region. Also
+  added: `not.toContain("enabled()")` cannot see a gate expressed some other way.
+- **The `read_to_string` residual** is named at the site: `unwrap_or_default()` treats a permission
+  error like the legitimate first-run `NotFound`, so an unreadable log would pass vacuously. Left as
+  is — the process that wrote the file is the one reading it — with the fix stated for if that widens.
+
+The stated blind spot the Reviewer judged honest is kept exactly as it was.
+
+### Round-5 verification
+
+- `sidecar/ai-console` **423 / 0** (no `NOT VERIFIED` notice), `sidecar/host` **153 / 0**,
+  `sidecar/contract` **12 / 0**; clippy clean.
+- `npm run check` 0 errors / 0 warnings; all three CPE-1975 TS guards green (**8 tests**, up one from
+  the split).
+- No production behaviour changed this round: the two refusals, the reaper's delete primitive and the
+  ungated stderr report are byte-identical to round 3.

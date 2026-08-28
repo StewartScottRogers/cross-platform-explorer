@@ -21,14 +21,34 @@
 // one that structurally cannot fire is worse than none, because it reads as one.** So the guard now
 // lives where the regression lives: over the source of the call site itself.
 //
-// ## How it reads the source
+// ## How it reads the source, and the strip claim — measured in both directions
 //
-// Comments are **stripped first** (`stripRustComments`), which is load-bearing here rather than
-// ceremonial: the function this scans is wrapped in ~30 lines of commentary that quote
-// `writeln!(std::io::stderr(), …)` verbatim while explaining why it is there. A scanner reading raw
-// text would match the *explanation* and pass with the code deleted — the exact silent-pass shape
-// CPE-1933 documents, reproduced here by construction. Same machinery and same precedent as
-// `MacroRunConfirm.test.ts`, which walks a `format!` literal out of `fsutil.rs`.
+// Comments are **stripped first** (`stripRustComments`), CPE-1933 rule 2. Same machinery and
+// precedent as `MacroRunConfirm.test.ts`, which walks a `format!` literal out of `fsutil.rs`.
+//
+// Round 4 asserted the strip was "load-bearing rather than ceremonial ... reproduced here by
+// construction". **That was false and was measured false**, in both directions: the scanned region
+// was anchored at `if let Err(`, and the ~30-line block quoting the call sits *before* that anchor,
+// so it was never scanned. Raw and stripped source gave identical verdicts. **A third sentence in
+// this PR that reached further than its measurement** — after a report routed to a channel that was
+// off, and a guard that could not see what it named.
+//
+// Round 5 fixed the mechanism rather than the sentence: [`reportRegion`] now starts at the
+// `spawn_detached` line, so the quoting block falls **inside** the scanned region and the strip
+// decides the outcome. Measured 2026-08-28, all four cells run (`npx vitest run
+// src/lib/consoleRefusalReport.test.ts`, 3 tests in the file) — and **re-run after the call-site
+// comment was edited**, because that comment lives inside the scanned region and editing it could
+// have changed every cell:
+//
+// | | strip ON | strip OFF (raw source) |
+// |---|---|---|
+// | **real code** | 3 passed — green | **1 failed**: the `enabled()` leg reds on the comment |
+// | **`writeln!` deleted** | **1 failed**: the stderr leg reds, naming the missing call | **the stderr leg PASSES** — it matched the comment's quotation; only the `enabled()` leg reds, for the wrong reason |
+//
+// The bottom-right cell is the point: with the strip off, **the leg that guards the deletion goes
+// green on a comment.** That is CPE-1933's silent-pass shape, now actually reproduced rather than
+// asserted. The top-right cell is the other direction — raw source reds on correct code, because the
+// same block explains the `enabled()` gate it is checking for the absence of.
 //
 // ## Red-proof, run rather than asserted
 //
@@ -45,6 +65,17 @@
 // and its stderr captured — worth doing on the day `discover_or_spawn` acquires a caller, and noted
 // here so that is a decision rather than an oversight. What this closes is the regression that
 // actually happened and was otherwise caught by nothing.
+//
+// **Not caught today, at least these** (an open list — never a count):
+//
+// * The scan is anchored on **literal substrings**. A semantically-equivalent respelling
+//   (`let mut e = std::io::stderr(); writeln!(e, …)`) reds — the safe direction, a false alarm
+//   rather than a miss. But **a rename of the `Ok(handle)` tail silently moves the slice boundary**,
+//   and a rename of the `let handle = Self::spawn_detached` start anchor throws (loud) while a
+//   changed tail merely shrinks or grows the region. That asymmetry is the one to watch.
+// * `not.toContain("enabled()")` is a substring test over the region, so it catches the gate being
+//   named there; it cannot see a gate expressed some other way (a helper, a `cfg!`, a bool computed
+//   earlier and passed in).
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -79,35 +110,55 @@ function fnBody(source: string, name: string): string {
   return source.slice(at, next);
 }
 
+/**
+ * The region of `discover_or_spawn` that reports a `write_port_file` failure: from the
+ * `spawn_detached` call that produces the handle, to the function's `Ok(handle)` tail.
+ *
+ * **The start anchor is deliberately the `spawn_detached` line and not the `if let Err(`**, and that
+ * choice is the whole reason comment-stripping is load-bearing here. The ~30-line block explaining
+ * *why* the report is ungated sits **between** those two anchors and quotes both
+ * `writeln!(std::io::stderr(), …)` and `enabled()` verbatim. Anchoring on `if let Err(` — which is
+ * what round 4 did — put that block outside the scanned region, so raw and stripped source gave
+ * identical verdicts and the strip did nothing. Round 5 widened it, and the four-cell table in this
+ * file's header is the measurement showing the strip now decides the outcome.
+ */
+function reportRegion(source: string): string {
+  const body = fnBody(source, "discover_or_spawn");
+  // The premise: this function still writes the port file at all. Without it the assertions below
+  // would be about a code path that no longer exists.
+  if (!body.includes("write_port_file(")) {
+    throw new Error("CPE-1975: discover_or_spawn no longer calls write_port_file");
+  }
+  const from = body.indexOf("let handle = Self::spawn_detached");
+  const to = body.indexOf("Ok(handle)");
+  if (from < 0) {
+    throw new Error(
+      "CPE-1975: no `let handle = Self::spawn_detached` start anchor in discover_or_spawn — the " +
+        "scanned region cannot be delimited, so this guard would be asserting over nothing",
+    );
+  }
+  if (to <= from) {
+    throw new Error("CPE-1975: no `Ok(handle)` tail after the start anchor to delimit the region");
+  }
+  return body.slice(from, to);
+}
+
 describe("CPE-1975 — the refusal is reported on an ungated channel", () => {
   const source = () => stripRustComments(readFileSync(join(REPO_ROOT, SUPERVISOR), "utf8"));
 
-  it("discover_or_spawn's write_port_file failure arm writes to the real stderr handle", () => {
-    const body = fnBody(source(), "discover_or_spawn");
-
-    // The premise: this function still writes the port file at all. Without it the assertions below
-    // would be about a code path that no longer exists.
-    expect(body, "discover_or_spawn no longer calls write_port_file").toContain("write_port_file(");
-
-    // The error arm, sliced from the `if let Err(` to the function's `Ok(handle)` tail.
-    const from = body.indexOf("if let Err(");
-    const to = body.indexOf("Ok(handle)");
-    expect(from, "no `if let Err(` arm around write_port_file — is the error swallowed again?").toBeGreaterThan(-1);
-    expect(to, "no `Ok(handle)` tail to delimit the error arm").toBeGreaterThan(from);
-    const arm = body.slice(from, to);
-
-    // The whole point: an UNGATED write to the process's own stderr.
+  it("discover_or_spawn's write_port_file failure writes to the real stderr handle", () => {
     expect(
-      arm.replace(/\s+/g, ""),
+      reportRegion(source()).replace(/\s+/g, ""),
       "CPE-1975: the write_port_file refusal must be reported with `writeln!(std::io::stderr(), …)`. " +
         "Reporting it only through `session_diag::trace` sends it nowhere — `trace` returns early " +
         "unless one of four env vars is set, and the console process sets none of them on this path. " +
         "See this file's header and the comment at the call site.",
     ).toContain("writeln!(std::io::stderr()");
+  });
 
-    // And nothing in that arm may gate the report on diagnostics being on.
+  it("and that report is not gated on diagnostics being enabled", () => {
     expect(
-      arm,
+      reportRegion(source()),
       "CPE-1975: the stderr report must not be conditional on `enabled()` — that is the gate this " +
         "whole change exists to get out from behind",
     ).not.toContain("enabled()");

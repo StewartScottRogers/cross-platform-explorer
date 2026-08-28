@@ -230,6 +230,11 @@ mod tests {
             std::thread::current().id()
         );
         trace("test", &token);
+        // `unwrap_or_default()` treats an unreadable log (a permission error) the same as the
+        // legitimate first-run `NotFound`, so an unreadable log would pass this vacuously. Left as
+        // is, and named rather than silently accepted: the process that wrote the file is the one
+        // reading it, so the case is very narrow. If it ever widens, distinguish `NotFound` from
+        // every other error and fail on the rest.
         let contents = std::fs::read_to_string(log_path()).unwrap_or_default();
         assert!(
             !contents.contains(&token),

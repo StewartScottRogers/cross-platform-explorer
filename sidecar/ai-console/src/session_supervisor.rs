@@ -117,11 +117,15 @@ impl SessionDaemonHandle {
                 port_file.display(),
                 handle.port
             );
-            // Guarded by `src/lib/consoleRefusalReport.test.ts`, which derives this arm's shape from
-            // this source (comments stripped first, since the block above quotes the very call it is
-            // checking for) and reds if the ungated `writeln!` goes away. Round 3's attempt to pin
-            // this from `session_diag`'s unit module could not fire — deleting this line left the
-            // crate green at 423/0.
+            // Guarded by `src/lib/consoleRefusalReport.test.ts`, which derives this region's shape
+            // from this source and reds if the ungated `writeln!` goes away. It strips comments
+            // first, and that is load-bearing rather than ceremonial — **measured, not asserted**:
+            // its scanned region starts at the `spawn_detached` line above, so the comment block
+            // between there and here (which quotes both `writeln!(std::io::stderr(), …)` and
+            // `enabled()`) falls inside it. With the strip off and this line deleted, the guard goes
+            // GREEN on the comment's quotation. The four-cell table is in that file's header.
+            // (Round 3's attempt to pin this from `session_diag`'s unit module could not fire at
+            // all — deleting this line left the crate green at 423/0.)
             let _ = writeln!(std::io::stderr(), "[CPE-1975] {msg}");
             session_diag::trace("supervisor", &msg);
         }
