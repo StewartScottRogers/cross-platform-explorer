@@ -3,7 +3,7 @@ id: CPE-1935
 title: one unwritable file aborts a whole extraction, leaving a half-extracted folder and a single error string with no record of what landed
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-27
@@ -277,3 +277,46 @@ shell-executing files that exited 127 in round 1 now pass, so the whole suite is
 `bindings.gen.ts` regenerated (the `ArchiveReport` doc edit is its only diff). `ratchet-baselines
 compare origin/main`: all 12 unchanged, none raised — `bidi-app-markup-offenders` needed its line
 numbers shifted +11 for App.svelte's added comments, same 31 entries.
+
+## Closing record — merged as PR #1090 (`6d909cd7`), 2026-08-28
+
+**What the gauntlet actually proved.**
+
+The rule — *the leaf is the archive's business; the chain is the run's* — was independently accepted after
+its Reviewer tried to break it in the two places it could plausibly fail, and could not. All twelve
+before/after cells were reproduced with a second, independently written harness reading the folder back
+each time, and both `ro tar` surprises reproduced too: **tar unlinks and replaces a user's read-only file
+where zip and 7z refuse it.** That was kept as measured and is now stated in the docs, because the
+alternative was to describe behaviour nobody had checked.
+
+**The round-2 blockers are the record worth keeping, and none of them was the feature.**
+
+The new guard added to pin the rule was **red on every LF checkout and blind on every CRLF one** — the
+same guard, opposite failures per platform. It stripped only `//`, so its own list of forbidden fragments
+was scanned as code and it named itself as the offender on Linux and macOS; and it located its exempt
+spans with `find("\n    }\n")`, a pattern that occurs **zero** times in a CRLF file, so an `unwrap_or`
+widened the exemption to the end of the file and left **461,898 bytes — 64.7%** unguarded on Windows.
+One `unwrap_or` turned *"I could not find where this ends"* into *"it never ends."*
+
+Worse, its **red-proof named a mutation the code cannot express** — `self.failed += 1` in an extractor
+leg, where legs hold a local `report`. Planting the real shape left the suite green. The replacement
+masks comments **and** string literals while preserving byte offsets, brace-matches spans over the mask,
+and **panics rather than widening** when a span cannot be located. Verified: 39 adversarial masker inputs
+including the whole lifetime family, `masked.len() == src.len()`, longest blanked run 123 bytes, and the
+sabotage reddens on **both** line endings naming both lines.
+
+Two further findings neither review round asked for: a **successful zero-file run** showed a failure toast
+and skipped the pane refresh — the same defect this ticket was fixing, on a different input — and the
+module's canonical rule block still stated the inverted rule while **citing a test this PR had itself
+renamed away**, in the PR whose headline finding was a phantom citation. A second sweep over every
+backticked test-shaped identifier found two more nobody had listed.
+
+**The provenance retraction.** Round 1 reported Linux `2422/0 (real ext4)`. A genuine LF checkout reds on
+that guard, so no ext4 tree can have produced it; the Linux toolchain was real, the annotation was not.
+Recorded honestly rather than reconstructed by guesswork.
+
+**Left as a ticket, deliberately:** a standing guard against stale test citations needs an allowlist
+(half the candidates are legitimate external names), which is a ratchet, which needs a `RATCHETS.md` row.
+Both the author and the reviewer independently judged that out of scope for a round-2 fix.
+
+Gates on the merge sha: 25 checks green, `GUI smoke (windows-latest)` skipped by design.
