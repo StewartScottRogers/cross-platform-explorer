@@ -198,9 +198,118 @@ tree that reads as noise. If you add a sixth place, that test reds until this li
      port, pinned to it by the shared `shellScriptLines.cases.json`) already handle quotes, escapes,
      trailing comments and heredoc bodies. For **Rust** sources: `src/lib/rustSource.ts`
      (`stripRustComments`, `rustStringLiteralAfter`, `rustStrSliceAfter`) — CPE-1950 lifted it out of
-     `MacroRunConfirm.test.ts` rather than let a third scanner grow a fourth copy of the rules. A
-     whole-line-comment filter is *not* enough — a **trailing** comment walks straight through it,
-     which is how CPE-1933's first draft reintroduced the hole it was closing.
+     `MacroRunConfirm.test.ts` rather than let a third scanner grow a fourth copy of the rules. For
+     **JavaScript** sources: `src/lib/jsSource.mjs`, and **the entry point is
+     `stripScriptBodiesChecked`, not the bare `stripJsComments`** — it runs `new vm.Script` over the
+     result and throws when source that parsed before stripping does not after, which is the only
+     leg that covers the shapes no case table names. Reach for `htmlScriptBodies` first when the
+     input is HTML; call `stripJsComments` bare only when there is genuinely no parseable-JS baseline
+     to compare against, and say at the call site why. CPE-1966 shipped the SIXTH private stripper,
+     in a `.mjs` harness, imported nowhere and untested; a Reviewer's 31 adversarial shapes found 7
+     wrong, **4 of them deleting real code** (that 31/7/4 tally is the Reviewer's round-2 count,
+     recorded as provenance and never independently re-run — treat it as history, not as a measurement
+     you can reproduce). A whole-line-comment filter is *not* enough — a **trailing** comment walks
+     straight through it, which is how CPE-1933's first draft reintroduced the hole it was closing.
+     Five JS-specific rules learned the hard way: decide regex-vs-division on the previous **token**,
+     never the previous character (every keyword ends in a word char, so `return /[//]/;` reads as
+     division and the `/` opens a comment that eats the line); decide a **`)`** by what its `(`
+     opened, never by the `)` itself (round 3 fixed the keyword prefix, then *documented* `)` as a gap
+     that "fails toward keeping source" — and `if (s.length) /[/*]/.test(s);` is valid JavaScript that
+     the same mechanism deleted 144 characters of, one round later, with a green test beside the false
+     claim); **a token-kind state must SURVIVE to the token that consumes it** — round 5's
+     `for await (const x of y) /[//]/…` deleted 14 characters because `await` is the one word the
+     grammar allows between a control word and its `(`, and it is also a regex-prefix keyword, so it
+     overwrote the `"control"` state that the `)` was going to read; **account for every character a
+     branch CONSUMES, not just the ones it emits** — a mis-read regex literal swallows the source's own
+     parens (`{} / f(1 / 2)` scans as `/ f(1 /`), and a swallowed `(` that never reached the stack
+     leaves the matching `)` popping the frame beneath it, another 14 characters (a real regex balances
+     its parens, so pushing/popping the ones the literal eats is a no-op for the honest case and a fix
+     for the dishonest one) — but **restoring the COUNT is only half of it: recover the KIND too**,
+     because a swallowed region can hold a `)` and a `(` from different statements, and round 5's
+     "push `false` for every swallowed `(`" broke four shapes round 4 got right; and **point a JS
+     scanner at JS only** — `sessionChipColours` tokenized a
+     whole HTML document, where one apostrophe in prose shifted the strip by 11,872 characters (a
+     round-2 figure, **no longer reproducible**: round 3 made an unterminated string stop at the
+     newline, so the same injection now shifts the strip by 0 — the rule stands on the mechanism, not
+     the size).
+     **The general lesson, which is the expensive one, and it cost two rounds because the fix looked
+     like the lesson:** a *declared* gap is a claim like any other. Round 3 asserted "all of which fail
+     toward keeping" over a list rather than deriving it per entry; round 4 split the list by
+     direction, derived it per entry with `vm.Script` — and then wrote **"neither is reachable from
+     valid JavaScript"** over the same list, which is the same defect one level up. A filter over a
+     case table proves a fact about **the table**; it cannot prove a fact about the language, and next
+     to a green run the generalisation reads as though it did. So: split a gap list by direction, pin
+     the deleting shapes as their own cases, derive the property per entry — and then **state the
+     assertion at the scope it was measured at.** `jsSource.test.ts` now says "no entry in this table
+     parses before stripping", not "no valid JavaScript reaches this". The only leg that speaks for the
+     shapes nobody enumerated is compiling the RESULT (`stripScriptBodiesChecked`).
+     **And the same correction applies to a SWEEP, which is where round 6 caught it again.** Round 5
+     reported "1,904 structured + 36,861 fuzzed inputs, 0 desyncs, no third family" and did not commit
+     the generator; a reviewer wrote their own and found a third family in minutes. Two rules fell out.
+     *(a) A negative over a generated space is a statement about the GENERATOR, never about the
+     language* — say "no input this generator produces", and remember 38,765 samples missed a
+     27-character input. *(b) If you cannot commit the generator, you have not measured anything a
+     reviewer can check* — `scripts/dev-harness/js-strip-sweep.mjs` is now in the tree, with
+     `--compare <ref>` so a change is scored as "N fixed, M regressed" instead of asserted to be an
+     improvement. That comparison is what proved round 5's paren fix was 45-for-4 rather than free.
+     Round 5's fuzz number was also inflated: its LCG lost precision in JS doubles and its 36,861
+     "inputs" deduped to about 120 distinct programs.
+     **A gap table earns its safety property; do not smuggle in an entry that breaks it.** When round
+     6's third family was dropped into `DELETING_GAPS`, the `parses()` filter went red immediately —
+     correctly, because that family DOES delete valid JavaScript. It got its own table
+     (`DELETING_ON_VALID_JS`) asserting the worse fact out loud, plus that `stripScriptBodiesChecked`
+     throws on it. A test file with more than one case table should also assert **which tables its
+     oracles sweep**, so a family held back from the enumeration is visible rather than merely absent.
+     **And that assertion must DERIVE its list of tables from the file's own source, not recall it**
+     (CPE-1932 again, one scope in). Round 6 wrote the list by hand; round 7 ran the two sabotages and
+     measured that it caught "registered the table, forgot the sweep" (1 red) and **missed** "declared
+     a table and mentioned it nowhere" (65/65 green) — which is the exact half the assertion exists
+     for. Scan the file for the declaration and require each name to appear.
+     **But a scan's SCOPE is itself a claim, and its default failure is that it covers the spelling
+     the author happened to use.** Round 7 scanned for `^const X: Case[] =` and wrote "closes the
+     class"; round 8 measured that it closes the class for exactly **one** spelling. Seven other
+     spellings of a real table — `let X`, **`export const X`** (what `docs.coverage.test.ts` and
+     `invoke.guard.test.ts` both use), `readonly Case[]`, `X:Case[]`, a two-line annotation,
+     `as Case[]`, `= KNOWN_GAPS.concat(…)` — were swept by nothing, declared held back nowhere, and
+     all **75/75 green**. So: follow `RATCHET_SHAPED` (`src/lib/ratchetBaselines.test.ts`), which
+     already allows leading whitespace, `export`, and a loose annotation. Two spelling axes are easy
+     to miss because they are not the type: the **name charset** (`[A-Z][A-Z0-9_]*` hides
+     `FifthFamily`) and the **other canonical spelling of the same type** (`Array<Case>` for
+     `Case[]`) — and this repo has **no ESLint / Biome / Prettier config anywhere** to steer an author
+     to one of them.
+     **The BLIND-SPOT LIST IS A CLAIM OF THE SAME KIND, and it fails the same way (round 9).** Round 8
+     did the right thing — widened the scan and wrote down what it still missed — and then wrote that
+     remainder as a **closed count of three**: *"`as Case[]`, a split-across-lines annotation, and a
+     type alias all still escape any regex."* Three more real unregistered tables broke it in minutes
+     (`Array<Case>`, a non-SCREAMING name, `] satisfies Case[]`), and **two of the three "escape any
+     regex" shapes were one regex away**. So when you write down what a scan cannot see: say **"at
+     least these"**, never a number; **split it into *cannot be caught* and *not caught today***
+     (only the alias needed more than a regex — it needs the alias resolved); and **red-proof one of
+     them**. If you find yourself writing a count of blind spots, write "at least" instead.
+     **And do not name a backstop without checking it can fire.** Round 8 pointed at the `vm.Script`
+     oracle as covering "shapes nobody enumerated" — but that oracle iterates the very enumeration the
+     scan feeds, so a table invisible to the scan is absent from it too; all three sabotages left it at
+     75 passed. A backstop that structurally cannot fire is worse than none, because it reads as one.
+     **Re-measure a "this safeguard bought nothing" note in the file it SHIPS in.** Round 8 recorded
+     that the column-0 anchor bought nothing (dropping it returned the identical 10 names) — true of
+     round 7's file, and false of round 8's, because the same commit's red-proof sentence put a literal
+     `export const FOURTH_FAMILY: Case[] = [` into the docblock: 10 anchored, **11** unanchored (12 after
+     round 9's own prose). Harmless — it reds loudly rather than hiding anything — but stale the moment
+     it was written, because the commit that writes such a claim is often the commit that falsifies it.
+     This is the second instance in one night — #1091's derived taint set
+     missed transitive assignment and inline substitutions, found the same way, by sabotage. A scan
+     with an OPEN stated blind spot is worth more than one advertised as closing the class. Related,
+     and also corrected: "a decoy inside a comment reds, which is the safe direction" is true only for
+     a bare `/*` block whose body starts at the margin — in ` * ` JSDoc and `//` lines a decoy is not
+     picked up at all. And a scan leg that spans LINES must read stripped code, not raw source: the
+     `as`/`satisfies` leg over raw text reaches back through the docblock quoting it and reports a
+     phantom table.
+     **Also: a claim about how many families exist is measured over whatever found them.** Round 6
+     called `DELETING_ON_VALID_JS` "the honest third category" while the same commit shipped the
+     generator that produces two more (`of` before a `/=`, and `yield`/`await` as plain identifiers in
+     sloppy code — both pre-existing since round 3, both caught by `stripScriptBodiesChecked`). Run the
+     committed generator and split its output before writing a number, and say which generator and
+     which seed the number came from.
   3. ***Red-proof it.*** Change the referenced source and watch the test fail. A "derivation" that
      never actually re-reads its source is the same defect with extra steps. Write the red-proof's
      **result at the site**, not only in the PR body — a code comment that merely asserts, next to a

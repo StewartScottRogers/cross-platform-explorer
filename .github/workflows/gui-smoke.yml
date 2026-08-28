@@ -1142,3 +1142,58 @@ jobs:
 
       - name: Run the layout guard (npm run harness:layout-guard)
         run: npm run harness:layout-guard
+
+  # CPE-1966: the real-browser CONTRAST sweep — scripts/dev-harness/launcher-contrast/. Same shape as
+  # `layout-guard` above (installed Chrome, `--headless=new`, raw CDP, Node 22 for the global
+  # `WebSocket`, no WebDriver and no npm dependency), pointed at a different question: not "where did
+  # this box land" but "what ratio does this colour actually paint at, against the ground it actually
+  # lands on".
+  #
+  # Why it needs a browser at all — CPE-1921 shipped a purely static sweep of the same stylesheet and
+  # it honestly reported ZERO failures on a page that had four measured ones, because a static parse
+  # has no DOM (so it assumed `Canvas` everywhere), no states (`:hover`/`:focus` were invisible), no
+  # time (an animated opacity has no single value to sample), and no notion of a non-text role (the
+  # page's ONLY focus indicator is a `border-color`). All four gaps are answerable by the engine and by
+  # nothing else. The static guard stays — `src/lib/aiConsoleLauncher.contrast.test.ts` runs on every
+  # `npm test` and is the fast layer — and it now asserts that THIS job still exists, so deleting the
+  # job cannot quietly turn the cheap half back into the whole story.
+  #
+  # It needs no dev server (it serves launcher.html itself, from an ephemeral in-process http server on
+  # a PID-derived port) and no build. Cost, measured locally: ~35s end to end for both colour schemes,
+  # 1,306 raw readings, 786 distinct sites, 53 forced pseudo-state readings and 63 animation frames per
+  # scheme. Unconditional and blocking for the same reason layout-guard is: at well under a minute, a
+  # path filter buys nothing and risks the CPE-1893 shape (a silently-skipped job reading, in the
+  # checks list, exactly like one that had nothing to do).
+  launcher-contrast:
+    name: AI Console launcher contrast (real-browser WCAG sweep) — CPE-1966
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22, NOT this workflow's usual 20 — same reason as `layout-guard` above: the CDP client in
+      # scripts/dev-harness/launcher-contrast/engine.mjs calls the global `WebSocket` constructor,
+      # which is only a stable Node built-in from v22. On 20 it is `ReferenceError: WebSocket is not
+      # defined` on every run, which reads as "the harness crashed" rather than "a colour regressed".
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Resolve + confirm Chrome
+        run: |
+          CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium-browser)"
+          echo "Using Chrome at: $CHROME_BIN"
+          "$CHROME_BIN" --version
+          echo "CHROME_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+
+      # --verify-pixels adds the second, independent measurement path: a real PNG screenshot, decoded
+      # by the harness itself, with the painted ground at each site compared against what the
+      # computed-style path predicted. Two paths that agree are what makes the numbers trustworthy;
+      # one path agreeing with itself is what CPE-1921's round 2 had when it first reported 3.81.
+      - name: Run the launcher contrast sweep (npm run harness:launcher-contrast)
+        run: npm run harness:launcher-contrast -- --verify-pixels
