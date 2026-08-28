@@ -2505,3 +2505,53 @@ characters**. Latent only because the swallowed region happened to be copied ver
 **And the narrow re-review is the reusable part.** A round-2 fix is new code that no review has seen;
 scoping a pass to *only what changed* cost a fraction of a full review and found two blockers the
 original reviewer could not have — it was reading round 1.
+
+## 2026-08-28 — a doc cited a guard by name, and the guard had never existed
+
+`ArchiveReport`'s doc comment has said, since **CPE-1775**, that its count/reason invariant is enforced
+by `skipped_count_matches_the_recorded_reasons_on_every_streamed_skip_path`. CPE-1935's worker went
+looking for it: **two grep hits — the sentence itself, and its copy carried into `bindings.gen.ts`.**
+The test has never existed.
+
+**This is the purest form of the CPE-1933 defect the repo has found.** The other instances were claims
+that were *once* true and went stale, or claims about another file's behaviour that nobody ran. This
+one was **never true at any revision** — and it survived because a named test in a doc comment is the
+most convincing possible citation. It reads as a pointer to something you could go and check, which is
+exactly why nobody did.
+
+**It also propagated.** The sentence was copied verbatim into the generated TypeScript bindings, so the
+false claim now had two homes and would have read as corroboration to anyone who grepped for it.
+
+**The cheap check, and it is genuinely cheap:** any comment naming a test, a function or a job as its
+enforcement is a **derivable** claim — grep for the name and count the hits. Two hits where one is the
+comment itself means the citation is empty. That is one command, and it would have caught this in 2026
+when it was written.
+
+It was replaced with a real source-derived guard, which is the right ending.
+
+## 2026-08-28 — the entry-verdict rule: scope first, severity second
+
+CPE-1935 and CPE-1938 (#1084) appeared to hold opposite positions on per-entry failures. #1084 kept an
+`Abort` for a transient `ENOENT` where `main` had degraded to a per-entry Skip, and its Auditor flagged
+that as *"the same 'one planted junction = total denial' shape it just fixed, re-entered through
+another door."* CPE-1935's ticket asked for the opposite. I briefed it as a conflict and asked for a
+rule.
+
+**It found the two were never in conflict — they were being told apart by the wrong question.**
+
+> **Scope — what is this evidence about?** The **one name the archive asked for** ⇒ *entry* verdict.
+> The **extraction folder**, **a path component many entries travel through**, or **the archive
+> container** ⇒ *run* verdict.
+>
+> **Severity — did anyone choose not to write?** A guard chose ⇒ `Skip`. The filesystem refused ⇒ `Fail`.
+>
+> **The leaf is the archive's business; the chain is the run's.**
+
+`entry_component_action` walks *directory components*, which every sibling beneath them travels
+through, and `create_dir_beneath` **creates** missing levels — so a refusal there is the destination
+being mutated under a run in progress, and #1084's `Abort` was right all along. It stayed unchanged.
+
+**The generalisable part is the diagnosis, not the answer.** One enum was carrying two orthogonal
+questions in three arms, so every argument about it was really an argument about which question the
+arms encoded. When two careful people reach opposite conclusions about the same enum, the enum is
+usually the problem.
