@@ -2802,3 +2802,36 @@ Same shape as the rest of this shift, applied to the crew instead of the code: *
 artifact.** A gate table is not the gate, a red-proof written in prose is not a red-proof performed, a
 declared limitation is not a measured one — and an agent's brief is not a description of what is on the
 branch. Every one of those is checkable in about one command, and the check is the cheap half.
+
+## 2026-08-28 — the same over-generalisation, one level up, in the fix for it
+
+Round 3 of #1087 shipped a gap list saying *"all of which fail toward KEEPING source"*. One of them
+deleted. Round 4 fixed that properly, replaced the sentence, and wrote a new one: *"neither deleting case
+is **reachable from valid JavaScript**"* — and this time made it **derived**, with a test that filters the
+deleting-gap table by "does this parse?" and requires the result empty.
+
+The narrow re-review found two parseable inputs that delete. `for await (…)` — because `await` sits in the
+set of keywords a regex may follow, so it overwrites the `for` that the new paren rule depends on. And a
+mis-read regex that swallows an unmatched `(`, desynchronising the very stack round 4 introduced.
+
+**The derivation was real and the generalisation was not.** The filter proves *no entry in this table
+parses*. That is a statement about the table. The prose next to it makes a statement about JavaScript.
+Between those two sentences is every shape nobody wrote down — which is exactly what round 3's list did,
+one level less abstract. **Round 4's own file header names this failure shape**, four hundred lines above
+the sentence that commits it.
+
+**The rule that would have caught both, and it is not "test harder":** when a test derives a property over
+an enumerated set, **write the claim in terms of the set.** *"No case in `DELETING_GAPS` parses"* is
+provable, useful, and cannot rot into a false statement about the world. *"Not reachable from valid
+JavaScript"* is a claim about an infinite set, and a table cannot get there no matter how many rows it
+has. **The bug is in the quantifier, not the coverage** — and a green test underneath makes the wrong
+quantifier read as proven.
+
+Neither shape was a regression (both reproduce identically on round 3), and the only production caller
+goes through the parse-checked wrapper, so in-tree this was a loud throw rather than silent corruption.
+**The blocker was the sentence.**
+
+Worth recording the count plainly: **the narrow re-review — scoped to only what changed since the previous
+round — has now found a blocking defect on this PR four rounds running, and each one was created by the
+previous round's fix.** Three of the four were false or over-broad claims rather than broken code. A fix
+that lands with a new claim attached needs the claim reviewed as carefully as the diff.
