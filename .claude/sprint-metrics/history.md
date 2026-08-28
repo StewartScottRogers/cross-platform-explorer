@@ -4021,3 +4021,38 @@ was measured against a shim, a synthetic test that re-implemented the rule it gu
 three transcribed measurements, and a mutant that relocated when it was fixed. **The same distribution as
 #1087's nine rounds.** Two independent PRs, two different authors, the same ratio of claim-defects to
 code-defects — which is evidence about how this crew writes, not about either author.
+
+## 2026-08-28 — the positive control failed, which is the test working
+
+#1089's CI went red on Linux with one failure out of 2,492:
+
+```
+assertion `left == right` failed: the swapper won only 19 of 20 trials, so the assertion above is not
+evidence: a run where nothing was ever swapped in would report zero escapes no matter what the
+extraction did.
+  left: 19   right: 20
+```
+
+**What failed is the positive control, not the property.** The escape count was still zero; what did not
+hold is the check that the attacker actually landed its swap on every trial — the thing that makes a zero
+mean something rather than being an artefact of a race nobody won.
+
+**This is a test built the way this shift has spent two days arguing for, failing honestly.** A race test
+whose control can quietly lose is the same defect as a guard that cannot run: both report success from
+having done nothing. Whoever wrote that assertion put the reason in the message, and the message is what
+makes the red immediately diagnosable rather than a shrug.
+
+**And it is genuinely ambiguous in a way worth separating by measurement.** Either the 20-of-20 bar is
+simply strict on a shared runner and this is its first visible loss — or **this PR narrowed the window**,
+which is entirely plausible because CPE-1961 changes exactly the write-and-commit path the test races
+against. If it is the second, the control is reporting something real: the test's premise no longer holds
+against this code, and its main assertion is weaker than it reads *even when green*.
+
+**The wrong response is to lower the bar**, and the test's own message says why — a control allowed to
+lose makes the assertion above it worthless. The right response is win rates on both revisions, on the
+platform where it failed, enough trials to say something.
+
+One more piece of data in the failure itself: **the author measured this suite green on WSL and it failed
+on a GitHub runner.** Same code, different scheduler. A marginal timing control does not have a truth
+value independent of where it runs — which is an argument for reporting *where* a race number was taken,
+every time, not only its value.
