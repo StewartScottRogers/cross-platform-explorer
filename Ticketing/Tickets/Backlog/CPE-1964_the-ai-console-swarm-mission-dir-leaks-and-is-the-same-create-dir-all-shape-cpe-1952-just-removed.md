@@ -1,5 +1,5 @@
 ---
-id: CPE-1963
+id: CPE-1964
 title: the AI Console's `cpe-swarm-<millis>` mission directory leaks — 55 on one machine — and is the same predictable-`create_dir_all` shape CPE-1952 just removed
 type: bug
 priority: Medium
@@ -86,3 +86,12 @@ deferred is leaking roughly six times harder than the one it fixed… it should 
 Related: **CPE-1952** (the catalog staging fix, PR #1075 — the model for the fix shape and the test
 shape), **CPE-1937** / **CPE-1929** (the containment and shadowed-guard families), **CPE-1932**
 (enumerate, don't recall — and the corrected recipe above).
+
+## ID note 2026-08-27
+
+Filed as CPE-1963 and renumbered to **CPE-1964** within the hour: PR #1070's round-2 worker filed its
+own **CPE-1963** (the staging rename's source being an enumerable attacker-writable path) at almost
+the same moment, from a worktree that could not see this one. Theirs is referenced from `fsutil.rs`
+comments, its PR body and CPE-1961; this one was referenced only by itself, so this is the cheaper
+side to move. Standing hazard: two agents allocating the next free ID from different checkouts will
+collide, and the tell is that neither can see the other's file.
