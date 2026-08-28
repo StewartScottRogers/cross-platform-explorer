@@ -174,6 +174,6 @@
   .md :global(p), .md :global(li) { line-height: 1.6; }
   .md :global(ul), .md :global(ol) { padding-left: 22px; }
   .md :global(code) { background: var(--surface-alt); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
-  .md :global(a) { color: var(--accent); }
+  .md :global(a) { color: var(--accent-text); }
   .md :global(strong) { color: var(--text); }
 </style>

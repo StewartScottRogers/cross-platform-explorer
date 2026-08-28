@@ -224,7 +224,7 @@
   .paths { font-size: 11.5px; color: var(--text-dim); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status { font-size: 11.5px; color: #2e9e4f; }
   .status.bad { color: var(--danger); }
-  .status.running { color: var(--accent); }
+  .status.running { color: var(--accent-text); }
   /* CPE-1879 review finding 3: the first refusal's path + reason, own line so it never crowds the
      status pill; truncated with the full text in the native tooltip (`title`) rather than wrapped. */
   .status-detail { flex-basis: 100%; font-size: 11px; color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

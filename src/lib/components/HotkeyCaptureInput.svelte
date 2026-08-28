@@ -122,7 +122,7 @@
     opacity: 0.6;
   }
   .capture.armed {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: var(--accent);
     border-style: dashed;
     font-style: normal;

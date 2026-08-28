@@ -229,7 +229,7 @@
   .status { padding: 6px 16px; font-size: 12px; min-height: 20px; color: var(--text-dim);
     border-top: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .status.error { color: #e0706b; }
-  .status.ok { color: var(--accent); }
+  .status.ok { color: var(--accent-text); }
 
   .foot { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
   .spacer { flex: 1; }

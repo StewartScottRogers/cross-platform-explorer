@@ -133,10 +133,17 @@
   .cp-card:last-child { margin-bottom: 0; }
   .cp-card-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
   .cp-summary { font-size: 13.5px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+  /* CPE-1919: the ground is `--surface`, written plainly. It used to be
+     `var(--accent-soft, var(--surface))` — but `--accent-soft` is defined NOWHERE in this repo, so
+     the fallback was always what painted. Harmless while it stayed undefined, and it is precisely
+     what makes this badge's pinned 5.03:1 correct; the hazard is that anyone defining `--accent-soft`
+     later as a blue tint would move this ground and silently invalidate that ratio, with nothing to
+     catch it (`--accent-text` is pinned against --bg/--surface/--surface-alt, not against a tint
+     that does not exist yet). Naming the real ground removes the trapdoor. */
   .cp-badge {
     font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
-    padding: 1px 7px; border-radius: 999px; background: var(--accent-soft, var(--surface));
-    color: var(--accent, var(--text-dim)); border: 1px solid var(--border); white-space: nowrap; flex: 0 0 auto;
+    padding: 1px 7px; border-radius: 999px; background: var(--surface);
+    color: var(--accent-text, var(--text-dim)); border: 1px solid var(--border); white-space: nowrap; flex: 0 0 auto;
   }
   .cp-badge-soft { color: var(--text-dim); background: var(--surface); }
   .cp-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }

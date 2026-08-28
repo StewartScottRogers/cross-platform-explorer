@@ -255,7 +255,7 @@
     border-color: var(--danger-fill);
   }
   .logs-toggle.repair {
-    color: var(--accent, #3a7d3a);
+    color: var(--accent-text, #3a7d3a);
     border-color: var(--accent, #3a7d3a);
   }
   .repair-msg {

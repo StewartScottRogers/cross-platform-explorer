@@ -359,7 +359,7 @@
   .paths, .create-row, .revert-one { display: flex; gap: 8px; margin-bottom: 8px; }
   .path, .label-input, .path-input { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
   .err { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
-  .note { color: var(--accent); font-size: 12.5px; margin-bottom: 8px; }
+  .note { color: var(--accent-text); font-size: 12.5px; margin-bottom: 8px; }
   .list { max-height: 30vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
   .empty { padding: 12px; color: var(--text-dim); font-size: 12.5px; }
   .cp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); }

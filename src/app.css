@@ -238,6 +238,23 @@
 
   --accent: var(--pal-blue-600);
   --accent-hover: var(--pal-blue-650);
+  /* CPE-1919: accent-hued colour for RUNNING TEXT the user reads (JSON-tree string values, markdown
+     link text, `.note`/`.status` lines, the Batch-Rename target filename, the status bar's
+     "N hidden" count). Split out of --accent because --accent carries THREE roles at once and the
+     bars they answer to are different: (a) a solid-fill BACKGROUND under white text (WCAG 1.4.11,
+     >=3:1 — see --accent-fg + src/app.css.solid-fill-contrast.test.ts), (b) an icon glyph / focus
+     ring / border (WCAG 1.4.11 non-text UI, >=3:1 — the bar the existing light/dark guards assert
+     --accent against), and (c) body text (WCAG 1.4.3, >=4.5:1). One value cannot be optimal for all
+     three, and CPE-1632 tuned --accent for (a)+(b): the dark theme's #0078e0 measures 3.70:1 on
+     --bg / 3.21:1 on --surface / 3.43:1 on --surface-alt, which clears (b) but FAILS (c) — the
+     defect CPE-1919 was filed for, invisible to every guard because no guard held --accent to the
+     text bar. This token owns role (c) alone and is pinned at >=4.5:1 against all three painted
+     surfaces in all four themes by src/app.css.accent-text-contrast.test.ts. In the light theme it
+     resolves to the SAME primitive as --accent (light already clears 5.11/5.67/5.48:1) — declared
+     separately anyway so a future re-tune of --accent for its fill role can't silently re-break
+     text a second time. Use --accent-text for text; keep --accent for fills, borders, rings and
+     icon glyphs. */
+  --accent-text: var(--pal-blue-600);
   /* CPE-1632 (guard review round 2): foreground text/icon colour for something painted ON TOP of a
      solid `--accent` fill (e.g. HomeView's "Add" button, MetadataStudioDialog's `.btn.primary`) —
      the SAME literal-white role `.btn.primary` already gets via a plain `color: #fff`, just given a
@@ -325,6 +342,9 @@
 
   --accent: var(--pal-blue-600);
   --accent-hover: var(--pal-blue-650);
+  --accent-text: var(--pal-blue-600);  /* CPE-1919 — body-text-only accent, see the bare :root block
+                                            above for why this is a separate token (identical to
+                                            --accent here: light already clears the 4.5:1 text bar) */
   --accent-fg: var(--pal-white);
   --selection: var(--pal-blue-100);
   --selection-hover: var(--pal-blue-150);
@@ -392,6 +412,25 @@
      rather than a hand-picked list. */
   --pal-dark-blue-400: #0078e0; /* accent */
   --pal-dark-blue-300: #0092d6; /* accent-hover */
+  /* CPE-1919: accent-hued BODY-TEXT blue (--accent-text) — a third role CPE-1632's two-role analysis
+     above never separated out. --pal-dark-blue-400 above is tuned for the solid-fill + icon/ring
+     roles, where 3:1 is the bar; painted as 12px text (the JSON tree's string values, markdown link
+     text, `.note`/`.status` lines) it measures 3.70 on --bg / 3.21 on --surface / 3.43 on
+     --surface-alt, all under WCAG 1.4.3's 4.5:1 for normal text. Lightened along the SAME hue
+     (~207 deg, so it still reads as the app's accent blue, not a new colour) until every painted
+     surface clears the text bar with margin: 5.79 on --bg (#202020) / 5.03 on --surface (#2b2b2b,
+     the .preview-pane ground the JSON tree actually sits on) / 5.38 on --surface-alt (#262626, the
+     .jt-row:hover fill). Deliberately the DARKEST value on that hue line that still clears 4.5:1
+     everywhere, so it stays maximally separated from --text (#f3f3f3, the number/boolean values
+     beside it: 2.53:1) and unmistakably not --text-dim (#c5c5c5, the keys). Pinned by
+     src/app.css.accent-text-contrast.test.ts. Not a solid-fill colour: white on it is 2.81:1, under
+     WCAG 1.4.11's 3:1 UI floor, so never repoint --accent at this. (Measured with the same
+     relativeLuminance/contrastRatio the guard uses, calibrated against CPE-1632's independently
+     recorded white-on-#0078e0 = 4.41:1. A first draft of this comment said 3.53:1 from estimate
+     rather than measurement, which would have put the number ABOVE the floor the sentence cites it
+     as being below — the exact "a contrast number recorded at the wrong bar reads like coverage"
+     failure this ticket is about, one level up in the prose. Measure, don't recall.) */
+  --pal-dark-blue-350: #3aa0f0; /* accent-text */
 
   /* CPE-1632: --danger/--danger-hover have the same two-role tension as --accent above — (a)
      foreground error text (existing >=4.5:1-vs-bg/surface guard below, error text is body-text
@@ -508,6 +547,8 @@
 
   --accent: var(--pal-dark-blue-400);
   --accent-hover: var(--pal-dark-blue-300);
+  --accent-text: var(--pal-dark-blue-350);  /* CPE-1919 — body-text-only accent; see the dark palette
+                                                 block above. This is the theme the defect was in. */
   --accent-fg: var(--pal-dark-white);
   --selection: var(--pal-dark-blue-900);
   --selection-hover: var(--pal-dark-blue-850);
@@ -625,6 +666,16 @@
      src/app.css.hc-solid-fill-contrast.test.ts, which derives this pairing from real component CSS. */
   --pal-hc-dark-blue-300: #4c85be;    /* accent */
   --pal-hc-dark-blue-200: #5590cc;    /* accent-hover */
+  /* CPE-1919: hc-dark's --accent-text — the body-text-only third role split out of --accent (see
+     the normal dark palette's --pal-dark-blue-350 for the full reasoning). hc-dark's --accent is
+     tuned to the [vsSurface>=4.5, whiteOnFill>=3] pair above and measures 5.41/5.00/4.48 on
+     --bg/--surface/--surface-alt — it fails even plain AA on the hover fill, and is nowhere near
+     this theme's AAA-inspired >=7:1 text bar. Brightened until it clears 7:1 on every painted
+     surface: 8.61 on #000000 / 7.97 on #0d0d0d / 7.13 on #1a1a1a. Text role only — white on it is
+     2.44:1, under WCAG 1.4.11's 3:1 UI floor, so this must never back a solid fill. (Measured, not
+     estimated — see --pal-dark-blue-350's note above for why that distinction earned its own
+     sentence.) */
+  --pal-hc-dark-blue-250: #72abdf;    /* accent-text */
 
   /* CPE-1649: hc-dark's --danger has the SAME two-role tension as --accent above, but here the
      window is NEGATIVE — no single hex can clear both bars at once. hc-dark's own AAA-inspired text
@@ -740,6 +791,11 @@
 
   --accent: var(--pal-hc-light-blue-900);
   --accent-hover: var(--pal-hc-light-blue-950);
+  /* CPE-1919 — body-text-only accent. hc-light's --accent is already darkened past this theme's
+     AAA-inspired text bar on both --bg and --surface (7.79:1 each), so the text role needs no
+     separate primitive here; declared by name anyway so the pairing is pinned per-theme rather
+     than inherited by luck. */
+  --accent-text: var(--pal-hc-light-blue-900);
   --accent-fg: var(--pal-hc-light-white);
   --selection: var(--pal-hc-light-blue-100);
   --selection-hover: var(--pal-hc-light-blue-150);
@@ -813,6 +869,8 @@
 
   --accent: var(--pal-hc-dark-blue-300);
   --accent-hover: var(--pal-hc-dark-blue-200);
+  --accent-text: var(--pal-hc-dark-blue-250);  /* CPE-1919 — body-text-only accent, see the hc-dark
+                                                    palette block above */
   --accent-fg: var(--pal-hc-dark-white);
   --selection: var(--pal-hc-dark-blue-900);
   --selection-hover: var(--pal-hc-dark-blue-850);
@@ -1176,7 +1234,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .cmd.new { font-weight: 400; }
 /* An active file-type filter (CPE-358) tints its button so the mode is visible. */
-.cmd.on { color: var(--accent); font-weight: 600; }
+.cmd.on { color: var(--accent-text); font-weight: 600; }
 .cmd-sep {
   width: 1px; height: 20px; background: var(--border-strong);
   margin: 0 6px; flex: none;

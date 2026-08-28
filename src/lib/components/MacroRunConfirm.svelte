@@ -401,7 +401,7 @@
     background: var(--surface-alt); border: 1px solid var(--border); white-space: pre-wrap; word-break: break-all;
   }
   .ops li.dim { color: var(--text-faint); font-family: inherit; }
-  .op-kind { color: var(--accent); font-weight: 600; margin-right: 4px; }
+  .op-kind { color: var(--accent-text); font-weight: 600; margin-right: 4px; }
   .op-arrow { color: var(--text-faint); }
   .results { margin-bottom: 8px; }
   .ok { font-size: 13px; color: var(--text); }

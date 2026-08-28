@@ -40,6 +40,20 @@ choice:
 Like Theme, Contrast applies immediately and persists across restarts — no separate "Save" step, and
 it composes with whichever Theme you've chosen (e.g. High contrast with Dark theme).
 
+## Accent-coloured text stays readable
+
+Some text is tinted with the app's accent blue rather than the ordinary text colour — JSON string
+values in the structured preview, links inside a Markdown or notebook preview, the rename dialog's
+"new name" column, the status bar's hidden-files count, and the short accent notes in several
+dialogs. That blue is now picked **separately from the accent used for buttons, focus rings and
+icons**, because those two jobs pull in opposite directions: a blue dark enough for white button
+text to sit on is too dark to read as small text on a dark background.
+
+The practical effect: accent-tinted text meets the WCAG AA contrast bar (4.5:1 for normal text) on
+every background it's painted on, in every Theme and Contrast combination. In the Dark theme, JSON
+string values used to sit at 3.2:1 against the preview pane — visibly dim — and now measure 5.0:1
+or better. Buttons and focus rings are unchanged.
+
 ## What's next
 
 Theme and Contrast are the first slices of the broader appearance program. Native accent colour and

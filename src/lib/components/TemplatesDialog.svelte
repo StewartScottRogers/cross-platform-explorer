@@ -204,7 +204,7 @@
   .mini.danger:hover { border-color: var(--danger); color: var(--danger); }
   .import { width: 100%; height: 96px; margin: 4px 0; padding: 8px; font: 12px/1.4 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); resize: vertical; box-sizing: border-box; }
   .status { min-height: 18px; margin: 6px 2px; font-size: 12px; }
-  .note { color: var(--accent); }
+  .note { color: var(--accent-text); }
   .err { color: var(--danger); }
   .dim { color: var(--text-dim); }
   .empty { padding: 14px; color: var(--text-dim); font-size: 12.5px; }

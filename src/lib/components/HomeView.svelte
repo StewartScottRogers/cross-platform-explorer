@@ -386,7 +386,7 @@
   .clear {
     margin-left: auto;
     font-size: 12px;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 2px 8px;
     border-radius: 4px;
   }

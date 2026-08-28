@@ -406,7 +406,7 @@
   }
   .log-row[data-level="error"] .log-badge { color: var(--danger); }
   .log-row[data-level="warn"] .log-badge { color: var(--log-warn); }
-  .log-row[data-level="info"] .log-badge { color: var(--accent); }
+  .log-row[data-level="info"] .log-badge { color: var(--accent-text); }
   .log-row[data-level="debug"] .log-badge { color: var(--text-dim); }
   .log-row[data-level="trace"] .log-badge { color: var(--text-faint); }
   .log-text { flex: 1; min-width: 0; color: var(--text); }
