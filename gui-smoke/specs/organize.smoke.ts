@@ -24,6 +24,14 @@ const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 const ORGANIZE_PNG_NAME = "CPE-1143-photo.png";
 const ORGANIZE_ZIP_NAME = "CPE-1143-archive.zip";
 
+// CPE-1965 — the selector this spec waits on before it clicks a rule pill (see the long note at the
+// wait site for why the wait exists at all). Declared here, at column 0 and exactly once, so
+// `src/lib/components/OrganizeDialog.test.ts` can read the literal back out of this file and PIN what
+// it matches against a real render of `OrganizeDialog.svelte` at t=0, t=119ms and t=180ms. That test is
+// the only thing standing between this line and the round-1 version of it, which accepted
+// `empty-state` too and was therefore satisfied at t=0 — a wait that waited for nothing.
+const CPE1965_SETTLED_PREVIEW = "[data-testid='summary']";
+
 describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a grouped preview", () => {
   before(() => {
     JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir: string };
@@ -91,34 +99,51 @@ describe("CPE-1143 — headless GUI smoke: auto-organize dialog renders a groupe
     // replace this with a longer `waitForClickable`: clickability was never the problem.
     //
     // `OrganizeDialog.svelte`'s backdrop is `display:grid; place-items:center` (the app-wide dialog
-    // convention — dozens of components), and its `.preview` box goes from `min-height:120px` while the
-    // first `organize_plan` is in flight to as much as `max-height:45vh` once the plan renders. At the
-    // 1000x700 window this harness sets, that is a ~195px growth on a VERTICALLY CENTRED dialog, so the
-    // `.rules` row above it slides UP by ~98px about 120ms (the dialog's own debounce) after mount.
-    // The rule pills are 28px tall. Clicking inside that window is a coin flip: WebDriver computes the
-    // element's centre point, the reflow happens, and the synthesized click lands ~98px lower — inside
-    // `.preview`, whose ancestor `.dialog` has `on:click|stopPropagation`. So the click SUCCEEDS at the
-    // protocol level, nothing is intercepted, the dialog stays open, and `rule` is simply never set.
+    // convention — 28 components share the rule), and its `.preview` box goes from `min-height:120px`
+    // while the first `organize_plan` is in flight to as much as `max-height:45vh` once the plan
+    // renders. At the 1000x700 window this harness sets, that is a ~195px growth on a VERTICALLY
+    // CENTRED dialog, so the `.rules` row above it slides UP by ~98px about 120ms (the dialog's own
+    // debounce) after mount. The rule pills are 28px tall. Clicking inside that window is a coin flip:
+    // WebDriver computes the element's centre point, the reflow happens, and the synthesized click
+    // lands ~98px lower — inside `.preview`, whose ancestor `.dialog` has `on:click|stopPropagation`.
+    // So the click SUCCEEDS at the protocol level, nothing is intercepted, the dialog stays open, and
+    // `rule` is simply never set.
     //
-    // MEASURED: 3 of 69 shard-4 jobs (4.3%) over 2026-08-27T12:24Z-2026-08-28T01:46Z, across BOTH
-    // webdriverio 9.30.0 (`added 479 packages`) and 9.31.4 (`added 489`) — so this is NOT CPE-1960's
-    // `scrollIntoView` wheel regression, which only exists on 9.31.4. Run 33131342785's
-    // `organize-dialog-fail.png` is the proof: "By kind" still highlighted, the by_kind plan rendered,
+    // DIRECTLY OBSERVED, not just inferred: in the failing log the driver issues `elementClick` at
+    // 28.956 and logs `RESULT null` at 28.985, while the dialog's debounce fires at mount+120ms
+    // ~= 28.960. The reflow lands INSIDE the click command's own 29ms window.
+    //
+    // MEASURED: 3 of 69 shard-4 jobs (4.3%) over 2026-08-27T12:24Z-2026-08-28T01:46Z cutting on
+    // JOB-START time (cutting on run-created admits 3 more jobs, all passes: 3 of 72 = 4.2%), across
+    // BOTH webdriverio 9.30.0 (`added 479 packages`) and 9.31.4 (`added 489`) — so this is NOT
+    // CPE-1960's `scrollIntoView` wheel regression, which only exists on 9.31.4. Every failure sits in
+    // a 113-119ms find-to-click band and NONE sits outside it (on the 72-job sweep: 3 of 13 in-band
+    // jobs failed, 0 of 59 out-of-band; Fisher p = 0.0048). In-band is a coin flip, not a death
+    // sentence — 3 in-band jobs at 115/116/117ms PASSED, which is exactly what a race predicts, and
+    // the argument rests on nothing failing OUTSIDE the band rather than on the band being empty of
+    // passes. Run 33131342785's `organize-dialog-fail.png` is
+    // the proof of mechanism: "By kind" still highlighted, the by_kind plan rendered,
     // `CPE-1143-photo.png` plainly present in the folder behind the dialog.
     //
-    // The settled preview is exactly `summary` (a plan rendered) / `empty-state` (a plan of zero) /
-    // `error`; the loading placeholder carries no testid, so "one of these three exists" IS "the
-    // dialog has stopped resizing". Deliberately tolerant of all three: this wait must not become a
-    // second, silent assertion that a plan was produced — the named assertions below own that.
-    await browser.waitUntil(
-      async () =>
-        (await $$('[data-testid="summary"], [data-testid="empty-state"], [data-testid="error"]').length) > 0,
-      {
-        timeout: 15_000,
-        timeoutMsg:
-          "expected the Organize dialog's default (by_kind) preview to settle before picking a rule",
-      },
-    );
+    // WHAT THIS WAITS ON, and why it is `summary` ALONE. `[data-testid="summary"]` renders only in the
+    // `plan.length > 0` branch, i.e. only once the plan has come back and the preview has grown to its
+    // final height — so waiting for it genuinely gates the reflow. `empty-state` does NOT: the
+    // component initialises `loading = false, plan = []` and `$: rule, path, scheduleLoad()` merely
+    // ARMS a 120ms `setTimeout`, so the `{:else if plan.length === 0}` branch renders `empty-state`
+    // synchronously AT MOUNT. Round 1 of this fix accepted all three "settled" testids and was
+    // therefore satisfied at t=0, buying one `findElements` round-trip (~10-15ms in these logs) and
+    // nothing else — it shifted the gap distribution INTO the hazard band rather than gating on the
+    // reflow. `src/lib/components/OrganizeDialog.test.ts` now pins that t=0 state against a real render.
+    // Tolerating `error` was the same mistake in miniature: the error branch renders in a `.preview`
+    // that has NOT grown. If the plan ever legitimately comes back empty this wait times out with the
+    // message below — which is fine, because the `group-` assertion further down would have failed
+    // anyway; this way it is named at the point that matters instead of 10s later.
+    await browser.waitUntil(async () => (await $$(CPE1965_SETTLED_PREVIEW).length) > 0, {
+      timeout: 15_000,
+      timeoutMsg:
+        `expected the Organize dialog's default (by_kind) preview to settle (${CPE1965_SETTLED_PREVIEW}) ` +
+        "before picking a rule — the plan never rendered, so the dialog never reached its final height",
+    });
 
     // Select a rule (By extension) — an explicit user action, not just relying on the dialog's
     // default. Produces the most legible grouping for this fixture (PNG/ZIP/TXT/RS/MP3 subdirs),

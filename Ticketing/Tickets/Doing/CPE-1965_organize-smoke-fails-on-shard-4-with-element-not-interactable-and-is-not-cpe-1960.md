@@ -109,7 +109,15 @@ ticket was filed to prevent, one level up.
 Every `GUI smoke` run created **2026-08-27T12:24:22Z → 2026-08-28T01:46Z** (103 runs), its shard-4 job
 resolved via `actions/runs/<id>/jobs`, every job that reached `completed` and was not `cancelled`
 (**69 jobs**) downloaded via `actions/jobs/<id>/logs`, and each fingerprinted by what `npm ci`
-installed in `gui-smoke/`:
+installed in `gui-smoke/`.
+
+**The window cuts on JOB-START time** — the shard-4 job's own `started_at`, not the run's `created_at`.
+Cutting on **run-created** instead admits **72** jobs: three more (`98727388423`, `98726514061`,
+`98731172209`) whose runs were created before 01:46Z but whose shard-4 jobs did not start until
+01:54–02:16Z. All three are **489 successes**, so the job-start figure below is conservative by a hair
+and nothing else moves; the run-created split is 479 → 51 jobs / 1 failure, 489 → 21 jobs / 2 failures,
+**3 of 72 = 4.2%**. Both numbers are stated wherever they matter. (Round 2: this basis was implicit
+before, which is how two careful people counted 69 and 72 from the same query.)
 
 | install | wdio | shard-4 jobs | organize.smoke failures | rate |
 |---|---|---|---|---|
@@ -117,8 +125,9 @@ installed in `gui-smoke/`:
 | `added 489 packages` | 9.31.4 | 18 | **2** | 11.1% |
 | **total** | | **69** | **3** | **4.3%** |
 
-The per-version split is **not** evidence of a version effect: 3 events over 51 vs 18 trials is
-p ≈ 0.15 by Fisher's exact test, and the mechanism below is version-independent. Quote **4.3%**.
+The per-version split is **not** evidence of a version effect: 1/51 vs 2/18 is **p = 0.1645** by
+Fisher's exact test (two-sided), and on the run-created window's 1/51 vs 2/21 it is **p = 0.2019**.
+The mechanism below is version-independent. Quote **4.3%** (**4.2%** on the wider window).
 
 The three: job `98561730405` (14:56Z, `cpe-1913-containment-gates`, **479**), `98713492478` (00:14Z,
 **`main`**, 489), `98725158256` (01:39Z, `cpe-1956-ci-verdict` = PR #1074, 489). All three carry the
@@ -154,10 +163,27 @@ The mechanism is a **reflow between the driver computing the click point and dis
 - The click lands ~98 px low, inside `.preview`, whose ancestor `.dialog` has
   `on:click|stopPropagation` — **swallowed in silence**. No rule change, no error, dialog stays open.
 
-Measured across the 69 logs, `rule-picker` found → `elementClick` on `rule-by_extension` is 27–159 ms,
-straddling the 120 ms debounce; the three failures sit at 115, 116 and 117 ms. The app *logic* is not
-at fault: `OrganizeDialog.test.ts` already proves a rule click switches the rule and that `loadGen`
-handles out-of-order plan resolution, and a new case re-proves it. The defect is **positional**.
+**Directly observed, not merely inferred.** In the failing log the driver issues `elementClick` at
+**28.956** and logs `RESULT null` at **28.985**; the dialog's debounce fires at mount+120 ms ≈
+**28.960**. The reflow lands *inside the click command's own 29 ms window*. That is the mechanism seen
+happening, not reconstructed from CSS.
+
+**The clustering, stated in its strongest TRUE form** (round-2 correction — the round-1 phrasing implied
+115/116/117 ms was an otherwise-empty band, and it is not):
+
+> Across the 72-job run-created sweep, `rule-picker` found → `elementClick` on `rule-by_extension`
+> ranges 27–159 ms. **Zero failures occur outside a 113–119 ms band.** Of the **13** in-band jobs,
+> **3 failed**; of the **59** out-of-band jobs, **0** failed. Fisher's exact, two-sided:
+> **p = 0.0048**. (On the 69-job job-start sweep: 3 of 13 in-band vs 0 of 56 out, **p = 0.0055**.)
+
+In-band is a **coin flip, not a death sentence** — 3 in-band jobs at 115/116/117 ms *passed*. That is
+exactly what a race predicts, and it is what the spec comment already said ("clicking inside that window
+is a coin flip"); only the summary prose implied exclusivity. Exclusivity is not needed and was never
+true: what carries the argument is that **nothing outside the band ever fails**.
+
+The app *logic* is not at fault: `OrganizeDialog.test.ts` already proves a rule click switches the rule
+and that `loadGen` handles out-of-order plan resolution, and a new case re-proves it. The defect is
+**positional**.
 
 That the app lets a click be swallowed at all is a genuine user-facing papercut, filed as **CPE-1968**
 with the three candidate fixes. Deliberately not fixed here: every one of them is a visual-design
@@ -168,10 +194,9 @@ is to unblock #1074.
 
 `gui-smoke/specs/organize.smoke.ts`:
 
-1. Wait for the **default rule's preview to settle** before clicking a pill — `summary` /
-   `empty-state` / `error`, which are exactly the three settled states (the loading placeholder carries
-   no testid), i.e. "the dialog has stopped resizing". Deliberately tolerant of all three so the wait
-   cannot become a silent second assertion that a plan was produced.
+1. Wait for the **default rule's preview to land** before clicking a pill — on
+   **`[data-testid="summary"]` alone** (round-2 correction; see Work Log round 2 for why the round-1
+   three-testid version was satisfied at t=0 and gated nothing).
 2. After the click, **assert the pill actually became `.active`**, with a message naming the swallowed
    click. This is the legibility half: the failure used to surface 10 s later as "expected a PNG group
    for the seeded CPE-1143-photo.png", which reads like a broken `organize_plan` or a missing fixture —
@@ -190,15 +215,18 @@ it is one this harness can simply stop tripping.
   10/10 green.
 - **Honest limit, stated at the site and here**: this does not reproduce the swallowed click. jsdom has
   no layout, so the ~98 px shift is not measurable locally, and at a 4.3% base rate **no single CI run
-  settles it either way** — roughly 65 consecutive green shard-4 jobs would be needed for 95%
-  confidence the rate has dropped below 4.3%. The empirical half of the red-proof is the enumeration
+  settles it either way** — `ln 0.05 / ln(1 − 3/69)` = **67.4**, i.e. **68** consecutive green shard-4
+  jobs for 95% confidence the rate has dropped (**71** on the run-created window's 3/72; round-2
+  correction — "~65" was a guess, not a computation). The empirical half of the red-proof is the enumeration
   above plus the failure screenshot. The new in-spec assertion guarantees that if it *does* recur it
   fails at the click, naming the cause, instead of 10 s later pointing at the wrong thing.
 
 ### 5. Neighbour sweep — enumerated, not recalled (CPE-1932)
 
-`git ls-files 'gui-smoke/specs/*.smoke.ts'` → **43 spec files, 139 `.click()` sites**; the 14 on shard 4
-account for 51 of them. `context-menu.smoke.ts` and `home-item-menu.smoke.ts` have **zero** `.click()`
+`git ls-files 'gui-smoke/specs/*.smoke.ts'` → **43 spec files, 138 `.click()` sites**; the 14 on shard 4
+account for 51 of them. (Round-2 correction: the count was stated as 139. Re-derived —
+`git ls-files "gui-smoke/specs/*.smoke.ts" | xargs grep -oh "\.click()" | wc -l` → **138**. A one-off
+miscount in a CPE-1932 enumeration is exactly the thing that must not be waved through.) `context-menu.smoke.ts` and `home-item-menu.smoke.ts` have **zero** `.click()`
 sites (they drive `lib/mouse.ts` / `browser.execute` instead) — absent from the table because the
 enumeration found none, not because they were skipped.
 
@@ -235,3 +263,125 @@ count unchanged at 25, so no ratchet movement. `ratchet.ts` only shape-checks `t
 
 - `gui-smoke`: `npm run typecheck` clean; `npm run test:unit` 149/149 pass.
 - root: `npm run check` **0 errors, 0 warnings**; `npm test` **348 files, 4989 passed, 2 skipped, 0 failed**.
+
+---
+
+## Work Log — 2026-08-27 (round 2, after review of PR #1079)
+
+### The blocker: the settle-wait was satisfied at t=0. It waited for nothing.
+
+Round 1 waited on `summary` **or** `empty-state` **or** `error`, justified by this sentence in the spec
+comment:
+
+> the loading placeholder carries no testid, so "one of these three exists" IS "the dialog has stopped
+> resizing"
+
+**That sentence is false**, and it was load-bearing. `OrganizeDialog.svelte` initialises
+`loading = false` and `plan = []`, and `$: rule, path, scheduleLoad()` only **arms**
+`setTimeout(loadPlan, 120)` — `loading` does not become `true` until t=120 ms. So for the entire
+pre-load window the markup takes the `{:else if plan.length === 0}` branch and renders
+`data-testid="empty-state"` **synchronously at mount**.
+
+Reproduced here with a jsdom probe over a real render (`round1` = the round-1 three-testid selector,
+`round2` = the shipped one):
+
+```
+t=  0  round1=1  round2=0  | ids: help-btn,rule-picker,rule-by_kind,…,preview,empty-state,cancel-btn,apply-btn
+t=119  round1=1  round2=0  | ids: help-btn,rule-picker,rule-by_kind,…,preview,empty-state,cancel-btn,apply-btn
+t=179  round1=1  round2=1  | ids: help-btn,rule-picker,rule-by_kind,…,preview,summary,group-Documents,group-Images,…
+```
+
+**Consequence.** `browser.waitUntil` returned on its first poll, so the "fix" bought one `findElements`
+round-trip — ~10–15 ms in these logs — and nothing else. It shifted the find→click gap distribution by
+~10 ms, which moves runs that used to land at 100–107 ms **into** the 113–119 ms hazard band. The ~4%
+flake was **re-labelled, not removed**, and the PR body's "it is fixed here" / "removes the CI red"
+were not supported. Both corrected.
+
+The second half of round 1 — asserting the pill actually became `.active` — is genuinely load-bearing
+and is unchanged. It converts a 10-s-later "expected a PNG group" into a failure named at the click.
+But re-labelling is all it does.
+
+### The fix: wait on `summary` ALONE, and argue it
+
+`[data-testid="summary"]` renders only in the `plan.length > 0` branch — i.e. only once the plan has
+come back and `.preview` has grown to its final height. It therefore genuinely gates the reflow, which
+is the whole point of the wait.
+
+The round-1 worry that motivated the three-way tolerance — *"this must not become a silent second
+assertion that a plan was produced"* — was misplaced twice over:
+
+- **It is not silent.** The `timeoutMsg` names it: *"expected the Organize dialog's default (by_kind)
+  preview to settle … the plan never rendered, so the dialog never reached its final height."*
+- **It is not second.** The very next assertion (`[data-testid^="group-"]`, then the named PNG/ZIP
+  groups) already asserts loudly that a plan was produced. An empty plan fails there regardless; this
+  wait only decides *where* it is named.
+
+Tolerating `error` was the same mistake in miniature: the error branch renders inside a `.preview` that
+has **not** grown, so it is a "settled" state that does not settle the layout.
+
+The rejected alternative — polling `$('[data-testid="preview"]').getSize().height` until stable across
+two samples ≥100 ms apart — is fixture-agnostic, but it is a *heuristic* (two equal samples can
+straddle a change), it adds ≥100 ms to every run, and it buys nothing here: this spec seeds its own
+mixed-kind fixture, so a non-empty by_kind plan is guaranteed by construction and `summary` is a
+**deterministic** state gate rather than a stability guess.
+
+### The fact the wait depends on is now PINNED (CPE-1933)
+
+`src/lib/components/OrganizeDialog.test.ts` gained a `CPE-1965 — organize.smoke's settle-wait does not
+match until the plan renders` block that:
+
+1. reads the selector literal **back out of `gui-smoke/specs/organize.smoke.ts`**, anchored at column 0
+   on a real `const CPE1965_SETTLED_PREVIEW = "…";` declaration asserted to occur exactly once (same
+   extractor shape as `guiSmokeFixtureLiterals.test.ts`, so a commented-out or quoted copy cannot
+   match — CPE-1933 rule 2); and
+2. drives a **real render** of the component through the debounce, asserting the selector matches
+   **0** at t=0, **0** at t=119 ms, and **>0** after t=180 ms; and
+3. pins the t=0 state directly — `empty-state` present, `summary` absent — and asserts the round-1
+   three-testid selector **does** match at t=0, so the defect itself stays reproducible rather than
+   becoming folklore.
+
+**Red-proofed** (CPE-1933 rule 3): widening the spec's `CPE1965_SETTLED_PREVIEW` back to the round-1
+three-testid selector reds **2 of 12** — *"organize.smoke.ts's settle-wait selector … already matches
+at MOUNT, so `browser.waitUntil` on it returns on its first poll and gates nothing"* and *"expected
+'[data-testid=\'summary\'], …' not to match /empty-state/"*. Reverted; 12/12 green.
+
+This is the check that would have caught the round-1 defect on the day it was written.
+
+### Number corrections (all four)
+
+| claim | round 1 | round 2 | how |
+|---|---|---|---|
+| `.click()` sites across the suite | 139 | **138** | re-derived from `git ls-files` piped through `grep -oh "\.click()" \| wc -l` |
+| Fisher p, per-version split | ≈ 0.15 | **0.1645** (1/51 vs 2/18); **0.2019** on 1/51 vs 2/21 | computed, two-sided |
+| consecutive greens for 95% confidence | ~65 | **68** (`ln 0.05 / ln(1 − 3/69)` = 67.4); **71** at 3/72 | computed, not guessed |
+| the enumeration window | "created 12:24Z–01:46Z" | same, **cut on job-start**; run-created admits 3 more (**72**) | stated explicitly in §1 |
+
+The three run-created extras (`98727388423`, `98726514061`, `98731172209`) are all **489 successes**,
+so the headline 4.3% is conservative by a hair and no conclusion moves. Both bases are now labelled
+wherever a number appears.
+
+### The clustering, restated as its stronger true form
+
+Round 1 implied 115/116/117 ms was an otherwise-empty band. It is not — **3 in-band jobs passed**.
+Exclusivity was never claimed by the spec comment (which says "a coin flip") but was implied by the PR
+body. The honest and much stronger claim, now used everywhere: **zero failures outside a 113–119 ms
+band; 3 of 13 in-band failed, 0 of 59 out-of-band; Fisher p = 0.0048.** A race predicts exactly this —
+in-band is a coin flip, out-of-band is safe.
+
+Added, from the failing log and previously unquoted: `elementClick` issued at **28.956** → `RESULT
+null` at **28.985**, with the debounce firing at mount+120 ms ≈ **28.960**. **The reflow lands inside
+the click command's own 29 ms window** — the mechanism directly observed rather than reconstructed.
+
+### What round 2 does NOT claim
+
+The wait now genuinely blocks until the reflow has happened, so the mechanism is closed at the point
+the spec controls. But the rate is 4.3%: **no CI run settles it**, and 68 consecutive greens is the
+bar. The `.active` assertion remains the safety net — if it recurs, it fails at the click with the
+cause in the message instead of 10 s later pointing at the fixture.
+
+### Round-2 checks
+
+- root `npm run check`: **0 errors, 0 warnings**
+- root `npm test`: **348 files, 4991 passed, 2 skipped, 0 failed** (4989 + the 2 new cases)
+- `gui-smoke`: `npm run typecheck` clean; `npm run test:unit` **149/149**
+- rebased on `origin/main` after #1072 and #1074 merged
