@@ -2112,3 +2112,30 @@ argued the benefit was a latent one (a skipped job satisfying a required check, 
 here because nothing is required). The live benefit was one layer down and larger. **When a change
 guards against a hazard, check what already consumes the signal it is changing** — the honest answer
 to "is this worth it" is often in a different file than the change.
+
+## 2026-08-27 — I asked for "treat SKIPPED as not-success" and the worker was right to refuse the blanket version
+
+Having found that `ci-poll.mjs` counted `SKIPPED` as success, I routed the fix with a strong steer:
+treat a skip as "did not run", because that is the house rule the day's other four fail-opens
+established. The worker measured before complying and found the steer would have broken the tool:
+**`GUI smoke (windows-latest)` is SKIPPED on every PR**, by its own job-level `if:`. A blanket rule
+would have made every board red forever — which is not fail-closed, it is broken, and it would have
+been reverted within a day, taking the real fix with it.
+
+What shipped instead derives the distinction at run time from `.github/workflows/*.yml`: a job with an
+`if:`, plus the transitive `needs:` closure behind it, is **skipped by design**; anything else **did
+not run**. An empty scan treats every skip as unexplained, so the derivation itself fails closed.
+
+**The lesson is about the shape of fail-open fixes, and it is easy to get wrong in the safe-feeling
+direction.** "Did not run must not read as success" is correct. "Therefore every not-run signal blocks"
+is not — it collapses two different facts (*this was deliberately not applicable* and *this should have
+run and did not*) that the tool has to tell apart. The discrimination is the work; treating the whole
+category as failure only looks like rigour.
+
+Two more things came out of the same pass. The sweep found a **second** fail-open script —
+`organize-done.mjs` printed a failed auto-commit to stdout and exited **0** *after renaming files*,
+and `git diff --cached --quiet` could not tell exit 1 from exit 128, the same exit-code confusion as
+the bash `[ -lt ]` returning 2. And **job age is now reported but deliberately not thresholded**: the
+median run here is 58.9 minutes, so any invented "over N minutes = hung" fires constantly. Report the
+number and the name; let the caller compare against a sibling. I spent an hour today doing that
+comparison by hand.
