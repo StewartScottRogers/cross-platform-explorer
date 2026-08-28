@@ -4457,8 +4457,8 @@ fn extract_zip_archive_stream(
             //
             // **CPE-1961: the bytes go into the CLAIM's staging sibling, never the destination.**
             // `continue`ing here drops `claimed`, which removes the staged file — and the destination
-            // name too when this call created it — so a decompression failure leaves the entry's name
-            // exactly as the extraction found it rather than truncated.
+            // name too when this call created it — so a decompression failure now leaves the entry's
+            // name exactly as the extraction found it instead of truncated-then-abandoned.
             if let Err(e) = std::io::copy(&mut entry, &mut claimed.file) {
                 report.fail(
                     &name,
@@ -4471,7 +4471,6 @@ fn extract_zip_archive_stream(
                 emit(&prog);
                 continue;
             }
-            claimed.commit().map_err(|r| r.why)?;
             prog.done_bytes += entry.size();
             // **CPE-1938 F-B — the mode is set through the HANDLE the bytes went into, not by name.**
             //
@@ -4534,18 +4533,40 @@ fn extract_zip_archive_stream(
             // failed identically before, because the deferred drain still left the file 0o444 at the
             // end of the first run. Same on `main`, measured, so nothing here made it worse.
             //
-            // **CPE-1935 — recorded, not fatal, and NOT counted as done.** `map_err(..)?` stood here.
-            // The bytes are on disk by this point, so the message says so and the entry is a `fail`
-            // rather than a `done`: the file the archive described had a mode this filesystem would not
-            // apply, and calling that success is the silent-partial shape one layer down.
+            // **CPE-1961 round 2 — this block sits ABOVE the commit, and that position is required
+            // twice over.** Mechanically: `ClaimedDestination::commit(mut self)` *consumes* the claim,
+            // so `claimed.file` does not exist after it — round 1 left the block below the commit
+            // still referring to the pre-rename local `f` and `crates/server` stopped compiling on
+            // Linux and macOS (`E0425: cannot find value `f``), which no Windows job could catch
+            // because the whole block is `#[cfg(unix)]`.
+            // Semantically it is the only position in which the paragraph above stays TRUE: the handle
+            // the bytes went into is the *staging sibling*, and applying the mode here puts it on that
+            // object while it is still nameless, so the file takes the destination name already
+            // wearing its final mode. There is no instant at which `out` exists with the wrong bits —
+            // the same "mode onto the staged file before it takes the name" ordering
+            // `fsutil::HandleCarryover::apply` uses, and the reason `create_staging_beneath` creates
+            // at `0600` rather than `0666 & ~umask`. Covered by
+            // `cpe1961_a_zip_entrys_unix_mode_lands_on_the_committed_file`.
+            //
+            // **CPE-1935's per-entry handling, kept — with the one word staging changes.** `map_err(..)?`
+            // stood here before CPE-1935 and a `?` would still take the whole run down for one entry, so
+            // the `fail`-and-`continue` is unchanged. What did change is the *sentence*: CPE-1935 said
+            // *"its contents were written, but its permissions could not be set"* because the bytes were
+            // already at the destination by this point. They are not any more — they are in a staging
+            // sibling that the `continue` below drops and unlinks — so the message now says nothing was
+            // written, which is what the filesystem will show. Still a `fail` rather than a `done`: the
+            // file the archive described had a mode this filesystem would not apply, and calling that
+            // success is the silent-partial shape one layer down.
             #[cfg(unix)]
             if let Some(mode) = entry.unix_mode() {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = f.set_permissions(fs::Permissions::from_mode(mode)) {
+                if let Err(e) = claimed.file.set_permissions(fs::Permissions::from_mode(mode)) {
                     report.fail(
                         &name,
                         &EntryFailure::from_write_error(
-                            format!("its contents were written, but its permissions could not be set: {e}"),
+                            format!(
+                                "its permissions could not be set, so nothing was written for it: {e}"
+                            ),
                             &e,
                         ),
                     );
@@ -4554,6 +4575,7 @@ fn extract_zip_archive_stream(
                     continue;
                 }
             }
+            claimed.commit().map_err(|r| r.why)?;
             report.done += 1; // only files count toward "done" — a dir is a placeholder, not content
         }
         prog.done_items += 1;
@@ -11392,6 +11414,171 @@ mod tests {
              run where nothing was ever swapped in would report zero escapes no matter what the \
              extraction did. The fix does not prevent the swap — it makes it irrelevant"
         );
+    }
+
+    /// **CPE-1961 round 2: the zip-extract Unix-mode leg, which had NO test at all.**
+    ///
+    /// # Why this exists
+    ///
+    /// Round 1 renamed the extraction loop's local `f` to `claimed` and moved the write to
+    /// `claimed.file`, but left the `#[cfg(unix)]` mode block referring to the old `f` *and* below
+    /// `claimed.commit()`, which consumes the claim. `crates/server` stopped compiling on Linux and
+    /// macOS (`error[E0425]: cannot find value `f``) and **the whole Windows CI leg stayed green**,
+    /// because the block is `#[cfg(unix)]` and a Windows build never parses past `#[cfg]`. Two
+    /// reviewers found it by building on Linux; nothing in the suite could have. The gap is that this
+    /// leg — an archive-chosen mode arriving on an extracted file — had no assertion anywhere, so even
+    /// on Linux the only thing standing between it and silence was the compiler.
+    ///
+    /// # What it asserts, and which half is one-sided
+    ///
+    /// 1. **The mode lands.** Three entries with distinct modes come out wearing them. Deleting the
+    ///    `#[cfg(unix)]` block turns this red on every Unix runner.
+    /// 2. **The bytes land with it**, so a green mode assertion cannot be satisfied by an empty or
+    ///    staged-but-uncommitted file.
+    /// 3. **No `.cpe-tmp` residue survives** in the destination. A commit that silently failed, or a
+    ///    claim dropped after a successful write, would leave one.
+    /// 4. **The name is never observed holding CONTENT at a non-final mode** — the ordering half, and
+    ///    the one the moved block is actually about. The staging file is born `0600`
+    ///    (`create_staging_beneath`), the mode is applied to it while it is still nameless, and only
+    ///    then does `commit()` give it the name. So the bytes and the final mode arrive at
+    ///    `dest/exec.sh` in the same instant. A future edit that applied the mode after the commit
+    ///    would make a *populated* `dest/exec.sh` observable at `0600` first.
+    ///
+    /// **Assertion 4 is about CONTENT-at-a-mode, not existence-at-a-mode, and the first draft got that
+    /// wrong — the test caught it, which is the point of running one.** The draft asserted the name is
+    /// never seen at anything but `0o755` and came back red with five observations of `0o644`. That is
+    /// not a bug: `claim_destination_handle` opens the destination through `create_beneath`, which
+    /// **creates the name** when it is absent (`created == true`, which is what `Drop` later removes on
+    /// an abandoned claim) so the guards have an object to interrogate. That placeholder is an **empty
+    /// file at the platform default `0o666 & ~umask`**, and it stands at the destination name for the
+    /// whole of the caller's write. It is recorded in this ticket's cost list; it is not what this
+    /// assertion is for, so the assertion is scoped to observations where `len > 0`.
+    ///
+    /// **This half is one-sided and says so rather than pretending otherwise**: the observer polls, so
+    /// on a fast or loaded runner it may see the file only after the run finished, in which case it
+    /// observes the final state and passes. It can produce a true red and cannot produce a trustworthy
+    /// green on its own — which is why 1–3 carry the regression and this carries the ordering claim.
+    ///
+    /// # Red-proof (run by hand on Linux, CPE-1929's first half)
+    ///
+    /// - **Delete the `#[cfg(unix)]` mode block**: red on assertion 1, all three entries arriving at
+    ///   `0o600` — the staging birth mode, which is itself the measurement behind the `0600` row in
+    ///   this ticket's cost list.
+    /// - **Move the block back below `claimed.commit()`**: does not compile, which is the defect this
+    ///   test was written for and the reason the position is called out in a comment at the site.
+    /// - **Assertion 4 on its own**: shown red above, by the placeholder, before it was scoped to
+    ///   populated observations — so the observer demonstrably does see the file mid-run on this
+    ///   runner rather than only after the extraction has finished.
+    #[cfg(unix)]
+    #[test]
+    fn cpe1961_a_zip_entrys_unix_mode_lands_on_the_committed_file() {
+        use std::os::unix::fs::PermissionsExt;
+        const WANT: [(&str, u32); 3] = [("exec.sh", 0o755), ("private.txt", 0o600), ("plain.txt", 0o644)];
+
+        let d = scratch("cpe1961-zip-mode");
+        let ap = d.join("modes.zip");
+        {
+            let mut w = zip::ZipWriter::new(fs::File::create(&ap).unwrap());
+            for (name, mode) in WANT {
+                let o: zip::write::FileOptions<()> =
+                    zip::write::FileOptions::default().unix_permissions(mode);
+                w.start_file(name, o).unwrap();
+                w.write_all(name.as_bytes()).unwrap();
+            }
+            // Filler AFTER the observed entry, so the extraction is still running when the observer
+            // starts looking — the same trick, and the same reason, as the CPE-1938 race above.
+            let plain: zip::write::FileOptions<()> =
+                zip::write::FileOptions::default().unix_permissions(0o644);
+            for i in 0..12 {
+                w.start_file(format!("filler{i}.bin"), plain).unwrap();
+                w.write_all(&vec![b'x'; 100_000]).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        // Assertion 4's observer. Bounded by a deadline, never by a flag, so it cannot hang a run.
+        let watched = dest.join("exec.sh");
+        let observer = {
+            let watched = watched.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                let (mut seen, mut wrong) = (0usize, Vec::<u32>::new());
+                while std::time::Instant::now() < deadline {
+                    if let Ok(m) = fs::symlink_metadata(&watched) {
+                        // `len > 0` is what distinguishes the COMMITTED file from the empty
+                        // placeholder `create_beneath` left at the name at claim time — see the doc.
+                        if m.len() > 0 {
+                            seen += 1;
+                            let mode = m.permissions().mode() & 0o7777;
+                            if mode != 0o755 {
+                                wrong.push(mode);
+                            }
+                            if seen > 4 {
+                                break; // it is committed and has settled; stop burning the CPU
+                            }
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+                (seen, wrong)
+            })
+        };
+
+        let report = extract_archive_streamed(
+            &ap.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("a plain archive of mode-carrying entries must extract");
+        assert_eq!(
+            report.done,
+            (WANT.len() + 12) as u64,
+            "every entry must be reported as extracted: {report:?}"
+        );
+
+        for (name, mode) in WANT {
+            let p = dest.join(name);
+            assert_eq!(
+                fs::read(&p).unwrap_or_default(),
+                name.as_bytes(),
+                "{name}: the committed file must hold the entry's bytes — a mode on an empty or \
+                 uncommitted file proves nothing"
+            );
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+                mode,
+                "{name}: the archive's mode did not reach the extracted file. `0600` here means the \
+                 `#[cfg(unix)]` block stopped running and the file is wearing the staging birth mode"
+            );
+        }
+
+        let residue: Vec<String> = fs::read_dir(&dest)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".cpe-tmp"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "the extraction left staging siblings behind, so a commit did not happen or a claim was \
+             dropped after a successful write: {residue:?}"
+        );
+
+        let (seen, wrong) = observer.join().unwrap();
+        assert!(
+            seen > 0,
+            "the observer never saw {watched:?} holding any bytes, so assertion 4 measured nothing"
+        );
+        assert!(
+            wrong.is_empty(),
+            "the destination name was observed holding CONTENT at a non-final mode {wrong:?} — the \
+             mode is being applied AFTER the commit, so there is a window in which the finished file \
+             is readable under its real name at the staging birth mode"
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// **CPE-1938 round 2: a component the filesystem refuses for an I/O reason stops the whole run,

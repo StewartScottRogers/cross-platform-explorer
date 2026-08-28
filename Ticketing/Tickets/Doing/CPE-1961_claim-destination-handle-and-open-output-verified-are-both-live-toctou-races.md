@@ -360,13 +360,282 @@ still on the filesystem.
   is to overwrite *that object's* bytes), so staging is not the answer there and it needs its own
   reasoning. Not raced here.
 
-### Verification
+### Verification (ROUND 1 — WITHDRAWN, see round 2's "Where 2,414 came from")
 
-- `crates/server --lib`: Windows **2,431 passed / 0 failed / 13 ignored**; Linux (WSL, sources touched
-  first) **2,414 / 0 / 13**.
-- `src-tauri cargo test --lib`: **230 / 0**.
-- `cargo clippy --locked --all-targets -- -D warnings` clean on `crates/server` (default **and**
-  `--all-features`) on Windows **and** under the WSL toolchain, and on `src-tauri`.
-- Frontend `npm test`: 5,081 passed / 19 failed — all 19 in `catalogPublish*` / `releaseVerifyWiring*`,
-  which shell out to `bash` and die on `EBUSY: resource busy or locked, rmdir` in `%TEMP%`. Environmental
-  on this box and unrelated to this change (no shell script, workflow or TS file is touched by it).
+> **Do not quote the numbers that stood here.** Round 1 reported a Linux `crates/server --lib` figure of
+> **2,414 / 0 / 13** and Linux clippy as clean. **Neither run can have happened on this branch: the tree
+> did not compile on Linux or macOS at `23bf35dd`.** The figures are withdrawn rather than edited, and
+> the round-2 section below records what was measured instead, plus what is known about where 2,414 came
+> from. The frontend diagnosis that stood here (`EBUSY … rmdir`) was also wrong and is corrected below.
+
+---
+
+## Round 2 — Reviewer + Security Auditor on PR #1089
+
+### SEC-1 — `crates/server` did not compile on Linux or macOS
+
+`archive.rs`: round 1 renamed the local `f` to `claimed` and moved the write to `claimed.file`, but the
+`#[cfg(unix)]` mode block still said `f` — `error[E0425]: cannot find value 'f' in this scope`,
+`archive.rs:4113`. The whole Windows CI leg stayed green, because a Windows build never parses past
+`#[cfg(unix)]`.
+
+**It was not a rename.** `ClaimedDestination::commit(mut self)` *consumes* the claim, so the block could
+not stay where it was. It now sits **above** the commit and acts on `claimed.file` — which is also the
+only position in which the CPE-1938 comment on it is still true (*"the mode is set through the HANDLE the
+bytes went into, not by name"*) and the ordering the rest of the ticket argues for everywhere else: the
+mode goes onto the staged file while it is still nameless, so the file takes the destination name already
+wearing its final mode and there is no instant at which `out` exists with the wrong bits.
+
+**And nothing covered the leg, so a test now does.**
+`archive::tests::cpe1961_a_zip_entrys_unix_mode_lands_on_the_committed_file` asserts four things: the
+archive's mode reaches the extracted file, the bytes reach it too, no `.cpe-tmp` residue survives, and the
+name is never observed holding **content** at a non-final mode.
+
+Red-proofed by hand on Linux (`Compiling cpe-server` line confirmed present each time — a `touch` on
+`/mnt/z` does not force a rebuild):
+
+- Disable the mode block → **red**, `left: 384 (0o600) / right: 493 (0o755)`. The `0o600` is the staging
+  birth mode, which is independently the measurement behind cost row 3 below.
+- Move the block back below `commit()` → does not compile. That is the defect, and it is why the position
+  is called out in a comment at the site.
+
+**The fourth assertion was written wrong first, and the test caught it** — worth recording, because the
+thing it caught is a real behaviour nobody had written down. The first draft asserted the destination name
+is never seen at anything but `0o755` and came back red with five observations of `0o644`.
+`claim_destination_handle` opens the destination through `create_beneath`, which **creates the name** when
+it is absent, so the guards have an object to interrogate. That placeholder is an empty file at the
+platform default mode and it stands at the destination name for the whole of the caller's write. The
+assertion is now scoped to observations where `len > 0`; the placeholder is cost row 4.
+
+### Where 2,414 came from — the honest answer, and what is actually known
+
+It is not knowable from here *which* run produced it, so here is what was **measured** instead of guessed,
+which is what the next person needs:
+
+| revision | Linux `--lib` | note |
+|---|---|---|
+| `c2a524d4` (merge base) | **2,429 / 0 / 13** | measured this round, in a throwaway worktree |
+| `23bf35dd` (PR head, round 1) | *does not build* | `E0425` |
+| `23bf35dd` + SEC-1 fix | **2,432 / 0 / 13** | Reviewer's figure |
+| round 2 (this) | **2,433 / 0 / 14** | +1 test, +1 `#[ignore]`d racer |
+
+**2,414 matches no revision in this PR's lineage** — not the branch (which does not build), not the merge
+base, not the fixed branch. It is 15 below the merge base, so it is a number from an older tree: carried
+forward from an earlier point in the shift, or from a different worktree. The PR added exactly 3 tests and
+0 `#[ignore]`s, which is what makes 2,429 → 2,432 checkable rather than asserted.
+
+**The lesson, which matters more than the number.** A wrong count is a slip. A reported measurement from a
+platform where the code does not build is a claim about work that did not happen, and it is the exact
+class of claim CLAUDE.md's *"derive provenance, don't claim it"* exists to kill. The corrective is not
+"be more careful" — it is that a gate figure must come from the same command in the same shell that
+printed it, in the same session as the diff it describes.
+
+### SEC-4 — one planted alternate data stream aborted a whole extraction
+
+`HandleCarryover::capture` failing, and the destination-metadata read next to it, were
+`Refusal::failure` — `policy: false` — which `extract_zip_archive_stream` matches as *"a file the user
+asked for and did not get"* and turns into `return Err(...)`, killing the run. Writing an ADS needs only
+write access to the file, so **one planted 9 MiB stream on one pre-existing name inside the extraction
+folder denied the entire extraction**. On `main` these legs never read streams at all, so the denial
+arrived *with* the carry-over.
+
+Both are now `policy: true`, which is also the honest classification and not just the convenient one:
+`policy` means *"not writing is the correct outcome"*, and both of these say exactly that — we cannot
+describe this destination, so we decline to replace it with a file whose protections we would have to
+guess. Same family as "this name is a link". The entry is reported to the user as a named skip with its
+reason; the rest of the job continues.
+
+**And the ADS refusal message no longer says "this confirmed overwrite"** — it was written when the
+editor's save was the only caller, and it is now reachable from a backup, a restore, a revert, a download
+and a zip extraction, none of which is a confirmed overwrite. Kept deliberately verb-free rather than
+plumbing a `LinkGuardWording` down through `HandleCarryover::capture`: what the sentence says is true of
+every caller, and a sixth caller should not have to remember to pass its verb to keep it true.
+
+### SEC-2 / SEC-3 — the scope corrections, and the race arm that was missing
+
+**Three doc sites named the Win32 call that was measured to refuse this.** `sys::rename` records that it
+uses `NtSetInformationFile(FileRenameInformation)` and **not** `SetFileInformationByHandle`, because the
+wrapper refuses a non-null `RootDirectory` with `0x80070057` — and warns that a future "simplification"
+back to the wrapper fails every commit on the `Beneath` arm. But `create_staging_beneath`'s doc,
+`rename_beneath`'s **public** doc and `ClaimedDestination::commit`'s doc all described the implementation
+as being that wrapper. The reader most likely to attempt the simplification is the one reading the public
+doc. All three now say `NtSetInformationFile(FileRenameInformation)`.
+
+**"CPE-1963 is closed on Windows" is true of the `Beneath` arm and false of `ByPath`**, and that split is
+now stated at `ClaimedDestination::commit` with the Auditor's numbers. The two legs that arrive by path —
+`revert_engine::apply_write` and `snapshot_capture::restore` — do not have it.
+
+**`written` is read by ONE of the five legs.** `backup::copy_one_verified` consumes it via
+`landed_inside`; `archive`, `transfer`, `revert_engine` and `snapshot_capture` all discard it. So round
+1's unqualified *"the residual aliasing becomes detectable rather than silent"* is true of `backup` only.
+Recorded at the field.
+
+**The `Beneath` commit had no racer in-tree**, so its headline property was measured by nothing here —
+arms D and E are both `ByPath`. `fsutil::tests::cpe_1961_beneath_commit_report` (`#[ignore]`d, like every
+racer in this module) now lands it, and both platforms were re-measured with it this round:
+
+```text
+                            aliased        relinks (liveness)  victim bytes changed
+Windows/NTFS   (Auditor)     0 / 3,000       11,666             0
+Windows/NTFS   (this fn)     0 / 3,000        9,692             0
+  ...delete-only CONTROL     0 / 3,000            0             0
+Linux/ext4     (Auditor) 2,785 / 3,000      (not reported)      0
+Linux/ext4     (this fn) 2,790 / 3,000      714,892             0
+  ...delete-only CONTROL     0 / 3,000            0             0
+```
+
+**2,790 against 2,785, and 0 against 0, from two harnesses written independently** — that agreement is
+what makes either set worth quoting. Linux rows taken on real ext4 with `TMPDIR` off `/tmp` (tmpfs on
+WSL). The Windows 0 is not the attacker failing to get in: it got in 9,692 times and changed nothing. The
+Linux figure is CPE-1963's open residual, not a regression and not this ticket's to close — POSIX has no
+fd-sourced rename. The harness asserts only the victim-content control (0 everywhere); aliasing is
+reported.
+
+### SEC-5 — the cleanup unlinked by path across the caller's whole write
+
+`Drop` and `commit`'s failure path both did `std::fs::remove_file` on an absolute path, defended as the
+same bounded exception the refusal arms record — *a name this call created moments ago*. **"Moments ago"
+had stopped being true.** `Drop` fires on any early return between the claim and the commit, and the
+caller's write sits in that gap: a multi-gigabyte download, a whole archive entry. A by-path unlink across
+that window is a deletion primitive.
+
+Both now go through `Staged::abandon`, one implementation so the two halves cannot drift. The `Beneath`
+arm unlinks through the held root handle (`open_beneath::remove_file_beneath`, which CPE-1937 added for
+exactly this and whose doc records 89 files deleted outside the root in 200 trials when the leaf is
+by-path after the same descent). The `ByPath` arm keeps `std::fs::remove_file` and that is recorded as a
+**residual, not a decision that it is safe** — those callers hold no root handle, and giving them one is
+wiring `open_beneath` into `revert_engine` and `snapshot_capture`, which CPE-1913 scoped out deliberately.
+
+**Minor, same finding:** `rename_beneath`'s descent ran as `Act::Write`, whose disposition is
+`FILE_OPEN_IF` / `mkdirat`-if-missing. A commit arrives after the staging file is already sitting in those
+parents, so that could only ever *re-create* a directory something removed under us and then fail at the
+rename anyway — debris behind a failure, the precise thing CPE-1937 gave the delete leg `FILE_OPEN` to
+avoid. New `Act::Commit` variant: the delete leg's disposition, the write leg's wording.
+
+### SEC-6 — three cost rows the audit was missing, plus a doc that read as cross-platform
+
+The audit was accurate on what it listed and incomplete. All four rows are now at
+`ClaimedDestination`'s doc, and the user-facing ones are in `src/docs/safety-undo.md`:
+
+1. **Peak disk space doubles for the file being written.** The destination's folder transiently holds the
+   old file *and* the new one; `set_len(0)`-then-write peaked at the new size. **On the backup leg —
+   overwriting a large file on a nearly-full external drive — this turns operations that used to succeed
+   into `ENOSPC`.** Per-file, not per-job. Unavoidable while keeping the containment property, because
+   "do not write into the object that is already there" *is* the containment property.
+2. **On Unix the destination's owner changes.** The object landing at `dst` was created by the running
+   user; writing through the pre-existing handle preserved the destination's owner and group.
+   `carried_mode` handles the privilege consequence (setuid/setgid dropped when the owner changed), but
+   ownership itself is neither carried nor recoverable — `fchown` to another uid needs `CAP_CHOWN`.
+   Derived from the mechanism, **not measured**, and said so at the site.
+3. **A destination created at a brand-new name lands at `0600`**, not `0666 & ~umask`: the staging file is
+   born at `STAGING_MODE` and `HandleCarryover` only runs when `created == false`, so nothing widens it.
+   `transfer::download_tree` is the leg that feels it. Measured, not reasoned — it is the `0o600` in the
+   archive test's red-proof above.
+4. **The destination name exists as an empty placeholder for the whole of the caller's write** (found by
+   the new test, above). Not a regression — before, the same name existed and *grew* — but a caller that
+   reads "the name exists" as "the file is finished" was wrong before and is still wrong.
+
+**Not listed as a cost, deliberately:** the hard-linked-batch change. An output that was a second name for
+another file inside the selected folder used to have both names updated; it now updates only the output
+asked for. That is an operation no longer mutating a name it was never pointed at — an improvement, in
+the docs page as a behaviour change.
+
+**And `HandleCarryover`'s "fails rather than downgrades" is a Windows property, not the type's.** On Unix
+neither half can fail: `capture` reads xattrs behind `if let Ok(names)` and `apply` discards every
+per-attribute error. A destination carrying a POSIX ACL this process cannot re-apply degrades silently to
+mode bits. Left as-is — making `apply` fail would turn the constant, harmless `security.selinux` refusal
+into a failed backup on every SELinux machine — but recorded, because the doc read as cross-platform and
+was not.
+
+### SEC-7 — an access right nothing goes on to use
+
+`create_staging_beneath` asked for `DELETE | READ_CONTROL | WRITE_DAC` unconditionally, defended as free
+because Windows grants a creator the last two implicitly. But `HandleCarryover::apply` runs **only when
+`created == false`**, and the common case for all five legs — a first backup, a fresh extraction, a
+download into an empty tree — is `created == true`. That is exactly the shape `create_beneath`'s own
+comment refuses, in the sentence the doc quoted approvingly: *an access right nothing goes on to use is
+one more thing a network redirector can refuse.* Local NTFS grants it; SMB/WebDAV is where a backup
+destination lives.
+
+New `carrying` parameter (`carried.is_some()`, i.e. `!created`) gates `READ_CONTROL | WRITE_DAC`; `DELETE`
+stays unconditional because the handle-sourced rename requires it. The `ByPath` arm splits on the same
+flag between `create_staging_file_for_carryover` and `create_staging_file`. **Unmeasured against a real
+SMB/WebDAV/NFS share**, and stated so at the site rather than claimed as verified.
+
+### SEC-8 — the memo and the filter disagreed about a unit
+
+`sweep_stale_temp_siblings_once_per_directory` remembers a **directory**; the filter matched only
+`<this target's own name>.<stamp>.cpe-tmp`. In a 10,000-file directory the first file swept its own temps
+and the other 9,999 never swept theirs — and the next run, walking in the same order, memoises on the same
+first file and skips them again. A killed process's staging file for any non-first name is collected
+**never**, not "by some later run": a partial copy of the user's data left in the user's own folder
+indefinitely.
+
+New `SweepScope`: the memoised caller sweeps `EveryDestination` so one scan per directory collects that
+directory's residue, while `stage_and_replace_at` keeps the unmemoised, name-scoped form unchanged. What
+this widens is stated at the variant — the "a pathologically slow save can have its own live temp swept"
+window no longer needs the two saves to be of the same destination. Bounded by the same two things it
+always was, neither weakened: a structurally valid `<digits>-<digits>` stamp, and an mtime
+`STALE_TEMP_FLOOR` behind the just-committed target's. An actively-written staging file has a *fresh*
+mtime, so reaching the floor takes a writer that has produced no bytes for five minutes.
+
+### ASK 4 — two doc claims that were too optimistic
+
+- **`LAST_SWEPT_DIR` is thread-local and never cleared at a run boundary**, so the memo is once per
+  directory per *thread lifetime*, not per run. Round 1 said residue is "not collected until some later
+  run enters that directory first"; on a reused pool thread a later run **on that same thread skips it
+  too**. Only a different thread sweeps. It cannot go stale in any load-bearing way — it suppresses
+  best-effort cleanup and can never affect where bytes land.
+- **`create_staging_beneath`'s doc promised an internal retry that does not exist.** It said a collision
+  means "the caller's next attempt gets a fresh pid+nanosecond stamp". `staging_sibling_name` is called
+  **once** and a collision refuses the entry. That is the right behaviour — the name carries this
+  process's pid and a nanosecond stamp, so something already at it is a signal — but it is not what the
+  sentence said.
+
+### Item 5 — "untestable by construction" was the wrong heading; it is SHADOWED
+
+The `handle_facts(&claimed.file)` refusal's CPE-1929 pair was green-then-red (2,430 green disabled;
+79 failed with the predicate lying), and round 1 filed that as *untestable by construction*. The real
+reason is that the only instrument that can make `handle_facts` answer `None` —
+`ProbeInjection::HandleUndescribable` — is **thread-global**, so arming it trips the *earlier*
+`handle_facts(&w)` call on the destination handle first and that arm returns before control reaches here.
+The 79 failures are hitting the earlier refusal. Reorder is meaningless (two different handles at two
+different moments; this one cannot run before the staged file exists) and delete fails open into
+`landed_inside`, so it is kept **deliberately as an unreachable fail-closed backstop** — the third
+disposition CPE-1929 allows, provided the site says so, which it now does.
+
+### ASK 5 — the frontend diagnosis was wrong and would have misdirected
+
+Round 1 wrote the 19 failures as *"`EBUSY … rmdir` in `%TEMP%`, environmental"*. They are
+`expect(status).toBe(0)` on a shelled-out script. **Cause: bare `bash` resolves to
+`C:\Windows\System32\bash.exe`, the WSL launcher**, which cannot run these scripts against Windows paths.
+Measured both directions this round on the same four files
+(`catalogPublishFreshnessGuard`, `catalogPublishLoudFailure`, `catalogPublishVersion`,
+`releaseVerifyWiringGuard`):
+
+```text
+System32\bash.exe first on PATH   4 files failed   19 failed / 41 passed
+Git Bash first on PATH            4 files passed   101 passed / 2 skipped
+```
+
+Both explanations agree the PR is not the cause, but the round-1 one would have sent the next person
+hunting a temp-dir lock that is not there. **`bash` must resolve to Git Bash, not `System32\bash.exe`.**
+
+### Verification (round 2 — every figure below taken after the final edit)
+
+- `crates/server --lib`: Linux (WSL, `TMPDIR` off tmpfs) **2,433 passed / 0 failed / 14 ignored**;
+  Windows **2,442 / 0 / 14**. The +1 ignored on both is the new `Beneath` racer; the +1 passed on Linux
+  only is the new `#[cfg(unix)]` archive test.
+- `crates/server --tests` on Linux, all integration targets: **21 / 22 / 2 / 1 / 1 / 45 / 16 / 32**, all
+  `ok`, 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: clean on `crates/server` on **Linux** and **Windows**
+  (`Checking cpe-server` present in both, so neither was a cached no-op).
+- Frontend, taken after the rebase onto `0d58a816` (which added `src/lib/catalogIndexOneDoor.test.ts`,
+  so the totals are 1 file / 30 tests above the pre-rebase 357 / 5,230): `npm run check` **0 errors / 0
+  warnings**; `npx vitest run` **358 files, 5,260 passed / 0 failed / 2 skipped** — with Git Bash first
+  on PATH, per ASK 5.
+- `src-tauri cargo test --lib`: **230 / 0**, unchanged — `open_beneath`'s new `carrying` parameter and
+  `Act::Commit` are both `pub(crate)`/private to `cpe-server` and cross no crate boundary.
+- `sidecar/host`'s `tests/keyring_roundtrip.rs` cannot link under WSL (`undefined symbol:
+  sd_listen_fds`) — a genuine environment gap, not a code failure. It is in `sidecar/host`, which this
+  diff does not touch, and it is covered by the Windows run.
