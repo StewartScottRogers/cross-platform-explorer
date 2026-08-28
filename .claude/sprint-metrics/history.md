@@ -3949,3 +3949,42 @@ The same review found three numbers-at-the-site that do not survive re-running:
 understates the work done, and one fabricates a string. **The fix for all three is the same and it is
 mechanical: paste what the runner prints.** A remembered assertion message is a summary, and a summary of
 an error message is exactly the artefact nobody re-checks — it looks like evidence and is prose.
+
+## 2026-08-28 — correcting myself: the silent success was archive's, not transfer's
+
+Last tick I recorded that my brief — *"use the `transfer.rs` shape"* — created a silent success on the
+download leg. Round 5 read the legs instead of assuming, and the correction is worth having exactly
+right: **`transfer` already forked correctly.** Its `skipped` + `Ok` for a link refusal is CPE-1709 /
+CPE-1881's standing contract for that leg and has produced the same outcome for a *claim*-time link since
+long before this ticket. It is a real and arguable behaviour, and it is not new.
+
+**The defect was `archive`'s, and it was this PR's own line.** It sent the link verdict to **failed** with
+*"clear that and extract again"* — advice that cannot work, because re-extracting refuses again — while
+**the claim-time arm ten lines above calls the identical thing a skip.** One refusal, one folder, two
+buckets, **decided by which microsecond the link was planted in.**
+
+So the lesson survives in a sharper form. *"Use the shape from the other leg"* was still the wrong
+instruction, but not because the other leg was wrong: **because a per-entry recording macro classifies by
+the refusal, and the two legs had already disagreed about that classification before I said anything.**
+The bug I caused was propagating a shape into a leg whose sibling arm already answered differently. **The
+question to ask is not "does this leg do it this way" but "does this leg agree with itself".**
+
+**And the author's own first draft of the bucket table was wrong the same way I was** — it assumed two
+legs arrive by a different destination shape. Reading the call sites showed **all five arrive the same
+way, and the shape it assumed has no production caller at all.** Two of us assumed the same class of
+thing about the same code within a day.
+
+Two more things from that round worth keeping:
+
+**A platform difference the fixture found rather than the author assumed.** The first draft panicked with
+the raw error instead of skipping — which is how it surfaced that **NTFS refuses to rename a directory
+with our staging handle open inside it**. That makes the swap Unix-constructible only. The author calls it
+*"the staging handle happening to pin its own ancestor chain — a platform accident, not a contract"*, and
+so **the Windows arm asserts the block by its error code**, reddening if NTFS ever permits it. A test that
+passes because the platform blocks it is worth only as much as the assertion that the block happened.
+
+**And a precise reading of the CPE-1929 signature.** A-disable green plus B-lie **red** is *not* the
+shadowed pair — that is both green. B reddening proves control reaches the fork. A's green says the
+narrower true thing: one side of the fork is structurally uncovered because its only input needs a race
+inside a copy loop. **Reporting which of the two sabotages fired is what separates "unreachable" from
+"untested".**
