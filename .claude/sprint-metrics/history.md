@@ -2001,3 +2001,35 @@ set of properties nobody audited** — ACLs, streams, inode identity, mode bits,
 permissions the new path now requires (F2: operations that worked on `main` with file-write alone now
 need directory-write, and fail). Race-closure and access-control preservation are different
 properties, and closing the first is a good reason to re-measure the second, not evidence about it.
+
+## 2026-08-27 — "intermittent" and "consistent" were both wrong: it had a commit boundary
+
+CPE-1960 was filed as an intermittent gui-smoke failure. I then raised it to High with a note arguing
+the opposite — that **every** shard-2 run which actually completed had reported it, so the word
+"intermittent" should come out. I was wrong in a specific and instructive way: I reasoned from the runs
+I had already looked at instead of running the query the ticket itself specified. The worker ran it and
+found **two** completed clean runs (jobs `98681871872` and `98686079109`, both `14/14 … 24 passed, 0
+failed`). Both **predate** commit `48aa8697`; every completed run after it fails. **100% deterministic
+on either side of one commit.**
+
+Neither "intermittent" nor "consistent" was the right frame, and the tell was in the evidence I had
+already used to argue High: *"three unrelated branches"* is not the signature of a race — it is the
+signature of three branches that had all rebased past the same commit. I read that fact and drew the
+opposite conclusion from it.
+
+**The cause is the sharper lesson.** `48aa8697` is CPE-1945 — the `npm audit` sweep — and its only
+functional change is `gui-smoke/package-lock.json`: **webdriverio 9.30.0 → 9.31.4**. WebdriverIO's
+`element.scrollIntoView()` is not the DOM API; it injects a real mouse wheel. 9.30.0 emitted
+`deltaX:0, deltaY:0` with `origin: <the element>` — a no-op. 9.31.4 emits a real delta with **no
+`origin`**, so the wheel lands at viewport **(0,0)**. Seven specs called it on `position: fixed` popup
+rows that can never need scrolling; on WebKitGTK the stray wheel moved the hover target, the flyout
+closed on `mouseleave`, and the retry found nothing.
+
+So: **a lockfile-only change inside a patch release silently converted a no-op into an input event**,
+and it did so in the harness that guards the whole GUI verification leg. Two things follow. A
+dependency bump with no source diff is still a **functional** change and deserves the same
+gauntlet as a code change — "audit fix, lockfile only" is exactly the diff nobody reviews. And a
+helper named for a DOM API that does not call that DOM API is a trap that had been armed in five
+further latent call sites, waiting for whichever spec next put a fixed-position element in front of
+it. The fix replaces the command with the actual DOM API and adds a guard test so the command cannot
+come back.
