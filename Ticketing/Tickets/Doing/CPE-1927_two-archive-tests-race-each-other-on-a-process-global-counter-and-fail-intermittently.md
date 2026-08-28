@@ -118,6 +118,16 @@ in the squat block go unarmed with no signal, and five consecutive raced-out att
 saying plainly that this is the *same* disease as the rest of the sprint's docket, entered from the
 other end: not a guard that proves nothing, but a guard that quietly stops proving what it says.
 
+**One caveat on the monotonicity argument, for the next editor.** It assumes `SESSION_ROOT` holds the
+**private** `s<pid>-<random>` root, which only this process numbers into. `session_root()` has a
+documented degraded fallback — `claim_session_root(&root).unwrap_or_else(|| root.clone())` — under which
+the session root becomes the **shared, cross-process** `%TEMP%/cpe-archive` itself, and extractions are
+numbered directly under it. In that mode another process can create *and remove* a name we later draw, so
+`landed < end` becomes reachable and "it cannot go red" stops holding. That is not a realistic suite
+condition (claiming the root has to fail outright) and it is not the shape this ticket is about, so
+nothing here depends on it — but the argument above is conditional on the normal path, and saying so is
+cheaper than having someone rediscover it from a red.
+
 I could not reproduce a red, so I have not diagnosed CPE-1896's one-off failure and this ticket should
 not be read as having closed it. What it closes is the coupling PR #1043's Reviewer identified.
 
@@ -173,16 +183,73 @@ Two sabotages, each 30× under default parallelism:
 
 | sabotage | result |
 |---|---|
-| `create_dir` → `create_dir_all` in `temp_extract_target_in` (the real CWE-377/CWE-59 bug row 1 guards) | **30/30 red**, on `e0`, victim assertion naming the damage. PR #906 measured the equivalent sabotage green in 2 of 3 runs against the v1 test. |
+| `create_dir` → `create_dir_all` in `temp_extract_target_in` (the real CWE-377/CWE-59 bug row 1 guards) | **30/30 red**, on `e0`, victim assertion naming the damage |
 | the injected namespace ignored (fall back to the process globals) | **30/30 red** on the landing assertion — the isolation is load-bearing, not decoration |
 
-### 5. Sweep (AC 4) — one other instance, fixed
+**Read the first 30/30 as a floor check, not as this PR's delta.** The round-2 Reviewer ran that same
+sabotage against **`main`'s current (v2) test** and got **30/30 red (module), 8/8 red (full suite)**. So
+v2 already caught this sabotage, and the rewrite does not turn a leaky one into a caught one — it shows
+only that the rewrite **did not lose** the catch. The "green in 2 of 3 runs" figure is PR #906's, against
+**v1**, which `main` has not carried for a long time; my round-1 wording said "the v1 test" and was
+accurate, but sitting under a *Red-proof* heading it read as a gain and was repeated as one in a status
+report. It is not a gain. Correcting it here rather than softening it: this is the
+measured-elsewhere-reads-as-measured-here family the sprint has spent the day burning down, and a
+red-proof table is the worst possible place to leave one.
 
-Enumerated every `static` in `crates/server/src` and every `.load(Ordering::…)` in test code. All
-`thread_local!` `Cell`s (`batch_media`, `vault_manager`, `batch_execute`) are per-thread, not shared;
-every other `.load` is on a test-local `Arc<Atomic*>`; `fsutil::scratch_dir`'s `SEQ`,
-`shell_menu`'s `HOME_ENV_LOCK` and `transfer.rs`'s fixed base dir were already ruled out by PR #1043's
-Reviewer and I re-confirmed them. One real hit:
+**The genuine delta is determinism and coverage**, which are the numbers in §1 and are mine. v2 passed
+whether or not it proved anything: it silently lost names out of its squat block in **2 of 7** full-suite
+runs here, and the round-2 Reviewer — running the harder shape, 124 attempts under 24 CPU hogs — measured
+`ours < 64` in **13 of 124 attempts (~10%)**, i.e. a partly-armed block with **no signal**, more often
+than my own figures showed; it also reproduced the raced-clean-past shape directly at
+`start=83 end=147 landed=148 ours=64 proven=false`. Both shapes are unreachable now: no retry, no `ours`
+bookkeeping, no `skip_notice!`, all 64 names armed on every run, and the landing assertion tightened to
+`==`. The Reviewer also confirmed **0 reds in those 124 attempts**, which is the other half of the §1
+finding — the fixture defect degrades coverage, it does not produce the intermittent red the ticket
+predicted.
+
+### 5. Sweep (AC 4) — one other instance fixed, one cleared, and a corrected criterion
+
+**Corrected criteria (round 2).** My round-1 criteria were *"every `static` in `crates/server/src`"*
+**and** *"every `.load(Ordering::…)` in test code"*. The second half is wrong, and wrong in the
+repo's own [[enumerate-dont-recall]] way: **a `Mutex`/`RwLock` global has no `.load`**, so the
+`and` silently excluded a whole family of shared globals — the CPE-1932 failure mode operating
+*inside the sweep built to catch it*. The criterion that actually covers AC 4 is:
+
+> every **process-global** in `crates/server/src` — `static` of any interior-mutability flavour
+> (`Atomic*`, `OnceLock`, `Mutex`, `RwLock`, `LazyLock`) — that **test code reads or writes by any
+> means**, not only via `.load`. `thread_local!` is excluded by construction (per-thread), and a
+> test-local `Arc<Atomic*>` is not a global.
+
+Re-run on that criterion the enumeration is: all `thread_local!` `Cell`s (`batch_media`,
+`vault_manager`, `batch_execute`) are per-thread, not shared; every `.load` outside `archive.rs` is on a
+test-local `Arc<Atomic*>`; `fsutil::scratch_dir`'s `SEQ`, `shell_menu`'s `HOME_ENV_LOCK` and
+`transfer.rs`'s fixed base dir were already ruled out by PR #1043's Reviewer and I re-confirmed them.
+That leaves one hit that the broken criterion had hidden, and one real fix.
+
+**Cleared: `archive.rs:1620` `LIVE_EXTRACTIONS`** — a process-global
+`Mutex<VecDeque<(PathBuf, Instant)>>` that production writes on **every** extraction, and that
+`cpe_1786_the_live_queue_is_monotonic_so_the_front_is_never_newer_than_the_back` (`:5842`) **reads while
+siblings run in parallel**. This is exactly the target shape and it should have been in the round-1
+report. Verdict after reading it: **safe, and safe by construction rather than by luck** — but for a
+sharper reason than "it filters on its own root", because its *ordering* assertion deliberately walks
+sibling entries too:
+
+- **Ordering claim.** `note_extraction_dir` samples `Instant::now()` **inside** the same critical section
+  that performs the `push_back`. Timestamps therefore enter the deque in the order the mutex grants, and
+  a sibling physically cannot interleave an older timestamp behind a newer one. The non-decreasing
+  property is enforced by the lock. (Had the instant been sampled *before* acquiring the lock, this test
+  would be a genuine flake: thread A samples `t1`, is descheduled, B samples `t2 > t1` and pushes, A then
+  pushes `t1` — queue goes backwards. Noted at the site so nobody hoists it.)
+- **Count claim.** `seen` filters on the test's own scratch root and asserts `>=`, so sibling pushes can
+  only add entries it ignores. The only operation that could *subtract* is eviction, and `drain_reapable`
+  cuts only above `MAX_LIVE_EXTRACTIONS` = 512 (and only after a `REAP_GRACE` ten-minute quiet gap) or
+  above `HARD_CAP_EXTRACTIONS` = 4096. The whole lib suite pushes on the order of tens.
+
+So: no change, deliberately — and the reasoning is now written at the site rather than living only in a
+reviewer's head. Both facts were verified by reading `note_extraction_dir` and `drain_reapable`, not
+inherited.
+
+One real hit:
 
 - **`ffmpeg_util::set_native_dep_dir_is_a_silent_no_op_on_a_second_call`** writes the process-global
   `NATIVE_DEP_DIR: OnceLock<PathBuf>` that production's `resolve_ffmpeg_bin` reads, while siblings run
@@ -192,7 +259,44 @@ Reviewer and I re-confirmed them. One real hit:
   move it, phrased against whatever the first call observed so it cannot itself become order-dependent.
   Red-proofed: with `set_native_dep_dir` neutered the test fails; before this change that sabotage was
   green.
+  **Scope caveat:** `pub mod ffmpeg_util` is `#[cfg(any(feature = "video-thumb", feature = "waveform"))]`
+  (`lib.rs:536`), so this test — and therefore this fix — **exists in only one of CI's three feature
+  modes**, `pdf-thumb,video-thumb,waveform,dicom-thumb`. It guards nothing in the default and
+  `--features index` modes, because the module it lives in is not compiled there. That is correct (the
+  seam under test does not exist without ffmpeg either) but it is not what "fixed" implies unqualified,
+  so: one mode of three.
 - `thumb_pdf`'s identical `NATIVE_DEP_DIR` has no test writer at all — noted, nothing to fix.
+
+### 5b. A behaviour change round 1 did not report — `session_root()?` ordering
+
+Splitting `temp_extract_target` into wrapper + `temp_extract_target_in` moved `session_root()?` **in
+front of** the `file_name()` validation; the old single function validated first. So an entry with no
+`file_name()` (`..`, `.`, `""`) now claims the session root and can run the stale-session sweep before
+returning the same `"invalid entry name"`. Round 1 missed it, and calling the production path
+"byte for byte" without this qualifier was too strong: the *walk* is byte-for-byte, the *evaluation
+order* is not.
+
+**Decision: note it, do not reorder** — and the argument is the ticket's own thesis rather than
+convenience.
+
+- *Why it is benign, precisely.* Nothing derived from `inner` reaches `session_root()`; it builds
+  `%TEMP%/cpe-archive/s<pid>-<random>` from our own pid and RNG only. No attacker-controlled path is
+  created, and the extraction still refuses. The one externally visible difference is the error
+  **string**: if the shared root is a link, `refuse_link_at_new_file` now answers first, which is the more
+  informative refusal — it names a real environmental hazard instead of masking it behind a name
+  complaint. The change is therefore a wash at worst and a small improvement at best.
+- *Why not reorder, given it is a two-line fix.* **The ordering is not pinnable by a test in this suite.**
+  Its only observable is a once-per-process side effect on `SESSION_ROOT`, a `OnceLock` every sibling test
+  races to initialise; a test asserting "`session_root()` was not called" would have to read that global
+  mid-suite and would be exactly the shared-mutable-fixture shape this ticket exists to delete. The other
+  route — making the shared root un-claimable to force the error path — mutates `%TEMP%` for the whole
+  process. So a reorder here could only ship **unverified**, in a security-adjacent refusal path, in the
+  round-2 pass of an approved PR. Shipping an unpinnable edit and shipping an unpinnable guard are the
+  same mistake; the rule this sprint has been enforcing all day says take the honest comment instead.
+- *What is written down.* The full note lives at the `temp_extract_target` site, including the recipe if
+  it ever does need reordering (have the wrapper pass an `ExtractNamespace` and let the body resolve the
+  root after validating) and the trigger that would make it worth doing: `session_root()` acquiring a
+  caller-visible cost, or a side effect derived from `inner`.
 
 ### 6. Verification
 

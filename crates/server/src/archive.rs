@@ -2128,6 +2128,28 @@ fn remove_session_tree(session: &Path) {
 /// - **Cleanup is owned, not absent.** The pre-CPE-1786 version of this list said *"nothing here cleans
 ///   up"*, and it was the truest sentence in the file: 1,394,403 leftover directories. What owns them
 ///   now, and why it cannot simply be a `Drop` guard, is on [`session_root`].
+///
+/// # One evaluation-order change, deliberately left in place (CPE-1927 round 2)
+///
+/// Splitting the body out moved `session_root()?` **in front of** the `file_name()` validation, which the
+/// old single function ran first. So an entry with no `file_name()` — `..`, `.`, `""` — now claims the
+/// session root and can run the stale-session sweep before returning the same `"invalid entry name"`.
+///
+/// It is benign, and precisely: **nothing derived from `inner` reaches `session_root()`**, which only ever
+/// builds `%TEMP%/cpe-archive/s<pid>-<random>` out of our own pid and RNG, so no attacker-controlled path
+/// is created and the extraction still refuses. The one externally visible difference is the error
+/// *string*: if the shared root is a link, the refusal now surfaces
+/// [`refuse_link_at_new_file`]'s message instead of `"invalid entry name"` — the more informative of the
+/// two, since it names a real environmental hazard rather than masking it behind a name complaint.
+///
+/// It was left rather than reordered because **the ordering is not pinnable by a test in this suite**, and
+/// this is the ticket about not shipping guards that prove nothing. The only observable is a
+/// once-per-process side effect on a `OnceLock` every sibling test races to initialise, so a test
+/// asserting "`session_root()` was not called" would be exactly the shared-mutable-fixture shape CPE-1927
+/// exists to delete. An unverifiable edit to a refusal path is the worse trade; this comment is the
+/// honest one. If a future change gives `session_root()` a caller-visible cost or a side effect that
+/// **is** derived from `inner`, reorder it then — the fix is to have this wrapper pass an
+/// [`ExtractNamespace`] and let the body resolve the root after validating.
 fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
     temp_extract_target_in(&session_root()?, &EXTRACT_SEQ, inner)
 }
@@ -5311,10 +5333,25 @@ mod tests {
     /// Two sabotages, each run 30× under cargo's default parallelism:
     ///
     /// - `create_dir` → `create_dir_all` in [`temp_extract_target_in`] — the actual CWE-377/CWE-59 bug
-    ///   this row guards: **30/30 red**, on `e0`, with the victim assertion naming the damage. The
-    ///   equivalent sabotage against the v1 test was measured green in 2 of 3 runs.
+    ///   this row guards: **30/30 red**, on `e0`, with the victim assertion naming the damage.
     /// - the injected namespace ignored (fall back to the process globals): **30/30 red** on the landing
     ///   assertion. So the isolation is load-bearing, not decoration.
+    ///
+    /// **The first 30/30 is a floor check, not a gain — read it that way.** PR #906's review measured the
+    /// equivalent sabotage green in 2 of 3 runs, but that was against **v1**, which `main` has not carried
+    /// for a long time. CPE-1927's round-2 Reviewer ran the same sabotage against `main`'s **v2** and got
+    /// **30/30 red (module) and 8/8 red (full suite)**. So this rewrite does not turn a leaky sabotage
+    /// into a caught one: v2 caught it too. The 30/30 says only that the rewrite **did not lose** the
+    /// catch, which is worth measuring and is not an improvement.
+    ///
+    /// **The improvement is determinism and coverage**, and those are the numbers above. v2 was green
+    /// whether or not it proved anything: it silently lost names out of its squat block in 2 of 7
+    /// full-suite runs measured here, and the round-2 Reviewer — running the harder shape, 124 attempts
+    /// under 24 CPU hogs — measured a partly-armed block in **13 of those 124 attempts (~10%)** with no
+    /// signal of any kind, plus the raced-clean-past shape directly (`start=83 end=147 landed=148
+    /// ours=64 proven=false`). Neither is reachable now: there is no retry, no `ours` bookkeeping and no
+    /// `skip_notice!`, every run arms all 64 names, and the landing assertion is `==`. A green means the
+    /// same thing every time it appears, which is the property v2 lacked.
     ///
     /// The suite is otherwise **unchanged** — same test count before and after, one test in, one test out;
     /// what changed is that the test's outcome no longer depends on which sibling ran first.
@@ -5818,6 +5855,22 @@ mod tests {
     /// missing. The count is well under [`MAX_LIVE_EXTRACTIONS`] so nothing is evicted, and the paths are
     /// real directories under this test's own scratch, so the best-effort removal in `note_extraction_dir`
     /// can never touch anything else even if a future change did evict them.
+    ///
+    /// # Why reading a process-global queue in parallel is safe here (CPE-1927 sweep)
+    ///
+    /// Written down because this is the one place in the crate that **reads a shared mutable global while
+    /// siblings write it**, and the sweep for `EXTRACT_SEQ`'s shape nearly missed it — see the ticket.
+    /// Both claims survive any interleaving, for two different reasons:
+    ///
+    /// - **Ordering.** [`note_extraction_dir`] samples `Instant::now()` *inside* the same critical section
+    ///   that does the `push_back`, so timestamps enter the queue in the order the mutex grants it. The
+    ///   non-decreasing property is enforced by the lock, not by luck — a sibling cannot interleave an
+    ///   older timestamp behind a newer one. (Sampling the instant **before** taking the lock would break
+    ///   exactly this; do not move it.)
+    /// - **Count.** `seen` filters on this test's own scratch root and the assertion is `>=`, so sibling
+    ///   pushes can only ever add entries this test ignores. The only thing that could *subtract* is
+    ///   eviction, and [`drain_reapable`] cuts only above 512 (quiet) or 4096 (busy) entries after a
+    ///   ten-minute gap — the whole lib suite pushes on the order of tens.
     #[test]
     fn cpe_1786_the_live_queue_is_monotonic_so_the_front_is_never_newer_than_the_back() {
         const THREADS: usize = 4;
