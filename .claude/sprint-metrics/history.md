@@ -3584,3 +3584,39 @@ Also worth keeping: the reviewer found a **silent fail-open inside the fail-clos
 comment in a workflow's `on:` block removes the entire workflow from the required set with no signal and
 `coverage=ok`. `ci.yml`'s `on:` block already carries a fifteen-line comment, indented today. One
 re-wrap and the guard stops guarding, permanently and quietly.
+
+## 2026-08-28 — a rule the real source satisfies is a rule the real source cannot test
+
+#1091's round-3 taint guard passed on the real script and would also have passed on a script with a
+sanitiser deleted — because the loop iterated *variables* and the deleted site had none. That is not a
+weak rule; it is a **vacuous** one, and nothing about a green run distinguishes the two.
+
+Round 4 closed both holes and then did the thing that keeps them closed: *"Both rules are satisfied by the
+script as it stands, so on the real source they look like nothing. A **synthetic-input test** drives both
+so neither can rot into the vacuous pass round 3's per-variable loop silently was."*
+
+**That is the generalisation, and it is worth more than either fix.** A guard whose subject currently has
+no violations gets exactly zero signal from its subject. It will report green on the day it is written,
+on the day someone breaks it, and on the day someone deletes its body. **Feed it a constructed input that
+violates it, and assert it complains** — otherwise the guard's own correctness is untested for as long as
+the codebase stays clean, which is precisely the period during which everyone learns to trust it.
+
+**And the same defect appeared a third time inside the fix.** The new default-deny needed to ignore
+single-quoted spans, and shipped as `/'[^']*'/g`. The script writes `'…%s'"'"'s latest release…'` — the
+regex pairs those quotes wrong and leaks the prose, which for one message contains a backtick-quoted
+`git tag`. **Whether it false-positives depends on the parity of apostrophes in a message someone may
+reword.** Replaced with a quote state machine, pinned by a test carrying that exact shape.
+
+Two more things from the round that are the right shape:
+
+**It removed a dependency rather than adding it to a list.** `grep` was load-bearing but unchecked;
+adding it to the tools check converts one absence into a clean refusal, **deleting it removes the failure
+mode entirely** — and a bash-native match replaced it, with equivalence *measured* against the substring
+trap `grep -Fxq` had been chosen for, not assumed. Then, because removing one instance does not close a
+class, it built a **derived** guard that enumerates every external command the script invokes and reads
+the checked list **out of the script's own `for t in …; do`**. Worth noting what the derivation caught in
+its own first draft: **7 of 13 "commands" were `${out}`, `${sep}` and `$((i+1))`.**
+
+**And it reported its gates honestly under a constraint.** `jq` is absent here, so it ran the structural
+half only and **said so, rather than quoting the 79-test total as a pass count** — the exact failure this
+shift logged two days ago on this same file.
