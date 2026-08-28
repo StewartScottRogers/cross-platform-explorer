@@ -4250,3 +4250,39 @@ Two smaller things from the same review, both the closed-list shape yet again: *
 X and Y"* written as a pair in two files, in a document whose enclosing bullet says "AT LEAST THESE" —
 **a sub-list does not inherit its parent's hedge.** And two files still calling something *"the one
 standing blind spot"*, a count sitting inside a header that declares the list open.
+
+## 2026-08-29 — the enumeration I asked for found a fourth gap on its first outing
+
+Round 6's finding on #1091 was the same defect for the third time, each in a sibling of the previous
+fix. I asked for the fix **plus a three-row table**: every function in the file that scans a shell line,
+checked against the same three questions — does it strip single-quoted prose first, does it bind every
+name its construct can bind, is its own consumer covered by a test that would red.
+
+**Filling in the table found a fourth gap.** For `commandWords`, column 3 came out *"partly, and by
+accident"*: dropping its comment-strip **does** red, because this script's prose is wordy enough to yield
+~30 phantom commands — but **disabling its `NAME=value` prefix strip red nothing at all.** Its only real
+consumer was the script itself, so the half of it that the script's own shape happens to exercise was
+covered and the other half was not. A new synthetic test closes it.
+
+**That is the artefact paying for itself immediately.** Nothing in the three previous rounds would have
+surfaced it: the gap is not in the function anyone changed, and no reviewer had reason to look. **A
+table with a fixed set of questions finds what a diff cannot, because it is indexed by the code's shape
+rather than by what someone edited.**
+
+Two more things from the round, both the same discipline pointed in different directions.
+
+**The worker corrected the reviewer's number rather than adopting it.** The brief said the taint set
+should return to 14 after removing four phantoms. It probed round 5's head directly and found **14
+already included two phantoms**; the real set has been **12** throughout. *"Re-run the number you were
+handed"* has been a standing rule here for a worker receiving a Foreman's figure — this is the same rule
+applied to a reviewer's, and it is the direction I had not written down.
+
+**And it caught one of its own drafted claims by running it.** It had written *"1 failed, green before
+round 7"* for the new sabotage; measured, it is **2 failed / 82 passed**, with a different conclusion.
+**Corrected at the site with a note saying the drafted number was wrong** — which is the honest form,
+because the next reader can then tell a measured number from a predicted one.
+
+Also worth noting for the record: `read -a` was passing before this round **only by luck** — the
+regex-revert red-proof stays green on that row while the other four go red. **A row that passes for the
+wrong reason is indistinguishable from one that passes for the right reason until something changes
+underneath it**, which is the whole argument for pinning shapes you have just widened past.
