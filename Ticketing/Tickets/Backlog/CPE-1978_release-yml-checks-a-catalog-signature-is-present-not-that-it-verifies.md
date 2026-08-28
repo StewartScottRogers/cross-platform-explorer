@@ -67,6 +67,135 @@ in `verify` — anti-rollback lives in `apply_bundle_with`, and `verify` applies
       at run time and executes the real binary with it**, which is this repo's answer to "a comment that
       claims what a workflow does." `release_workflow_wiring.rs` is the worked example.
 
+## Work Log
+
+**2026-08-28 — worked. What was MEASURED, and what was not.**
+
+*The gap, on exit status.* The pre-fix `Verify the signed bundle before uploading it` body was run
+against `catalog-out/catalog-index.json` + a `catalog-index.json.sig` holding the ASCII text
+`not a signature`. It printed `signed catalog bundle carries 1 entr(y|ies); files to upload:` and
+exited **0** — the job would have uploaded it. That is now a permanent executed case in
+`src/lib/catalogPublishLoudFailure.test.ts` §8, asserting `r.status === 0`, not a log string.
+
+*The same bundle through the real binary.* `catalog-sign verify catalog-out <trusted pubkey>` →
+`FAIL: index signature does not verify under the key`, exit **1**.
+
+*The new step, real `cargo`, real `catalog-sign`, body extracted from `release.yml` itself.* Four
+scenarios, run locally against a bundle signed with a throwaway keypair (deleted):
+A. good bundle + its key → exit **0** (`OK: index + 1 manifest(s) verify`, then the control run
+   refused under the decoy).
+B. same bundle, index `.sig` overwritten with `not a signature` → exit **1**.
+C. good bundle, a key that did not sign it (a rotation nobody mirrored) → exit **1**.
+D. `cargo` absent from `PATH` → exit **1** (`cargo: command not found`, then the step's `::error::`).
+
+*The pubkey decision.* The key is a **literal in `release.yml`**, not a repository secret. It is the
+public half; the identical value is already committed as `CATALOG_TRUSTED_KEYS` in
+`src-tauri/src/lib.rs` and ships inside every installed binary, so a secret buys no confidentiality
+and costs two things: a second copy no diff and no guard can see (a rotation could silently diverge
+from what clients trust — the exact failure this check exists to catch), and an unset secret
+expanding to the empty string, i.e. failing **open**. `catalogPublishLoudFailure.test.ts` §8 derives
+both sides and reds on any divergence; red-proofed in both directions (workflow literal changed →
+red; Rust const changed → red; both reverted). No signing key was generated in-repo, committed, or
+touched, and `tauri.conf.json` is unmodified.
+
+*Verifying under the CLIENTS' key, not the signing key,* is deliberate: verifying under the key that
+just signed would only prove the bundle is self-consistent.
+
+*Fail-closed, including "did not run".* `set -euo pipefail` covers a missing cargo, a build failure
+and an unreadable bundle. The case an exit code cannot cover — a verifier that says yes to
+everything — is covered by running the check **twice**, the second time under a key that did not
+sign the bundle, requiring a refusal. Executed: a stub `cargo` that approves everything makes the
+step exit non-zero.
+
+*Enumeration (CPE-1932).* Derived from `allShellUnits()` over every workflow and extracted script,
+not from a remembered pair of filenames. **`release-sidecar.yml` has no catalog job and no
+`--bin *-sign` invocation** — nothing in the sign family there to diverge. (Round 1 wrote "signs
+nothing", which is false and was corrected in review: that workflow does sign — Authenticode via
+`cpe-sign.pfx` at `release-sidecar.yml:562`, plus tauri-action's updater signatures. Different
+subsystems, with their own gates.) The sign-family invocations on this revision are
+`release.yml → catalog-sign` (sign, and now verify) and **`model-snapshot.yml → model-snapshot-sign`
+(sign only, no verification before publishing)**.
+
+*Sibling gap found and NOT closed here — now **CPE-1981**.* `model-snapshot.yml` signs
+`models-index.json` with the same key and publishes it to the `model-catalog` release with no
+signature check at all — the identical shape. It is not closed in this PR because
+`model-snapshot-sign` **has no CLI surface that could host a verify path**. Giving it one is a change
+to a scheduled publishing workflow with its own blast radius.
+
+**Round 2 (PR #1095 review, F1/F2) — the detector was measured backwards, and this is the round's
+real finding.** Round 1 asked the narrow question "does the binary have a subcommand called
+`verify`?" and its docblock claimed a missed spelling "fails toward reporting a gap that is already
+closed — loud, not silent". **That is the wrong direction.** A `false` from that predicate *excuses*
+the signer, so a missed spelling makes the guard **under-report silently**. Measured by the reviewer:
+a real verify path spelled `args[1] == "check"` added to `model_snapshot_sign.rs`, workflow still
+publishing unverified → **62 passed, 0 red**. Control, same sabotage spelled `"verify"` → **2 red**.
+
+*The choice made:* **widen the detector so it fails closed**, rather than keep it and lean on the pin.
+The pin cannot be stronger than the detector it calls — the `"check"` sabotage fooled the pin and the
+sweep together, which is CPE-1950's shared blindness, not two legs. The question now has no verb in
+it: `couldHostAVerifyPath` excuses a binary only when **all** of six clauses hold over
+comment-stripped source — it reads argv *in this file* (F2: delegated parsing is no longer excused),
+no string-literal comparison (`== "…"` plus the `starts_with(" / ends_with(" / contains(" / .eq(" /
+eq_ignore_ascii_case("` method spellings and `matches!(`), no `"…" =>` match arm, no `--`-prefixed
+literal, no arg-parser crate, and no `const`/`static … &str = "…"` declaration. The excuse is also no
+longer allowed to be silent: a new test requires every excused signer to be named by a pin whose
+title is read out of this test file's own source.
+
+**Round 3 (review) — the fix shipped with a closed safety claim, and three real shapes falsified
+it.** Round 2 wrote that a binary passing the clauses "structurally cannot host a verify path of any
+spelling", and listed the remaining blind spots as only the no-CLI-surface family, "none reachable by
+widening a regex". The reviewer broke both, each as a working verify dispatch on a live CLI surface
+with the workflow still publishing unverified, each **0 red**: `args[1].starts_with("verif")`; a
+`const VERIFY_CMD: &str = "verify"` compared with `args[1] == VERIFY_CMD`; and
+`match args.len() { 2 => exit(0), _ => {} }`. **The const one is the damning one** — it is literally
+the `==` dispatch the clause exists to catch, defeated by hoisting the literal, a refactor a reviewer
+would routinely suggest.
+
+This is CLAUDE.md's round-9 rule one scope in: *the blind-spot list is a claim of the same kind*, and
+round 2's fix turned round 1's defect into a narrower version of itself. Fixed both ways — the claim
+now states only what was measured (*no string-literal comparison, match arm, `--` flag, `matches!`,
+string constant or parser crate is visible in the file that declares it*), and the clauses were
+widened. Measured after: shape 1 → **2 red**, shape 2 → **2 red**, shape 3 → **0 red** (deliberately
+open). Verified the tightening does not over-report: `model_snapshot_sign.rs` contains none of the
+new patterns.
+
+*Blind spots, now split by why, "at least these", no count.* **Not caught today but reachable** (a
+regex or a resolution step away — a to-do list, not a boundary): argv-indexed branching with no
+string anywhere (`match args.len()`; not closed because a general argv-arity clause would over-report
+on this binary's own `args.len() != 4`); a token reaching the comparison indirectly via `format!`, a
+`&[&str]` table, or a helper; and any comparison spelling nobody has written down yet. **Cannot be
+caught by scanning at all:** a verify path with no CLI surface — selected by an environment variable,
+by `argv[0]`, or by a build feature.
+
+*Also round 3:* the pin-title scan's docblock claimed it was "anchored on `it(` so a title has to be a
+real call" and that "nothing in this file does it today". Both false — the regex runs over raw source
+and this file's own assertion message embeds `an it("${s.bin} has no CLI surface ...")`, which the
+scan counted. It failed to self-satisfy the pin only because `${s.bin}` is literal text, i.e. the
+guard was one "make this message concrete" edit from certifying its own excuse. Corrected the
+sentences and added a `${` filter. `stripScriptBodiesChecked` is not used here and the reason is
+stated at the site: this file is TypeScript, so its `vm.Script` oracle cannot compile it, and calling
+`stripJsComments` bare would be that stripper with the leg that makes it trustworthy removed.
+
+*What remains UNVERIFIED.* No release was cut and no workflow run was triggered, so the shipped step
+has **never executed on a GitHub runner**. What was executed is the step's own `run:` body, extracted
+from `release.yml` at run time, under bash — locally with the real `catalog-sign`, and in CI (vitest)
+with a key-sensitive stub `cargo`. The one link that stays inferred is that the CI runner's
+`CPE_CATALOG_SIGNING_KEY` secret is the private half of `CATALOG_TRUSTED_KEYS`; if it is not, the new
+step fails the next release **loudly** — which is the intended behaviour, but it is a prediction, not
+a measurement.
+
+*Security scope.* This closes the publish-time **availability** half — a bundle every installed
+client would reject can no longer publish green. It is **not** integrity protection against a
+compromised signing key that is still the private half of `5b18…`.
+
+*The negative control's strength is key-dependent (review F4), recorded at the site.* For today's key
+the decoy `0b18…` is a valid ed25519 curve point, so `VerifyingKey::from_bytes` succeeds and the
+refusal comes from `verify_strict` — the control really does exercise the signature path. That is a
+property of this key: on a throwaway `d21f…` the decoy `021f…` is *not* a valid point, and the
+refusal would come from key parsing instead. It fails closed either way (`trust.rs` returns `false`
+rather than panicking), so the step is correct in both cases; the note at the workflow site says to
+re-check on a rotation and switch to flipping a `.sig` byte if the new decoy is off-curve.
+
 ## Notes
 
 Filed 2026-08-28 by the sprint Foreman from CPE-1954's worker (PR #1088), which found it while

@@ -563,11 +563,13 @@ jobs:
             ls -la catalog-out 2>/dev/null || echo "(catalog-out does not exist)"
             exit 1
           fi
-          # RESIDUAL, named deliberately (CPE-1953 review): this checks the signature is PRESENT and
-          # non-empty, never that it VERIFIES. A garbage `.sig` passes here. That is scoped out on
-          # purpose — verifying it needs the public key and the same verify path a client uses, which
-          # is CPE-1954's `VerifiedIndex` work, not a shell one-liner bolted on here. This step's
-          # claim is therefore exactly "a signature file was produced", not "the bundle is valid".
+          # SCOPE, named deliberately: this checks the signature is PRESENT and non-empty, never
+          # that it VERIFIES. A garbage `.sig` passes HERE. That was a documented residual until
+          # CPE-1954 landed the verify path (PR #1088); the real check is now the
+          # `Verify the signed bundle's signatures under the trusted key (CPE-1978)` step below,
+          # which runs `catalog-sign verify` before anything is uploaded. This step's claim stays
+          # exactly "a signature file was produced" — it is the cheap, jq-free arm that names the
+          # missing-file case precisely; the step below is the one that decides validity.
           if [ ! -s "${index}.sig" ]; then
             echo "::error::${index} exists but its detached signature ${index}.sig is missing or empty. Every client verifies the signature before applying (CPE-372), so an unsigned index publishes a catalog nobody can use."
             exit 1
@@ -603,6 +605,100 @@ jobs:
           echo "entries=${entries}" >> "$GITHUB_OUTPUT"
           echo "signed catalog bundle carries ${entries} entr(y|ies); files to upload:"
           ls -la catalog-out
+
+      # CPE-1978 — the step above proves a `.sig` FILE EXISTS; this one proves the BYTES VERIFY.
+      #
+      # MEASURED GAP (do not re-derive it from the names): with a bundle whose `catalog-index.json.sig`
+      # was the ASCII text `not a signature`, the step above exited **0** and the job went on to
+      # upload. That is an exit status, not a log reading, and it is red-proofed permanently in
+      # `src/lib/catalogPublishLoudFailure.test.ts` §8 ("REGRESSION DEMO"), which executes that
+      # step's own `run:` body against exactly that bundle. Its own comment named CPE-1954 as the
+      # enabler; CPE-1954 landed (PR #1088), so the real check runs here now.
+      #
+      # WHY THE KEY IS A LITERAL IN THIS FILE AND NOT A REPO SECRET. `CATALOG_PUBKEY` is the PUBLIC
+      # half of `CPE_CATALOG_SIGNING_KEY`. Publishing it costs nothing — the identical value is
+      # already committed as `CATALOG_TRUSTED_KEYS` in `src-tauri/src/lib.rs` and ships inside every
+      # installed binary, so a secret would buy no confidentiality at all. It would cost two things
+      # that matter. (1) It would be a SECOND copy of a value that must equal `CATALOG_TRUSTED_KEYS`,
+      # held somewhere no diff and no guard in this tree can see — so a key rotation could silently
+      # disagree with what every installed client trusts, which is the one failure this step exists
+      # to catch. (2) An unset secret expands to the empty string, i.e. it fails OPEN, which is the
+      # shape this job has now been bitten by twice (CPE-1893/CPE-1953). A literal is reviewable in
+      # the diff, and `src/lib/catalogPublishLoudFailure.test.ts` §8 reads it out of THIS file and
+      # out of `CATALOG_TRUSTED_KEYS` and reds if they ever differ.
+      #
+      # WHY THE CLIENTS' KEY AND NOT THE SIGNING KEY. Verifying under the key that just signed would
+      # only prove the bundle is self-consistent. Verifying under `CATALOG_TRUSTED_KEYS` also proves
+      # that a rotated `CPE_CATALOG_SIGNING_KEY` nobody mirrored into the app cannot publish a
+      # bundle every installed client will reject — the availability failure the threat model calls
+      # out as unfixable after the fact (`CATALOG_TRUSTED_KEYS` is compile-time).
+      #
+      # FAIL CLOSED — "ran and found nothing" vs "did not run" (CLAUDE.md). `set -euo pipefail`
+      # covers cargo being absent (127), the build failing (101), and the bundle being unreadable.
+      # The case an exit code alone CANNOT cover is a verifier that runs and says yes to everything,
+      # so the check runs TWICE: once under the trusted key, which must PASS, and once under a key
+      # that provably did not sign this bundle, which must FAIL. A stub, a no-op, a short-circuited
+      # `verify`, or a future edit that drops the subcommand passes both runs and is caught by the
+      # second. That negative run is not vacuous — the positive run immediately before it read the
+      # same directory and exited 0, so a refusal here cannot be "could not read the bundle".
+      # `sidecar/host/tests/catalog_sign_verify_gate.rs` pins the binary's side of both halves
+      # (`a_bundle_from_the_real_signer_still_verifies`, and the "signed by a key the operator did
+      # not name" arm of `every_unusable_index_is_refused_rather_than_waved_through`).
+      #
+      # THE CONTROL'S STRENGTH IS KEY-DEPENDENT, recorded here because it is invisible from the code
+      # (PR #1095 review F4). For TODAY's key the decoy `0b18…` is a valid ed25519 curve point, so
+      # `VerifyingKey::from_bytes` SUCCEEDS and the refusal comes from `verify_strict` — i.e. the
+      # control genuinely exercises the signature path and cannot be satisfied by the same trivial
+      # success the positive run would get. That is a property of this key, not of the construction:
+      # measured on a throwaway key `d21f…`, the decoy `021f…` is NOT a valid point, and there the
+      # refusal would come from key parsing instead, proving only that a malformed key is rejected.
+      # It still fails closed either way (`sidecar/host/src/trust.rs` returns false rather than
+      # panicking on an unparsable key), so the step is correct in both cases — but on a future
+      # ROTATION, re-check this: if the rotated key's decoy is off-curve, strengthen the control by
+      # flipping a byte of `catalog-out/catalog-index.json.sig` in a scratch copy instead, which is
+      # key-independent.
+      - name: Verify the signed bundle's signatures under the trusted key (CPE-1978)
+        id: sigverify
+        if: steps.k.outputs.has == 'true'
+        shell: bash
+        env:
+          # The PUBLIC key (hex). Must equal an entry of `CATALOG_TRUSTED_KEYS` in
+          # `src-tauri/src/lib.rs`; that equality is asserted, not assumed — see above.
+          CATALOG_PUBKEY: 5b18ad467b37b7c06556000f15359a845bd85790ece91de110a337890d017130
+        run: |
+          set -euo pipefail
+          key="${CATALOG_PUBKEY:-}"
+          # Shape first, so an unusable key is refused as "did not run" instead of being handed to
+          # the verifier and coming back as an ordinary "no" nobody can tell from a real refusal.
+          case "$key" in
+            "" | *[!0-9a-f]*)
+              echo "::error::CATALOG_PUBKEY is empty or is not lowercase hex ([${key}]). Refusing to run the signature check under a value that cannot be an ed25519 public key — an unusable key means the check DID NOT RUN, which must never read as a pass."
+              exit 1
+              ;;
+          esac
+          if [ "${#key}" -ne 64 ]; then
+            echo "::error::CATALOG_PUBKEY is ${#key} hex characters, not the 64 of an ed25519 public key. Refusing to publish on a check that could not have verified anything."
+            exit 1
+          fi
+          run_verify() {
+            cargo run --locked --release --quiet --manifest-path sidecar/host/Cargo.toml --bin catalog-sign -- \
+              verify catalog-out "$1"
+          }
+          echo "verifying catalog-out under the trusted key ${key}"
+          if ! run_verify "$key"; then
+            echo "::error::catalog-sign verify did not succeed under CATALOG_TRUSTED_KEYS (${key}). The line(s) directly above say which of the three it was, and they are three different problems: (a) the verifier COULD NOT RUN AT ALL (no cargo, a build failure, a missing bundle) — that is 'did not run', never a pass; (b) CPE_CATALOG_SIGNING_KEY is not the private half of the key this app trusts, so every installed client would reject this catalog outright; (c) the bundle's index/manifest signatures, content hashes, schema or entry ids are bad. Refusing to upload on any of them."
+            exit 1
+          fi
+          # The "did it actually run?" control. Same key with its first hex digit changed, so it is
+          # the right shape and is certainly not the key that signed this bundle.
+          decoy="0${key#?}"
+          if [ "$decoy" = "$key" ]; then decoy="1${key#?}"; fi
+          echo "control: the same bundle must be REFUSED under ${decoy}"
+          if run_verify "$decoy"; then
+            echo "::error::catalog-sign reported success under ${decoy}, a key that did not sign this bundle. The verifier is not verifying — it is missing, stubbed, or short-circuited — so the passing run above proves nothing. Refusing to publish on a check that cannot fail."
+            exit 1
+          fi
+          echo "catalog-out verifies under the trusted key, and is refused under a key that did not sign it"
 
       # CPE-1893's own claim lives here: with `if: ${{ !cancelled() }}` above, a total-matrix
       # `release` failure leaves NO release object for this tag, and `gh release upload` then exits
@@ -683,6 +779,7 @@ jobs:
           HAS_KEY: ${{ steps.k.outputs.has }}
           SIGN: ${{ steps.sign.outcome }}
           BUNDLE: ${{ steps.bundle.outcome }}
+          SIGVERIFY: ${{ steps.sigverify.outcome }}
           UPLOAD: ${{ steps.up.outcome }}
           CONFIRM: ${{ steps.confirm.outcome }}
           ENTRIES: ${{ steps.bundle.outputs.entries }}
@@ -709,6 +806,7 @@ jobs:
           failed=""
           [ "${SIGN:-}" = "success" ] || failed="${failed} build+sign(${SIGN:-<none>})"
           [ "${BUNDLE:-}" = "success" ] || failed="${failed} verify-bundle(${BUNDLE:-<none>})"
+          [ "${SIGVERIFY:-}" = "success" ] || failed="${failed} verify-signatures(${SIGVERIFY:-<none>})"
           [ "${UPLOAD:-}" = "success" ] || failed="${failed} upload(${UPLOAD:-<none>})"
           [ "${CONFIRM:-}" = "success" ] || failed="${failed} confirm-on-release(${CONFIRM:-<none>})"
           if [ -n "$failed" ]; then
