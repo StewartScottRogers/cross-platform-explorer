@@ -4090,3 +4090,39 @@ had it (the second of two listed spellings was already correct in the round bein
 deliberate exclusion with no stated reason sitting in a list next to genuine gaps — **so a decision and an
 oversight read identically.** Both are the same family: prose that describes the code less precisely than
 the code describes itself.
+
+## 2026-08-28 — the worker declined my literal instruction because it violated the repo's own rule
+
+I specified #1093's fix precisely: generalise the detection to *any `on:`-block key* matching
+`/^pull_request[_a-z]*$/`. The phrasing implies a grep over the file's bytes, and that is what I meant.
+
+The worker did not do it. **`ci.yml` carries roughly sixty lines of commentary inside its `on:` block**,
+so a comment merely *mentioning* `pull_request_review` would have reddened the guard — CLAUDE.md's rule 2,
+*anchor on code, never on prose*, which this repo wrote after a scanner parsed a comment that quoted an
+old value and passed silently. Instead the parser now **returns the events it actually parsed**, with
+comments already stripped by the machinery that was there, and the test filters those.
+
+**That is the third time tonight a worker has improved on my brief**, and the three have a shape in
+common. The line-number citation I gave for a quote was one commit stale. The recovery pattern I named
+turned out to depend on how the receiving macro classifies a refusal. And now an instruction whose literal
+form would have reintroduced the defect the rule exists to prevent. **In each case the brief was specific
+enough to be actionable and specific enough to be wrong**, and in each case the worker had the one thing I
+did not: the file open in front of it.
+
+**So the standing instruction is the one I have been giving reviewers all shift, pointed back at me: a
+suggested fix in a brief is a hypothesis, not a spec.** I should say what must become true and why, and
+name a mechanism as a starting point rather than a target. Where I have done that — *"do not write another
+closed list"*, *"make the two legs agree or say why they must not"* — the results have been better than
+where I named the line to change.
+
+Two more things this round did that are worth copying.
+
+**It added an inline positive control to its own new assertion**, on the reasoning that *"an `events` that
+silently returned `[]` would leave `toEqual([])` green forever — which is this PR's own defect shape one
+guard earlier."* The guard it just built is vulnerable to the exact failure the guard it is guarding had.
+Recognising that in your own new code, in the same round, is rare.
+
+**And it labelled its over-reporting.** The flow-form token sweep yields spurious names for an exotic
+input, and the site says so — *over-reports in the fail-closed direction for this consumer only*. **A
+known inaccuracy with its direction stated is a different object from an unknown one**, and the difference
+is one clause.
