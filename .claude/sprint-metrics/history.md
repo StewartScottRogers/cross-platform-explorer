@@ -3686,3 +3686,48 @@ column-0 anchor *"bought nothing"* — dropping it returned the identical 10 nam
 Round 8's own red-proof sentence then quoted a literal declaration into the docblock, so in the file it
 ships in, dropping the anchor returns **11**. No silent consequence — it would red loudly — but **a
 measurement recorded about the file as it was, in a commit that changed the file, is stale on arrival.**
+
+## 2026-08-28 — a shim measures your shim
+
+#1091 replaced `grep -Fxq` with a bash-native loop, on the sound argument that **deleting a dependency
+beats checking it**. The comment records *"EQUIVALENCE MEASURED, not assumed, executing this script with
+gh/curl/**jq** shimmed."*
+
+**jq on Windows writes the embedded newlines of `join("\n")` as CRLF.** `grep -Fxq` tolerated the
+trailing `\r`; `IFS= read -r` plus `[ "$x" = 'catalog-index.json' ]` does not. So the guard takes the "no
+index among the assets" branch on a release that lists it, and emits **byte-for-byte the
+self-contradicting fail-open at exit 0 that the same commit says it fixed** — same message, same exit
+code, a `\r` instead of a missing binary.
+
+**The equivalence was measured against a fake jq**, which is exactly the class of behaviour a shim will
+not reproduce: a real tool's platform-specific output. The shim was written from the contract; the bug is
+in what the tool actually does.
+
+**Where a claim is about a real tool's behaviour, run the real tool. Where you cannot, say the claim is
+about the shim** — *"equivalent under our stub"* is a true, useful, and much smaller sentence than
+*"equivalence measured."*
+
+**And CI could not have caught it.** vitest runs on `ubuntu-latest` only, so `main` stays green while
+every Windows `npm test` reds **45 tests in that one file** — 76 passed before the change, 34 passed and
+45 failed after, 79 with the one-line CR strip. CLAUDE.md treats local `npm test` as a first-class
+backstop; this is the first time this shift that the two disagreed, and the disagreement is invisible
+from the side CI watches.
+
+## 2026-08-28 — the test that "keeps a rule from rotting" re-implemented the rule
+
+The same round added a **synthetic-input test** for two new scanner rules, on the correct reasoning that
+rules the real source satisfies get no signal from the real source. The docblock says it *"keeps them
+from rotting into a vacuous pass."*
+
+It **copies** the classification loop instead of calling it. So the shared helpers are genuinely pinned —
+each is independently required for the assertion — **and the two predicates inside the real scan's body
+are not.** Disable one and delete a live sanitiser from a live log site, and the structural leg passes,
+the full file passes, **and the synthetic test that exists to prevent exactly this passes.**
+
+**Naming a test as a guard against rot does not make it one.** The check is one sabotage: break the rule
+and see whether the test that claims to protect it reds. Here the answer was no, and the fix is
+CPE-1950's — **extract one function and have both callers use it**, rather than a second implementation
+that agrees with the first only until someone edits one.
+
+Both blockers this round are the same shape: **a verification that verified something adjacent to the
+thing claimed.** A shim adjacent to a tool; a copy adjacent to a rule.
