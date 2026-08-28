@@ -2835,3 +2835,47 @@ Worth recording the count plainly: **the narrow re-review — scoped to only wha
 round — has now found a blocking defect on this PR four rounds running, and each one was created by the
 previous round's fix.** Three of the four were false or over-broad claims rather than broken code. A fix
 that lands with a new claim attached needs the claim reviewed as carefully as the diff.
+
+## 2026-08-28 — a comparison that ERRORS is not a comparison that is FALSE
+
+#1091's publish-time guard refuses a catalog version that is not strictly greater than the published
+one. Its Security Auditor found two ways to make it print *"strictly newer"* and exit **0**.
+
+**One.** `if [ "$candidate" -le "$bound" ]` — bash's `test` builtin parses integers with `strtoimax`,
+and **on overflow it writes `integer expected` to stderr and returns 2**. A non-zero `[` is falsy, the
+refusal branch is skipped, and the function falls through to its success `printf`. The script runs under
+`set -uo pipefail` with **no `-e`**, so nothing aborts and the step sees exit 0. `CatalogEntry.version`
+is a `u64`, so **every value in `[2^63, 2^64-1]` is a legal published version this guard reads as
+"yours is newer".**
+
+**Two.** `jq '[.entries[]?.version] | max'` — jq's total ordering sorts numbers **below** strings, so a
+single `"version": "1"` anywhere in the index makes `max` return `1` and the guard bound against it.
+
+**The generalisable half is the first one.** An `if` has two branches and a failed comparison has a third
+state, so shell folds *error* into *false* — and which branch "false" lands you in decides whether the
+folding is safe. Here false meant proceed. **Any `[ ]`, `test`, `expr` or arithmetic comparison whose
+false branch is the permissive one needs its operands validated before the comparison, not after** —
+because the comparison itself cannot tell you it failed. The digit-only regex the script already had
+looked like that validation and was not: it constrained the *characters*, never the *magnitude*.
+
+**And a note the Auditor left that is worth more than the bug.** `[ x -le y ]` does **not**
+arithmetic-evaluate its operands; `[[ x -le y ]]` **does**. So anyone "modernising" that line to the
+double-bracket form turns an overflow fail-open into **command execution**. A latent hazard that is
+invisible unless someone writes it at the site — which is now done.
+
+Ranked honestly, and the ranking belongs in the PR: defeating this guard reverts to pre-PR behaviour,
+and forging the API response still cannot forge a signed catalog. **It is not a new attack surface. It
+is a guard that does not hold under the conditions its own comment claims it holds under** — and that
+comment is what licensed shipping an unverified fetch on the release path in the first place.
+
+## 2026-08-28 — the count in the diagnostic can lie
+
+Same audit, smaller finding, and it keeps recurring in different clothes. The guard's permissive branch
+prints *"N asset(s) enumerated"* — with `N` derived from a **joined string** rather than
+`.assets | length`. An asset array of nameless objects prints "0 asset(s) enumerated" when there were
+assets, on the one branch that proceeds.
+
+That is this shift's *counts must come from work done, not intent* rule pointed at a diagnostic instead
+of a gate. A number in a log is not load-bearing until the day someone reads it to decide whether a
+silent branch was correct — and the permissive branch is exactly where that day arrives. **Derive the
+count from the thing being counted, even when it is "only" a message.**
