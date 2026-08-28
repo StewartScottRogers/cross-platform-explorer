@@ -644,6 +644,19 @@ jobs:
       # `sidecar/host/tests/catalog_sign_verify_gate.rs` pins the binary's side of both halves
       # (`a_bundle_from_the_real_signer_still_verifies`, and the "signed by a key the operator did
       # not name" arm of `every_unusable_index_is_refused_rather_than_waved_through`).
+      #
+      # THE CONTROL'S STRENGTH IS KEY-DEPENDENT, recorded here because it is invisible from the code
+      # (PR #1095 review F4). For TODAY's key the decoy `0b18…` is a valid ed25519 curve point, so
+      # `VerifyingKey::from_bytes` SUCCEEDS and the refusal comes from `verify_strict` — i.e. the
+      # control genuinely exercises the signature path and cannot be satisfied by the same trivial
+      # success the positive run would get. That is a property of this key, not of the construction:
+      # measured on a throwaway key `d21f…`, the decoy `021f…` is NOT a valid point, and there the
+      # refusal would come from key parsing instead, proving only that a malformed key is rejected.
+      # It still fails closed either way (`sidecar/host/src/trust.rs` returns false rather than
+      # panicking on an unparsable key), so the step is correct in both cases — but on a future
+      # ROTATION, re-check this: if the rotated key's decoy is off-curve, strengthen the control by
+      # flipping a byte of `catalog-out/catalog-index.json.sig` in a scratch copy instead, which is
+      # key-independent.
       - name: Verify the signed bundle's signatures under the trusted key (CPE-1978)
         id: sigverify
         if: steps.k.outputs.has == 'true'

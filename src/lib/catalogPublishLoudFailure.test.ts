@@ -30,6 +30,7 @@ import { readFileSync, writeFileSync, readdirSync, mkdtempSync, mkdirSync, rmSyn
 import { join, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { parseYaml } from "./preview/yaml";
 import { stripRustComments, rustStrSliceAfter } from "./rustSource";
 import { logicalLines } from "./shellScriptLines";
@@ -1101,9 +1102,15 @@ describe("the verify step fails closed on every way the check can fail to RUN (C
 // two files. Enumerate instead -- every workflow step and every extracted script CI runs -- and ask
 // the general question: does anything that SIGNS a bundle also VERIFY it before publishing?
 //
-// Measured on this revision: `release-sidecar.yml` has no catalog job and signs nothing, so there is
-// nothing there to diverge; the sign-family invocations are `release.yml`'s `catalog-sign` (sign +,
-// now, verify) and `model-snapshot.yml`'s `model-snapshot-sign` (sign only).
+// Measured on this revision: `release-sidecar.yml` has no catalog job and **no `--bin *-sign`
+// invocation**, so there is nothing in the sign family there to diverge. Stated that precisely
+// (PR #1095 review F3) because the shorter "signs nothing" is FALSE and would be quoted later as
+// the stronger claim: that workflow does sign -- Authenticode via `cpe-sign.pfx`
+// (`release-sidecar.yml:562`) and tauri-action's updater signatures. Those are different signing
+// subsystems with their own gates (`verify-published-manifest-sidecar`, `verify-updater-pin`); the
+// scope of THIS sweep is the ed25519 bundle signers, and that is the scope its sentence must claim.
+// The sign-family invocations are `release.yml`'s `catalog-sign` (sign +, now, verify) and
+// `model-snapshot.yml`'s `model-snapshot-sign` (sign only).
 //
 // RED-PROOFED, and specifically against the trap CPE-1933 rule 2 names. The real verify invocation
 // in `release.yml` was replaced with a `#` COMMENT carrying the identical text (`# cargo run …
@@ -1160,16 +1167,77 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
   }
 
   /**
-   * Whether `bin` even HAS a `verify` subcommand, derived from the crate manifest the invocation
-   * itself names and the Rust file that manifest points at (comments stripped first -- the one
-   * `verify` in `model_snapshot_sign.rs` is inside a comment, so a raw-source scan would answer
-   * this question wrong in the direction that hides a gap).
+   * Could `bin` host a verify path AT ALL? Returns `true` unless the binary demonstrably has no CLI
+   * surface that could carry one. Derived from the crate manifest the invocation itself names and
+   * the Rust file that manifest points at, comments stripped first.
    *
-   * Blind spot, named: a verify path spelled some other way (`check`, a clap subcommand, a flag)
-   * reads as absent here. That fails toward reporting a gap that is already closed -- loud, not
-   * silent -- which is the safe direction for this particular scan.
+   * ## Why this asks "could it?" and not "does it have one called `verify`?" (PR #1095 review, F1)
+   *
+   * Round 1 asked the narrow question -- `src.includes('"verify"')` -- and its docblock said a
+   * differently-spelled verify path "fails toward reporting a gap that is already closed -- loud,
+   * not silent". **That was backwards, and it was measured backwards.** In
+   * `no signer publishes unverified while its binary CAN verify` below, a `false` here EXCUSES the
+   * signer: it is dropped from `stillUnverified` and the workflow is waved through. So a missed
+   * spelling makes this guard **under-report, silently** -- the fail-OPEN direction, in the guard
+   * written about fail-open checks.
+   *
+   * Measured by the reviewer: a real verify path spelled `args[1] == "check"` added to
+   * `model_snapshot_sign.rs`, with `model-snapshot.yml` still publishing unverified, left the file
+   * at **62 passed, 0 red**. The control -- the same sabotage spelled `"verify"` -- was **2 red**.
+   * The narrow question worked for exactly one spelling.
+   *
+   * ## The choice made, and why
+   *
+   * Widen the detector so it fails CLOSED, rather than keep it and lean on the pin below. This
+   * repo's answer to "an unrecognised input is treated as safe" is to refuse rather than guess, and
+   * the pin cannot be stronger than the detector it calls -- the `"check"` sabotage fooled the pin
+   * and the sweep together, which is CPE-1950's shared blindness, not two independent legs.
+   *
+   * So the question became one that has no name in it. A binary is excused ONLY when every one of
+   * these holds, all over comment-stripped source:
+   *
+   * 1. it reads argv **in this file** (`env::args`) -- if parsing is delegated to a module, a
+   *    builder, or another crate, its CLI surface is not visible here, so we do not claim to have
+   *    seen it (this is F2's "routed through another file" case, and it now fails closed);
+   * 2. **no comparison against any string literal** (`== "..."`) -- this is the clause that kills
+   *    the spelling axis: `verify`, `check`, `validate`, a word nobody has thought of, and the
+   *    `let cmd = args[1].as_str(); if cmd == "check"` shape all trip it equally;
+   * 3. **no string-literal match arm** (`"..." =>`) -- the other way a subcommand dispatch is
+   *    written;
+   * 4. **no `--`-prefixed literal** -- a verify path exposed as a flag rather than a subcommand;
+   * 5. **no argument-parser crate** named (`clap`, `structopt`, `argh`, `bpaf`, `pico_args`,
+   *    `lexopt`) -- those move the whole surface into a builder this scan cannot read.
+   *
+   * A binary satisfying all five is a bare positional CLI with no options and no subcommands, which
+   * structurally cannot host a verify path of any spelling. `model_snapshot_sign.rs` is one today.
+   *
+   * ## What this still cannot see -- AT LEAST these, and the list is open
+   *
+   * All of these now fail CLOSED (they make the detector return `true`, so the signer is NOT
+   * excused and must be verified in its workflow), which is the direction that costs a reviewable
+   * diff instead of hiding a gap:
+   *
+   * - a verify path reached through any of the five clauses above;
+   * - a binary whose `[[bin]]` `path` this scan cannot resolve (it throws instead).
+   *
+   * Still genuinely open, i.e. could still excuse a signer that should be wired: a verify path with
+   * **no CLI surface at all** -- selected by an environment variable, by the argv[0] the binary was
+   * invoked as, or by a build feature. None of those appear in this repo today, and none is
+   * reachable by widening a regex; catching them needs the binary's dispatch resolved rather than
+   * scanned. Say "at least these": nobody has enumerated the ways a program can branch.
+   *
+   * RED-PROOFED, results here rather than only in the PR body. Each sabotage was applied to
+   * `model_snapshot_sign.rs` (whose workflow still publishes unverified) and then reverted:
+   *
+   * - the reviewer's exact shape, `args[1] == "check"` -- **2 red** (clause 2). It was **0 red**
+   *   against the narrow round-1 detector, which is the whole reason this was rewritten.
+   * - a verify path with NO subcommand dispatch at all, exposed as a flag
+   *   (`args.iter().any(|a| a.starts_with("--verify"))`) -- **2 red** (clause 4). This is the shape
+   *   that would still have been missed had the fix only widened the list of subcommand NAMES.
+   * - renaming this file's pin so no title names the excused binary -- **1 red**, from
+   *   `every signer this sweep EXCUSES is named by a pin in this file`.
    */
-  function hasVerifySubcommand(manifest: string, bin: string): boolean {
+  function couldHostAVerifyPath(manifest: string, bin: string): boolean {
     const toml = readFileSync(join(process.cwd(), manifest), "utf8");
     const blocks = toml.split("[[bin]]").slice(1);
     for (const block of blocks) {
@@ -1178,9 +1246,31 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
       if (name !== bin || !path) continue;
       const crateDir = manifest.slice(0, manifest.lastIndexOf("/"));
       const src = stripRustComments(readFileSync(join(process.cwd(), crateDir, path), "utf8"));
-      return src.includes('"verify"');
+      const readsArgvHere = /\benv\s*::\s*args\b/.test(src);
+      const comparesToLiteral = /==\s*"/.test(src);
+      const matchesOnLiteral = /"[^"]*"\s*=>/.test(src);
+      const hasFlagLiteral = /"--[A-Za-z0-9]/.test(src);
+      const usesArgParser = /\b(clap|structopt|argh|bpaf|pico_args|lexopt)\b/.test(src);
+      return !readsArgvHere || comparesToLiteral || matchesOnLiteral || hasFlagLiteral || usesArgParser;
     }
     throw new Error(`${manifest} declares no [[bin]] named ${bin} -- the invocation and the manifest disagree`);
+  }
+
+  /**
+   * The `it(...)` titles declared in THIS file, read out of its own source.
+   *
+   * Used to require that every signer the sweep excuses is also named by a dedicated pin, so a new
+   * excused signer cannot appear with nothing anywhere saying it was excused. Derived rather than
+   * listed (CPE-1932, one scope in): a hand-written list of "the ones with pins" is the same defect
+   * this file exists to police.
+   *
+   * Anchored on `it("` so a title has to be a real call, not prose in a comment. A comment could
+   * still spell `it("...")` verbatim and be counted -- that direction excuses, so it is named here
+   * rather than left to be discovered; nothing in this file does it today.
+   */
+  function declaredTestTitles(): string[] {
+    const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    return [...self.matchAll(/\bit\s*(?:\.\w+(?:\([^)]*\))?)*\s*\(\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
   }
 
   const CALLS = signFamilyCalls();
@@ -1205,47 +1295,94 @@ describe("every workflow that SIGNS a bundle also verifies it before publishing 
     ).toBe(true);
   });
 
-  it("no signer publishes unverified while its binary CAN verify", () => {
-    const stillUnverified: string[] = [];
+  /** Every (workflow, bin) that signs a bundle there and never verifies it there. */
+  function unverifiedSigners(): { file: string; bin: string; manifest: string }[] {
+    const out: { file: string; bin: string; manifest: string }[] = [];
     for (const bin of [...new Set(CALLS.map((c) => c.bin))]) {
       const calls = CALLS.filter((c) => c.bin === bin);
       const signing = calls.filter((c) => !c.verifying);
-      if (signing.length === 0) continue;
-      const files = [...new Set(signing.map((c) => c.file))];
-      for (const file of files) {
+      for (const file of [...new Set(signing.map((c) => c.file))]) {
         if (calls.some((c) => c.verifying && c.file === file)) continue;
         const manifest = signing.find((c) => c.file === file)?.manifest;
         if (!manifest) {
-          throw new Error(`${bin} is invoked in ${file} with no --manifest-path -- cannot derive whether it can verify`);
+          throw new Error(
+            `${bin} is invoked in ${file} with no --manifest-path -- this sweep cannot locate its ` +
+              `source, and "cannot tell" must never be resolved to "fine"`,
+          );
         }
-        if (hasVerifySubcommand(manifest, bin)) stillUnverified.push(`${file} -> ${bin}`);
+        out.push({ file, bin, manifest });
       }
     }
+    return out;
+  }
+
+  // MEASURED, and the counts are the point (PR #1095 review F1). With the OLD narrow detector
+  // (`src.includes('"verify"')`), the reviewer added a real verify path spelled `args[1] == "check"`
+  // to `model_snapshot_sign.rs` while `model-snapshot.yml` still published unverified: 62 passed,
+  // **0 red** -- silently excused. The same sabotage spelled `"verify"`: 2 red. With the detector
+  // below asking "could it host a verify path at all", the `"check"` sabotage reds here, because
+  // clause 2 (`== "`) does not care what the subcommand is called.
+  it("no signer publishes unverified while its binary could host a verify path", () => {
+    const stillUnverified = unverifiedSigners()
+      .filter((s) => couldHostAVerifyPath(s.manifest, s.bin))
+      .map((s) => `${s.file} -> ${s.bin}`);
     expect(
       stillUnverified,
-      `these workflows sign and publish a bundle without verifying it, using a binary that HAS a ` +
-        `verify subcommand: ${stillUnverified.join(", ")}. That is CPE-1978's defect in a sibling ` +
-        `workflow -- wire the verify call in rather than widening this test.`,
+      `these workflows sign and publish a bundle without verifying it, using a binary whose CLI ` +
+        `could carry a verify path: ${stillUnverified.join(", ")}. That is CPE-1978's defect in a ` +
+        `sibling workflow -- wire the verify call in rather than widening this test.`,
     ).toEqual([]);
+  });
+
+  // The excuse is the fail-open direction, so it is not allowed to be silent. Anything this sweep
+  // waves through must ALSO be named by a dedicated pin in this file, and the pin list is read out
+  // of this file's own source rather than recalled -- so a second excused signer cannot appear with
+  // nothing anywhere saying so. Today the only entry is `model-snapshot-sign`.
+  it("every signer this sweep EXCUSES is named by a pin in this file", () => {
+    const excused = unverifiedSigners().filter((s) => !couldHostAVerifyPath(s.manifest, s.bin));
+    const titles = declaredTestTitles();
+    expect(
+      titles.length,
+      "no it() titles read out of this file's own source -- the derivation broke, and an empty list " +
+        "would excuse every signer silently",
+    ).toBeGreaterThanOrEqual(10);
+    for (const s of excused) {
+      expect(
+        titles.some((t) => t.includes(s.bin) && t.includes("has no CLI surface")),
+        `${s.file} signs and publishes without verifying, and this sweep excuses it because ` +
+          `${s.bin} has no CLI surface that could host a verify path. That excuse needs a pin: add ` +
+          `an it("${s.bin} has no CLI surface ...") case that derives the five clauses, so the ` +
+          `excuse reds the day it stops being true.`,
+      ).toBe(true);
+    }
   });
 
   // The open half, recorded as a derived fact rather than as prose so it cannot go stale silently.
   // `model-snapshot.yml` signs `models-index.json` with the SAME key and publishes it to the
   // `model-catalog` release with no signature check at all -- the identical shape this ticket
-  // closes for the agent catalog. It is not closed here because `model-snapshot-sign` has no verify
-  // path to call: closing it means adding one to the binary, which is its own change with its own
-  // blast radius (a scheduled workflow) and belongs in its own ticket. The day someone adds that
-  // subcommand, this test reds and the assertion above starts demanding the wiring.
-  it("model-snapshot-sign still has no verify subcommand -- the reason its workflow is not covered", () => {
+  // closes for the agent catalog. It is not closed here because `model-snapshot-sign` has NO CLI
+  // SURFACE that could host one: closing it means giving the binary a verify path, which is its own
+  // change to a scheduled publishing workflow with its own blast radius. Filed as CPE-1981.
+  //
+  // Note what this pin can and cannot do. It reds the day `model_snapshot_sign.rs` grows a
+  // subcommand dispatch, a flag, or an arg parser -- any spelling, because the clauses have no verb
+  // in them. It CANNOT red for a verify path with no CLI surface at all (env var, argv[0], build
+  // feature); see `couldHostAVerifyPath`'s docblock for that open list. And it is not an
+  // independent leg from the sweep above -- both call the same detector, so a shape the detector
+  // cannot see is invisible to both (CPE-1950: a shared oracle catches divergence, not shared
+  // blindness). It is the sweep's excuse written down where it can be reviewed, not a second
+  // opinion about it.
+  it("model-snapshot-sign has no CLI surface that could host a verify path -- why its workflow is not covered", () => {
     const snapshot = CALLS.filter((c) => c.bin === "model-snapshot-sign");
     expect(snapshot.length, "model-snapshot.yml no longer signs a snapshot -- re-derive this note").toBeGreaterThanOrEqual(1);
     const manifest = snapshot[0].manifest;
     expect(manifest, "the model-snapshot-sign invocation names no --manifest-path").toBeDefined();
     expect(
-      hasVerifySubcommand(String(manifest), "model-snapshot-sign"),
-      "model-snapshot-sign has grown a `verify` subcommand. The reason model-snapshot.yml publishes " +
-        "an unverified signed bundle no longer holds -- wire `verify` into that workflow the way " +
-        "CPE-1978 did for release.yml, then delete this test.",
+      couldHostAVerifyPath(String(manifest), "model-snapshot-sign"),
+      "model-snapshot-sign has grown a CLI surface (a subcommand dispatch, a flag, or an arg " +
+        "parser). The reason model-snapshot.yml publishes an unverified signed bundle no longer " +
+        "holds by inspection -- give it a verify path and wire that into the workflow the way " +
+        "CPE-1978 did for release.yml (CPE-1981), then delete this test.",
     ).toBe(false);
   });
 });

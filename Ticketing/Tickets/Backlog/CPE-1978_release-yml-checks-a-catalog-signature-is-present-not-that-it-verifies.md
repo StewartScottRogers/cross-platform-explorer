@@ -108,17 +108,41 @@ sign the bundle, requiring a refusal. Executed: a stub `cargo` that approves eve
 step exit non-zero.
 
 *Enumeration (CPE-1932).* Derived from `allShellUnits()` over every workflow and extracted script,
-not from a remembered pair of filenames. **`release-sidecar.yml` has no catalog job and signs
-nothing** — nothing there to diverge. The sign-family invocations on this revision are
+not from a remembered pair of filenames. **`release-sidecar.yml` has no catalog job and no
+`--bin *-sign` invocation** — nothing in the sign family there to diverge. (Round 1 wrote "signs
+nothing", which is false and was corrected in review: that workflow does sign — Authenticode via
+`cpe-sign.pfx` at `release-sidecar.yml:562`, plus tauri-action's updater signatures. Different
+subsystems, with their own gates.) The sign-family invocations on this revision are
 `release.yml → catalog-sign` (sign, and now verify) and **`model-snapshot.yml → model-snapshot-sign`
 (sign only, no verification before publishing)**.
 
-*Sibling gap found and NOT closed here.* `model-snapshot.yml` signs `models-index.json` with the same
-key and publishes it to the `model-catalog` release with no signature check at all — the identical
-shape. It is not closed in this PR because `model-snapshot-sign` **has no `verify` subcommand**
-(derived, comments stripped: the only `verify` in `model_snapshot_sign.rs` is inside a comment).
-Adding one is its own change to a scheduled workflow and wants its own ticket. The guard records this
-as a derived fact: the day that subcommand appears, the test reds and starts demanding the wiring.
+*Sibling gap found and NOT closed here — now **CPE-1981**.* `model-snapshot.yml` signs
+`models-index.json` with the same key and publishes it to the `model-catalog` release with no
+signature check at all — the identical shape. It is not closed in this PR because
+`model-snapshot-sign` **has no CLI surface that could host a verify path**. Giving it one is a change
+to a scheduled publishing workflow with its own blast radius.
+
+**Round 2 (PR #1095 review, F1/F2) — the detector was measured backwards, and this is the round's
+real finding.** Round 1 asked the narrow question "does the binary have a subcommand called
+`verify`?" and its docblock claimed a missed spelling "fails toward reporting a gap that is already
+closed — loud, not silent". **That is the wrong direction.** A `false` from that predicate *excuses*
+the signer, so a missed spelling makes the guard **under-report silently**. Measured by the reviewer:
+a real verify path spelled `args[1] == "check"` added to `model_snapshot_sign.rs`, workflow still
+publishing unverified → **62 passed, 0 red**. Control, same sabotage spelled `"verify"` → **2 red**.
+
+*The choice made:* **widen the detector so it fails closed**, rather than keep it and lean on the pin.
+The pin cannot be stronger than the detector it calls — the `"check"` sabotage fooled the pin and the
+sweep together, which is CPE-1950's shared blindness, not two legs. The question now has no verb in
+it: `couldHostAVerifyPath` excuses a binary only when **all** of five clauses hold over
+comment-stripped source — it reads argv *in this file* (F2: delegated parsing is no longer excused),
+no `== "…"` comparison of any kind, no `"…" =>` match arm, no `--`-prefixed literal, no arg-parser
+crate. A binary passing all five is a bare positional CLI that structurally cannot host a verify path
+of *any* spelling. The excuse is also no longer allowed to be silent: a new test requires every
+excused signer to be named by a pin whose title is read out of this test file's own source.
+
+*Still open, "at least these", never a count:* a verify path with **no CLI surface at all** —
+selected by an environment variable, by `argv[0]`, or by a build feature — would still be excused.
+None exists in this repo today and none is reachable by widening a regex.
 
 *What remains UNVERIFIED.* No release was cut and no workflow run was triggered, so the shipped step
 has **never executed on a GitHub runner**. What was executed is the step's own `run:` body, extracted
@@ -127,6 +151,18 @@ with a key-sensitive stub `cargo`. The one link that stays inferred is that the 
 `CPE_CATALOG_SIGNING_KEY` secret is the private half of `CATALOG_TRUSTED_KEYS`; if it is not, the new
 step fails the next release **loudly** — which is the intended behaviour, but it is a prediction, not
 a measurement.
+
+*Security scope.* This closes the publish-time **availability** half — a bundle every installed
+client would reject can no longer publish green. It is **not** integrity protection against a
+compromised signing key that is still the private half of `5b18…`.
+
+*The negative control's strength is key-dependent (review F4), recorded at the site.* For today's key
+the decoy `0b18…` is a valid ed25519 curve point, so `VerifyingKey::from_bytes` succeeds and the
+refusal comes from `verify_strict` — the control really does exercise the signature path. That is a
+property of this key: on a throwaway `d21f…` the decoy `021f…` is *not* a valid point, and the
+refusal would come from key parsing instead. It fails closed either way (`trust.rs` returns `false`
+rather than panicking), so the step is correct in both cases; the note at the workflow site says to
+re-check on a rotation and switch to flipping a `.sig` byte if the new decoy is off-curve.
 
 ## Notes
 
